@@ -520,6 +520,14 @@ describe('AvailabilityEngine.confirmBooking — shared global day cap (source gu
     expect(availSrc).not.toMatch(/const existingBookings = await trx\('self_booked_appointments'\)/);
   });
 
+  test('confirmBooking replaces the old same-day-only "already passed" floor with the shared notice-window helper', () => {
+    expect(availSrc).toMatch(/const \{ violatesSelfServeNotice \} = require\('\.\/scheduling\/self-serve-notice'\);/);
+    const idx = availSrc.indexOf('violatesSelfServeNotice({ date: dateStr, startTime })');
+    expect(idx).toBeGreaterThan(-1);
+    expect(availSrc.slice(idx, idx + 200)).toMatch(/'SLOT_TAKEN'/);
+    expect(availSrc).not.toMatch(/already passed today/);
+  });
+
   test('getAvailableSlots filters full days by the GLOBAL count (shared helper), matching what confirm enforces', () => {
     // The zone-engine BUILDER used to count per zone: when another zone had
     // consumed the global cap, it still offered this zone's slots and every
@@ -709,5 +717,58 @@ describe('/status/:code PII trim', () => {
     expect(route).toMatch(/'customers\.first_name', 'customers\.city'/);
     expect(route).not.toMatch(/customers\.last_name/);
     expect(route).not.toMatch(/customers\.address_line1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Self-serve notice window (owner ruling 2026-09-23) — offer/commit parity
+// ---------------------------------------------------------------------------
+//
+// Both the offer (buildBookingAvailability's addCandidate) and the commit
+// (createSelfBooking) call the SAME shared helper on the SAME (date,
+// startTime) shape, so a slot the picker shows is always one the commit
+// gate accepts, and vice versa. Full end-to-end execution of createSelfBooking
+// needs the whole transaction's mock surface (see slot-reservation.test.js /
+// booking-availability-occupancy.test.js for the functional coverage of each
+// half); this locks the shared-helper wiring itself, the same style the
+// day-cap tests above use for this file's other cross-writer invariants.
+describe('self-serve notice window — offer/commit parity (source guards)', () => {
+  test('both the offer and the commit import the SAME shared helper', () => {
+    expect(src).toMatch(/const \{ violatesSelfServeNotice \} = require\('\.\.\/services\/scheduling\/self-serve-notice'\);/);
+    // Exactly one import — a private second copy could drift from the offer.
+    expect(src.split("require('../services/scheduling/self-serve-notice')")).toHaveLength(2);
+  });
+
+  test('createSelfBooking refuses a slot inside the notice window, replacing the old same-day-only "already passed" floor', () => {
+    const idx = src.indexOf('violatesSelfServeNotice({ date: slotDateStr, startTime: slot_start })');
+    expect(idx).toBeGreaterThan(-1);
+    // After the past-date check, before the customer insert (no-orphan-profile
+    // invariant the test above this one pins).
+    const pastDateIdx = src.indexOf("error: 'That date has already passed — please pick another day.'");
+    const insertIdx = src.indexOf("await db('customers').insert(applyContactNormalization(");
+    expect(pastDateIdx).toBeGreaterThan(-1);
+    expect(idx).toBeGreaterThan(pastDateIdx);
+    expect(idx).toBeLessThan(insertIdx);
+    // Customer-facing call-us copy, matching the tone of the file's other
+    // operational refusals.
+    const block = src.slice(idx, idx + 300);
+    expect(block).toMatch(/941\)\s*297-5749/);
+    expect(block).toMatch(/status: 409/);
+  });
+
+  test("buildBookingAvailability's offer filter is self-serve opt-in only — the voice agent's calls never set it", () => {
+    const fnIdx = src.indexOf('async function buildBookingAvailability(');
+    expect(fnIdx).toBeGreaterThan(-1);
+    expect(src.slice(fnIdx, fnIdx + 400)).toMatch(/selfServeNotice = false/);
+    const candidateIdx = src.indexOf('violatesSelfServeNotice({ date: slot.date, startTime: fmt(startMin) }, today)');
+    expect(candidateIdx).toBeGreaterThan(fnIdx);
+    // Gated on the opt-in flag, not called unconditionally.
+    expect(src.slice(candidateIdx - 80, candidateIdx)).toMatch(/selfServeNotice &&/);
+  });
+
+  test('every self-serve caller in this file opts in with selfServeNotice: true', () => {
+    const occurrences = src.split('selfServeNotice: true,').length - 1;
+    // GET /availability, POST /find-slots, and the capture-intent revalidation.
+    expect(occurrences).toBe(3);
   });
 });

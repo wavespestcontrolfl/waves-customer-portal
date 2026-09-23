@@ -40,8 +40,23 @@ const CONFIG = {
   max_self_books_per_day: 3,
 };
 
+// Pinned to an early ET morning (owner ruling 2026-09-23, self-serve notice
+// window default 24h): "tomorrow" (advance_days_min: 1) must never itself
+// fall inside the notice window, or these day-cap assertions ('09:00'
+// present/absent on days[0]) would depend on the wall-clock time the suite
+// happens to run at. This file is about the day cap, not the notice window.
+const NOW = new Date('2027-05-14T09:00:00Z'); // 05:00 ET
+beforeAll(() => {
+  jest.useFakeTimers();
+  jest.setSystemTime(NOW);
+});
+afterAll(() => {
+  jest.useRealTimers();
+  delete process.env.GATE_SELF_BOOK_DAY_CAP;
+});
+
 // The dates the engine can consider (it skips Sundays itself).
-const CANDIDATE_DATES = [1, 2].map((i) => etDateString(addETDays(new Date(), i)));
+const CANDIDATE_DATES = [1, 2].map((i) => etDateString(addETDays(NOW, i)));
 
 let selfBookedRows;
 
@@ -109,6 +124,9 @@ function arrayChain(rowsArr) {
 }
 
 beforeEach(() => {
+  // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): the day cap is dark by
+  // default — this whole file is about the cap, so force it on.
+  process.env.GATE_SELF_BOOK_DAY_CAP = 'true';
   selfBookedRows = [];
   db.mockReset();
   db.mockImplementation((table) => {

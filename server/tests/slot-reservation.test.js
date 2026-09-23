@@ -618,10 +618,11 @@ describe('slot reservation helpers', () => {
     expect(chain.del).toHaveBeenCalledTimes(1);
   });
 
-  test('reserveSlot rejects a same-day slot inside the 2-hour booking lead', async () => {
+  test('reserveSlot rejects a slot inside the self-serve notice window (owner ruling 2026-09-23)', async () => {
     // The guard fires before any db work, so no query mocks are needed.
     jest.useFakeTimers();
-    // 15:00Z = 11:00 ET (EDT): a 12:30 ET start is only 90 minutes out.
+    // 15:00Z = 11:00 ET (EDT): a same-day 12:30 ET start is only 90 minutes
+    // out — well inside the default 24h notice window.
     jest.setSystemTime(new Date('2027-07-14T15:00:00Z'));
     try {
       await expect(slotReservation.reserveSlot({
@@ -634,16 +635,18 @@ describe('slot reservation helpers', () => {
     }
   });
 
-  test('reserveSlot lets a same-day slot outside the booking lead through the guard', async () => {
+  test('reserveSlot lets a slot outside the self-serve notice window through the guard', async () => {
     jest.useFakeTimers();
+    // 15:00Z = 11:00 ET on 2027-07-14. The notice floor (default 24h) is
+    // therefore 11:00 ET on 2027-07-15 — a 13:00 ET start the next day is
+    // 2 hours past it.
     jest.setSystemTime(new Date('2027-07-14T15:00:00Z'));
-    // Sentinel transaction: reaching the db proves the lead guard passed.
+    // Sentinel transaction: reaching the db proves the notice guard passed.
     db.transaction = jest.fn(async () => { throw new Error('REACHED_DB'); });
     try {
-      // 13:30 ET start = 150 minutes out — bookable.
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-07-14', hhmm: '13:30', techId: 'tech-1' }),
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-07-15', hhmm: '13:00', techId: 'tech-1' }),
       })).rejects.toThrow('REACHED_DB');
       expect(db.transaction).toHaveBeenCalled();
     } finally {
@@ -651,20 +654,41 @@ describe('slot reservation helpers', () => {
     }
   });
 
-  test('reserveSlot accepts a slot exactly at the lead boundary — the generator still offers it', async () => {
+  test('reserveSlot accepts a slot exactly at the notice boundary — the generator still offers it', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-07-14T15:00:00Z'));
     db.transaction = jest.fn(async () => { throw new Error('REACHED_DB'); });
     try {
-      // 13:00 ET start = exactly 120 minutes out; the generator's
-      // startMin >= earliest offers it, so the guard must not 409 it.
+      // 2027-07-15 11:00 ET is exactly 24h (the default notice) out; the
+      // generator's startMin >= earliest offers it, so the guard must not
+      // 409 it (equality passes, same convention as the old lead check).
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-07-14', hhmm: '13:00', techId: 'tech-1' }),
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-07-15', hhmm: '11:00', techId: 'tech-1' }),
       })).rejects.toThrow('REACHED_DB');
       expect(db.transaction).toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot honors a custom SELF_SERVE_NOTICE_HOURS at call time', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-07-14T15:00:00Z')); // 11:00 ET
+    const saved = process.env.SELF_SERVE_NOTICE_HOURS;
+    process.env.SELF_SERVE_NOTICE_HOURS = '1';
+    db.transaction = jest.fn(async () => { throw new Error('REACHED_DB'); });
+    try {
+      // With a 1-hour notice, same-day 12:30 ET (90 minutes out) now clears.
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-07-14', hhmm: '12:30', techId: 'tech-1' }),
+      })).rejects.toThrow('REACHED_DB');
+      expect(db.transaction).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+      if (saved === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
+      else process.env.SELF_SERVE_NOTICE_HOURS = saved;
     }
   });
 

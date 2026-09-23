@@ -716,5 +716,91 @@ describe('reschedule-public inactive-account fail-closed (C4)', () => {
       const body = await res.json();
       expect(body.reason).toBe('account_inactive');
     });
+
+    // Self-serve notice window (owner ruling 2026-09-23): a visit that
+    // starts LATER TODAY is always inside the default 24h notice, so this
+    // is deterministic at any real wall-clock time the suite runs at.
+    const { etDateString } = require('../utils/datetime-et');
+    const laterTodaySvc = () => svcRow({
+      customer_active: true,
+      scheduled_date: etDateString(),
+      window_start: '23:59', window_end: '23:59',
+    });
+
+    test('GET: a visit starting later today renders not_reschedulable / self_serve_notice, no availability', async () => {
+      wireSvc(laterTodaySvc());
+      const res = await fetch(`${base}/api/public/reschedule/${TOKEN}`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.state).toBe('not_reschedulable');
+      expect(body.reason).toBe('self_serve_notice');
+      expect(body.availability).toBeNull();
+    });
+
+    test('POST: a visit starting later today cannot be moved online (409 SELF_SERVE_NOTICE)', async () => {
+      wireSvc(laterTodaySvc());
+      const res = await fetch(`${base}/api/public/reschedule/${TOKEN}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ date: '2099-07-11', start_time: '09:00' }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('SELF_SERVE_NOTICE');
+      expect(body.error).toMatch(/941\)\s*297-5749/);
+    });
+
+    test('POST find-slots: a visit starting later today is refused too (409 self_serve_notice)', async () => {
+      wireSvc(laterTodaySvc());
+      const res = await fetch(`${base}/api/public/reschedule/${TOKEN}/find-slots`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query: 'next friday morning' }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.reason).toBe('self_serve_notice');
+    });
+
+    test('GET: a MISSED visit (past start) is unaffected by the notice rule — it is being rebooked', async () => {
+      wireSvc(svcRow({
+        customer_active: true, status: 'confirmed',
+        scheduled_date: '2020-01-01', window_start: '09:00', window_end: '11:00',
+      }));
+      const res = await fetch(`${base}/api/public/reschedule/${TOKEN}`);
+      const body = await res.json();
+      expect(body.state).toBe('reschedulable');
+      expect(body.missed).toBe(true);
+      expect(body.reason).toBeNull();
+    });
+  });
+});
+
+describe('withSelfServeNotice (self-serve notice window, owner ruling 2026-09-23)', () => {
+  const { withSelfServeNotice } = reschedulePublicRouter._test;
+
+  test('overrides an otherwise-eligible visit starting inside the notice window', () => {
+    const now = new Date('2026-07-02T16:00:00.000Z'); // 12:00 ET
+    const svc = { scheduled_date: '2026-07-02', window_start: '23:00' };
+    const elig = { ok: true };
+    expect(withSelfServeNotice(elig, svc, now)).toEqual({ ok: false, reason: 'self_serve_notice' });
+  });
+
+  test('leaves an already-ineligible verdict untouched', () => {
+    const elig = { ok: false, reason: 'completed' };
+    expect(withSelfServeNotice(elig, { scheduled_date: '2026-07-02', window_start: '23:00' })).toBe(elig);
+  });
+
+  test('never overrides a MISSED (rebookable) verdict', () => {
+    const elig = { ok: true, missed: true };
+    const svc = { scheduled_date: '2020-01-01', window_start: '09:00' };
+    expect(withSelfServeNotice(elig, svc)).toBe(elig);
+  });
+
+  test('leaves a visit outside the notice window untouched', () => {
+    const now = new Date('2026-07-02T16:00:00.000Z');
+    const elig = { ok: true };
+    const svc = { scheduled_date: '2026-07-20', window_start: '09:00' };
+    expect(withSelfServeNotice(elig, svc, now)).toBe(elig);
   });
 });

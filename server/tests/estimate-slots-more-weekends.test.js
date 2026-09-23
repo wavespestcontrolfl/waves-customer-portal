@@ -192,6 +192,13 @@ describe('estimate slot weekend and expander behavior', () => {
       dateTo: '2026-05-27',
       durationMinutes: 60,
       techs,
+      // Pinned well before dateFrom — this test is about tech/window
+      // enumeration, not lead-time filtering (the default `now` would
+      // otherwise be the actual wall-clock date the suite runs on, which
+      // the self-serve notice window (owner ruling 2026-09-23) would now
+      // correctly treat this fixed 2026-05-27 date as being in the past
+      // of, since the environment's real "today" is well after it).
+      now: new Date('2026-05-01T12:00:00Z'),
     });
 
     const windows = new Set(slots.map((slot) => slot.windowStart));

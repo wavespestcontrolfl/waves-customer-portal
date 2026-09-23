@@ -64,6 +64,7 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 // missed-appointment rule) lives in a service so the promised-link worker
 // reaches the SAME answer this page gives (codex #4293 r3 P2).
 const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
+const { visitInsideNoticeWindow } = require('../services/scheduling/self-serve-notice');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -219,6 +220,20 @@ async function eligibilityAsync(svc, now = new Date()) {
   const grouped = await groupedVisit(svc);
   if (grouped === 'unknown') return { ok: false, reason: 'not_available' };
   return grouped ? { ok: false, reason: 'grouped' } : elig;
+}
+
+// Self-serve notice window (owner ruling 2026-09-23) layered ON TOP of
+// eligibilityAsync's verdict: refuse even an otherwise-eligible visit that
+// itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED visit is being
+// REBOOKED — its own past start is irrelevant — so the notice rule doesn't
+// apply to it. Kept OUT of services/reschedule-eligibility.js: that module
+// is shared with the call-driven promised-link worker, which the notice
+// rule must not reach (self-serve only).
+function withSelfServeNotice(elig, svc, now = new Date()) {
+  if (elig.ok && !elig.missed && visitInsideNoticeWindow(svc, now)) {
+    return { ok: false, reason: 'self_serve_notice' };
+  }
+  return elig;
 }
 
 async function loadByToken(token) {
@@ -410,6 +425,9 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     today: new Date(),
     excludeServiceIds: [svc.id],
     excludeSelfBookingId: svc.self_booking_id || null,
+    // Self-serve surface — a new target starting within the notice window
+    // (owner ruling 2026-09-23) can't be offered or committed.
+    selfServeNotice: true,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —
@@ -433,9 +451,9 @@ router.get('/:token', async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = accountInactive(svc)
+    const elig = withSelfServeNotice(accountInactive(svc)
       ? { ok: false, reason: 'account_inactive' }
-      : await eligibilityAsync(svc);
+      : await eligibilityAsync(svc), svc);
     const base = {
       state: elig.ok ? 'reschedulable' : 'not_reschedulable',
       reason: elig.ok ? null : elig.reason,
@@ -523,9 +541,9 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = accountInactive(svc)
+    const elig = withSelfServeNotice(accountInactive(svc)
       ? { ok: false, reason: 'account_inactive' }
-      : await eligibilityAsync(svc);
+      : await eligibilityAsync(svc), svc);
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
@@ -595,6 +613,18 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       : await eligibilityAsync(svc);
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
+    }
+    // Self-serve notice window (owner ruling 2026-09-23): refuse moving a
+    // visit that itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED
+    // visit is being rebooked, not moved off its own too-soon start. Its
+    // own code/message (not the generic reason above) so the client renders
+    // the specific call-us guidance (ScheduleFlowPage.jsx falls back to
+    // body.error verbatim for an unrecognized code).
+    if (!elig.missed && visitInsideNoticeWindow(svc)) {
+      return res.status(409).json({
+        error: 'This visit starts too soon to move online — call (941) 297-5749 and our team can help.',
+        code: 'SELF_SERVE_NOTICE',
+      });
     }
 
     // Idempotent replay: a retried POST (network retry, double-tap) whose
@@ -899,6 +929,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 router._test = {
   eligibility,
   eligibilityAsync,
+  withSelfServeNotice,
   accountInactive,
   bookingRange,
   searchParseOpts,

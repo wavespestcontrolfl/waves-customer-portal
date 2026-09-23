@@ -34,9 +34,10 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
-const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
+const { addETDays, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
+const { violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
 // Rung 1 of the global scheduling lock order — see the ORDERING CONTRACT in
 // scheduling/occupancy.js for why both write paths here take it first, and
 // why each also runs the tech-blind global probe (findConflictingVisits)
@@ -663,13 +664,15 @@ async function reserveSlot({
 
   // Stale-slot guard: the slot list is generated minutes before the customer
   // taps it, and a page left open can hold windows the generator would no
-  // longer offer. Enforce the same minimum booking lead the generator uses
-  // (estimate-slot-availability's minimumLeadMinutes default) — a window
-  // inside the lead can't be routed and dispatched, so reserving it books a
-  // visit no tech can make on time. STRICTLY inside: the generator offers
+  // longer offer. Enforce the same self-serve notice window the generator
+  // uses (estimate-slot-availability's minimumLeadMinutes default —
+  // selfServeNoticeMinutes(), owner ruling 2026-09-23, replacing the old
+  // flat 120-minute lead) — a window inside the notice can't be routed and
+  // dispatched, so reserving it books a visit no tech can make on time.
+  // Spans calendar days (a 24h notice reaches into tomorrow near midnight),
+  // unlike the old today-only check. STRICTLY inside: the generator offers
   // starts AT the boundary (startMin >= earliest), so equality must pass
   // here too or a just-fetched boundary slot 409s on the first tap.
-  const MINIMUM_LEAD_MINUTES = 120;
   const todayEt = etDateString();
   if (date < todayEt) {
     const err = new Error('slot date has already passed');
@@ -677,15 +680,11 @@ async function reserveSlot({
     err.slotId = slotId;
     throw err;
   }
-  if (date === todayEt) {
-    const nowEt = etParts(new Date());
-    const [sh, sm] = String(windowStart).split(':').map(Number);
-    if (sh * 60 + sm < nowEt.hour * 60 + nowEt.minute + MINIMUM_LEAD_MINUTES) {
-      const err = new Error('slot start is inside the booking lead window');
-      err.code = 'SLOT_UNAVAILABLE';
-      err.slotId = slotId;
-      throw err;
-    }
+  if (violatesSelfServeNotice({ date, startTime: windowStart })) {
+    const err = new Error('slot start is inside the booking notice window');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
   }
 
   // Server-authoritative slot policy: parseSlotId validates FORMAT only — the
