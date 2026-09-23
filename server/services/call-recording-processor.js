@@ -9863,9 +9863,12 @@ const CallRecordingProcessor = {
             // is the promise the sweep holds the card to, and a reprocess
             // that now hears "none" must not erase a confirmed ask
             // (pre-push audit P1).
+            // …while a pass that NEWLY hears a confirmed appointment does
+            // stamp it: the stronger ask wins in both directions.
             const parsedCard = JSON.parse(conflictCard.payload);
+            const newlyConfirmed = parsedCard.scheduling_window?.status === 'confirmed' || parsedCard.scheduling_status === 'confirmed';
             const addressEvidence = Object.fromEntries(Object.entries(parsedCard)
-              .filter(([key]) => !['scheduling_window', 'scheduling_status'].includes(key)));
+              .filter(([key]) => newlyConfirmed || !['scheduling_window', 'scheduling_status'].includes(key)));
             await trx('triage_items')
               .insert(conflictCard)
               .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
