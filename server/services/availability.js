@@ -272,8 +272,9 @@ class AvailabilityEngine {
       // empty day (lunch only) keeps today's earliest-per-gap behavior.
       const hasRealStops = occupied.length > 0;
 
-      // Add lunch block
-      occupied.push({ start: lunchStart, end: lunchEnd });
+      // Add lunch block — flagged so findGaps' packed-ends mode never
+      // treats it as a route stop to pack against (Codex r1 P2).
+      occupied.push({ start: lunchStart, end: lunchEnd, lunch: true });
 
       // Sort occupied by start time
       occupied.sort((a, b) => a.start - b.start);
@@ -322,6 +323,10 @@ class AvailabilityEngine {
   // middle gap (between two blocks) tries both, independently (an accept
   // rejection on one end never suppresses the other). False (or no real
   // stop that day) keeps the legacy first-accepted-hour-per-gap walk.
+  // Only a REAL stop is a packing anchor: a block flagged `lunch: true` is
+  // a fixed break, not a stop, so a gap bounded by it on one side gets no
+  // offer on that side (a day whose only stop is 16:00 offers the hour
+  // before that stop and the hour after it — never "packed before lunch").
   findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null, packEnds = false) {
     const slots = [];
     // Round minutes-since-midnight UP to the next clean hour. Customer-
@@ -349,17 +354,20 @@ class AvailabilityEngine {
 
     const gaps = [];
     let cursor = dayStart;
+    let realBefore = false;
     for (const block of occupied) {
-      gaps.push({ start: roundUpToHour(cursor + buffer), end: block.start - buffer });
+      gaps.push({
+        start: roundUpToHour(cursor + buffer), end: block.start - buffer,
+        realBefore, realAfter: !block.lunch,
+      });
       cursor = Math.max(cursor, block.end);
+      realBefore = !block.lunch; // the block directly before the NEXT gap
     }
     // Gap after the last occupied block — same clean-hour rule.
-    gaps.push({ start: roundUpToHour(cursor + buffer), end: dayEnd });
+    gaps.push({ start: roundUpToHour(cursor + buffer), end: dayEnd, realBefore, realAfter: false });
 
-    gaps.forEach((gap, i) => {
+    gaps.forEach((gap) => {
       if (!packEnds) { offerEarliest(gap.start, gap.end); return; }
-      const isLeading = i === 0;
-      const isTrailing = i === gaps.length - 1;
       // A middle gap's earliest and latest picks can land on the same hour
       // (a gap too narrow to hold two distinct accepted starts) — dedupe
       // within this one gap so it never reports the identical slot twice.
@@ -373,9 +381,8 @@ class AvailabilityEngine {
           else gapStarts.push(added.start);
         }
       };
-      if (!isLeading) tryOffer(offerEarliest); // trailing or middle
-      if (!isTrailing) tryOffer(offerLatest); // leading or middle
-      if (isLeading && isTrailing) tryOffer(offerEarliest); // no real stop at all (defensive)
+      if (gap.realBefore) tryOffer(offerEarliest); // packed after the stop before this gap
+      if (gap.realAfter) tryOffer(offerLatest); // packed before the stop after this gap
     });
 
     return slots.slice(0, 4); // max 4 slots per day

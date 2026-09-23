@@ -184,3 +184,34 @@ test('a linked booking copy cannot retain the old window after its visit stops o
   linkedVisit = true;
   expect(startsOf(await engine.getAvailableSlots('Palmetto'))).toContain('09:00');
 });
+
+describe('findGaps packed-ends: the lunch block is never a packing anchor (Codex #4664 r1 P2)', () => {
+  const LUNCH = { start: 12 * 60, end: 13 * 60, lunch: true };
+
+  test('a day whose only real stop is 16:00 offers the hour before it and the hour after it — never "packed before lunch"', () => {
+    const occupied = [LUNCH, { start: 16 * 60, end: 17 * 60 }];
+    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, true);
+    expect(slots.map((g) => g.start / 60)).toEqual([15, 17]);
+  });
+
+  test('a stop before lunch anchors the hour after it, but the gap after lunch gets nothing from the lunch side', () => {
+    const occupied = [{ start: 9 * 60, end: 10 * 60 }, LUNCH];
+    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, true);
+    // 8:00 packed before the 9:00 stop, 10:00 packed after it; 11:00 is
+    // NOT offered (lunch is not a stop); the afternoon has no real stop to
+    // pack against.
+    expect(slots.map((g) => g.start / 60)).toEqual([8, 10]);
+  });
+
+  test('an unflagged block is still a real anchor on both sides (middle gap offers both packed ends)', () => {
+    const occupied = [{ start: 9 * 60, end: 10 * 60 }, { start: 14 * 60, end: 15 * 60 }];
+    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, true);
+    expect(slots.map((g) => g.start / 60)).toEqual([8, 10, 13, 15]);
+  });
+
+  test('legacy mode (packEnds false) ignores the lunch flag and keeps one earliest hour per gap', () => {
+    const occupied = [LUNCH, { start: 16 * 60, end: 17 * 60 }];
+    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0);
+    expect(slots.map((g) => g.start / 60)).toEqual([8, 13, 17]);
+  });
+});

@@ -1573,16 +1573,31 @@ function timeToMinutes(hhmm) {
 // report describes, so buildAsapCapacitySlots' output for these dates is
 // dropped before it ever reaches selection. An empty date (no rows here)
 // is untouched — ASAP windows keep filling it exactly as before.
-async function stopDatesInRange(dateFrom, dateTo) {
+//
+// `ownEstimateId`: this estimate's OWN uncommitted hold is not a stop for
+// itself (same narrow predicate as filterCollidingSlots) — the route
+// generator and the collision filter both exclude it, so counting it here
+// would strip every ASAP window from a date whose only row is the customer's
+// own live hold and leave the reloaded picker unable to confirm it (Codex r1
+// P1). A committed visit of this estimate (customer_id set) still counts.
+async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
   if (!dateFrom || !dateTo) return new Set();
   try {
-    const rows = await db('scheduled_services')
+    let query = db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
       .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
       .whereNotNull('window_start')
       .where((q) => {
         q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
-      })
+      });
+    if (ownEstimateId) {
+      query = query.whereNot((own) => {
+        own.where('source_estimate_id', ownEstimateId)
+          .whereNull('customer_id')
+          .whereNotNull('reservation_expires_at');
+      });
+    }
+    const rows = await query
       .distinct('scheduled_date')
       .pluck('scheduled_date');
     return new Set(rows.map((d) => (typeof d === 'string' ? d.slice(0, 10) : new Date(d).toISOString().slice(0, 10))));
@@ -1853,13 +1868,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     dateFrom, dateTo, seasonalSelectionProfile(serviceProfile),
   );
   if (!coords) {
-    const asapRaw = (await Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
-      dateFrom: segFrom,
-      dateTo: segTo,
-      durationMinutes: serviceProfile.durationMinutes,
-      includeWeekends: opts.includeWeekends,
-      minimumLeadMinutes: opts.minimumLeadMinutes,
-    })))).flat();
+    // Same stop-date suppression as the coords path below (Codex r1 P2):
+    // a geocoding failure must not be the one case where the hourly ASAP
+    // windows still fill a date that has a committed stop.
+    const [asapLists, stopDates] = await Promise.all([
+      Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
+        dateFrom: segFrom,
+        dateTo: segTo,
+        durationMinutes: serviceProfile.durationMinutes,
+        includeWeekends: opts.includeWeekends,
+        minimumLeadMinutes: opts.minimumLeadMinutes,
+      }))),
+      stopDatesInRange(dateFrom, dateTo, estimateId),
+    ]);
+    const asapRaw = asapLists.flat().filter((s) => !stopDates.has(s.date));
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
     const filtered = dedupeSlots(asap).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
@@ -1952,7 +1974,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       includeWeekends: opts.includeWeekends,
       minimumLeadMinutes: opts.minimumLeadMinutes,
     }))),
-    stopDatesInRange(dateFrom, dateTo),
+    stopDatesInRange(dateFrom, dateTo, estimateId),
   ]);
   const raw = { slots: rawLists.flatMap((r) => r?.slots || []) };
   // A date with a committed stop offers ONLY the packed find-time ends — a

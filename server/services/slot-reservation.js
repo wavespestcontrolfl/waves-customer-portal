@@ -1726,11 +1726,16 @@ async function commitReservation({
         excludeServiceIds: [scheduledServiceId],
         includeHolds: !!row._lapsed,
         // Travel gap: the pin reserveSlot stamped on the hold row, plus the
-        // same expected-minutes credit find-time/filterCollidingSlots
-        // resolved when this window was offered (owner ruling 2026-09-23).
+        // expected-minutes credit of the service ACTUALLY being scheduled
+        // (owner ruling 2026-09-23). The accepted serviceProfile is
+        // authoritative here — the row below is restamped from it, so a hold
+        // taken for one service mode and accepted under another must not
+        // keep the stale row's padding credit (Codex r1 P1). The hold row's
+        // own stamp is only the fallback when no profile resolved.
         travel: {
           lat: row.lat ?? null, lng: row.lng ?? null,
-          expectedMinutes: await candidateExpectedMinutesFromRow(client, row, probeWindowMinutes),
+          expectedMinutes: (await candidateExpectedMinutesFromProfile(client, serviceProfile, probeWindowMinutes))
+            ?? (await candidateExpectedMinutesFromRow(client, row, probeWindowMinutes)),
         },
       });
       // Capacity mode keeps its own visit check (verifyArrivalCapacity,

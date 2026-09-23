@@ -40,7 +40,7 @@ const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
-const { occupiedRows } = require('./visit-capacity');
+const { occupiedRows, allocationKey } = require('./visit-capacity');
 const logger = require('../logger');
 const { etParts, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 // Recruiting interview occupancy constants — mirrored from
@@ -698,6 +698,25 @@ async function findConflictingVisitsWithTravel({
     .orderBy('scheduled_services.window_start', 'asc');
   if (!Array.isArray(rows)) return [];
 
+  // A version-2 combined allocation is expanded by occupiedRows to the
+  // SUM of its members' work spans — its expected-minutes credit must be
+  // summed the same way, or the expanded stop is treated as finished after
+  // its first member and the remaining allocated work is credited toward
+  // travel (Codex r1 P1). Keyed exactly as occupiedRows keys the span.
+  const expectedByAllocation = new Map();
+  for (const row of rows) {
+    const key = allocationKey(row);
+    if (!key) continue;
+    const s = timeToMinutes(row.window_start);
+    const e = timeToMinutes(row.window_end);
+    const span = s != null && e != null && e > s ? e - s
+      : (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : DEFAULT_DURATION_MINUTES);
+    const own = expectedMinutesSync({
+      serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes: span,
+    });
+    expectedByAllocation.set(key, (expectedByAllocation.get(key) || 0) + own);
+  }
+
   const stops = [];
   for (const row of occupiedRows(rows)) {
     const startMin = timeToMinutes(row.window_start);
@@ -707,6 +726,7 @@ async function findConflictingVisitsWithTravel({
       ? Number(row.estimated_duration_minutes)
       : DEFAULT_DURATION_MINUTES;
     const endMin = row.endMin ?? (explicitEnd != null ? explicitEnd : startMin + durationMin);
+    const allocation = allocationKey(row);
     stops.push({
       startMin,
       endMin,
@@ -718,10 +738,12 @@ async function findConflictingVisitsWithTravel({
       // 2026-09-23) — service_key_snapshot first, else services.name =
       // service_type; no match falls back to the window length.
       windowMinutes: endMin - startMin,
-      expectedMinutes: expectedMinutesSync({
-        serviceKey: row.service_key_snapshot, serviceType: row.service_type,
-        windowMinutes: endMin - startMin,
-      }),
+      expectedMinutes: allocation
+        ? Math.min(expectedByAllocation.get(allocation) || (endMin - startMin), endMin - startMin)
+        : expectedMinutesSync({
+          serviceKey: row.service_key_snapshot, serviceType: row.service_type,
+          windowMinutes: endMin - startMin,
+        }),
       row,
     });
   }

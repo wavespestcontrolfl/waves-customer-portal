@@ -109,3 +109,46 @@ describe('the 2026-09-03 Palmetto/Bradenton 33-minute case stays blocked on both
     expect(clash.map((c) => c.id)).toEqual(['bradenton-stop']);
   });
 });
+
+describe('version-2 combined allocation: expected minutes are summed across the members (Codex #4664 r1 P1)', () => {
+  const { ensureCatalogLoaded, clearExpectedServiceMinutesCache } = require('../services/scheduling/expected-service-minutes');
+  const catalog = (table) => ({
+    select: async () => (table === 'services'
+      ? [{ service_key: 'quarterly_pest', name: 'Pest', min_duration_minutes: 30, max_duration_minutes: 60 }]
+      : []),
+  });
+  const mix = { version: 2, allocatedServiceIds: ['m1', 'm2'] };
+  const member = (id, windowStart, windowEnd) => ({
+    id, customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: '2026-09-03',
+    window_start: windowStart, window_end: windowEnd, status: 'scheduled',
+    service_type: 'Pest', service_key_snapshot: 'quarterly_pest', estimated_duration_minutes: 60,
+    reservation_expires_at: null, reservation_service_mix: mix, lat: PALMETTO.lat, lng: PALMETTO.lng,
+  });
+
+  beforeEach(async () => { clearExpectedServiceMinutesCache(); await ensureCatalogLoaded(catalog); });
+  afterEach(() => clearExpectedServiceMinutesCache());
+
+  // Both members carry the allocation's shared 09:00 arrival anchor (that
+  // anchor is part of allocationKey); occupiedRows expands each to the
+  // summed 09:00-11:00 work span.
+  test('two 60-minute members occupying 09:00-11:00 are expected done at 10:30 (45+45), not 09:45 — the 33-minute Bradenton 11:00 candidate is refused', async () => {
+    db.mockImplementation(() => makeQuery([member('m1', '09:00:00', '10:00:00'), member('m2', '09:00:00', '10:00:00')]));
+    const clash = await findConflictingVisits({
+      date: '2026-09-03', windowStart: '11:00', windowEnd: '12:00',
+      travel: { ...BRADENTON, expectedMinutes: 45 },
+    });
+    // Per-member credit would put the expected end at 09:45 -> a 75-minute
+    // gap that clears the 33-minute drive; the summed credit ends at 10:30
+    // -> 30 minutes, short of the drive.
+    expect(clash.map((r) => r.id).sort()).toEqual(['m1', 'm2']);
+  });
+
+  test('the same allocation with a co-located 11:00 candidate is still fine (summed credit, zero drive)', async () => {
+    db.mockImplementation(() => makeQuery([member('m1', '09:00:00', '10:00:00'), member('m2', '09:00:00', '10:00:00')]));
+    const clash = await findConflictingVisits({
+      date: '2026-09-03', windowStart: '11:00', windowEnd: '12:00',
+      travel: { ...PALMETTO, expectedMinutes: 45 },
+    });
+    expect(clash).toEqual([]);
+  });
+});

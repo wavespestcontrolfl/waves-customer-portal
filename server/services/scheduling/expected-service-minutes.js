@@ -50,15 +50,31 @@ async function ensureCatalogLoaded(conn) {
   if (catalogCache && catalogCache.expiresAt > Date.now()) return catalogCache;
   if (!conn) return catalogCache;
   try {
-    const rows = await conn('services').select(
-      'service_key', 'name', 'default_duration_minutes',
-      'min_duration_minutes', 'max_duration_minutes',
-    );
+    const rows = await selectCatalog(conn);
     catalogCache = buildCatalogIndex(rows);
   } catch {
     catalogCache = catalogCache || buildCatalogIndex([]);
   }
   return catalogCache;
+}
+
+// "Fails open" is only true OUTSIDE a transaction: a query that errors
+// inside a caller's transaction (a reserve/commit under the date lock)
+// leaves that transaction aborted, and every later statement — the commit
+// itself — fails with "current transaction is aborted" (CI, combined-visit
+// capacity suite, whose services fixture has no duration columns). Inside a
+// transaction the read runs under a SAVEPOINT (knex nests a transaction on
+// a trx as one), so a failed preload rolls back to the savepoint and the
+// caller's transaction stays usable.
+function selectCatalog(conn) {
+  const read = (c) => c('services').select(
+    'service_key', 'name', 'default_duration_minutes',
+    'min_duration_minutes', 'max_duration_minutes',
+  );
+  if (conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((savepoint) => read(savepoint));
+  }
+  return read(conn);
 }
 
 function clampToWindow(minutes, windowMinutes) {

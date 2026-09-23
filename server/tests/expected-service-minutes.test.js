@@ -117,3 +117,51 @@ describe('expectedServiceMinutes — catalog midpoint / default / clamp', () => 
     expect(expectedMinutesSync({ serviceKey: 'k', windowMinutes: 60 })).toBe(30);
   });
 });
+
+describe('ensureCatalogLoaded inside a transaction (CI combined-visit capacity failure)', () => {
+  // A failed read INSIDE a caller's transaction aborts that transaction —
+  // "fails open" via try/catch is not open at all once every later
+  // statement (the commit itself) errors with "current transaction is
+  // aborted". Under a trx the read runs in a SAVEPOINT (knex nests a
+  // transaction on a trx as one) so a failed preload rolls back to the
+  // savepoint and the caller's transaction stays usable.
+  test('a failing read under a trx runs inside a savepoint and still falls back to the window length', async () => {
+    const calls = [];
+    const trx = (table) => {
+      calls.push(`select:${table}`);
+      return { select: async () => { throw new Error('column "min_duration_minutes" does not exist'); } };
+    };
+    trx.isTransaction = true;
+    trx.transaction = async (fn) => {
+      calls.push('savepoint');
+      const savepoint = (table) => trx(table);
+      savepoint.isTransaction = true;
+      return fn(savepoint);
+    };
+    expect(await expectedServiceMinutes(trx, { serviceKey: 'quarterly_pest', windowMinutes: 60 })).toBe(60);
+    expect(calls).toEqual(['savepoint', 'select:services']);
+  });
+
+  test('a plain (non-transaction) connection reads directly — no savepoint', async () => {
+    const calls = [];
+    const conn = (table) => {
+      calls.push(`select:${table}`);
+      return { select: async () => [{ service_key: 'quarterly_pest', name: 'Pest', min_duration_minutes: 30, max_duration_minutes: 60 }] };
+    };
+    conn.transaction = async () => { throw new Error('must not be called'); };
+    expect(await expectedServiceMinutes(conn, { serviceKey: 'quarterly_pest', windowMinutes: 60 })).toBe(45);
+    expect(calls).toEqual(['select:services']);
+  });
+
+  test('a successful read under a trx also goes through the savepoint', async () => {
+    const calls = [];
+    const trx = (table) => {
+      calls.push(`select:${table}`);
+      return { select: async () => [{ service_key: 'quarterly_pest', name: 'Pest', min_duration_minutes: 30, max_duration_minutes: 60 }] };
+    };
+    trx.isTransaction = true;
+    trx.transaction = async (fn) => { calls.push('savepoint'); return fn(trx); };
+    expect(await expectedServiceMinutes(trx, { serviceKey: 'quarterly_pest', windowMinutes: 60 })).toBe(45);
+    expect(calls).toEqual(['savepoint', 'select:services']);
+  });
+});
