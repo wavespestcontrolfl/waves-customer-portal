@@ -69,6 +69,7 @@ const REASON_LABELS = {
   secondary_contact_captured: "Second contact named — confirm",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
+  attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
 };
 
 // Human-readable occupancy names for property-role proposal rows.
@@ -640,6 +641,10 @@ export default function TriageInboxTabV2() {
                 // commitment needs the single-card Resolve/Dismiss transition,
                 // same as bounce and property-role cards above).
                 const isPromiseCard = isTriage && item.reason_code === "reschedule_link_promise";
+                // An owed follow-up visit (the primary booked; visit 2 is
+                // booked by hand) — settled by its own Resolve once booked,
+                // never by a call verdict (the server 400s /verdict on it).
+                const isFollowUpCard = isTriage && item.reason_code === "attached_booking_followup_unbooked";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
                 // While the re-transcription is still running the card is a
                 // placeholder — resolving it would bury the candidates the
@@ -674,7 +679,7 @@ export default function TriageInboxTabV2() {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isRescheduleProposal && (
+                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isRescheduleProposal && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -735,6 +740,16 @@ export default function TriageInboxTabV2() {
                             >
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
                               {actioning === busyKey ? "Saving…" : "Mark handled"}
+                            </Button>
+                          ) : isFollowUpCard ? (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={actioning === busyKey}
+                              onClick={() => resolveItem(item)}
+                            >
+                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                              {actioning === busyKey ? "Saving…" : "Follow-up booked"}
                             </Button>
                           ) : (
                             <>
