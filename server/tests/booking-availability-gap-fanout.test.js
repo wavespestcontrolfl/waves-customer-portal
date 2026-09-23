@@ -361,4 +361,34 @@ describe('buildBookingAvailability — customerFacing propagation to find-time',
     expect(startTimes(selfServe)[0]).toBe('09:00');
     expect(startTimes(voice)).toContain('08:00');
   });
+
+  // Push-audit P1 on #4663: addCandidate's customerWindowAdmits() call
+  // defaults dayEndMinutes to currentDayEndMinutes() — scheduling/
+  // customer-windows.js's shared, 60s-TTL cache — which this file never
+  // had to warm before customerWindowAdmits existed (its own bounds always
+  // came straight from the freshly-loaded `config`). Prove
+  // buildBookingAvailability warms that cache itself, so a reconfigured
+  // booking_config.day_end narrower than the passed-in `config` still
+  // narrows the offer the moment this request reads it, not up to 60s
+  // later.
+  test('buildBookingAvailability warms the customer-windows cache with the LIVE booking_config row before generating candidates', async () => {
+    // CONFIG (passed in, used for addCandidate's OWN dayStartMin/dayEndMin
+    // check) keeps its normal 18:00 day_end — 17:00+60=18:00 fits it fine.
+    // The mocked booking_config ROW (what a fresh read would return) is a
+    // tighter 16:00 — only customerWindowAdmits()'s live-cache default
+    // reads that value. Without the refresh this test guards, the cache
+    // would never see the tighter row and currentDayEndMinutes() would
+    // fall back to the fixed 18:00 constant, wrongly admitting 17:00.
+    findAvailableSlots.mockResolvedValue({ slots: [gapSlot('17:00', { latest_start_min: 17 * 60 })] });
+    const bookingConfigBuilder = { first: jest.fn().mockResolvedValue({ day_end: '16:00:00', lunch_start: null, lunch_end: null }) };
+    db.mockImplementation((table) => {
+      if (table === 'booking_config') return bookingConfigBuilder;
+      throw new Error(`unexpected table ${table}`);
+    });
+    const result = await buildBookingAvailability({
+      lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date(), selfServeNotice: true,
+    });
+    expect(bookingConfigBuilder.first).toHaveBeenCalled();
+    expect(startTimes(result)).not.toContain('17:00');
+  });
 });

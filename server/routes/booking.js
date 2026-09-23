@@ -12,7 +12,9 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
-const { CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits } = require('../services/scheduling/customer-windows');
+const {
+  CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
+} = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled } = require('../config/feature-gates');
 const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -905,6 +907,19 @@ function roundPublicCoord(value) {
 // this false — the call agent is unaffected by the notice rule.
 async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', selfServeNotice = false }) {
   config = applySchedulingPolicy(config);
+  // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
+  // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
+  // scheduling/customer-windows.js's shared, 60s-TTL cache. Unlike
+  // estimate-slot-availability.js and slot-reservation.js (which both
+  // explicitly warm it before relying on it), this file never had to before
+  // customerWindowAdmits existed — its own day-end/lunch bounds always came
+  // straight from the freshly-loaded `config` above. Warm it here too, so a
+  // reconfigured booking_config.day_end/lunch_start/_end can't leave this
+  // offer generator on a stale or never-initialized cached value while
+  // validateBookingSlotGeometry (the commit-side check in this same file)
+  // reads a fresh config row on every request — the exact offer/commit
+  // parity break this predicate exists to prevent (push-audit P1 on #4663).
+  await refreshCustomerBookingWindowConfig();
   // Rain chips (GATE_BOOKING_RAIN_CHIPS): kick off ONE bounded office-point
   // daily outlook so it overlaps the slot computation; stamped onto days/slots
   // just before the return. Bounded + cached + fail-open in the service (null
