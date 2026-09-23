@@ -9770,7 +9770,12 @@ const CallRecordingProcessor = {
     let houseNumberConflictFiled = false;
     if (customerId && !createdCustomerFromCall && onFileAddress) {
       try {
-        let houseConflict = onFileHouseNumberConflict({ addressValidation: effectiveAddressValidation, onFileAddress });
+        // `detected` is the detector's own verdict; the guards below may
+        // withhold the CARD (uncorroborated, a known property) without
+        // settling the disagreement — only a positive verdict of "no
+        // conflict" may retire an earlier card (pre-push audit P1).
+        const detected = onFileHouseNumberConflict({ addressValidation: effectiveAddressValidation, onFileAddress });
+        let houseConflict = detected;
         // AV proves a premise EXISTS, not that the caller said it: in shadow
         // mode the bridge refuses to adopt an AV street that disagrees with
         // the legacy extraction, and this lane must not present it as caller
@@ -9806,7 +9811,14 @@ const CallRecordingProcessor = {
           // makes (codex r2 P2).
           const statedUnit = extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
           const statedKey = propertyKey({ address_line1: n.street_line_1, address_line2: statedUnit, city: n.city, zip: n.postal_code });
-          const props = await db('customer_properties').where({ customer_id: customerId, active: true }).select('address_line1', 'address_line2', 'city', 'zip');
+          // Independent provenance only: a property row the call pipeline
+          // itself minted from THIS (or an earlier pass's) stated address is
+          // the disagreement restated, not a confirmation of it (pre-push
+          // audit P1) — manual / self-book / backfill rows count.
+          const props = await db('customer_properties')
+            .where({ customer_id: customerId, active: true })
+            .whereNot({ source: 'call_pipeline' })
+            .select('address_line1', 'address_line2', 'city', 'zip');
           if (statedKey && props.some((prop) => propertyKey(prop) === statedKey)) houseConflict = null;
         }
         if (houseConflict) {
@@ -9855,7 +9867,7 @@ const CallRecordingProcessor = {
         // stays theirs).
         const avPositive = ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status)
           && !!effectiveAddressValidation?.normalized?.street_line_1;
-        if (!houseConflict && avPositive) {
+        if (!detected && avPositive) {
           await db('triage_items')
             .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
             .update({
