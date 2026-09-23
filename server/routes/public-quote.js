@@ -1198,6 +1198,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // P1), and a GIS outage on a recalculation must not erase an earlier
     // authoritative warning (codex r5 P1).
     let priorAddressUnverified = null;
+    // The clean evidence's ORIGINAL timestamp, carried onto the published
+    // verdict so a recovered clean verdict never outranks a flag committed
+    // after it (pre-push audit P1). Declared before the reconciliation
+    // that assigns it.
+    let cleanEvidenceAt = null;
     // The lookup stage's server-owned CLEAN verdict for this premise: it
     // stands in for a roll answer this run could not get (record-less
     // clean lookups are never cached) and supersedes every older warning
@@ -1296,10 +1301,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       profileFound: trustedProfileFound,
       prior: leadCleanVerdict ? null : priorAddressUnverified,
     });
-    // The clean evidence's ORIGINAL timestamp, carried onto the published
-    // verdict so a recovered clean verdict never outranks a flag committed
-    // after it (pre-push audit P1).
-    let cleanEvidenceAt = null;
     // Did the county roll answer on THIS run (or, for this premise, on the
     // lookup stage)? Only an answer may clear a marker an existing draft
     // already carries (see the draft refresh).
