@@ -429,9 +429,10 @@ async function findAvailableSlots(opts) {
   // serviceKey/serviceType match falls back to the window length (no
   // credit, legacy gap).
   let candidatePadding = 0;
+  let candidateExpectedMinutes = durationMinutes;
   if (stopBuffer > 0) {
     await ensureCatalogLoaded(db);
-    const candidateExpectedMinutes = Number.isFinite(expectedMinutes) && expectedMinutes > 0
+    candidateExpectedMinutes = Number.isFinite(expectedMinutes) && expectedMinutes > 0
       ? Math.min(expectedMinutes, durationMinutes)
       : expectedMinutesSync({
         serviceKey, serviceType: opts.serviceType || null, windowMinutes: durationMinutes,
@@ -530,7 +531,17 @@ async function findAvailableSlots(opts) {
         );
         // Must allow drive from new → next before next.startMin (its real,
         // never-adjusted window start — a promise to whoever holds it).
+        // Against a REAL next stop the candidate is the early side of the
+        // pair, so — exactly as travel-gap.js requiredGapMinutes/
+        // effectiveEndMinutes measure it at commit — the drive starts at the
+        // candidate's EXPECTED end (start + its expected minutes), not its
+        // full window end; measuring from the window end here rejected
+        // starts the commit probe accepts whenever drive > 0 (push-audit
+        // P1). The HQ leg keeps the full window (no credit, as before).
         const latestEndFloor = next.startMin - driveOut - nextBuffer;
+        const latestStartFloor = nextIsStop
+          ? latestEndFloor - candidateExpectedMinutes
+          : latestEndFloor - durationMinutes;
 
         // A coordless anchor (ungeocoded stop, or a divergent stamped rental
         // whose primary-coord fallback the SELECT suppressed) degrades to
@@ -570,7 +581,7 @@ async function findAvailableSlots(opts) {
             // genuinely free later hours, and whole days with real capacity
             // disappeared from the self-serve booking surfaces (2026-08-05
             // field report).
-            latest_start_min: latestEndFloor - durationMinutes,
+            latest_start_min: latestStartFloor,
             insertion: {
               after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
               before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,
@@ -593,10 +604,10 @@ async function findAvailableSlots(opts) {
           // to a single candidate below.
           const fits = (startMin) => Number.isFinite(startMin)
             && startMin >= earliestFloor
-            && startMin + durationMinutes <= latestEndFloor
+            && startMin <= latestStartFloor
             && startMin + durationMinutes <= dayClose;
           const earliestHourStart = Math.ceil(earliestFloor / 60) * 60;
-          const latestHourStart = Math.floor((latestEndFloor - durationMinutes) / 60) * 60;
+          const latestHourStart = Math.floor(latestStartFloor / 60) * 60;
           const wantEarliest = prevIsStop; // trailing or middle gap
           const wantLatest = nextIsStop;   // leading or middle gap
           const starts = new Set();
@@ -612,7 +623,7 @@ async function findAvailableSlots(opts) {
           ? Math.ceil(earliestFloor / slotStepMinutes) * slotStepMinutes
           : earliestFloor;
         const earliestEnd = startMin + durationMinutes;
-        if (earliestEnd > latestEndFloor) continue; // doesn't fit
+        if (startMin > latestStartFloor) continue; // doesn't fit
         if (earliestEnd > dayClose) continue;  // past end of day
         candidates.push(makeCandidate(startMin));
       }
