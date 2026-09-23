@@ -16,7 +16,7 @@ jest.mock('../config/twilio-numbers', () => ({
 
 const { onFileHouseNumberConflict, sameHouseNumberStreet } = require('../services/call-triage-flags');
 const { buildTriageItem } = require('../services/call-routing-gates');
-const { classifyTriageItem, RULE_NOTES } = require('../services/triage-auto-resolve');
+const { classifyTriageItem, RULE_NOTES, visitAtStatedAddress } = require('../services/triage-auto-resolve');
 
 const av = (street, extra = {}) => ({
   status: 'validated_accept',
@@ -206,5 +206,29 @@ describe('triage auto-resolve: house_number_adopted', () => {
     expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_deleted_at: '2026-09-20T00:00:00Z' }), {}, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', payload: {} }), {}, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', payload: { stated_house_number: '1250' } }), {}, { now: NOW })).toBeNull();
+  });
+});
+
+describe('visitAtStatedAddress', () => {
+  const card = {
+    call_customer_id: 'c1',
+    payload: { stated_street: '1250 Example St', stated_city: 'Parrish', stated_zip: '34219', stated_house_number: '1250' },
+  };
+  const visit = (line1, city = 'Parrish', zip = '34219', line2 = null) => ({
+    customer_id: 'c1', service_address_line1: line1, service_address_line2: line2, service_address_city: city, service_address_zip: zip,
+  });
+
+  test('a booking at the stated premise counts; one at the old on-file number does not', () => {
+    expect(visitAtStatedAddress(card, visit('1250 Example Street'), new Map())).toBe(true);
+    expect(visitAtStatedAddress(card, visit('1260 Example St'), new Map())).toBe(false);
+    expect(visitAtStatedAddress(card, visit('1250 Example St', 'Bradenton'), new Map())).toBe(false);
+    expect(visitAtStatedAddress(card, visit('1250 Example St', 'Parrish', '34221'), new Map())).toBe(false);
+  });
+
+  test('a stated unit must match; a card with no stated street proves nothing', () => {
+    const unitCard = { ...card, payload: { ...card.payload, stated_unit: 'Apt 2' } };
+    expect(visitAtStatedAddress(unitCard, visit('1250 Example St', 'Parrish', '34219', 'Apt 2'), new Map())).toBe(true);
+    expect(visitAtStatedAddress(unitCard, visit('1250 Example St', 'Parrish', '34219', 'Apt 3'), new Map())).toBe(false);
+    expect(visitAtStatedAddress({ ...card, payload: {} }, visit('1250 Example St'), new Map())).toBe(false);
   });
 });

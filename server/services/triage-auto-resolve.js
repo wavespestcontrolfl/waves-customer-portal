@@ -1393,6 +1393,23 @@ async function loadContactEvidence(conn, items, flag) {
 // neither is only associated with the customer and proves nothing about
 // where service happens. The unit is part of the identity: Unit B is not
 // Unit A, and a unit-less stamp cannot prove a unit.
+// A booking positively at the address the CALLER stated on a house-number
+// card (stated_street / stated_unit / stated_city / stated_zip) — the
+// filing-time on-file snapshot cannot vouch once the office adopted the
+// caller's number (pre-push audit P1 on #4666): key, unit and locality
+// all against the stated premise.
+function visitAtStatedAddress(item, visit, places) {
+  const payload = parseMaybeJson(item.payload);
+  const stated = addressKey(payload?.stated_street);
+  if (!stated) return false;
+  const place = bookingPlace(visit, places);
+  if (!place || !place.key) return false;
+  if (place.customer_id && String(place.customer_id) !== String(item.call_customer_id)) return false;
+  const unit = unitOf(payload.stated_street, payload.stated_unit);
+  return place.key === stated && (!unit || unit === place.unit)
+    && localityAgrees(place, { city: payload.stated_city, zip: payload.stated_zip });
+}
+
 function visitAtOnFileAddress(item, visit, places) {
   const onFile = addressKey(onFileAddress(item)?.address_line1);
   if (!onFile) return false;
@@ -1456,7 +1473,7 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
   // #4666). Service, cadence, window and hour checks still apply.
   const adoptedAddress = item.reason_code === 'on_file_house_number_conflict' && recordCarriesStatedStreet(item);
   const association = singleProperty && (requestedAddressIsOnFile(item) || adoptedAddress) && window
-    ? parents.filter((v) => inAsk(v) && visitAtOnFileAddress(item, v, places))
+    ? parents.filter((v) => inAsk(v) && (adoptedAddress ? visitAtStatedAddress(item, v, places) : visitAtOnFileAddress(item, v, places)))
     : [];
   // Every address the call named needs its own covering bookings — a
   // two-property ask is not answered by bookings at one of them (codex r24
@@ -2109,6 +2126,7 @@ module.exports = {
   requestedAddressIsOnFile,
   bookingAtRequestedAddress,
   bookingCoversRequest,
+  visitAtStatedAddress,
   loadEvidence,
   EVIDENCE_CODES,
   LIVE_BOOKING_STATUSES,
