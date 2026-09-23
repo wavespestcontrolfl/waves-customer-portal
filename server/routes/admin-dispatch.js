@@ -20,6 +20,7 @@ const db = require('../models/db');
 const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
@@ -712,6 +713,12 @@ router.get('/:date?', async (req, res, next) => {
 
     const services = await db('scheduled_services')
       .where({ 'scheduled_services.scheduled_date': date })
+      // A technician token is scoped to their OWN current assignments, same
+      // as the admin-schedule day feed (scopeToAssignedTech) — this route
+      // has no client caller by date any more, but stays reachable directly
+      // and must never hand one tech another tech's customers, access codes,
+      // rates or invoice totals for any day (ADMIN-BUG-R04).
+      .modify((q) => technicianCurrentVisitFilter(req, q))
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select(

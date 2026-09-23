@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const healthService = require('../services/customer-health');
@@ -21,7 +21,12 @@ function liveScoresOnly(q) {
   });
 }
 
-router.use(adminAuthenticate);
+// Owner-only surface: monthly rate, lifetime revenue, CRM notes, gate/lockbox
+// codes and Stripe ids ride on every health row, and the client already hides
+// /admin/health from technicians (adminNavigation.js TECH_ALLOWED_PATH_PREFIXES,
+// admin-customers.js TECH_360_STRIPPED_CUSTOMER_FIELDS). No technician surface
+// calls this router, so it is admin-only end to end (ADMIN-BUG-R06).
+router.use(adminAuthenticate, requireAdmin);
 
 // Auto-create health tables if missing
 async function ensureHealthTables() {

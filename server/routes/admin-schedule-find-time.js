@@ -21,7 +21,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { validateHintParams, markUnknownDetours, guardHintSlots, scorePickedHour } = require('../services/scheduling/find-time-hints');
@@ -34,7 +34,12 @@ const { bookingPropertyStamp } = require('../services/customer-properties');
 
 const MAX_FIND_TIME_DAYS = 90;
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// Admin-only: every caller in the repo (CreateAppointmentModal, useBestTimes)
+// is an admin surface, and the ranked-slot payload names every assignable
+// technician's customers/appointment times plus resolves any customer or
+// visit id to a street address with no ownership predicate — a technician
+// token must never reach it (ADMIN-BUG-R07).
+router.use(adminAuthenticate, requireAdmin);
 
 function httpError(status, message) {
   const err = new Error(message);
