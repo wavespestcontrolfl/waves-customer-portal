@@ -9935,7 +9935,7 @@ const CallRecordingProcessor = {
             const newlyConfirmed = parsedCard.scheduling_window?.status === 'confirmed' || parsedCard.scheduling_status === 'confirmed';
             const addressEvidence = Object.fromEntries(Object.entries(parsedCard)
               .filter(([key]) => newlyConfirmed || !['scheduling_window', 'scheduling_status'].includes(key)));
-            await trx('triage_items')
+            const landed = await trx('triage_items')
               .insert(conflictCard)
               .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .merge({
@@ -9943,7 +9943,15 @@ const CallRecordingProcessor = {
                 summary: conflictCard.summary,
                 updated_at: new Date(),
               })
-              .where('triage_items.status', 'open');
+              .where('triage_items.status', 'open')
+              .returning('id');
+            // A CLAIMED (in_progress) card is left untouched — and when this
+            // pass NEWLY confirms an appointment that card's snapshot never
+            // recorded, the confirmed ask is not persisted anywhere: report
+            // "unfiled" so the approved-but-unbooked fallback files it
+            // (pre-push audit P1). An unchanged, already-recorded ask on a
+            // claimed card still counts as filed.
+            if (!landed.length && newlyConfirmed) return 'claimed_unrecorded';
             return 'filed';
           }
           // A card whose call CONFIRMED an appointment carries the only

@@ -859,7 +859,12 @@ router.post('/:id/verdict', async (req, res) => {
         }
       }
 
-      if (heldConflictConfirmed && resolvedRows.some((r) => r?.reason_code === 'on_file_house_number_conflict')) {
+      // Whenever a conflict card resolves — confirmed or not: the processor
+      // unassigns existing AI bookings even when a reprocess heard no
+      // confirmed appointment, and the decision helper decides what work
+      // remains (a held booking files a task on an unconfirmed card too;
+      // pre-push audit P1).
+      if (heldConflictPayload && resolvedRows.some((r) => r?.reason_code === 'on_file_house_number_conflict')) {
         // Pre-decision (address-independent parts) so the evidence item can
         // carry the approved snapshot; the coverage check reads
         // scheduling_window.requested_address.
