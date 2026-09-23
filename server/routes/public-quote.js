@@ -1245,13 +1245,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .filter((snap) => cleanVerdictCovers(snap, normalizedAddress))
           .map((snap) => Date.parse(snap.address_verdict?.at || '') || 0)
           .reduce((max, at) => Math.max(max, at), 0);
-        if (newestClean) leadCleanVerdict = true;
-        for (const snap of snapshots) {
-          const flag = recoverAddressUnverified(snap);
-          if (!flag || !flagCoversAddress(flag, normalizedAddress)) continue;
-          if (newestClean && newestClean > (Date.parse(flag.flagged_at || '') || 0)) continue;
-          priorAddressUnverified = flag;
-          break;
+        // The clean verdict counts only when it is newer than EVERY matching
+        // flag — a clean lookup followed by a flagged one and an outage must
+        // end flagged (pre-push audit P1).
+        const matchingFlags = snapshots
+          .map((snap) => recoverAddressUnverified(snap))
+          .filter((flag) => flag && flagCoversAddress(flag, normalizedAddress));
+        const newestFlag = matchingFlags.map((flag) => Date.parse(flag.flagged_at || '') || 0).reduce((max, at) => Math.max(max, at), 0);
+        if (newestClean && newestClean > newestFlag) {
+          leadCleanVerdict = true;
+        } else if (matchingFlags.length) {
+          priorAddressUnverified = matchingFlags.sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0];
         }
       } catch (leadErr) {
         logger.warn(`[public-quote] contact-pair lead flag re-read failed: ${leadErr.code || leadErr.name || 'error'}`);

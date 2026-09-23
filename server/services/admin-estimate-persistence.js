@@ -3187,6 +3187,30 @@ async function reviseAdminEstimate({
     // exists would let a concurrent send read the draft as "unedited" (see
     // estimate-learning.js for the concurrency contract).
     await recordPreSendRevision({ priorEstimate: lockedPrior, trx });
+    // A staff correction / confirmation that just cleared the draft's
+    // county-roll block is the AUTHORITATIVE verdict for that premise: it
+    // lands on the linked lead too (its flag cleared, a clean
+    // address_verdict stamped), so the booking route's lead and contact-
+    // pair checks and the next /calculate honor it (pre-push audit P1).
+    const parseJson = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
+    const writtenData = parseJson(row.estimate_data);
+    const priorLockedData = parseJson(lockedPrior?.estimate_data);
+    if (writtenData?.addressUnverifiedClearedBy && priorLockedData?.addressUnverified === true && writtenData.lead_id) {
+      const parts = String(row.address || '').split(',').map((part) => part.trim());
+      const verdict = {
+        status: 'clean',
+        address_line1: parts[0] || null,
+        city: parts[1] || null,
+        state: 'FL',
+        zip: (String(row.address || '').match(/\b\d{5}\b(?!.*\b\d{5}\b)/) || [null])[0],
+        at: new Date().toISOString(),
+        source: `staff:${writtenData.addressUnverifiedClearedBy}`,
+      };
+      await trx('leads').where({ id: writtenData.lead_id }).update({
+        extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
+        updated_at: now(),
+      });
+    }
     return row;
   });
   if (!updated) {
