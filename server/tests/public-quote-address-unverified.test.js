@@ -187,3 +187,12 @@ describe('address verdict', () => {
     expect(cleanVerdictCovers({}, address)).toBe(false);
   });
 });
+
+describe('assertEstimateSendable refuses a flagged address', () => {
+  test('the send guard names the correction path', () => {
+    const { _internals } = require('../routes/admin-estimates');
+    const base = { status: 'draft', archived_at: null, estimate_data: { addressUnverified: true } };
+    expect(() => _internals.assertEstimateSendable(base)).toThrow(/Correct the address/);
+    try { _internals.assertEstimateSendable(base); } catch (e) { expect(e.code).toBe('ADDRESS_UNVERIFIED'); }
+  });
+});

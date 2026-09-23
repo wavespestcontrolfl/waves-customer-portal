@@ -1227,6 +1227,36 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a publication a FLAGGED run withdrew for this visitor still carries
     // the verdict — both contact factors plus the complete premise, the
     // same proof the withdrawal itself required (pre-push audit P1).
+    // Earlier LEAD rows for the same contact pair and premise (a lookup
+    // abandoned before /calculate leaves neither draft nor publication):
+    // their flags carry over unless a newer clean verdict for the premise
+    // supersedes them (pre-push audit P1).
+    if (!priorAddressUnverified && !leadCleanVerdict && contactEmail && contactPhone) {
+      try {
+        const phoneTen = String(contactPhone).replace(/\D/g, '').slice(-10);
+        const rows = phoneTen ? await db('leads')
+          .whereNull('deleted_at')
+          .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+          .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneTen])
+          .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+          .select('extracted_data') : [];
+        const snapshots = rows.map((row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data)).filter(Boolean);
+        const newestClean = snapshots
+          .filter((snap) => cleanVerdictCovers(snap, normalizedAddress))
+          .map((snap) => Date.parse(snap.address_verdict?.at || '') || 0)
+          .reduce((max, at) => Math.max(max, at), 0);
+        if (newestClean) leadCleanVerdict = true;
+        for (const snap of snapshots) {
+          const flag = recoverAddressUnverified(snap);
+          if (!flag || !flagCoversAddress(flag, normalizedAddress)) continue;
+          if (newestClean && newestClean > (Date.parse(flag.flagged_at || '') || 0)) continue;
+          priorAddressUnverified = flag;
+          break;
+        }
+      } catch (leadErr) {
+        logger.warn(`[public-quote] contact-pair lead flag re-read failed: ${leadErr.code || leadErr.name || 'error'}`);
+      }
+    }
     if (!priorAddressUnverified && !leadCleanVerdict && contactEmail && contactPhone) {
       try {
         const rows = await db('estimates')

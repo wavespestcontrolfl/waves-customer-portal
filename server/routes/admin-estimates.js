@@ -543,6 +543,23 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.code = 'REPRICE_PENDING';
     throw err;
   }
+  // The quote intake's county-roll verdict: the public renderer refuses
+  // the link while it stands (estimateOffCustomerSurface), so a send would
+  // hand the customer a 404. Staff clear it by correcting the address on
+  // the estimate (a revision that changes the address), or by confirming it
+  // explicitly (addressUnverified: false in the revision) — pre-push audit
+  // P1 on #4667.
+  {
+    const data = typeof estimate.estimate_data === 'string'
+      ? (() => { try { return JSON.parse(estimate.estimate_data); } catch { return null; } })()
+      : estimate.estimate_data;
+    if (data && data.addressUnverified === true) {
+      const err = new Error('County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.');
+      err.statusCode = 409;
+      err.code = 'ADDRESS_UNVERIFIED';
+      throw err;
+    }
+  }
   // One-tap purchase drafts are INTERNAL flow state, never a document to
   // publish (Codex #3395 r12 P2): sending one flips it to 'sent' — a state
   // the open purchase's confirm rejects and neither cleanup sweep reclaims

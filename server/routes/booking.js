@@ -2604,6 +2604,13 @@ async function createSelfBooking(payload = {}) {
             if (parseData(lockedDraft?.estimate_data)?.addressUnverified === true) refuse();
           }
         }
+        // The share-token estimate entry (estimate_id + estimate_share_token)
+        // resolves a customer from the estimate itself; its own stored
+        // verdict is rechecked under the row lock too (pre-push audit P1).
+        if (estimate?.id && estimate_share_token && String(estimate.token || '') === String(estimate_share_token)) {
+          const lockedShared = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data');
+          if (parseData(lockedShared?.estimate_data)?.addressUnverified === true) refuse();
+        }
         const submitted = new_customer?.address_line1 ? {
           line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
         } : null;

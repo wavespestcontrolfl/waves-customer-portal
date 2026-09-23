@@ -2576,7 +2576,35 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // handoff-link recheck — an ordinary staff revision must not silently drop
 // it and revive a stale booking link for a still-unconfirmed address
 // (codex #4667 r5 P1); a clean wizard run clears it explicitly (false).
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'addressUnverified', 'addressUnverifiedFlag'];
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState'];
+// The wizard's county-roll verdict (addressUnverified + addressUnverifiedFlag)
+// is carried across an ORDINARY revision (the public link and the send
+// guard both refuse while it stands), and cleared by the two staff actions
+// that answer it: a revision that CHANGES the estimate's address (the
+// correction), or an explicit `addressUnverified: false` in the revision
+// payload (the confirmation) — pre-push audit P1 on #4667. Prior-wins
+// otherwise, so a stale client copy cannot drop it by omission.
+function carryAddressBlockAcrossRevise(nextData, priorData, { addressChanged = false } = {}) {
+  if (!nextData || typeof nextData !== 'object' || !priorData || typeof priorData !== 'object') return false;
+  const explicitlyConfirmed = nextData.addressUnverified === false;
+  if (addressChanged || explicitlyConfirmed) {
+    if (priorData.addressUnverified === true || priorData.addressUnverifiedFlag) {
+      nextData.addressUnverified = false;
+      nextData.addressUnverifiedFlag = null;
+      nextData.addressUnverifiedClearedBy = addressChanged ? 'address_corrected' : 'staff_confirmed';
+      return true;
+    }
+    return false;
+  }
+  let changed = false;
+  for (const key of ['addressUnverified', 'addressUnverifiedFlag']) {
+    if (priorData[key] !== undefined && nextData[key] !== priorData[key]) {
+      nextData[key] = priorData[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
 const GROUP_PUBLICATION_KEYS = ['groupLinkViewableThrough', 'groupPublishedByEstimateId'];
 // Click-to-estimate mints (#3391 audit P0): both markers are
 // lifecycle-critical and PRIOR-WINS across a revise — the zero-comms
@@ -2822,6 +2850,9 @@ async function reviseAdminEstimate({
           preserved = true;
         }
       }
+      if (carryAddressBlockAcrossRevise(nextData, existingData, {
+        addressChanged: writeFields.address !== undefined && String(writeFields.address || '') !== String(estimate.address || ''),
+      })) preserved = true;
       // Publication belongs to the group that sent the link. A move or
       // explicit removal cannot carry that group's navigation window away.
       const nextGroupId = writeFields.estimate_group_id === undefined
@@ -3071,6 +3102,9 @@ async function reviseAdminEstimate({
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
           }
+          carryAddressBlockAcrossRevise(pendingData, lockedData, {
+            addressChanged: revisedFields.address !== undefined && String(revisedFields.address || '') !== String(lockedPrior.address || ''),
+          });
           const revisedGroupId = revisedFields.estimate_group_id === undefined
             ? lockedPrior.estimate_group_id : revisedFields.estimate_group_id;
           const staysInLockedGroup = lockedPrior.estimate_group_id

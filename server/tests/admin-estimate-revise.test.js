@@ -374,6 +374,21 @@ describe('reviseAdminEstimate', () => {
     expect(JSON.parse(updates[0].estimate_data).deliveryState).toEqual(latest);
   });
 
+  test('a revision that changes the address clears the wizard address-verification marker; an explicit confirmation clears it too', async () => {
+    const priorData = JSON.parse(sentEstimate.estimate_data);
+    const flagged = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, addressUnverified: true, addressUnverifiedFlag: { reason: 'r' } }) };
+    const corrected = makeReviseDatabase({ estimate: flagged, lockedEstimate: flagged });
+    await reviseAdminEstimate({ database: corrected.database, estimateId: 'est-1', body: { ...reviseBody, address: '1250 Example St, Parrish, FL 34219' },
+      technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    const afterCorrection = JSON.parse(corrected.updates[0].estimate_data);
+    expect(afterCorrection.addressUnverified).toBe(false);
+    expect(afterCorrection.addressUnverifiedClearedBy).toBe('address_corrected');
+    const confirmed = makeReviseDatabase({ estimate: flagged, lockedEstimate: flagged });
+    await reviseAdminEstimate({ database: confirmed.database, estimateId: 'est-1', body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, addressUnverified: false } },
+      technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(confirmed.updates[0].estimate_data).addressUnverifiedClearedBy).toBe('staff_confirmed');
+  });
+
   test('retains the wizard address-verification marker across an ordinary revision', async () => {
     const priorData = JSON.parse(sentEstimate.estimate_data);
     const flagged = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, addressUnverified: true }) };

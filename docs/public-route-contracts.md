@@ -932,7 +932,11 @@ the early read and the insert still refuses (409, code
 lead for the typed email AND phone whose flag covers the submitted premise
 (a repeat lookup's newer lead). If the flagged run's publication
 withdrawal transaction fails, `/calculate` answers 503 (retry) rather than
-leaving an earlier publication live. A roll that never answered (GIS
+leaving an earlier publication live. Staff clear the draft's marker by
+revising the estimate with a changed address (correction) or an explicit
+`addressUnverified: false` (confirmation); the admin send guard refuses a
+still-flagged estimate with 409 `ADDRESS_UNVERIFIED` since the customer
+link would not render. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
 answers clean, and an existing draft's own `addressUnverified` marker is
