@@ -878,6 +878,19 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+Address-verification guard (2026-09-23): when the SERVER-trusted property
+profile (the cache-only `performPropertyLookup` re-read, or the lookup
+stage's own server-written `extracted_data.address_unverified` on the
+visitor's ownership-matched lead row — never the client's `enriched`
+payload) carries a HIGH `address` verify flag from the county-roll
+house-number audit, the run withholds the self-book handoff entirely: no
+`/book` link, no estimate handoff token, no website publication
+(`booking_url` null). The price still returns and the lead / estimate
+still persist; the lead's `extracted_data.address_unverified` records the
+audit (reason, county, typed number, nearest roll numbers, the judged
+street/city/ZIP) for the callback, and a later run over a clean address
+clears it (the key is always written, null when clean). A roll that never
+answered (GIS outage) is not a flag.
 Request shape: either `services` keyed by the engine
 keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 `serviceKey` / `service_key` from the `/api/public/services/menu` payload,
