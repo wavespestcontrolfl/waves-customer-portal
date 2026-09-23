@@ -66,6 +66,10 @@ describe('onFileHouseNumberConflict', () => {
     expect(sameHouseNumberStreet('1250 Main St N', '1250 Main St S')).toBe(false);
   });
 
+  test('a legacy unit-first on-file line is peeled before comparing', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Main St'), onFileAddress: { ...ON_FILE, address_line1: 'Apt 4, 1260 Main St' } })?.on_file_house_number).toBe('1260');
+  });
+
   test('same house number → nothing to confirm', () => {
     expect(onFileHouseNumberConflict({ addressValidation: av('1260 Example Street'), onFileAddress: ON_FILE })).toBeNull();
   });
@@ -220,6 +224,9 @@ describe('visitAtStatedAddress', () => {
 
   test('a booking at the stated premise counts; one at the old on-file number does not', () => {
     expect(visitAtStatedAddress(card, visit('1250 Example Street'), new Map())).toBe(true);
+    // Equivalent spellings (directional, suffixless) via the detector's comparator.
+    expect(visitAtStatedAddress({ ...card, payload: { ...card.payload, stated_street: '1250 North Example St' } }, visit('1250 N Example Street'), new Map())).toBe(true);
+    expect(visitAtStatedAddress(card, visit('1250 Example'), new Map())).toBe(true);
     expect(visitAtStatedAddress(card, visit('1260 Example St'), new Map())).toBe(false);
     expect(visitAtStatedAddress(card, visit('1250 Example St', 'Bradenton'), new Map())).toBe(false);
     expect(visitAtStatedAddress(card, visit('1250 Example St', 'Parrish', '34221'), new Map())).toBe(false);

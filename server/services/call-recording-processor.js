@@ -9843,10 +9843,26 @@ const CallRecordingProcessor = {
         // preferred_date_time) — a shadow-mode V2 "none" over a confirmed
         // legacy booking would file a card that looks unconfirmed and let
         // an Accept drop the only trace of the appointment (codex r7 P1).
+        // The WHOLE evidence snapshot (scheduling, service_request,
+        // property) comes from the booking authority — in shadow mode the
+        // legacy record, never a V2 blob with only its scheduling swapped
+        // (askSnapshot reads service_request and property too; codex r8 P2).
         const schedulingAuthority = CALL_EXTRACTION_V2_DRIVES_ROUTING
           ? v2CanonicalExtraction
           : {
-            ...(v2CanonicalExtraction || {}),
+            meta: v2CanonicalExtraction?.meta || null,
+            service_request: {
+              primary_service_category: extracted?.matched_service || extracted?.requested_service || null,
+              specific_service_name: extracted?.requested_service || null,
+            },
+            property: {
+              service_address: {
+                street_line_1: extracted?.address_line1 || null,
+                street_line_2: extracted?.address_line2 || null,
+                city: extracted?.city || null,
+                postal_code: extracted?.zip || null,
+              },
+            },
             scheduling: {
               status: extracted?.appointment_confirmed ? 'confirmed' : (extracted?.preferred_date_time ? 'requested' : 'none'),
               confirmed_start_at: extracted?.appointment_confirmed ? (extracted?.preferred_date_time || null) : null,
@@ -13900,6 +13916,23 @@ const CallRecordingProcessor = {
                   // but holds the NEW side effects — a technician assignment
                   // and a follow-up visit at the disputed address — until
                   // the office confirms the number (pre-push audit P1).
+                  // The dispute's row mutations below run only under THIS
+                  // pass's processing claim, checked inside the booking
+                  // transaction: a pass that lost its claim (the card lane
+                  // reported claim_lost, or a reclaim landed since) must not
+                  // unassign a visit the replacement pass created or kept
+                  // after resolving the conflict (codex r8 P1). The hold on
+                  // NEW side effects stands regardless (it creates nothing).
+                  let disputeOwned = false;
+                  if (houseNumberDisputed) {
+                    const ownedForDispute = await trx('call_log')
+                      .where({ id: call.id })
+                      .where('processing_token', procToken)
+                      .forUpdate()
+                      .first('id');
+                    disputeOwned = !!ownedForDispute;
+                    if (!disputeOwned) logger.info(`[call-proc] processing claim lost — dispute unassignments skipped for ${callSid} (the owner applies them)`);
+                  }
                   const reuseHeldForAddress = houseNumberDisputed;
                   if (reuseHeldForAddress) {
                     logger.warn(`[call-proc] reused booking for ${callSid} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
@@ -13917,7 +13950,7 @@ const CallRecordingProcessor = {
                   // card is the office's surface for it (pre-push audit P1).
                   // The status predicate is enforced ATOMICALLY by the writer
                   // (allowedStatuses on its CAS write), not by this read.
-                  if (reuseHeldForAddress && !isAttachedManualBooking && existing.technician_id) {
+                  if (reuseHeldForAddress && disputeOwned && !isAttachedManualBooking && existing.technician_id) {
                     // Through the canonical assignment writer (codex r7 P1):
                     // its technician CAS (expectTechnicianId) refuses to
                     // overwrite a dispatcher's NEWER assignment, it holds the
@@ -13955,7 +13988,7 @@ const CallRecordingProcessor = {
                   // whenever the AI booking is, whether or not the parent
                   // still carried a technician (pre-push audit P1); same
                   // writer, same CAS (codex r6 P1).
-                  if (reuseHeldForAddress && !isAttachedManualBooking) {
+                  if (reuseHeldForAddress && disputeOwned && !isAttachedManualBooking) {
                     const { assignDispatchJob } = require('./dispatch-assignment');
                     const children = await trx('scheduled_services')
                       .where({ parent_service_id: existing.id, source_action: 'ai_call_pipeline_followup' })

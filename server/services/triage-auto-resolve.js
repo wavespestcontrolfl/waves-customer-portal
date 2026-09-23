@@ -372,7 +372,7 @@ function requestedAddressIsOnFile(item) {
 // active property row it points at, else null.
 function bookingPlace(visit, places) {
   if (visit.service_address_line1 && (zip5(visit.service_address_zip) || cityKey(visit.service_address_city))) {
-    return { key: addressKey(visit.service_address_line1), unit: unitOf(visit.service_address_line1, visit.service_address_line2), city: visit.service_address_city, zip: visit.service_address_zip };
+    return { key: addressKey(visit.service_address_line1), line1: visit.service_address_line1, unit: unitOf(visit.service_address_line1, visit.service_address_line2), city: visit.service_address_city, zip: visit.service_address_zip };
   }
   return visit.property_id ? places.get(String(visit.property_id)) || null : null;
 }
@@ -1400,13 +1400,17 @@ async function loadContactEvidence(conn, items, flag) {
 // all against the stated premise.
 function visitAtStatedAddress(item, visit, places) {
   const payload = parseMaybeJson(item.payload);
-  const stated = addressKey(payload?.stated_street);
-  if (!stated) return false;
+  if (!String(payload?.stated_street || '').trim()) return false;
   const place = bookingPlace(visit, places);
   if (!place || !place.key) return false;
   if (place.customer_id && String(place.customer_id) !== String(item.call_customer_id)) return false;
+  // The DETECTOR's comparator (directionals, suffixless spellings), not the
+  // property key — the record and the manual booking may carry an
+  // equivalent spelling of the stated street (codex r8 P2).
+  const { sameHouseNumberStreet } = require('./call-triage-flags');
+  if (!sameHouseNumberStreet(payload.stated_street, place.line1 || '')) return false;
   const unit = unitOf(payload.stated_street, payload.stated_unit);
-  return place.key === stated && (!unit || unit === place.unit)
+  return (!unit || unit === place.unit)
     && localityAgrees(place, { city: payload.stated_city, zip: payload.stated_zip });
 }
 
@@ -1903,7 +1907,7 @@ async function loadVisitEvidence(conn, items, flag) {
   const places = new Map();
   const activeCount = new Map();
   for (const r of propRows) {
-    places.set(String(r.id), { customer_id: r.customer_id, key: addressKey(r.address_line1), unit: unitOf(r.address_line1, r.address_line2), city: r.city, zip: r.zip });
+    places.set(String(r.id), { customer_id: r.customer_id, key: addressKey(r.address_line1), line1: r.address_line1, unit: unitOf(r.address_line1, r.address_line2), city: r.city, zip: r.zip });
     activeCount.set(String(r.customer_id), (activeCount.get(String(r.customer_id)) || 0) + 1);
   }
   // The association and address arms need EXACTLY one active property —

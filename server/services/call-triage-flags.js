@@ -1812,8 +1812,12 @@ function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = n
   // House tokens may be alphanumeric or hyphenated (1250A, 12-14) — the
   // restatement parser's digits-only house would leave those unkeyed and
   // this exact disagreement unsurfaced (codex r2 P2).
+  // A legacy unit-FIRST on-file line ("Apt 4, 1260 Main St") is peeled the
+  // same way the restatement path peels it before the trailing-unit split
+  // (codex r8 P2).
+  const onFileStreetLine = (splitUnitFirstLine(onFile) || {}).rest || onFile;
   const a = houseAndName(splitStreetLineUnit(stated).street || stated);
-  const b = houseAndName(splitStreetLineUnit(onFile).street || onFile);
+  const b = houseAndName(splitStreetLineUnit(onFileStreetLine).street || onFileStreetLine);
   if (!a.house || !b.house || a.house === b.house) return null;
   if (!a.name || !b.name) return null;
   const sameStreet = [b.name, b.withoutSuffix].includes(a.name) || [a.name, a.withoutSuffix].includes(b.name);
