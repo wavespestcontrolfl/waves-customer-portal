@@ -724,6 +724,62 @@ export function wouldExceedPreviewGroupCap({ previewGroupRequests, targetKey, ca
   return !requests.some((r) => r.key === targetKey) && requests.length >= cap;
 }
 
+// Codex pre-push audit, round 6 structural fix (PR #4656): ONE predicate,
+// the only thing that enables Submit for a given group and the only thing
+// the submit loop checks before binding that group's write to a preview
+// row. Collapses what used to be several independently-evolved checks
+// (previewConfirming, previewGroupError, the submit-time
+// fresh.enabled !== previewedRegime comparison, and the missing
+// stackGroupConflict / null-price / appointmentDiscountGateSnapshot
+// checks the round-6 audit found) into one place, so a NEW gating rule
+// only ever needs to be added HERE, not re-derived at each call site.
+//
+// A group with nothing regime-dependent about it (no discount, no line
+// discount) needs no preview at all and is trivially submittable.
+// Otherwise the group's own preview row must be FRESH (status 'ready',
+// keyed to the current previewRequestKey — never a stale entry left over
+// from a prior configuration), carry no per-group error, carry no
+// stackGroupConflict (the server's verdict is authoritative — a client-
+// side conflict check can be looking at a stale local catalog while the
+// server already sees the real one), and have a CONFIRMED price (`price
+// == null` — the service is still unpriced — blocks outright rather than
+// silently omitting expected_price at the write boundary, which let a
+// catalog price gained between preview and create post uncaught). Last,
+// the regime that produced this price must agree with BOTH the live gate
+// probe (liveRegime) and, when this group carries the appointment-level
+// discount, the FROZEN snapshot that discount was originally selected
+// under (appointmentDiscountGateSnapshot) — a probe that already agrees
+// with the preview but disagrees with that older snapshot means the
+// selection itself predates a gate flip the preview never re-validated
+// against, and must not silently ride the new regime's math.
+export function canSubmitGroup({
+  regimeDependent, groupKey: key, serverPreview, previewRequestKey,
+  liveRegimeKnown, liveRegime, carriesAppointmentDiscount, appointmentDiscountGateSnapshot,
+}) {
+  if (!regimeDependent) return { ok: true, reason: null };
+  if (serverPreview?.status !== 'ready' || serverPreview?.forKey !== previewRequestKey) {
+    return { ok: false, reason: 'confirming' };
+  }
+  const row = serverPreview.byKey?.get(key);
+  if (!row || typeof row.error === 'string') return { ok: false, reason: 'error', message: row?.error || null };
+  if (row.stackGroupConflict) return { ok: false, reason: 'conflict', conflict: row.stackGroupConflict };
+  // Strict === null (never == null / typeof-undefined too): the real
+  // server ALWAYS sends this field on a non-error row — a number or an
+  // explicit null (buildAppointmentPricing genuinely has no price yet,
+  // e.g. a mosquito line still awaiting a lot-based quote) — so a
+  // CONFIRMED null is the only value meant to block here. price undefined
+  // never occurs against the real route; treating it the same as null
+  // would wrongly block whenever this group's own total is meant to fall
+  // through to a local computation instead (unpriced-by-design, not
+  // unpriced-by-confirmation).
+  if (row.price === null) return { ok: false, reason: 'price-required' };
+  if (!liveRegimeKnown || liveRegime !== serverPreview.regime) return { ok: false, reason: 'regime-mismatch' };
+  if (carriesAppointmentDiscount && liveRegime !== appointmentDiscountGateSnapshot) {
+    return { ok: false, reason: 'regime-mismatch' };
+  }
+  return { ok: true, reason: null, price: row.price, regime: serverPreview.regime };
+}
+
 // Classify a failed group POST. Idempotent retry recovery, PROVEN only
 // (codex r20 P1 + r21 P0): a prior partial split save can lose
 // createdGroupKeysRef when the modal closes between POSTs, and the retry
@@ -1378,9 +1434,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // quick-add "Attach as additional property" on the same customer.
   const [bookingProperties, setBookingProperties] = useState([]);
   const [bookingPropertyState, setBookingPropertyState] = useState('idle'); // idle | loading | ready | hidden | error
-  // Set when a submit-time revalidation finds the gate moved under us; shown
-  // through the existing discount-blocked banner rather than a second channel.
-  const [staleStackingNotice, setStaleStackingNotice] = useState('');
   const [selectedPropertyId, setSelectedPropertyId] = useState('');
   const [propertyRefresh, setPropertyRefresh] = useState(0);
   // Wait for the selected customer's advisory address card before enabling
@@ -3199,8 +3252,56 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // dozen+ getByRole('button', { name: 'Schedule appointment' }) sites,
   // a stable label lets them keep capturing one DOM reference instead of
   // re-querying after every state change).
-  const previewConfirming = previewGroupRequests.length > 0
-    && !(serverPreview.status === 'ready' && serverPreview.forKey === previewRequestKey);
+  // Codex pre-push audit, round 6 structural fix: ONE verdict per submit
+  // group, computed by the exported canSubmitGroup predicate above — the
+  // SAME function the submit loop calls again immediately before each
+  // group's own POST, this time with the FRESH live-probe result
+  // (ensureStackingFresh()). There is no synchronously-fresh probe result
+  // available at render time (a real probe is a network round trip), so
+  // this DISPLAY-level call passes serverPreview.regime as its own
+  // liveRegime — the regime check becomes a no-op BY CONSTRUCTION here
+  // (a value trivially agreeing with itself), leaving the other four
+  // checks (confirming / error / conflict / null price) as what actually
+  // gates the button. The regime-vs-live-probe and regime-vs-
+  // appointmentDiscountGateSnapshot comparisons (round 6 P1 :3788) are
+  // only ever MEANINGFUL against a genuinely fresh probe, so they are
+  // deferred entirely to the submit loop's own call — a button that
+  // reads enabled can still have its click intercepted and held there,
+  // exactly as it always could.
+  const groupSubmitVerdicts = appointmentSubmitGroups
+    // A group already committed this modal session has nothing left to
+    // verify (it is excluded from previewGroupRequests for the exact same
+    // reason — round 5's own committed-group fix) — including it here
+    // would read its now-absent preview row as a permanent 'error',
+    // blocking Submit forever over a group that already saved.
+    .filter((group) => !groupAlreadyCommitted(group))
+    .map((group) => {
+      const key = groupKey(group);
+      const carriesDiscount = !!appointmentDiscount && !!appointmentDiscountGroup && appointmentDiscountGroup.key === key;
+      return {
+        key,
+        verdict: canSubmitGroup({
+          regimeDependent: groupRegimeDependent(group, carriesDiscount),
+          groupKey: key,
+          serverPreview,
+          previewRequestKey,
+          liveRegimeKnown: true,
+          liveRegime: serverPreview.regime,
+          carriesAppointmentDiscount: carriesDiscount,
+          appointmentDiscountGateSnapshot: carriesDiscount ? serverPreview.regime : appointmentDiscountGateSnapshot,
+        }),
+      };
+    });
+  const blockedGroupVerdict = groupSubmitVerdicts.find((v) => !v.verdict.ok);
+  // 'regime-mismatch' cannot appear in blockedGroupVerdict (the DISPLAY
+  // verdict above deliberately feeds canSubmitGroup a liveRegime that
+  // trivially agrees with itself — see that computation's own comment),
+  // so this only ever reads the "preview hasn't landed for the current
+  // inputs yet" reason. A genuine regime disagreement is caught by the
+  // SAME predicate at actual submit time, with a real fresh probe —
+  // no named banner there either (see the submit loop's own invalidate-
+  // and-refetch comment), just a held Submit that self-heals.
+  const previewConfirming = blockedGroupVerdict?.verdict.reason === 'confirming';
   // GitHub round 4 P0 (Codex, blocked push 3): landing a response was
   // being treated as "confirmed" without ever reading it — the preview's
   // own per-group price/error was fetched and then ignored. Submit now
@@ -3209,10 +3310,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // mid-session, a scope/eligibility rejection, etc.) — the same class of
   // drift (a catalog value changed, not just the gate) this endpoint
   // exists to catch.
-  const previewGroupError = previewConfirming ? null : previewGroupRequests.find((req) => {
-    const row = serverPreview.byKey.get(req.key);
-    return !row || typeof row.error === 'string';
-  });
+  const previewGroupError = blockedGroupVerdict?.verdict.reason === 'error' ? { key: blockedGroupVerdict.key } : null;
+  // Codex pre-push audit, round 6 P2 (:3214): a preview row that priced
+  // fine but carries the server's OWN stackGroupConflict verdict (the
+  // client's local existingSelectionConflict can be looking at a stale
+  // catalog while the server already sees a real one — stack_group
+  // metadata changing after the modal loaded it) blocks exactly like any
+  // other preview-confirmed reason, named with the conflicting presets.
+  const previewGroupConflict = blockedGroupVerdict?.verdict.reason === 'conflict' ? blockedGroupVerdict.verdict.conflict : null;
+  // Codex pre-push audit, round 6 P1 (:3837): a CONFIRMED null price (a
+  // variable-priced service still unpriced) must block outright, not
+  // silently omit expected_price at the write boundary — the create
+  // route would then have nothing to compare a later-resolved price
+  // against.
+  const previewPriceRequired = blockedGroupVerdict?.verdict.reason === 'price-required';
   // GitHub round 4 P1 (:3916, Codex, blocked push 4): a 'ready' status
   // with a per-group error is a SUCCESSFUL fetch — the auto-retry above
   // (armed once) covers a transient failure; a SECOND error means Save
@@ -3753,57 +3864,51 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // every REMAINING group's own submit permanently fail this check,
           // even one carrying no discount at all, with no way to Retry past
           // it (there is nothing left to reconcile for an unrelated group).
-          const groupOwnPricingRegimeDependent = groupRegimeDependent(group, carriesAppointmentDiscount);
-          // GitHub round 6 P0 (Codex, blocked push 7 on PR #4656): this
-          // used to compare the live probe against groupPricedUnder
-          // (carriesAppointmentDiscount ? appointmentDiscountCompound :
-          // stackingEnabled) — a HOOK/PICK snapshot, not the regime that
-          // actually produced the number on screen. serverPreview.regime
-          // (the regime the last-landed /admin/schedule/preview response
-          // was computed under, the same response groupStackedPerVisitTotal
-          // reads for the DISPLAYED total) is now the only source: the
-          // regime that produced the displayed price is the only regime
-          // the write may bind to. groupPricedUnder is deleted outright —
-          // grepped for a non-money consumer first; it had none (its only
-          // two references were its own declaration and this comparison).
-          //
-          // The CONFIRMED regime this group's write is bound to —
-          // undefined (field omitted) whenever nothing about this group's
-          // own total can move with the gate, matching #4655/#4658's own
-          // "a write whose total can't move with the regime omits the
-          // field entirely" contract exactly.
+          // Codex pre-push audit, round 6 structural fix: canSubmitGroup —
+          // the SAME predicate that gates the Submit button — is the ONLY
+          // thing checked here too, called with the FRESH live probe
+          // (ensureStackingFresh(), not this render's possibly-stale
+          // stackingEnabled the button-level check used) as the LAST
+          // possible check before this specific group's money POST. This
+          // single call now covers every prior individually-added check
+          // (regime-vs-preview, regime-vs-appointmentDiscountGateSnapshot
+          // — round 6 P1 :3788 — stackGroupConflict, and a confirmed null
+          // price — round 6 P1 :3837) plus closes the class the coordinator
+          // named: groupPricedUnder (a hook/pick snapshot) is long gone;
+          // the regime that produced the DISPLAYED price is the only
+          // regime the write may bind to, and now that includes the
+          // discount's own frozen pick-time snapshot, not just the preview.
+          const regimeDependent = groupRegimeDependent(group, carriesAppointmentDiscount);
           let confirmedGroupRegime;
-          if (groupOwnPricingRegimeDependent) {
-            // The regime that produced the CURRENTLY DISPLAYED price for
-            // this submission — null/not-fresh here should not be
-            // reachable in practice (Submit is held by previewConfirming
-            // until serverPreview is 'ready' for previewRequestKey), but
-            // is treated as a disagreement below rather than trusted,
-            // same fail-closed posture as everywhere else this file reads
-            // serverPreview.
-            const previewedRegimeFresh = serverPreview.status === 'ready' && serverPreview.forKey === previewRequestKey;
-            const previewedRegime = previewedRegimeFresh ? serverPreview.regime : null;
+          if (regimeDependent) {
             const fresh = await ensureStackingFresh();
             assertSubmitCurrent();
-            if (!previewedRegimeFresh || !fresh.known || fresh.enabled !== previewedRegime) {
-              // Do NOT submit under either regime. Invalidate the preview
+            const verdict = canSubmitGroup({
+              regimeDependent: true,
+              groupKey: key,
+              serverPreview,
+              previewRequestKey,
+              liveRegimeKnown: fresh.known,
+              liveRegime: fresh.enabled,
+              carriesAppointmentDiscount,
+              appointmentDiscountGateSnapshot,
+            });
+            if (!verdict.ok) {
+              // Do NOT submit under any regime. Invalidate the preview
               // this group's request was priced under (it no longer
-              // matches the live gate, whether or not it still matches
-              // previewRequestKey) and force a re-fetch — bumping the
-              // status to 'loading' directly, not just the retry nonce,
-              // so previewConfirming reads true on THIS render already
-              // rather than waiting out the effect's own comparison
-              // (forKey still equals previewRequestKey, so the effect
-              // alone would not flip status without this). Deliberately
-              // NOT routed through setStaleStackingNotice: that drives
-              // discountSaveBlockedReason, a PERSISTENT banner that stays
-              // up until an explicit Retry click — gating Submit a second
-              // time on top of previewConfirming, which already holds it.
-              // The instruction is "hold Submit until the fresh response
-              // lands, then the operator clicks again" — one click, on
-              // Submit itself, once previewConfirming clears on its own.
-              // firstError still surfaces a one-time, non-blocking toast
-              // (submitFailureNotice below) so this attempt isn't silent.
+              // matches the live gate/snapshot, whether or not it still
+              // matches previewRequestKey) and force a re-fetch — bumping
+              // the status to 'loading' directly, not just the retry
+              // nonce, so previewConfirming reads true on THIS render
+              // already rather than waiting out the effect's own
+              // comparison (forKey still equals previewRequestKey, so the
+              // effect alone would not flip status without this). ONE
+              // recovery mechanism (round 6 P2 :1383 — staleStackingNotice
+              // deleted, never a second parallel channel): invalidate
+              // preview → re-fetch → canSubmitGroup, re-evaluated on the
+              // operator's own next click. firstError still surfaces a
+              // one-time, non-blocking toast (submitFailureNotice below)
+              // so this attempt isn't silent.
               setServerPreview((prev) => ({ ...prev, status: 'loading' }));
               setPreviewRetryNonce((n) => n + 1);
               firstError = {
@@ -3813,28 +3918,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               };
               break;
             }
-            // The LIVE value this freshness check just confirmed (already
-            // proven equal to the previewed regime above) — the server's
-            // own POST /admin/schedule refuses a mismatch against its
-            // live discountStackingLive() with a retryable 409 (GitHub
-            // round 4 P0) rather than silently saving the other regime's
-            // math, mirroring #4655/#4658's identical contract.
-            confirmedGroupRegime = previewedRegime;
+            // The server's own POST /admin/schedule refuses a regime
+            // mismatch against its live discountStackingLive() with a
+            // retryable 409 (GitHub round 4 P0), and a price mismatch
+            // against its freshly-computed pricing.finalPrice via
+            // assertPriceMatchesPricing (round 6 P0), before any write —
+            // both bound to EXACTLY this verdict's own regime/price, never
+            // a second, independently-read source. expected_price is
+            // never omitted here: canSubmitGroup already refused a
+            // confirmed-null price above (round 6 P1 :3837), so verdict.price
+            // is guaranteed non-null whenever verdict.ok is true.
+            confirmedGroupRegime = verdict.regime;
             body.expected_discount_stacking = confirmedGroupRegime;
-            // Codex pre-push audit P0 (round 6, blocked push 8): the
-            // regime alone wasn't enough — a discount's own CATALOG
-            // AMOUNT can drift mid-session with the regime unchanged
-            // (a $10 credit edited to $5), which agreeing regimes never
-            // catch. The server's own assertPriceMatchesPricing (mirroring
-            // assertPrepayTotalMatchesPricing's identical contract) refuses
-            // a mismatch against its freshly-computed pricing.finalPrice
-            // with a retryable 409 before any write. Sourced from the SAME
-            // fresh preview row groupStackedPerVisitTotal reads for the
-            // displayed price — omitted (not sent) when there is none to
-            // compare, so an older/different caller and a group with
-            // nothing priced yet stay byte-identical to before this fix.
-            const previewedPrice = freshPreviewGroupPrice({ serverPreview, previewRequestKey, groupKey: key });
-            if (previewedPrice != null) body.expected_price = previewedPrice;
+            body.expected_price = verdict.price;
           }
           bookingPostAttempted = true;
           const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
@@ -4046,11 +4142,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // after that. A gate flip during any of those windows reached the
     // server un-caught. The check now lives at the actual network
     // boundary, immediately before EACH group's own POST, inside
-    // submitAppointments — re-run per group, not just once up front. A
-    // notice left over from an earlier failed attempt is cleared here so a
-    // fresh attempt starts clean; submitAppointments re-sets it if its own
-    // per-group check finds a drift.
-    setStaleStackingNotice('');
+    // submitAppointments — re-run per group, not just once up front (via
+    // canSubmitGroup, round 6's own single predicate).
     let booked = false;
     try {
       booked = await submitAppointments(separateProgram);
@@ -4122,21 +4215,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     known: stackingKnown, appointmentDiscountSelected: appointmentDiscountState,
   });
   const retryPercentExclusions = () => setPercentExclusionsAttempt((n) => n + 1);
-  // Codex pre-push audit P1: staleStackingNotice is a SUBMIT-time finding
-  // (ensureStackingFresh() disagreed with the preview, or its probe failed)
-  // — distinct from stackingUnconfirmedBlocksSave, which watches the
-  // POLLING hook's own known flag. A submit can leave staleStackingNotice
-  // set while stackingKnown is still true (the poll resolved fine; only the
-  // submit-time revalidation caught the drift), so the banner's Retry button
-  // must not fall through the stackingUnconfirmedBlocksSave branch to the
-  // default (pickAppointmentDiscount('')) — that silently REMOVED the
-  // selected discount instead of retrying. Clears the notice and forces a
-  // fresh probe so the preview re-syncs to the live gate before the operator
-  // tries Save again.
-  const retryStaleStacking = () => {
-    setStaleStackingNotice('');
-    retryStackingProbe();
-  };
+  // Codex pre-push audit, round 6 P2 (:1383): the staleStackingNotice
+  // state/setter/retry handler that used to live here is deleted outright
+  // — a submit-time gate/preview disagreement is a canSubmitGroup
+  // 'regime-mismatch' now, which invalidates serverPreview and re-fetches
+  // (see the submit loop below) rather than writing to a second, parallel
+  // notice state. ONE recovery mechanism: invalidate preview → re-fetch →
+  // predicate.
   // Codex pre-push audit P1 (round 3): resolves appointmentDiscountGateDrifted
   // — a background poll flip since this discount was selected. Issues a
   // LIVE probe (not just the hook's cached poll) and, once it confirms an
@@ -4314,8 +4399,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     && Array.isArray(existingSelectionConflict.rows)
     && existingSelectionConflict.rows.some((row) => row?.spansAll === true)
   );
-  const discountSaveBlockedReason = staleStackingNotice
-    || stackingUnconfirmedBlocksSave
+  // Codex pre-push audit, round 6 P2 (:1383): staleStackingNotice deleted
+  // outright (state, setter, retry handler, and its own branch here) —
+  // every setter that used to write a non-empty value was replaced by the
+  // invalidate-preview-and-refetch flow rounds ago; the state could only
+  // ever read ''. This chain's first branch is now stackingUnconfirmedBlocksSave
+  // / appointmentDiscountGateDrifted alone (the background-poll-level
+  // findings), never a second, unreachable recovery path alongside them.
+  const discountSaveBlockedReason = stackingUnconfirmedBlocksSave
     // Codex pre-push audit P1 (round 3): a background gate flip since this
     // discount was picked shares the SAME banner/copy as the probe-unknown
     // case (per owner ruling) — the operator's fix is identical (Retry),
@@ -4331,20 +4422,32 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           ? (existingSelectionConflictInvolvesAppointment
             ? `${existingSelectionConflict.names[0]} and ${existingSelectionConflict.names[1]} can't both apply to the same line — remove one before saving.`
             : `${existingSelectionConflict.names[0]} and ${existingSelectionConflict.names[1]} can't both apply to the same line — remove one from its line above before saving.`)
-          // GitHub round 4 P1 (:3916, Codex, blocked push 4): a preview
-          // that landed 'ready' but still could not price a group we're
-          // about to post — surfaced with its own retry, same as every
-          // other reason here.
-          : (previewGroupError
-            ? `Couldn't confirm today's price${serverPreview.byKey.get(previewGroupError.key)?.error ? ` (${serverPreview.byKey.get(previewGroupError.key).error})` : ''} — retry before saving.`
-            // Codex P2 (round 5, blocked push 10 on PR #4656): a
-            // PERMANENT preview failure (see the fetch effect's own
-            // comment) — never silently disabled forever, surfaced with
-            // the same named-reason/Retry shape as every other blocker
-            // above.
-            : (previewFailed
-              ? `Couldn't confirm today's price (${serverPreview.errorMessage}) — retry before saving.`
-              : ''))));
+          // Codex pre-push audit, round 6 P2 (:3214): the server's OWN
+          // previewed stack-group verdict — authoritative over the
+          // client's local existingSelectionConflict above (which can be
+          // looking at stale catalog rows) — named the same way.
+          : (previewGroupConflict
+            ? `${previewGroupConflict.names[0]} and ${previewGroupConflict.names[1]} can't both apply to the same line — remove one before saving.`
+            // Codex pre-push audit, round 6 P1 (:3837): a confirmed null
+            // price blocks with its own named reason — no Retry helps
+            // (nothing changed on the server side), the fix is to enter a
+            // price for the unpriced line.
+            : (previewPriceRequired
+              ? 'This service still needs a price before saving.'
+              // GitHub round 4 P1 (:3916, Codex, blocked push 4): a preview
+              // that landed 'ready' but still could not price a group we're
+              // about to post — surfaced with its own retry, same as every
+              // other reason here.
+              : (previewGroupError
+                ? `Couldn't confirm today's price${serverPreview.byKey.get(previewGroupError.key)?.error ? ` (${serverPreview.byKey.get(previewGroupError.key).error})` : ''} — retry before saving.`
+                // Codex P2 (round 5, blocked push 10 on PR #4656): a
+                // PERMANENT preview failure (see the fetch effect's own
+                // comment) — never silently disabled forever, surfaced with
+                // the same named-reason/Retry shape as every other blocker
+                // above.
+                : (previewFailed
+                  ? `Couldn't confirm today's price (${serverPreview.errorMessage}) — retry before saving.`
+                  : ''))))));
 
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
@@ -5347,29 +5450,42 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 id="appointment-discount"
                 value={appointmentDiscount?.id || ''}
                 onChange={(e) => pickAppointmentDiscount(e.target.value)}
-                // Codex pre-push audit P1 (round 5): disabled for the same
-                // window the Save button is blocked for — a re-pick made
-                // while a drift/unconfirmed/percent-exclusion banner is up
-                // would freeze appointmentDiscountGateSnapshot to whatever
-                // the LIVE (possibly still-wrong) gate reads at that
-                // instant, discarding the fresh pick with no feedback the
-                // moment the drift check re-evaluates. The banner's own
-                // "Retry"/"Remove discount" button is a separate element,
-                // unaffected by this. GitHub review round 2 P1: ALSO
-                // disabled once any group of a split save has already
-                // committed (createdGroupKeysRef, same convention the
-                // customer selector already uses below) — a partial-save
-                // retry must never let the operator change or remove the
-                // discount a committed group already carries, or price a
-                // NEW pick against a group submitAppointments will skip.
-                // GitHub review round 2 P1: ALSO disabled for the whole
-                // submit (`saving`) — including the mosquito-price/
-                // address-ask prerequisite awaits BEFORE the first POST,
-                // where createdGroupKeysRef is still empty. The functional
-                // guard is pickAppointmentDiscount's own submitLockRef
-                // check (synchronous, sooner than this React state
-                // update); this is the matching visual state.
-                disabled={!!discountSaveBlockedReason || partialCommitLocked || saving}
+                // GitHub review round 2 P1: disabled once any group of a
+                // split save has already committed (createdGroupKeysRef /
+                // partialCommitLocked, same convention the customer
+                // selector already uses below) — a partial-save retry must
+                // never let the operator change or remove the discount a
+                // committed group already carries, or price a NEW pick
+                // against a group submitAppointments will skip. ALSO
+                // disabled for the whole submit (`saving`) — including the
+                // mosquito-price/address-ask prerequisite awaits BEFORE the
+                // first POST, where createdGroupKeysRef is still empty. The
+                // functional guard is pickAppointmentDiscount's own
+                // submitLockRef check (synchronous, sooner than this React
+                // state update); this is the matching visual state.
+                //
+                // Codex pre-push audit, round 6 P2 (:5372): a PERMANENT
+                // preview-confirmed reason (a preview per-group error, a
+                // server stack-group conflict, a permanent preview 400, a
+                // confirmed-unmatched discount) has no retry that changes
+                // anything — disabling the WHOLE select disabled its
+                // "None" option too, so an operator stuck behind one of
+                // these had no way to correct the selection short of
+                // closing the modal and losing the rest of the booking.
+                // pickAppointmentDiscount's own handler (above) already
+                // enforces the real rule (a NEW pick is refused while
+                // discountSaveBlockedReason is truthy; clearing is always
+                // allowed except once partialCommitLocked), so the select
+                // stays interactive for exactly the one safe action for
+                // these reasons specifically. Every OTHER blocked reason
+                // (a live gate drift/unconfirmed poll, a percent-exclusion
+                // lookup) keeps the select fully disabled exactly as
+                // before — round-5's own concern still applies there: a
+                // re-pick mid-drift would freeze appointmentDiscountGateSnapshot
+                // to a still-wrong live value with zero feedback.
+                disabled={partialCommitLocked || saving || (!!discountSaveBlockedReason
+                  && !(previewGroupError || previewGroupConflict || previewFailed
+                    || previewPriceRequired || appointmentDiscountHasNoGroup))}
                 style={inputStyle}
               >
                 <option value="">None</option>
@@ -5411,16 +5527,39 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   slot only, which isn't part of this conflict) — omit the
                   button and let the message above direct the operator to
                   the per-line "x" controls instead of offering one that
-                  silently does nothing. */}
-              {!(existingSelectionConflict && !existingSelectionConflictInvolvesAppointment
-                && !staleStackingNotice && !stackingUnconfirmedBlocksSave
-                && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted) && (
-                <button
-                  type="button"
-                  onClick={staleStackingNotice ? retryStaleStacking : (stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : (previewGroupError || previewFailed) ? retryPreviewGroups : () => pickAppointmentDiscount('')}
-                  style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
-                >{!staleStackingNotice && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted && (appointmentDiscountHasNoGroup || existingSelectionConflict) ? 'Remove discount' : 'Retry'}</button>
-              )}
+                  silently does nothing. Codex pre-push audit, round 6
+                  structural fix: rebuilt as one explicit "does a safe
+                  single action exist" flag (bannerRecoveryAvailable)
+                  instead of a growing negated AND-chain — the round-6
+                  audit's own carried-forward P1 (this chain never checked
+                  appointmentDiscountHasNoGroup, so that reason's own
+                  Remove-discount action could be hidden by an unrelated,
+                  co-occurring line conflict) falls out the same way the
+                  five NEW findings did: a reason not explicitly named
+                  "no safe action" now always gets one.
+                  previewGroupConflict/previewPriceRequired (round 6's own
+                  new preview-confirmed reasons) have no safe single action
+                  either — the server names the conflicting presets, but
+                  which specific pick to drop is the SAME ambiguity a
+                  line-vs-line conflict already has no button for. */}
+              {(() => {
+                const bannerRecoveryAvailable = stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted
+                  || percentExclusionsBlockSave
+                  || appointmentDiscountHasNoGroup
+                  || (existingSelectionConflict && existingSelectionConflictInvolvesAppointment)
+                  || previewGroupError || previewFailed;
+                if (!bannerRecoveryAvailable) return null;
+                const removalLabel = !stackingUnconfirmedBlocksSave && !appointmentDiscountGateDrifted
+                  && !percentExclusionsBlockSave
+                  && (appointmentDiscountHasNoGroup || (existingSelectionConflict && existingSelectionConflictInvolvesAppointment));
+                return (
+                  <button
+                    type="button"
+                    onClick={(stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : (previewGroupError || previewFailed) ? retryPreviewGroups : () => pickAppointmentDiscount('')}
+                    style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
+                  >{removalLabel ? 'Remove discount' : 'Retry'}</button>
+                );
+              })()}
             </div>
           )}
 

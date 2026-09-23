@@ -15,6 +15,7 @@ import CreateAppointmentModal, {
   handleSubmitBlockedByDiscountOrPreviewState,
   freshPreviewGroupPrice,
   wouldExceedPreviewGroupCap,
+  canSubmitGroup,
 } from './CreateAppointmentModal.jsx';
 
 afterEach(() => {
@@ -851,6 +852,12 @@ describe('appointment discount stale-gate retry (Codex pre-push audit P1)', () =
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
     // The selection survived the whole episode — never silently removed.
     expect(picker.value).toBe('mil');
+    // GitHub round 7 (Codex, blocked push 11 on PR #4656): the POST that
+    // finally landed is bound to the RECONCILED regime the second preview
+    // actually confirmed (true, the default mock's regime) — never the
+    // stale false the first mismatched probe saw, and never posted
+    // "gate-off" under the old selection.
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).expected_discount_stacking).toBe(true);
   });
 });
 
@@ -2844,5 +2851,193 @@ describe('GitHub round 6 P2 (Codex, blocked push 10 on PR #4656) — wouldExceed
 
   it('an empty previewGroupRequests array never refuses', () => {
     expect(wouldExceedPreviewGroupCap({ previewGroupRequests: [], targetKey: 'g0', cap: 12 })).toBe(false);
+  });
+});
+
+describe('GitHub round 7 structural fix (Codex, blocked push 11 on PR #4656) — canSubmitGroup predicate table', () => {
+  const readyPreview = (byKeyEntries, regime = true) => ({
+    status: 'ready', forKey: 'k', regime, byKey: new Map(byKeyEntries),
+  });
+  const BASE = {
+    regimeDependent: true,
+    groupKey: 'g1',
+    previewRequestKey: 'k',
+    liveRegimeKnown: true,
+    liveRegime: true,
+    carriesAppointmentDiscount: false,
+    appointmentDiscountGateSnapshot: true,
+  };
+
+  it('a group with nothing regime-dependent is always ok, even with no preview at all', () => {
+    expect(canSubmitGroup({ ...BASE, regimeDependent: false, serverPreview: { status: 'idle', forKey: '', byKey: new Map() } }))
+      .toEqual({ ok: true, reason: null });
+  });
+
+  it('preview not yet ready -> confirming', () => {
+    expect(canSubmitGroup({ ...BASE, serverPreview: { status: 'loading', forKey: 'k', byKey: new Map() } }))
+      .toMatchObject({ ok: false, reason: 'confirming' });
+  });
+
+  it('a ready preview keyed to a DIFFERENT previewRequestKey -> confirming (stale, not trusted)', () => {
+    expect(canSubmitGroup({ ...BASE, serverPreview: readyPreview([['g1', { price: 90 }]]), previewRequestKey: 'different-key' }))
+      .toMatchObject({ ok: false, reason: 'confirming' });
+  });
+
+  it('ready, but this group has no row at all -> error', () => {
+    expect(canSubmitGroup({ ...BASE, serverPreview: readyPreview([]) }))
+      .toMatchObject({ ok: false, reason: 'error', message: null });
+  });
+
+  it('ready, row carries a per-group error string -> error, message passed through', () => {
+    expect(canSubmitGroup({ ...BASE, serverPreview: readyPreview([['g1', { error: 'discount unavailable' }]]) }))
+      .toMatchObject({ ok: false, reason: 'error', message: 'discount unavailable' });
+  });
+
+  it('ready, row carries a stackGroupConflict -> conflict, the verdict itself', () => {
+    const conflict = { group: 'tier', names: ['Gold', 'Silver'] };
+    expect(canSubmitGroup({ ...BASE, serverPreview: readyPreview([['g1', { price: 90, stackGroupConflict: conflict }]]) }))
+      .toMatchObject({ ok: false, reason: 'conflict', conflict });
+  });
+
+  it('ready, row price is a CONFIRMED null -> price-required', () => {
+    expect(canSubmitGroup({ ...BASE, serverPreview: readyPreview([['g1', { price: null }]]) }))
+      .toMatchObject({ ok: false, reason: 'price-required' });
+  });
+
+  it('ready, row price is simply absent (undefined) -> not blocked (never occurs against the real server; a test-mock artifact)', () => {
+    expect(canSubmitGroup({ ...BASE, serverPreview: readyPreview([['g1', {}]]) }))
+      .toMatchObject({ ok: true });
+  });
+
+  it('row prices fine, but the live probe disagrees with the previewed regime -> regime-mismatch', () => {
+    expect(canSubmitGroup({ ...BASE, serverPreview: readyPreview([['g1', { price: 90 }]], true), liveRegime: false }))
+      .toMatchObject({ ok: false, reason: 'regime-mismatch' });
+  });
+
+  it('the live probe is unknown (known: false) -> regime-mismatch, never trusted as agreeing', () => {
+    expect(canSubmitGroup({ ...BASE, serverPreview: readyPreview([['g1', { price: 90 }]], true), liveRegimeKnown: false }))
+      .toMatchObject({ ok: false, reason: 'regime-mismatch' });
+  });
+
+  it('everything agrees, no appointment discount on this group -> ok, with price and regime from the row', () => {
+    expect(canSubmitGroup({ ...BASE, serverPreview: readyPreview([['g1', { price: 90 }]], true) }))
+      .toEqual({ ok: true, reason: null, price: 90, regime: true });
+  });
+
+  it('this group carries the appointment discount and the live probe agrees with the preview but NOT with the discount\'s own frozen gate snapshot -> regime-mismatch (round 6 P1 :3788)', () => {
+    expect(canSubmitGroup({
+      ...BASE, carriesAppointmentDiscount: true, appointmentDiscountGateSnapshot: false,
+      serverPreview: readyPreview([['g1', { price: 90 }]], true), liveRegime: true,
+    })).toMatchObject({ ok: false, reason: 'regime-mismatch' });
+  });
+
+  it('this group carries the appointment discount and ALL THREE (preview, live probe, gate snapshot) agree -> ok', () => {
+    expect(canSubmitGroup({
+      ...BASE, carriesAppointmentDiscount: true, appointmentDiscountGateSnapshot: true,
+      serverPreview: readyPreview([['g1', { price: 90 }]], true), liveRegime: true,
+    })).toEqual({ ok: true, reason: null, price: 90, regime: true });
+  });
+});
+
+describe('GitHub round 7 P1 :3837 (Codex, blocked push 11 on PR #4656) — a confirmed null price blocks Submit', () => {
+  it('a preview row with price: null blocks Submit with a named reason and posts nothing', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 100,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        // A variable-priced service still unpriced -- the server confirms
+        // it, not a mock artifact (real preview rows always carry price
+        // as a number or an explicit null, never omit the field).
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, price: null })) }),
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+
+    await screen.findByText('This service still needs a price before saving.', {}, { timeout: 4000 });
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+});
+
+describe('GitHub round 7 P2 :3214 (Codex, blocked push 11 on PR #4656) — the server\'s previewed stack-group conflict blocks Submit', () => {
+  it('a preview row with stackGroupConflict but no error blocks Submit and names the conflicting presets', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 100,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        // Priced fine, no per-group error -- but the SERVER's own
+        // stack-group verdict (fresher than the client's local catalog)
+        // already knows these two conflict.
+        (groups) => ({
+          regime: true,
+          results: groups.map((g) => ({ key: g.key, price: 90, stackGroupConflict: { group: 'tier', names: ['Gold', 'Silver'] } })),
+        }),
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+
+    await screen.findByText("Gold and Silver can't both apply to the same line — remove one before saving.", {}, { timeout: 4000 });
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+});
+
+describe('GitHub round 7 P2 :5372 (Codex, blocked push 11 on PR #4656) — appointment discount removable while permanently blocked', () => {
+  it('None stays selectable (and clears the discount) while a persistent preview error blocks Submit', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      discounts: [{ id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        // Attempt 1.
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, error: 'not eligible for this customer' })) }),
+        // Attempt 2 (the one automatic retry) -- still ineligible, so it
+        // surfaces as a PERMANENT reason rather than looping.
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, error: 'not eligible for this customer' })) }),
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    await screen.findByText(
+      "Couldn't confirm today's price (not eligible for this customer) — retry before saving.",
+      {}, { timeout: 4000 },
+    );
+    // The whole point of this fix: the select is NOT disabled by this
+    // PERMANENT reason (unlike a live-gate drift, where it still is —
+    // covered by the "disables the picker while a drift/unconfirmed
+    // banner is showing" test elsewhere in this file).
+    expect(picker.disabled).toBe(false);
+    fireEvent.change(picker, { target: { value: '' } });
+    expect(picker.value).toBe('');
+    await waitFor(() => expect(screen.queryByText(/not eligible for this customer/)).toBeNull());
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+  });
+});
+
+describe('GitHub round 7 P2 :1383 (Codex, blocked push 11 on PR #4656) — staleStackingNotice fully removed', () => {
+  it('no live reference to staleStackingNotice remains in the component source', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const source = fs.readFileSync(path.join(process.cwd(), 'src/components/schedule/CreateAppointmentModal.jsx'), 'utf8');
+    // Only comment prose explaining the removal may remain -- no state
+    // declaration, no setter call, no handler declaration, no JSX read.
+    expect(source).not.toMatch(/const\s*\[\s*staleStackingNotice/);
+    expect(source).not.toMatch(/setStaleStackingNotice\s*\(/);
+    expect(source).not.toMatch(/retryStaleStacking\s*=/);
+    expect(source).not.toMatch(/\{\s*staleStackingNotice\b/);
   });
 });
