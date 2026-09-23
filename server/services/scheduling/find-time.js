@@ -23,7 +23,7 @@ const { applyAssignable } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
-const { paddingMinutesOf, effectiveEndMinutes } = require('./travel-gap');
+const { paddingMinutesOf, effectiveEndMinutes, travelGapEnabled } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 
 const DAY_START_HOUR = 8;   // 8:00 AM
@@ -264,24 +264,323 @@ function packCapacityEnds(slots) {
   return slots.filter((s) => keep.has(s));
 }
 
-/**
- * Main entry. Returns ranked candidate slots.
- *
- * @param {Object} opts
- * @param {number} opts.lat                  Target job latitude
- * @param {number} opts.lng                  Target job longitude
- * @param {number} [opts.durationMinutes=60] How long the new job takes
- * @param {string} opts.dateFrom             YYYY-MM-DD
- * @param {string} opts.dateTo               YYYY-MM-DD
- * @param {string} [opts.technicianId]       Restrict to one tech
- * @param {number} [opts.topN=10]            How many slots to return
- * @param {number} [opts.dayStartHour=8]
- * @param {number} [opts.dayEndHour=17]
- * @param {boolean} [opts.includeWeekends=false] Include Sundays in addition to Saturdays
- * @returns {Promise<{slots: Array, evaluated: number}>}
- */
-async function findAvailableSlots(opts) {
-  if (capacityEnabled()) return findCapacitySlots(opts);
+// The candidate's own expected-minutes credit (owner ruling 2026-09-23),
+// resolved ONCE per findAvailableSlots call — extracted from the main
+// function to keep its own branching down (Codex r4 P2 complexity finding).
+// wantsExpectedMinutesCredit false (staff/optimizer callers, or the gate
+// off for everyone else) skips the catalog read entirely and returns the
+// legacy zero-padding shape.
+async function resolveCandidateExpectedMinutes({
+  wantsExpectedMinutesCredit, durationMinutes, expectedMinutes, serviceKey, serviceType,
+}) {
+  if (!wantsExpectedMinutesCredit) return { candidateExpectedMinutes: durationMinutes, candidatePadding: 0 };
+  await ensureCatalogLoaded(db);
+  const candidateExpectedMinutes = Number.isFinite(expectedMinutes) && expectedMinutes > 0
+    ? Math.min(expectedMinutes, durationMinutes)
+    : expectedMinutesSync({ serviceKey, serviceType, windowMinutes: durationMinutes });
+  return { candidateExpectedMinutes, candidatePadding: Math.max(0, durationMinutes - candidateExpectedMinutes) };
+}
+
+// One tech's route stops for one day: filtered to this tech (packed-ends
+// callers also anchor on unassigned committed visits — Codex r2 P1),
+// mapped to the {startMin, endMin, expectedMinutes?} shape the gap geometry
+// below reads, sorted by start. Extracted so findAvailableSlots' own
+// branching stays in the loop that drives it, not the row-shaping itself.
+function buildDayStops(services, {
+  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+}) {
+  return services
+    .filter((s) => {
+      if (excludeSet.has(String(s.id))) return false;
+      if (toDateStr(s.scheduled_date) !== date) return false;
+      // Packed-ends callers (customer-facing): an UNASSIGNED committed
+      // visit is a real stop someone will serve that day — it anchors the
+      // packing on every tech's route rather than reading as an open day
+      // that fans out every grid hour (Codex r2 P1). Legacy callers keep
+      // the per-tech route byte-identical.
+      return s.technician_id === tech.id || (wantsPackedEnds && s.technician_id == null);
+    })
+    .map((s) => {
+      const startMin = timeToMinutes(s.window_start);
+      const endMin = timeToMinutes(s.window_end) ?? startMin + (s.estimated_duration_minutes || DEFAULT_SERVICE_MIN);
+      return {
+        id: s.id,
+        lat: s.svc_lat || s.cust_lat,
+        lng: s.svc_lng || s.cust_lng,
+        startMin,
+        endMin,
+        customer: `${s.first_name || ''} ${s.last_name || ''}`.trim() || 'Unknown',
+        city: s.city,
+        service_type: s.service_type,
+        // Expected-minutes padding credit (owner ruling 2026-09-23) — only
+        // resolved for a customer-facing caller; a plain endMin-startMin
+        // window with no catalog match degrades effectiveEndMinutes/
+        // paddingMinutesOf to the legacy endMin/zero padding.
+        ...(wantsExpectedMinutesCredit ? {
+          expectedMinutes: expectedMinutesSync({
+            serviceKey: s.service_key_snapshot, serviceType: s.service_type,
+            windowMinutes: endMin - startMin,
+          }),
+        } : {}),
+      };
+    })
+    .sort((a, b) => a.startMin - b.startMin);
+}
+
+// The geometry of ONE route gap (between consecutive anchors prev/next):
+// how much drive the detour adds, how early/late a candidate can start in
+// it, and a maker for the candidate object at a given start. Pulled out of
+// findAvailableSlots' loop (Codex r4 P2 complexity finding) — this is the
+// single most decision-heavy piece of the scoring, and it has no reason to
+// share a function scope with the day/tech enumeration around it.
+// `geo` carries the invariants resolved once per findAvailableSlots call:
+// { newStop, dateFrom, stopBuffer, candidatePadding, candidateExpectedMinutes,
+//   durationMinutes, dayOpen, earliestStartMin, todayEt, todayFloorMin }.
+function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
+  const {
+    newStop, dateFrom, stopBuffer, candidatePadding, candidateExpectedMinutes,
+    durationMinutes, dayOpen, earliestStartMin, todayEt, todayFloorMin,
+  } = geo;
+  const baselineDrive = driveMin(prev, next);
+  const driveIn = driveMin(prev, newStop);
+  const driveOut = driveMin(newStop, next);
+  const detourDrive = driveIn + driveOut;
+  const extraDrive = Math.max(0, detourDrive - baselineDrive);
+
+  const prevIsStop = prev.id !== 'HQ_START';
+  const nextIsStop = next.id !== 'HQ_END';
+
+  // Neighbour-buffer geometry (owner ruling 2026-09-23): the buffer against
+  // a real stop is reduced by that stop's own padding (window minus its
+  // expected service minutes) when IT is the early side of the pair —
+  // prev.endMin/prev's own padding on the earliest edge (the existing stop
+  // finishes early, candidate arrives after), the CANDIDATE's own padding
+  // on the latest edge (the candidate finishes early, arrives before an
+  // upcoming stop). HQ legs never get a buffer or padding credit —
+  // unaffected either way. With stopBuffer 0 (no neighbour buffer in play)
+  // both terms are 0, byte-identical to the legacy flat `prev.endMin +
+  // driveIn` / `next.startMin - driveOut` geometry.
+  const prevBuffer = prevIsStop ? Math.max(0, stopBuffer - paddingMinutesOf(prev)) : 0;
+  const nextBuffer = nextIsStop ? Math.max(0, stopBuffer - candidatePadding) : 0;
+  const prevAnchorEnd = prevIsStop ? effectiveEndMinutes(prev) : prev.endMin;
+
+  // Earliest the new job could start: after the previous anchor's
+  // (effective) end + drive from prev → new — floored at "now + lead" when
+  // the date is today.
+  const earliestFloor = Math.max(
+    dayOpen,
+    prevAnchorEnd + driveIn + prevBuffer,
+    date === todayEt ? todayFloorMin : 0,
+    earliestStartMin, // honor a hard time-window lower bound (0 = no-op)
+  );
+  // Must allow drive from new → next before next.startMin (its real,
+  // never-adjusted window start — a promise to whoever holds it). Against a
+  // REAL next stop the candidate is the early side of the pair, so —
+  // exactly as travel-gap.js requiredGapMinutes/effectiveEndMinutes measure
+  // it at commit — the drive starts at the candidate's EXPECTED end (start
+  // + its expected minutes), not its full window end; measuring from the
+  // window end here rejected starts the commit probe accepts whenever
+  // drive > 0 (push-audit P1). The HQ leg keeps the full window (no
+  // credit, as before).
+  const latestEndFloor = next.startMin - driveOut - nextBuffer;
+  // Capped by next.startMin - durationMinutes too (Codex r4 P1): when the
+  // candidate's own expected minutes are LESS than its full window (a
+  // 90-minute offer credited only 60 expected minutes), the credit-only
+  // bound (latestEndFloor - candidateExpectedMinutes) can land a start
+  // whose REAL end (start + durationMinutes, the full window makeCandidate
+  // below actually books) runs PAST next's real, never-adjusted window
+  // start — travel-gap.js's own real-overlap check is unconditional
+  // regardless of credit, so that one packed-before candidate is rejected
+  // downstream with no fallback, and the whole leading/middle gap's
+  // "before next" side silently vanishes instead of still trying the next
+  // hour back. The real window must never overlap next's, credited or not.
+  const latestStartFloor = nextIsStop
+    ? Math.min(latestEndFloor - candidateExpectedMinutes, next.startMin - durationMinutes)
+    : latestEndFloor - durationMinutes;
+
+  // A coordless anchor (ungeocoded stop, or a divergent stamped rental
+  // whose primary-coord fallback the SELECT suppressed) degrades to zero
+  // drive time via driveMin() rather than hiding the gaps on either side of
+  // it — skipping here starved otherwise-valid slots around every
+  // coordless stop (codex round-9 P2).
+
+  // Day delay penalty — prefer sooner days (0.5 min/day)
+  const daysOut = Math.max(0, (new Date(date + 'T12:00:00') - new Date(dateFrom + 'T12:00:00')) / (1000 * 60 * 60 * 24));
+  const score = extraDrive + daysOut * 0.5;
+
+  const makeCandidate = (candidateStartMin) => {
+    const candidateEndMin = candidateStartMin + durationMinutes;
+    return {
+      date,
+      technician: { id: tech.id, name: tech.name },
+      start_time: minutesToTime(candidateStartMin),
+      end_time: minutesToTime(candidateEndMin),
+      detour_minutes: extraDrive,
+      baseline_drive_minutes: baselineDrive,
+      total_drive_minutes: detourDrive,
+      // The two legs the detour is made of, so a picker can say what the
+      // van actually drives INTO this stop (from the previous anchor)
+      // separately from what the insertion adds to the route. A coordless
+      // anchor scores as zero drive above (so its gaps stay offered), but
+      // that zero is a sentinel, not a trip — report the leg as unknown
+      // (null) so a hint omits it rather than claiming "0 min drive"
+      // (Codex #4120 r2 P2).
+      drive_in_minutes: hasCoords(prev) ? driveIn : null,
+      drive_out_minutes: hasCoords(next) ? driveOut : null,
+      score,
+      // Last start this gap can hold (its end still clears the drive to
+      // the next anchor). Availability surfaces that only offer clean
+      // grid-aligned times use this to fan out EVERY aligned start the gap
+      // fits — offering only the earliest-feasible minute meant an
+      // hour-snap into the lunch block or an occupied hour hid the gap's
+      // genuinely free later hours, and whole days with real capacity
+      // disappeared from the self-serve booking surfaces (2026-08-05
+      // field report).
+      latest_start_min: latestStartFloor,
+      insertion: {
+        after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
+        before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,
+        // Bare name for labels ("from <previous stop>"); null = the home base.
+        after_name: prev.id === 'HQ_START' ? null : prev.customer,
+        after_stop_id: prev.id === 'HQ_START' || prev.id === 'HQ_END' ? null : prev.id,
+        before_stop_id: next.id === 'HQ_START' || next.id === 'HQ_END' ? null : next.id,
+      },
+      stops_that_day: dayStops.length,
+    };
+  };
+
+  return {
+    prevIsStop, nextIsStop, earliestFloor, latestStartFloor, makeCandidate,
+  };
+}
+
+// Packed-ends candidate starts for ONE gap (owner bug report 2026-09-23):
+// both ends of a real gap, snapped to the customer hour grid (ceil for
+// earliest, floor for latest), restricted to whichever end(s) border a
+// real stop. Legacy dedupe-by-slotId downstream (estimate-slot-
+// availability's dedupeSlots) tolerates duplicates across gaps; within one
+// gap, coincident ends collapse to a single start via the Set.
+function packedEndsStarts({ prevIsStop, nextIsStop, earliestFloor, latestStartFloor }, durationMinutes, dayClose) {
+  const fits = (startMin) => Number.isFinite(startMin)
+    && startMin >= earliestFloor
+    && startMin <= latestStartFloor
+    && startMin + durationMinutes <= dayClose;
+  const earliestHourStart = Math.ceil(earliestFloor / 60) * 60;
+  const latestHourStart = Math.floor(latestStartFloor / 60) * 60;
+  const starts = new Set();
+  if (prevIsStop && fits(earliestHourStart)) starts.add(earliestHourStart); // packed after prev
+  if (nextIsStop && fits(latestHourStart)) starts.add(latestHourStart);     // packed before next
+  return starts;
+}
+
+// Every candidate for ONE (date, tech) pair: builds that day's virtual
+// route (HQ ... stops ... HQ), evaluates each gap's geometry, and collects
+// its packed-ends or single-candidate output. Extracted from
+// findAvailableSlots' own control flow (Codex r4 P2 complexity finding) —
+// this is the deepest, most decision-heavy layer of the per-day/per-tech
+// double loop, and has no reason to share a function scope with the
+// date/tech enumeration around it.
+// `params`: { services, geo, excludeSet, wantsPackedEnds,
+//   wantsExpectedMinutesCredit, slotStepMinutes, durationMinutes, dayOpen, dayClose }.
+function candidatesForDay(date, tech, params) {
+  const {
+    services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+    slotStepMinutes, durationMinutes, dayOpen, dayClose,
+  } = params;
+  const dayStops = buildDayStops(services, {
+    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+  });
+  // Build virtual stop list: HQ ... stops ... HQ
+  // "Stops" include timing. For gaps we evaluate between consecutive anchors.
+  const anchors = [
+    { id: 'HQ_START', lat: HQ.lat, lng: HQ.lng, startMin: dayOpen, endMin: dayOpen, customer: 'HQ (start)' },
+    ...dayStops,
+    { id: 'HQ_END', lat: HQ.lat, lng: HQ.lng, startMin: dayClose, endMin: dayClose, customer: 'HQ (end)' },
+  ];
+  const found = [];
+  let evaluatedGaps = 0;
+  // Evaluate each gap between anchor[i] and anchor[i+1]
+  for (let i = 0; i < anchors.length - 1; i++) {
+    evaluatedGaps++;
+    const gap = evaluateGap(anchors[i], anchors[i + 1], { date, tech, dayStops, geo });
+
+    if (wantsPackedEnds && dayStops.length > 0) {
+      for (const startMin of packedEndsStarts(gap, durationMinutes, dayClose)) {
+        found.push(gap.makeCandidate(startMin));
+      }
+      continue;
+    }
+
+    // Legacy single-candidate path: earliest-feasible minute only, snapped
+    // to slotStepMinutes (default 1 = exact minute).
+    const startMin = slotStepMinutes > 1
+      ? Math.ceil(gap.earliestFloor / slotStepMinutes) * slotStepMinutes
+      : gap.earliestFloor;
+    if (startMin > gap.latestStartFloor) continue; // doesn't fit
+    if (startMin + durationMinutes > dayClose) continue; // past end of day
+    found.push(gap.makeCandidate(startMin));
+  }
+  return { candidates: found, evaluatedGaps };
+}
+
+// Normalizes findAvailableSlots' raw opts: applies every default, and
+// derives the flags/sets the rest of the function reads (stopBuffer,
+// wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet). Pure and
+// synchronous — no DB access — and kept separate from findAvailableSlots'
+// own control flow (Codex r4 P2 complexity finding): this destructuring
+// alone, with its dozen defaults, was close to a third of that function's
+// reported complexity.
+//
+// @param {Object} opts
+// @param {number} opts.lat                  Target job latitude
+// @param {number} opts.lng                  Target job longitude
+// @param {number} [opts.durationMinutes=60] How long the new job takes
+// @param {string} opts.dateFrom             YYYY-MM-DD
+// @param {string} opts.dateTo               YYYY-MM-DD
+// @param {string} [opts.technicianId]       Restrict to one tech
+// @param {number} [opts.topN=10]            How many slots to return
+// @param {number} [opts.dayStartHour=8]
+// @param {number} [opts.dayEndHour=17]
+// @param {boolean} [opts.includeWeekends=false] Include Sundays in addition to Saturdays
+// @param {string[]} [opts.excludeServiceIds] Service ids to drop from the occupied-route
+//   set — used when relocating an existing visit so its own current row isn't counted as
+//   a stop blocking the slot it's being moved out of. Default [] = identical legacy behavior.
+// @param {number} [opts.slotStepMinutes=1] Snap proposed start times up to this minute
+//   granularity (e.g. 60 = on the hour). Default 1 = exact earliest-feasible minute.
+// @param {number} [opts.earliestStartMin=0] Lower bound (minutes from midnight) on a
+//   proposed start time. Used to honor a HARD customer time-window preference: each route
+//   gap emits only its earliest-feasible start, so without this an empty/early gap
+//   collapses to e.g. 08:00 and a valid later preferred start (e.g. 13:00 for an afternoon
+//   preference) is never generated. Floors earliestStart so the gap yields a candidate
+//   at/after the window start instead. Default 0 = no effect (identical legacy behavior).
+// @param {number} [opts.bufferMinutes=0] Turnaround minutes between the new stop and a
+//   NEIGHBOURING STOP (never an HQ leg) on top of the modeled drive. Customer-facing
+//   callers pass travel-gap.js customerFacingBufferMinutes() (GATE_SLOT_TRAVEL_GAP);
+//   default 0 = legacy geometry for staff and optimizer callers. When this is > 0 the
+//   neighbour-buffer geometry also picks up the shared expected-minutes padding reduction
+//   (scheduling/travel-gap.js, expected-service-minutes.js, owner ruling 2026-09-23) so
+//   offers agree with the same rule the commit gates enforce — with no expected-minutes
+//   signal, padding is 0 and the math is identical to before that ruling.
+// @param {boolean} [opts.packEnds=false] Packed-ends mode (customer-facing lanes ONLY —
+//   estimate slots, /book, reschedule, re-service; staff/optimizer callers never pass
+//   this): per route gap with an existing stop on either side, emit BOTH the earliest
+//   feasible start (packed after prev) and the latest feasible start (packed before
+//   next), each snapped to the hour, instead of one earliest-only candidate. The leading
+//   gap (day-open to the first stop) emits ONLY the latest (packed against the first
+//   stop); the trailing gap (last stop to day-close) emits ONLY the earliest (packed
+//   against the last stop); a middle gap emits both, or one when they coincide. An empty
+//   day (no stops at all) is unaffected — the single HQ-to-HQ gap keeps today's
+//   one-candidate-at-the-exact-minute behavior. Default false = byte-identical
+//   single-candidate-per-gap output.
+// @param {string} [opts.serviceKey] The NEW job's own catalog identity, for its
+//   expected-minutes padding credit when it is the EARLY side of a gap (packed before an
+//   upcoming stop). Optional; no match (or no serviceKey/serviceType given) falls back to
+//   the window length — zero padding, legacy gap.
+// @param {number} [opts.expectedMinutes] A caller-resolved whole-visit expected minutes
+//   (estimate picker: the sum across every service in the profile) — wins over the
+//   single serviceKey lookup so a combined visit's other members are never credited
+//   toward travel (push-audit P1).
+function normalizeFindTimeOptions(opts) {
   const {
     lat, lng,
     durationMinutes = DEFAULT_SERVICE_MIN,
@@ -291,98 +590,56 @@ async function findAvailableSlots(opts) {
     dayStartHour = DAY_START_HOUR,
     dayEndHour = DAY_END_HOUR,
     includeWeekends = false,
-    // Service ids to drop from the occupied-route set — used when relocating an
-    // existing visit so its own current row isn't counted as a stop blocking the
-    // slot it's being moved out of. Default [] = identical legacy behavior.
     excludeServiceIds = [],
-    // Snap proposed start times up to this minute granularity (e.g. 60 = on the
-    // hour). Default 1 = exact earliest-feasible minute (identical legacy behavior).
     slotStepMinutes = 1,
-    // Lower bound (minutes from midnight) on a proposed start time. Used to honor
-    // a HARD customer time-window preference: each route gap emits only its
-    // earliest-feasible start, so without this an empty/early gap collapses to
-    // e.g. 08:00 and a valid later preferred start (e.g. 13:00 for an afternoon
-    // preference) is never generated. Floors earliestStart so the gap yields a
-    // candidate at/after the window start instead. Default 0 = no effect
-    // (identical legacy behavior for every other caller).
     earliestStartMin = 0,
-    // Turnaround minutes between the new stop and a NEIGHBOURING STOP (never an
-    // HQ leg) on top of the modeled drive. Customer-facing callers pass
-    // travel-gap.js customerFacingBufferMinutes() (GATE_SLOT_TRAVEL_GAP);
-    // default 0 = legacy geometry for staff and optimizer callers. When this
-    // is > 0 the neighbour-buffer geometry below also picks up the shared
-    // expected-minutes padding reduction (scheduling/travel-gap.js,
-    // expected-service-minutes.js, owner ruling 2026-09-23) so offers agree
-    // with the same rule the commit gates enforce — with no expected-minutes
-    // signal, padding is 0 and the math is identical to before that ruling.
     bufferMinutes = 0,
-    // Packed-ends mode (customer-facing lanes ONLY — estimate slots, /book,
-    // reschedule, re-service; staff/optimizer callers never pass this):
-    // per route gap with an existing stop on either side, emit BOTH the
-    // earliest feasible start (packed after prev) and the latest feasible
-    // start (packed before next), each snapped to the hour, instead of one
-    // earliest-only candidate. The leading gap (day-open to the first stop)
-    // emits ONLY the latest (packed against the first stop); the trailing
-    // gap (last stop to day-close) emits ONLY the earliest (packed against
-    // the last stop); a middle gap emits both, or one when they coincide.
-    // An empty day (no stops at all) is unaffected — the single HQ-to-HQ
-    // gap keeps today's one-candidate-at-the-exact-minute behavior. Default
-    // false = byte-identical single-candidate-per-gap output.
     packEnds = false,
-    // The NEW job's own catalog identity, for its expected-minutes padding
-    // credit when it is the EARLY side of a gap (packed before an upcoming
-    // stop). Optional; no match (or no serviceKey/serviceType given) falls
-    // back to the window length — zero padding, legacy gap.
     serviceKey = null,
-    // A caller-resolved whole-visit expected minutes (estimate picker: the
-    // sum across every service in the profile) — wins over the single
-    // serviceKey lookup so a combined visit's other members are never
-    // credited toward travel (push-audit P1).
     expectedMinutes = null,
   } = opts;
   const stopBuffer = Math.max(0, Number(bufferMinutes) || 0);
   const wantsPackedEnds = packEnds === true;
+  // Expected-minutes credit is keyed to stopBuffer > 0 below for the common
+  // case, but SLOT_TRAVEL_BUFFER_MINUTES=0 is a supported, deliberate owner
+  // override (travel-gap.js travelBufferMinutes()) — a customer-facing
+  // caller (packEnds, per this module's own contract, is customer-facing
+  // lanes ONLY) with the gate on but a configured zero buffer would
+  // otherwise behave exactly like gate-off here, while the commit probes
+  // (travel-gap.js effectiveEndMinutes/paddingMinutesOf) still measure from
+  // the expected end regardless of the buffer value — an offer/commit
+  // mismatch (Codex r4 P2). ADDITIVE, never subtractive: every existing
+  // stopBuffer > 0 caller is unaffected; this only adds the zero-buffer
+  // customer-facing case. Staff/optimizer callers (never packEnds, never a
+  // customer-facing buffer) stay byte-identical either way.
+  const wantsExpectedMinutesCredit = stopBuffer > 0 || (wantsPackedEnds && travelGapEnabled());
   const excludeSet = new Set((excludeServiceIds || []).map(String));
-  // The requesting estimate's OWN uncommitted holds are not route stops for
-  // itself (codex r17 P1). The collision filter downstream already excludes
-  // them, but ROUTE GENERATION treated them as occupied anchors — so a held
-  // 08:00 or 12:00 window (neither is a PREFERRED_WINDOWS slot) dropped out
-  // of both the classified and ASAP pools, and the V1 page, which no longer
-  // adopts that hold, could be left with no way to confirm the time the
-  // customer already holds. Resolved to ids here so every downstream
-  // exclusion — dayStops included — honours it through one set.
-  if (opts.excludeEstimateId) {
-    const ownHolds = await db('scheduled_services')
-      .where({ source_estimate_id: opts.excludeEstimateId })
-      .whereNull('customer_id')
-      .whereNotNull('reservation_expires_at')
-      .select('id');
-    for (const row of ownHolds) excludeSet.add(String(row.id));
-  }
+  return {
+    lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
+    dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
+    earliestStartMin, packEnds, serviceKey, expectedMinutes,
+    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
+  };
+}
 
-  if (lat == null || lng == null) {
-    return { error: 'lat/lng required', slots: [] };
-  }
-  if (!dateFrom || !dateTo) {
-    return { error: 'dateFrom and dateTo required', slots: [] };
-  }
-
-  if (opts.arrivalWindow?.serviceId && arrivalWindowRoutingEnabled()) {
-    return findArrivalWindowSlots(opts);
-  }
-
-  const newStop = { lat: parseFloat(lat), lng: parseFloat(lng) };
-  const dayOpen = dayStartHour * 60;
-  const dayClose = dayEndHour * 60;
-
-  // Load techs — only assignable ones (active employment AND field-dispatchable).
-  // Every slot consumer (booking, estimate availability, reschedule, re-service,
+// Loads this request's technician/service/date context: assignable
+// technicians (optionally narrowed to one), every route-relevant
+// scheduled_services row in range, and the requested date range with
+// blackout days removed. Extracted from findAvailableSlots' own control
+// flow (Codex r4 P2 complexity finding) — a cohesive "resolve who/what/
+// when" step, independent of the per-gap scoring that consumes it. An
+// empty techs array short-circuits (no services/dates query) — the caller
+// still owns the "no assignable technicians" early return, since that
+// shape is a findAvailableSlots response contract, not a loading concern.
+async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates }) {
+  // Only assignable techs (active employment AND field-dispatchable). Every
+  // slot consumer (booking, estimate availability, reschedule, re-service,
   // voice relay, auto-dispatch) inherits this filter, so a prospective
   // placeholder or an office-only account never contributes a day.
   let techQuery = applyAssignable(db('technicians'));
   if (technicianId) techQuery = techQuery.where('technicians.id', technicianId);
   const techs = await techQuery.select('id', 'name');
-  if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
+  if (!techs.length) return { techs, services: [], dates: [] };
 
   // Load all scheduled services in date range, per tech, with coords
   const services = await db('scheduled_services')
@@ -421,8 +678,6 @@ async function findAvailableSlots(opts) {
       db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END as cust_lng`),
     );
 
-  let dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
-
   // Owner blackout days (admin Settings → Scheduling → Blackout days) are
   // removed from the offer enumeration here — /book, the reschedule page,
   // route-aware estimate slots, and the Waves AI searches all generate
@@ -432,11 +687,64 @@ async function findAvailableSlots(opts) {
   // unblocked by design — staff callers (the dispatch Find-best-times tool)
   // pass includeBlackoutDates:true to keep their recommendations complete.
   // The helper fails open.
-  if (dates.length && !opts.includeBlackoutDates) {
+  let dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
+  if (dates.length && !includeBlackoutDates) {
     const { getBlackoutDates } = require('./blackout-dates');
     const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1]);
     if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
   }
+  return { techs, services, dates };
+}
+
+/**
+ * Main entry. Returns ranked candidate slots — see normalizeFindTimeOptions
+ * for the full option contract.
+ * @returns {Promise<{slots: Array, evaluated: number}>}
+ */
+async function findAvailableSlots(opts) {
+  if (capacityEnabled()) return findCapacitySlots(opts);
+  const {
+    lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
+    dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
+    earliestStartMin, serviceKey, expectedMinutes,
+    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
+  } = normalizeFindTimeOptions(opts);
+  // The requesting estimate's OWN uncommitted holds are not route stops for
+  // itself (codex r17 P1). The collision filter downstream already excludes
+  // them, but ROUTE GENERATION treated them as occupied anchors — so a held
+  // 08:00 or 12:00 window (neither is a PREFERRED_WINDOWS slot) dropped out
+  // of both the classified and ASAP pools, and the V1 page, which no longer
+  // adopts that hold, could be left with no way to confirm the time the
+  // customer already holds. Resolved to ids here so every downstream
+  // exclusion — dayStops included — honours it through one set.
+  if (opts.excludeEstimateId) {
+    const ownHolds = await db('scheduled_services')
+      .where({ source_estimate_id: opts.excludeEstimateId })
+      .whereNull('customer_id')
+      .whereNotNull('reservation_expires_at')
+      .select('id');
+    for (const row of ownHolds) excludeSet.add(String(row.id));
+  }
+
+  if (lat == null || lng == null) {
+    return { error: 'lat/lng required', slots: [] };
+  }
+  if (!dateFrom || !dateTo) {
+    return { error: 'dateFrom and dateTo required', slots: [] };
+  }
+
+  if (opts.arrivalWindow?.serviceId && arrivalWindowRoutingEnabled()) {
+    return findArrivalWindowSlots(opts);
+  }
+
+  const newStop = { lat: parseFloat(lat), lng: parseFloat(lng) };
+  const dayOpen = dayStartHour * 60;
+  const dayClose = dayEndHour * 60;
+
+  const { techs, services, dates } = await loadFindTimeContext({
+    dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates,
+  });
+  if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
   const candidates = [];
   let evaluated = 0;
@@ -449,213 +757,29 @@ async function findAvailableSlots(opts) {
   const nowEt = etParts(new Date());
   const todayFloorMin = nowEt.hour * 60 + nowEt.minute + 30;
 
-  // Expected-minutes padding (owner ruling 2026-09-23) only ever matters
-  // when a neighbour buffer is in play — with stopBuffer 0 (staff/optimizer
-  // callers, or the gate off) `Math.max(0, 0 - padding)` is 0 regardless, so
-  // skip the catalog read entirely and keep those callers' statement set
-  // byte-identical. The candidate's OWN padding applies when IT is the
-  // early side of a gap (packed before an upcoming stop); no
-  // serviceKey/serviceType match falls back to the window length (no
-  // credit, legacy gap).
-  let candidatePadding = 0;
-  let candidateExpectedMinutes = durationMinutes;
-  if (stopBuffer > 0) {
-    await ensureCatalogLoaded(db);
-    candidateExpectedMinutes = Number.isFinite(expectedMinutes) && expectedMinutes > 0
-      ? Math.min(expectedMinutes, durationMinutes)
-      : expectedMinutesSync({
-        serviceKey, serviceType: opts.serviceType || null, windowMinutes: durationMinutes,
-      });
-    candidatePadding = Math.max(0, durationMinutes - candidateExpectedMinutes);
-  }
+  // Expected-minutes padding (owner ruling 2026-09-23) — resolved ONCE for
+  // the whole call; only ever matters for a customer-facing caller
+  // (wantsExpectedMinutesCredit above). See resolveCandidateExpectedMinutes.
+  const { candidateExpectedMinutes, candidatePadding } = await resolveCandidateExpectedMinutes({
+    wantsExpectedMinutesCredit, durationMinutes, expectedMinutes,
+    serviceKey, serviceType: opts.serviceType || null,
+  });
+  // Invariants every gap's geometry (evaluateGap) needs, bundled once so the
+  // per-gap call site stays a single readable line.
+  const geo = {
+    newStop, dateFrom, stopBuffer, candidatePadding, candidateExpectedMinutes,
+    durationMinutes, dayOpen, earliestStartMin, todayEt, todayFloorMin,
+  };
 
+  const dayParams = {
+    services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+    slotStepMinutes, durationMinutes, dayOpen, dayClose,
+  };
   for (const date of dates) {
     for (const tech of techs) {
-      // Pull this tech's stops for this day
-      const dayStops = services
-        .filter(s => {
-          if (excludeSet.has(String(s.id))) return false;
-          const sd = toDateStr(s.scheduled_date);
-          if (sd !== date) return false;
-          // Packed-ends callers (customer-facing): an UNASSIGNED committed
-          // visit is a real stop someone will serve that day — it anchors
-          // the packing on every tech's route rather than reading as an
-          // open day that fans out every grid hour (Codex r2 P1). Legacy
-          // callers keep the per-tech route byte-identical.
-          return s.technician_id === tech.id || (wantsPackedEnds && s.technician_id == null);
-        })
-        .map(s => {
-          const startMin = timeToMinutes(s.window_start);
-          const endMin = timeToMinutes(s.window_end) ?? startMin + (s.estimated_duration_minutes || DEFAULT_SERVICE_MIN);
-          return {
-            id: s.id,
-            lat: s.svc_lat || s.cust_lat,
-            lng: s.svc_lng || s.cust_lng,
-            startMin,
-            endMin,
-            customer: `${s.first_name || ''} ${s.last_name || ''}`.trim() || 'Unknown',
-            city: s.city,
-            service_type: s.service_type,
-            // Expected-minutes padding credit (owner ruling 2026-09-23) —
-            // only resolved when a neighbour buffer is actually in play
-            // (see candidatePadding above); a plain endMin-startMin window
-            // with no catalog match degrades effectiveEndMinutes/
-            // paddingMinutesOf to the legacy endMin/zero padding.
-            ...(stopBuffer > 0 ? {
-              expectedMinutes: expectedMinutesSync({
-                serviceKey: s.service_key_snapshot, serviceType: s.service_type,
-                windowMinutes: endMin - startMin,
-              }),
-            } : {}),
-          };
-        })
-        .sort((a, b) => a.startMin - b.startMin);
-
-      // Build virtual stop list: HQ ... stops ... HQ
-      // "Stops" include timing. For gaps we evaluate between consecutive anchors.
-      const anchors = [
-        { id: 'HQ_START', lat: HQ.lat, lng: HQ.lng, startMin: dayOpen, endMin: dayOpen, customer: 'HQ (start)' },
-        ...dayStops,
-        { id: 'HQ_END', lat: HQ.lat, lng: HQ.lng, startMin: dayClose, endMin: dayClose, customer: 'HQ (end)' },
-      ];
-
-      // Evaluate each gap between anchor[i] and anchor[i+1]
-      for (let i = 0; i < anchors.length - 1; i++) {
-        const prev = anchors[i];
-        const next = anchors[i + 1];
-        evaluated++;
-
-        const baselineDrive = driveMin(prev, next);
-        const driveIn = driveMin(prev, newStop);
-        const driveOut = driveMin(newStop, next);
-        const detourDrive = driveIn + driveOut;
-        const extraDrive = Math.max(0, detourDrive - baselineDrive);
-
-        const prevIsStop = prev.id !== 'HQ_START';
-        const nextIsStop = next.id !== 'HQ_END';
-
-        // Neighbour-buffer geometry (owner ruling 2026-09-23): the buffer
-        // against a real stop is reduced by that stop's own padding (window
-        // minus its expected service minutes) when IT is the early side of
-        // the pair — prev.endMin/prev's own padding on the earliest edge
-        // (the existing stop finishes early, candidate arrives after), the
-        // CANDIDATE's own padding on the latest edge (the candidate finishes
-        // early, arrives before an upcoming stop). HQ legs never get a
-        // buffer or padding credit — unaffected either way. With stopBuffer
-        // 0 (no neighbour buffer in play) both terms are 0, byte-identical
-        // to the legacy flat `prev.endMin + driveIn` / `next.startMin -
-        // driveOut` geometry.
-        const prevBuffer = prevIsStop ? Math.max(0, stopBuffer - paddingMinutesOf(prev)) : 0;
-        const nextBuffer = nextIsStop ? Math.max(0, stopBuffer - candidatePadding) : 0;
-        const prevAnchorEnd = prevIsStop ? effectiveEndMinutes(prev) : prev.endMin;
-
-        // Earliest the new job could start: after the previous anchor's
-        // (effective) end + drive from prev → new — floored at "now + lead"
-        // when the date is today.
-        const earliestFloor = Math.max(
-          dayOpen,
-          prevAnchorEnd + driveIn + prevBuffer,
-          date === todayEt ? todayFloorMin : 0,
-          earliestStartMin, // honor a hard time-window lower bound (0 = no-op)
-        );
-        // Must allow drive from new → next before next.startMin (its real,
-        // never-adjusted window start — a promise to whoever holds it).
-        // Against a REAL next stop the candidate is the early side of the
-        // pair, so — exactly as travel-gap.js requiredGapMinutes/
-        // effectiveEndMinutes measure it at commit — the drive starts at the
-        // candidate's EXPECTED end (start + its expected minutes), not its
-        // full window end; measuring from the window end here rejected
-        // starts the commit probe accepts whenever drive > 0 (push-audit
-        // P1). The HQ leg keeps the full window (no credit, as before).
-        const latestEndFloor = next.startMin - driveOut - nextBuffer;
-        const latestStartFloor = nextIsStop
-          ? latestEndFloor - candidateExpectedMinutes
-          : latestEndFloor - durationMinutes;
-
-        // A coordless anchor (ungeocoded stop, or a divergent stamped rental
-        // whose primary-coord fallback the SELECT suppressed) degrades to
-        // zero drive time via driveMin() rather than hiding the gaps on
-        // either side of it — skipping here starved otherwise-valid slots
-        // around every coordless stop (codex round-9 P2).
-
-        // Day delay penalty — prefer sooner days (0.5 min/day)
-        const daysOut = Math.max(0, (new Date(date + 'T12:00:00') - new Date(dateFrom + 'T12:00:00')) / (1000 * 60 * 60 * 24));
-        const score = extraDrive + daysOut * 0.5;
-
-        const makeCandidate = (candidateStartMin) => {
-          const candidateEndMin = candidateStartMin + durationMinutes;
-          return {
-            date,
-            technician: { id: tech.id, name: tech.name },
-            start_time: minutesToTime(candidateStartMin),
-            end_time: minutesToTime(candidateEndMin),
-            detour_minutes: extraDrive,
-            baseline_drive_minutes: baselineDrive,
-            total_drive_minutes: detourDrive,
-            // The two legs the detour is made of, so a picker can say what the
-            // van actually drives INTO this stop (from the previous anchor)
-            // separately from what the insertion adds to the route. A
-            // coordless anchor scores as zero drive above (so its gaps stay
-            // offered), but that zero is a sentinel, not a trip — report the
-            // leg as unknown (null) so a hint omits it rather than claiming
-            // "0 min drive" (Codex #4120 r2 P2).
-            drive_in_minutes: hasCoords(prev) ? driveIn : null,
-            drive_out_minutes: hasCoords(next) ? driveOut : null,
-            score,
-            // Last start this gap can hold (its end still clears the drive to
-            // the next anchor). Availability surfaces that only offer clean
-            // grid-aligned times use this to fan out EVERY aligned start the
-            // gap fits — offering only the earliest-feasible minute meant an
-            // hour-snap into the lunch block or an occupied hour hid the gap's
-            // genuinely free later hours, and whole days with real capacity
-            // disappeared from the self-serve booking surfaces (2026-08-05
-            // field report).
-            latest_start_min: latestStartFloor,
-            insertion: {
-              after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
-              before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,
-              // Bare name for labels ("from <previous stop>"); null = the home base.
-              after_name: prev.id === 'HQ_START' ? null : prev.customer,
-              after_stop_id: prev.id === 'HQ_START' || prev.id === 'HQ_END' ? null : prev.id,
-              before_stop_id: next.id === 'HQ_START' || next.id === 'HQ_END' ? null : next.id,
-            },
-            stops_that_day: dayStops.length,
-          };
-        };
-
-        if (wantsPackedEnds && dayStops.length > 0) {
-          // Packed-ends mode: BOTH ends of a real gap, snapped to the
-          // customer hour grid (ceil for earliest, floor for latest — the
-          // existing latest_start_min bound is the source), restricted to
-          // whichever end(s) border a real stop. Legacy dedupe-by-slotId
-          // downstream (estimate-slot-availability's dedupeSlots) tolerates
-          // duplicates across gaps; within one gap, coincident ends collapse
-          // to a single candidate below.
-          const fits = (startMin) => Number.isFinite(startMin)
-            && startMin >= earliestFloor
-            && startMin <= latestStartFloor
-            && startMin + durationMinutes <= dayClose;
-          const earliestHourStart = Math.ceil(earliestFloor / 60) * 60;
-          const latestHourStart = Math.floor(latestStartFloor / 60) * 60;
-          const wantEarliest = prevIsStop; // trailing or middle gap
-          const wantLatest = nextIsStop;   // leading or middle gap
-          const starts = new Set();
-          if (wantEarliest && fits(earliestHourStart)) starts.add(earliestHourStart);
-          if (wantLatest && fits(latestHourStart)) starts.add(latestHourStart);
-          for (const startMin of starts) candidates.push(makeCandidate(startMin));
-          continue;
-        }
-
-        // Legacy single-candidate path: earliest-feasible minute only,
-        // snapped to slotStepMinutes (default 1 = exact minute).
-        const startMin = slotStepMinutes > 1
-          ? Math.ceil(earliestFloor / slotStepMinutes) * slotStepMinutes
-          : earliestFloor;
-        const earliestEnd = startMin + durationMinutes;
-        if (startMin > latestStartFloor) continue; // doesn't fit
-        if (earliestEnd > dayClose) continue;  // past end of day
-        candidates.push(makeCandidate(startMin));
-      }
+      const { candidates: dayCandidates, evaluatedGaps } = candidatesForDay(date, tech, dayParams);
+      evaluated += evaluatedGaps;
+      candidates.push(...dayCandidates);
     }
   }
 

@@ -127,6 +127,41 @@ describe('H1 — leading gap (day-open before the first stop)', () => {
   });
 });
 
+describe('leading gap capped against the next real window when expected < full duration (Codex r4 P1)', () => {
+  // A termite-inspection catalog row (min 30 / max 90 -> expected 60) for a
+  // 90-minute offered candidate: candidatePadding = 90-60 = 30, so nextBuffer
+  // collapses to 0 and the credit-only bound (latestEndFloor -
+  // candidateExpectedMinutes) lands at 11:00 — but the candidate's REAL
+  // window is still the full 90 minutes (makeCandidate uses durationMinutes,
+  // never the credited figure), so an 11:00 start's real end (12:30)
+  // overlaps the noon stop it is supposedly packed before. The bound must
+  // also respect next.startMin - durationMinutes (630 = 10:30, floored to
+  // 10:00) so the offered start's real window never reaches the next stop.
+  const CANDIDATE_CATALOG = [{
+    service_key: 'termite_inspection', name: 'Termite Inspection Service',
+    min_duration_minutes: 30, max_duration_minutes: 90, default_duration_minutes: null,
+  }];
+  const stops = [stopRow('s1', '12:00', '13:00')];
+
+  test('a 90-minute candidate credited only 60 expected minutes never overlaps the noon stop\'s real window', async () => {
+    wireDb({ stops, catalog: CANDIDATE_CATALOG });
+    const { slots } = await findAvailableSlots({
+      ...BASE, durationMinutes: 90, packEnds: true, serviceKey: 'termite_inspection',
+      bufferMinutes: customerFacingBufferMinutes(),
+    });
+    const leading = slots.filter((s) => s.insertion.after_stop_id == null && s.insertion.before_stop_id === 's1');
+    // Before the fix, the only "packed before s1" candidate was 11:00 (real
+    // end 12:30 — overlapping s1's real 12:00 start); a downstream overlap
+    // check would reject it with no fallback, so this side of the gap
+    // vanished entirely instead of falling back to 10:00.
+    expect(leading.map((s) => s.start_time)).toEqual(['10:00']);
+    for (const slot of leading) {
+      const [h, m] = slot.end_time.split(':').map(Number);
+      expect(h * 60 + m).toBeLessThanOrEqual(12 * 60); // never runs into the stop's real 12:00 start
+    }
+  });
+});
+
 describe('H5 — middle gap (idle time between two stops)', () => {
   const stops = [stopRow('s1', '09:00', '10:00'), stopRow('s2', '14:00', '15:00')];
 
@@ -150,6 +185,39 @@ describe('trailing gap (last stop before day-close)', () => {
     });
     const trailing = slots.filter((s) => s.insertion.after_stop_id === 's1' && s.insertion.before_stop_id == null);
     expect(trailing.map((s) => s.start_time)).toEqual(['11:00']);
+  });
+});
+
+describe('zero buffer still credits expected minutes for a customer-facing caller (Codex r4 P2)', () => {
+  // SLOT_TRAVEL_BUFFER_MINUTES=0 is a supported, deliberate owner override
+  // (travel-gap.js travelBufferMinutes()) — gate on, buffer explicitly
+  // zeroed. travel-gap.js's effectiveEndMinutes/paddingMinutesOf are
+  // buffer-agnostic — a stop's own catalog credit must still reduce its
+  // effective end for a customer-facing (packEnds) caller even at buffer 0,
+  // or the offer geometry silently reverts to gate-off behavior while the
+  // commit probes keep crediting it (an offer/commit mismatch).
+  const WIDE_CATALOG = [{
+    service_key: 'wide_pest', name: 'pest_control',
+    min_duration_minutes: 15, max_duration_minutes: 45, default_duration_minutes: null,
+  }];
+  const stops = [stopRow('s1', '10:00', '12:00')]; // 120-min window; expected 30 -> effective end 10:30
+
+  test('a trailing gap packs to the credited hour (11:00), not the raw window-end hour (12:00)', async () => {
+    wireDb({ stops, catalog: WIDE_CATALOG });
+    const { slots } = await findAvailableSlots({
+      ...BASE, packEnds: true, serviceKey: 'pest_control', bufferMinutes: 0, // explicit zero, NOT customerFacingBufferMinutes()
+    });
+    const trailing = slots.filter((s) => s.insertion.after_stop_id === 's1' && s.insertion.before_stop_id == null);
+    expect(trailing.map((s) => s.start_time)).toEqual(['11:00']);
+  });
+
+  test('legacy callers (packEnds omitted) are unaffected by this gate — bufferMinutes 0 stays legacy geometry', async () => {
+    wireDb({ stops, catalog: WIDE_CATALOG });
+    const { slots } = await findAvailableSlots({ ...BASE, serviceKey: 'pest_control', bufferMinutes: 0 });
+    // Legacy (non-packed) earliest-feasible-minute path: no credit either
+    // way (stopBuffer is 0 and packEnds is not requested), byte-identical
+    // to gate-off/staff-caller geometry.
+    expect(slots.some((s) => s.insertion.after_stop_id === 's1' && s.start_time === '12:00')).toBe(true);
   });
 });
 
