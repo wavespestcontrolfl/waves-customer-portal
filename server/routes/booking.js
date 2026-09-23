@@ -2618,15 +2618,30 @@ async function createSelfBooking(payload = {}) {
         // confirming in that window would see only the older clean lead
         // (codex r9 P1). Both typed contact factors bind the lookup.
         if (submitted && new_customer?.email && phoneDigits) {
-          const flaggedLeads = await trx('leads')
+          // Phones compare on their last ten digits: the quote intake stores
+          // +1 E.164, the booking page submits ten (pre-push audit P1).
+          const { cleanVerdictCovers } = require('../services/lead-address-unverified');
+          const contactLeads = await trx('leads')
             .whereNull('deleted_at')
             .whereRaw('LOWER(email) = ?', [String(new_customer.email).toLowerCase().trim()])
-            .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [phoneDigits])
-            .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
+            .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits.slice(-10)])
+            .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
             .select('extracted_data');
-          for (const row of flaggedLeads) {
-            const flag = recoverAddressUnverified(parseData(row.extracted_data));
-            if (flag && flagCoversAddress(flag, submitted)) refuse();
+          // A NEWER clean verdict for this premise (a later run, possibly on
+          // a different lead row) supersedes an older lead's flag — repeat
+          // lookups mint new rows and a clean run clears only its own
+          // (pre-push audit P1).
+          const snapshots = contactLeads.map((row) => parseData(row.extracted_data)).filter(Boolean);
+          const newestClean = snapshots
+            .filter((snap) => cleanVerdictCovers(snap, submitted))
+            .map((snap) => Date.parse(snap.address_verdict?.at || '') || 0)
+            .reduce((max, at) => Math.max(max, at), 0);
+          for (const snap of snapshots) {
+            const flag = recoverAddressUnverified(snap);
+            if (!flag || !flagCoversAddress(flag, submitted)) continue;
+            const flaggedAt = Date.parse(flag.flagged_at || '') || 0;
+            if (newestClean && newestClean > flaggedAt) continue;
+            refuse();
           }
         }
       }
