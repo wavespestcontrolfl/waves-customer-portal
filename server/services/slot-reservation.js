@@ -34,9 +34,10 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
-const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
+const { addETDays, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
+const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduling/self-serve-notice');
 // Rung 1 of the global scheduling lock order — see the ORDERING CONTRACT in
 // scheduling/occupancy.js for why both write paths here take it first, and
 // why each also runs the tech-blind global probe (findConflictingVisits)
@@ -690,13 +691,15 @@ async function reserveSlot({
 
   // Stale-slot guard: the slot list is generated minutes before the customer
   // taps it, and a page left open can hold windows the generator would no
-  // longer offer. Enforce the same minimum booking lead the generator uses
-  // (estimate-slot-availability's minimumLeadMinutes default) — a window
-  // inside the lead can't be routed and dispatched, so reserving it books a
-  // visit no tech can make on time. STRICTLY inside: the generator offers
+  // longer offer. Enforce the same self-serve notice window the generator
+  // uses (estimate-slot-availability's minimumLeadMinutes default —
+  // selfServeNoticeMinutes(), owner ruling 2026-09-23, replacing the old
+  // flat 120-minute lead) — a window inside the notice can't be routed and
+  // dispatched, so reserving it books a visit no tech can make on time.
+  // Spans calendar days (a 24h notice reaches into tomorrow near midnight),
+  // unlike the old today-only check. STRICTLY inside: the generator offers
   // starts AT the boundary (startMin >= earliest), so equality must pass
   // here too or a just-fetched boundary slot 409s on the first tap.
-  const MINIMUM_LEAD_MINUTES = 120;
   const todayEt = etDateString();
   if (date < todayEt) {
     const err = new Error('slot date has already passed');
@@ -704,15 +707,11 @@ async function reserveSlot({
     err.slotId = slotId;
     throw err;
   }
-  if (date === todayEt) {
-    const nowEt = etParts(new Date());
-    const [sh, sm] = String(windowStart).split(':').map(Number);
-    if (sh * 60 + sm < nowEt.hour * 60 + nowEt.minute + MINIMUM_LEAD_MINUTES) {
-      const err = new Error('slot start is inside the booking lead window');
-      err.code = 'SLOT_UNAVAILABLE';
-      err.slotId = slotId;
-      throw err;
-    }
+  if (violatesSelfServeNotice({ date, startTime: windowStart })) {
+    const err = new Error('slot start is inside the booking notice window');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
   }
 
   // Server-authoritative slot policy: parseSlotId validates FORMAT only — the
@@ -1306,6 +1305,17 @@ async function reserveSlot({
       // Visit groups: deliberately NOT stamped — a customer_id-less slot
       // HOLD is not a customer stop; graduation goes through the
       // estimate converter, which stamps.
+      // Self-serve notice window re-read under the occupancy/tech/zone
+      // locks (Codex r1 P2): the entry check ran before coordinate
+      // resolution, capacity preparation and the lock waits — a start that
+      // crossed the cutoff meanwhile would otherwise become a live hold that
+      // commitReservation is guaranteed to reject.
+      if (violatesSelfServeNotice({ date, startTime: windowStart })) {
+        const err = new Error('slot start is inside the booking notice window');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
       const [row] = await trx('scheduled_services').insert({
         customer_id: null,
         technician_id: techId,
@@ -1573,6 +1583,17 @@ async function commitReservation({
     if (row._expired) {
       const err = new Error('reservation expired');
       err.code = 'RESERVATION_EXPIRED';
+      throw err;
+    }
+    // Self-serve notice window (owner ruling 2026-09-23): a hold reserved
+    // just outside the window can cross the boundary during checkout. The
+    // LOCKED hold's own start is re-checked here — after the
+    // already-committed replay above (an accepted visit is never un-accepted
+    // by this rule) — so what the generator would no longer offer cannot be
+    // graduated either. Same recoverable code the other slot-side rejects use.
+    if (visitInsideNoticeWindow(row)) {
+      const err = new Error('slot start is inside the booking notice window');
+      err.code = 'SLOT_UNAVAILABLE';
       throw err;
     }
     // Graduating inside the grace window: reservation_expires_at itself has
@@ -2239,6 +2260,15 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       const err = new Error('Your time-slot hold has reached its limit — pick a time again');
       err.code = 'HOLD_LIMIT_REACHED';
       err.expiresAt = row.reservation_expires_at;
+      throw err;
+    }
+    // Self-serve notice window (owner ruling 2026-09-23): never extend a hold
+    // whose start has slid inside the window — commitReservation would refuse
+    // it anyway, so keeping it alive only strands the customer on a time they
+    // can no longer book. Same recoverable code reserveSlot uses.
+    if (visitInsideNoticeWindow(row)) {
+      const err = new Error('slot start is inside the booking notice window');
+      err.code = 'SLOT_UNAVAILABLE';
       throw err;
     }
 

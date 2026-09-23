@@ -161,6 +161,17 @@ provider legs or exact route coordinates. Scheduling traffic lookups share a
 HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Gate-off availability is unchanged apart from the
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
+Self-serve notice window (owner ruling 2026-09-23,
+`scheduling/self-serve-notice.js`, `SELF_SERVE_NOTICE_HOURS`, default 24 h):
+every SELF-SERVE offer and commit surface — the estimate slot picker and its
+reserve/commit/extend gates, `/api/booking/availability`, `/find-slots`,
+`/confirm` and capture-intent revalidation, public reschedule, public
+re-service, and the assistant's availability engine — neither offers nor
+accepts a start within that window of now (the estimate picker's minimum lead
+IS this window, replacing the flat 120-minute same-day lead). The old
+`max_self_books_per_day` cap is retired: its offer-time day filtering and
+commit-time re-checks run only while `GATE_SELF_BOOK_DAY_CAP` is set. Staff,
+admin and the voice agent's booking tools are unaffected.
 Catalog-sized estimate offers resolve the primary appointment allowance from
 `services.scheduling_duration_policy`; independent recurring companions do not
 enlarge that appointment, while one-time paid add-ons contribute shared work.
@@ -1435,12 +1446,20 @@ roll-ups. The per-slot flag is shared by every consumer of that engine:
 searches — added in #3888 so the picker labels each time from its own
 route-fit, not the day's). Day lists contain all feasible starts; only the
 separate recommendations are curated. Moving an existing self-booked visit
-excludes that booking from its own day-cap count. POST is a WRITE with two owner-authorized
+excludes that booking from its own day-cap count (the per-day cap runs only
+while `GATE_SELF_BOOK_DAY_CAP` is set — retired 2026-09-23). Self-serve notice
+window (owner ruling 2026-09-23, `scheduling/self-serve-notice.js`,
+`SELF_SERVE_NOTICE_HOURS` default 24): GET answers `not_reschedulable` with
+reason `self_serve_notice` for a visit that itself starts within the window
+(a MISSED visit is being rebooked and is exempt), no offered target starts
+within the window, and POST refuses such a visit with 409 code
+`SELF_SERVE_NOTICE`. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
 (route feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK`
-is set, self-book day caps re-checked server-side):
+is set, the self-serve notice window, and — only while `GATE_SELF_BOOK_DAY_CAP`
+is set — self-book day caps re-checked server-side):
   - default: moves the single visit via `SmartRebooker.reschedule`
     (advisory lock + tech-route overlap conflict check + `reschedule_log`
     audit as `customer_self_serve` + escalation flagging);
@@ -1527,7 +1546,8 @@ allowing the page to select the remaining lane; malformed lanes still return 400
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
 feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK` is set,
-day caps — the anti-forgery model
+the self-serve notice window, day caps only while `GATE_SELF_BOOK_DAY_CAP`
+is set — the anti-forgery model
 reschedule-public uses in place of the funnel's signed-offer HMAC), then
 committed through `createSelfBooking`'s transaction with the
 internal-only `callbackVisit` option (is_callback=true — completion

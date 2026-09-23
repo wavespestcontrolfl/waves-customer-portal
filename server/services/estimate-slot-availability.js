@@ -44,6 +44,7 @@ const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid, overlapsLunch, lunchBlockEnabled,
   refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval,
 } = require('./scheduling/customer-windows');
+const { selfServeNoticeMinutes } = require('./scheduling/self-serve-notice');
 const { isEnabled } = require('../config/feature-gates');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
@@ -59,6 +60,13 @@ const DEFAULT_OPTS = {
   expanderMaxResults: 3,
   durationMinutes: 60,
   includeWeekends: true,
+  // Fallback only — getAvailableSlots/getSlotDebug override this with the
+  // live self-serve notice window (selfServeNoticeMinutes(), owner ruling
+  // 2026-09-23, default 24h) unless a caller passes its own
+  // minimumLeadMinutes (tests, internal callers). Kept here so a direct
+  // caller of a lower-level helper (earliestBookableMinuteForDate,
+  // filterPastSlotsForToday, buildAsapCapacitySlotsForTechs) that supplies
+  // no override still gets a sane default.
   minimumLeadMinutes: 120,
 };
 
@@ -1193,10 +1201,31 @@ function enumerateETDateStrings(dateFrom, dateTo, { includeWeekends = true } = {
   return dates;
 }
 
+// Generalized for a lead that can span calendar days (the self-serve
+// notice default is 24h — SELF_SERVE_NOTICE_HOURS, replacing the old flat
+// 120-minute same-day-only lead): resolve the ET calendar date the
+// earliest-bookable INSTANT (now + lead) falls on, rather than assuming
+// only "today" is ever restricted. A `date` strictly before that day is
+// entirely inside the lead (every minute rejected — Infinity, so
+// `startMin >= earliest` never passes); strictly after it is entirely
+// clear (0 — no restriction, same as the original); the day itself gets
+// the exact minute-of-day floor. Reduces to the original same-day formula
+// whenever `now + lead` never crosses midnight (true for the old 120-min
+// lead on all but the last two hours of the day).
 function earliestBookableMinuteForDate(date, now = new Date(), minimumLeadMinutes = DEFAULT_OPTS.minimumLeadMinutes) {
-  if (date !== etDateString(now)) return 0;
-  const parts = etParts(now);
-  return parts.hour * 60 + parts.minute + Math.max(0, Number(minimumLeadMinutes) || 0);
+  const lead = Math.max(0, Number(minimumLeadMinutes) || 0);
+  const earliestInstant = new Date(now.getTime() + lead * 60000);
+  const earliestDateStr = etDateString(earliestInstant);
+  if (date < earliestDateStr) return Infinity;
+  if (date > earliestDateStr) return 0;
+  const parts = etParts(earliestInstant);
+  // Round UP when seconds/milliseconds remain: the commit gate
+  // (violatesSelfServeNotice) compares exact instants, so at 11:00:30 the
+  // 11:00 start is INSIDE the window — offering it here (minute precision
+  // says 11:00 >= 11:00) would hand out a slot reserveSlot immediately
+  // refuses. ET offsets are whole hours, so UTC seconds/ms are the ET ones.
+  const subMinute = earliestInstant.getUTCSeconds() > 0 || earliestInstant.getUTCMilliseconds() > 0 ? 1 : 0;
+  return parts.hour * 60 + parts.minute + subMinute;
 }
 
 function buildAsapCapacitySlotsForTechs({
@@ -1652,7 +1681,11 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
 // ---------- main ----------
 
 async function getAvailableSlots(estimateId, userOpts = {}) {
-  const opts = { ...DEFAULT_OPTS, ...userOpts };
+  // Self-serve notice window (owner ruling 2026-09-23) is the live default
+  // lead — read at call time so a SELF_SERVE_NOTICE_HOURS flip needs no
+  // redeploy — overridable by an explicit userOpts.minimumLeadMinutes
+  // (tests, internal callers) via the spread order below.
+  const opts = { ...DEFAULT_OPTS, minimumLeadMinutes: selfServeNoticeMinutes(), ...userOpts };
 
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
   // every synchronous lunch/day-end check this call makes below — see
@@ -2080,7 +2113,9 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
 // ---------- admin debug variant ----------
 
 async function getSlotDebug(estimateId, userOpts = {}) {
-  const opts = { ...DEFAULT_OPTS, ...userOpts };
+  // Same live-notice default as getAvailableSlots — the admin debug view
+  // must reflect the lead a customer actually sees, not the old constant.
+  const opts = { ...DEFAULT_OPTS, minimumLeadMinutes: selfServeNoticeMinutes(), ...userOpts };
   // Mirrors the live path's config read so this debug surface's dayEndHour
   // reflects what the customer is actually offered (Codex r1 P2 on #4663).
   await refreshCustomerBookingWindowConfig();

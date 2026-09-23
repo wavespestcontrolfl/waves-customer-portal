@@ -64,6 +64,7 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 // missed-appointment rule) lives in a service so the promised-link worker
 // reaches the SAME answer this page gives (codex #4293 r3 P2).
 const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
+const { visitInsideNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -219,6 +220,20 @@ async function eligibilityAsync(svc, now = new Date()) {
   const grouped = await groupedVisit(svc);
   if (grouped === 'unknown') return { ok: false, reason: 'not_available' };
   return grouped ? { ok: false, reason: 'grouped' } : elig;
+}
+
+// Self-serve notice window (owner ruling 2026-09-23) layered ON TOP of
+// eligibilityAsync's verdict: refuse even an otherwise-eligible visit that
+// itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED visit is being
+// REBOOKED — its own past start is irrelevant — so the notice rule doesn't
+// apply to it. Kept OUT of services/reschedule-eligibility.js: that module
+// is shared with the call-driven promised-link worker, which the notice
+// rule must not reach (self-serve only).
+function withSelfServeNotice(elig, svc, now = new Date()) {
+  if (elig.ok && !elig.missed && visitInsideNoticeWindow(svc, now)) {
+    return { ok: false, reason: 'self_serve_notice' };
+  }
+  return elig;
 }
 
 async function loadByToken(token) {
@@ -410,6 +425,9 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     today: new Date(),
     excludeServiceIds: [svc.id],
     excludeSelfBookingId: svc.self_booking_id || null,
+    // Self-serve surface — a new target starting within the notice window
+    // (owner ruling 2026-09-23) can't be offered or committed.
+    selfServeNotice: true,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —
@@ -433,9 +451,9 @@ router.get('/:token', async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = accountInactive(svc)
+    const elig = withSelfServeNotice(accountInactive(svc)
       ? { ok: false, reason: 'account_inactive' }
-      : await eligibilityAsync(svc);
+      : await eligibilityAsync(svc), svc);
     const base = {
       state: elig.ok ? 'reschedulable' : 'not_reschedulable',
       reason: elig.ok ? null : elig.reason,
@@ -523,9 +541,9 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = accountInactive(svc)
+    const elig = withSelfServeNotice(accountInactive(svc)
       ? { ok: false, reason: 'account_inactive' }
-      : await eligibilityAsync(svc);
+      : await eligibilityAsync(svc), svc);
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
@@ -596,7 +614,6 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
-
     // Idempotent replay: a retried POST (network retry, double-tap) whose
     // target matches the visit's current date + start already succeeded —
     // committing again would duplicate the reschedule_log row, re-send the
@@ -653,6 +670,22 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       });
     }
 
+    // Self-serve notice window (owner ruling 2026-09-23): refuse moving a
+    // visit that itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED
+    // visit is being rebooked, not moved off its own too-soon start. Runs
+    // AFTER the idempotent replay above: a move that succeeded just outside
+    // the boundary but lost its response must replay as success when
+    // retried past it, not flip to an ineligible page. Its own code/message
+    // (not the generic reason above) so the client renders the specific
+    // call-us guidance (ScheduleFlowPage.jsx falls back to body.error
+    // verbatim for an unrecognized code).
+    if (!elig.missed && visitInsideNoticeWindow(svc)) {
+      return res.status(409).json({
+        error: 'This visit starts too soon to move online — call (941) 297-5749 and our team can help.',
+        code: 'SELF_SERVE_NOTICE',
+      });
+    }
+
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
@@ -701,6 +734,31 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // should have every later visit follow, not sit a double interval out.
     // Strict statuses only (no allowLive) — eligibility already gated those.
     const reanchor = shouldReanchor(svc, date);
+    // Self-serve notice window re-check INSIDE the rebooker's transaction
+    // (owner ruling 2026-09-23): the guard above ran on an unlocked snapshot
+    // before the availability build. The `expect` fence below pins the row to
+    // that snapshot (a concurrent staff move that changed date/start aborts
+    // the CAS with SLOT_TAKEN instead of moving a row this page never saw),
+    // and beforeMove re-reads the clock under the scheduling locks so a
+    // request that waited across the boundary is refused, missed exemption
+    // preserved. Same code/message as the pre-check.
+    const noticeRecheck = async () => {
+      if (!elig.missed && visitInsideNoticeWindow(svc)) {
+        throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
+          statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
+        });
+      }
+      // The DESTINATION too (Codex r1 P1): the availability build above
+      // floored its offers at now + notice on an unlocked clock; a request
+      // that waited across the boundary must not commit a start that is now
+      // inside the window (missed visits skip the current-visit check
+      // above, so this is their only guard). Same code as the offer floor.
+      if (violatesSelfServeNotice({ date, startTime: newWindow.start })) {
+        throw Object.assign(new Error('That time is too soon to book online — call (941) 297-5749 and our team can help.'), {
+          statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
+        });
+      }
+    };
     let result;
     try {
       result = reanchor
@@ -725,6 +783,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             travelGap: true,
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
+            beforeMove: noticeRecheck,
           }
         )
         : await SmartRebooker.reschedule(
@@ -738,7 +797,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           // the collective choke point must not widen a disclosed single move.
           // travelGap: customer-facing move — the rebooker's occupancy probe
           // applies GATE_SLOT_TRAVEL_GAP (the offers above were built under it).
-          { technicianId: slot.technician_id, seriesPolicy: 'single', travelGap: true }
+          {
+            technicianId: slot.technician_id,
+            seriesPolicy: 'single',
+            travelGap: true,
+            expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
+            beforeMove: noticeRecheck,
+          }
         );
     } catch (err) {
       if (err?.statusCode) {
@@ -899,6 +964,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 router._test = {
   eligibility,
   eligibilityAsync,
+  withSelfServeNotice,
   accountInactive,
   bookingRange,
   searchParseOpts,
