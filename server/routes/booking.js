@@ -2505,6 +2505,35 @@ async function createSelfBooking(payload = {}) {
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['self-booking-confirm', `${custId}:${slotDateStr}`],
       );
+      // The county-roll address verdict, rechecked UNDER ROW LOCKS held
+      // through this transaction — the unlocked reads above can observe a
+      // clean draft / lead while a concurrent /calculate commits the flag
+      // before the appointment rows below are inserted (pre-push audit
+      // P1 on #4667). Refuses before either booking row is written; the
+      // route maps ADDRESS_UNVERIFIED to the same 409 as the early checks.
+      {
+        const { recoverAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
+        const parseData = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
+        const refuse = () => {
+          throw Object.assign(new Error('County records could not confirm this house number. Our office will verify the address with you before scheduling.'), {
+            statusCode: 409, isOperational: true, code: 'ADDRESS_UNVERIFIED',
+          });
+        };
+        if (pricing_estimate_id && estimate_token) {
+          const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+          if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+            const lockedDraft = await trx('estimates').where({ id: pricing_estimate_id }).forUpdate().first('estimate_data');
+            if (parseData(lockedDraft?.estimate_data)?.addressUnverified === true) refuse();
+          }
+        }
+        if (lead_id && new_customer?.address_line1) {
+          const lockedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').forUpdate().first('extracted_data');
+          const flag = recoverAddressUnverified(parseData(lockedLead?.extracted_data));
+          if (flag && flagCoversAddress(flag, {
+            line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
+          })) refuse();
+        }
+      }
       // The customer-keyed lock above only serializes a double-submit —
       // two DIFFERENT customers confirming the same slot can still both
       // pass the overlap check under READ COMMITTED. Tech bookings take
@@ -2958,7 +2987,7 @@ async function createSelfBooking(payload = {}) {
       // crossed the notice boundary while this request waited — another
       // "pick another slot" outcome that must not strand a just-created
       // profile.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'ADDRESS_UNVERIFIED') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is

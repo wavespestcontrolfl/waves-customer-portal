@@ -922,7 +922,10 @@ id can only block a booking at a flagged premise, never enable one). A
 token-verified pricing handoff (`pricing_estimate_id` + `estimate_token`)
 whose draft carries `addressUnverified: true` is refused the same way,
 unconditionally — before any booking write, whatever the customers-only
-gate or the bearer's authentication. A roll that never answered (GIS
+gate or the bearer's authentication; both verdicts are rechecked under row
+locks inside the booking transaction itself, so a flag committed between
+the early read and the insert still refuses (409, code
+`ADDRESS_UNVERIFIED`). A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
 answers clean, and an existing draft's own `addressUnverified` marker is
