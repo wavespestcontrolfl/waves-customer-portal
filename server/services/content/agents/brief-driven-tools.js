@@ -60,21 +60,31 @@ const getGateRetryDirectives = lazy('gate-retry-directives', '../gate-retry-dire
  */
 const sessionDrafts = new Map();
 const sessionEditorial = new Map();
-function registerSessionEditorial(sessionId, brief) {
-  if (sessionId && require('../editorial-evidence').enabled()
-      && ['supporting-blog', 'customer-question', 'refresh'].includes(brief?.page_type)) {
-    const refresh = brief.page_type === 'refresh' || brief.action_type === 'refresh_existing_page';
-    sessionEditorial.set(sessionId, {
-      // A refresh title comes from get_existing_page below. Decay briefs can
-      // legitimately have no query/keyword, and an agent-supplied replacement
-      // title is not authoritative for the live page being expanded.
-      title: refresh ? '' : brief.working_title || brief.target_keyword || '',
-      requiresExistingTitle: refresh,
-      targetUrl: refresh ? brief.target_url || brief.page_url || null : null,
-      attempts: 0,
-      plan: null,
-    });
+async function registerSessionEditorial(sessionId, brief) {
+  const editorial = require('../editorial-evidence');
+  if (!sessionId || !editorial.enabled()) return;
+
+  const refresh = brief?.page_type === 'refresh' || brief?.action_type === 'refresh_existing_page';
+  if (!refresh && !['supporting-blog', 'customer-question'].includes(brief?.page_type)) return;
+  if (!refresh) {
+    sessionEditorial.set(sessionId, { title: brief.working_title || brief.target_keyword || '', attempts: 0, plan: null });
+    return;
   }
+
+  // Install the fail-closed context before resolving. A missing target or a
+  // transient read failure must keep emit_draft blocked, while a positively
+  // resolved non-blog target is outside the blog editorial contract.
+  const context = { title: '', requiresExistingTitle: true, attempts: 0, plan: null };
+  sessionEditorial.set(sessionId, context);
+  const targetUrl = brief.target_url || brief.page_url || null;
+  if (!targetUrl) return;
+  const existing = await executeBriefTool('get_existing_page', { page_url: targetUrl }, { sessionId });
+  if (!existing?.file_path) return;
+  if (!editorial.applicable(existing.file_path)) {
+    sessionEditorial.delete(sessionId);
+    return;
+  }
+  context.title = String(existing.frontmatter?.title || existing.frontmatter?.metaTitle || '').trim();
 }
 
 // Routes each session was SHOWN by check_existing_content. The writer
@@ -387,17 +397,7 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       context.plan = null;
       if (++context.attempts > 3) return { pass: false, error: 'Answer-plan attempt budget exhausted; stop this draft.' };
       if (context.requiresExistingTitle && !String(context.title || '').trim()) {
-        // Resolve the brief's bound target ourselves. The refresh agent may
-        // call get_existing_page for comparison/research pages too; accepting
-        // the most recent agent-selected page would review against an
-        // unrelated title promise.
-        const existing = context.targetUrl
-          ? await executeBriefTool('get_existing_page', { page_url: context.targetUrl }, { sessionId })
-          : null;
-        context.title = String(existing?.frontmatter?.title || existing?.frontmatter?.metaTitle || '').trim();
-        if (!context.title) {
-          return { pass: false, error: 'Existing page title unavailable; resolve the refresh brief target before validating the answer plan.' };
-        }
+        return { pass: false, error: 'Existing page title unavailable; resolve the refresh brief target before validating the answer plan.' };
       }
       try {
         const result = await require('../editorial-review').reviewPlan({ title: context.title, sections: input?.sections });
