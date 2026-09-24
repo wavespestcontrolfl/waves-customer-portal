@@ -150,7 +150,11 @@ function parseDisplayAddress(text) {
   const source = unitFirst ? unitFirst.rest : String(text || '');
   const parts = source.split(',').map((part) => part.trim()).filter(Boolean);
   const streetLine = parts[0] || '';
-  const city = parts.slice(1).find((part) => !isUnitSegment(part) && !STATE_ZIP_SEGMENT.test(part) && !STATE_ONLY_SEGMENT.test(part)) || '';
+  // …never a bare ZIP / ZIP+4 segment ("1260 Example St, 34219"): the
+  // staff-correction fan-out writes this city into lead and customer
+  // records (pre-push audit P1 after r42).
+  const ZIP_ONLY_SEGMENT = /^\d{5}(?:-\d{4})?$/;
+  const city = parts.slice(1).find((part) => !isUnitSegment(part) && !STATE_ZIP_SEGMENT.test(part) && !STATE_ONLY_SEGMENT.test(part) && !ZIP_ONLY_SEGMENT.test(part)) || '';
   const tail = parts.slice(1).find((part) => STATE_ZIP_SEGMENT.test(part) || /^\d{5}(?:-\d{4})?$/.test(part)) || '';
   const stateOnly = parts.slice(1).find((part) => STATE_ONLY_SEGMENT.test(part)) || '';
   const state = (tail.match(/^([a-z]{2})\s*\d{5}/i) || [null, stateOnly || null])[1];

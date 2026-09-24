@@ -581,6 +581,14 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             addressUnverified = newerFlag;
             staffCleanAt = null;
             cachedAuditStale = false;
+          } else if (!addressUnverified && cachedAuditStale && lockedCleanAt
+            && (Date.parse(lockedCleanAt) || 0) > (Date.parse(staffCleanAt || '') || 0)) {
+            // Already superseded before the lock: a NEWER clean verdict a
+            // concurrent staff confirmation committed since is the one to
+            // persist, or this write would replace it with the older
+            // pre-lock timestamp and let an intervening sibling flag win
+            // (pre-push audit P1 after r42).
+            staffCleanAt = lockedCleanAt;
           } else if (addressUnverified && newerFlag && newerFlag !== addressUnverified
             && newerFlagAt > (Date.parse(addressUnverified.flagged_at || '') || 0)) {
             // An already-flagged lookup carrying an OLDER cached flag adopts

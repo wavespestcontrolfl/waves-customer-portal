@@ -100,3 +100,19 @@ describe('pre-push audit after r42: group lock before claim rows; proposal clear
     expect(typeof persistence.stampContactMatchedLeadsClean).toBe('function');
   });
 });
+
+describe('pre-push audit after r42: parser and lookup clean-timestamp', () => {
+  test('a bare ZIP segment is never the city', () => {
+    const { parseDisplayAddress } = require('../services/lead-address-unverified');
+    expect(parseDisplayAddress('1260 Example St, 34219')).toMatchObject({ city: '', zip: '34219' });
+    expect(parseDisplayAddress('1260 Example St, 34219-1234')).toMatchObject({ city: '', zip: '34219' });
+    expect(parseDisplayAddress('1260 Example St, Parrish, FL 34219')).toMatchObject({ city: 'Parrish', zip: '34219', state: 'FL' });
+  });
+  test('an already-superseded lookup persists the newer clean timestamp found under the lock', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
+    const start = src.indexOf('const lockedCleanAt = await resolveStaffCleanAt(trx);');
+    const block = src.slice(start, src.indexOf('address_unverified: addressUnverified,', start));
+    expect(block).toContain('} else if (!addressUnverified && cachedAuditStale && lockedCleanAt');
+    expect(block).toContain('staffCleanAt = lockedCleanAt;\n          } else if (addressUnverified && newerFlag');
+  });
+});
