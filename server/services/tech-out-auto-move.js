@@ -52,6 +52,10 @@ const { resolveAlert, emitAlert } = require('./dispatch-alerts');
 const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('./dispatch-assignment');
 const { ALERT_TYPE, ABSENT_STOP_EXCLUDE_STATUSES } = require('./tech-out');
 
+// Statuses that occupy no route capacity — exactly what the rebooker's
+// probeMoveConflicts excludes (NOT_A_ROUTE_STOP_STATUSES + completed).
+const FIT_EXCLUDE_STATUSES = [...DEFAULT_EXCLUDE_STATUSES, 'completed'];
+
 // Up to this many fitting candidates get a real move attempt (best detour
 // first) before an alert gives up and stays parked for a human.
 const MAX_MOVE_ATTEMPTS = 3;
@@ -127,7 +131,9 @@ async function fitsWindow(stop, tech, date, conn = db) {
     const others = await conn('scheduled_services')
       .where({ scheduled_date: date, technician_id: tech.id })
       .whereNot('id', stop.id)
-      .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
+      // Same status set as the rebooker's commit probe: a finished visit
+      // occupies nothing (never stricter than the commit, Codex r9 P2).
+      .whereNotIn('status', FIT_EXCLUDE_STATUSES)
       // A lapsed estimate hold occupies nothing — same predicate as the
       // rebooker's kept-tech check and scheduling/occupancy.js.
       .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
@@ -152,7 +158,7 @@ async function detourForTech(stop, techId, date) {
   const rows = await dayStopsQuery(db, {
     dateStr: date,
     technicianId: techId,
-    excludeStatuses: DEFAULT_EXCLUDE_STATUSES,
+    excludeStatuses: FIT_EXCLUDE_STATUSES,
     select: [
       'scheduled_services.id', 'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.estimated_duration_minutes', 'scheduled_services.reservation_expires_at',

@@ -349,7 +349,13 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
   // tech_full_name if this hasn't loaded yet.
   useEffect(() => {
     const date = job?.scheduled_date ? String(job.scheduled_date).slice(0, 10) : null;
-    if (!date || fetchedTechsForDateRef.current === date) return;
+    // Drawer closed (no job): drop the cache key — absence events are not
+    // tracked while closed, so a reopen on the same date must refetch.
+    if (!date) {
+      fetchedTechsForDateRef.current = null;
+      return;
+    }
+    if (fetchedTechsForDateRef.current === date) return;
     // A list fetched for ANOTHER date is wrong for this job (a tech marked
     // out today may be free tomorrow and vice versa): drop it now, so a slow
     // or failed fetch falls back to the current assignment, never a stale roster.

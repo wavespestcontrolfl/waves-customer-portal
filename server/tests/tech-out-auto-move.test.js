@@ -462,6 +462,18 @@ describe('selection matches the commit policy', () => {
     expect(res.stops_that_day).toBe(3); // live-hold + visit + the stop itself
   });
 
+  test('a candidate\'s completed visit occupies nothing — the same status set as the rebooker\'s commit probe', async () => {
+    const { _test: { fitsWindow } } = require('../services/tech-out-auto-move');
+    const others = query([]);
+    const queue = [others, query([])];
+    db.mockImplementation(() => queue.shift() || query({}));
+
+    await fitsWindow(baseStop(), CANDIDATE, DATE);
+
+    const excluded = others.whereNotIn.mock.calls.find(([col]) => col === 'status')[1];
+    expect(excluded).toEqual(expect.arrayContaining(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']));
+  });
+
   test('schedule blocks refuse a candidate on the arrival-routing path too', async () => {
     const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('../services/scheduling/arrival-route');
     arrivalWindowRoutingEnabled.mockReturnValue(true);

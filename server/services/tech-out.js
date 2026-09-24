@@ -76,14 +76,22 @@ async function openParkedStopCount({ technicianId, date, conn = db }) {
     .where({ type: ALERT_TYPE, tech_id: technicianId })
     .whereNull('resolved_at')
     .whereRaw("payload->>'date' = ?", [date])
-    .select('payload');
-  let count = 0;
+    .select('job_id', 'payload');
+  if (!rows.length) return 0;
+  // Count STOPS that still need a decision: a card's members (or its own
+  // job) that are still open on the absent tech-day. A grouped card whose
+  // non-representative member was reassigned / completed stays open (its
+  // representative is still parked) but must not keep counting that member.
+  const openIds = new Set((await openStopsForTechDay(conn, { technicianId, date })).map((s) => String(s.id)));
+  const parked = new Set();
   for (const row of rows) {
     const payload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) || {};
-    const memberIds = payload.visit_member_ids;
-    count += Array.isArray(memberIds) && memberIds.length ? memberIds.length : 1;
+    const ids = Array.isArray(payload.visit_member_ids) && payload.visit_member_ids.length
+      ? payload.visit_member_ids
+      : [row.job_id];
+    for (const id of ids) if (id && openIds.has(String(id))) parked.add(String(id));
   }
-  return count;
+  return parked.size;
 }
 
 /** The uncleared technician_absences row for a tech+date, or null. */

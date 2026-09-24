@@ -401,9 +401,10 @@ describe('getTechOut / clearTechOut', () => {
   // frozen mark-out snapshot — parked_open_count is read fresh every call.
   test('parked_open_count is a live read of OPEN overflow alerts, one stop per visit_member_ids entry (or 1 for an ungrouped card)', async () => {
     await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'j1' }), stop({ id: 'm1', visit_id: 'v' }), stop({ id: 'm2', visit_id: 'v' })]));
     db.__state.alerts.push(
-      { id: 'a1', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: null, payload: { date: DATE } },
-      { id: 'a2', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: null, payload: { date: DATE, visit_member_ids: ['m1', 'm2'] } },
+      { id: 'a1', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'j1', resolved_at: null, payload: { date: DATE } },
+      { id: 'a2', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'm1', resolved_at: null, payload: { date: DATE, visit_member_ids: ['m1', 'm2'] } },
       // Resolved already — never counted.
       { id: 'a3', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: 'now', payload: { date: DATE } },
       // A different date's card for the same tech — never counted.
@@ -412,6 +413,16 @@ describe('getTechOut / clearTechOut', () => {
     expect((await getTechOut({ technicianId: TECH.id, date: DATE })).parked_open_count).toBe(3);
 
     db.__state.alerts.find((a) => a.id === 'a1').resolved_at = 'now';
+    expect((await getTechOut({ technicianId: TECH.id, date: DATE })).parked_open_count).toBe(2);
+  });
+
+  test('parked_open_count drops a grouped member that left the absent day while its card stays open', async () => {
+    await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    db.__state.alerts.push(
+      { id: 'g', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'm1', resolved_at: null, payload: { date: DATE, visit_member_ids: ['m1', 'm2', 'm3'] } },
+    );
+    // m3 was reassigned by hand; m1 (the representative) and m2 remain.
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'm1', visit_id: 'v' }), stop({ id: 'm2', visit_id: 'v' })]));
     expect((await getTechOut({ technicianId: TECH.id, date: DATE })).parked_open_count).toBe(2);
   });
 
