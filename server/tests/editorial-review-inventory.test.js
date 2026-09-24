@@ -52,10 +52,10 @@ test('keeps factual sections whose headings begin with a decorative heading word
 });
 
 test('keeps prose adjacent to a fenced code block', () => {
-  const passage = 'Pests transmit pathogens.';
-  const analysis = analyzeDocument(`${passage}\n\`\`\`text\nexample\n\`\`\``, 'Guide');
-  expect(analysis.passages).toEqual([expect.objectContaining({ text: passage })]);
-  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
+  const passages = ['Pests transmit pathogens.', 'Mosquitoes breed in standing water.'];
+  const analysis = analyzeDocument(`${passages[0]}\n\`\`\`text\nexample\n\`\`\`\n${passages[1]}`, 'Guide');
+  expect(analysis.passages.map((passage) => passage.text)).toEqual(passages);
+  expect(analysis.claims.map((claim) => claim.passage)).toEqual(passages);
 });
 
 test('keeps deterministic factual claims phrased as questions', () => {

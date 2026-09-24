@@ -26,27 +26,32 @@ function isNavigationParagraph(text) {
   return lines.length > 0 && lines.every((line) => /^(?:[-*+]\s*)?\[[^\]]+\]\([^)]+\)\s*$/.test(line));
 }
 
-function mdxInnerProse(raw, startingFence = null) {
-  let fenceMarker = startingFence;
-  const visible = [];
-  for (const line of String(raw || '').match(/[^\r\n]*(?:\r?\n|$)/g) || []) {
-    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.[0];
-    if (marker) { fenceMarker = fenceMarker === marker ? null : (fenceMarker || marker); continue; }
-    if (!fenceMarker) visible.push(line);
-  }
-  let text = visible.join('').trim();
-  if (/^<[A-Z][A-Za-z0-9_.]*(?:\s[^<>]*?)?\/?>$/.test(text)) return { text: '', fenceMarker };
+function mdxInnerProse(raw) {
+  let text = String(raw || '').trim();
+  if (/^<[A-Z][A-Za-z0-9_.]*(?:\s[^<>]*?)?\/?>$/.test(text)) return '';
   text = text.replace(/^<[A-Z][A-Za-z0-9_.]*(?:\s[^<>]*?)?>\s*/, '');
   text = text.replace(/\s*<\/[A-Z][A-Za-z0-9_.]*\s*>$/, '');
-  return { text: text.trim(), fenceMarker };
+  return text.trim();
+}
+
+function maskFencedCode(body) {
+  let marker = null;
+  let masked = '';
+  for (const line of String(body || '').match(/[^\r\n]*(?:\r?\n|$)/g) || []) {
+    const nextMarker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.[0];
+    const inside = marker !== null;
+    if (nextMarker && (!marker || marker === nextMarker)) marker = inside ? null : nextMarker;
+    masked += inside || nextMarker ? line.replace(/[^\r\n]/g, '\n') : line;
+  }
+  return masked;
 }
 
 function proseParagraphs(body) {
   const chunks = [];
   const ranges = decorativeRanges(body);
+  const visibleBody = maskFencedCode(body);
   let offset = 0;
-  let fenceMarker = null;
-  for (const match of String(body || '').matchAll(/[^\r\n](?:[\s\S]*?[^\r\n])?(?=(?:\r?\n){2,}|$)/g)) {
+  for (const match of visibleBody.matchAll(/[^\r\n](?:[\s\S]*?[^\r\n])?(?=(?:\r?\n){2,}|$)/g)) {
     const raw = match[0];
     offset = match.index || offset;
     const segments = [];
@@ -57,9 +62,7 @@ function proseParagraphs(body) {
     }
     if (segmentStart < raw.length) segments.push({ raw: raw.slice(segmentStart), offset: offset + segmentStart });
     for (const segment of segments) {
-      const prose = mdxInnerProse(segment.raw, fenceMarker);
-      let { text } = prose;
-      fenceMarker = prose.fenceMarker;
+      let text = mdxInnerProse(segment.raw);
       while (text && CTA_PARAGRAPH_RE.test(text)) {
         const firstSentence = /^[\s\S]*?(?:[.!?](?:\s+|$)|\r?\n)/.exec(text);
         text = firstSentence ? text.slice(firstSentence[0].length).trim() : '';
