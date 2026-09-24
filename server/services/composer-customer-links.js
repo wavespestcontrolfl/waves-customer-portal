@@ -894,6 +894,23 @@ async function immediateOnlyLinkSendCheck(body) {
   if (linkRuns(runs, /\/inspection\//i).some((run) => canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME))) {
     return { present: true, label: 'Consultation link' };
   }
+  // ...and a consultation SHORT code on any host (Codex #4709 r13 P1).
+  const anyHostCodes = linkRuns(runs, /\/l\//i)
+    .filter((run) => {
+      // Owned hosts are already judged by shortRows above; only a FOREIGN
+      // wrapper needs this extra lookup.
+      try {
+        const host = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`).host.toLowerCase().replace(/\.$/, '');
+        return !hosts.includes(host);
+      } catch { return false; }
+    })
+    .map((run) => (/\/l\/([A-Za-z0-9_-]+)/i.exec(run) || [])[1])
+    .filter(Boolean)
+    .map((c) => c.toLowerCase());
+  if (anyHostCodes.length) {
+    const foreignRows = await db('short_codes').whereIn('code', [...new Set(anyHostCodes)]).where({ kind: 'consultation' }).select('code', 'kind');
+    if ((foreignRows || []).some((r) => r.kind === 'consultation')) return { present: true, label: 'Consultation link' };
+  }
   // ...and a SIGNED consultation token on any host (Codex #4709 r12 P1):
   // parked here so the send-time check refuses it.
   const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
@@ -1448,6 +1465,23 @@ async function consultationLinkRows(body) {
     const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
     if (m && verifyLeadConsultationToken(m[1], 0)) rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
   }
+  // ...and a CONSULTATION short code (/l/<code>) under a foreign host
+  // (Codex #4709 r13 P1) — the generated bearer is the short link, so the
+  // wrapper check must cover it too, independent of the surrounding host.
+  const foreignCodes = [];
+  for (const run of linkRuns(runs, /\/l\//i)) {
+    let url;
+    try { url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`); } catch { continue; }
+    if ([].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
+    const m = /\/l\/([A-Za-z0-9_-]+)\/?$/i.exec(url.pathname);
+    if (m) foreignCodes.push(m[1].toLowerCase());
+  }
+  if (foreignCodes.length) {
+    const wrapped = await db('short_codes').whereIn('code', [...new Set(foreignCodes)]).where({ kind: 'consultation' }).select('code', 'kind');
+    for (const r of wrapped || []) {
+      if (r.kind === 'consultation') rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
+    }
+  }
   const longRuns = linkRuns(runs, /\/inspection\//i);
   const tokenRuns = longRuns
     .map((run) => ({ run, token: canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME) }))
@@ -1545,6 +1579,7 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLea
     if (digitsLast10(lead.phone) !== String(toLast10 || '')) {
       return refuseSend('This consultation link belongs to a different lead — remove it before sending.');
     }
+    if (ctx) ctx.consultationLeadIds = [...new Set([...(ctx.consultationLeadIds || []), String(row.lead_id)])];
     if (expectedLeadId && String(row.lead_id) !== String(expectedLeadId)) {
       return refuseSend('This consultation link was made for a different lead — remove it and insert a fresh one.');
     }
@@ -1655,6 +1690,9 @@ async function bearerLinkSendCheck(body, toLast10, {
     ...(statements.length ? { statements } : {}),
     ...(preps.length ? { preps } : {}),
     ...(projectReports.length ? { projectReports } : {}),
+    // The one lead a validated consultation link belongs to (Codex #4709
+    // r13 P2) — so a pasted link still gets its lead outreach bookkeeping.
+    ...(ctx.consultationLeadIds?.length === 1 ? { consultationLeadId: ctx.consultationLeadIds[0] } : {}),
   };
   // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
   // goes to a phone that may be a customer's, and /sms applies that

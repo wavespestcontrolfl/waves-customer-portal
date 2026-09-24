@@ -444,7 +444,7 @@ router.post('/sms', async (req, res, next) => {
       // auto-send check) still applies.
       leadId,
     } = req.body;
-    const trustedLeadId = leadId && UUID_RE.test(String(leadId)) ? String(leadId) : null;
+    let trustedLeadId = leadId && UUID_RE.test(String(leadId)) ? String(leadId) : null;
     reviewRequestEmail = req.body.reviewRequestEmail === true;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
@@ -736,6 +736,9 @@ router.post('/sms', async (req, res, next) => {
         expectedLeadId: trustedLeadId,
       });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
+      // A pasted consultation link carries no client leadId — its validated
+      // lead drives the outreach bookkeeping (Codex #4709 r13 P2).
+      if (!trustedLeadId && bearerCheck.consultationLeadId) trustedLeadId = bearerCheck.consultationLeadId;
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
       if (bearerCheck.preps) prepLinkSends = bearerCheck.preps;
       // A bearer send to a number exactly one live customer owns is that

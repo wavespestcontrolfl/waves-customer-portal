@@ -2769,6 +2769,27 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
       .toEqual({ present: true, label: 'Consultation link' });
   });
 
+  // Codex #4709 r13 P1: the generated consultation SHORT code wrapped in a
+  // foreign host is refused at send and parked by the fence.
+  test('a consultation short code under a host we do not own → refused and fenced', async () => {
+    mockBuilders = {
+      short_codes: chainBuilder({ rows: [{ code: 'cons1', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+      leads: chainBuilder({ firstRow: LEAD_ROW }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    const refusal = await checkConsultationLinkSend('Pick a time: https://tracker.example/l/cons1 Reply STOP to opt out.', '9415550100');
+    expect(refusal.error).toMatch(/another website/);
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    expect(await immediateOnlyLinkSendCheck('https://tracker.example/l/cons1')).toEqual({ present: true, label: 'Consultation link' });
+  });
+
+  // Codex #4709 r13 P2: the validated lead rides back for outreach bookkeeping.
+  test('bearerLinkSendCheck returns the validated consultation lead id', async () => {
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [] });
+    expect((await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null })).consultationLeadId).toBe('lead-1');
+  });
+
   // Codex #4709 r5 P1: a pasted long /inspection/<token> URL is checked too.
   test('a long-form /inspection/<token> link is verified like its short wrapper', async () => {
     const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
@@ -2899,7 +2920,7 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     wireConsultation();
     mockBuilders.customers = chainBuilder({ rows: [{ id: 'c1' }] });
     expect(await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null }))
-      .toEqual({ ok: true, customerId: 'c1' });
+      .toEqual({ ok: true, customerId: 'c1', consultationLeadId: 'lead-1' });
     // Several live customers on the number: never an arbitrary pick.
     wireConsultation();
     mockBuilders.customers = chainBuilder({ rows: [{ id: 'c1' }, { id: 'c2' }] });
@@ -2909,6 +2930,6 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     // None on the number (the ordinary case — a not-yet-converted lead): stays a lead.
     wireConsultation();
     mockBuilders.customers = chainBuilder({ rows: [] });
-    expect(await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+    expect(await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, consultationLeadId: 'lead-1' });
   });
 });
