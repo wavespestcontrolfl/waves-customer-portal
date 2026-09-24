@@ -717,6 +717,133 @@ describe('topUpRecurringSeriesLocked — plan-hold exclusion (Codex GitHub r6 P1
   });
 });
 
+// Bespoke fixture for isSupersededSeries (Codex GitHub guards follow-up
+// P1) — models MULTIPLE ongoing root series for one customer, keyed by
+// id, each with its own family (familyOfServiceRow.mockImplementation,
+// keyed by row id), property (property_id — the simplest of the three
+// property-key sources to fixture; the address-fallback logic is pure and
+// has no DB dependency worth re-testing here), and latest-live-visit date.
+// topupScenario's own generic builder assumes a single series and can't
+// express two roots competing for "latest," so this stays separate rather
+// than bloating that shared fixture for a rarely-exercised case.
+function supersededScenario(roots) {
+  const byId = new Map(roots.map((r) => [r.id, r]));
+  familyOfServiceRow.mockImplementation((row) => byId.get(row.id)?.familyKey ?? null);
+  const rowShape = (r) => ({
+    id: r.id, customer_id: r.customerId ?? 5, is_recurring: true, recurring_pattern: 'weekly',
+    recurring_ongoing: r.recurringOngoing !== false, scheduled_date: r.latestDate || daysOut(0),
+    property_id: r.propertyId, service_id: 1, created_at: r.createdAt || '2020-01-01T00:00:00Z',
+    estimated_duration_minutes: 60, create_invoice_on_complete: true, estimated_price: '150.00',
+    window_start: null, window_end: null,
+  });
+  const seriesDatesById = new Map(roots.map((r) => [r.id, new Set(r.latestDate ? [r.latestDate] : [])]));
+  const conn = makeConn(({ table, calls, op, data }) => {
+    if (table === 'scheduled_services') {
+      if (op === 'columnInfo') return BASE_COLS;
+      if (op === 'pluck') return [];
+      if (op === 'first') {
+        const firstCall = calls.find((c) => c[0] === 'first');
+        const idWhere = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'id' in c[1]);
+        if (firstCall[1] === 'recurring_ongoing') {
+          const root = idWhere ? byId.get(idWhere[1].id) : null;
+          return { recurring_ongoing: root ? root.recurringOngoing !== false : true };
+        }
+        if (calls.some((c) => c[0] === 'orderBy')) {
+          // latestLiveSeriesVisit — find which id it targeted via the
+          // nested whereFn's orWhere('id', targetId) recording.
+          const whereFn = calls.find((c) => c[0] === 'whereFn');
+          const nested = whereFn ? whereFn[1] : [];
+          const idMatch = nested.find((c) => c[0] === 'orWhere' && c[1] === 'id');
+          const targetId = idMatch ? idMatch[2] : null;
+          const dates = seriesDatesById.get(targetId);
+          if (!dates || !dates.size) return undefined;
+          return { scheduled_date: [...dates].sort().slice(-1)[0] };
+        }
+        if (idWhere) {
+          const root = byId.get(idWhere[1].id);
+          return root ? rowShape(root) : undefined;
+        }
+        return null;
+      }
+      if (op === 'await') {
+        if (calls.some((c) => c[0] === 'whereNull' && c[1] === 'recurring_parent_id') && calls.some((c) => c[0] === 'select' && c[1] === '*')) {
+          const excludeCall = calls.find((c) => c[0] === 'whereNot');
+          const excludeId = excludeCall ? excludeCall[2] : null;
+          return roots.filter((r) => r.id !== excludeId).map(rowShape);
+        }
+        if (calls.some((c) => c[0] === 'del')) return 0;
+        if (calls.some((c) => c[0] === 'whereRaw')) return [];
+        if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) return [];
+        return [];
+      }
+      if (op === 'insertReturning') {
+        const row = { id: 900 + Math.floor(Math.random() * 1000), ...data };
+        if (data?.recurring_parent_id != null) {
+          const set = seriesDatesById.get(data.recurring_parent_id) || new Set();
+          set.add(data.scheduled_date);
+          seriesDatesById.set(data.recurring_parent_id, set);
+        }
+        return [row];
+      }
+    }
+    if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+    if (table === 'customers' && op === 'first') {
+      return { id: 5, active: true, deleted_at: null, service_paused_at: null, pipeline_stage: 'active_customer' };
+    }
+    if (table === 'services') return null;
+    if (table === 'system_settings') return null;
+    if (table === 'schedule_blackout_dates') return [];
+    return null;
+  });
+  return conn;
+}
+
+describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Codex GitHub guards follow-up P1)', () => {
+  // A customer can carry 2+ ongoing root series for the SAME family at the
+  // SAME property — almost always a legacy series replaced by a new
+  // cadence but never had its OWN recurring_ongoing cleared. A prod dry
+  // run found 44 active customers with 2+ ongoing roots in one family.
+  test('an older duplicate root (same property/family) is skipped while the newer one tops up', async () => {
+    const roots = [
+      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
+      { id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z' },
+    ];
+    const olderResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(olderResult.skipped).toBe('superseded_series');
+    const newerResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
+    expect(newerResult.skipped).not.toBe('superseded_series');
+  });
+
+  test('two roots at DIFFERENT properties both top up — never compared against each other', async () => {
+    const roots = [
+      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
+      { id: 99, propertyId: 'prop-2', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z' },
+    ];
+    const firstResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(firstResult.skipped).not.toBe('superseded_series');
+    const secondResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
+    expect(secondResult.skipped).not.toBe('superseded_series');
+  });
+
+  test('a different family at the same property is unaffected', async () => {
+    const roots = [
+      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
+      { id: 99, propertyId: 'prop-1', familyKey: 'pest_control', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z' },
+    ];
+    const result = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(result.skipped).not.toBe('superseded_series');
+  });
+
+  test('a series with no resolvable family is never compared against a sibling', async () => {
+    const roots = [
+      { id: 10, propertyId: 'prop-1', familyKey: null, latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
+      { id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z' },
+    ];
+    const result = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(result.skipped).not.toBe('superseded_series');
+  });
+});
+
 describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
   // Same shared verdict every OFFICE series writer consults
   // (seriesExtensionUnbillable) — the completion-time single-visit
@@ -726,16 +853,19 @@ describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
   // recurring-count.test.js pins that classification on the source).
   // Checked per ACTUAL candidate date inside extendSeriesOnceLocked (price
   // varies by date), so an unbillable series silently inserts nothing and
-  // stops — `skipped` stays null, same as running out of horizon or hitting
-  // the insert cap; it isn't a distinct ineligibility reason like
-  // 'not_ongoing' because the series WAS otherwise eligible and simply
-  // couldn't produce a billable date.
+  // stops. `skipped: 'unbillable'` when the VERY FIRST attempt this run is
+  // the one refused (nothing else inserted first) — an honest reason
+  // rather than a generic "would add nothing" the ops script used to
+  // print for this exact case (mistakable for "already at horizon", which
+  // has nothing to do with pricing); it isn't a distinct ELIGIBILITY
+  // reason like 'not_ongoing' since the series WAS otherwise eligible and
+  // simply couldn't produce a billable date.
   test('an unpriced series with no create-invoice stamp and no membership/lane inserts nothing — never mints a stack of $0 visits', async () => {
     const { conn, inserted } = topupScenario({
       parentOverrides: { create_invoice_on_complete: false, estimated_price: null },
     });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    expect(result.skipped).toBeNull();
+    expect(result.skipped).toBe('unbillable');
     expect(inserted).toHaveLength(0);
     expect(result.spawnedVisits).toHaveLength(0);
   });
@@ -936,6 +1066,41 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
   });
 });
 
+describe('topUpRecurringSeriesLocked — occupancy clashes are advisory only in top-up mode (Codex GitHub guards follow-up P2)', () => {
+  // seriesCandidateDateClashes is tech-blind, so on a busy calendar a hard
+  // skip-to-next-cadence-step can drop whole months of candidates from an
+  // unattended run (a prod monthly-lawn dry run lost Nov/Dec/Feb/May/Aug/Sep
+  // to one recurring conflict). guardRecurrenceDestination's own ruling for
+  // every OTHER admin write path is that an overlap is advisory (owner
+  // ruling 2026-08-25) — top-up's insert loop now matches that instead of
+  // reinventing a stricter rule for itself. Completion mode is unaffected:
+  // recurring-series-maintenance.test.js's own 'P1: auto-extend skips a
+  // candidate day another visit already occupies' pins that a clash still
+  // advances to the next cadence step there, since opts.overlapAdvisoryOnly
+  // is never set on that path.
+  test('a clash on the very first candidate still inserts that date, never advancing to the next cadence step', async () => {
+    const fixtureArgs = {
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00',
+        estimated_duration_minutes: 60,
+      },
+    };
+    const baseline = topupScenario(fixtureArgs);
+    const baselineResult = await topUpRecurringSeriesLocked(baseline.conn, 10, { horizonDays: 14 });
+
+    findConflictingVisits.mockReset().mockResolvedValueOnce([{ id: 'occupied-1' }]).mockResolvedValue([]);
+    const clashing = topupScenario(fixtureArgs);
+    const clashingResult = await topUpRecurringSeriesLocked(clashing.conn, 10, { horizonDays: 14 });
+
+    expect(findConflictingVisits).toHaveBeenCalled();
+    // Identical inserted dates whether or not the FIRST candidate clashed —
+    // the clash never advanced the search to a later cadence step.
+    expect(clashing.inserted.map((r) => r.scheduled_date)).toEqual(baseline.inserted.map((r) => r.scheduled_date));
+    expect(clashingResult.spawnedVisits.length).toBe(baselineResult.spawnedVisits.length);
+    expect(clashingResult.skipped).toBeNull();
+  });
+});
+
 describe('topUpRecurringSeriesLocked — horizon fill', () => {
   test('fills a weekly series to the horizon and stops (no past-dated or duplicate inserts)', async () => {
     const { conn, inserted, seriesDates } = topupScenario({
@@ -976,13 +1141,13 @@ describe('topUpRecurringSeriesLocked — horizon fill', () => {
     expect(inserted).toHaveLength(TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN);
   });
 
-  test('a series already booked past the horizon inserts nothing', async () => {
+  test('a series already booked past the horizon inserts nothing — skipped: at_horizon (Codex GitHub guards follow-up P2)', async () => {
     const { conn, inserted } = topupScenario({
       parentOverrides: { recurring_pattern: 'weekly' },
       seriesDates: [daysOut(60)],
     });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    expect(result.skipped).toBeNull();
+    expect(result.skipped).toBe('at_horizon');
     expect(inserted).toHaveLength(0);
     expect(result.priorBookedThrough).toBe(daysOut(60));
   });
