@@ -69,6 +69,7 @@ const FIELD_GROUPS = {
     'price_accepted',
     'price_prepay_term',
     'price_tier_mentioned',
+    'price_stated_by',
   ],
   low: [
     'lead_quality',

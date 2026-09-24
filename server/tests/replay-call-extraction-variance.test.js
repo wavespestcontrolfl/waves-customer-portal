@@ -653,6 +653,7 @@ describe('call extraction replay variance reporting', () => {
         'price_accepted',
         'price_prepay_term',
         'price_tier_mentioned',
+        'price_stated_by',
       ]) {
         expect(allFields.has(field)).toBe(true);
       }

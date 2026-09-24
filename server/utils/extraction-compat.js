@@ -58,6 +58,7 @@ function flatView(extraction) {
     price_accepted: typeof price.accepted === 'boolean' ? price.accepted : null,
     price_prepay_term: price.prepay_term || null,
     price_tier_mentioned: price.tier_mentioned || null,
+    price_stated_by: price.stated_by || null,
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
     service_address_occupancy: property.service_address_occupancy || null,
     service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'

@@ -1176,6 +1176,7 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(flat.price_accepted).toBe(false);
     expect(flat.price_prepay_term).toBe('annual');
     expect(flat.price_tier_mentioned).toBe('gold');
+    expect(flat.price_stated_by).toBe('agent');
   });
 
   test('flatView defaults every price field to null when price is absent or empty', () => {
@@ -1186,6 +1187,7 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(absent.price_accepted).toBeNull();
     expect(absent.price_prepay_term).toBeNull();
     expect(absent.price_tier_mentioned).toBeNull();
+    expect(absent.price_stated_by).toBeNull();
 
     const empty = flatView({
       meta: { schema_version: '1.12.0' },
