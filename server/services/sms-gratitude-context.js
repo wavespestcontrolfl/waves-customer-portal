@@ -40,27 +40,38 @@ function gratitudeActivation() {
 }
 
 function validateGratitudeDraftContract(row, { expectedReply, expectedPromptVersion } = {}) {
-  if (!row || row.status !== 'shadow' || row.intent !== GRATITUDE_INTENT) return 'draft_not_shadow_gratitude';
-  if (!row.sms_log_id || !row.customer_id) return 'draft_unlinked';
-  if (row.scheduling_intent === true) return 'scheduling_intent';
-  if (!row.model || row.model === 'deterministic') return 'invalid_model';
-  if (!expectedPromptVersion || row.prompt_version !== expectedPromptVersion) return 'prompt_version_mismatch';
+  const rowFailure = [
+    [() => !row || row.status !== 'shadow' || row.intent !== GRATITUDE_INTENT, 'draft_not_shadow_gratitude'],
+    [() => !row.sms_log_id || !row.customer_id, 'draft_unlinked'],
+    [() => row.scheduling_intent === true, 'scheduling_intent'],
+    [() => !row.model || row.model === 'deterministic', 'invalid_model'],
+    [() => !expectedPromptVersion || row.prompt_version !== expectedPromptVersion, 'prompt_version_mismatch'],
+  ].find(([rejected]) => rejected());
+  if (rowFailure) return rowFailure[1];
+
   const meta = jsonObject(row.intended_actions);
   if (!meta) return 'invalid_draft_metadata';
-  if (!Array.isArray(meta.actions) || meta.actions.length > 1
-      || (meta.actions.length === 1 && meta.actions[0]?.type !== SAFE_ACTION)) return 'action_required';
-  if (meta.verify?.converged !== true) return 'not_converged';
-  if (meta.gratitude?.source !== 'live_webhook'
-      || meta.gratitude?.policy_version !== GRATITUDE_POLICY_VERSION) return 'invalid_gratitude_provenance';
-  if (meta.gratitude?.actions_verified_safe !== true) return 'actions_not_verified_safe';
-  if (meta.gratitude?.verifier_enabled !== true) return 'verifier_disabled';
-  if (meta.missing_info !== null && meta.missing_info !== undefined && String(meta.missing_info).trim()) return 'missing_info';
+  const metadataFailure = [
+    [() => !Array.isArray(meta.actions) || meta.actions.length > 1
+      || (meta.actions.length === 1 && meta.actions[0]?.type !== SAFE_ACTION), 'action_required'],
+    [() => meta.verify?.converged !== true, 'not_converged'],
+    [() => meta.gratitude?.source !== 'live_webhook'
+      || meta.gratitude?.policy_version !== GRATITUDE_POLICY_VERSION, 'invalid_gratitude_provenance'],
+    [() => meta.gratitude?.actions_verified_safe !== true, 'actions_not_verified_safe'],
+    [() => meta.gratitude?.verifier_enabled !== true, 'verifier_disabled'],
+    [() => meta.missing_info !== null && meta.missing_info !== undefined
+      && String(meta.missing_info).trim(), 'missing_info'],
+  ].find(([rejected]) => rejected());
+  if (metadataFailure) return metadataFailure[1];
+
   const flags = jsonArray(row.flags);
   if (!flags) return 'invalid_flags';
-  if (flags.some((flag) => String(flag?.type || '').startsWith('comms_lint:')
-      || ['open_complaint', 'cancel_save_active'].includes(flag?.type))) return 'unsafe_flags';
-  if (typeof expectedReply !== 'string' || row.draft_response !== expectedReply) return 'edited_draft';
-  return null;
+  const unsafe = flags.some((flag) => String(flag?.type || '').startsWith('comms_lint:')
+    || ['open_complaint', 'cancel_save_active'].includes(flag?.type));
+  return [
+    [unsafe, 'unsafe_flags'],
+    [typeof expectedReply !== 'string' || row.draft_response !== expectedReply, 'edited_draft'],
+  ].find(([rejected]) => rejected)?.[1] || null;
 }
 
 function mediaCountFromMetadata(value) {
@@ -70,13 +81,22 @@ function mediaCountFromMetadata(value) {
 
 async function pendingGratitudeWork(dbh, { customerId, threadLast10 }) {
   const openRequest = await dbh('service_requests').where({ customer_id: customerId })
-    .whereNotIn('status', ['resolved', 'closed', 'cancelled']).first('id');
+    .whereNotIn(dbh.raw("COALESCE(status, 'new')"), ['resolved', 'closed', 'cancelled']).first('id');
   if (openRequest) return true;
 
-  const openCallCommitment = await dbh('call_commitments as cc')
+  const openCallCommitment = dbh('call_commitments as cc')
     .join('call_log as cl', 'cc.call_log_id', 'cl.id')
-    .where({ 'cc.status': 'open', 'cl.customer_id': customerId }).first('cc.id');
-  if (openCallCommitment) return true;
+    .where({ 'cc.status': 'open' })
+    .where(function sameCustomerOrThread() {
+      this.where('cl.customer_id', customerId);
+      if (threadLast10) {
+        this.orWhereRaw(`(
+          RIGHT(REGEXP_REPLACE(COALESCE(cl.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?
+          OR RIGHT(REGEXP_REPLACE(COALESCE(cl.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?
+        )`, [threadLast10, threadLast10]);
+      }
+    });
+  if (await openCallCommitment.first('cc.id')) return true;
   const openSmsCommitment = dbh('call_commitments as cc_sms')
     .join('sms_log as s_commitment', 'cc_sms.sms_log_id', 's_commitment.id')
     .where({ 'cc_sms.status': 'open' })
@@ -123,7 +143,7 @@ async function pendingGratitudeWork(dbh, { customerId, threadLast10 }) {
 
   const decision = dbh('agent_decisions as ad')
     .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-    .whereIn('ad.status', ['pending_review', 'scheduled']);
+    .whereIn('ad.status', ['pending_review', 'pending', 'scheduled', 'sending', 'initiated', 'active']);
   if (threadLast10) {
     decision.where(function pendingForCustomerOrThread() {
       this.where('ad.customer_id', customerId)
@@ -162,8 +182,12 @@ async function readGratitudeContext({
   const inbound = await dbh('sms_log').where({ id: smsLogId, direction: 'inbound' }).first(
     'id', 'customer_id', 'direction', 'from_phone', 'to_phone', 'message_body', 'metadata', 'created_at'
   );
-  if (!inbound?.created_at || !inbound.from_phone || !inbound.to_phone) return { ok: false, reason: 'inbound_unavailable' };
-  if (draft.customer_id !== inbound.customer_id || draft.inbound_message !== inbound.message_body) return { ok: false, reason: 'immutable_source_mismatch' };
+  const sourceFailure = [
+    [() => !inbound?.created_at || !inbound.from_phone || !inbound.to_phone, 'inbound_unavailable'],
+    [() => draft.customer_id !== inbound.customer_id
+      || draft.inbound_message !== inbound.message_body, 'immutable_source_mismatch'],
+  ].find(([rejected]) => rejected());
+  if (sourceFailure) return { ok: false, reason: sourceFailure[1] };
   const timing = gratitudeTimingReason({ inboundCreatedAt: inbound.created_at, now, activatedAt });
   if (timing) return { ok: false, reason: timing };
 

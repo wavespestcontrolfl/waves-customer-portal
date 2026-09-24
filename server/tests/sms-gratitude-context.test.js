@@ -41,7 +41,7 @@ function compilingDb() {
   return { dbh, queries };
 }
 
-function readContextDb({ pendingRequest = false } = {}) {
+function readContextDb({ pendingRequest = false, inboundAvailable = true } = {}) {
   const inboundCreatedAt = '2026-09-24T12:00:00.000Z';
   const draft = contractRow({
     created_at: '2026-09-24T12:00:01.000Z',
@@ -63,7 +63,7 @@ function readContextDb({ pendingRequest = false } = {}) {
   ];
   const firstResults = {
     message_drafts: [draft],
-    sms_log: [inbound, null],
+    sms_log: [inboundAvailable ? inbound : null, null],
     service_requests: [pendingRequest ? { id: 'request-1' } : null],
     'call_commitments as cc': [null],
     'call_commitments as cc_sms': [null],
@@ -105,6 +105,17 @@ test('persisted gratitude contract accepts only verified live fixed copy', () =>
   expect(validateGratitudeDraftContract(contractRow({ flags: [{ type: 'open_complaint' }] }), args)).toBe('unsafe_flags');
 });
 
+test.each([
+  ['missing row', null, 'draft_not_shadow_gratitude'],
+  ['earlier row failure', contractRow({ sms_log_id: null, model: null }), 'draft_unlinked'],
+  ['malformed metadata', contractRow({ intended_actions: null }), 'invalid_draft_metadata'],
+  ['malformed flags', contractRow({ flags: null }), 'invalid_flags'],
+])('persisted gratitude contract fails closed for %s', (_label, row, reason) => {
+  expect(validateGratitudeDraftContract(row, {
+    expectedReply: 'Our pleasure, Dana!', expectedPromptVersion: 'house_voice_v11',
+  })).toBe(reason);
+});
+
 test('pending-work SQL covers every customer and same-thread operational queue', async () => {
   const { dbh, queries } = compilingDb();
   await expect(pendingGratitudeWork(dbh, {
@@ -114,6 +125,16 @@ test('pending-work SQL covers every customer and same-thread operational queue',
     'service_requests', 'call_commitments as cc', 'call_commitments as cc_sms',
     'triage_items as ti', 'operator_inbox_items as oi', 'agent_decisions as ad',
   ]);
+  const serviceRequest = queries.find((q) => q.table === 'service_requests');
+  expect(serviceRequest.sql).toContain("COALESCE(status, 'new') not in");
+  const callCommitment = queries.find((q) => q.table === 'call_commitments as cc');
+  expect(callCommitment.sql).toContain('cl.from_phone');
+  expect(callCommitment.sql).toContain('cl.to_phone');
+  expect(callCommitment.bindings.filter(value => value === '9415550100')).toHaveLength(2);
+  const decision = queries.find((q) => q.table === 'agent_decisions as ad');
+  expect(decision.bindings).toEqual(expect.arrayContaining([
+    'pending_review', 'pending', 'scheduled', 'sending', 'initiated', 'active',
+  ]));
   const sql = queries.map((q) => q.sql).join('\n');
   expect(sql).toContain('"ti"."sms_log_id" = "ti_sms"."id"');
   expect(sql).toContain('"oi"."customer_id"');
@@ -145,6 +166,14 @@ test('read context rejects when authoritative queues contain pending work', asyn
     now: '2026-09-24T12:05:00.000Z', activatedAt: '2026-09-24T11:00:00.000Z', dbh,
   })).resolves.toEqual({ ok: false, reason: 'pending_work' });
   expect(dbh).toHaveBeenCalledWith('service_requests');
+});
+
+test('read context fails closed without dereferencing a missing inbound', async () => {
+  const { dbh } = readContextDb({ inboundAvailable: false });
+  await expect(readGratitudeContext({
+    draftId: 'draft-1', smsLogId: 'sms-1', expectedPromptVersion: 'house_voice_v11',
+    now: '2026-09-24T12:05:00.000Z', activatedAt: '2026-09-24T11:00:00.000Z', dbh,
+  })).resolves.toEqual({ ok: false, reason: 'inbound_unavailable' });
 });
 
 test('read context validates against only the explicitly supplied prompt version', async () => {
