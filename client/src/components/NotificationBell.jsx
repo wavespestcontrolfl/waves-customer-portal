@@ -408,6 +408,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     </div>
   );
 
+  // Admin only: the per-event bell/push toggles live on Settings →
+  // Notifications (CommunicationsPageV2 reads the hash as #tab=<name>).
+  const settingsLink = type === 'admin' && (
+    <div style={{ padding: '12px 20px 16px', textAlign: 'center' }}>
+      <a href="/admin/communications#tab=notifications" style={{ color: colors.teal, fontSize: 13, fontWeight: 500, textDecoration: 'none' }}>
+        Notification settings →
+      </a>
+    </div>
+  );
+
   return (
     <div ref={bellRef} style={{ position: 'relative' }}>
       {/* Bell Button */}
@@ -595,6 +605,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 </div>
               ))}
               {tab === 'account' && moreControl}
+              {settingsLink}
             </div>
           </div>
         ) : (
@@ -724,6 +735,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 </div>
               ))}
               {moreControl}
+              {settingsLink}
             </div>
           </div>
         ),

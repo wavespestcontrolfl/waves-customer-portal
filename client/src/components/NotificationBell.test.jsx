@@ -67,6 +67,20 @@ afterEach(() => {
 });
 
 describe('NotificationBell panel', () => {
+  it('links admins to the notification settings tab, and never customers', async () => {
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    const link = await screen.findByRole('link', { name: /notification settings/i });
+    // CommunicationsPageV2 reads the hash as #tab=<name>; the per-event
+    // bell/push toggles are the "notifications" tab (PushSettingsV2).
+    expect(link).toHaveAttribute('href', '/admin/communications#tab=notifications');
+    cleanup();
+    render(<NotificationBell type="customer" customerId="cust-1" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByRole('dialog');
+    expect(screen.queryByRole('link', { name: /notification settings/i })).toBeNull();
+  });
+
   it.each([390, 1280])('lets admins read an older refreshed alert on a %ipx screen', async (width) => {
     const previousWidth = window.innerWidth;
     window.innerWidth = width;
