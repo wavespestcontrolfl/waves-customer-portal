@@ -63,9 +63,10 @@ and database-mirroring authority; the workflow only regenerates their evidence.
 The CLI retries source/provider failures or head races three times with 15/30
 second backoff, then reports the article as deferred and leaves it unpublished.
 No approval message is sent. New article revisions trigger new checks.
-Scheduled checks refresh signed-but-expired evidence twice hourly. A rotating
-three-PR work window prevents persistently failing articles from starving other
-PRs. Every evidence push requires a fresh build/review of the resulting head.
+Scheduled checks retry missing, invalid, or expired evidence twice hourly. A
+rotating three-PR work window prevents persistently failing articles from
+starving other PRs. Every evidence push requires a fresh build/review of the
+resulting head.
 
 Seven-day freshness applies at publishing and PR validation. Already-published,
 unchanged signed files do not expire during unrelated builds. Exact document
