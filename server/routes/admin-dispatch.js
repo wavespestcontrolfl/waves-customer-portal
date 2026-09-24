@@ -1023,11 +1023,21 @@ router.patch('/:serviceId/note', async (req, res, next) => {
     }
     const { notes } = req.body;
     const text = (notes == null ? '' : String(notes)).slice(0, 2000);
+    // codex-review P1: pin the atomic write to the technician_id the
+    // ownership check above just verified — a reassignment landing between
+    // that read and this write then makes the update miss (0 rows) instead
+    // of silently letting the FORMER technician overwrite the reassigned
+    // visit's notes. Admin requests stay unscoped.
     const updated = await db('scheduled_services')
       .where({ id: req.params.serviceId })
+      .modify((q) => { if (req.techRole !== 'admin') q.where({ technician_id: req.technicianId }); })
       .update({ notes: text, updated_at: new Date() })
       .returning(['id', 'notes']);
-    if (!updated.length) return res.status(404).json({ error: 'Service not found' });
+    if (!updated.length) {
+      return req.techRole === 'admin'
+        ? res.status(404).json({ error: 'Service not found' })
+        : res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
     res.json({ success: true, notes: updated[0].notes });
   } catch (err) { next(err); }
 });
@@ -4153,7 +4163,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'technician_id', 'scheduled_date');
+      .first('id', 'technician_id', 'scheduled_date', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
     // Ownership: this route ran WITHOUT the tech-assignment check the
@@ -4185,6 +4195,36 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
     }
     if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
       return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+    // codex-review P0: RainOut.commit's own collective-anchoring rule
+    // (rain-out.js, GATE_COLLECTIVE_SERIES_ANCHOR) shifts the visit's WHOLE
+    // FUTURE SERIES whenever a recurring job's date actually changes —
+    // independent of scope, so a plain scope='job' rain-out on the
+    // technician's own recurring visit reaches the same series-wide blast
+    // radius scope='route' is already admin-gated for. Refuse it here
+    // before RainOut.commit ever runs the implicit expansion.
+    if (
+      req.techRole !== 'admin'
+      && process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
+      && svc.is_recurring
+      && target?.date
+      && String(target.date) !== serviceDateOnly(svc.scheduled_date)
+    ) {
+      return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+    }
+
+    // codex-review P1: the ownership decision above reads a snapshot;
+    // RainOut.commit does its own (unlocked) re-read of the row rather than
+    // accepting a caller-supplied CAS predicate, so re-verify assignment as
+    // late as possible, immediately before handing off, to shrink the
+    // window a mid-flight reassignment could land in.
+    if (req.techRole !== 'admin') {
+      const stillAssigned = await db('scheduled_services')
+        .where({ id: req.params.serviceId, technician_id: req.technicianId })
+        .first('id');
+      if (!stillAssigned) {
+        return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+      }
     }
 
     const RainOut = require('../services/rain-out');
@@ -5062,6 +5102,19 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // Pin the fields that resolution derived from into the rebooker's CAS.
     const movePin = rescheduleExpectPredicate(observedForMove);
     if (movePin) rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), ...movePin };
+    // codex-review P1: the ownership check above reads a snapshot; without
+    // pinning it, a reassignment landing between that read and this write
+    // has no effect on the write itself, so the FORMER technician's move
+    // still commits (and still notifies the customer). Extend the rebooker's
+    // OWN atomic write predicate (options.expect merges straight into the
+    // UPDATE's WHERE) with the authenticated technician id — a concurrent
+    // reassignment then makes the write miss and surfaces the existing
+    // concurrent-change 409, the same fence every other CAS field here gets.
+    // Admin requests stay unscoped (an admin's own /reschedule with
+    // technicianId reassigns the row on purpose).
+    if (req.techRole !== 'admin') {
+      rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), technician_id: req.technicianId };
+    }
     // Staff surface: occupancy clashes commit with a warning instead of
     // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
     rescheduleOptions.overlapAdvisory = true;
