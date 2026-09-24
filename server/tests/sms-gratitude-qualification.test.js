@@ -316,7 +316,7 @@ describe('sms gratitude qualification', () => {
 
     await expect(qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' }))
       .rejects.toMatchObject({ code: 'RUN_IN_PROGRESS', runId: first.id });
-    expect(lockHeldByAnySession).toHaveBeenCalledWith(`sms-gratitude-qualification:${first.id}`);
+    expect(lockHeldByAnySession).toHaveBeenCalledWith(`sms-gratitude-qualification:${first.id}`, store.dbi);
     expect(store.rows).toHaveLength(1);
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'running' });
   });
@@ -345,7 +345,7 @@ describe('sms gratitude qualification', () => {
 
     await expect(qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' }))
       .rejects.toMatchObject({ code: 'RUN_IN_PROGRESS', runId: run.id });
-    expect(lockHeldByAnySession).toHaveBeenCalledWith(`sms-gratitude-qualification:${run.id}`);
+    expect(lockHeldByAnySession).toHaveBeenCalledWith(`sms-gratitude-qualification:${run.id}`, store.dbi);
     expect(store.rows).toHaveLength(1);
 
     releaseDraft();
@@ -365,7 +365,7 @@ describe('sms gratitude qualification', () => {
     });
 
     const replacement = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
-    expect(lockHeldByAnySession).toHaveBeenCalledWith(`sms-gratitude-qualification:${first.id}`);
+    expect(lockHeldByAnySession).toHaveBeenCalledWith(`sms-gratitude-qualification:${first.id}`, store.dbi);
     expect(replacement.id).not.toBe(first.id);
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'failed', failure: 'stale_run_recovered' });
     expect(snapshot(store.rows[1])).toMatchObject({ state: 'running' });

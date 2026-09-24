@@ -161,7 +161,7 @@ async function createGratitudeQualification({ dbi = db, triggeredBy = null } = {
         let leaseHeld = null;
         try {
           const { lockHeldByAnySession } = require('../utils/cron-lock');
-          leaseHeld = await lockHeldByAnySession(`sms-gratitude-qualification:${prior.id}`);
+          leaseHeld = await lockHeldByAnySession(`sms-gratitude-qualification:${prior.id}`, trx);
         } catch { /* an unknown lease state must fail closed */ }
         if (leaseHeld !== false) throw runInProgress();
       }
