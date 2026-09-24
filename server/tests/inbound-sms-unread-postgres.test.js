@@ -1,5 +1,5 @@
 // Opt-in regression against a private QA PostgreSQL database. No application
-// DATABASE_URL is read. Temporary objects roll back after the suite.
+// DATABASE_URL is read. Objects in this dedicated database roll back after the suite.
 const mockRawCalls = [];
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
@@ -23,20 +23,20 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     mockPg = await database.transaction();
     await mockPg.raw(`
-      CREATE TEMP TABLE customers (id uuid PRIMARY KEY, phone varchar(32));
-      CREATE TEMP TABLE conversations (id uuid PRIMARY KEY, customer_id uuid, contact_phone varchar(32), our_endpoint_id varchar(100));
-      CREATE TEMP TABLE messages (
+      CREATE TABLE customers (id uuid PRIMARY KEY, phone varchar(32));
+      CREATE TABLE conversations (id uuid PRIMARY KEY, customer_id uuid, contact_phone varchar(32), our_endpoint_id varchar(100));
+      CREATE TABLE messages (
         id uuid PRIMARY KEY, conversation_id uuid NOT NULL, channel varchar(20), direction varchar(12),
         body text, media jsonb DEFAULT '[]', metadata jsonb DEFAULT '{}', message_type varchar(30),
         delivery_status varchar(20), twilio_sid varchar(64), is_read boolean, created_at timestamptz NOT NULL
       );
-      CREATE TEMP TABLE sms_log (
+      CREATE TABLE sms_log (
         id uuid PRIMARY KEY, customer_id uuid, direction varchar(12), from_phone varchar(32), to_phone varchar(32),
         message_body text, metadata jsonb, message_type varchar(30), status varchar(20), twilio_sid varchar(64), created_at timestamptz NOT NULL
       );
-      CREATE TEMP TABLE blocked_numbers (id uuid PRIMARY KEY, number varchar(32));
-      CREATE TEMP TABLE message_drafts (id uuid PRIMARY KEY, sms_log_id uuid, customer_id uuid, flags jsonb, intent text, sent_at timestamptz);
-      CREATE TEMP TABLE messaging_audit_log (
+      CREATE TABLE blocked_numbers (id uuid PRIMARY KEY, number varchar(32));
+      CREATE TABLE message_drafts (id uuid PRIMARY KEY, sms_log_id uuid, customer_id uuid, flags jsonb, intent text, sent_at timestamptz);
+      CREATE TABLE messaging_audit_log (
         id uuid PRIMARY KEY, provider_message_id varchar(64), channel varchar(16), metadata jsonb, created_at timestamptz NOT NULL
       );
       CREATE INDEX messaging_audit_provider_message_id_idx ON messaging_audit_log (provider_message_id)
