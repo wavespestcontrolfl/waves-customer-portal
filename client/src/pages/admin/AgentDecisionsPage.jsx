@@ -108,6 +108,11 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const [replyScenarioLabel, setReplyScenarioLabel] = useState("");
   const requestRef = useRef(0);
   const editEpochRef = useRef(0);
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const selectionEpochRef = useRef(0);
+  const lastSelectedIdRef = useRef(selectedId);
+  const currentLoadRef = useRef(null);
   const detailEditRef = useRef({ decisionId: null, epoch: 0 });
   const detailAppliedRef = useRef({ decisionId: null, editEpoch: 0 });
   const draftBaselineRef = useRef({
@@ -140,10 +145,17 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       if (request === requestRef.current) setLoading(false);
     }
   }, [status]);
+  currentLoadRef.current = load;
 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (lastSelectedIdRef.current === selectedId) return;
+    lastSelectedIdRef.current = selectedId;
+    selectionEpochRef.current += 1;
+  }, [selectedId]);
 
   const selected = useMemo(
     () => data.decisions?.find((d) => d.id === selectedId) || data.decisions?.[0] || null,
@@ -250,6 +262,11 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
   const review = useCallback(async (decision, verdict) => {
     if (!decision) return;
+    const decisionId = decision.id;
+    const submittedEditEpoch = editEpochRef.current;
+    const submittedSelectionEpoch = selectionEpochRef.current;
+    requestRef.current += 1;
+    setLoading(false);
     setBusyId(`${decision.id}:${verdict}`);
     setActionError("");
     setNotice("");
@@ -268,13 +285,18 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
         method: "POST",
         body: JSON.stringify(body),
       });
-      draftBaselineRef.current = {
-        ...draftBaselineRef.current,
-        correctionNote,
-        correctedActions,
-      };
-      setNotice(`Decision ${statusLabel(verdict).toLowerCase()}.`);
-      await load();
+      if (selectedIdRef.current === decisionId
+        && selectionEpochRef.current === submittedSelectionEpoch
+        && editEpochRef.current === submittedEditEpoch
+        && currentLoadRef.current === load) {
+        draftBaselineRef.current = {
+          ...draftBaselineRef.current,
+          correctionNote,
+          correctedActions,
+        };
+        setNotice(`Decision ${statusLabel(verdict).toLowerCase()}.`);
+        await load();
+      }
     } catch (err) {
       setActionError(err.message);
     } finally {
@@ -284,6 +306,12 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
   const saveReplyTraining = useCallback(async (decision, replyVerdict) => {
     if (!decision || !replyContextReady) return;
+    const decisionId = decision.id;
+    const currentEdit = detailEditRef.current;
+    const submittedEditEpoch = currentEdit.decisionId === decisionId ? currentEdit.epoch : 0;
+    const submittedSelectionEpoch = selectionEpochRef.current;
+    requestRef.current += 1;
+    setLoading(false);
     setBusyId(`${decision.id}:reply:${replyVerdict}`);
     setActionError("");
     setNotice("");
@@ -303,6 +331,12 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           scenarioLabel: replyScenarioLabel,
         }),
       });
+      const latestEdit = detailEditRef.current;
+      const latestEditEpoch = latestEdit.decisionId === decisionId ? latestEdit.epoch : 0;
+      if (selectedIdRef.current !== decisionId
+        || selectionEpochRef.current !== submittedSelectionEpoch
+        || latestEditEpoch !== submittedEditEpoch
+        || currentLoadRef.current !== load) return;
       setDetail((current) => ({ ...(current || {}), replyTraining: next.replyTraining }));
       draftBaselineRef.current = {
         ...draftBaselineRef.current,
@@ -317,7 +351,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     } finally {
       setBusyId("");
     }
-  }, [actualReply, idealReply, replyReviewNote, replyScenarioLabel, replyContextReady]);
+  }, [actualReply, idealReply, replyReviewNote, replyScenarioLabel, replyContextReady, load]);
 
   const metrics = data.metrics || {};
   const replyMetrics = metrics.replyTraining || {};

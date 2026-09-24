@@ -7,15 +7,16 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import AgentDecisionsPage from './AgentDecisionsPage';
 import { adminFetch } from '../../utils/admin-fetch';
 
-const { refresh } = vi.hoisted(() => ({ refresh: { callback: null } }));
+const { refresh } = vi.hoisted(() => ({ refresh: { callback: null, enabled: false } }));
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
 vi.mock('../../hooks/useVisiblePageRefresh', () => ({
-  default: (callback) => {
+  default: (callback, options) => {
     refresh.callback = callback;
+    refresh.enabled = options?.enabled ?? true;
   },
 }));
-beforeEach(() => { refresh.callback = null; });
+beforeEach(() => { refresh.callback = null; refresh.enabled = false; });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.resetAllMocks(); });
 
 it('preserves the decision correction payload from the shared review fields', async () => {
@@ -198,6 +199,83 @@ it('preserves a failed decision action while automatic polls clear only read err
   expect(screen.getByText('Decision action failed')).toBeInTheDocument();
   expect(screen.queryByText('Decision read failed')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+});
+
+it('invalidates a pending list poll when reply training starts', async () => {
+  let resolvePoll;
+  let resolveAction;
+  let listReads = 0;
+  const decisions = [
+    { id: 'decision-a', customerName: 'Customer A', recommendedActions: [], suggestedMessage: 'Suggested A' },
+    { id: 'decision-b', customerName: 'Customer B', recommendedActions: [], suggestedMessage: 'Suggested B' },
+  ];
+  adminFetch.mockImplementation((url, options) => {
+    if (url.endsWith('/reply-training') && options?.method === 'POST') {
+      return new Promise((resolve) => { resolveAction = resolve; });
+    }
+    if (url.endsWith('/context')) return Promise.resolve({ context: {} });
+    listReads += 1;
+    if (listReads === 1) return Promise.resolve({ decisions });
+    return new Promise((resolve) => { resolvePoll = resolve; });
+  });
+
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  const reply = await screen.findByLabelText('Final / rewrite reply');
+  await waitFor(() => expect(reply).toHaveValue('Suggested A'));
+
+  let pollPromise;
+  act(() => { pollPromise = refresh.callback(); });
+  await waitFor(() => expect(resolvePoll).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: 'Accept draft' }));
+  await waitFor(() => expect(resolveAction).toBeTypeOf('function'));
+
+  await act(async () => {
+    resolvePoll({ decisions: [decisions[1]] });
+    await pollPromise;
+  });
+  expect(screen.getAllByText('Customer A').length).toBeGreaterThan(0);
+  expect(screen.queryByText('Customer B')).toBeInTheDocument();
+
+  await act(async () => resolveAction({
+    replyTraining: { outboundBody: 'Saved reply A', verdict: 'accepted' },
+  }));
+  await waitFor(() => expect(reply).toHaveValue('Saved reply A'));
+});
+
+it('does not apply an older reply-training response or baseline to a newer selection', async () => {
+  let resolveAction;
+  const decisions = [
+    { id: 'decision-a', customerName: 'Customer A', recommendedActions: [], suggestedMessage: 'Suggested A' },
+    { id: 'decision-b', customerName: 'Customer B', recommendedActions: [], suggestedMessage: 'Suggested B' },
+  ];
+  adminFetch.mockImplementation((url, options) => {
+    if (url.endsWith('/reply-training') && options?.method === 'POST') {
+      return new Promise((resolve) => { resolveAction = resolve; });
+    }
+    if (url.endsWith('/context')) return Promise.resolve({ context: {} });
+    return Promise.resolve({ decisions });
+  });
+
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  const reply = await screen.findByLabelText('Final / rewrite reply');
+  await waitFor(() => expect(reply).toHaveValue('Suggested A'));
+  fireEvent.click(screen.getByRole('button', { name: 'Accept draft' }));
+  await waitFor(() => expect(resolveAction).toBeTypeOf('function'));
+
+  fireEvent.click(screen.getByText('Customer B'));
+  await waitFor(() => expect(reply).toHaveValue('Suggested B'));
+  fireEvent.change(reply, { target: { value: 'Suggested A' } });
+
+  await act(async () => resolveAction({
+    replyTraining: {
+      outboundBody: 'Action response for A',
+      reviewedBy: 'A reviewer',
+      verdict: 'accepted',
+    },
+  }));
+  expect(reply).toHaveValue('Suggested A');
+  expect(screen.queryByText('Reviewed by A reviewer')).not.toBeInTheDocument();
+  await waitFor(() => expect(refresh.enabled).toBe(false));
 });
 
 it('clears foreground loading when a newer background poll wins', async () => {
