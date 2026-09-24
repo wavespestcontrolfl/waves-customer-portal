@@ -334,6 +334,26 @@ function mergeLawnComposites(list) {
   };
 }
 
+// Baseline (unflagged) reading per signal key — everything else is worth
+// mentioning to the customer.
+const LAWN_SIGNAL_BASELINE = {
+  fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low',
+};
+
+// Deterministic, allowlisted customer copy built ONLY from the closed
+// none/minor/moderate/severe (low/moderate/high for thatch) vocabulary —
+// NEVER the raw model `observations` prose (codex r6 P1: analyzePhoto's
+// observations field is free-text vision output that can name a specific
+// disease/insect or overclaim, the same "never raw model text" rule
+// pest-identification.js's PEST_LIBRARY exists to enforce). This mirrors
+// tree-shrub-assessment.js's buildTreeShrubTechFindings aiSummary — a
+// template sentence, never a paraphrase of what the model said.
+function lawnDeterministicObservations(signals) {
+  const flagged = signals.filter((s) => s.level !== LAWN_SIGNAL_BASELINE[s.key]);
+  if (!flagged.length) return 'No urgent lawn issues spotted in these photos.';
+  return `These photos show ${flagged.map((s) => s.label.toLowerCase()).join(', ')} worth a closer look.`;
+}
+
 function lawnPublicResult(merged) {
   const signals = Object.keys(LAWN_SIGNAL_LABELS)
     .filter((key) => merged[key] != null)
@@ -343,7 +363,7 @@ function lawnPublicResult(merged) {
     scores: { turf_density: merged.turf_density, weed_coverage: merged.weed_coverage, color_health: merged.color_health },
     signals,
     overwatering_signal: merged.overwatering_signal,
-    observations: merged.observations || '',
+    observations: lawnDeterministicObservations(signals),
   };
 }
 

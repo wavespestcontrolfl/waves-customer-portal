@@ -258,9 +258,12 @@ describe('POST /api/photo-id/:type happy paths', () => {
     });
   });
 
-  test('lawn: a severe reading on one photo is never masked by a healthy first photo\'s text', async () => {
-    // codex r2 P1 — severity fields take the worst photo; observations must
-    // not collapse to only the first (reassuring) photo's paragraph.
+  test('lawn: a severe reading on one photo is never masked by a healthy first photo, and customer copy is never the raw model text', async () => {
+    // codex r2 P1 — severity fields take the worst photo, never diluted by a
+    // healthy first photo. codex r6 P1 — the customer-facing `observations`
+    // field is deterministic, allowlisted wording built from the signal
+    // vocabulary, never the model's own free-text prose (which can name a
+    // specific disease/insect or overclaim).
     mockLawnAnalyzePhoto
       .mockResolvedValueOnce({
         composite: {
@@ -269,7 +272,7 @@ describe('POST /api/photo-id/:type happy paths', () => {
       })
       .mockResolvedValueOnce({
         composite: {
-          turf_density: 40, weed_coverage: 30, color_health: 5, fungal_activity: 'severe', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Severe fungal patches near the back fence.',
+          turf_density: 40, weed_coverage: 30, color_health: 5, fungal_activity: 'severe', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Severe brown patch fungal disease near the back fence.',
         },
       });
     await withServer(async (base) => {
@@ -277,7 +280,10 @@ describe('POST /api/photo-id/:type happy paths', () => {
       const body = await res.json();
       const fungalSignal = body.result.signals.find((s) => s.key === 'fungal_activity');
       expect(fungalSignal.level).toBe('severe');
-      expect(body.result.observations).toContain('Severe fungal patches');
+      expect(body.result.observations).toContain('fungal activity');
+      expect(body.result.observations).not.toContain('brown patch');
+      expect(body.result.observations).not.toContain('back fence');
+      expect(body.result.observations).not.toContain('This front section looks healthy');
     });
   });
 
