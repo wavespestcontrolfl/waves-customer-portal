@@ -30,7 +30,7 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
   afterAll(async () => { await mockTrx?.rollback(); await database?.destroy(); });
 
   beforeEach(async () => {
-    await mockTrx.raw('TRUNCATE messages, conversations, customers, sms_log, blocked_numbers, message_drafts, messaging_audit_log');
+    await mockTrx.raw('TRUNCATE messages, conversations, customers, sms_log, blocked_numbers, message_drafts, messaging_audit_log, inbound_sms_optout_receipts');
     tick = new Date('2026-09-23T12:00:00.000Z');
     mockRawCalls.length = 0;
   });
@@ -77,7 +77,7 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
       id: randomUUID(), provider_message_id: sid, channel: 'sms',
       metadata: JSON.stringify(auditMetadata), created_at: createdAt,
     });
-    return { customerId: ownerId, conversationId: conversation.id, messageId, smsLogId, sid };
+    return { customerId: ownerId, conversationId: conversation.id, messageId, smsLogId, sid, createdAt };
   }
 
   test('ignores read state and dedupes endpoint candidates by canonical peer', async () => {
@@ -188,6 +188,32 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await mockTrx('sms_log').where({ twilio_sid: canonical.sid }).update({ message_type: null, created_at: tick });
     await seed({ body: 'Question after STOP?' });
     await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+  });
+
+  test('a durable STOP receipt covers a missing legacy log without shifting canonical chronology', async () => {
+    await seed({ ours: '+19415550191', body: 'Can you call me?' });
+    const stop = await seed({ body: 'Please stop texting me', messageType: null, legacy: false });
+    await mockTrx('inbound_sms_optout_receipts').insert({
+      message_sid: stop.sid, phone: '+19415550100', applied_at: stop.createdAt,
+    });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+
+    await seed({ ours: '+19415550191', body: 'Actually, can you call tomorrow?' });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+  });
+
+  test('a late untyped STOP retry uses the earlier receipt boundary', async () => {
+    await seed({ body: 'An older question?' });
+    const appliedAt = tick;
+    tick = new Date(tick.getTime() + 1000);
+    const current = await seed({ ours: '+19415550191', body: 'A newer question?' });
+    const retriedStop = await seed({ body: 'STOP', messageType: null, legacy: false });
+    await mockTrx('inbound_sms_optout_receipts').insert({
+      message_sid: retriedStop.sid, phone: '+19415550100', applied_at: appliedAt,
+    });
+    await expect(countPendingSmsConversations({ includePending: true })).resolves.toEqual({
+      conversations: 1, messages: 1, pendingMessageIds: [current.messageId],
+    });
   });
 
   test('media overrides courtesy and spam; enforced text-only spam retires', async () => {

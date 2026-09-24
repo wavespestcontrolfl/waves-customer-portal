@@ -18,6 +18,9 @@ async function createSmsResponseTables(trx) {
       CREATE TABLE messaging_audit_log (
         id uuid PRIMARY KEY, provider_message_id varchar(64), channel varchar(16), metadata jsonb, created_at timestamptz NOT NULL DEFAULT now()
       );
+      CREATE TABLE inbound_sms_optout_receipts (
+        message_sid text PRIMARY KEY, phone text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE INDEX messaging_audit_provider_message_id_idx ON messaging_audit_log (provider_message_id)
         WHERE provider_message_id IS NOT NULL;
   `);
