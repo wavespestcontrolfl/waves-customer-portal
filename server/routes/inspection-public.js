@@ -912,6 +912,12 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
     phone: freshLead.phone || '',
     email: freshLead.email || null,
     ...(verifiedContact && !multiAccount ? {} : { forceNewAccount: true, ignorePhoneMatch: true }),
+    // The lead row is already locked, so attaching a phone-matched legacy
+    // customer to an account must use the existing non-blocking
+    // customer-comms fence + fresh re-resolve (local audit P1), exactly as
+    // the lead convert does — a busy fence fails closed (retryable) instead
+    // of deadlocking a merge-undo.
+    fenceAttach: true,
   });
   if (verifiedContact) {
     const matched = multiAccount

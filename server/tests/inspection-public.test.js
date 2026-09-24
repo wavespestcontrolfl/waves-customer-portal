@@ -1339,6 +1339,8 @@ describe('POST /:token commit', () => {
         expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
         expect(updateCalls.some((c) => c.table === 'leads')).toBe(false);
         expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.not.objectContaining({ forceNewAccount: true }));
+        // Local audit P1: attach runs with the non-blocking comms fence.
+        expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ fenceAttach: true }));
       });
 
       test('same address (street + zip), no open visits → reuses the existing property profile, never a new one', async () => {
