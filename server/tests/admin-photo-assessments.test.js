@@ -121,6 +121,7 @@ jest.mock('sharp', () => jest.fn(() => ({
 
 const express = require('express');
 const adminRouter = require('../routes/admin-photo-assessments');
+const assessmentCreate = require('../services/photo-assessment-create');
 
 const ROW_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const LEAD_ID = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
@@ -917,7 +918,7 @@ describe('POST /:type (admin create) — message_photos (inbound MMS)', () => {
 // through the HTTP layer — the describe block above already proves the
 // handler wires them together correctly end to end.
 describe('resolveRequestPhotos / resolveAssociations / lookupAssociation (unit)', () => {
-  const { resolveRequestPhotos, resolveAssociations, lookupAssociation } = adminRouter._test;
+  const { resolveRequestPhotos, resolveAssociations, lookupAssociation } = assessmentCreate._test;
   const MESSAGE_ID = 'dddddddd-eeee-4fff-8000-111111111111';
   const CONVERSATION_ID = 'eeeeeeee-ffff-4000-8111-222222222222';
   const CUSTOMER_ID = 'ffffffff-0000-4111-8222-333333333333';
@@ -996,7 +997,7 @@ describe('resolveRequestPhotos / resolveAssociations / lookupAssociation (unit)'
   });
 
   test('buildSnapshots: falls back to the linked customer contact when the body has none, explicit contact wins', () => {
-    const { buildSnapshots } = adminRouter._test;
+    const { buildSnapshots } = assessmentCreate._test;
     const customerContact = { first_name: 'Dana', last_name: 'Reed', email: 'dana@example.com', phone: '+12395550100' };
     expect(buildSnapshots({}, customerContact).contactSnapshot).toEqual(customerContact);
     expect(buildSnapshots({}, null).contactSnapshot).toBeNull();
@@ -1019,9 +1020,9 @@ describe('resolveRequestPhotos / resolveAssociations / lookupAssociation (unit)'
 
 describe('tree & shrub — third assessment type', () => {
   const { storeFunnelPhotos } = require('../utils/funnel-photos');
-  const {
-    TYPES, TYPE_KEYS, configFor, listRowShape, releaseRefusal, worstTreeShrubSignal,
-  } = adminRouter._test;
+  const { listRowShape, releaseRefusal } = adminRouter._test;
+  const { TYPES, TYPE_KEYS, configFor } = assessmentCreate;
+  const { worstTreeShrubSignal } = assessmentCreate._test;
   const MESSAGE_ID = 'dddddddd-eeee-4fff-8000-111111111111';
   const CONVERSATION_ID = 'eeeeeeee-ffff-4000-8111-222222222222';
   const CUSTOMER_ID = 'ffffffff-0000-4111-8222-333333333333';
@@ -1315,12 +1316,12 @@ describe('tree & shrub — third assessment type', () => {
       expect(text).not.toMatch(/infestation|diseased/i);
       // The report builder's visit-written category copy is not stored.
       expect(contract.categories.every((c) => !('customerExplanation' in c))).toBe(true);
-      expect(contract.suggested_customer_action).toBe(adminRouter._test.TREE_SHRUB_NEXT_STEPS.disease_leaf_spot);
+      expect(contract.suggested_customer_action).toBe(assessmentCreate._test.TREE_SHRUB_NEXT_STEPS.disease_leaf_spot);
     });
   });
 
   test('TREE_SHRUB_NEXT_STEPS: one prospect-safe next step per category plus the clean case, none promising a visit', () => {
-    const { TREE_SHRUB_NEXT_STEPS } = adminRouter._test;
+    const { TREE_SHRUB_NEXT_STEPS } = assessmentCreate._test;
     const { buildTreeShrubVisualCategories } = require('../services/service-report/tree-shrub-visual-categories');
     const categoryKeys = buildTreeShrubVisualCategories({}).map((c) => c.key);
     expect(Object.keys(TREE_SHRUB_NEXT_STEPS).sort()).toEqual([...categoryKeys, 'none'].sort());
@@ -1364,7 +1365,7 @@ describe('tree & shrub — third assessment type', () => {
   });
 
   test('headlineTreeShrubPhoto falls back to the first photo when nothing is flagged', () => {
-    const { headlineTreeShrubPhoto } = adminRouter._test;
+    const { headlineTreeShrubPhoto } = assessmentCreate._test;
     const first = { index: 0, categories: [{ key: 'pest_activity', score: 95 }] };
     const second = { index: 1, categories: [{ key: 'pest_activity', score: 90 }] };
     expect(headlineTreeShrubPhoto([first, second], null)).toBe(first);

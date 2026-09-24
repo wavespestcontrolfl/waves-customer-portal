@@ -11,6 +11,10 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
+const {
+  sendManualCustomerSms,
+  manualSmsDeliveryState,
+} = require('../messaging/send-manual-customer-sms');
 const { excludeRecruitingSmsLog } = require('../../utils/recruiting-thread-scope');
 
 // Admin phones to exclude from results
@@ -234,6 +238,9 @@ async function executeCommsTool(toolName, input) {
       default: return { error: `Unknown comms tool: ${toolName}` };
     }
   } catch (err) {
+    if (isUncertainManualSmsOutcome(err)) {
+      return uncertainManualSmsResponse(err);
+    }
     // The sender preserves a provider receipt when its later audit write
     // fails. Losing that receipt would label an accepted message failed and
     // invite a duplicate send. Never include the recipient/body in logs.
@@ -248,6 +255,24 @@ async function executeCommsTool(toolName, input) {
     logger.error(`[intelligence-bar:comms] Tool ${toolName} failed (code=${err.code || 'unknown'})`);
     return { error: err.message };
   }
+}
+
+function uncertainManualSmsResponse(outcome) {
+  return {
+    success: false,
+    error: 'The carrier did not confirm this text. It may still go out; check the thread and do not retry it.',
+    blocked: true,
+    code: outcome?.code || 'SMS_DELIVERY_UNCERTAIN',
+    mayHaveSent: true,
+    retry: false,
+    retryable: false,
+  };
+}
+
+function isUncertainManualSmsOutcome(outcome) {
+  return manualSmsDeliveryState(outcome) === 'uncertain'
+    || outcome?.deliveryOutcome === 'uncertain'
+    || outcome?.providerOutcome?.deliveryOutcome === 'uncertain';
 }
 
 
@@ -769,8 +794,7 @@ async function sendSms(input) {
   // daily-driver send path, so the validators apply consistently:
   // suppression list, sms_enabled, no customer-emoji, segment metadata.
   // Operator messages still need to follow the customer voice rules.
-  const { sendCustomerMessage } = require('../messaging/send-customer-message');
-  const result = await sendCustomerMessage({
+  const result = await sendManualCustomerSms({
     to: phone,
     body: message,
     channel: 'sms',
@@ -797,6 +821,10 @@ async function sendSms(input) {
     },
   });
 
+  if (isUncertainManualSmsOutcome(result)) {
+    return uncertainManualSmsResponse(result);
+  }
+
   if (result.sent) {
     logger.info(`[intelligence-bar:comms] Sent SMS (custId=${custId || 'n/a'} segs=${result.segmentCount})`);
     return {
@@ -810,6 +838,9 @@ async function sendSms(input) {
       char_count: message.length,
       segmentCount: result.segmentCount,
       encoding: result.encoding,
+      ...(result.acceptedAfterError ? {
+        warning: 'The provider accepted the message, but its local audit could not be completed. Do not send it again.',
+      } : {}),
     };
   }
   // CRITICAL: Intelligence Bar tool-failure detection in

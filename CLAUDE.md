@@ -18,6 +18,10 @@ Context for Claude Code sessions working on the waves-customer-portal monorepo.
 
 ## Project Overview
 
+SMS gratitude replies are a disabled, future-only lane. See `docs/sms-gratitude-replies.md`
+for the cutoff, replay evidence, and activation prerequisites. Do not treat historical replay
+results as queued messages or as live graduation evidence.
+
 Waves Pest Control & Lawn Care — family-owned, SW Florida (Manatee / Sarasota / Charlotte counties). Custom AI-native operations platform: React/Vite frontend + Express/Node.js backend + PostgreSQL, deployed on Railway.
 
 Three interfaces:

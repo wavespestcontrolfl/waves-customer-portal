@@ -34,7 +34,7 @@ function mockDb(table) {
 }
 mockDb.raw = (sql) => ({ sql });
 jest.mock('../models/db', () => mockDb);
-jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'webhooks' || (key === 'aiAssistantAutoReply' && mockState.ai) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'webhooks' || (key === 'aiAssistantAutoReply' && mockState.ai), gateEnvValue: () => false }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/messaging/validators/suppression', () => ({ recordSuppression: jest.fn(), clearSuppression: jest.fn() }));
