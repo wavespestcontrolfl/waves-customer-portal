@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -9,6 +9,7 @@ import {
   Search,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { adminFetch } from "../../utils/admin-fetch";
 
 const D = {
@@ -176,27 +177,34 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncNotice, setSyncNotice] = useState("");
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [syncError, setSyncError] = useState("");
+  const loadGen = useRef(0);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const load = useCallback(async (background = false) => {
+    const gen = ++loadGen.current;
+    if (!background) setLoading(true);
+    setReadError("");
     try {
       const next = await adminFetch(buildQuery({ status, contentType, source, liveStatus, search }));
+      if (gen !== loadGen.current) return;
       setData(next);
+      setReadError("");
       setSelectedId((current) => (
         next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null
       ));
     } catch (err) {
-      setError(err.message);
+      if (gen !== loadGen.current) return;
+      setReadError(err.message);
     } finally {
-      setLoading(false);
+      if (gen === loadGen.current) setLoading(false);
     }
   }, [status, contentType, source, liveStatus, search]);
 
   const runSync = useCallback(async () => {
+    loadGen.current += 1;
     setSyncing(true);
-    setError("");
+    setSyncError("");
     setSyncNotice("");
     try {
       const result = await adminFetch("/admin/content-registry/sync", {
@@ -207,7 +215,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
       setSyncNotice(`Sync complete: ${Number(summary.astro_files_scanned || 0).toLocaleString()} Astro files, ${Number(summary.matched_count || 0).toLocaleString()} matched, ${Number(summary.conflict_count || 0).toLocaleString()} conflicts.`);
       await load();
     } catch (err) {
-      setError(err.message);
+      setSyncError(err.message);
     } finally {
       setSyncing(false);
     }
@@ -217,6 +225,14 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
     const timer = setTimeout(load, 250);
     return () => clearTimeout(timer);
   }, [load]);
+
+  useVisiblePageRefresh(
+    () => {
+      if (loading || syncing) return undefined;
+      return load(true);
+    },
+    { intervalMs: 120_000 },
+  );
 
   const items = data?.items || [];
   const counts = data?.counts || {};
@@ -245,7 +261,6 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
           icon={Database}
           actions={[
             { key: "sync", label: "Sync", icon: RefreshCw, onClick: runSync, disabled: loading || syncing, variant: "primary" },
-            { key: "refresh", label: "Refresh", icon: RefreshCw, onClick: load, disabled: loading || syncing, variant: "secondary" },
           ]}
         />
       )}
@@ -259,21 +274,28 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
           >
             <RefreshCw size={14} strokeWidth={2} /> {syncing ? "Syncing..." : "Sync"}
           </button>
-          <button
-            type="button"
-            onClick={load}
-            disabled={loading || syncing}
-            style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 36, padding: "0 12px", borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, fontSize: 12, fontWeight: 700, cursor: "pointer" }}
-          >
-            <RefreshCw size={14} strokeWidth={2} /> Refresh
-          </button>
         </div>
       )}
 
-      {error && (
+      {syncError && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
           <AlertTriangle size={16} strokeWidth={2} />
-          <span style={{ fontSize: 13, fontWeight: 700 }}>{error}</span>
+          <span style={{ fontSize: 13, fontWeight: 700 }}>{syncError}</span>
+        </div>
+      )}
+
+      {readError && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
+          <AlertTriangle size={16} strokeWidth={2} />
+          <span style={{ fontSize: 13, fontWeight: 700 }}>{readError}</span>
+          <button
+            type="button"
+            onClick={() => load()}
+            disabled={loading || syncing}
+            style={{ marginLeft: "auto", minHeight: 36, padding: "0 12px", borderRadius: 6, border: `1px solid ${D.red}`, background: D.card, color: D.red, fontSize: 14, fontWeight: 700, cursor: "pointer" }}
+          >
+            Retry
+          </button>
         </div>
       )}
 

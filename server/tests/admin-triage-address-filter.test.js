@@ -32,16 +32,18 @@ test('address-only lookup filters in SQL before the default inbox limit', async 
   const { sql, bindings } = await listQuery({ status: 'active', customer_id: customerId, address_confirmation: 'true' });
   expect(sql).toContain('"triage_items"."reason_code" in (');
   expect(sql.indexOf('"triage_items"."reason_code" in (')).toBeLessThan(sql.indexOf(' limit '));
+  // customerId twice: the customer scope, then the relink guard's
+  // dispute_customer_id predicate (codex #4666 r33 P2).
   expect(bindings).toEqual([
-    'open', 'in_progress', customerId,
+    'open', 'in_progress', customerId, customerId,
     'missing_unit_number', 'address_unverified', 'missing_service_address',
     'low_confidence_address', 'address_validation_unavailable', 'address_unverifiable',
-    'address_not_validated', 'on_file_proof_customer_mismatch', 'address_recovered', 'address_readback', 100,
+    'address_not_validated', 'on_file_proof_customer_mismatch', 'address_recovered', 'address_readback', 'on_file_house_number_conflict', 100,
   ]);
 });
 
 test.each([undefined, 'false'])('ordinary triage listing keeps all reasons when filter is %s', async (flag) => {
   const { sql, bindings } = await listQuery({ status: 'active', customer_id: customerId, address_confirmation: flag });
   expect(sql).not.toContain('"triage_items"."reason_code" in (');
-  expect(bindings).toEqual(['open', 'in_progress', customerId, 100]);
+  expect(bindings).toEqual(['open', 'in_progress', customerId, customerId, 100]);
 });

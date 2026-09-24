@@ -34,6 +34,8 @@ const { invalidateServiceReportPdfCache } = require('./service-report/pdf-storag
 const { buildReportIdentitySnapshot, canonicalProductId, resolveVisitAddress } = require('./service-report/report-identity-snapshot');
 const { approvedReportProductFacts } = require('./service-report/report-data');
 const { detectServiceLine } = require('./service-report/service-line-configs');
+const { loadActiveConfig: loadPestPressureConfig } = require('./pest-pressure/store');
+const { pestPressureConfigAllowsTechnicianRating } = require('./pest-pressure/technician-rating-gate');
 const { isValidRateUnit } = require('./inventory-units');
 const { completionSuppliesOwedMarker } = require('./supplies-consumption');
 const { etDateString } = require('../utils/datetime-et');
@@ -375,6 +377,9 @@ async function submitRecap({
   // recap (a re-recap / edit of a historical completion, not the completion
   // itself) — callers must not apply once-per-completion effects.
   let recapPriorCompleted = false;
+  // Set inside the transaction: the staff rating passed the admin switch /
+  // service-line gate (read again after commit to decide the rescore).
+  let recapRatingAllowed = false;
   // Concurrency idempotency (Codex P1): scheduled_service_id has only a
   // non-unique index, so two simultaneous submits (double-tap, browser
   // retry, admin+tech race) could each pass the existing-record lookup
@@ -507,7 +512,17 @@ async function submitRecap({
     // Pressure scores it as the report score, same as the completion form
     // (owner ruling 2026-09-24). Without the stamp the null source reads as
     // a customer rating and lands on the blended path.
-    const staffRatingFields = clientPestRating != null
+    // Same admin switch + service-line gate as the completion form: with
+    // technician entry off, a stale or direct request's rating is ignored
+    // rather than written with technician provenance.
+    if (clientPestRating != null) {
+      const pestPressureConfig = await loadPestPressureConfig(trx).catch(() => null);
+      recapRatingAllowed = pestPressureConfigAllowsTechnicianRating({
+        pestPressureConfig,
+        serviceLine: detectServiceLine(locked?.service_type || svc.service_type || 'Pest Control'),
+      });
+    }
+    const staffRatingFields = clientPestRating != null && recapRatingAllowed
       ? {
         client_pest_rating: clientPestRating,
         ...(serviceRecordCols.client_pest_rating_source ? { client_pest_rating_source: 'technician' } : {}),
@@ -1371,7 +1386,7 @@ async function submitRecap({
   // rescore after the commit so the gauge and PDF never keep the old value.
   // Best-effort, same as the completion flow — a scoring failure must not
   // fail a committed recap.
-  if (clientPestRating != null) {
+  if (clientPestRating != null && recapRatingAllowed) {
     const { runAndSwallowErrors: rescorePestPressure } = require('./pest-pressure/orchestrate');
     await rescorePestPressure(recordId, knex);
   }

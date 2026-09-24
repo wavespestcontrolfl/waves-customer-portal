@@ -318,7 +318,35 @@ Please search for current FL and federal tax changes, then provide your analysis
 
   async getCurrentTaxRates() {
     try {
-      return await db('tax_rates').where('active', true);
+      // Same effective/expiry bound as TaxCalculator.calculateTax, and
+      // deliberately NOT filtered by `active` for the same reason: a
+      // backfilled correction posted after a later rate is already in
+      // force inserts its own active:true row (which must not outrank that
+      // later, still-effective row just because it's active), and an old-
+      // shape staged rate can leave a still-current predecessor marked
+      // active:false. The newest effective_date whose window covers today,
+      // active or not, is the one row per county calculateTax would also
+      // select (codex round-1 P1 dropping the county entirely, round-5 P0
+      // ranking an active backfill over a later legacy row).
+      // A row switched off with NO expiry (active:false, expiry_date null)
+      // is deliberately disabled and is excluded here exactly as
+      // calculateTax excludes it (fallback-auditor P1 on 9bc52bc07c).
+      const nowET = etDateString();
+      const rows = await db('tax_rates')
+        .andWhere('effective_date', '<=', nowET)
+        .andWhere(function () {
+          this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
+        })
+        .andWhere(function () {
+          this.where('active', true).orWhereNotNull('expiry_date');
+        })
+        .orderBy('effective_date', 'desc');
+      const seenCounties = new Set();
+      return rows.filter((row) => {
+        if (seenCounties.has(row.county)) return false;
+        seenCounties.add(row.county);
+        return true;
+      });
     } catch { return []; }
   }
 

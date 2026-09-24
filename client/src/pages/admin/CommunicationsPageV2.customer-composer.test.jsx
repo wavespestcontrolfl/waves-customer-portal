@@ -46,6 +46,13 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
 
+it("keeps inbox filters and log loading out of the Customer360 composer", () => {
+  setup();
+
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("/admin/communications/log?"))).toBe(false);
+});
+
 it("keeps the profile recipient and thread line, sends once, and clears only on provider acceptance", async () => {
   window.history.replaceState({}, "", "/?phone=9415550197&draftId=unrelated");
   let accept;
