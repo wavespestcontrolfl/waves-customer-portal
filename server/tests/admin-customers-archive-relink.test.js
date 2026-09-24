@@ -35,6 +35,7 @@ jest.mock('../models/db', () => {
     q.whereNot = () => q;
     q.whereNotIn = () => q;
     q.whereRaw = () => q;
+    q.leftJoin = () => q;
     q.first = async () => (table === 'customers' ? mockState.customer : null);
     q.update = async (patch) => { mockState.updates.push({ table, viaTrx, where: { ...q._where }, patch }); return 1; };
     return q;

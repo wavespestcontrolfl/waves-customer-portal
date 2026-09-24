@@ -29,15 +29,22 @@
  * click that never asked for them.
  */
 
-// A future/unresolved scheduled_services row — CANCELLABLE_STATUSES is the
-// canonical "still cancellable" allowlist (cancellation-eligibility.js,
-// shared with cancellation-processor.js's own sweep and the customer
-// portal's upcoming-visits query). 'rescheduled' is date-EXEMPT: those rows
-// keep their ORIGINAL (often past) date until SmartRebooker actions them
-// back onto the calendar, so an open rebook intent counts as live
-// regardless of its stale date (codex #3504 — excluding it let a second
-// same-family series activate, and would let an archive/churn through
-// while a rebook is still owed).
+// A future/unresolved OR in-progress scheduled_services row.
+// CANCELLABLE_STATUSES (cancellation-eligibility.js, shared with
+// cancellation-processor.js's own sweep and the customer portal's
+// upcoming-visits query) is the "still cancellable" allowlist — but
+// cancellation eligibility is narrower than lifecycle liveness: an
+// en_route/on_site visit is not something a cancel would touch (the tech is
+// already rolling), yet it is definitely still live for an archive/churn
+// refusal, so those two statuses are added on top, date-exempt like
+// 'rescheduled' (an in-progress visit stays live across a midnight
+// boundary — findActiveRecurringSeries applies the same exemption).
+// 'rescheduled' rows keep their ORIGINAL (often past) date until
+// SmartRebooker actions them back onto the calendar, so an open rebook
+// intent counts as live regardless of its stale date (codex #3504 —
+// excluding it let a second same-family series activate, and would let an
+// archive/churn through while a rebook is still owed).
+const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
   const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
   const today = todayIso || require('../utils/datetime-et').etDateString();
@@ -47,23 +54,31 @@ async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
   // doubles, which mock different subsets of knex's chain methods; none of
   // them actually invoke a callback passed to `.where()`, so this form is
   // inert (never crashes) under every one of them and correct under real knex.
+  const dateExemptStatuses = ['rescheduled', ...IN_PROGRESS_STATUSES];
   return dbh('scheduled_services')
     .where({ customer_id: customerId })
-    .where(function inCancellableStatus() {
-      for (const status of CANCELLABLE_STATUSES) this.orWhere('status', status);
+    .where(function inLiveStatus() {
+      for (const status of [...CANCELLABLE_STATUSES, ...IN_PROGRESS_STATUSES]) this.orWhere('status', status);
     })
     .where(function activeBound() {
-      this.where('scheduled_date', '>=', today).orWhere('status', 'rescheduled');
+      this.where('scheduled_date', '>=', today);
+      for (const status of dateExemptStatuses) this.orWhere('status', status);
     })
     .first('id', 'scheduled_date', 'status');
 }
 
-// An active annual prepay term — coverage the customer is still paying for
-// (or the account still owes visits against).
-async function findActivePrepayTerm(dbh, customerId) {
-  return dbh('annual_prepay_terms')
-    .where({ customer_id: customerId, status: 'active' })
-    .first('id', 'term_end');
+// A prepay term whose paid coverage is live as of today — reuses
+// coveredTermsAsOf (annual-prepay-renewals.js), the SAME canonical "is this
+// term's paid coverage live" predicate cancellation-eligibility.js's
+// hasCancellableWork calls, rather than a narrower status='active' check
+// that misses a renewal_pending term or a decided (renewed/switch_plan) term
+// still riding out its already-paid window.
+async function findActivePrepayTerm(dbh, customerId, { todayIso } = {}) {
+  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  const today = todayIso || require('../utils/datetime-et').etDateString();
+  return coveredTermsAsOf(dbh, today)
+    .where('t.customer_id', customerId)
+    .first('t.id as id', 't.term_end as term_end', 't.status as status');
 }
 
 // Byte-identical to the billing fields cancellation-processor.js's churn

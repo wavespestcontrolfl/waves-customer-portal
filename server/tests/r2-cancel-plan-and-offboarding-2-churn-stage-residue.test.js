@@ -34,7 +34,7 @@ const mockState = { initial: null, locked: null, patches: [] };
 jest.mock('../models/db', () => {
   const build = (table, inTransaction = false) => {
     const query = { lockedRead: false };
-    for (const method of ['where', 'whereNull', 'whereNot', 'whereRaw', 'select']) {
+    for (const method of ['where', 'whereNull', 'whereNot', 'whereNotIn', 'whereRaw', 'select', 'leftJoin']) {
       query[method] = () => query;
     }
     query.forUpdate = () => { query.lockedRead = true; return query; };
