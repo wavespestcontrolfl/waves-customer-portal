@@ -346,13 +346,27 @@ function buildTreeShrubTechFindings({ scores = {}, observations = '' } = {}) {
       score: c.score,
       defaultAction: 'monitor', // monitor | confirm | hide
     }));
+  // codex GH r2 (cloud) P1: a 'tracking' category (the score was never
+  // reported by either model — see photo-id.js's treeShrubFieldEverReported)
+  // is not a "finding" (it isn't flagged), but it is also not a clean read —
+  // "No urgent issues" tells the customer every dimension was checked and
+  // came back healthy, which is false for a dimension that was never
+  // assessed at all. Say so instead whenever any category is still
+  // tracking, even though nothing was flagged.
+  const trackingCount = cats.filter((c) => c.status === 'tracking').length;
   const aiSummary = findings.length
     ? `AI flagged ${findings.length} item${findings.length > 1 ? 's' : ''} to review.`
-    : 'No urgent visible plant issues found.';
+    : trackingCount > 0
+      ? "We couldn't get a clear enough read on every area from these photos."
+      : 'No urgent visible plant issues found.';
   const suggestedCustomerAction = findings.length
     ? 'Monitor the flagged areas; we’ll recheck on the next visit.'
-    : 'No action needed';
-  return { aiSummary, suggestedCustomerAction, findings };
+    : trackingCount > 0
+      ? 'Send clearer photos of every area and we can take another look.'
+      : 'No action needed';
+  return {
+    aiSummary, suggestedCustomerAction, findings, trackingCount,
+  };
 }
 
 /**

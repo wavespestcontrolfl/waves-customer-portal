@@ -107,6 +107,17 @@ const mockStoreTreeShrubPhotos = jest.fn(async () => {});
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => !!mockGateState[gate] }));
+// codex GH r2 (cloud) P1: same fixed-re-encode mock pattern as
+// admin-photo-assessments.test.js's message-photo path — sharp's chain
+// always resolves a known JPEG buffer so a HEIC-transcode test can assert
+// deterministically on it, without needing a real libvips/libheif build in
+// the test environment.
+const MOCK_TRANSCODED_JPEG = Buffer.from('transcoded-jpeg-bytes');
+jest.mock('sharp', () => jest.fn(() => ({
+  rotate: jest.fn().mockReturnThis(),
+  jpeg: jest.fn().mockReturnThis(),
+  toBuffer: jest.fn().mockResolvedValue(MOCK_TRANSCODED_JPEG),
+})));
 // express-rate-limit's default store is in-memory and lives for the life of
 // the router module — which this whole test file shares — so every test
 // that doesn't care about quota gets a FRESH default customer id per test
@@ -212,6 +223,7 @@ async function withServer(fn) {
 }
 
 const PHOTO_DATA_URL = 'data:image/jpeg;base64,aGVsbG8=';
+const HEIC_DATA_URL = 'data:image/heic;base64,aGVsbG8=';
 
 // codex GH r6 P1: lawn/tree-shrub's OWN dual-model merge (inside
 // lawnAssessment.analyzePhoto / tree-shrub-assessment's analyzePhoto)
@@ -322,6 +334,22 @@ describe('POST /api/photo-id/:type happy paths', () => {
     });
   });
 
+  test('lawn: out-of-contract scores are clamped to their declared range before egress (codex GH r2-cloud P2)', async () => {
+    // The vision prompt's OWN contract advertises turf_density/weed_coverage
+    // as 0-100 and color_health as 1-10 — nothing downstream enforced that
+    // before this fix, so a JSON-valid but out-of-range reply (140, -20, 30)
+    // was persisted and served to the customer verbatim.
+    mockLawnAnalyzePhoto.mockResolvedValue(lawnAnalyzeResult({
+      turf_density: 140, weed_coverage: -20, color_health: 30, fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Looks fine.',
+    }));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.result.scores).toEqual({ turf_density: 100, weed_coverage: 0, color_health: 10 });
+    });
+  });
+
   test('lawn: a severe reading on one photo is never masked by a healthy first photo, and customer copy is never the raw model text', async () => {
     // codex r2 P1 — severity fields take the worst photo, never diluted by a
     // healthy first photo. codex r6 P1 — the customer-facing `observations`
@@ -391,17 +419,62 @@ describe('POST /api/photo-id/:type happy paths', () => {
       expect(res.status).toBe(400);
     });
   });
+
+  test('HEIC photo is transcoded to real JPEG before the vision call and before S3 storage (codex GH r2-cloud P1)', async () => {
+    // validateRequestPhotos accepts HEIC (real iPhone camera-roll uploads),
+    // but Claude/Gemini vision only accept JPEG/PNG/WebP — an untranscoded
+    // HEIC byte stream would make the model call itself fail, after the
+    // customer already spent both rate-limit buckets on a photo that was
+    // perfectly valid on their end.
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody({ photos: [HEIC_DATA_URL] }));
+      expect(res.status).toBe(200);
+      const [data, mimeType] = mockLawnAnalyzePhoto.mock.calls[0];
+      expect(mimeType).toBe('image/jpeg');
+      expect(data).toBe(MOCK_TRANSCODED_JPEG.toString('base64'));
+      // The same transcoded bytes go to S3 storage, not the original HEIC.
+      expect(mockStoreFunnelPhotos).toHaveBeenCalledWith(expect.objectContaining({
+        photos: [expect.objectContaining({ mimeType: 'image/jpeg', data: MOCK_TRANSCODED_JPEG.toString('base64') })],
+      }));
+    });
+  });
+
+  test('the nonstandard "image/jpg" MIME is also transcoded to real "image/jpeg" (codex GH r2-cloud P1)', async () => {
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody({ photos: ['data:image/jpg;base64,aGVsbG8='] }));
+      expect(res.status).toBe(200);
+      const [, mimeType] = mockLawnAnalyzePhoto.mock.calls[0];
+      expect(mimeType).toBe('image/jpeg');
+    });
+  });
+
+  test('a genuine JPEG/PNG/WebP photo is passed through unchanged (no needless re-encode)', async () => {
+    await withServer(async (base) => {
+      await post(base, '/api/photo-id/lawn', photoBody());
+      const [data, mimeType] = mockLawnAnalyzePhoto.mock.calls[0];
+      expect(mimeType).toBe('image/jpeg');
+      expect(data).toBe('aGVsbG8='); // the ORIGINAL bytes — sharp never ran
+    });
+  });
 });
 
 // ── next_step branches ───────────────────────────────────────────────────
 describe('next_step branches', () => {
-  test('pest: termite (inspection-first) -> inspection', async () => {
+  test('pest: termite (inspection-first) -> inspection, prefill category "other" not "pest_issue" (codex GH r2-cloud P1)', async () => {
+    // Termite's resolved lane (contract.service.line) is neither 'pest' nor
+    // 'lawn' — pestReserviceLane returns null, same as mosquito/rodent — so
+    // the prefill must resolve to 'other', not the upload-type default
+    // 'pest_issue': requests.js derives its OWN lane from this category
+    // (category==='pest_issue' -> lane 'pest') to decide whether to
+    // intercept the ticket with "good news, covered by your plan" — a
+    // termite concern is never pest-lane reservice-eligible, so 'pest_issue'
+    // here could misroute an inspection-only concern into that picker.
     mockIdentifyPest.mockResolvedValue(pestResultFor('subterranean-termite'));
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/pest', photoBody());
       const body = await res.json();
       expect(body.next_step.kind).toBe('inspection');
-      expect(body.next_step.request_prefill).toEqual({ category: 'pest_issue', location: 'front_yard', note: 'a note' });
+      expect(body.next_step.request_prefill).toEqual({ category: 'other', location: 'front_yard', note: 'a note' });
     });
   });
 
@@ -703,6 +776,21 @@ describe('next_step branches', () => {
     });
   });
 
+  test('pest: a lawn-targeting pest (chinch bugs) with NO lawn coverage prefills "lawn_concern", not "pest_issue" (codex GH r2-cloud P1)', async () => {
+    // requests.js derives ITS OWN lane from this category
+    // (category==='pest_issue' -> 'pest', else 'lawn') to decide whether to
+    // intercept the ticket — a chinch-bug concern filed as 'pest_issue'
+    // would be checked against the WRONG lane's coverage.
+    mockIdentifyPest.mockResolvedValue(pestResultFor('chinch-bug'));
+    mockReserviceAccess.mockResolvedValue(null); // no plan coverage at all -> 'request'
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('request');
+      expect(body.next_step.request_prefill.category).toBe('lawn_concern');
+    });
+  });
+
   test('pest: a mosquito identification is never reservice-eligible, whatever the customer\'s plan covers', async () => {
     mockIdentifyPest.mockResolvedValue(pestResultFor('mosquito'));
     mockReserviceAccess.mockResolvedValue({ token: 'tok-both', lanes: ['pest', 'lawn'] });
@@ -710,6 +798,29 @@ describe('next_step branches', () => {
       const res = await post(base, '/api/photo-id/pest', photoBody());
       const body = await res.json();
       expect(body.next_step.kind).toBe('request');
+    });
+  });
+
+  test('pest: a mosquito identification prefills "other", never "pest_issue" (its null lane can never be reservice-eligible — codex GH r2-cloud P1)', async () => {
+    mockIdentifyPest.mockResolvedValue(pestResultFor('mosquito'));
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-both', lanes: ['pest', 'lawn'] });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      const body = await res.json();
+      expect(body.next_step.request_prefill.category).toBe('other');
+    });
+  });
+
+  test('tree_shrub prefills "other", never "lawn_concern" — tree_shrub is never reservice-eligible so a static "lawn_concern" could misroute into the lawn picker (codex GH r2-cloud P1)', async () => {
+    mockTreeAnalyzePhoto.mockResolvedValue(treeAnalyzeResult({
+      foliage_fullness: 80, leaf_color_vigor: 75, pest_signals: 'none', disease_signals: 'none', water_heat_stress: 'none', pruning_mechanical: 'none', observations: 'Plants look healthy.',
+    }));
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-lawn3', lanes: ['lawn'] });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('request');
+      expect(body.next_step.request_prefill.category).toBe('other');
     });
   });
 });
@@ -1048,7 +1159,7 @@ describe('real averageScores merges never leave the composite empty (why raw evi
     });
   });
 
-  test('lawn: numeric-only real evidence (no signal fields reported by either model) omits every signal, never a false "none"/"low" (codex GH r9 P1)', async () => {
+  test('lawn: numeric-only real evidence (no signal fields reported by either model) goes through finalizeCustomerResult as UNCLEAR, never a false "none"/"low" baseline or real scores next to it (codex GH r9 P1, tightened by GH r2-cloud P1)', async () => {
     // Both models reported ONLY the 3 numeric scores — no fungal/insect/
     // mechanical/thatch data at all. Real averageScores would otherwise
     // default all 4 to a confident 'none'/'low' baseline.
@@ -1061,13 +1172,21 @@ describe('real averageScores merges never leave the composite empty (why raw evi
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/lawn', photoBody());
       const body = await res.json();
-      expect(body.result.scores).toEqual({ turf_density: 80, weed_coverage: 10, color_health: 8 });
-      // None of the 4 never-assessed signals may appear as a false-clean reading.
+      // codex GH r2 (cloud) P1: zero signals means the lawn was never
+      // ASSESSED for disease/pest/damage — real turf/weed/color numbers
+      // sitting next to an empty signals array and "No urgent issues" read
+      // as a complete, reassuring result. finalizeCustomerResult now treats
+      // "no severity signal ever reported" as incomplete for the WHOLE
+      // result, not just the signals array — the neutral placeholder (null
+      // scores too) and an 'unclear' next_step, exactly like a partial
+      // photo batch.
+      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
       expect(body.result.signals).toEqual([]);
+      expect(body.next_step.kind).toBe('unclear');
     });
   });
 
-  test('tree_shrub: numeric-only real evidence (no severity fields reported by either model) reads those categories as untracked, never a confident 95', async () => {
+  test('tree_shrub: numeric-only real evidence (no severity fields reported by either model) goes through finalizeCustomerResult as UNCLEAR, never confident foliage/color numbers next to untracked severities', async () => {
     // Both models reported ONLY foliage/color — no pest/disease/water-heat
     // signal data at all. Real averageScores/toCategoryScores would
     // otherwise default all three severity categories to 95 ('none').
@@ -1079,12 +1198,16 @@ describe('real averageScores merges never leave the composite empty (why raw evi
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
       const body = await res.json();
-      expect(body.result.scores.foliage_fullness).toBe(80);
-      expect(body.result.scores.leaf_color_vigor).toBe(75);
-      // The three never-assessed signal categories read as 'tracking' (the
-      // existing null-score status), never a confident 'strong'/'healthy'.
-      const levels = body.result.signals.map((s) => s.level);
-      expect(levels.every((level) => level === 'tracking')).toBe(true);
+      // codex GH r2 (cloud) P1: nulling the three severity scores stopped
+      // the false-healthy NUMBER, but buildTreeShrubTechFindings' aiSummary
+      // still said "No urgent visible plant issues found" (tracking isn't a
+      // "finding"), and the route still showed the real foliage/color
+      // numbers next to it — reassuring overall despite 3 of 5 dimensions
+      // never being assessed. finalizeCustomerResult now treats ANY
+      // tracking category as incomplete for the WHOLE result.
+      expect(body.result.scores).toEqual({ foliage_fullness: null, leaf_color_vigor: null, overall: null });
+      expect(body.result.signals).toEqual([]);
+      expect(body.next_step.kind).toBe('unclear');
     });
   });
 });

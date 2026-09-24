@@ -28,6 +28,7 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const sharp = require('sharp');
 const router = express.Router();
 
 const db = require('../models/db');
@@ -68,7 +69,48 @@ const TYPE_TABLE = {
   tree_shrub: 'tree_shrub_assessments',
 };
 
-const REQUEST_CATEGORY = { pest: 'pest_issue', lawn: 'lawn_concern', tree_shrub: 'lawn_concern' };
+// codex GH r2 (cloud) P1: the prefill category must come from the RESOLVED
+// re-service lane — the SAME value laneOutcomeKind/pestReserviceLane use for
+// the coverage check — never the upload type. requests.js derives its own
+// lane SOLELY from this category (`category === 'pest_issue' ? 'pest' :
+// 'lawn'`, requests.js:499-509) to decide whether to intercept the ticket
+// with "good news, covered by your plan" and point at the reservice picker.
+// A static per-type category was wrong in two ways: a lawn-targeting pest
+// (chinch bugs — resolved lane 'lawn') filed as 'pest_issue' would be
+// checked against the WRONG lane's coverage, and every tree_shrub concern
+// (never reservice-eligible — reservice-scheduler.js excludes it from both
+// lanes) filed as 'lawn_concern' could get misrouted into "book your free
+// lawn re-service" for a concern that was never a lawn issue at all. A null
+// lane (mosquito/termite/rodent/inspection-only pest, or tree_shrub) maps to
+// 'other' so requests.js's category-based interception never fires for it —
+// those are genuine office tickets, not a reservice-eligible category.
+function resolvePrefillCategory(lane) {
+  if (lane === 'pest') return 'pest_issue';
+  if (lane === 'lawn') return 'lawn_concern';
+  return 'other';
+}
+
+// codex GH r2 (cloud) P1: validateRequestPhotos accepts HEIC/HEIF (real
+// iPhone camera-roll formats) and the nonstandard "image/jpg", but every
+// vision provider this route calls (Claude, Gemini) only accepts genuine
+// JPEG/PNG/WebP — passing HEIC bytes through doesn't just mis-tag the photo,
+// it makes the model call itself fail, AFTER the customer has already spent
+// both rate-limit buckets on a photo that was perfectly valid on their end.
+// Transcode to real JPEG with sharp — the same HEIC decoder the repo
+// already relies on (admin-photo-assessments.js's message-photo path:
+// `sharp(raw).rotate()....jpeg({quality}).toBuffer()`) — BEFORE any vision
+// call or S3 storage. Every handler shares the same photoInputs array, so
+// this runs once in the POST dispatcher rather than being duplicated per
+// type.
+const PHOTO_ID_JPEG_QUALITY = 88;
+const NEEDS_TRANSCODE_MIME = new Set(['image/heic', 'image/heif', 'image/jpg']);
+
+async function normalizePhotoInput(photo) {
+  if (!NEEDS_TRANSCODE_MIME.has(String(photo.mimeType || '').toLowerCase())) return photo;
+  const raw = Buffer.from(photo.data, 'base64');
+  const jpegBuffer = await sharp(raw).rotate().jpeg({ quality: PHOTO_ID_JPEG_QUALITY }).toBuffer();
+  return { mimeType: 'image/jpeg', data: jpegBuffer.toString('base64') };
+}
 
 // ── Dark until Adam flips the gate — authenticate first (every handler needs
 // req.customer), then the 404 gate (also every handler, GET / included). ──
@@ -184,8 +226,10 @@ function laneOutcomeKind(lane, access, isSecondary) {
   return (lane && access && Array.isArray(access.lanes) && access.lanes.includes(lane)) ? 'reservice' : 'request';
 }
 
-function prefillFor(type, { location, note } = {}) {
-  return { category: REQUEST_CATEGORY[type], location: location || null, note: note || null };
+// `lane` is the RESOLVED re-service lane ('pest' | 'lawn' | null) — see
+// resolvePrefillCategory's comment above for why it can't be the upload type.
+function prefillFor(lane, { location, note } = {}) {
+  return { category: resolvePrefillCategory(lane), location: location || null, note: note || null };
 }
 
 // codex GH r1 P1: honor the customer's selected saved property (portal
@@ -270,10 +314,6 @@ const PEST_PARTIAL_RESULT = {
   recommendation: null,
 };
 
-function pestResultForResponse(pestResult, partial) {
-  return partial ? PEST_PARTIAL_RESULT : pestResult;
-}
-
 // Order matters (codex r1 P1): a contested or low-confidence "not a pest"
 // read (e.g. a lovebug/beneficial call that disagreed across photos, or
 // never rose past low confidence) must NOT reach the reassuring "nothing to
@@ -356,15 +396,17 @@ async function handlePest(req, res, { note, location, propertyId, isSecondary })
 
   const pestResult = pestPublicResult(contract);
   const idLabel = publicIdentificationLabel(contract);
+  const lane = pestReserviceLane(contract);
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = pestNextStepKind(pestResult, idLabel, pestReserviceLane(contract), access, partial, isSecondary);
+  const kind = pestNextStepKind(pestResult, idLabel, lane, access, partial, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-    prefill: prefillFor('pest', { location, note }),
+    prefill: prefillFor(lane, { location, note }),
   });
+  const { result: finalPestResult } = finalizeCustomerResult('pest', { complete: !partial, build: () => pestResult });
 
   return res.status(200).json({
-    id: row.id, type: 'pest', created_at: row.created_at, result: pestResultForResponse(pestResult, partial), next_step: nextStep,
+    id: row.id, type: 'pest', created_at: row.created_at, result: finalPestResult, next_step: nextStep,
   });
 }
 
@@ -447,6 +489,20 @@ const LAWN_SCORE_FIELD_ROUNDING = {
   color_health: (v) => Math.round(v * 10) / 10, // 1-10 scale, 1 decimal — matches averageScores' own color_health rounding
 };
 
+// codex GH r2 (cloud) P2: the vision prompt's contract advertises
+// turf_density/weed_coverage as 0-100 and color_health as 1-10, but nothing
+// downstream of the raw model output enforced those ranges before this fix
+// — a JSON-valid but out-of-contract reply (140, -20, 30) passed the
+// evidence check and was persisted + served to the customer verbatim.
+// Clamp every recomputed value to its declared range as the LAST step,
+// after rounding, so a single stray value can't read as a real measurement
+// outside the scale the client renders it against.
+const LAWN_SCORE_RANGE = { turf_density: [0, 100], weed_coverage: [0, 100], color_health: [1, 10] };
+
+function clampToRange(value, [min, max]) {
+  return value == null ? null : Math.min(max, Math.max(min, value));
+}
+
 function lawnRawNumericValue(raw, key) {
   if (!raw || raw[key] == null || raw[key] === '') return null;
   const n = Number(raw[key]);
@@ -456,9 +512,10 @@ function lawnRawNumericValue(raw, key) {
 function lawnRecomputeScoreField(claude, gemini, key) {
   const c = lawnRawNumericValue(claude, key);
   const g = lawnRawNumericValue(gemini, key);
-  if (c != null && g != null) return LAWN_SCORE_FIELD_ROUNDING[key]((c + g) / 2);
-  if (c != null) return c;
-  if (g != null) return g;
+  const range = LAWN_SCORE_RANGE[key];
+  if (c != null && g != null) return clampToRange(LAWN_SCORE_FIELD_ROUNDING[key]((c + g) / 2), range);
+  if (c != null) return clampToRange(LAWN_SCORE_FIELD_ROUNDING[key](c), range);
+  if (g != null) return clampToRange(LAWN_SCORE_FIELD_ROUNDING[key](g), range);
   return null;
 }
 
@@ -566,10 +623,6 @@ const LAWN_PARTIAL_RESULT = {
   observations: "We couldn't analyze every photo you sent — send these to our team and we'll take a personal look.",
 };
 
-function lawnResultForResponse(lawnResult, partial) {
-  return partial ? LAWN_PARTIAL_RESULT : lawnResult;
-}
-
 async function handleLawn(req, res, { note, location, propertyId, isSecondary }) {
   const photoInputs = req._photoInputs;
   // codex GH r10 P1: loadCustomerGrassContext is account-wide by design —
@@ -635,16 +688,27 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   });
 
   const noUsableScores = merged.turf_density == null && merged.weed_coverage == null && merged.color_health == null;
-  const lawnUnreliable = noUsableScores || partial;
+  // codex GH r2 (cloud) P1: usable turf/color scores existing is not the
+  // same as the lawn having been ASSESSED for disease/pest/damage —
+  // lawnPublicResult only ever puts a key in `signals` when the merged
+  // composite actually carries it, so zero signals means every severity
+  // dimension was unassessed, not that all five came back clean. Feeding
+  // that straight to lawnDeterministicObservations produced a confident
+  // "No urgent lawn issues" for a submission that never checked for any.
+  const signalsUnassessed = lawnResult.signals.length === 0;
+  const { result: finalLawnResult, unclear: lawnUnclear } = finalizeCustomerResult('lawn', {
+    complete: !partial && !noUsableScores && !signalsUnassessed,
+    build: () => lawnResult,
+  });
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = lawnUnreliable ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary);
+  const kind = lawnUnclear ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('lawn', { location, note }),
   });
 
   return res.status(200).json({
-    id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResultForResponse(lawnResult, lawnUnreliable), next_step: nextStep,
+    id: row.id, type: 'lawn', created_at: row.created_at, result: finalLawnResult, next_step: nextStep,
   });
 }
 
@@ -656,8 +720,26 @@ const TREE_PARTIAL_RESULT = {
   summary: "We couldn't get a reliable read from these photos — send them to our team and we'll take a personal look.",
 };
 
-function treeResultForResponse(treeResult, unreliable) {
-  return unreliable ? TREE_PARTIAL_RESULT : treeResult;
+// ── Structural egress guard ──────────────────────────────────────────────
+// Rounds 1-12 local + 2 cloud reviews all found the SAME class of bug: an
+// incomplete, synthesized, or unassessed analysis leaking reassuring
+// customer-facing copy (a hedged ID read as confirmed, a healthy score off
+// a partial photo batch, "no issues" when a whole category was never
+// checked). Scattered per-field suppression kept missing the next case
+// because each fix only closed the ONE symptom Codex had just found. ONE
+// function per type now decides completeness ONCE — from the SAME
+// evidence each handler already computes to decide `partial`/`unreliable`
+// — and gates the WHOLE result through it: an incomplete verdict always
+// returns the type's neutral placeholder (no signals, no scores, no
+// summary text that could read as healthy) and the caller always forces
+// `next_step` to 'unclear'; only a complete verdict runs the real report
+// builder. Every caller — POST and every GET reconstruction, for all three
+// types — goes through this one path, never a bespoke per-type helper.
+const PARTIAL_RESULT = { pest: PEST_PARTIAL_RESULT, lawn: LAWN_PARTIAL_RESULT, tree_shrub: TREE_PARTIAL_RESULT };
+
+function finalizeCustomerResult(type, { complete, build }) {
+  if (!complete) return { result: PARTIAL_RESULT[type], unclear: true };
+  return { result: build(), unclear: false };
 }
 
 // ── Tree & shrub ─────────────────────────────────────────────────────────
@@ -746,17 +828,25 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
   // must not let the successfully-scored subset present as a complete read.
   const partial = preview.scoredCount != null && preview.photoCount != null
     && preview.scoredCount < preview.photoCount;
-  // codex GH r1 P1: toCategoryScores normalizes a MISSING severity field to
-  // 'none' (the healthiest reading) rather than null, so a vision response
-  // that's valid JSON but omits pest/disease/water-heat entirely still
-  // produces three scores of 95 and a healthy-looking overallScore — the
-  // `overall == null` check below can never catch this (those three fields
-  // are never actually null). foliageFullness/leafColorVigor are the only
-  // two fields toCategoryScores leaves genuinely null when absent (no
-  // synthetic default exists for them), so both being null is the signal
-  // that this response carried little to no real evidence.
-  const synthesized = preview.scores?.foliageFullness == null && preview.scores?.leafColorVigor == null;
-  const unreliable = partial || synthesized;
+  // codex GH r1 P1 (narrower predecessor of the r2-cloud fix below):
+  // toCategoryScores normalizes a MISSING severity field to 'none' (the
+  // healthiest reading) rather than null, so a vision response that's valid
+  // JSON but omits pest/disease/water-heat entirely still produced three
+  // scores of 95 and a healthy-looking overallScore.
+  //
+  // codex GH r2 (cloud) P1: nulling those three scores (previewTreeShrubWithEvidence,
+  // above) stopped the false-healthy NUMBER, but buildTreeShrubTechFindings'
+  // own aiSummary still said "No urgent visible plant issues found" for a
+  // 'tracking' (never-assessed) category, because tracking isn't a
+  // "finding" either — fixed at the source in tree-shrub-assessment.js, but
+  // the ROUTE also needs to know a tracking category happened at all, to
+  // suppress the whole result and force `unclear`, the same way `partial`
+  // does. `preview.trackingCount` (buildTreeShrubTechFindings' own tally of
+  // buildTreeShrubVisualCategories' 5 categories) already answers this for
+  // ALL five dimensions in one place — the two numeric fields (the r1 fix's
+  // narrower case) AND any of the three severity fields nulled above.
+  const anyTracking = (preview.trackingCount || 0) > 0;
+  const unreliable = partial || anyTracking;
 
   const [row] = await db('tree_shrub_assessments').insert({
     customer_id: req.customer.id,
@@ -799,11 +889,15 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
   const kind = (noUsableScores || unreliable) ? 'unclear' : laneOutcomeKind(null, access, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-    prefill: prefillFor('tree_shrub', { location, note }),
+    prefill: prefillFor(null, { location, note }),
+  });
+  const { result: finalTreeResult } = finalizeCustomerResult('tree_shrub', {
+    complete: !noUsableScores && !unreliable,
+    build: () => treeResult,
   });
 
   return res.status(200).json({
-    id: row.id, type: 'tree_shrub', created_at: row.created_at, result: treeResultForResponse(treeResult, unreliable), next_step: nextStep,
+    id: row.id, type: 'tree_shrub', created_at: row.created_at, result: finalTreeResult, next_step: nextStep,
   });
 }
 
@@ -832,8 +926,20 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
       location = body.location;
     }
 
-    const photoInputs = validated.photos.map(splitDataUrl).filter(Boolean);
-    if (!photoInputs.length) return res.status(400).json({ error: 'Photos could not be read.' });
+    const rawPhotoInputs = validated.photos.map(splitDataUrl).filter(Boolean);
+    if (!rawPhotoInputs.length) return res.status(400).json({ error: 'Photos could not be read.' });
+
+    // codex GH r2 (cloud) P1: transcode HEIC/HEIF/nonstandard-jpg to real
+    // JPEG BEFORE any vision call or S3 storage — see normalizePhotoInput's
+    // comment. Every handler shares req._photoInputs, so this runs once here
+    // rather than being duplicated per type.
+    let photoInputs;
+    try {
+      photoInputs = await Promise.all(rawPhotoInputs.map(normalizePhotoInput));
+    } catch (err) {
+      logger.warn(`[photo-id] photo transcode failed: ${err.message}`);
+      return res.status(400).json({ error: 'One of your photos could not be processed. Try a different photo.' });
+    }
     req._photoInputs = photoInputs;
 
     // codex GH r11 P1: strict — a resolution failure here must not silently
@@ -905,8 +1011,13 @@ function pestNextStepKindFromRow(row, access, isSecondary) {
 function lawnRowIsUnreliable(row) {
   const contract = parseJsonSafe(row.report_contract);
   const scores = contract?.result?.scores || {};
+  const signals = contract?.result?.signals || [];
   const noScores = scores.turf_density == null && scores.weed_coverage == null && scores.color_health == null;
-  return noScores || !!contract.partial;
+  // codex GH r2 (cloud) P1 — same "zero signals means unassessed, not
+  // clean" rule as handleLawn's own POST-time check, read back from the
+  // persisted result so a GET reconstructs the identical verdict.
+  const signalsUnassessed = signals.length === 0;
+  return noScores || signalsUnassessed || !!contract.partial;
 }
 
 function lawnNextStepKindFromRow(row, access, isSecondary) {
@@ -988,13 +1099,15 @@ router.get('/:type/:id', async (req, res, next) => {
       const pestResult = pestPublicResult(contract);
       const idLabel = publicIdentificationLabel(contract);
       const partial = !!parseJsonSafe(row.ai_analysis).partial;
-      const kind = pestNextStepKind(pestResult, idLabel, pestReserviceLane(contract), access, partial, scope.isSecondary);
+      const lane = pestReserviceLane(contract);
+      const kind = pestNextStepKind(pestResult, idLabel, lane, access, partial, scope.isSecondary);
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-        prefill: prefillFor('pest', { location: row.location, note: row.note }),
+        prefill: prefillFor(lane, { location: row.location, note: row.note }),
       });
+      const { result: finalPestResult } = finalizeCustomerResult('pest', { complete: !partial, build: () => pestResult });
       return res.status(200).json({
-        id: row.id, type: 'pest', created_at: row.created_at, result: pestResultForResponse(pestResult, partial), next_step: nextStep,
+        id: row.id, type: 'pest', created_at: row.created_at, result: finalPestResult, next_step: nextStep,
       });
     }
 
@@ -1007,8 +1120,9 @@ router.get('/:type/:id', async (req, res, next) => {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
         prefill: prefillFor('lawn', { location: row.location, note: row.note }),
       });
+      const { result: finalLawnResult } = finalizeCustomerResult('lawn', { complete: !lawnUnreliable, build: () => lawnResult });
       return res.status(200).json({
-        id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResultForResponse(lawnResult, lawnUnreliable), next_step: nextStep,
+        id: row.id, type: 'lawn', created_at: row.created_at, result: finalLawnResult, next_step: nextStep,
       });
     }
 
@@ -1022,10 +1136,14 @@ router.get('/:type/:id', async (req, res, next) => {
     const kind = treeNextStepKindFromRow(row, access, scope.isSecondary);
     const nextStep = buildNextStep(kind, {
       url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-      prefill: prefillFor('tree_shrub', { location: row.location, note: row.note }),
+      prefill: prefillFor(null, { location: row.location, note: row.note }),
+    });
+    const { result: finalTreeResult } = finalizeCustomerResult('tree_shrub', {
+      complete: !treeShrubIsUnreliable(row),
+      build: () => treeResult,
     });
     return res.status(200).json({
-      id: row.id, type: 'tree_shrub', created_at: row.created_at, result: treeResultForResponse(treeResult, treeShrubIsUnreliable(row)), next_step: nextStep,
+      id: row.id, type: 'tree_shrub', created_at: row.created_at, result: finalTreeResult, next_step: nextStep,
     });
   } catch (err) {
     return next(err);
