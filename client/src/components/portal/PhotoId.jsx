@@ -144,19 +144,33 @@ function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
 
 // =========================================================================
 // Gate hook — single GET /api/photo-id, shared by the FAB and the More sheet.
+//
+// `sessionKey` should be something that changes whenever the authorized
+// account does — PortalPage passes its `sessionEpoch` from useAuth (already
+// bumped on login, refresh-family rotation, AND a saved-property switch,
+// since a property can belong to a different customerId). PortalPage itself
+// never remounts on those changes, so without this the gate would otherwise
+// keep serving the PREVIOUS account's availability/history (Codex r5 P1).
 // =========================================================================
-export function usePhotoIdGate() {
+export function usePhotoIdGate(sessionKey) {
   // 'loading' | 'available' | 'unavailable'
   const [status, setStatus] = useState('loading');
   const [items, setItems] = useState([]);
+  // Bumped every time sessionKey changes so a response still in flight from
+  // the PREVIOUS account/session — including one kicked off by an external
+  // refresh() call — is discarded instead of being applied here.
+  const genRef = useRef(0);
 
   const refresh = useCallback(() => {
+    const myGen = genRef.current;
     return api.getPhotoIds()
       .then((d) => {
+        if (genRef.current !== myGen) return;
         setItems(Array.isArray(d?.items) ? d.items : []);
         setStatus('available');
       })
       .catch((err) => {
+        if (genRef.current !== myGen) return;
         if (err?.status === 404) {
           setStatus('unavailable');
           setItems([]);
@@ -171,7 +185,14 @@ export function usePhotoIdGate() {
       });
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    // A new session/account: invalidate anything the old one had in flight,
+    // fail closed while the new read is pending, then ask again.
+    genRef.current += 1;
+    setStatus('loading');
+    setItems([]);
+    refresh();
+  }, [refresh, sessionKey]);
 
   return { status, items, refresh };
 }

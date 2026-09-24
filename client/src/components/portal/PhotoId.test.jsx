@@ -440,3 +440,31 @@ describe('stale-flow safety (Codex r1 P1s)', () => {
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
   });
 });
+
+describe('session/account switching (Codex r5 P1)', () => {
+  // PortalPage passes its `sessionEpoch` (bumped on login and on a
+  // saved-property switch, since a property can belong to a different
+  // customerId) as the gate's sessionKey — PortalPage itself never remounts
+  // on those changes.
+  function KeyedHarness({ sessionKey }) {
+    const gate = usePhotoIdGate(sessionKey);
+    return <div>status:{gate.status} items:{gate.items.map((i) => i.headline).join(',') || 'none'}</div>;
+  }
+
+  it('re-fetches on a sessionKey change and discards a stale response from the previous account', async () => {
+    let resolveFirst;
+    api.getPhotoIds.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
+    const { rerender } = render(<KeyedHarness sessionKey={1} />);
+    await screen.findByText('status:loading items:none');
+
+    // Switch account/session BEFORE the first (account A) request resolves.
+    api.getPhotoIds.mockResolvedValueOnce({ items: [{ id: 'b1', type: 'pest', created_at: '2026-09-01T00:00:00Z', headline: 'Account B item' }] });
+    rerender(<KeyedHarness sessionKey={2} />);
+    await screen.findByText('status:available items:Account B item');
+
+    // The abandoned account-A response finally arrives — must not overwrite B's data.
+    resolveFirst({ items: [{ id: 'a1', type: 'pest', created_at: '2026-09-01T00:00:00Z', headline: 'Account A item' }] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('status:available items:Account B item')).toBeInTheDocument();
+  });
+});

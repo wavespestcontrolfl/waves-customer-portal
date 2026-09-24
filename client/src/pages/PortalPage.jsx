@@ -16258,7 +16258,7 @@ export default function PortalPage() {
   // the feature is live (404 hides both). reportIssuePrefill carries the
   // category/location/note/photos a "Request service" next-step hands to
   // the New Request form.
-  const photoIdGate = usePhotoIdGate();
+  const photoIdGate = usePhotoIdGate(sessionEpoch);
   const [showPhotoId, setShowPhotoId] = useState(false);
   const [reportIssuePrefill, setReportIssuePrefill] = useState(null);
   const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount;
