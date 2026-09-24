@@ -11266,32 +11266,38 @@ export function CompletionPanel({
     // the report map cannot render them this visit, so counting them as
     // checked would publish typed counts the customer-visible map can't
     // show. Re-pinning (a move) brings a stale station back into the counts.
-    // On inspection_only, a preloaded pin also needs an explicit tap or
-    // move to count — the zero-tap default is not itself an inspection
-    // (codex round-8 P1: the typed stations_checked count still claimed
-    // every visible station on a partial inspection, contradicting the
-    // filtered termiteStations payload and overriding the customer report's
-    // own mismatch guard with the inflated typed number). A newly placed
-    // pin is inherently explicit regardless of outcome.
-    const isInspectionOnly = visitOutcome === "inspection_only";
     const activeKeys = [
       ...stationPreloads
         .filter((station) => !stationRetired.includes(station.id)
-          && (station.shape || stationMoves[station.id])
-          && (!isInspectionOnly || stationMoves[station.id]
-            || Object.prototype.hasOwnProperty.call(stationStatuses, station.id)))
+          && (station.shape || stationMoves[station.id]))
         .map((station) => station.id),
       ...stationNew.map((station) => station.key),
     ];
+    // On inspection_only, the VISIT-SPECIFIC counts (checked / inaccessible
+    // / activity) also need an explicit tap or move — the zero-tap default
+    // is not itself an inspection (codex round-8 P1: stations_checked still
+    // claimed every visible station on a partial inspection, contradicting
+    // the filtered termiteStations payload). total_stations stays the full
+    // property pin count regardless of outcome — it is the map's roster
+    // size, not a visit result, and narrowing it too made the report's
+    // partial-inspection denominator disappear along with the numerator
+    // (codex round-9 P1). A newly placed pin is inherently explicit
+    // regardless of outcome.
+    const isInspectionOnly = visitOutcome === "inspection_only";
+    const checkedKeys = isInspectionOnly
+      ? activeKeys.filter((key) => stationMoves[key]
+        || stationNew.some((station) => station.key === key)
+        || Object.prototype.hasOwnProperty.call(stationStatuses, key))
+      : activeKeys;
     const statusOf = (key) => stationStatuses[key] || "ok";
-    const inaccessible = activeKeys.filter((key) => statusOf(key) === "inaccessible").length;
+    const inaccessible = checkedKeys.filter((key) => statusOf(key) === "inaccessible").length;
     // Each program maps to ITS schema's count keys — never auto-write a key
     // the schema doesn't own, or submit validation rejects the unknown
     // field. Trapping owns traps_checked only: captures is a tech-judgment
     // count (one trap can hold multiple captures), and the schema has no
     // total/inaccessible keys.
     const counts = stationProgram === "trapping"
-      ? { traps_checked: String(activeKeys.length - inaccessible) }
+      ? { traps_checked: String(checkedKeys.length - inaccessible) }
       : {
         // total_stations is termite-only since 2026-07-23: the rodent
         // schema retired it (the map's pins ARE the roster), and writing it
@@ -11300,12 +11306,12 @@ export function CompletionPanel({
         ...(stationProgram === "termite"
           ? { total_stations: String(activeKeys.length) }
           : {}),
-        stations_checked: String(activeKeys.length - inaccessible),
+        stations_checked: String(checkedKeys.length - inaccessible),
         stations_inaccessible: String(inaccessible),
         // Only the termite schema carries a per-station activity COUNT; the
         // rodent flow records consumption as a select (tech judgment).
         ...(stationProgram === "termite"
-          ? { stations_with_activity: String(activeKeys.filter((key) => statusOf(key) === "activity").length) }
+          ? { stations_with_activity: String(checkedKeys.filter((key) => statusOf(key) === "activity").length) }
           : {}),
       };
     // Snapshot the last auto-written values BEFORE scheduling the state
