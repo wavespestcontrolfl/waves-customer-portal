@@ -1609,7 +1609,7 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
     expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-live' });
   });
 
-  test('local audit P1: live wins never crowd out a dead one — the dead filter runs before the LIMIT', async () => {
+  test('local audit P1: live wins never starve a dead one — the last_reconciled_at cursor reaches it within ceil(rows/limit) ticks', async () => {
     const live = Array.from({ length: 5 }, (_, i) => ({ id: `sale-live-${i}`, status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: `cust-${i}` }));
     const fakeDb = install({
       scheduled_services: [
@@ -1622,9 +1622,28 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
         { id: 'co-dead', scheduled_service_id: 'visit-1', customer_id: 'cust-x', outcome: 'won', won_at: new Date('2026-09-19T15:00:00Z'), won_evidence_booking_id: 'sale-dead', pre_win_outcome: 'warm' },
       ],
     });
-    const result = await reconcileOpenConsultationOutcomes({ now: NOW, limit: 2 });
-    expect(result.reopened).toBe(1);
+    let reopened = 0;
+    for (let tick = 0; tick < 3; tick += 1) {
+       
+      reopened += (await reconcileOpenConsultationOutcomes({ now: new Date(NOW.getTime() + tick * 3600e3), limit: 2 })).reopened;
+    }
+    expect(reopened).toBe(1);
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-dead').outcome).toBe('warm');
+  });
+
+  test('local audit P1: a win booking edited into a free re-service (not cancelled) is reopened too', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1', is_callback: true, estimated_price: '0.00' },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.reopened).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'warm', won_evidence_booking_id: null });
   });
 
   test('a live evidence booking, or a win with no recorded evidence, is left won', async () => {

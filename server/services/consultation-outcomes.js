@@ -1013,8 +1013,10 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
 }
 
 // Codex #4710 r3 P1: a booking win stays `won` only while the booking behind
-// it is still a live sale. When that booking is later cancelled, skipped or
-// no-showed (or deleted), the row returns to the outcome it had before the
+// it is still a real sale by isQualifyingSaleBooking (and not an
+// assessment). When that booking is later cancelled, skipped, no-showed,
+// deleted, or edited into a free visit, surviving in-window evidence
+// re-points the win; otherwise the row returns to the outcome it had before the
 // win (pre_win_outcome, warm when unknown) and the ordinary win pass can then
 // re-judge it against whatever evidence still stands. Each reopen is a
 // guarded UPDATE keyed on the same evidence id, so a row re-won meanwhile by
@@ -1023,16 +1025,14 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
   result.reopened = 0;
   let rows;
   try {
-    // Dead-or-missing evidence is filtered BEFORE the LIMIT (local audit
-    // P1): a LIMIT over every evidence-backed win would re-read the same
-    // newest live wins each tick and never reach an older dead one.
+    // Every evidence-backed win is re-judged in turn, least recently
+    // examined first (last_reconciled_at NULLS FIRST, the same fairness
+    // cursor the win pass uses), so a batch LIMIT can never starve an older
+    // win (local audit P1).
     rows = await db('consultation_outcomes as co')
       .where('co.outcome', 'won')
       .whereNotNull('co.won_evidence_booking_id')
-      .whereNotIn('co.won_evidence_booking_id', function liveBookings() {
-        this.select('id').from('scheduled_services').whereNotIn('status', DEAD_CONSULTATION_STATUSES);
-      })
-      .orderBy('co.won_at', 'asc')
+      .orderBy([{ column: 'co.last_reconciled_at', order: 'asc', nulls: 'first' }, { column: 'co.won_at', order: 'asc' }])
       .limit(limit)
       .select('co.id', 'co.customer_id', 'co.scheduled_service_id', 'co.won_evidence_booking_id', 'co.pre_win_outcome');
   } catch (err) {
@@ -1045,6 +1045,22 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
        
       const changed = await db.transaction(async (locked) => {
         if (row.customer_id) await lockCustomerRow(locked, row.customer_id);
+        // The win's booking still has to be a real sale by the SAME rule the
+        // win pass applies (local audit P1) — not merely uncancelled: an
+        // office edit can turn a priced booking into a free re-service
+        // (is_callback, $0) without cancelling it.
+        const evidenceBooking = await locked('scheduled_services')
+          .where({ id: row.won_evidence_booking_id })
+          .first(
+            'id', 'service_type', 'service_id', 'status', 'source_action', 'customer_confirmed',
+            'is_callback', 'recurring_parent_id', 'followup_included', 'estimated_price',
+            'annual_prepay_term_id', 'is_recurring', 'create_invoice_on_complete',
+          );
+        if (evidenceBooking && isQualifyingSaleBooking(evidenceBooking)
+          && !(await isAssessmentBooking(evidenceBooking, locked))) {
+          await locked('consultation_outcomes').where({ id: row.id }).update({ last_reconciled_at: now });
+          return 0;
+        }
         // Surviving evidence first (local audit P1): the win pass below only
         // selects consultations inside the sweep's selection window, so an
         // old consultation must be re-judged HERE, against its own 90-day
@@ -1063,6 +1079,7 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
             won_at: evidence.won_at,
             won_via: evidence.won_via,
             won_evidence_booking_id: evidence.booking_id || null,
+            last_reconciled_at: now,
             updated_at: now,
           });
         }
@@ -1072,6 +1089,7 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
           won_via: null,
           won_evidence_booking_id: null,
           pre_win_outcome: null,
+          last_reconciled_at: now,
           updated_at: now,
         });
       });
