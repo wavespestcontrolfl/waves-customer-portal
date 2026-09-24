@@ -322,8 +322,14 @@ async function sendCustomerMessageCore(input) {
     providerPreSendCheck,
     withSmsHandoff,
     withProviderHandoff,
+    providerHandoffReservation: suppliedProviderHandoffReservation,
     ...inputRest
   } = input;
+  const providerCoordination = require('./provider-handoff-reservation');
+  if (isEnabled('smsGratitudeReplies')
+    && providerCoordination.isProviderHandoffHandle(suppliedProviderHandoffReservation)) {
+    providerHandoffReservation = suppliedProviderHandoffReservation;
+  }
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
   // Request lifecycle email companions have no text leg. Keep their App
@@ -752,9 +758,9 @@ async function sendCustomerMessageCore(input) {
   // re-check the window without another opaque caller await or a DB lock.
   providerPreparationCheck.isStillValid = () => checkSendWindow(sendInput, policy, contactState)?.ok === true;
 
-  const providerCoordination = require('./provider-handoff-reservation');
   let providerCoordinationBlock = null;
-  if (providerCoordination.canonicalCoordinationApplies(input, { providerPreSendCheck, withSmsHandoff })) {
+  if (!providerHandoffReservation
+    && providerCoordination.canonicalCoordinationApplies(input, { providerPreSendCheck, withSmsHandoff })) {
     try {
       const TwilioService = require('../twilio');
       const frozenFromNumber = sendInput.metadata?.fromNumber || await TwilioService.deriveOutboundNumber({
@@ -767,6 +773,7 @@ async function sendCustomerMessageCore(input) {
         fromNumber: frozenFromNumber,
         body: sendInput.body,
         messageType: sendInput.metadata?.original_message_type || mapPurposeToMessageType(sendInput.purpose),
+        adminUserId: sendInput.metadata?.adminUserId,
       });
       if (prepared.blocked) {
         providerCoordinationBlock = {
@@ -879,7 +886,7 @@ async function sendCustomerMessageCore(input) {
       identityTrust: resolvedTrust,
       providerOutcome: null,
     });
-    return {
+    return providerCoordination.attachReservationContext(providerHandoffReservation, {
       sent: false,
       blocked: true,
       deliveryOutcome: providerOutcome.deliveryOutcome,
@@ -891,7 +898,7 @@ async function sendCustomerMessageCore(input) {
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
-    };
+    });
   }
 
   await recordReceiptSmsDelivery(sendInput, providerOutcome);
@@ -970,7 +977,7 @@ async function sendCustomerMessageCore(input) {
   // blocking: the text is already out.
   await recordPromiseEvidenceFallback(sendInput, providerOutcome, audit);
 
-  return {
+  return providerCoordination.attachReservationContext(providerHandoffReservation, {
     sent: true,
     blocked: false,
     deliveryOutcome: providerOutcome.deliveryOutcome,
@@ -983,7 +990,7 @@ async function sendCustomerMessageCore(input) {
     ...((withheldLinksRewritten || providerOutcome.withheldLinksRewritten)
       ? { withheldLinksRewritten: withheldLinksRewritten || providerOutcome.withheldLinksRewritten }
       : {}),
-  };
+  });
   } catch (err) {
     if (providerHandoffReservation) {
       const providerCoordination = require('./provider-handoff-reservation');
@@ -992,6 +999,10 @@ async function sendCustomerMessageCore(input) {
     }
     // A recursive fallback may already carry its more specific outcome.
     if (!err.providerOutcome) err.providerOutcome = providerOutcome;
+    if (providerHandoffReservation) {
+      require('./provider-handoff-reservation')
+        .attachReservationContext(providerHandoffReservation, err.providerOutcome);
+    }
     throw err;
   }
 }

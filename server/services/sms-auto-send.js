@@ -458,6 +458,14 @@ async function maybeAutoSend(params = {}) {
     }
     let result;
     try {
+      const providerHandoffReservation = require('./messaging/provider-handoff-reservation')
+        .borrowProviderHandoffReservation({
+          reservationId: claim.reservationId,
+          to: claim.toPhone,
+          fromNumber: claim.fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+          body: reply,
+          messageType: AUTOSEND_MESSAGE_TYPE,
+        });
       result = await sendCustomerMessage({
         to: claim.toPhone,
         body: reply,
@@ -472,6 +480,7 @@ async function maybeAutoSend(params = {}) {
         // texted into an active thread — the send class the window
         // deliberately never defers.
         conversationalContext: true,
+        providerHandoffReservation,
         metadata: {
           original_message_type: AUTOSEND_MESSAGE_TYPE,
           agentDecisionId: claim.decisionId,

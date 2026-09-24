@@ -788,6 +788,7 @@ const TwilioService = {
             fromNumber,
             body,
             messageType: options.messageType || 'manual',
+            adminUserId: options.adminUserId,
           });
         } catch {
           return {

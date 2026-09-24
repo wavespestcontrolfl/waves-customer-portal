@@ -12,7 +12,9 @@ jest.mock('../utils/recruiting-thread-scope', () => {
   const real = jest.requireActual('../utils/recruiting-thread-scope');
   return { ...real, isRecruitingPhone: jest.fn(async () => false) };
 });
-jest.mock('../services/twilio', () => ({}));
+jest.mock('../services/twilio', () => ({
+  deriveOutboundNumber: jest.fn(async () => '+19413529161'),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -85,7 +87,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),
   parkThreadSuggestions: jest.fn(async () => []),
-  createReplyHoldingReservation: jest.fn(async () => 'resv-1'),
+  createReplyHoldingReservation: jest.fn(async () => '44444444-4444-4444-8444-444444444444'),
   settleReplyHoldingReservation: jest.fn(async () => true),
   reopenScheduledSuggestions: jest.fn(async () => 0),
   ignoreParkedSuggestions: jest.fn(async () => 0),
@@ -219,7 +221,7 @@ function makeUniversalBuilder() {
   for (const m of ['where', 'whereNull', 'whereNot', 'whereIn', 'whereRaw', 'leftJoin', 'join', 'joinRaw', 'select', 'orderBy', 'groupBy', 'distinct', 'limit', 'offset', 'insert', 'update', 'onConflict', 'ignore', 'merge', 'count']) {
     b[m] = jest.fn(chain);
   }
-  b.returning = jest.fn(() => Promise.resolve([{ id: 'resv-1' }]));
+  b.returning = jest.fn(() => Promise.resolve([{ id: '44444444-4444-4444-8444-444444444444' }]));
   b.first = jest.fn(() => Promise.resolve(null));
   b.del = jest.fn(() => Promise.resolve(1));
   b.pluck = jest.fn(() => Promise.resolve([]));
@@ -1746,7 +1748,7 @@ describe('admin communications SMS route', () => {
       expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledWith(db, expect.objectContaining({
         parkedDecisionIds: ['parked-1'],
       }));
-      expect(suggestMode.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: 'resv-1', uncertain: true });
+      expect(suggestMode.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: '44444444-4444-4444-8444-444444444444', uncertain: true });
       expect(suggestMode.reopenScheduledSuggestions).not.toHaveBeenCalled();
     });
   });
@@ -1823,6 +1825,22 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('sender lookup failure stays retryable before reservation or provider entry', async () => {
+    db.mockImplementation(() => makeUniversalBuilder());
+    require('../services/twilio').deriveOutboundNumber.mockRejectedValueOnce(new Error('db down'));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Hi there' }),
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ retryable: true, code: 'PROVIDER_HANDOFF_PREPARATION_FAILED' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+  });
+
   test('a gate-on manual send without fromNumber reserves and still sends (no 503)', async () => {
     // Regression: the reservation insert must resolve a non-null from_phone
     // without referencing an out-of-scope customer. With the gate on and no
@@ -1840,6 +1858,13 @@ describe('admin communications SMS route', () => {
 
       expect(res.status).toBe(200);
       expect(sendCustomerMessage).toHaveBeenCalled();
+      const sentInput = sendCustomerMessage.mock.calls[0][0];
+      expect(require('../services/messaging/provider-handoff-reservation')
+        .isProviderHandoffHandle(sentInput.providerHandoffReservation)).toBe(true);
+      expect(sentInput.providerHandoffReservation.context).toMatchObject({
+        fromNumber: '+19413529161', to: '+15551234567', body: 'Hi there', messageType: 'manual',
+      });
+      expect(sentInput.metadata.fromNumber).toBe('+19413529161');
     });
   });
 
@@ -2239,7 +2264,7 @@ describe('Communications review ask serialization', () => {
     reviews.releaseInlineClaim.mockReset().mockResolvedValue(undefined);
     sendCustomerMessage.mockReset().mockResolvedValue({ sent: true, providerMessageId: 'SM-test' });
     suggestMode.parkThreadSuggestions.mockReset().mockResolvedValue([]);
-    suggestMode.createReplyHoldingReservation.mockReset().mockResolvedValue('resv-1');
+    suggestMode.createReplyHoldingReservation.mockReset().mockResolvedValue('44444444-4444-4444-8444-444444444444');
     suggestMode.settleReplyHoldingReservation.mockReset().mockResolvedValue(true);
     suggestMode.reopenScheduledSuggestions.mockReset().mockResolvedValue(0);
     suggestMode.ignoreParkedSuggestions.mockReset().mockResolvedValue(0);
@@ -2274,7 +2299,7 @@ describe('Communications review ask serialization', () => {
           selected = {
             ...values,
             metadata: typeof values.metadata === 'string' ? JSON.parse(values.metadata) : values.metadata,
-            id: `resv-${reservations.length + 1}`,
+            id: `00000000-0000-4000-8000-${String(reservations.length + 1).padStart(12, '0')}`,
           };
           reservations.push(selected);
           b.returning.mockResolvedValue([{ id: selected.id }]);
@@ -2462,11 +2487,11 @@ describe('Communications review ask serialization', () => {
     });
     // The claimed-link seam now reserves BEFORE dispatchReviewAsk's own
     // spacing check runs, and passes excludeReservationId so this same
-    // attempt's own row (the default builder always returns id 'resv-1')
+    // attempt's own row (the default builder always returns id '44444444-4444-4444-8444-444444444444')
     // doesn't self-block it — a later request (no exclude, or a different
     // id) still sees it as durable spacing evidence.
     history.lastManualAskAt.mockImplementation(async (_customerId, opts = {}) =>
-      (reserved && opts.excludeReservationId !== 'resv-1') ? new Date() : null);
+      (reserved && opts.excludeReservationId !== '44444444-4444-4444-8444-444444444444') ? new Date() : null);
     sendCustomerMessage.mockImplementation(async () => {
       expect(reserved).toBe(true);
       if (mode.includes('throw')) throw Object.assign(new Error('audit unavailable'), { providerOutcome: { sent: true, providerMessageId: 'SM-accepted' } });

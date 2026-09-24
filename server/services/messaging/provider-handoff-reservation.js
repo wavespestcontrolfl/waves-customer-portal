@@ -6,6 +6,22 @@ const { isEnabled } = require('../../config/feature-gates');
 
 const handles = new WeakSet();
 const GRATITUDE_RESERVATION_OWNER = Symbol('gratitude_reservation_owner');
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function createHandle({ reservationId, to, fromNumber, body, messageType, adminUserId = null, callerOwned = false }) {
+  const handle = {
+    reservationId,
+    context: { to: normalizeRecipient(to), fromNumber, body, messageType, adminUserId, metadata: {} },
+    deliveryOutcome: 'not_sent',
+    providerMessageId: null,
+    finalized: false,
+    acceptedPromoted: false,
+    settlementPromise: null,
+    callerOwned,
+  };
+  handles.add(handle);
+  return handle;
+}
 
 function threadLast10(value) {
   return String(value || '').replace(/\D/g, '').slice(-10) || null;
@@ -48,7 +64,7 @@ function directCoordinationApplies({ messageType, reservationOwner = null } = {}
 }
 
 async function prepareProviderHandoffReservation({
-  to, customerId = null, fromNumber, body, messageType,
+  to, customerId = null, fromNumber, body, messageType, adminUserId = null,
 } = {}) {
   const normalizedTo = normalizeRecipient(to);
   const last10 = threadLast10(normalizedTo);
@@ -64,23 +80,37 @@ async function prepareProviderHandoffReservation({
       fromNumber,
       body,
       messageType,
+      adminUserId: UUID_RE.test(String(adminUserId || '')) ? adminUserId : null,
       reservationKind: 'provider_handoff',
       uncertain: true,
     });
     if (!reservationId) throw new Error('provider handoff reservation was not created');
     return { reservationId };
   });
-  const handle = {
+  const handle = createHandle({
     reservationId: prepared.reservationId,
-    context: { to: normalizedTo, fromNumber, body, messageType, metadata: {} },
-    deliveryOutcome: 'not_sent',
-    providerMessageId: null,
-    finalized: false,
-    acceptedPromoted: false,
-    settlementPromise: null,
-  };
-  handles.add(handle);
+    to: normalizedTo,
+    fromNumber,
+    body,
+    messageType,
+    adminUserId: UUID_RE.test(String(adminUserId || '')) ? adminUserId : null,
+  });
   return { handle };
+}
+
+function borrowProviderHandoffReservation({
+  reservationId, to, fromNumber, body, messageType, adminUserId = null,
+} = {}) {
+  if (!UUID_RE.test(String(reservationId || '')) || !threadLast10(to) || !fromNumber) return null;
+  return createHandle({
+    reservationId,
+    to,
+    fromNumber,
+    body,
+    messageType,
+    adminUserId: UUID_RE.test(String(adminUserId || '')) ? adminUserId : null,
+    callerOwned: true,
+  });
 }
 
 function isProviderHandoffHandle(value) {
@@ -110,8 +140,20 @@ function recordProviderOutcome(handle, outcome = {}) {
   }
 }
 
+function attachReservationContext(handle, outcome) {
+  if (!isProviderHandoffHandle(handle) || !handle.callerOwned
+    || !outcome || (typeof outcome !== 'object' && typeof outcome !== 'function')) return outcome;
+  Object.defineProperty(outcome, 'reservationContext', {
+    value: handle.context,
+    enumerable: false,
+    configurable: true,
+  });
+  return outcome;
+}
+
 function settleProviderHandoffReservation(handle) {
   if (!isProviderHandoffHandle(handle) || handle.finalized) return Promise.resolve(true);
+  if (handle.callerOwned) return Promise.resolve(true);
   if (handle.settlementPromise) return handle.settlementPromise;
 
   const pending = (async () => {
@@ -120,15 +162,21 @@ function settleProviderHandoffReservation(handle) {
       let settled;
       if (handle.deliveryOutcome === 'accepted') {
         if (!handle.acceptedPromoted) {
-          const promoted = await suggest.settleReplyHoldingReservation({
-            reservationId: handle.reservationId,
-            acceptedResult: {
-              sent: true,
-              deliveryOutcome: 'accepted',
-              providerMessageId: handle.providerMessageId,
-              reservationContext: handle.context,
-            },
-          });
+          let promoted = false;
+          for (let attempt = 1; attempt <= 2 && !promoted; attempt += 1) {
+            promoted = await suggest.settleReplyHoldingReservation({
+              reservationId: handle.reservationId,
+              acceptedResult: {
+                sent: true,
+                deliveryOutcome: 'accepted',
+                providerMessageId: handle.providerMessageId,
+                reservationContext: handle.context,
+              },
+            });
+            if (!promoted && attempt === 1) {
+              logger.warn(`[provider-handoff] retrying accepted reservation promotion (${handle.reservationId})`);
+            }
+          }
           if (!promoted) {
             logger.warn(`[provider-handoff] accepted reservation promotion failed (${handle.reservationId})`);
             return false;
@@ -158,9 +206,11 @@ module.exports = {
   trustedGratitudeOwnsReservation,
   gratitudeReservationOwner,
   prepareProviderHandoffReservation,
+  borrowProviderHandoffReservation,
   isProviderHandoffHandle,
   captureProviderContext,
   recordProviderOutcome,
+  attachReservationContext,
   settleProviderHandoffReservation,
   normalizeRecipient,
 };

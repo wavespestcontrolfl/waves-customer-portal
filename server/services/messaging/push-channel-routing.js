@@ -472,7 +472,9 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       return { delivered: false, deliveryOutcome: 'not_sent' };
     }
     deliveryOutcome = 'accepted';
-    const acceptedAt = new Date();
+    const acceptedAt = appNotification?.push?.deduped
+      ? new Date(appNotification.push.acceptedAt)
+      : new Date();
     if (appNotification?.push?.deduped) return {
       delivered: true, deliveryOutcome, sid: `push:${appNotification.id}`,
       notificationId: String(appNotification.id), acceptedAt,

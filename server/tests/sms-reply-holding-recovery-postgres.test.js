@@ -109,9 +109,10 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
   }
 
   test('provider coordination preserves exact accepted SMS evidence when the ordinary provider row is missing', async () => {
+    const adminUserId = randomUUID();
     const prepared = await providerCoordination.prepareProviderHandoffReservation({
       to: '(202) 555-0101', fromNumber: '+19413529161', body: 'Draft body',
-      messageType: 'estimate_service_details',
+      messageType: 'estimate_service_details', adminUserId,
     });
     expect(prepared.blocked).not.toBe(true);
     const reservedAt = new Date(Date.now() - 10000);
@@ -132,7 +133,7 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     const row = await trx('sms_log').where({ id: prepared.handle.reservationId }).first();
     expect(row).toMatchObject({
       from_phone: '+19413529161', to_phone: '+12025550101', message_body: 'Final normalized body',
-      message_type: 'estimate_service_details', status: 'sent', twilio_sid: sid,
+      message_type: 'estimate_service_details', status: 'sent', twilio_sid: sid, admin_user_id: adminUserId,
     });
     expect(row.created_at.getTime()).toBe(providerAcceptedAt.getTime());
     expect(row.created_at.getTime()).toBeGreaterThan(inboundAt.getTime());
@@ -142,7 +143,44 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     });
   });
 
-  test('a failed accepted promotion remains retryable and succeeds on the next settlement', async () => {
+  test('a caller-owned reservation is borrowed without duplication and receives the actual provider context', async () => {
+    const adminUserId = randomUUID();
+    const reservationId = await suggest.createReplyHoldingReservation(trx, {
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Draft body',
+      messageType: 'manual', adminUserId, reservationKind: 'manual', uncertain: true,
+    });
+    const handle = providerCoordination.borrowProviderHandoffReservation({
+      reservationId, to: '+12025550101', fromNumber: '+19413529161', body: 'Draft body',
+      messageType: 'manual', adminUserId,
+    });
+    const providerAcceptedAt = new Date(Date.now() - 1000);
+    providerCoordination.captureProviderContext(handle, {
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Final normalized body',
+      messageType: 'manual', channel: 'sms', providerAcceptedAt,
+    });
+    const sid = `SM${'d'.repeat(32)}`;
+    providerCoordination.recordProviderOutcome(handle, {
+      deliveryOutcome: 'accepted', providerMessageId: sid, channel: 'sms',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(true);
+    expect(await trx('sms_log').where({ id: reservationId }).first('status')).toMatchObject({ status: 'sending' });
+
+    const acceptedResult = providerCoordination.attachReservationContext(handle, {
+      sent: true, deliveryOutcome: 'accepted', providerMessageId: sid,
+    });
+    expect(Object.keys(acceptedResult)).not.toContain('reservationContext');
+    expect(await suggest.settleReplyHoldingReservation({ reservationId, acceptedResult })).toBe(true);
+
+    const rows = await trx('sms_log').where({ to_phone: '+12025550101' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: reservationId, status: 'sent', twilio_sid: sid, message_body: 'Final normalized body',
+      from_phone: '+19413529161', message_type: 'manual', admin_user_id: adminUserId,
+    });
+    expect(rows[0].created_at.getTime()).toBe(providerAcceptedAt.getTime());
+  });
+
+  test('a failed accepted promotion retries inside the shared settlement attempt', async () => {
     const handle = await acceptedProviderHandle('Retry accepted promotion');
     const realSettle = suggest.settleReplyHoldingReservation;
     const settleSpy = jest.spyOn(suggest, 'settleReplyHoldingReservation');
@@ -155,10 +193,9 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
       return realSettle(input);
     });
     try {
-      expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(false);
-      expect(await trx('sms_log').where({ id: handle.reservationId }).first('status')).toMatchObject({ status: 'sending' });
       expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(true);
       expect(await trx('sms_log').where({ id: handle.reservationId }).first('status')).toMatchObject({ status: 'sent' });
+      expect(settleSpy).toHaveBeenCalledTimes(3);
     } finally {
       settleSpy.mockRestore();
     }

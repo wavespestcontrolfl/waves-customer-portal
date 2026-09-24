@@ -19,7 +19,7 @@ const mockAcceptedSid = `SM${'a'.repeat(32)}`;
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: mockAcceptedSid })) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/sms-suggest-mode', () => ({
-  reserveHumanReply: jest.fn(async () => ({ parkedDecisionIds: ['dec-1'], reservationId: 'resv-1', autoSendInFlight: false })),
+  reserveHumanReply: jest.fn(async () => ({ parkedDecisionIds: ['dec-1'], reservationId: '22222222-2222-4222-8222-222222222222', autoSendInFlight: false })),
   settleHumanReply: jest.fn(async () => undefined),
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => undefined) }));
@@ -109,10 +109,13 @@ describe('POST /sms', () => {
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415550100', body: 'On my way.', channel: 'sms', audience: 'customer', purpose: 'conversational',
       customerId: 'c1', identityTrustLevel: 'phone_matches_customer', entryPoint: 'tech_line_text',
+      providerHandoffReservation: expect.any(Object),
       metadata: expect.objectContaining({ original_message_type: 'manual', tech_line: true, scheduled_service_id: VISIT, adminUserId: 'tech-1', fromNumber: '+19413529161', parkedDecisionIds: ['dec-1'] }),
     }));
+    expect(require('../services/messaging/provider-handoff-reservation')
+      .isProviderHandoffHandle(sendCustomerMessage.mock.calls[0][0].providerHandoffReservation)).toBe(true);
     expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({
-      parkedDecisionIds: ['dec-1'], reservationId: 'resv-1', sent: true,
+      parkedDecisionIds: ['dec-1'], reservationId: '22222222-2222-4222-8222-222222222222', sent: true,
       acceptedResult: { sent: true, providerMessageId: mockAcceptedSid }, reviewedBy: 'tech-1',
     }));
     expect(r.body).toEqual({ success: true, from: LINE });
@@ -162,7 +165,7 @@ describe('POST /sms', () => {
     expect(r.body).toMatchObject({ code: 'PROVIDER_TIMEOUT', mayHaveSent: true });
     expect(chains.sms_send_claims).toBeUndefined(); // claim kept
     // Reservation row cleared, parked suggestions neither reopened nor ignored.
-    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ reservationId: 'resv-1', parkedDecisionIds: [], sent: false }));
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ reservationId: '22222222-2222-4222-8222-222222222222', parkedDecisionIds: [], sent: false }));
     // A validator block is definitive even when flagged retryable: released + reopened.
     primeVisit(); settleHumanReply.mockClear();
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, retryable: true, code: 'QUIET_HOURS', reason: 'Quiet hours' });
