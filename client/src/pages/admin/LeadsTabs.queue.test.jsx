@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LeadsSection } from './LeadsTabs';
@@ -14,7 +14,10 @@ vi.mock('../../components/admin/customer360/CustomerSmsPanel', () => ({
 }));
 const lead = { id: 'lead-qa', first_name: 'QA', last_name: 'Prospect', status: 'estimate_viewed', service_interest: 'Mosquito', first_contact_at: new Date().toISOString() };
 let calls;
-function Location() { return <output aria-label="Current route">{useLocation().search}</output>; }
+function Location() {
+  const navigate = useNavigate();
+  return <><output aria-label="Current route">{useLocation().search}</output><button onClick={() => navigate(-1)}>Browser back</button></>;
+}
 function mount(url = '/admin/pipeline', props = {}) {
   return render(<MemoryRouter initialEntries={[url]}><LeadsSection {...props} /><Location /></MemoryRouter>);
 }
@@ -238,7 +241,8 @@ describe('Linked lead history preview', () => {
   });
   it('opens the exact linked record and preserves review mode', async () => {
     linkedFixture();
-    mount('/admin/pipeline?lead=lead-qa&leadReview=1&leadStatus=estimate_viewed&leadSearch=QA&leadPage=3&source_name=Paid');
+    mount('/admin/pipeline?leadReview=1&leadStatus=estimate_viewed&leadSearch=QA&leadPage=3&source_name=Paid');
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect', exact: true }));
     expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Primary record: Original Example');
     fireEvent.click(screen.getByRole('button', { name: 'Review record' }));
     await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=primary-qa'));
@@ -248,5 +252,8 @@ describe('Linked lead history preview', () => {
       return params.get('id') === 'primary-qa' && params.get('page') === '1'
         && !params.has('status') && !params.has('search') && !params.has('source_name');
     })).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+    await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=lead-qa'));
+    expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Primary record: Original Example');
   });
 });

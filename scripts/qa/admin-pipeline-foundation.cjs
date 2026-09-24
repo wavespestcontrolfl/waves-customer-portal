@@ -345,6 +345,13 @@ async function main() {
       assert.equal(new URL(page.url()).searchParams.get("leadReview"), "1");
       await page.goBack();
       await history.getByText(/Linked record: Robin Example/).waitFor();
+      await page.goto(`${server.baseUrl}/admin/pipeline?tab=leads&leadReview=1`);
+      await page.getByRole("button", { name: "Avery Example", exact: true }).click();
+      await history.getByRole("button", { name: "Review record" }).click();
+      await page.getByRole("button", { name: "Robin Example", exact: true }).waitFor();
+      await page.goBack();
+      await history.getByText(/Linked record: Robin Example/).waitFor();
+      assert.equal(new URL(page.url()).searchParams.get("lead"), "lead-fixture");
       assert.equal(
         await page
           .locator(".ui-surface")

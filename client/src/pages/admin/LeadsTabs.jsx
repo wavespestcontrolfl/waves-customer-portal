@@ -1769,13 +1769,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           </span>
                                           <Button
                                             variant="secondary"
-                                            onClick={() =>
+                                            onClick={() => {
+                                              // Ordinary row expansion is local state. Keep
+                                              // its exact record in history before leaving.
+                                              setSearchParams({
+                                                tab: "leads",
+                                                leadReview: "1",
+                                                lead: lead.id,
+                                              }, { replace: true });
                                               setSearchParams({
                                                 tab: "leads",
                                                 leadReview: "1",
                                                 lead: record.id,
-                                              })
-                                            }
+                                              });
+                                            }}
                                           >
                                             Review record
                                           </Button>
