@@ -15,6 +15,26 @@ test('every tool-bearing module in the existing tool census joins the registry',
   }
 });
 
+test('no wire tool definition carries oneOf/anyOf/allOf at the top level of input_schema', () => {
+  // 2026-09-22: compare_vendor_pricing's top-level anyOf made Anthropic reject
+  // every request that loaded it ("input_schema does not support oneOf,
+  // allOf, or anyOf at the top level") — a prod 500 on the Intelligence Bar.
+  const combinators = ['oneOf', 'anyOf', 'allOf'];
+  const offenders = [...registry.actions.values()]
+    .filter(action => combinators.some(key => key in (action.definition.input_schema || {})))
+    .map(action => action.id);
+  expect(offenders).toEqual([]);
+  for (const scope of [{ role: 'admin', context: 'inventory' }, { role: 'admin', context: 'platform' }]) {
+    for (const tool of registry.initialTools(scope.context, scope)) {
+      expect(combinators.some(key => key in (tool.input_schema || {}))).toBe(false);
+    }
+  }
+  // The stripped constraint survives in the server-side validator.
+  const stripped = registry.actions.get('compare_vendor_pricing');
+  expect('anyOf' in stripped.schema).toBe(true);
+  expect('anyOf' in stripped.definition.input_schema).toBe(false);
+});
+
 test('a proposal-pinned customer id validates for reply_via_sms while a forged one fails', () => {
   const scope = { role: 'admin', context: 'platform' };
   const pinned = { email_id: '10000000-0000-4000-8000-000000000001', message: 'On our way', customer_id: '10000000-0000-4000-8000-000000000002' };
