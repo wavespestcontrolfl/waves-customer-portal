@@ -109,6 +109,48 @@ describe('resumeSequence vs an explicit stop (audit repro, corrected fix locatio
     expect(await canSystemResumeInvoice('inv-1')).toBe(true);
   });
 
+  // Codex round 1 P2: stopSequence encodes the row's PRE-STOP status onto
+  // the reason with a `:prev=<state>` suffix (same convention the unvoid
+  // re-arm uses) when coverage lands on an already-paused sequence — an
+  // exact-membership check against 'annual_prepay_covered' alone rejects
+  // this variant, so the sequence would stay stopped forever on reversal.
+  test('canSystemResumeInvoice allows the annual-prepay coverage stamp EVEN with a :prev=paused suffix', async () => {
+    const seq = { id: 'seq-1', status: 'stopped', stopped_reason: 'annual_prepay_covered:prev=paused', stopped_by_admin_id: null };
+    setupDb({ seq, invoice: sentInvoice });
+    expect(await canSystemResumeInvoice('inv-1')).toBe(true);
+  });
+
+  test('resumeSequenceIfSystemResumable restores PAUSED (not active dunning) for a :prev=paused system stamp', async () => {
+    const seq = {
+      id: 'seq-1', customer_id: 'cust-1', status: 'stopped',
+      stopped_reason: 'annual_prepay_covered:prev=paused', stopped_by_admin_id: null,
+      is_autopay_held: false, step_index: 0, anchor_at: new Date().toISOString(),
+    };
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice });
+
+    const resumed = await resumeSequenceIfSystemResumable('inv-1');
+
+    expect(resumed).toBe(true);
+    expect(seqUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'paused', stopped_reason: null, stopped_by_admin_id: null,
+    }));
+    // Never active dunning — the underlying pause must survive the round trip.
+    expect(seqUpdate.mock.calls.every(([p]) => p.status !== 'active')).toBe(true);
+  });
+
+  test('resumeSequence itself restores PAUSED for a :prev=paused stamp on the explicit operator route too', async () => {
+    const seq = {
+      id: 'seq-1', customer_id: 'cust-1', status: 'stopped',
+      stopped_reason: 'invoice_voided:prev=paused', stopped_by_admin_id: null,
+      is_autopay_held: false, step_index: 0, anchor_at: new Date().toISOString(),
+    };
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice });
+    await resumeSequence('inv-1');
+    expect(seqUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'paused', stopped_reason: null, stopped_by_admin_id: null,
+    }));
+  });
+
   test('resumeSequenceIfSystemResumable does NOT re-arm an ADMIN-stopped row (the call shape both system re-arm callers now use)', async () => {
     const seq = {
       id: 'seq-1', customer_id: 'cust-1', status: 'stopped',

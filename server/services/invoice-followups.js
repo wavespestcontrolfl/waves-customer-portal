@@ -1382,12 +1382,24 @@ async function pauseSequence(invoiceId, { reason, until, adminId } = {}) {
 // (:385-388).
 const SYSTEM_SETTLEMENT_STOP_REASONS = ['annual_prepay_covered'];
 
+// Strip the shared `:prev=<state>` suffix (stopSequence encodes the row's
+// pre-stop status onto the reason so a later resume can restore it — see
+// resumeSequence's own `:prev=paused` branch above) before comparing
+// against the known system reasons: 'annual_prepay_covered:prev=paused' is
+// exactly as system-owned as a bare 'annual_prepay_covered' (Codex round 1
+// P2 — the exact-membership check here used to reject the suffixed variant
+// outright, leaving a paused-then-covered-then-reversed sequence stopped
+// forever).
+function systemStopReasonBase(reason) {
+  return String(reason || '').replace(/:prev=\w+$/, '');
+}
+
 function canSystemResume(seq) {
   if (!seq) return false;
   if (seq.status === 'completed') return true;
   return seq.status === 'stopped'
     && !seq.stopped_by_admin_id
-    && SYSTEM_SETTLEMENT_STOP_REASONS.includes(String(seq.stopped_reason || ''));
+    && SYSTEM_SETTLEMENT_STOP_REASONS.includes(systemStopReasonBase(seq.stopped_reason));
 }
 
 // Read-then-decide helper for the two system re-arm callers: they must NOT
@@ -1430,6 +1442,27 @@ async function resumeSequence(invoiceId, dbc = db) {
   if (!seq) return;
   const invoice = await dbc('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
+  // A stop stamped with the shared `:prev=<state>` convention (stopSequence
+  // :1700-1709, scheduleForInvoice's unvoid re-arm :385-388/:413-428)
+  // preserved an underlying non-stopped state under the stop — e.g. a
+  // 'paused' row that a later system stop (annual_prepay_covered, a void)
+  // landed on top of, with no admin ever stopping it. Resuming must restore
+  // THAT state, not steamroll straight into active dunning; checked before
+  // exhaustion/hold so it takes priority the same way the unvoid re-arm's
+  // repause branch does. The only encoded prior state today is 'paused',
+  // and pauseSequence never touches next_touch_at/is_autopay_held on a
+  // later stop, so restoring is just flipping status back — no other field
+  // needs recomputing.
+  if (/:prev=paused$/.test(String(seq.stopped_reason || ''))) {
+    await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
+      updated_at: dbc.fn.now(),
+      status: 'paused',
+      stopped_reason: null,
+      stopped_by_admin_id: null,
+      next_touch_at: null,
+    });
+    return;
+  }
   // A shifted anchor (delivered-invoice due-date edit while paused) wins so
   // the re-armed step lands on the same timeline fireStep progression uses.
   const nextTouchAt = computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index);

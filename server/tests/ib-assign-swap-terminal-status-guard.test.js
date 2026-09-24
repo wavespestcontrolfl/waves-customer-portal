@@ -129,6 +129,12 @@ describe('assign_technician on a mixed set — terminal rows are dropped and dis
 
     trxServices = chain({
       count: jest.fn().mockResolvedValue([{ count: '0' }]),
+      // The under-lock live re-read (Codex round 1 P1 fence) — svc-done was
+      // already dropped from serviceIds at preview time, so only svc-open
+      // is re-verified here, still non-terminal and still on Adam.
+      select: jest.fn().mockResolvedValue([
+        { id: 'svc-open', status: 'confirmed', technician_id: ADAM.id, visit_id: null, scheduled_date_str: '2026-09-21' },
+      ]),
       returning: jest.fn().mockResolvedValue([{ id: 'svc-open', scheduled_date: '2026-09-21', window_start: '09:00', window_end: '11:00' }]),
     });
     const trx = jest.fn((table) => (table === 'scheduled_services' ? trxServices : chain()));
@@ -159,6 +165,61 @@ describe('assign_technician on a mixed set — terminal rows are dropped and dis
   });
 });
 
+describe('assign_technician commit-time drift — a stop turning terminal between preview and lock aborts the whole batch', () => {
+  // Both stops are non-terminal at preview time.
+  const ROW_A = {
+    id: 'svc-a', first_name: 'Jane', last_name: 'Doe', service_type: 'Quarterly Pest',
+    scheduled_date: '2026-09-21', window_start: '09:00', window_end: '11:00',
+    current_tech_id: ADAM.id, visit_id: null, scheduled_date_str: '2026-09-21',
+    current_tech_name: ADAM.name, status: 'confirmed',
+  };
+  const ROW_B = {
+    id: 'svc-b', first_name: 'Bob', last_name: 'Roe', service_type: 'Lawn',
+    scheduled_date: '2026-09-21', window_start: '09:00', window_end: '11:00',
+    current_tech_id: ADAM.id, visit_id: null, scheduled_date_str: '2026-09-21',
+    current_tech_name: ADAM.name, status: 'confirmed',
+  };
+
+  let trxServices;
+  beforeEach(() => {
+    const techChain = chain({ first: jest.fn().mockResolvedValue(LUIS) });
+    const svcChain = chain({ select: jest.fn().mockResolvedValue([ROW_A, ROW_B]) });
+    db.mockImplementation((table) => (table === 'technicians' ? techChain : svcChain));
+
+    trxServices = chain({
+      count: jest.fn().mockResolvedValue([{ count: '0' }]),
+      // Between the preview read above and this lock, svc-b was completed
+      // out from under the pending card — the live re-read must catch it.
+      select: jest.fn().mockResolvedValue([
+        { id: 'svc-a', status: 'confirmed', technician_id: ADAM.id, visit_id: null, scheduled_date_str: '2026-09-21' },
+        { id: 'svc-b', status: 'completed', technician_id: ADAM.id, visit_id: null, scheduled_date_str: '2026-09-21' },
+      ]),
+      returning: jest.fn().mockResolvedValue([{ id: 'svc-a', scheduled_date: '2026-09-21', window_start: '09:00', window_end: '11:00' }]),
+    });
+    const trx = jest.fn((table) => (table === 'scheduled_services' ? trxServices : chain()));
+    trx.raw = jest.fn((sql) => sql);
+    trx.fn = { now: () => new Date() };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+  });
+
+  test('aborts the whole batch with a contract-drift error — neither stop is reassigned, no notice fires', async () => {
+    const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
+    const preview = await executeScheduleTool('assign_technician', { service_ids: ['svc-a', 'svc-b'], technician_name: 'Luis' }, {});
+    expect(preview.proposal).toBe(true);
+    expect(preview.stops.map((s) => s.id).sort()).toEqual(['svc-a', 'svc-b']);
+
+    const result = await executeScheduleTool('assign_technician',
+      { service_ids: ['svc-a', 'svc-b'], technician_name: 'Luis', confirmed: true }, { confirmed: true });
+
+    expect(result.preview_changed).toBe(true);
+    expect(result.error).toMatch(/turned completed\/cancelled\/skipped\/no_show/);
+    expect(result.skipped_terminal).toEqual([{ id: 'svc-b', status: 'completed' }]);
+    // Not a partial success — svc-a (still live) is never written either.
+    expect(trxServices.update).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+});
+
 describe('swap_tech_assignments with a no_show row — terminal rows never swap', () => {
   // Fixture rows; the mock applies the executor's own whereNotIn list so the
   // test proves what the predicate lets through, not what the mock chooses.
@@ -172,9 +233,20 @@ describe('swap_tech_assignments with a no_show row — terminal rows never swap'
   function servicesChain() {
     let techId = null;
     let excluded = [];
-    const filtered = () => ROWS.filter((r) => r.technician_id === techId && !excluded.includes(r.status));
+    const rowsForTech = () => ROWS.filter((r) => r.technician_id === techId);
+    const filtered = () => rowsForTech().filter((r) => !excluded.includes(r.status));
     const b = chain();
-    b.where = jest.fn((arg) => { if (arg && typeof arg === 'object' && arg.technician_id) techId = arg.technician_id; return b; });
+    // The preview read now awaits `.where(...)` directly (no `.whereNotIn`
+    // chained) — the executor reads every row for the tech/day and filters
+    // client-side so it can also collect the terminal ones for disclosure.
+    // `liveStops` (inside the transaction) still chains
+    // `.whereNotIn(...).forUpdate().select(...)` off the same object, which
+    // keeps working unchanged below.
+    b.where = jest.fn((arg) => {
+      if (arg && typeof arg === 'object' && arg.technician_id) techId = arg.technician_id;
+      const p = Promise.resolve(rowsForTech());
+      return Object.assign(p, b);
+    });
     b.whereNotIn = jest.fn((col, list) => { excluded = list; const p = Promise.resolve(filtered()); Object.assign(p, b); return p; });
     b.select = jest.fn(async () => filtered().map((r) => ({ id: r.id, visit_id: r.visit_id })));
     return b;
@@ -209,6 +281,10 @@ describe('swap_tech_assignments with a no_show row — terminal rows never swap'
     expect(aIds).toEqual([]);
     const bIds = preview.stops[LUIS.name].map((s) => s.id).sort();
     expect(bIds).toEqual(['b-open']);
+    // Codex round 1 P1: the terminal rows must be DISCLOSED on the card,
+    // not just silently absent from the swappable set.
+    expect(preview.skipped_terminal.map((s) => s.id).sort()).toEqual(['a-done', 'a-noshow', 'a-skipped']);
+    expect(preview.note).toMatch(/3 stop\(s\) are in a terminal status/);
 
     const result = await executeScheduleTool('swap_tech_assignments',
       { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis', confirmed: true }, { confirmed: true });
@@ -219,6 +295,8 @@ describe('swap_tech_assignments with a no_show row — terminal rows never swap'
     expect(toAdam.ids.sort()).toEqual(['b-open']);
     expect(updates.some((u) => u.patch.technician_id === null)).toBe(false);
     expect(updates.some((u) => (u.ids || []).includes('a-noshow') || (u.ids || []).includes('a-skipped'))).toBe(false);
+    // The confirmed response also discloses the terminal rows left behind.
+    expect(result.skipped_terminal.map((s) => s.id).sort()).toEqual(['a-done', 'a-noshow', 'a-skipped']);
   });
 });
 

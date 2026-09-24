@@ -258,6 +258,17 @@ function pairKey(idA, idB) {
   return idA < idB ? [idA, idB] : [idB, idA];
 }
 
+// revertMerge's dismissal (see below) uses this EXACT reason as a sentinel
+// so runAutoMergeSweep alone can recognize and skip it — a regular "not a
+// duplicate" verdict (blank or free-text reason from POST /dismiss) never
+// collides with it. findDuplicateGroups treats it as a NON-hiding dismissal
+// by default (Codex round 1 P2): recording customer_duplicate_dismissals on
+// undo used to hide the pair from the review queue and every eligibility
+// check FOREVER, with no reopen endpoint — an undone merge must stay
+// reviewable for a human to re-merge on purpose, it must just never be
+// auto-merged again.
+const UNDO_MERGE_DISMISSAL_REASON = 'undo_merge';
+
 // Detection output travels to the admin browser via the review-queue route —
 // never ship the stored credential hash or raw Stripe id; the UI only needs
 // existence booleans for its badges.
@@ -266,7 +277,7 @@ function sanitizeCustomer(row) {
   return { ...rest, has_portal_login: !!passwordHash, has_stripe: !!stripeCustomerId };
 }
 
-async function findDuplicateGroups(database = db, { failClosedOnDismissals = false } = {}) {
+async function findDuplicateGroups(database = db, { failClosedOnDismissals = false, respectUndoMergeSuppression = false } = {}) {
   // Live ROWS only (active + not deleted) — deliberately NOT restricted to
   // whereLiveCustomer's real-customer stages: the duplicates this tool exists
   // to clean up ARE lead-stage shells (intake guards refuse ambiguous
@@ -297,7 +308,13 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
   let dismissed = new Set();
   try {
     dismissed = new Set(
-      (await database('customer_duplicate_dismissals').select('customer_id_a', 'customer_id_b'))
+      (await database('customer_duplicate_dismissals').select('customer_id_a', 'customer_id_b', 'reason'))
+        // An undo-merge suppression hides the pair ONLY from the automatic
+        // sweep (respectUndoMergeSuppression: true) — every other caller
+        // (the review queue, dashboard alert, IB tool, manual-merge
+        // eligibility recheck) must keep surfacing it so a human can still
+        // choose to re-merge it.
+        .filter((d) => respectUndoMergeSuppression || d.reason !== UNDO_MERGE_DISMISSAL_REASON)
         .map((d) => `${d.customer_id_a}:${d.customer_id_b}`),
     );
   } catch (e) {
@@ -2427,17 +2444,27 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
 // Auto-merge sweep (cron entry point — caller owns the feature gate)
 // ---------------------------------------------------------------------------
 
-async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
+// onlyPair (test-only in practice today): narrows the sweep to a single
+// (winnerId, loserId) candidate — every group/candidate outside it is
+// skipped entirely, with no change to eligibility logic or safety checks.
+// Lets a test exercise the real sweep against a real database without
+// touching every other live duplicate pair the target database happens to
+// hold (Codex round 1 P2 test-hygiene finding).
+async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = null } = {}) {
   let groups;
   try {
-    groups = await findDuplicateGroups(db, { failClosedOnDismissals: true });
+    // respectUndoMergeSuppression: the ONLY reader that must treat an
+    // undo-merge dismissal as hiding the pair — see UNDO_MERGE_DISMISSAL_REASON.
+    groups = await findDuplicateGroups(db, { failClosedOnDismissals: true, respectUndoMergeSuppression: true });
   } catch (e) {
     logger.warn(`[customer-dedupe] auto-merge sweep aborted — dismissals unreadable, refusing to merge blind: ${e.message}`);
     return { merged: [], skipped: [], aborted: 'dismissals_unreadable' };
   }
   const results = { merged: [], skipped: [] };
   for (const group of groups) {
+    if (onlyPair && String(group.winner.id) !== String(onlyPair.winnerId)) continue;
     for (const candidate of group.candidates) {
+      if (onlyPair && String(candidate.loser.id) !== String(onlyPair.loserId)) continue;
       if (candidate.tier !== 'green') {
         results.skipped.push({ loserId: candidate.loser.id, tier: candidate.tier, reasons: candidate.reasons });
         continue;
@@ -4828,17 +4855,22 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // Record the dismissal in the SAME transaction as the undo, mirroring
     // runRedPairAutoDismissSweep's own write (:2544-2553): idempotent via
     // the ordered-pair unique constraint, so a re-run or a race with a
-    // manual dismissal is an ignored conflict, never an error. The pair
-    // stays visible in the review queue (findDuplicateGroups only filters
-    // dismissals from the DEFAULT display, not detection) for a human to
-    // re-adjudicate; it just never auto-merges again.
+    // manual dismissal is an ignored conflict, never an error.
+    // Codex round 1 P2: a PLAIN dismissal (any reason) used to hide the pair
+    // from findDuplicateGroups' default read too — the review queue, the
+    // dashboard alert, the IB tool and the manual-merge eligibility recheck
+    // ALL stopped seeing it, with no reopen endpoint. UNDO_MERGE_DISMISSAL_REASON
+    // is a sentinel findDuplicateGroups recognizes and, by default, does NOT
+    // hide behind — only runAutoMergeSweep opts in (respectUndoMergeSuppression)
+    // to treat it as suppressing. The pair stays fully reviewable for a human
+    // to re-merge on purpose; it just never auto-merges again.
     const [dismissA, dismissB] = pairKey(winnerId, loserId);
     await acquirePairAdjudicationLock(trx, dismissA, dismissB);
     await trx('customer_duplicate_dismissals')
       .insert({
         customer_id_a: dismissA,
         customer_id_b: dismissB,
-        reason: 'undone merge',
+        reason: UNDO_MERGE_DISMISSAL_REASON,
         created_by: performedBy || 'unknown',
       })
       .onConflict(['customer_id_a', 'customer_id_b'])
@@ -5368,6 +5400,10 @@ module.exports = {
   // unjournaled rows count on presence.
   countActivityRows,
   activityColumnsFor,
+  // The sentinel revertMerge stamps and only runAutoMergeSweep's
+  // respectUndoMergeSuppression reads — exported so tests assert against
+  // the real constant rather than a hardcoded copy of the string.
+  UNDO_MERGE_DISMISSAL_REASON,
   // exported for tests
   _test: {
     EMAIL_BOUND_SURFACES,

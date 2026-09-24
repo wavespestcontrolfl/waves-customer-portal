@@ -5,8 +5,15 @@
  * and revertMerge records no customer_duplicate_dismissals row for the pair.
  *
  * Real Postgres (clone of waves_audit_tpl via DATABASE_URL). Written to assert
- * the EXPECTED behaviour (an undone pair is never auto-merged again), so it
- * FAILS on current code if the bug is real.
+ * the EXPECTED behaviour (an undone pair is never auto-merged again, but
+ * STAYS reviewable for a human — Codex round 1 P2), so it FAILS on current
+ * code if the bug is real.
+ *
+ * Test hygiene (Codex round 1 P2): both sweep calls are scoped to the seeded
+ * pair via runAutoMergeSweep's onlyPair filter, so this test never touches
+ * any other live duplicate pair the target database happens to hold, and
+ * every seeded row (customers, journal, dismissals) is deleted in afterAll
+ * regardless of how the test ends.
  */
 const { randomUUID } = require('crypto');
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -35,11 +42,23 @@ jest.setTimeout(60000);
       pipeline_stage: 'new_lead', active: true, created_at: '2026-07-09T00:00:00Z',
     });
   });
-  afterAll(async () => { await db.destroy(); });
+  afterAll(async () => {
+    // Delete every seeded row regardless of how the test ended — the merge
+    // may have soft-deleted the loser and repointed rows back onto the
+    // winner, and a dismissal row may or may not exist depending on where
+    // the test failed.
+    await db('customer_duplicate_dismissals')
+      .where((q) => q.where({ customer_id_a: winnerId, customer_id_b: loserId }).orWhere({ customer_id_a: loserId, customer_id_b: winnerId }))
+      .del().catch(() => {});
+    await db('customer_merge_journal').where({ winner_customer_id: winnerId }).del().catch(() => {});
+    await db('customers').whereIn('id', [winnerId, loserId]).del().catch(() => {});
+    await db.destroy();
+  });
 
-  test('sweep -> undo -> sweep: the undone pair is NOT re-merged', async () => {
-    // Sweep 1: the pair is green, so it auto-merges.
-    const first = await dedupe.runAutoMergeSweep({ performedBy: 'test:sweep-1' });
+  test('sweep -> undo -> sweep: the undone pair is NOT re-merged, but stays reviewable', async () => {
+    // Sweep 1: the pair is green, so it auto-merges. Scoped to this pair
+    // only — never touches another live duplicate pair in the clone.
+    const first = await dedupe.runAutoMergeSweep({ performedBy: 'test:sweep-1', onlyPair: { winnerId, loserId } });
     const firstHit = first.merged.filter((m) => m.loserId === loserId);
     expect(firstHit).toHaveLength(1);
     const journal1 = await db('customer_merge_journal').where({ loser_customer_id: loserId }).orderBy('created_at').first();
@@ -55,20 +74,34 @@ jest.setTimeout(60000);
     const j1 = await db('customer_merge_journal').where({ id: journal1.id }).first();
     expect(j1.undone_at).not.toBeNull();
 
-    // Sweep 2 (next 4:40 tick): EXPECTED — the undone pair is excluded from
-    // automatic merging (dismissal recorded, or journal consulted).
-    const second = await dedupe.runAutoMergeSweep({ performedBy: 'test:sweep-2' });
+    // The dismissal recorded is the sweep-only sentinel, not a plain
+    // "not a duplicate" verdict.
+    const dismissalAfterUndo = await db('customer_duplicate_dismissals')
+      .where((q) => q.where({ customer_id_a: winnerId, customer_id_b: loserId }).orWhere({ customer_id_a: loserId, customer_id_b: winnerId }))
+      .first();
+    expect(dismissalAfterUndo?.reason).toBe(dedupe.UNDO_MERGE_DISMISSAL_REASON);
+
+    // Codex round 1 P2: the pair must stay visible to a HUMAN (the review
+    // queue, findDuplicateGroups' default read) even though the sentinel
+    // dismissal exists — only the automatic sweep suppresses it.
+    const visibleGroups = await dedupe.findDuplicateGroups(db);
+    const stillVisible = visibleGroups.some((g) => String(g.winner.id) === String(winnerId)
+      && g.candidates.some((c) => String(c.loser.id) === String(loserId)));
+    expect(stillVisible).toBe(true);
+
+    // Sweep 2 (next 4:40 tick), scoped to this pair only: EXPECTED — the
+    // undone pair is excluded from automatic merging.
+    const second = await dedupe.runAutoMergeSweep({ performedBy: 'test:sweep-2', onlyPair: { winnerId, loserId } });
     const secondHit = second.merged.filter((m) => m.loserId === loserId);
     const journals = await db('customer_merge_journal').where({ loser_customer_id: loserId }).orderBy('created_at');
-    const dismissals = await db('customer_duplicate_dismissals')
-      .where((q) => q.where({ customer_id_a: winnerId, customer_id_b: loserId }).orWhere({ customer_id_a: loserId, customer_id_b: winnerId }));
     const after = await db('customers').where({ id: loserId }).first('active', 'deleted_at');
 
-     
+
     console.log('REPRO STATE', JSON.stringify({
       sweep2MergedThisPair: secondHit.length,
       journalRows: journals.map((j) => ({ id: j.id, performed_by: j.performed_by, undone_at: j.undone_at })),
-      dismissalRowsForPair: dismissals.length,
+      dismissalReason: dismissalAfterUndo?.reason || null,
+      stillVisibleInQueue: stillVisible,
       loserAfterSweep2: after,
     }, null, 2));
 
