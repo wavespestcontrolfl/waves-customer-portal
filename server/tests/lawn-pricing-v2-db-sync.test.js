@@ -74,7 +74,7 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
     expect(lawn.marketAnnual).toBe(576);
     // 9/12-visit ladder — the 4-visit 'basic' tier is no longer sold, and
     // the 6-visit 'standard' tier is hidden for new sales (owner directive
-    // 2026-09-24; migration 20260924000003 writes tiers.standard.hidden on
+    // 2026-09-24; migration 20260924000010 writes tiers.standard.hidden on
     // the row this suite loads).
     expect(lawn.tiers.map((tier) => tier.tier)).toEqual(['enhanced', 'premium']);
   });

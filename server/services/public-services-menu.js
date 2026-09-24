@@ -268,7 +268,7 @@ async function loadPublicServicesMenu(conn = db) {
 // label from `name` so key and label can never disagree (pre-push codex P1:
 // serviceKey and serviceInterest are independently attacker-controlled).
 // Keys the menu advertised until migration 20260903000020 (and, for
-// lawn_care_recurring, 20260924000003 — 6x lawn retired) hid them. A visitor
+// lawn_care_recurring, 20260924000010 — 6x lawn retired) hid them. A visitor
 // on a cached quote page, or on the astro fallback snapshot until it is
 // refreshed, can still post one; it must keep resolving (AGENTS.md: astro
 // form posts are an external contract, breaking them is P0) — as a

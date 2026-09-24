@@ -1,5 +1,5 @@
 /**
- * 20260924000003 — retire the 6x/bi-monthly residential lawn tier for NEW
+ * 20260924000010 — retire the 6x/bi-monthly residential lawn tier for NEW
  * sales (owner directive 2026-09-24).
  *
  * Half 1: pricing_config lawn_pricing_v2.tiers.standard → hidden (reversible,
@@ -9,7 +9,7 @@
  * see public-quote-menu-tier-c-hide.test.js, whose fake-knex pattern this
  * extends with the pricing_config upsert).
  */
-const migration = require('../models/migrations/20260924000003_lawn_retire_bimonthly_6x');
+const migration = require('../models/migrations/20260924000010_lawn_retire_bimonthly_6x');
 
 function fakeKnex(db) {
   const rows = (table) => (db[table] = db[table] || []);
@@ -100,7 +100,7 @@ function seededDb() {
 const lawnData = (db) => JSON.parse(db.pricing_config.find((r) => r.config_key === 'lawn_pricing_v2').data);
 const selectableFlag = (db, key) => db.services.find((r) => r.service_key === key).public_quote_selectable;
 
-describe('20260924000003 retire the 6x/bi-monthly lawn tier for new sales', () => {
+describe('20260924000010 retire the 6x/bi-monthly lawn tier for new sales', () => {
   test('up hides tiers.standard only — every other lawn_pricing_v2 key and tier survives untouched', async () => {
     const db = seededDb();
     const before = lawnData(db);
@@ -130,7 +130,7 @@ describe('20260924000003 retire the 6x/bi-monthly lawn tier for new sales', () =
     for (const key of ['lawn_care_6week', 'lawn_care_monthly', 'lawn_care_one_time', 'pest_general_bimonthly']) {
       expect({ key, selectable: selectableFlag(db, key) }).toEqual({ key, selectable: true });
     }
-    const state = db.system_settings.find((r) => r.key === 'migration.20260924000003.state');
+    const state = db.system_settings.find((r) => r.key === 'migration.20260924000010.state');
     expect(JSON.parse(state.value).hiddenIds).toEqual([1]);
   });
 

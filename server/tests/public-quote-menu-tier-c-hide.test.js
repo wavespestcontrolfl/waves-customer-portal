@@ -6,7 +6,7 @@
 const hide = require('../models/migrations/20260903000020_public_quote_menu_tier_c_hide');
 const selectable = require('../models/migrations/20260829000020_services_public_quote_selectable');
 const { FORMERLY_PUBLIC_KEYS } = require('../services/public-services-menu');
-const retire6x = require('../models/migrations/20260924000003_lawn_retire_bimonthly_6x');
+const retire6x = require('../models/migrations/20260924000010_lawn_retire_bimonthly_6x');
 
 function fakeKnex(db) {
   const knex = (table) => {

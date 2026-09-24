@@ -35,7 +35,7 @@
 
 const ROW_NAME = 'Lawn Pricing V2 Dense 35% Floor + 6x Retired';
 const CHANGED_BY = 'claude-2026-09-24';
-const STATE_KEY = 'migration.20260924000003.state';
+const STATE_KEY = 'migration.20260924000010.state';
 const SERVICE_KEY = 'lawn_care_recurring';
 
 const CHANGELOG_IDENTITY = {
