@@ -20,6 +20,10 @@ jest.mock('../services/appointment-reminders', () => ({
   alertRegistrationFailure: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({
+  // serviceMatchesCoverage is pure (no DB) — keep the REAL implementation so
+  // the term-cap's customer-wide service scoping is exercised for real;
+  // only coveredTermsAsOf (the DB query) is mocked per-test.
+  ...jest.requireActual('../services/annual-prepay-renewals'),
   coveredTermsAsOf: jest.fn(),
 }));
 
@@ -114,7 +118,7 @@ function makeConn(handler, opts = {}) {
 // behavior extendSeriesOnceLocked relies on.
 function topupScenario({
   parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
-  colsOverrides = {}, linkedTermIds = [], customerTermIds = [],
+  colsOverrides = {}, linkedTermIds = [], customerTerms = [],
 } = {}) {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'weekly',
@@ -174,7 +178,7 @@ function topupScenario({
       if (op === 'first') return customer;
     }
     if (table === 'annual_prepay_terms') {
-      if (op === 'pluck' && field === 'id') return customerTermIds;
+      if (op === 'await') return customerTerms; // .select('id', 'coverage_service_type')
     }
     if (table === 'system_settings') return null;
     if (table === 'schedule_blackout_dates') return [];
@@ -322,7 +326,7 @@ describe('topUpRecurringSeriesLocked — annual-prepay term_end cap', () => {
       seriesDates: [daysOut(0)],
       colsOverrides: { annual_prepay_term_id: {} },
       linkedTermIds: [],
-      customerTermIds: ['term-B'],
+      customerTerms: [{ id: 'term-B', coverage_service_type: 'Weekly Pest Control' }],
     });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
     expect(result.effectiveHorizon).toBe(termEnd);
@@ -385,6 +389,56 @@ describe('topUpRecurringSeriesLocked — annual-prepay term_end cap', () => {
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
     expect(result.termCap).toBe(futureTermEnd);
     for (const row of inserted) expect(row.scheduled_date < futureTermEnd).toBe(true);
+  });
+
+  test('scopes the customer-wide term scan to THIS series\' service — an unrelated service\'s longer term never extends past this one\'s real window', async () => {
+    const pestTermEnd = daysOut(20);
+    const lawnTermEnd = daysOut(200); // longer, but a DIFFERENT service
+    const termRows = [
+      { id: 'term-pest', term_end: pestTermEnd, status: 'active', renewal_decision: null },
+      { id: 'term-lawn', term_end: lawnTermEnd, status: 'active', renewal_decision: null },
+    ];
+    coveredTermsAsOf.mockReturnValue({
+      whereIn: (col, ids) => ({ select: async () => termRows.filter((r) => ids.includes(r.id)) }),
+    });
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly', service_type: 'Weekly Pest Control' },
+      seriesDates: [daysOut(0)],
+      colsOverrides: { annual_prepay_term_id: {} },
+      customerTerms: [
+        { id: 'term-pest', coverage_service_type: 'Pest Control' },
+        { id: 'term-lawn', coverage_service_type: 'Lawn Care Program' },
+      ],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    // Capped at the PEST term's own end, never stretched to the unrelated
+    // (longer) lawn term.
+    expect(result.termCap).toBe(pestTermEnd);
+    for (const row of inserted) expect(row.scheduled_date < pestTermEnd).toBe(true);
+  });
+
+  test('an unrelated service\'s overdue/undecided term never freezes this series', async () => {
+    // A pest series with NO annual-prepay term of its own; the customer
+    // separately holds an overdue, undecided LAWN term. That must not cap
+    // (let alone freeze) this unrelated pest series.
+    const overdueLawnTermEnd = daysOut(-10);
+    coveredTermsAsOf.mockReturnValue({
+      whereIn: (col, ids) => ({
+        select: async () => (ids.includes('term-lawn-overdue')
+          ? [{ id: 'term-lawn-overdue', term_end: overdueLawnTermEnd, status: 'active', renewal_decision: null }]
+          : []),
+      }),
+    });
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly', service_type: 'Weekly Pest Control' },
+      seriesDates: [daysOut(0)],
+      colsOverrides: { annual_prepay_term_id: {} },
+      customerTerms: [{ id: 'term-lawn-overdue', coverage_service_type: 'Lawn Care Program' }],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.termCap).toBeNull();
+    expect(result.effectiveHorizon).toBe(daysOut(30));
+    expect(inserted.length).toBeGreaterThan(0);
   });
 
   test('fails closed (skips the series) when the term-cap lookup errors — never guesses "no cap"', async () => {

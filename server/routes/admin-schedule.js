@@ -15039,12 +15039,27 @@ async function resolveTopUpTermCap(conn, parent, parentId, cols) {
   if (!cols.annual_prepay_term_id) return { cap: null, failed: false };
   try {
     const linkedIds = await seriesTermIds(conn, parentId, parent?.annual_prepay_term_id);
-    const customerIds = await conn('annual_prepay_terms')
+    const { serviceMatchesCoverage, coveredTermsAsOf } = require('../services/annual-prepay-renewals');
+    // Customer-wide scan (a term bought/paid ahead of its first linked
+    // visit, or one no scheduled_services row has been stamped with yet)
+    // MUST be scoped to THIS series' own service — a customer can hold
+    // separate annual-prepay terms for different services (pest vs. lawn,
+    // etc.), and an unscoped scan let an unrelated term's term_end either
+    // extend this series past its OWN real paid window or freeze it on an
+    // unrelated service's overdue renewal (Codex pre-push P1). `linkedIds`
+    // needs no such filter — a term explicitly stamped on one of THIS
+    // series' own rows is trusted regardless of coverage_service_type.
+    // Uses the SAME matcher every other coverage consumer uses
+    // (serviceMatchesCoverage + term.coverage_service_type) so this can
+    // never disagree with what actually gets stamped as covered.
+    const customerTerms = await conn('annual_prepay_terms')
       .where({ customer_id: parent.customer_id })
-      .pluck('id');
-    const allIds = [...new Set([...linkedIds, ...customerIds].map(String))];
+      .select('id', 'coverage_service_type');
+    const scopedCustomerIds = customerTerms
+      .filter((t) => serviceMatchesCoverage({ service_type: parent.service_type }, t.coverage_service_type))
+      .map((t) => t.id);
+    const allIds = [...new Set([...linkedIds, ...scopedCustomerIds].map(String))];
     if (!allIds.length) return { cap: null, failed: false };
-    const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
     const rows = await coveredTermsAsOf(conn, null).whereIn('t.id', allIds)
       .select('t.term_end', 't.status', 't.renewal_decision');
     const todayStr = etDateString();
