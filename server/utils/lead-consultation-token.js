@@ -80,10 +80,19 @@ function verifyLeadConsultationToken(token, nowSec = Math.floor(Date.now() / 100
 // phone is corrected after the text no longer matches, so an old link can
 // never vouch for the new number. Hex digest — no '.' to break the token's
 // segment split.
+//
+// Codex #4737 r8 P1: this MUST be keyed with the server secret, not a bare
+// sha256(phone). The page reveals the phone's last 4 digits, so an unsalted
+// digest lets anyone with the claim brute-force the other 6 digits offline
+// (10^6 guesses) and recover the lead's full phone number. Deriving a
+// distinct HMAC key from the same secret the token signature already uses
+// (rather than a new env var) keeps this fail-closed the same way `sign()`
+// is: no secret configured, no channel claim.
 function smsChannelFor(phone) {
   const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
-  if (last10.length !== 10) return null;
-  return `sms-${crypto.createHash('sha256').update(`lead-consultation-sms:${last10}`).digest('hex').slice(0, 16)}`;
+  if (last10.length !== 10 || !secret()) return null;
+  const key = crypto.createHmac('sha256', secret()).update('sms-channel-key').digest();
+  return `sms-${crypto.createHmac('sha256', key).update(`lead-consultation-sms:${last10}`).digest('hex').slice(0, 16)}`;
 }
 
 module.exports = { mintLeadConsultationToken, verifyLeadConsultationToken, smsChannelFor, TTL_SECONDS };

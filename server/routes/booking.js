@@ -3159,7 +3159,13 @@ async function createSelfBooking(payload = {}) {
       // crossed the notice boundary while this request waited — another
       // "pick another slot" outcome that must not strand a just-created
       // profile.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE') {
+      // LOCATION_CHANGED_RETRY rides it too (Codex #4737 r8 P2): the
+      // customer's stored pin moved under the fence (callbackVisit's
+      // expectedLocation check above) — a "pick a time again at the
+      // customer's CURRENT address" outcome the consultation page's
+      // sendBookingFailure answers the same way it answers a slot race
+      // (409, refreshed availability), never the global error handler.
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is

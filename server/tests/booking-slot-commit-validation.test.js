@@ -505,6 +505,29 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(gateBlock).toMatch(/does not belong to booking customer/);
     expect(gateBlock).not.toMatch(/ok: false/);
   });
+
+  // Codex #4737 r8 P2: the callbackVisit.expectedLocation fence throws
+  // LOCATION_CHANGED_RETRY (409) — a "pick a time again at the customer's
+  // CURRENT address" race, exactly like SLOT_TAKEN/DAY_FULL/ALREADY_BOOKED/
+  // SELF_SERVE_NOTICE above it. Before this fix it was absent from this
+  // list, so it fell through to `throw txErr` and reached the global error
+  // middleware instead of createSelfBooking's own { ok: false, ... } result
+  // path — inspection-public.js's sendBookingFailure never saw it.
+  test('LOCATION_CHANGED_RETRY converts to a normal { ok: false } result — never falls through to the global error handler', () => {
+    const convertIdx = src.indexOf("if (txErr.code === 'SLOT_TAKEN'");
+    expect(convertIdx).toBeGreaterThan(-1);
+    const lineEnd = src.indexOf('\n', convertIdx);
+    const conditionLine = src.slice(convertIdx, lineEnd);
+    expect(conditionLine).toMatch(/txErr\.code === 'LOCATION_CHANGED_RETRY'/);
+    // Still inside the same branch that returns { ok:false, status:409, ...
+    // code } rather than re-throwing — pin the branch body, not just the
+    // condition line, so moving LOCATION_CHANGED_RETRY to its own
+    // differently-shaped branch would also fail this test.
+    const throwIdx = src.indexOf('throw txErr;', convertIdx);
+    const returnIdx = src.indexOf("return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };", convertIdx);
+    expect(returnIdx).toBeGreaterThan(convertIdx);
+    expect(returnIdx).toBeLessThan(throwIdx);
+  });
 });
 
 // ---------------------------------------------------------------------------

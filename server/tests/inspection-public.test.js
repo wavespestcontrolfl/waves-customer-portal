@@ -229,6 +229,10 @@ afterEach(() => {
   mockSummarizeWindow.mockClear();
   db.transaction.mockClear();
   db.raw.mockClear();
+  // A test that overrides db.raw's implementation (e.g. to simulate a busy
+  // comms fence) must not leak that override into later tests — mockClear
+  // alone does not reset it.
+  db.raw.mockImplementation((sql) => (String(sql).includes('pg_try_advisory_xact_lock') ? Promise.resolve({ rows: [{ locked: true }] }) : sql));
 });
 
 const LEAD_ROW = {
@@ -441,6 +445,44 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
     const insert = src.indexOf("await trx('self_booked_appointments').insert({", fence);
     expect(check).toBeGreaterThan(fence);
     expect(check).toBeLessThan(insert);
+  });
+});
+
+// Codex #4737 r8 P2: createSelfBooking's expectedLocation fence throwing
+// LOCATION_CHANGED_RETRY must answer through the booking result path, the
+// same as a slot race — 409 SLOT_TAKEN-style, refreshed at the customer's
+// CURRENT address, not the pre-race pin the caller offered the slot at.
+describe('Codex #4737 r8 P2: LOCATION_CHANGED_RETRY answers like a slot race, at the CURRENT stored pin', () => {
+  test('sendBookingFailure refreshes availability at the customer\'s CURRENT pin, not the stale pre-race bookingLocation', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    // No stored coordinates yet — phase 1 geocodes the customer's own
+    // stored address TEXT (the pre-race pin) and writes it back; bookingLocation
+    // is that geocoded value, computed BEFORE the race below.
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null };
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockGeocode.mockResolvedValueOnce({ location: { lat: 27.4, lng: -82.5 } }); // the pre-race pin
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      // The exact race LOCATION_CHANGED_RETRY signals: another commit moved
+      // the customer's stored pin WHILE createSelfBooking held its own
+      // commit-time fence — AFTER phase 1 (and bookingLocation) already ran
+      // against the old one.
+      firstResults.customers = { ...firstResults.customers, latitude: 27.9, longitude: -82.9 };
+      return { ok: false, status: 409, error: 'Your address just changed — please pick a time again.', code: 'LOCATION_CHANGED_RETRY' };
+    });
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(409);
+    // Same shape a slot race gets — never falls through to a generic 500 or
+    // a bare passthrough of createSelfBooking's error.
+    expect(res.body.code).toBe('SLOT_TAKEN');
+    // The refresh ran at the CURRENT stored pin (27.9/-82.9), never the
+    // stale pre-race one (27.4/-82.5) bookingLocation carried.
+    const refreshCall = mockBuildAvailability.mock.calls.at(-1);
+    expect(refreshCall[0]).toEqual(expect.objectContaining({ lat: 27.9, lng: -82.9 }));
   });
 });
 
@@ -1252,6 +1294,67 @@ describe('POST /:token commit', () => {
       // ...and it becomes the lead's provenance, so a reopened link finds it.
       const provenance = insertCalls.find((c) => c.table === 'lead_activities' && c.payload.activity_type === 'consultation_prospect');
       expect(JSON.parse(provenance.payload.metadata)).toEqual({ customer_id: 'new-cust-1', requires_verification: true });
+    });
+
+    // Codex #4737 r8 P1: a legacy linked profile with NO account_id yet
+    // must be attached to its OWN new account explicitly, never through
+    // ensureCustomerAccount's phone lookup — which, on a phone several live
+    // accounts share, can resolve to a DIFFERENT household. The new
+    // property must land under the linked profile's OWN account.
+    test('a legacy linked profile (no account_id) whose phone is shared by another household books a new property under its OWN new account, never through the phone lookup', async () => {
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      // cust-1 is a legacy profile — no account yet — whose phone is also
+      // on file for a totally different household (acct-someone-else),
+      // which ensureCustomerAccount's phone-first lookup would find first.
+      firstResults.customers = { id: 'cust-1', account_id: null, phone: '9415550101', first_name: 'Pat', last_name: 'Lee', address_line1: '1 Home St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+      // Visit history exists → not correctable in place (same shape as the
+      // r6 P1 test above) → forces the "another property" branch.
+      listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-old' }] : []);
+      listResults.customers = [firstResults.customers];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.6, lng: -82.4 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '9 Rental Ln, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(200);
+      // ensureCustomerAccount's phone lookup is NEVER used for this
+      // profile — it could pick another household sharing this phone.
+      expect(mockEnsureCustomerAccount).not.toHaveBeenCalled();
+      // A brand-new account keyed to the LINKED PROFILE'S OWN id (never a
+      // phone-matched stranger's account).
+      const accountInsert = insertCalls.find((c) => c.table === 'customer_accounts');
+      expect(accountInsert).toBeTruthy();
+      expect(accountInsert.payload.id).toBe('cust-1');
+      // The linked profile itself is attached to that same new account.
+      const linkedAttach = updateCalls.find((c) => c.table === 'customers' && c.payload.account_id === 'cust-1');
+      expect(linkedAttach).toBeTruthy();
+      // The new property lands under that account — not any other one.
+      const created = insertCalls.find((c) => c.table === 'customers');
+      expect(created.payload).toMatchObject({ account_id: 'cust-1', address_line1: '9 Rental Ln', profile_label: 'Additional property' });
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe('new-cust-1');
+    });
+
+    // Codex #4737 r8 P1: the comms fence is busy (an undo in flight on this
+    // exact profile) — fails closed and recoverable, never a blocking wait,
+    // never a silent phone-lookup fallback.
+    test('the comms fence busy on the attach fails closed and recoverable (address_unresolved), never falls back to a phone lookup', async () => {
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', account_id: null, phone: '9415550101', first_name: 'Pat', last_name: 'Lee', address_line1: '1 Home St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+      listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-old' }] : []);
+      listResults.customers = [firstResults.customers];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.6, lng: -82.4 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      db.raw.mockImplementation((sql) => (String(sql).includes('pg_try_advisory_xact_lock') ? Promise.resolve({ rows: [{ locked: false }] }) : sql));
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '9 Rental Ln, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(422);
+      expect(res.body.error).toBe('address_unresolved');
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+      expect(insertCalls.some((c) => c.table === 'customer_accounts')).toBe(false);
+      expect(mockEnsureCustomerAccount).not.toHaveBeenCalled();
     });
 
     // Codex #4737 r7 pre-push P0: that provenance is an existing account's

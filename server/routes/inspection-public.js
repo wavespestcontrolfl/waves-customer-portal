@@ -1006,21 +1006,61 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   return { customer: created };
 }
 
+// Attach a KNOWN, specific legacy profile (`linked`, no account_id yet) to
+// its OWN brand-new account (Codex #4737 r8 P1). This must never go through
+// ensureCustomerAccount/findAccountByContact's phone lookup — several live
+// accounts can legitimately share one phone (Codex #4737 r5 P1), so that
+// lookup can resolve to a DIFFERENT household's account that merely shares
+// this phone, silently reparenting `linked` under a stranger's account.
+// Mirrors admin-customers.js's own attach path
+// (attachMatchedCustomerToAccount + its fenceMatchedCustomer caller): the
+// lead row is already locked, so the attach takes the non-blocking
+// customer-comms fence, then RE-RESOLVES the exact row before writing —
+// busy or already-attached (the world moved under us) returns null and the
+// caller fails closed/recoverable, never a blocking wait (which could
+// deadlock a merge-undo) and never a second account for this profile.
+async function attachLinkedProfileToOwnAccount(trx, linked) {
+  const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
+  if (!(await tryLockCustomerComms(trx, linked.id))) return null;
+  const fresh = await trx('customers').where({ id: linked.id }).first();
+  if (!fresh || fresh.account_id) return null;
+  const accountId = fresh.id;
+  await trx('customer_accounts')
+    .insert({
+      id: accountId,
+      first_name: fresh.first_name,
+      last_name: fresh.last_name,
+      phone: fresh.phone || null,
+      email: fresh.email ? String(fresh.email).trim().toLowerCase() : null,
+      company_name: fresh.company_name || null,
+      created_at: fresh.created_at || new Date(),
+      updated_at: new Date(),
+    })
+    .onConflict('id')
+    .ignore();
+  await trx('customers')
+    .where({ id: fresh.id })
+    .update({
+      account_id: accountId,
+      is_primary_profile: fresh.is_primary_profile === false ? false : true,
+      profile_label: fresh.profile_label || 'Primary',
+      updated_at: new Date(),
+    });
+  return { accountId, existingCustomer: { ...fresh, account_id: accountId } };
+}
+
 // A linked lead booking a DIFFERENT property of its account: that account's
 // matching profile is reused, else a new "Additional property" profile is
-// created under it (a legacy profile with no account is attached to one
-// first, through the same non-blocking fence the lead convert uses).
+// created under it (a legacy profile with no account is attached to its OWN
+// new account first — see attachLinkedProfileToOwnAccount).
 async function resolveOtherAccountProperty(trx, freshLead, linked, resolved) {
   let account = linked.account_id ? { accountId: linked.account_id, existingCustomer: linked } : null;
   if (!account) {
-    const { ensureCustomerAccount } = require('./admin-customers');
-    account = await ensureCustomerAccount(trx, {
-      firstName: linked.first_name || freshLead.first_name || 'New Lead',
-      lastName: linked.last_name || freshLead.last_name || '',
-      phone: linked.phone || freshLead.phone || '',
-      email: linked.email || null,
-      fenceAttach: true,
-    });
+    account = await attachLinkedProfileToOwnAccount(trx, linked);
+    // Fence busy, or the row was attached/changed since freshCustRow was
+    // read — recoverable, same shape provisionLinkedCustomer already
+    // returns for an address that changed under the lock.
+    if (!account) return { locationFailure: 'address_unresolved' };
   }
   const existing = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
   const chosen = existing
@@ -1306,6 +1346,7 @@ async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, 
   if (anotherProperty) {
     const other = await resolveOtherAccountProperty(trx, freshLead, freshCustRow, resolved);
     if (other.eligibility) return { eligibility: other.eligibility };
+    if (other.locationFailure) return { locationFailure: other.locationFailure };
     return { custRow: other.customer, location: other.location || resolved.location };
   }
   if (resolved.source !== 'customer') {
@@ -1569,6 +1610,17 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
     // now the customer's open assessment.
     const eligibility = await resolveEligibility(db, lead, custRow);
     return res.json(eligibilityResponse(eligibility, leadPayload));
+  }
+  if (result.code === 'LOCATION_CHANGED_RETRY') {
+    // createSelfBooking's own fence found the customer's stored pin had
+    // moved AFTER phase 1 committed (Codex #4737 r8 P2) — `bookingLocation`
+    // is the pin as it stood then, now stale. Answer with fresh times at
+    // the address on file RIGHT NOW, not the pin that just lost the race.
+    const fresh = await db('customers').where({ id: custRow.id }).first('latitude', 'longitude');
+    const currentLocation = (fresh?.latitude != null && fresh?.longitude != null)
+      ? { lat: parseFloat(fresh.latitude), lng: parseFloat(fresh.longitude) }
+      : bookingLocation;
+    return sendSlotTaken(res, { location: currentLocation, range, config, catalog, leadId: lead.id, error: result.error });
   }
   if (result.status === 409) {
     return sendSlotTaken(res, { location: bookingLocation, range, config, catalog, leadId: lead.id, error: result.error });
