@@ -1757,15 +1757,25 @@ async function createSelfBooking(payload = {}) {
       callbackVisit,
     } = payload;
 
-    // callbackVisit is INTERNAL-ONLY (reservice-public.js): a server-resolved
-    // { serviceKey, serviceId, serviceType, durationMinutes } describing a
-    // free re-service callback (services/re-service.js). It swaps the funnel
-    // catalog resolution for the caller's catalog row, marks the committed
-    // visit is_callback so completion never bills it, and skips the
-    // funnel-only follow-ons (signed-offer gate, card-capture step, ad
-    // attribution). Like authedCustomer/payAtVisit, it must be set AFTER the
-    // body spread at every public call site (/confirm nulls it) — a crafted
-    // body must never mint itself a free callback or skip the offer sig.
+    // callbackVisit is INTERNAL-ONLY (reservice-public.js, inspection-public.js):
+    // a server-resolved { serviceKey, serviceId, serviceType, durationMinutes,
+    // isCallback?, dedupeLane?, expectedIdentity?, expectedLocation?, alertLabel? } describing a free internal-
+    // caller booking. It swaps the funnel catalog resolution for the caller's
+    // catalog row and skips the funnel-only follow-ons (signed-offer gate,
+    // card-capture step, ad attribution, customer promotion, quarterly
+    // follow-up seeding). isCallback (default true) additionally marks the
+    // visit is_callback so completion never bills it and callback reporting
+    // counts it — false for a non-re-service internal booking (an assessment
+    // is free without being a warranty callback). dedupeLane (default true)
+    // additionally takes the reservice-lane advisory lock and re-checks the
+    // RESERVICE_LANES-keyed open-callback dedupe — false for a caller whose
+    // serviceKey isn't a re-service lane (that check's fallback classification
+    // would false-hit on an unrelated open pest/lawn re-service); such a
+    // caller owns its own pre-commit idempotency check. alertLabel overrides
+    // the default "🔁 Free re-service self-booked:" internal SMS line. Like
+    // authedCustomer/payAtVisit, callbackVisit must be set AFTER the body
+    // spread at every public call site (/confirm nulls it) — a crafted body
+    // must never mint itself a free callback or skip the offer sig.
 
     if (!slot_date || !slot_start) {
       return { ok: false, status: 400, error: 'slot_date and slot_start required' };
@@ -2878,6 +2888,12 @@ async function createSelfBooking(payload = {}) {
       // below resolves its comms recipients LIVE from the customer row, so
       // it must serialize against a concurrent customer-merge undo's
       // absence probes — after the scheduling rungs, BEFORE every row lock.
+      // The consultation page fences EVERY profile its lead touches first,
+      // in sorted order (Codex #4737 r22 P0 — the same order the waitlist
+      // uses); re-taking this customer's own fence below is a no-op.
+      if (typeof callbackVisit?.leadDedupe?.fenceIds === 'function') {
+        for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) await lockCustomerComms(trx, id);
+      }
       await lockCustomerComms(trx, custId);
       if (custId) {
         const freshBookingCustomer = await trx('customers')
@@ -2888,6 +2904,21 @@ async function createSelfBooking(payload = {}) {
             isOperational: true,
             code: 'CUSTOMER_CHANGED_RETRY',
           });
+        }
+        // callbackVisit.expectedLocation (consultation page only, Codex #4737
+        // r5 P1): the location the caller validated the slot for must still be
+        // the customer's, checked under this fence — another commit can have
+        // replaced the address after the caller's own lock released.
+        if (callbackVisit?.expectedLocation) {
+          const pin = await trx('customers').where({ id: custId }).first('latitude', 'longitude');
+          const same = (a, b) => a != null && Math.abs(parseFloat(a) - Number(b)) < 1e-6;
+          if (!pin || !same(pin.latitude, callbackVisit.expectedLocation.lat) || !same(pin.longitude, callbackVisit.expectedLocation.lng)) {
+            throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'LOCATION_CHANGED_RETRY',
+            });
+          }
         }
         // Estimate linkage revalidates under the fence too (r35): a
         // journaled estimate a merge-undo just returned no longer belongs
@@ -3054,11 +3085,54 @@ async function createSelfBooking(payload = {}) {
       // the other writers is possible. Placed BEFORE the replay lookup only
       // for lock-order clarity — the replay return below still wins for an
       // exact double-submit, so retries never see this 409.
-      if (callbackVisit) {
+      //
+      // callbackVisit.dedupeLane (default true — reservice-public's only
+      // caller never sets it, so its lock + lane-dedupe stay byte-identical):
+      // false opts an internal caller OUT of the reservice-LANE namespace and
+      // the RESERVICE_LANES-keyed ALREADY_BOOKED check right below (inspection-
+      // public.js: a Waves Assessment isn't a pest/lawn re-service lane, and
+      // laneForCallbackRow's default 'pest' fallback would otherwise false-hit
+      // on an unrelated open pest re-service). Such a caller owns its own
+      // idempotency check before calling in.
+      if (callbackVisit && callbackVisit.dedupeLane !== false) {
         await trx.raw(
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['reservice-lane', `${custId}:${callbackVisit.serviceKey}`],
         );
+      }
+      // callbackVisit.leadDedupe (consultation page only, Codex #4737 r9 P1):
+      // one lead can book through several property profiles, so its
+      // dedupe is LEAD-scoped too — a lead lock taken after the per-customer
+      // lane lock (same order in every commit), then the open-assessment
+      // check across every profile of the lead, below.
+      if (callbackVisit?.leadDedupe?.leadId) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['inspection-lead', String(callbackVisit.leadDedupe.leadId)],
+        );
+        // The caller's authority over this customer, re-checked HERE under
+        // the lead lock (Codex #4737 r10 pre-push P0): a phone change or
+        // relink after the caller's own locks released must not still
+        // book (and hand back a reschedule bearer).
+        // It also answers the lead's eligibility (r10 pre-push P1): a lead
+        // converted, or given another visit, since phase 1 is refused like
+        // any duplicate (ALREADY_BOOKED — the page resolves the real state).
+        const { revalidate } = callbackVisit.leadDedupe;
+        const verdict = typeof revalidate === 'function' ? await revalidate(trx) : 'ok';
+        if (verdict === 'ineligible') {
+          throw Object.assign(new Error('You already have a consultation on the books.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'ALREADY_BOOKED',
+          });
+        }
+        if (verdict !== 'ok') {
+          throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'CUSTOMER_CHANGED_RETRY',
+          });
+        }
       }
 
       // Idempotent replay: same customer, same day, same start time →
@@ -3074,7 +3148,25 @@ async function createSelfBooking(payload = {}) {
         .whereNot('status', 'cancelled');
       if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);
       const existing = await replayQuery.first();
-      if (existing) return { existing };
+      if (existing) {
+        // A callback/consultation replay (round-10 P2) must also confirm the
+        // VISIT it is replaying is still live — an admin can cancel the
+        // linked scheduled_services row (scheduled_services.self_booking_id)
+        // without touching this self_booked_appointments row's own status,
+        // and replaying that as success would silently refuse a genuine
+        // rebooking attempt for an assessment nobody is actually holding
+        // anymore. Non-callback replays (paid /book) are unaffected — they
+        // never carried this extra check before.
+        const replayIsLive = !callbackVisit || Boolean(await trx('scheduled_services')
+          .where({ self_booking_id: existing.id })
+          // Any dead visit status, not only cancelled (skipped/rescheduled
+          // rows no longer hold the booking either).
+          .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
+          .first('id'));
+        if (replayIsLive) return { existing };
+        // Else: the linked assessment was cancelled — fall through to a
+        // normal insert instead of replaying a dead booking.
+      }
 
       // Self-serve notice window (owner ruling 2026-09-23), replacing the old
       // same-day-only "already passed" floor: a customer can't self-book a
@@ -3093,7 +3185,7 @@ async function createSelfBooking(payload = {}) {
         });
       }
 
-      if (callbackVisit) {
+      if (callbackVisit && callbackVisit.dedupeLane !== false) {
         const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');
         const lane = laneForCallbackRow({ serviceKey: callbackVisit.serviceKey });
         if (await openCallbackExistsForLane(trx, custId, lane)) {
@@ -3102,6 +3194,24 @@ async function createSelfBooking(payload = {}) {
             isOperational: true,
             code: 'ALREADY_BOOKED',
           });
+        }
+      }
+      if (callbackVisit?.leadDedupe?.leadId) {
+        const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');
+        const lane = laneForCallbackRow({ serviceKey: callbackVisit.serviceKey });
+        // The profile set is read HERE, inside the lead lock (Codex #4737 r9
+        // pre-push P1) — a caller-captured list could miss a profile another
+        // commit created and booked in between.
+        const profileIds = await callbackVisit.leadDedupe.resolveCustomerIds(trx);
+        for (const profileId of profileIds) {
+          if (String(profileId) === String(custId)) continue;
+          if (await openCallbackExistsForLane(trx, profileId, lane)) {
+            throw Object.assign(new Error('You already have a consultation on the books.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'ALREADY_BOOKED',
+            });
+          }
         }
       }
 
@@ -3202,7 +3312,8 @@ async function createSelfBooking(payload = {}) {
           lat: Number.isFinite(offerLat) ? offerLat : null,
           lng: Number.isFinite(offerLng) ? offerLng : null,
           // Same credit buildBookingAvailability offered this window under.
-          expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration),
+          // expectedIdentity: consultation page only (#4737 r1 P2).
+          expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration, callbackVisit?.expectedIdentity || null),
         },
       });
       if (globalClash.length) {
@@ -3310,8 +3421,18 @@ async function createSelfBooking(payload = {}) {
         // invoice suppression (same server-side derivation admin-schedule
         // performs from the catalog row); service_id keys completion-profile
         // resolution to the re-service catalog row.
+        //
+        // callbackVisit.isCallback (default true — reservice-public never
+        // sets it): false for an internal caller whose visit is NOT a re-
+        // service warranty callback (inspection-public.js's Waves Assessment)
+        // — is_callback also drives dispatch/reporting's "callback" badge and
+        // billing-lane's re-service completion posture, both wrong for an
+        // assessment. service_id still links the catalog row either way
+        // (completion-profile resolution + isAssessmentServiceRow also match
+        // on it), and no-invoice-on-complete is correct for both: neither
+        // visit ever bills.
         ...(callbackVisit ? {
-          is_callback: true,
+          is_callback: callbackVisit.isCallback !== false,
           service_id: callbackVisit.serviceId || null,
           create_invoice_on_complete: false,
         } : {}),
@@ -3428,7 +3549,15 @@ async function createSelfBooking(payload = {}) {
       // crossed the notice boundary while this request waited — another
       // "pick another slot" outcome that must not strand a just-created
       // profile.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'ADDRESS_UNVERIFIED') {
+      // CUSTOMER_CHANGED_RETRY too (Codex #4737 r9 P2) — the same race seen
+      // through the comms fingerprint (an address TEXT edit), checked first.
+      // LOCATION_CHANGED_RETRY rides it too (Codex #4737 r8 P2): the
+      // customer's stored pin moved under the fence (callbackVisit's
+      // expectedLocation check above) — a "pick a time again at the
+      // customer's CURRENT address" outcome the consultation page's
+      // sendBookingFailure answers the same way it answers a slot race
+      // (409, refreshed availability), never the global error handler.
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
@@ -5198,8 +5327,10 @@ async function createSelfBooking(payload = {}) {
         // Callbacks announce themselves as what they are — the office reads
         // "re-service" and knows the 5-business-day callback protocol
         // (original tech first) applies, instead of parsing a generic booking.
+        // callbackVisit.alertLabel overrides the re-service default for a
+        // different internal caller (inspection-public.js's free consultation).
         const alertHead = callbackVisit
-          ? '🔁 Free re-service self-booked:'
+          ? (callbackVisit.alertLabel || '🔁 Free re-service self-booked:')
           : '📱 New self-booked appointment:';
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
           `${alertHead}\n${customer.first_name} ${customer.last_name}\n${resolvedServiceType}\n${dateLabel} ${startLabel}\n${customer.city}\nSource: ${source || 'portal'}\nCode: ${confCode}`,

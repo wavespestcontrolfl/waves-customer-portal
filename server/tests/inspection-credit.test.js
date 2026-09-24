@@ -307,6 +307,17 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     expect(source).toContain("whereRaw('COALESCE(s.is_callback, false) = false')");
   });
 
+  // Codex #4737 r2 P1: the consultation page books a Waves Assessment with
+  // is_callback false — still free, still never a credit.
+  it('a free Waves Assessment booking never mints either', async () => {
+    mockBookings = [{ id: 'svc-2', created_at: new Date('2026-08-10'), status: 'confirmed', is_callback: false, service_type: 'Waves Assessment' }];
+    mockEvents = [{ created_at: new Date('2026-08-10') }];
+    mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ redeemed: 0, amount: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
   it('NO booking event → nothing minted, deferred to the sweep (r28 P2)', async () => {
     // A reused row (graduated hold, adopted appointment) carries a
     // reservation/placeholder created_at — falling back to it when the
@@ -974,6 +985,20 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(seamAt).toBeLessThan(replayAt); // seam precedes the replay success
     // The unreachable block stays deleted.
     expect(source).not.toContain('no-show invoice void sweep failed');
+  });
+
+  // Codex #4737 r5 P1: assessments are excluded where evidence is recorded
+  // AND everywhere it is selected, not only at the final mint.
+  it('free assessments are excluded from credit evidence at record time and in every selection query', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    const callbackFilters = (source.match(/COALESCE\((s\.)?is_callback, false\) = false/g) || []).length;
+    const assessmentFilters = (source.match(/\.whereRaw\(notAssessmentSql\(/g) || []).length;
+    expect(assessmentFilters).toBe(callbackFilters);
+    const fnAt = source.indexOf('async function markBookingForInspectionCredit');
+    const insertAt = source.indexOf("sp('inspection_credit_booking_events')", fnAt);
+    const checkAt = source.indexOf('isAssessmentBooking(booked, sp)', fnAt);
+    expect(checkAt).toBeGreaterThan(fnAt);
+    expect(checkAt).toBeLessThan(insertAt);
   });
 
   it('booking evidence freezes its moment at call time, not at retry time (r26 P2, r16 carry-through)', () => {

@@ -31,7 +31,7 @@
  * base render the glass layer restyles.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { DOC_EYEBROW } from '../theme-doc';
 import { estimateCard } from '../components/estimate/cardStyles';
@@ -46,6 +46,25 @@ import {
 } from '../constants/business';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+// Inspection only — the ONE network call that resolves availability for a
+// SUPPLIED address (Codex pre-push P1, 2026-09-24): the address gate's own
+// resolve (InspectionAddressGate, a separate component) and the page's own
+// refreshInspectionAvailability (reset / SLOT_TAKEN recovery) both call
+// this exact function, so the request shape can never drift between them.
+// Returns the raw fetch Response alongside the parsed body so each caller
+// keeps its own status/error handling (the gate shows inline recovery UI;
+// the page-level refresh just needs the availability payload).
+async function postInspectionAvailability(token, address, { signal } = {}) {
+  const res = await fetch(`${API_BASE}/public/inspection/${token}/availability`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address }),
+    signal,
+  });
+  const body = await res.json().catch(() => ({}));
+  return { res, body };
+}
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const S = {
@@ -130,6 +149,22 @@ function formatDateLabel(dateStr) {
   }
 }
 
+// Short weekday for the inspection flow's "Book <Day> <window>" confirm
+// button (a button has no room for formatDateLabel's full "Tuesday,
+// September 29" — the day chip above it and the section date heading
+// already carry that).
+function shortDayLabel(dateStr) {
+  if (!dateStr) return '';
+  try {
+    const [y, m, d] = String(dateStr).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
+      weekday: 'short', timeZone: 'UTC',
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
 function formatTimeLabel(hhmm) {
   if (!hhmm) return '';
   const [h, m] = String(hhmm).split(':').map(Number);
@@ -195,7 +230,32 @@ function HelpCard({ children }) {
   );
 }
 
-function EmptyTimesCard({ aiFiltered }) {
+function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, onRetry }) {
+  // Inspection GET can answer state:'ok' with availability:null and
+  // service_area_unavailable:true (the county lookup itself failed, not a
+  // verdict either way — Codex pre-push P1, 2026-09-24). Same recoverable
+  // wording InspectionAddressGate already uses for the POST version of this
+  // failure, plus a retry action since there's no form to resubmit here.
+  if (serviceAreaUnavailable) {
+    return (
+      <Card>
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginBottom: 12 }}>
+          We couldn&apos;t confirm your service area just now. Please try again in a moment, or text or call us.
+        </div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            data-glass-accent=""
+            onClick={onRetry}
+            style={{ ...PRIMARY_CTA, width: 'auto', padding: '0 20px' }}
+          >
+            Try again
+          </button>
+        </div>
+        <ContactRow />
+      </Card>
+    );
+  }
   return (
     <Card>
       <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
@@ -809,6 +869,329 @@ function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, detail
   );
 }
 
+// ───────────────────────────── inspection (consultation) flow ─────────────────────────────
+// "Book with Adam" — a lead-scoped link to the free Waves Assessment
+// (owner ruling 2026-09-08: an assessment is not a win). Same shell as
+// re-service; the address-first gate and the out-of-area stop are the two
+// pieces neither reschedule nor re-service need.
+
+const INPUT_STYLE = {
+  width: '100%', boxSizing: 'border-box',
+  minHeight: 48, padding: '12px 14px', font: 'inherit', fontSize: 16,
+  color: S.text, background: '#fff', border: `1px solid ${S.softBorder}`, borderRadius: 10,
+};
+
+function GoneCard() {
+  return (
+    <Card>
+      <CardTitle>We couldn&apos;t find that lead</CardTitle>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
+        This link may be out of date. Text or call us and we&apos;ll get a time on the calendar.
+      </div>
+      <ContactRow />
+    </Card>
+  );
+}
+
+function ExpiredLinkCard() {
+  return (
+    <Card>
+      <CardTitle>This link has expired</CardTitle>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
+        Consultation links are only good for 14 days. Text or call us and we&apos;ll get a time on the calendar.
+      </div>
+      <ContactRow />
+    </Card>
+  );
+}
+
+// already_booked / converted: the lead already has a visit on the books
+// (their own open assessment, or — once converted — any future visit).
+function InspectionCoveredCard({ data }) {
+  const visit = data?.visit;
+  const converted = data?.state === 'converted';
+  return (
+    <Card>
+      {/* A converted lead with no upcoming visit is a customer, not "on the
+          calendar" (Codex #4737 r4 P2). */}
+      <CardTitle>
+        {data?.lead?.first_name ? `Hi ${data.lead.first_name} — ` : ''}
+        {converted && !visit ? <>you&apos;re already a Waves customer</> : <>you&apos;re already on the calendar</>}
+      </CardTitle>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
+        {converted ? (
+          <>You&apos;re already a Waves customer{visit ? <> with a visit on the books</> : ''}.</>
+        ) : (
+          <>Your free consultation is already scheduled.</>
+        )}
+        {visit ? (
+          <>
+            {' '}It&apos;s set for <strong style={{ color: S.text }}>{formatDateLabel(visit.date)}</strong>
+            {visit.window?.start ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(visit.window.start)}</strong></> : null}.
+          </>
+        ) : null}
+      </div>
+      {data?.rescheduleUrl ? (
+        <a href={data.rescheduleUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 14 }}>
+          Need a different time? Move that visit
+        </a>
+      ) : null}
+      <HelpCard>Something changed? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will help.</HelpCard>
+    </Card>
+  );
+}
+
+// Out-of-area stop (owner ruling 2026-09-23): STOP the page entirely and
+// offer the one-field expansion-waitlist prompt.
+function OutOfAreaCard({ token, county, ticket }) {
+  const [email, setEmail] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [joined, setJoined] = useState(false);
+  const [error, setError] = useState(null);
+
+  const join = async () => {
+    const value = email.trim();
+    if (!value || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/public/inspection/${token}/waitlist`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // The server-signed ticket from the out_of_area answer carries the
+        // region (Codex #4737 r15 P0) — never a client-supplied county.
+        body: JSON.stringify({ email: value, waitlist_ticket: ticket || undefined }),
+      });
+      if (!res.ok) throw new Error('failed');
+      setJoined(true);
+    } catch {
+      setError("Something went wrong. Please try again, or text or call us and we'll add you.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardTitle>We don&apos;t service this area yet</CardTitle>
+      {joined ? (
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
+          You&apos;re on the list — we&apos;ll let you know as soon as we&apos;re in your area.
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginBottom: 12 }}>
+            We&apos;re not out that way just yet, but we&apos;re growing. Leave your email and we&apos;ll
+            reach out the moment we&apos;re in your area.
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <input
+              type="email"
+              name="waitlist_email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              aria-label="Email address"
+              style={{ ...INPUT_STYLE, flex: '1 1 220px' }}
+            />
+            <button
+              type="button"
+              data-glass-accent=""
+              onClick={join}
+              disabled={submitting || !email.trim()}
+              style={{ ...PRIMARY_CTA, width: 'auto', padding: '0 20px' }}
+            >
+              {submitting ? 'Joining…' : 'Notify me'}
+            </button>
+          </div>
+          {error ? <div className="wpk-error" role="alert" style={{ marginTop: 10 }}>{error}</div> : null}
+        </>
+      )}
+      <ContactRow />
+    </Card>
+  );
+}
+
+// Address-first gate: a lead with no address on file (or one that won't
+// resolve) sees this instead of the picker until one geocodes.
+function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
+  const [address, setAddress] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+  const [outOfArea, setOutOfArea] = useState(null);
+
+  const submit = async () => {
+    const value = address.trim();
+    if (!value || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    setOutOfArea(null);
+    try {
+      const { res, body } = await postInspectionAvailability(token, value);
+      if (res.status === 422 && body.error === 'out_of_area') {
+        setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
+        return;
+      }
+      // Recoverable: the address text didn't geocode (typo, unparseable
+      // input, geocoder hiccup) — never conflated with out_of_area, which
+      // means the address DID resolve and is simply outside the service
+      // area. Stay on this form with an inline message instead of stopping
+      // the page.
+      if (res.status === 422 && body.error === 'address_unresolved') {
+        setError("We couldn't find that address. Please check it and try again, or text or call us.");
+        return;
+      }
+      // Recoverable: the service-area check itself couldn't run (provider
+      // timeout/outage) — not a verdict either way, so stay on the form and
+      // let them try again rather than stopping the page.
+      if (res.status === 503 && body.error === 'service_area_unavailable') {
+        setError("We couldn't confirm your service area just now. Please try again in a moment, or text or call us.");
+        return;
+      }
+      // Online consultation booking is switched off (Codex #4737 r7 P2).
+      if (res.status === 503 && body.error === 'booking_unavailable') {
+        setError("Online booking isn't available right now. Please text or call us and we'll get you scheduled.");
+        return;
+      }
+      if (!res.ok) throw new Error(body.error || 'failed');
+      // A terminal state from the eligibility re-check (Codex #4737 r11 P2)
+      // replaces the gate with the same card GET would show.
+      if (body.state && body.state !== 'ok') {
+        onResolved(body);
+        return;
+      }
+      onAddressResolved?.(value);
+      // The hero shows the address being booked, not the stale one on file
+      // (Codex #4737 r6 P2).
+      onResolved({
+        availability: body.availability,
+        needs_address: false,
+        // The new address resolved in area — any earlier outage flag is
+        // stale (Codex #4737 r23 P2).
+        service_area_unavailable: false,
+        lead: { ...(data?.lead || {}), address_display: value, has_address: true },
+      });
+    } catch {
+      setError("We couldn't look up that address. Please check it and try again, or text or call us.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (outOfArea) return <OutOfAreaCard token={token} county={outOfArea.county} ticket={outOfArea.ticket} />;
+
+  return (
+    <Card>
+      <CardTitle>{data?.lead?.first_name ? `Hi ${data.lead.first_name} — ` : ''}where should we come by?</CardTitle>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginBottom: 12 }}>
+        We just need the address for the visit to show you open times.
+      </div>
+      <label htmlFor="inspection-address" style={{ display: 'block', fontSize: 14, fontWeight: 700, marginBottom: 6 }}>
+        Address for the visit
+      </label>
+      <input
+        id="inspection-address"
+        name="inspection_address"
+        value={address}
+        onChange={(e) => setAddress(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
+        placeholder="123 Palm Ave, Bradenton, FL 34209"
+        style={INPUT_STYLE}
+      />
+      <button
+        type="button"
+        data-glass-accent=""
+        onClick={submit}
+        disabled={submitting || !address.trim()}
+        style={{ ...PRIMARY_CTA, marginTop: 14 }}
+      >
+        {submitting ? 'Looking up…' : 'Show open times'}
+      </button>
+      {error ? <div className="wpk-error" role="alert" style={{ marginTop: 10 }}>{error}</div> : null}
+      <ContactRow />
+    </Card>
+  );
+}
+
+function InspectionHero({ data, details, onDetails, onChangeAddress }) {
+  const lead = data?.lead || {};
+  return (
+    <>
+      <div style={{ margin: '8px 2px 20px' }}>
+        <div data-gt="eyebrow" style={DOC_EYEBROW}>Free consultation</div>
+        <h1 style={{ margin: 0, fontFamily: FONTS.serif, fontSize: 'clamp(30px, 5vw, 40px)', fontWeight: 500, lineHeight: 1.1, color: S.text }}>
+          {lead.first_name ? `Hi ${lead.first_name} — ` : ''}pick a time for us to stop by
+        </h1>
+        <div style={{ marginTop: 12, color: S.body, fontSize: 16, lineHeight: 1.55 }}>
+          {data?.durationMinutes ? `About ${data.durationMinutes} minutes. ` : ''}We arrive in a 2-hour window.
+        </div>
+      </div>
+      <Card>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: S.text }}>
+            {[lead.first_name, lead.phone_masked].filter(Boolean).join(' · ')}
+          </div>
+          <a href={WAVES_SUPPORT_SMS_TEL} style={{ fontSize: 14, fontWeight: 700, color: COLORS.glassNavy, textDecoration: 'underline' }}>
+            Not you?
+          </a>
+        </div>
+        {lead.address_display ? (
+          <div style={{ marginTop: 10, fontSize: 14, color: S.body, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'baseline' }}>
+            <span>{lead.address_display}</span>
+            {onChangeAddress ? (
+              <button
+                type="button"
+                onClick={onChangeAddress}
+                style={{ background: 'none', border: 0, padding: 0, font: 'inherit', fontSize: 14, fontWeight: 700, color: COLORS.glassNavy, textDecoration: 'underline', cursor: 'pointer' }}
+              >
+                Different address?
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        <label htmlFor="inspection-notes" style={{ display: 'block', fontSize: 14, fontWeight: 700, marginTop: 16, marginBottom: 6 }}>
+          Anything we should know? <span style={{ fontWeight: 500, color: S.body }}>(optional)</span>
+        </label>
+        <textarea
+          id="inspection-notes"
+          name="inspection_notes"
+          value={details}
+          onChange={(e) => onDetails(e.target.value)}
+          maxLength={400}
+          rows={2}
+          placeholder="Ants along the kitchen window, a spot in the backyard, etc."
+          style={{
+            width: '100%', boxSizing: 'border-box', resize: 'vertical',
+            border: '1px solid #E7E2D7', borderRadius: 10, padding: '10px 12px',
+            font: 'inherit', fontSize: 16, color: S.text, background: '#fff',
+          }}
+        />
+      </Card>
+    </>
+  );
+}
+
+function InspectionSuccessCard({ result }) {
+  const visit = result?.visit || {};
+  return (
+    <Card>
+      <CardTitle>You&apos;re on the calendar</CardTitle>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
+        Your free consultation is set for <strong style={{ color: S.text }}>{formatDateLabel(visit.date)}</strong>, arrival window{' '}
+        <strong style={{ color: S.text }}>{arrivalWindowLabel(visit.window?.start) || result.startLabel}</strong>.
+        {/* No delivery promise: a confirmation follows the profile's own
+            preferences, and an additional-property profile starts with
+            confirmations off (Codex #4737 r4 + r6 P2). */}
+      </div>
+      {result?.rescheduleUrl ? (
+        <a href={result.rescheduleUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
+          Need a different time? Reschedule it
+        </a>
+      ) : null}
+    </Card>
+  );
+}
+
 // ───────────────────────────── the page ─────────────────────────────
 
 // Everything that differs between the two flows lives here, as data — the
@@ -874,6 +1257,67 @@ const FLOWS = {
     stateChangedMessage: 'Your re-service options just updated — here is the latest.',
     pickedNote: () => null,
   },
+  inspection: {
+    endpoint: 'inspection',
+    notFound: { title: "We couldn't find that link", body: "This link may be out of date. Text or call us and we'll get a time on the calendar." },
+    loadErrorTitle: "We couldn't load your consultation options",
+    // `data` here is this flow's own GET/availability response, and `ctx`
+    // (token, mergeData) is inspection-only — the other flows' `blocked`
+    // never reads a second argument.
+    blocked: (data, ctx) => {
+      if (!data) return null;
+      if (data.state === 'gone') return <GoneCard />;
+      if (data.state === 'expired') return <ExpiredLinkCard />;
+      if (data.state === 'already_booked' || data.state === 'converted') return <InspectionCoveredCard data={data} />;
+      // GET's own out-of-area verdict (a stored address that resolves but
+      // sits outside the service area) — same stop card the commit-time
+      // out_of_area response raises, just sourced from initial load instead
+      // of a POST (Codex pre-push P1, 2026-09-24).
+      if (data.state === 'out_of_area') return <OutOfAreaCard token={ctx?.token} county={data.county} ticket={data.waitlist_ticket} />;
+      if (data.needs_address) {
+        return (
+          <InspectionAddressGate
+            data={data}
+            token={ctx?.token}
+            onResolved={ctx?.mergeData}
+            onAddressResolved={ctx?.setResolvedAddress}
+          />
+        );
+      }
+      return null;
+    },
+    Hero: InspectionHero,
+    Success: ({ result }) => <InspectionSuccessCard result={result} />,
+    canConfirm: () => true,
+    // "Book <Day> <window>" (brief copy contract) — the only flow whose CTA
+    // names the picked slot; reschedule/reservice keep their generic label.
+    actionLabel: ({ submitting, slot }) => (submitting
+      ? 'Booking…'
+      : slot ? `Book ${shortDayLabel(slot.date)} ${arrivalWindowLabel(slot.start_time)}` : 'Book free'),
+    payload: ({ slot, details, address }) => ({
+      date: slot.date,
+      time: slot.start_time,
+      notes: details.trim() || undefined,
+      // Only set when the address gate collected one (needs_address) — the
+      // server ignores it (and requires nothing) when the lead already has
+      // an address on file.
+      ...(address ? { address } : {}),
+    }),
+    // Every terminal state the commit can answer (already_booked/converted/
+    // gone — idempotent replay, or eligibility that changed since page
+    // load) is handled uniformly in confirm() itself, straight from the
+    // commit's own response body — never routed through stateChangedCodes
+    // (unused for this flow; kept as an empty array since confirm() reads
+    // it unconditionally for every flow).
+    stateChangedCodes: [],
+    stateChangedMessage: null,
+    // ?slot= preselect fallback (email link): "we moved you" is a picked-slot
+    // note like reschedule's ReanchorNote, sourced from page state via the
+    // third ctx arg (this flow is the only one that uses it).
+    pickedNote: (_data, _slot, ctx) => (ctx?.slotMovedNotice
+      ? <div className="wpk-picked-note"><div data-glass="soft" style={SOFT_NOTE}>{ctx.slotMovedNotice}</div></div>
+      : null),
+  },
 };
 
 export default function ScheduleFlowPage({ flow }) {
@@ -902,11 +1346,24 @@ export default function ScheduleFlowPage({ flow }) {
   // Re-service only: which plan family and the optional details line.
   const [selectedLane, setSelectedLane] = useState(null);
   const [details, setDetails] = useState('');
+  // Inspection only: the out-of-area stop (STOPs the page like `blocked`,
+  // but it's raised from a POST response rather than the GET's own state)
+  // and the ?slot= preselect's "we moved you" notice.
+  const [searchParams] = useSearchParams();
+  const [outOfArea, setOutOfArea] = useState(null);
+  const [slotMovedNotice, setSlotMovedNotice] = useState(null);
+  // The address text the gate resolved (never persisted until commit) —
+  // carried into the commit payload alongside the picked slot.
+  const [resolvedAddress, setResolvedAddress] = useState('');
 
   // Abort the in-flight load on unmount/token change — a late response must
   // not setState against an unmounted page (or land under a different token);
   // superseding a still-running load also keeps responses in issue order.
   const loadAbortRef = useRef(null);
+  // ?slot=YYYY-MM-DD|HH:MM applies once per page life (the email link) — a
+  // later data refresh (AI search, SLOT_TAKEN recovery) must not re-apply it
+  // over the customer's own subsequent pick.
+  const appliedSlotParamRef = useRef(false);
 
   const laneQuery = flow === 'reservice' && selectedLane && (data?.lanes || []).filter(lane => !lane.alreadyBooked).length > 1
     ? `?lane=${selectedLane}` : '';
@@ -962,6 +1419,85 @@ export default function ScheduleFlowPage({ flow }) {
     });
   }, [data]);
 
+  // Inspection only: ?slot=YYYY-MM-DD|HH:MM preselect (the new-lead email's
+  // three slot buttons link with one). Applies once, the first time real
+  // availability shows up — a later refresh (AI search, SLOT_TAKEN recovery)
+  // must not override the customer's own subsequent pick. A requested slot
+  // that's gone by the time they tap falls to the nearest open slot with a
+  // notice, rather than silently landing on a slot nobody asked for.
+  useEffect(() => {
+    if (flow !== 'inspection' || appliedSlotParamRef.current) return;
+    const days = data?.availability?.days || [];
+    if (!days.length) return;
+    appliedSlotParamRef.current = true;
+    const raw = searchParams.get('slot');
+    if (!raw) return;
+    const [wantDate, wantTime] = raw.split('|');
+    const day = days.find((d) => d.date === wantDate);
+    const slot = day?.slots?.find((s) => s.start_time === wantTime);
+    if (slot) {
+      setSelectedDate(day.date);
+      setSelectedSlot({ ...slot, date: day.date, fullDate: day.fullDate });
+      return;
+    }
+    // The first opening AT OR AFTER the requested time (Codex #4737 r17
+    // P2), never an earlier one; if nothing later remains, the earliest
+    // opening with wording that says so.
+    const openings = days.flatMap((d) => (d.slots || []).map((sl) => ({ day: d, slot: sl })));
+    const later = openings.find(({ day: d, slot: sl }) => d.date > wantDate || (d.date === wantDate && sl.start_time >= wantTime));
+    const pick = later || openings[0];
+    if (pick) {
+      setSelectedDate(pick.day.date);
+      setSelectedSlot({ ...pick.slot, date: pick.day.date, fullDate: pick.day.fullDate });
+      setSlotMovedNotice(later
+        ? 'That time just filled. We moved you to the next open time.'
+        : "That time just filled, and there's nothing later this week. Here's the earliest open time.");
+    }
+  }, [flow, data, searchParams]);
+
+  // Inspection's address gate resolves availability without a full reload —
+  // merge it straight into `data` so the picker mounts immediately.
+  const mergeData = useCallback((patch) => {
+    setData((prev) => (prev ? { ...prev, ...patch } : prev));
+  }, []);
+
+  // Inspection only — the ONE client helper that refreshes availability on
+  // any post-load path (Codex pre-push P1, 2026-09-24): "Show all open
+  // times" after an AI search, and the SLOT_TAKEN recovery fallback, both
+  // call this. When a resolvedAddress is held (the address gate already
+  // resolved one this page-life — a lead with no address on file), it
+  // POSTs that address through postInspectionAvailability (the SAME call
+  // the address gate itself makes) and MERGES the result into `data`,
+  // never replacing it wholesale — a bare GET on availabilityUrl (no
+  // address) would re-answer needs_address:true for an addressless lead
+  // and yank the picker back to a blank address form mid-session. When the
+  // lead already has an address on file (no resolvedAddress held), the
+  // plain GET is correct and unchanged — same as every other flow.
+  // ignoreHeldAddress: the held address was just invalidated (an address
+  // race — Codex #4737 r10 pre-push P1); this call's closure still holds
+  // it, so the plain GET (the customer's current address) is used instead.
+  const refreshInspectionAvailability = useCallback(async ({ signal, ignoreHeldAddress = false } = {}) => {
+    if (flow === 'inspection' && resolvedAddress && !ignoreHeldAddress) {
+      const { res, body } = await postInspectionAvailability(token, resolvedAddress, { signal });
+      if (signal?.aborted) return;
+      if (!res.ok) throw new Error(body.error || 'availability refresh failed');
+      // A terminal state (already_booked / converted / gone) replaces the
+      // page, as the gate and the slot search do (Codex #4737 r11 pre-push P1).
+      if (body.state && body.state !== 'ok') {
+        setData(body);
+        return;
+      }
+      mergeData({ availability: body.availability, needs_address: false });
+      return;
+    }
+    const res = await fetch(availabilityUrl, { signal });
+    if (signal?.aborted) return;
+    if (!res.ok) throw new Error('availability refresh failed');
+    const body = await res.json();
+    if (signal?.aborted) return;
+    setData(body);
+  }, [flow, resolvedAddress, token, availabilityUrl, mergeData]);
+
   // Waves AI date/time search — swaps in the matching window's availability
   // (same shape the GET returns) and hands the summary line back to the
   // card. Throwing lets the card show its own call-us fallback line.
@@ -970,12 +1506,27 @@ export default function ScheduleFlowPage({ flow }) {
     const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}/find-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, ...(flow === 'reservice' ? { lane: selectedLane } : {}) }),
+      body: JSON.stringify({
+        query,
+        ...(flow === 'reservice' ? { lane: selectedLane } : {}),
+        // Inspection only: an addressless lead's search has nothing to
+        // geocode against server-side unless the address gate already
+        // resolved one this page-life (P1 :457 — find-slots now accepts it
+        // the same way the commit and /availability endpoints do).
+        ...(flow === 'inspection' && resolvedAddress ? { address: resolvedAddress } : {}),
+      }),
       signal,
     });
     const body = await res.json().catch(() => ({}));
     if (signal?.aborted) throw new Error('search superseded');
     if (!res.ok) throw new Error(body.error || 'search failed');
+    // Inspection: a terminal state (already_booked / converted / gone) from
+    // the server's eligibility re-check replaces the page, exactly as the
+    // commit path does (Codex #4737 r11 P2).
+    if (flow === 'inspection' && body.state && body.state !== 'ok') {
+      setData(body);
+      return { summary: null };
+    }
     if (body.availability) {
       setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
       setSelectedSlot(null);
@@ -993,11 +1544,8 @@ export default function ScheduleFlowPage({ flow }) {
     setSelectedSlot(null);
     const signal = loadAbortRef.current?.signal;
     try {
-      const res = await fetch(availabilityUrl, { signal });
-      if (!res.ok) return;
-      const body = await res.json();
+      await refreshInspectionAvailability({ signal });
       if (signal?.aborted) return;
-      setData(body);
       setAiFiltered(false);
       setAiSession((n) => n + 1); // remount the card → clears its recap/query
     } catch { /* keep the filtered calendar + reset link */ }
@@ -1007,7 +1555,7 @@ export default function ScheduleFlowPage({ flow }) {
     if (!selectedSlot || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
     setSubmitting(true);
     setSubmitError(null);
-    const payload = cfg.payload({ slot: selectedSlot, data, lane: selectedLane, details });
+    const payload = cfg.payload({ slot: selectedSlot, data, lane: selectedLane, details, address: resolvedAddress });
     try {
       const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`, {
         method: 'POST',
@@ -1019,12 +1567,64 @@ export default function ScheduleFlowPage({ flow }) {
         setResult(body);
         return;
       }
+      // Inspection only: the geocoded address falls outside the service
+      // area — STOP with the dedicated card instead of a generic error.
+      if (flow === 'inspection' && body.error === 'out_of_area') {
+        setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
+        return;
+      }
+      // Inspection only: the address didn't geocode at commit time (rare —
+      // usually caught earlier by the address gate) — recoverable, stay on
+      // the picker with an inline message rather than showing the raw error
+      // code or a generic failure line.
+      if (flow === 'inspection' && body.error === 'address_unresolved') {
+        setSubmitError("We couldn't verify that address. Please text or call us and we'll get you booked.");
+        return;
+      }
+      // Inspection only: the service-area check itself couldn't run — not a
+      // verdict, so stay on the picker and let them retry rather than
+      // stopping on the out-of-area card.
+      if (flow === 'inspection' && body.error === 'service_area_unavailable') {
+        setSubmitError("We couldn't confirm your service area just now. Please try again, or text or call us.");
+        return;
+      }
+      // Inspection only: the commit answers any of GET's own terminal
+      // states (already_booked/converted/gone) when eligibility changed
+      // since page load — idempotent replay, or a race with another
+      // booking. Replace `data` with the response body itself (it's the
+      // SAME shape GET returns) so the existing blocked() rendering path
+      // shows the right card immediately, uniformly for every terminal
+      // state — not just ALREADY_BOOKED, which previously left converted/
+      // gone falling through to a generic "something went wrong" line
+      // (Codex pre-push P1, 2026-09-24).
+      if (flow === 'inspection' && res.ok && body.state && body.state !== 'ok') {
+        setSelectedSlot(null);
+        setData(body);
+        return;
+      }
       if (body.code === 'SLOT_TAKEN') {
         setSelectedSlot(null);
         setAiFiltered(false); // refreshed availability spans the full window
         setAiSession((n) => n + 1); // remount the card — its recap is stale too
+        // Inspection only: a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY
+        // race answers with the customer's CURRENT address (round-10 P2) —
+        // drop the held supplied address so the next confirm doesn't
+        // resubmit the stale one, and show the address actually on file.
+        if (flow === 'inspection' && body.address_changed) {
+          setResolvedAddress('');
+          if (body.lead) mergeData({ lead: body.lead });
+        }
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
+        } else if (flow === 'inspection') {
+          // The server's own refresh attempt came back empty — fall back
+          // to a client-side refresh through the SAME address-aware helper
+          // showAllTimes uses, never the bare load()/GET below: an
+          // addressless lead's held resolvedAddress must not be dropped
+          // here either (Codex pre-push P1, 2026-09-24).
+          try {
+            await refreshInspectionAvailability({ ignoreHeldAddress: Boolean(body.address_changed) });
+          } catch { /* keep the current calendar rather than blanking it */ }
         } else {
           await load();
         }
@@ -1059,7 +1659,10 @@ export default function ScheduleFlowPage({ flow }) {
   if (notFound) return <Page><NotFoundCard title={cfg.notFound.title} body={cfg.notFound.body} /></Page>;
   if (loadError) return <Page><LoadErrorCard title={cfg.loadErrorTitle} onRetry={load} /></Page>;
   if (result) return <Page><cfg.Success result={result} data={data} /></Page>;
-  const blocked = cfg.blocked(data);
+  // Inspection only: raised from the commit's out_of_area response — a STOP
+  // like `blocked` below, just sourced from a POST instead of the GET state.
+  if (outOfArea) return <Page><OutOfAreaCard token={token} county={outOfArea.county} ticket={outOfArea.ticket} /></Page>;
+  const blocked = cfg.blocked(data, { token, mergeData, setResolvedAddress });
   if (blocked) return <Page>{blocked}</Page>;
 
   const lanes = data?.lanes || [];
@@ -1067,8 +1670,6 @@ export default function ScheduleFlowPage({ flow }) {
   const blockedLanes = lanes.filter((l) => l.alreadyBooked);
   const days = data?.availability?.days || [];
   const selectedDay = days.find((d) => d.date === selectedDate) || days[0] || null;
-
-  const actionLabel = cfg.actionLabel({ submitting, lane: selectedLane });
 
   return (
     // Single column at every width (owner ask 2026-07-14) — the page keeps
@@ -1091,6 +1692,19 @@ export default function ScheduleFlowPage({ flow }) {
         }}
         details={details}
         onDetails={setDetails}
+        // Inspection only: re-open the address form to correct the address
+        // (Codex #4737 r5 P1 — an explicitly typed address wins on the
+        // server, so a corrected retry books there).
+        onChangeAddress={() => {
+          // An in-flight search for the OLD address must never land after
+          // the new one resolves (Codex #4737 r15 P2): abort it and start a
+          // fresh controller for the requests that follow.
+          loadAbortRef.current?.abort();
+          loadAbortRef.current = new AbortController();
+          setAiFiltered(false);
+          setSelectedSlot(null);
+          mergeData({ needs_address: true });
+        }}
       />
       {blockedLanes.map((lane) => (
         <AlreadyBookedCard key={lane.key} lane={lane} />
@@ -1121,12 +1735,18 @@ export default function ScheduleFlowPage({ flow }) {
                 onClick={confirm}
                 disabled={submitting || !cfg.canConfirm({ lane: selectedLane })}
               >
-                {actionLabel}
+                {cfg.actionLabel({ submitting, lane: selectedLane, slot })}
               </button>
-              {cfg.pickedNote(data, slot)}
+              {cfg.pickedNote(data, slot, { slotMovedNotice })}
             </>
           )}
-          empty={<EmptyTimesCard aiFiltered={aiFiltered} />}
+          empty={(
+            <EmptyTimesCard
+              aiFiltered={aiFiltered}
+              serviceAreaUnavailable={flow === 'inspection' && !!data?.service_area_unavailable}
+              onRetry={load}
+            />
+          )}
         />
       </>)}
       <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>

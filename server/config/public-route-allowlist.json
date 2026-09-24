@@ -18,7 +18,7 @@
     {
       "router": "server/index.js",
       "mount": "/",
-      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off",
+      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers.",
       "routes": [
         "USE / (inline function#1fe36153)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
@@ -27,6 +27,7 @@
         "USE /api/public/a2a (inline function#c621253a)",
         "USE /api/public/careers (inline function#1ef2d7c2)",
         "USE /api/public/careers/interview (inline function#656a8908)",
+        "USE /api/public/inspection (inline function#ae857f75)",
         "USE /api/public/lawn-assessment (inline function#8e4982f2)",
         "USE /api/public/mcp (inline function#6af8a3db)",
         "USE /api/public/pest-forecast (inline function#a972e744)",
@@ -388,6 +389,19 @@
         "GET /api/public/reservice/:token",
         "POST /api/public/reservice/:token",
         "POST /api/public/reservice/:token/find-slots"
+      ]
+    },
+    {
+      "router": "server/routes/inspection-public.js",
+      "mount": "/api/public/inspection",
+      "reason": "Tokenized free-consultation self-booking links texted to leads (owner-commissioned consultation-first lane, PR #4737; dark behind GATE_LEAD_INSPECTION_LINK): HMAC lead token is the bearer, customer data only under the verified-phone trust rules",
+      "routes": [
+        "USE /api/public/inspection (inline function#ad62acd0)",
+        "GET /api/public/inspection/:token",
+        "POST /api/public/inspection/:token",
+        "POST /api/public/inspection/:token/availability",
+        "POST /api/public/inspection/:token/find-slots",
+        "POST /api/public/inspection/:token/waitlist"
       ]
     },
     {

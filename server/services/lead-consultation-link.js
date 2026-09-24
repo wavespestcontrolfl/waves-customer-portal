@@ -23,7 +23,7 @@ const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { createShortCode } = require('./short-url');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
-const { mintLeadConsultationToken, TTL_SECONDS } = require('../utils/lead-consultation-token');
+const { mintLeadConsultationToken, smsChannelFor, TTL_SECONDS } = require('../utils/lead-consultation-token');
 // The chokepoint (pre-push Codex P1): every caller of this module —
 // composer-customer-links.js's buildConsultationLink, admin-communications.js's
 // resolveConsultationLeadOnly, and admin-leads.js's GET
@@ -43,9 +43,16 @@ function consultationSmsLineFor(url) {
 
 // The long URL for a lead id, independent of the short-url wrapper — the
 // recurring-lead email PR renders this (or a shortened form of it) directly
-// into the send-time template.
-function consultationUrlForLead(leadId) {
-  const token = mintLeadConsultationToken(leadId);
+// into the send-time template. `channel` (round 11, Codex pre-push P1,
+// 2026-09-24) is an OPTIONAL delivery-channel claim minted into the token
+// itself (server/utils/lead-consultation-token.js) — omitted here (the
+// default), a link is UNVERIFIED delivery; an SMS send passes `'sms'` to
+// buildLeadConsultationLink, which signs it as smsChannelFor(lead.phone) so
+// inspection-public.js's leadContactVerified can trust that this exact link
+// reached the lead's CURRENT phone. Never set it for an email send —
+// only an SMS send is evidence the phone itself received the link.
+function consultationUrlForLead(leadId, channel) {
+  const token = mintLeadConsultationToken(leadId, undefined, channel);
   if (!token) return null;
   return `${publicPortalUrl()}/inspection/${token}`;
 }
@@ -82,7 +89,7 @@ async function leadLinkRefusal(lead) {
   return null;
 }
 
-async function buildLeadConsultationLink(leadOrId) {
+async function buildLeadConsultationLink(leadOrId, { channel } = {}) {
   try {
     if (!leadInspectionLinkLive()) {
       return { url: null, line: '', reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)' };
@@ -100,7 +107,14 @@ async function buildLeadConsultationLink(leadOrId) {
     const refusal = await leadLinkRefusal(lead);
     if (refusal) return { url: null, line: '', reason: refusal };
 
-    const longUrl = consultationUrlForLead(lead.id);
+    // 'sms' is signed as the phone-bound claim (smsChannelFor of this fresh
+    // row's phone) — the only form inspection-public.js's
+    // leadContactVerified accepts (Codex #4737 r1 P1 follow-through).
+    const signedChannel = channel === 'sms' ? smsChannelFor(lead.phone) : channel;
+    if (channel === 'sms' && !signedChannel) {
+      return { url: null, line: '', reason: 'Lead phone is not a valid 10-digit number' };
+    }
+    const longUrl = consultationUrlForLead(lead.id, signedChannel);
     if (!longUrl) return { url: null, line: '', reason: 'Could not build a consultation link (no signing secret configured)' };
 
     const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000);
@@ -237,7 +251,10 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
     logger.warn(`[lead-consultation-link] template pre-check failed: ${err.message}`);
     return unavailable('Consultation text template is unavailable');
   }
-  const built = await buildLeadConsultationLink(leadOrId);
+  // The SMS helper mints the phone-bound SMS claim (Codex #4737 r13 P1):
+  // every production text goes through here, so the page can treat the
+  // token's delivery to this phone as verification.
+  const built = await buildLeadConsultationLink(leadOrId, { channel: 'sms' });
   if (!built.url) return built;
   try {
     const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');

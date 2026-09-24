@@ -384,6 +384,35 @@ app.use('/api/public/a2a', (req, res, next) => {
   }
   next();
 });
+// Consultation booking page (routes/inspection-public.js): same
+// unobservable-when-dark contract as the public MCP/A2A guards above — ahead
+// of the global /api limiter and JSON parsing, so while
+// GATE_LEAD_INSPECTION_LINK is off every request is a uniform 404, never a
+// 429/413/400 (Codex #4737 r2 P0). Call-time gate read.
+// Privacy headers first (Codex #4737 r4 P0), exactly as the careers
+// interview surface does: the dark 404 and any global-limiter 429 for a
+// bearer-token URL still carry Cache-Control/X-Robots-Tag/Referrer-Policy.
+app.use('/api/public/inspection', require('./middleware/no-store').noStore);
+app.use('/api/public/inspection', (req, res, next) => {
+  if (!require('./config/feature-gates').leadInspectionLinkLive()) {
+    return res.status(404).json({ error: 'not_found' });
+  }
+  // A token that is not even validly SIGNED is a uniform 404 here, before
+  // the global limiter and body parsers (Codex #4737 r5 P0). Expiry is not
+  // checked here (nowSec 0) — an expired-but-genuine link still reaches the
+  // router, which answers GET { state: 'expired' }.
+  let token = String(req.path || '').split('/').filter(Boolean)[0] || '';
+  try { token = decodeURIComponent(token); } catch { token = ''; }
+  // GET keeps an expired-but-genuine link alive for its { state: 'expired' }
+  // page (signature only, nowSec 0); every other method needs a LIVE token
+  // here, before parsing (Codex #4737 r6 P0).
+  const { verifyLeadConsultationToken } = require('./utils/lead-consultation-token');
+  const live = req.method === 'GET' ? verifyLeadConsultationToken(token, 0) : verifyLeadConsultationToken(token);
+  if (!token || !live) {
+    return res.status(404).json({ error: 'not_found' });
+  }
+  next();
+});
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 app.use('/api/', limiter);
 
@@ -702,6 +731,10 @@ app.use('/api/public/reschedule', require('./routes/reschedule-public'));
 // Token-gated on customers.reservice_token; every route 404s until
 // GATE_RESERVICE_SELF_SERVE is on.
 app.use('/api/public/reservice', require('./routes/reservice-public'));
+// Lead-scoped consultation-booking link ("Book with Adam" — the free Waves
+// Assessment). Token-gated on the signed lead-consultation token; every
+// route 404s until GATE_LEAD_INSPECTION_LINK is on.
+app.use('/api/public/inspection', require('./routes/inspection-public'));
 // Customer appointment page (24h reminder + booking confirmation link
 // target). Token-gated on the same reschedule_token; every route 404s
 // until GATE_APPOINTMENT_PAGE is on.

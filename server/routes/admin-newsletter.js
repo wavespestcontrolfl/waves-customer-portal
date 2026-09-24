@@ -151,6 +151,9 @@ router.post('/subscribers', async (req, res, next) => {
       lastName: lastName || null,
       source: source || 'admin_manual',
       strict: false,
+      // An operator deliberately adding this address may bring a waitlist
+      // row into sends (Codex #4737 r3 P2); bulk imports never do.
+      promoteWaitlist: true,
     });
     res.json({
       success: true,

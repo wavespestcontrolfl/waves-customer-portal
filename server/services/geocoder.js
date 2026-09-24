@@ -28,8 +28,18 @@ const STREET_LEVEL_LOCATION_TYPES = new Set(['ROOFTOP', 'RANGE_INTERPOLATED']);
 /**
  * Why a geocode result is unusable, or null when it is usable. Pure, so the
  * policy is unit-testable without a live API call.
+ *
+ * `requireInServiceArea` (default true) gates ONLY the box check — every
+ * other rejection (no location, partial match, a coarse/non-street-level
+ * result) always applies. Pass false for a caller that wants street-level
+ * quality filtering WITHOUT discarding a result that's simply outside the
+ * box, because it needs to distinguish "this address doesn't exist" from
+ * "this address exists and is out of area" itself (inspection-public.js:
+ * an out-of-box address must answer out_of_area with a waitlist prompt, not
+ * the generic "we couldn't find that address" a swallowed box-reject used
+ * to produce — Codex pre-push P1, 2026-09-24).
  */
-function rejectGeocodeResult(result) {
+function rejectGeocodeResult(result, { requireInServiceArea = true } = {}) {
   if (!result || !result.geometry || !result.geometry.location) return 'no_location';
   if (result.partial_match === true) return 'partial_match';
   const types = Array.isArray(result.types) ? result.types : [];
@@ -37,8 +47,10 @@ function rejectGeocodeResult(result) {
     types.some((t) => STREET_LEVEL_TYPES.has(t)) ||
     STREET_LEVEL_LOCATION_TYPES.has(result.geometry.location_type);
   if (!streetLevel) return `coarse_result:${types.join('|') || 'unknown'}`;
-  const { lat, lng } = result.geometry.location;
-  if (!isInServiceAreaBox(lat, lng)) return 'outside_service_area';
+  if (requireInServiceArea) {
+    const { lat, lng } = result.geometry.location;
+    if (!isInServiceAreaBox(lat, lng)) return 'outside_service_area';
+  }
   return null;
 }
 
@@ -121,12 +133,17 @@ async function fetchGeocodeResult(address, cacheOnly = false) {
  * addresses — a newsletter event venue in Tampa, say — where a
  * point-of-interest hit outside the customer footprint is the right answer
  * and must not be thrown away.
+ *
+ * Pass { requireInServiceArea: false } (with serviceAddress:true) to keep
+ * street-level quality filtering but stop discarding an out-of-box result —
+ * see rejectGeocodeResult's own comment. Defaults to `serviceAddress`, so
+ * every existing caller (which never sets this) is byte-identical.
  */
-async function geocodeAddressWithStatus(address, { serviceAddress = true, cacheOnly = false } = {}) {
+async function geocodeAddressWithStatus(address, { serviceAddress = true, cacheOnly = false, requireInServiceArea = serviceAddress } = {}) {
   const { result, permanent } = await fetchGeocodeResult(address, cacheOnly);
   if (!result) return { location: null, permanent };
   if (serviceAddress) {
-    const rejected = rejectGeocodeResult(result);
+    const rejected = rejectGeocodeResult(result, { requireInServiceArea });
     if (rejected) {
       // Reason only — the address is customer PII and does not belong in logs.
       logger.warn(`[geocoder] rejected geocode: ${rejected}`);

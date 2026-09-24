@@ -1748,6 +1748,153 @@ booking window, READ-ONLY, no raw query logging. Generic 404 for
 bad/unknown tokens and while the gate is off. Treat the reservice token,
 the lane-eligibility gates, and the $0/is_callback commit contract as
 security-critical).
+`/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
+`POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
+with Adam" consultation link — booking.js's free Waves Assessment (owner
+ruling 2026-09-08: an assessment is NOT a win, `services/assessment-
+booking.js`) for a lead, modeled directly on reservice-public's shell and
+anti-forgery model but scoped to a LEAD rather than a standing customer
+token. Whole surface is dark behind GATE_LEAD_INSPECTION_LINK
+(`leadInspectionLinkLive()`, fail-closed `==='true'` in every env — every
+route 404s while off). Token: `mintLeadConsultationToken` /
+`verifyLeadConsultationToken` (`utils/lead-consultation-token.js`) — a
+14-day HMAC namespaced `lead-consultation:` (never interchangeable with the
+lead-prefill token) carrying the lead id IN the token
+(`<leadId>.<exp>.<sig>`, or `<leadId>.<exp>.<channel>.<sig>` when minted
+with an optional signed `channel` claim — the only claim
+`leadContactVerified` trusts is the phone-bound `smsChannelFor(lead.phone)`
+value (`sms-<digest of the phone's last ten digits>`), which
+`buildLeadConsultationLink(id, { channel: 'sms' })` signs from the freshly
+loaded lead phone; a bare `'sms'` claim is rejected, and a claim for any
+other phone stops counting once the lead's phone changes. Omitted by
+default, which is UNVERIFIED delivery), so no DB lookup is needed to resolve
+identity. A
+well-formed but past-TTL token answers 200 `{ state: 'expired' }` (re-
+verified with the TTL check isolated to nowSec=0, which never trips since
+`exp` is always minted positive); a malformed/mis-signed token 404s. 60
+req/min router limit, 10 req/min on the commit POST, 15 req/min on
+find-slots/availability/waitlist, noStore privacy headers, and the SPA
+shell (`/inspection/<token>`) carries noindex/no-referrer/no-store via
+sensitive-spa-headers. GET returns `{ state, lead: { first_name,
+phone_masked, has_address, address_display }, visit?, availability?,
+rescheduleUrl?, county?, service_area_unavailable? }`. States: `ok`;
+`already_booked` (the lead's linked customer already has an open,
+non-terminal Waves Assessment visit — hands back that visit's
+`/reschedule/:token` URL via `services/reschedule-link.js`); `converted`
+(the lead converted, or already has a future booked NON-assessment visit —
+same shape as already_booked); `gone` (lead deleted/missing); `out_of_area`
+(a resolved address — commonly the linked customer's own stored one — sits
+outside the service area; 200, not an error, since the page still has to
+render the out-of-area stop card with the waitlist prompt: `{ state:
+'out_of_area', county, lead, waitlist_ticket }`, no `availability` key at
+all). Availability
+needs coordinates (the linked customer's stored coords, else a geocode of
+whichever address is on file); with none resolvable, `availability: null`
+and `needs_address: true` — the page asks for an address via `POST
+/:token/availability { address }` (not persisted by the availability
+call; the commit persists the validated, in-area address onto the customer
+in its phase 1 and KEEPS it even if the booking attempt then fails — owner
+ruling 2026-09-24, since undoing it raced concurrent bookings that had
+already adopted it; a retry with a different address writes that one)
+before showing times. GET is routed through the SAME
+`finalizeBookingLocation` every other producer of a booking location in
+this file uses (resolveServiceAddress wrapped by checkServiceArea) — a
+stored address that resolves is never taken as "covered" without also
+clearing the area check (Codex pre-push P1, 2026-09-24: GET previously
+called resolveServiceAddress directly and could answer `needs_address:
+false` with an empty calendar for an out-of-area stored address instead of
+stopping the page). When the area check itself can't run (Google key
+configured, county lookup returns null/throws), GET stays at `state: 'ok'`
+with `lead`, `needs_address: false`, `availability: null`, and
+`service_area_unavailable: true` — recoverable, not a verdict either way,
+so the page shows a retry message where the calendar would be rather than
+an empty one. `POST /:token/find-slots` is the same natural-language search
+reservice uses, READ-ONLY, same booking-window clamp on both ends, and
+(same P1) is likewise routed through `finalizeBookingLocation` rather than
+a raw `resolveServiceAddress` — a directly supplied out-of-area address
+422s `{ error: 'out_of_area', county, waitlist_ticket }` or 503s
+`{ error: 'service_area_unavailable' }` instead of returning slot
+availability for a location that could never survive the commit handler's
+own area check. `resolveServiceAddress` and `checkServiceArea` have no
+callers anywhere in this file outside `finalizeBookingLocation`'s own body
+— a structural test on the route file's source enforces it. `POST
+/:token` commit:
+body `{ date, time, address?, notes? }`; idempotent — a lead whose customer
+already holds an open assessment short-circuits to the SAME `already_booked`
+shape (200, before geocoding or creating anything) instead of a second
+visit. Address required only when neither the lead nor its (existing)
+customer has one on file (`resolveServiceAddress`: stored address wins only
+when it actually geocodes — never merely by being present — else a
+supplied one is tried), parsed with `parseRawAddress` and geocoded with
+street-level quality filtering but `requireInServiceArea:false` (the box
+alone is never grounds to discard a geocode as unresolvable); checked
+against the service area via `checkServiceArea`, applied uniformly to every
+resolved location including a customer's stored coordinates: county via
+`services/address-validation`'s `reverseGeocodeCounty` when a Google key is
+configured (a null county is NOT permission — 503
+`{ error: 'service_area_unavailable' }`, recoverable), else the box test
+`services/service-area.js` enforces explicitly. Out of area 422s
+`{ error: 'out_of_area', county, waitlist_ticket }` and books nothing; an unresolvable
+address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
+The slot is re-validated against a fresh single-day
+availability build (same anti-forgery model as reservice-public) before
+committing through `createSelfBooking`'s `callbackVisit` option with
+`isCallback: false` and `dedupeLane` left at its default (on). booking.js
+skips the funnel's signed-offer/card-capture/ad-attribution/customer-promotion
+machinery like a re-service callback, without setting `is_callback`. The lane
+dedupe runs on a dedicated `assessment` lane (`laneForCallbackRow` in
+`services/reservice-scheduler.js` classifies `lawn_inspection` before the
+pest/lawn cases): the check and the insert share one transaction under
+`pg_advisory_xact_lock(['reservice-lane', customerId:assessment])`, so two
+concurrent commits at different slots can never both book, and an unrelated
+open pest/lawn re-service never false-hits. A duplicate returns the same
+`already_booked` shape GET does. The lead gets
+(or keeps) a customer row and is linked (`leads.customer_id`) but nothing
+else on the lead changes — status/pipeline_stage/converted_at/member_since
+all stay untouched (`promoteCustomerOnBooking`'s own
+`isAssessmentServiceType` guard, matching `admin-leads.js`'s identical
+assessment posture). A lead that is ALREADY linked to a customer
+(`leads.customer_id`) is trusted only when the link is proven
+(`loadTrustedCustomer`): the lead's contact is verified (below) AND the
+linked customer's phone is the lead's own — `customer_id` alone is never
+proof, since public-quote.js links quote leads to existing customers from
+unverified submitted contact info. An unproven link is treated as no link:
+none of that customer's address, visits or reschedule links are returned,
+and a booking goes onto a separate prospect while the existing link is left
+untouched. An unlinked lead whose phone matches an existing
+customer (`leadContactVerified`) only reuses that customer when the phone
+is independently corroborated and still the lead's CURRENT phone — an
+inbound-call lead whose phone equals its originating `call_log.from_phone`,
+or an SMS-delivered token whose signed `channel` claim is `smsChannelFor`
+of this exact phone — never a bare public-form
+submission; otherwise it always gets its own separate prospect profile and
+never sees another customer's visit data, reschedule URL, or booking
+(Codex pre-push P1, 2026-09-24). The free-text note rides
+`scheduled_services.internal_notes` (never `notes`, which is customer/tech
+visible) via a best-effort post-commit update. `SLOT_TAKEN` 409 mirrors
+reservice-public's shape (fresh `availability` attached). Office alert:
+`createSelfBooking`'s internal Twilio alert with `alertLabel` swapped to
+"🔁 Free consultation self-booked:" — no customer comms beyond
+`createSelfBooking`'s own standard confirmation. `POST /:token/waitlist`
+(the out-of-area stop's one-field ask): body `{ email, waitlist_ticket }`.
+`waitlist_ticket` is the short-lived (1h) HMAC ticket minted ONLY with a
+server-verified out-of-area answer (GET `out_of_area`, or the
+`/availability`, `/find-slots` and commit 422s above), binding this lead
+and the region the server found; a caller-supplied `county` is ignored.
+No/invalid/expired ticket, another lead's ticket, or a lead no longer
+eligible (closed, converted, already booked) → the generic 404 and nothing
+is written. With a valid ticket it inserts
+(idempotent on email, `onConflict('email').ignore()`) a
+`newsletter_subscribers` row tagged `expansion_waitlist:<county>` at status
+`waitlist` (deliberately not `active` — buildSubscriberQuery selects
+status='active' with no source exclusion, so an active row would enrol in
+ordinary newsletter sends and this token never proved ownership of the
+typed email; deliberately not `pending` either — that status has its own
+live double-opt-in meaning elsewhere, incl. a future admin CSV import
+queuing it a real confirmation email); no email sent. Generic 404 for
+bad/unknown tokens and while the gate is off. Treat the lead-consultation
+token, the assessment-not-a-win invariant, and the out-of-area/no-booking
+contract as security-critical).
 `/api/reviews/featured` (read-only public featured Google reviews for the
 marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).

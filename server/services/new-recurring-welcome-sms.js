@@ -158,6 +158,14 @@ async function retireSupersededEmailRows(customerId, scheduledServiceId, conn) {
 async function oneTimeWelcomeEligibility(service, customer) {
   if (!service?.id || !customer?.id || service.customer_id !== customer.id) return { eligible: false, reason: 'missing_booking' };
   if (service.is_recurring !== false) return { eligible: false, reason: 'not_one_time' };
+  // A free Waves Assessment is not a win (services/assessment-booking.js) —
+  // the "new recurring customer" welcome would misrepresent an unpriced
+  // consultation as a closed, signed-up member. Checked here (not per
+  // writer) so every path that reaches this one-time email — the
+  // consultation self-booking page included — is covered without each
+  // caller having to remember the carve-out.
+  const { isAssessmentBooking } = require('./assessment-booking');
+  if (await isAssessmentBooking(service, db)) return { eligible: false, reason: 'assessment_booking' };
   // A parked or cancelled row drops at delivery and the rebooked visit
   // re-enters through the tagger (cancelled email queue rows do not hold the
   // once-per-customer guard; a still-queued row for a dead booking is retired

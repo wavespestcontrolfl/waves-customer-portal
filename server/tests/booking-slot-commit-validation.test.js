@@ -301,6 +301,37 @@ describe('createSelfBooking — DB-free forged-payload rejections', () => {
   });
 });
 
+// Round-10 P2 :1593 — a callback/consultation replay (self_booked_appointments
+// idempotency lookup) must not trust a row whose linked scheduled_services
+// visit was cancelled out from under it (self_booking_id, admin cancel never
+// touches the sba row's own status). Source-pattern guard: the DB-round-trip
+// behavior needs a real Postgres harness the rest of this suite doesn't set
+// up (see file header — DB-free rejections only).
+describe('createSelfBooking idempotent replay — linked-visit liveness gate (round-10 P2 :1593)', () => {
+  test('a callback replay is trusted only when its linked scheduled_services row is still non-cancelled', () => {
+    expect(src).toMatch(
+      /const replayIsLive = !callbackVisit \|\| Boolean\(await trx\('scheduled_services'\)\s*\n\s*\.where\(\{ self_booking_id: existing\.id \}\)[\s\S]*?\.whereNotIn\('status', \['cancelled', 'skipped', 'rescheduled'\]\)\s*\n\s*\.first\('id'\)\);/
+    );
+    expect(src).toMatch(/if \(replayIsLive\) return \{ existing \};/);
+  });
+
+  test('a non-callback (paid /book) replay is unaffected — !callbackVisit short-circuits the check', () => {
+    // The liveness check is OR-short-circuited for a non-callback caller, so
+    // a plain /book double-submit replay never pays for (or is gated by) a
+    // scheduled_services lookup that never applied to it before this fix.
+    expect(src).toMatch(/const replayIsLive = !callbackVisit \|\|/);
+  });
+
+  test('the fall-through comment: a dead-linked-visit replay is NOT returned — falls to a normal insert instead', () => {
+    const gateIdx = src.indexOf("const replayIsLive = !callbackVisit ||");
+    expect(gateIdx).toBeGreaterThan(-1);
+    // Nothing between the gate and the next statement unconditionally
+    // returns `{ existing }` — the old unconditional
+    // `if (existing) return { existing };` is gone.
+    expect(src).not.toMatch(/if \(existing\) return \{ existing \};/);
+  });
+});
+
 describe('createSelfBooking commit-path wiring (source guards)', () => {
   test('geometry validation runs at commit with the server-resolved duration', () => {
     expect(src).toMatch(/const geometryError = validateBookingSlotGeometry\(\{\s*\n?\s*startMin: timeToMin\(slot_start\), duration, config,/);
@@ -443,7 +474,10 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
   });
 
   test('day cap re-checked INSIDE the transaction, after the idempotent-replay lookup', () => {
-    const replayIdx = src.indexOf("if (existing) return { existing };");
+    // Round-10 P2 :1593 replaced the unconditional replay return with a
+    // linked-visit liveness gate — `if (replayIsLive) return { existing };`
+    // is the new terminal marker for "the replay decision is settled".
+    const replayIdx = src.indexOf("if (replayIsLive) return { existing };");
     const capIdx = src.indexOf("code: 'DAY_FULL',");
     const conflictIdx = src.indexOf("code: 'SLOT_TAKEN',");
     expect(replayIdx).toBeGreaterThan(-1);
@@ -504,6 +538,75 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     // mismatch: warn + unlinked, never a rejection
     expect(gateBlock).toMatch(/does not belong to booking customer/);
     expect(gateBlock).not.toMatch(/ok: false/);
+  });
+
+  // Codex #4737 r8 P2: the callbackVisit.expectedLocation fence throws
+  // LOCATION_CHANGED_RETRY (409) — a "pick a time again at the customer's
+  // CURRENT address" race, exactly like SLOT_TAKEN/DAY_FULL/ALREADY_BOOKED/
+  // SELF_SERVE_NOTICE above it. Before this fix it was absent from this
+  // list, so it fell through to `throw txErr` and reached the global error
+  // middleware instead of createSelfBooking's own { ok: false, ... } result
+  // path — inspection-public.js's sendBookingFailure never saw it.
+  test('LOCATION_CHANGED_RETRY converts to a normal { ok: false } result — never falls through to the global error handler', () => {
+    const convertIdx = src.indexOf("if (txErr.code === 'SLOT_TAKEN'");
+    expect(convertIdx).toBeGreaterThan(-1);
+    const lineEnd = src.indexOf('\n', convertIdx);
+    const conditionLine = src.slice(convertIdx, lineEnd);
+    expect(conditionLine).toMatch(/txErr\.code === 'LOCATION_CHANGED_RETRY'/);
+    // Codex #4737 r9 P2: the fingerprint-side twin of the same race.
+    expect(conditionLine).toMatch(/txErr\.code === 'CUSTOMER_CHANGED_RETRY'/);
+    // Still inside the same branch that returns { ok:false, status:409, ...
+    // code } rather than re-throwing — pin the branch body, not just the
+    // condition line, so moving LOCATION_CHANGED_RETRY to its own
+    // differently-shaped branch would also fail this test.
+    const throwIdx = src.indexOf('throw txErr;', convertIdx);
+    const returnIdx = src.indexOf("return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };", convertIdx);
+    expect(returnIdx).toBeGreaterThan(convertIdx);
+    expect(returnIdx).toBeLessThan(throwIdx);
+  });
+
+  // Codex #4737 r9 P1: the consultation page's lead-scoped dedupe — the lead
+  // lock is taken AFTER the per-customer lane lock and BEFORE the replay /
+  // slot checks, and every other profile of the lead is checked for an open
+  // assessment, refusing ALREADY_BOOKED.
+  // Codex #4737 r10 pre-push P0: the caller's authority is re-checked
+  // under the lead lock, before the replay / insert.
+  // Codex #4737 r22 P0: every profile of the lead is fenced, sorted, before
+  // the booked customer's own comms fence.
+  test('leadDedupe.fenceIds fences are taken before the booked customer\'s own comms fence', () => {
+    const fences = src.indexOf('for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) await lockCustomerComms(trx, id);');
+    const own = src.indexOf('await lockCustomerComms(trx, custId);', fences);
+    expect(fences).toBeGreaterThan(-1);
+    expect(own).toBeGreaterThan(fences);
+    expect(own - fences).toBeLessThan(400);
+  });
+
+  test('leadDedupe.revalidate runs right after the inspection-lead lock and refuses CUSTOMER_CHANGED_RETRY', () => {
+    const leadLock = src.indexOf("['inspection-lead', String(callbackVisit.leadDedupe.leadId)]");
+    const revalidate = src.indexOf('await revalidate(trx)', leadLock);
+    const replay = src.indexOf("const replayQuery = trx('self_booked_appointments')");
+    expect(revalidate).toBeGreaterThan(leadLock);
+    expect(revalidate).toBeLessThan(replay);
+    const body = src.slice(revalidate, revalidate + 900);
+    expect(body).toMatch(/verdict === 'ineligible'[\s\S]*code: 'ALREADY_BOOKED'/);
+    expect(body).toMatch(/code: 'CUSTOMER_CHANGED_RETRY'/);
+  });
+
+  test('leadDedupe takes the inspection-lead lock after the lane lock and refuses a lead with an open assessment on another profile', () => {
+    const laneLock = src.indexOf("['reservice-lane', `${custId}:${callbackVisit.serviceKey}`]");
+    const leadLock = src.indexOf("['inspection-lead', String(callbackVisit.leadDedupe.leadId)]");
+    const replay = src.indexOf("const replayQuery = trx('self_booked_appointments')");
+    expect(laneLock).toBeGreaterThan(-1);
+    expect(leadLock).toBeGreaterThan(laneLock);
+    expect(leadLock).toBeLessThan(replay);
+    // The set is resolved on the transaction, after the lead lock (pre-push P1).
+    const resolve = src.indexOf('await callbackVisit.leadDedupe.resolveCustomerIds(trx)');
+    expect(resolve).toBeGreaterThan(leadLock);
+    const loop = src.indexOf('for (const profileId of profileIds)', resolve);
+    expect(loop).toBeGreaterThan(replay);
+    const body = src.slice(loop, loop + 600);
+    expect(body).toMatch(/openCallbackExistsForLane\(trx, profileId, lane\)/);
+    expect(body).toMatch(/code: 'ALREADY_BOOKED'/);
   });
 });
 
@@ -774,8 +877,11 @@ describe('self-serve notice window — offer/commit parity (source guards)', () 
     expect(idx).toBeGreaterThan(-1);
     // After the replay lookup (a booking that landed just outside the boundary
     // whose response was lost must still replay as success when the retry
-    // crosses it), before the day-cap / slot-conflict re-checks.
-    const replayIdx = src.indexOf('if (existing) return { existing };');
+    // crosses it), before the day-cap / slot-conflict re-checks. Round-10 P2
+    // :1593 replaced the unconditional replay return with a linked-visit
+    // liveness gate — `if (replayIsLive) return { existing };` is the new
+    // terminal marker for "the replay decision is settled".
+    const replayIdx = src.indexOf('if (replayIsLive) return { existing };');
     const dayCapIdx = src.indexOf('if (selfBookDayCapEnabled()) {', replayIdx);
     expect(replayIdx).toBeGreaterThan(-1);
     expect(idx).toBeGreaterThan(replayIdx);

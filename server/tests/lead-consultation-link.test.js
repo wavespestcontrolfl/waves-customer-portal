@@ -207,6 +207,20 @@ describe('buildLeadConsultationLink — gate on', () => {
     expect(result.url).toBeNull();
     expect(mockDb).not.toHaveBeenCalled();
   });
+
+  // Round 11 — Codex pre-push P1, 2026-09-24: an explicit { channel: 'sms' }
+  // option rides into the minted token (createShortCode receives the LONG
+  // url, so its own 4-segment token is directly observable here).
+  // Codex #4737 r1 P1 follow-through: 'sms' is signed as the PHONE-BOUND
+  // claim, the exact form the booking route's verifier accepts.
+  test('{ channel: "sms" } mints the phone-bound claim for the fresh row\'s phone', async () => {
+    const { verifyLeadConsultationToken, smsChannelFor } = require('../utils/lead-consultation-token');
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }) };
+    await buildLeadConsultationLink(LEAD_ID, { channel: 'sms' });
+    const longUrl = createShortCode.mock.calls[0][0];
+    const verified = verifyLeadConsultationToken(longUrl.split('/inspection/')[1]);
+    expect(verified).toEqual({ leadId: LEAD_ID, channel: smsChannelFor('9415550100') });
+  });
 });
 
 describe('consultationUrlForLead', () => {
@@ -220,6 +234,19 @@ describe('consultationUrlForLead', () => {
     delete process.env.JWT_SECRET;
     expect(consultationUrlForLead(LEAD_ID)).toBeNull();
   });
+
+  // Round 11 — Codex pre-push P1, 2026-09-24: the optional channel claim
+  // (the PR4 SMS send's evidence that THIS link reached the lead's own
+  // phone) threads through to the minted token.
+  test('an explicit channel mints a token carrying it', () => {
+    const url = consultationUrlForLead(LEAD_ID, 'sms');
+    expect(url).toMatch(new RegExp(`^https://portal\\.wavespestcontrol\\.com/inspection/${LEAD_ID}\\.\\d+\\.sms\\.[A-Za-z0-9_-]+$`));
+  });
+
+  test('no channel passed → the plain 3-segment token, unchanged from every other caller', () => {
+    const url = consultationUrlForLead(LEAD_ID);
+    expect(url.split('/inspection/')[1].split('.')).toHaveLength(3);
+  });
 });
 
 describe('consultationSmsLineFor', () => {
@@ -230,6 +257,19 @@ describe('consultationSmsLineFor', () => {
 });
 
 describe('buildLeadConsultationSmsLine', () => {
+  // Codex #4737 r13 P1: every text carries the phone-bound SMS claim.
+  test('the SMS line mints a token carrying the phone-bound SMS channel claim', async () => {
+    const { verifyLeadConsultationToken, smsChannelFor } = require('../utils/lead-consultation-token');
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    getTemplate.mockResolvedValue('Pick a time: https://waves.link/l/abc123 Reply STOP to opt out.');
+    await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    const longUrl = createShortCode.mock.calls[0][0];
+    expect(verifyLeadConsultationToken(longUrl.split('/inspection/')[1])).toEqual({ leadId: LEAD_ID, channel: smsChannelFor('9415550100') });
+  });
+
   test('renders the admin template with {first_name, consultation_url}, collapsed to one line and flagged standalone', async () => {
     mockBuilders = {
       leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
