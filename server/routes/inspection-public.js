@@ -352,6 +352,18 @@ async function loadTrustedCustomer(dbConn, lead, token) {
 // decision; the winner keeps whatever trust level the caller was already
 // applying to the original id.
 const MAX_MERGE_CHAIN_HOPS = 8;
+// THE outright-trust rule (Codex #4737 r12 pre-push P0 — one predicate
+// for every trust decision that skips the verified-phone proof): the
+// provenance row names this profile, is not requires_verification, and the
+// profile is untouched by any merge (neither merged away nor having
+// absorbed another customer).
+async function outrightProspect(dbConn, meta, profileId) {
+  if (!meta?.customer_id || meta.requires_verification) return false;
+  if (String(meta.customer_id) !== String(profileId)) return false;
+  if (await mergedWinnerId(dbConn, meta.customer_id)) return false;
+  return !(await wonAMerge(dbConn, profileId));
+}
+
 // Whether a customer ABSORBED another in a (not undone) merge (Codex #4737
 // r11 pre-push P0): a flow-created prospect that won a merge now carries
 // the loser's appointments, so its outright trust ends there too.
@@ -396,7 +408,7 @@ async function provenanceCustomer(dbConn, lead, token) {
   // trusted only under the verified-phone proof, whatever the flag said.
   // Outright trust only for a flow-created prospect untouched by any merge
   // — neither merged away (winnerId) nor absorbing another (wonAMerge).
-  if (!meta.requires_verification && !winnerId && !(await wonAMerge(dbConn, prospect.id))) return prospect;
+  if (await outrightProspect(dbConn, meta, prospect.id)) return prospect;
   return (await verifiedForCustomer(lead, prospect, token, dbConn)) ? prospect : null;
 }
 
@@ -1126,10 +1138,11 @@ async function attachLinkedProfileToOwnAccount(trx, linked) {
 async function tokenMayUseProfile(dbConn, lead, profile, token) {
   if (await verifiedForCustomer(lead, profile, token, dbConn)) return true;
   const rows = await dbConn('lead_activities').where({ lead_id: lead.id, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata');
-  return (rows || []).some((row) => {
+  for (const row of rows || []) {
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-    return meta && String(meta.customer_id) === String(profile.id) && !meta.requires_verification;
-  });
+    if (await outrightProspect(dbConn, meta, profile.id)) return true;
+  }
+  return false;
 }
 
 async function resolveOtherAccountProperty(trx, freshLead, linked, resolved, token) {
@@ -1160,7 +1173,7 @@ async function resolveOtherAccountProperty(trx, freshLead, linked, resolved, tok
   // property needs the verified-phone proof.
   if (chosen.customer) {
     const prior = await latestProvenance(trx, freshLead.id);
-    const ownProspect = prior?.customer_id === linked.id && !prior.requires_verification;
+    const ownProspect = await outrightProspect(trx, prior, linked.id);
     await trx('lead_activities').insert({
       lead_id: freshLead.id,
       activity_type: CONSULTATION_PROSPECT_ACTIVITY,
@@ -1447,7 +1460,7 @@ async function correctableInPlace(trx, freshLead, profile) {
   const history = await trx('scheduled_services').where({ customer_id: profile.id }).select('id').limit(1);
   if (history.length > 0) return false;
   const prior = await latestProvenance(trx, freshLead.id);
-  return prior?.customer_id === profile.id && !prior.requires_verification;
+  return outrightProspect(trx, prior, profile.id);
 }
 
 // The linked-customer half of phase 1 (split out of provisionCommitCustomer).
@@ -1827,7 +1840,9 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId, { includeMer
     const winnerId = await mergedWinnerId(dbConn, meta.customer_id);
     const targetId = winnerId || meta.customer_id;
     if (ids.has(String(targetId))) continue;
-    const outright = !meta.requires_verification && (includeMergedWinners || (!winnerId && !(await wonAMerge(dbConn, targetId))));
+    const outright = includeMergedWinners
+      ? !meta.requires_verification
+      : await outrightProspect(dbConn, meta, targetId);
     if (outright) { ids.add(String(targetId)); continue; }
     const profile = await loadCustomer(dbConn, targetId);
     if (profile && await verifiedForCustomer(lead, profile, token, dbConn)) ids.add(String(profile.id));
@@ -2123,6 +2138,8 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
 });
 
 router._test = {
+  tokenMayUseProfile,
+  outrightProspect,
   loadTrustedCustomer,
   provenanceCustomer,
   trustedLeadProfileIds,

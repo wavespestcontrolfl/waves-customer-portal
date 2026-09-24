@@ -2890,6 +2890,30 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
     expect(await provenanceCustomer(base, lead, null)).toEqual(expect.objectContaining({ id: 'prospect-1' }));
   });
 
+  // Codex #4737 r12 pre-push P0: the one outright-trust predicate — a
+  // flow-created prospect that absorbed another customer is no longer
+  // usable by an unverified token, anywhere (sibling reuse included).
+  test('outrightProspect / tokenMayUseProfile: a merge-winner prospect needs the verified-phone proof', async () => {
+    const { tokenMayUseProfile, outrightProspect } = inspectionPublicRouter._test;
+    const meta = { customer_id: 'prospect-a' };
+    const winDb = (table) => ({
+      where() { return this; }, whereNull() { return this; }, orderBy() { return this; },
+      select: async () => (table === 'lead_activities' ? [{ metadata: JSON.stringify(meta) }] : []),
+      first: async () => (table === 'customer_merge_journal' ? { winner_customer_id: 'prospect-a' } : null),
+    });
+    const cleanDb = (table) => ({
+      where() { return this; }, whereNull() { return this; }, orderBy() { return this; },
+      select: async () => (table === 'lead_activities' ? [{ metadata: JSON.stringify(meta) }] : []),
+      first: async () => null,
+    });
+    expect(await outrightProspect(cleanDb, meta, 'prospect-a')).toBe(true);
+    expect(await outrightProspect(winDb, meta, 'prospect-a')).toBe(false);
+    const lead = { id: 'lead-1', phone: '9415551234' };
+    const profile = { id: 'prospect-a', phone: '9415559999' };
+    expect(await tokenMayUseProfile(cleanDb, lead, profile, null)).toBe(true);
+    expect(await tokenMayUseProfile(winDb, lead, profile, null)).toBe(false);
+  });
+
   test('trustedLeadProfileIds: a merged prospect\'s winner joins the DEDUPE set; response sets stay strict', async () => {
     const fakeDb = makeMergeFakeDb({
       customers: { 'winner-1': { id: 'winner-1', phone: '9415551234', account_id: null } },
