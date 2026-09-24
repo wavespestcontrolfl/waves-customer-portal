@@ -42,7 +42,7 @@ async function classifyUniform({ buffer, mimeType }) {
   } catch (err) { return { ok: false, reason: err.message }; }
   if (!res.ok) return { ok: false, reason: res.reason || 'vision failed' };
   let parsed = null;
-  try { parsed = JSON.parse(String(res.text).replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch (e) { parsed = null; }
+  try { parsed = JSON.parse(String(res.text).replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch (_) { parsed = null; }
   if (!parsed || typeof parsed !== 'object') return { ok: false, reason: 'unparseable', raw: String(res.text).slice(0, 200) };
   return { ok: true, parsed };
 }
@@ -67,16 +67,22 @@ async function main() {
   const rows = [];
   for (const rel of todo) {
     const key = rel.split(path.sep).join('__');
-    const buf = fs.readFileSync(path.join(DIR, rel));
+    let buf;
+    try { buf = fs.readFileSync(path.join(DIR, rel)); } catch (err) { rows.push({ file: key, path: rel, error: `unreadable: ${err.message}` }); process.stdout.write(`? ${key} (unreadable)\n`); continue; }
     const res = await classifyUniform({ buffer: buf, mimeType: MIME[path.extname(rel).toLowerCase()] });
     if (!res.ok) { rows.push({ file: key, path: rel, error: res.reason, raw: res.raw }); process.stdout.write(`? ${key} (${res.reason})\n`); continue; }
     const parsed = res.parsed;
     rows.push({ file: key, path: rel, ...parsed });
     const flag = outOfUniform(parsed);
     process.stdout.write(`${flag ? 'FIX' : ' ok'} ${key}${parsed.person ? ` — ${parsed.role}: ${parsed.shirt}; cap ${parsed.cap} (${parsed.head || '?'}); pants ${parsed.pants}` : ' — no person'}\n`);
+    writeReport(); // incremental: a crash mid-sweep never loses the paid calls so far
   }
-  const fix = rows.filter((r) => !r.error && outOfUniform(r));
-  fs.writeFileSync(OUT, JSON.stringify({ auditedAt: new Date().toISOString(), dir: DIR, total: rows.length, toFix: fix.map((r) => r.file), rows }, null, 2));
+  const fix = writeReport();
+  function writeReport() {
+    const fixRows = rows.filter((r) => !r.error && outOfUniform(r));
+    fs.writeFileSync(OUT, JSON.stringify({ auditedAt: new Date().toISOString(), dir: DIR, total: rows.length, toFix: fixRows.map((r) => r.file), rows }, null, 2));
+    return fixRows;
+  }
   console.log(`\n${rows.length} images audited · ${fix.length} need regeneration · ${rows.filter((r) => r.error).length} errors · report: ${OUT}`);
 }
 
