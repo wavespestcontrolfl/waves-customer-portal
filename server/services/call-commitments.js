@@ -84,26 +84,39 @@ const CHANNEL_ALIASES = Object.freeze({
   mail: 'email', e_mail: 'email',
   in_person: 'in_person', inperson: 'in_person', on_site: 'in_person', onsite: 'in_person', visit: 'in_person',
 });
+// Only STRING values are vocabulary; a number, boolean, array or object is a
+// structural problem and is left for the validator to reject (codex #4681
+// r1 P2: stringifying `false` to 'unknown' would let malformed output through,
+// and 'unknown' is a sendable channel for send_reschedule_link).
 function normalizeChannel(value) {
   if (value === null || value === undefined) return null;
-  const key = String(value).trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (typeof value !== 'string') return value;
+  const key = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
   if (!key) return null;
   if (CHANNELS.includes(key)) return key;
   return CHANNEL_ALIASES[key] || 'unknown';
 }
-function normalizeKind(value) {
-  const key = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+// "call back" / "call-back" normalize to call_back, which is the CUSTOMER
+// kind; the Waves kind is spelled callback. Resolve the collision by party
+// so a Waves callback promise is not silently dropped later as a
+// party/kind mismatch (codex #4681 r1 P2).
+function normalizeKind(value, party = null) {
+  if (typeof value !== 'string') return value;
+  let key = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (key === 'call_back' && party === 'waves') key = 'callback';
+  if (key === 'callback' && party === 'customer') key = 'call_back';
   return COMMITMENT_KINDS.includes(key) ? key : 'other';
 }
-// Coerce the enum-typed fields of each model item in place so a vocabulary
-// slip fails soft (to 'unknown' / 'other') instead of failing the response.
-// Structural problems (missing evidence, bad types) still reach the schema.
+// Coerce the enum-typed STRING fields of each model item in place so a
+// vocabulary slip fails soft (to 'unknown' / 'other') instead of failing the
+// response. Structural problems (missing evidence, wrong types) still reach
+// the schema.
 function normalizeModelOutput(parsed) {
   if (!parsed || !Array.isArray(parsed.commitments)) return parsed;
   for (const item of parsed.commitments) {
     if (!item || typeof item !== 'object') continue;
-    if ('channel' in item) item.channel = normalizeChannel(item.channel);
-    if (typeof item.kind === 'string') item.kind = normalizeKind(item.kind);
+    if (typeof item.channel === 'string') item.channel = normalizeChannel(item.channel);
+    if (typeof item.kind === 'string') item.kind = normalizeKind(item.kind, item.party);
   }
   return parsed;
 }

@@ -950,6 +950,26 @@ describe('model vocabulary slips are normalized before schema validation (audit 
     expect(normalizeModelOutput({ commitments: 'not-an-array' })).toEqual({ commitments: 'not-an-array' });
     expect(normalizeModelOutput(null)).toBeNull();
   });
+  test('non-string channel or kind is left for the validator (codex r1 P2): the item still fails the schema', async () => {
+    expect(normalizeChannel(false)).toBe(false);
+    expect(normalizeChannel(1)).toBe(1);
+    expect(normalizeKind({ a: 1 })).toEqual({ a: 1 });
+    const create = jest.fn(async () => reply([item({ channel: false })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBe('schema_failed');
+    expect(out.errors.some((e) => e.instancePath === '/commitments/0/channel')).toBe(true);
+  });
+  test('"call back" resolves by party (codex r1 P2): waves -> callback, customer -> call_back', async () => {
+    expect(normalizeKind('call back', 'waves')).toBe('callback');
+    expect(normalizeKind('Call-Back', 'customer')).toBe('call_back');
+    expect(normalizeKind('callback', 'customer')).toBe('call_back');
+    expect(normalizeKind('call_back', null)).toBe('call_back');
+    const create = jest.fn(async () => reply([item({ kind: 'call back' })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.droppedMismatched).toBe(0);
+    expect(out.items.map((i) => i.kind)).toEqual(['callback']);
+  });
   test('the prompt names the channel vocabulary', () => {
     const prompt = buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' });
     expect(prompt).toMatch(/"channel" is exactly one of "sms", "email", "call", "in_person", "unknown"/);
