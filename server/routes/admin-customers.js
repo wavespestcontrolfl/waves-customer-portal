@@ -3794,7 +3794,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         return res.status(409).json({
           error: 'customer_still_billing_or_scheduled',
           message: liveVisit
-            ? `This customer still has a scheduled visit on ${liveVisit.scheduled_date instanceof Date ? liveVisit.scheduled_date.toISOString().slice(0, 10) : liveVisit.scheduled_date}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+            ? `${LifecycleGuard.describeLiveVisit(liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
             : 'This customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.',
           liveVisit: liveVisit || null,
           liveTerm: liveTerm || null,
@@ -4317,7 +4317,7 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
         return res.status(409).json({
           error: 'customer_still_billing_or_scheduled',
           message: liveVisit
-            ? `This customer still has a scheduled visit on ${liveVisit.scheduled_date instanceof Date ? liveVisit.scheduled_date.toISOString().slice(0, 10) : liveVisit.scheduled_date}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+            ? `${LifecycleGuard.describeLiveVisit(liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
             : 'This customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.',
           liveVisit: liveVisit || null,
           liveTerm: liveTerm || null,
@@ -4511,7 +4511,7 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
       return res.status(409).json({
         error: 'customer_still_billing_or_scheduled',
         message: liveVisit
-          ? `This customer still has a scheduled visit on ${liveVisit.scheduled_date instanceof Date ? liveVisit.scheduled_date.toISOString().slice(0, 10) : liveVisit.scheduled_date}. Cancel the plan (visits, prepay term and autopay) before archiving.`
+          ? `${LifecycleGuard.describeLiveVisit(liveVisit)}. Cancel the plan (visits, prepay term and autopay) before archiving.`
           : 'This customer still has an active prepay term. Cancel the plan before archiving.',
         liveVisit: liveVisit || null,
         liveTerm: liveTerm || null,

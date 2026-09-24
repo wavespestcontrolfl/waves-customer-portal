@@ -1175,7 +1175,7 @@ async function updateCustomer(customerId, updates, expectedVersion) {
   // silently repointing the account into a still-billing churn label;
   // otherwise wind the billing fields down in the same write.
   if (clean.pipeline_stage === 'churned' && before.pipeline_stage !== 'churned') {
-    const { findLiveFutureVisit, findActivePrepayTerm, billingWindDownStamps } = require('../customer-lifecycle-guard');
+    const { findLiveFutureVisit, findActivePrepayTerm, describeLiveVisit, billingWindDownStamps } = require('../customer-lifecycle-guard');
     const [liveVisit, liveTerm] = await Promise.all([
       findLiveFutureVisit(db, customerId),
       findActivePrepayTerm(db, customerId),
@@ -1183,8 +1183,8 @@ async function updateCustomer(customerId, updates, expectedVersion) {
     if (liveVisit || liveTerm) {
       return {
         error: liveVisit
-          ? `Cannot mark Churned — this customer still has a scheduled visit on ${liveVisit.scheduled_date instanceof Date ? liveVisit.scheduled_date.toISOString().slice(0, 10) : liveVisit.scheduled_date}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
-          : 'Cannot mark Churned — this customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.',
+          ? `Cannot mark Churned: ${describeLiveVisit(liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+          : 'Cannot mark Churned: this customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.',
         preview_changed: true,
       };
     }

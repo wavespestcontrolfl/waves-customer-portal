@@ -45,6 +45,15 @@
 // excluding it let a second same-family series activate, and would let an
 // archive/churn through while a rebook is still owed).
 const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
+// A live visit/series obligation: either an upcoming-or-in-progress
+// scheduled_services row, OR a series ANCHOR still marked recurring_ongoing
+// with no upcoming child seeded yet (a completed last occurrence whose next
+// one the maintenance job will mint on its own schedule) — mirrors
+// hasCancellableWork's two separate checks (cancellation-eligibility.js) and
+// the wind-down cancellation-processor.js applies (it clears
+// recurring_ongoing even on an already-completed anchor). Without the
+// second leg, an account between occurrences (last visit completed, next
+// one not yet seeded) would read as clean while its plan keeps running.
 async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
   const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
   const today = todayIso || require('../utils/datetime-et').etDateString();
@@ -55,16 +64,37 @@ async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
   // them actually invoke a callback passed to `.where()`, so this form is
   // inert (never crashes) under every one of them and correct under real knex.
   const dateExemptStatuses = ['rescheduled', ...IN_PROGRESS_STATUSES];
-  return dbh('scheduled_services')
-    .where({ customer_id: customerId })
-    .where(function inLiveStatus() {
-      for (const status of [...CANCELLABLE_STATUSES, ...IN_PROGRESS_STATUSES]) this.orWhere('status', status);
-    })
-    .where(function activeBound() {
-      this.where('scheduled_date', '>=', today);
-      for (const status of dateExemptStatuses) this.orWhere('status', status);
-    })
-    .first('id', 'scheduled_date', 'status');
+  const [upcoming, ongoingAnchor] = await Promise.all([
+    dbh('scheduled_services')
+      .where({ customer_id: customerId })
+      .where(function inLiveStatus() {
+        for (const status of [...CANCELLABLE_STATUSES, ...IN_PROGRESS_STATUSES]) this.orWhere('status', status);
+      })
+      .where(function activeBound() {
+        this.where('scheduled_date', '>=', today);
+        for (const status of dateExemptStatuses) this.orWhere('status', status);
+      })
+      .first('id', 'scheduled_date', 'status'),
+    dbh('scheduled_services')
+      .where({ customer_id: customerId, recurring_ongoing: true })
+      .first('id', 'service_type', 'scheduled_date', 'status'),
+  ]);
+  if (upcoming) return { ...upcoming, liveReason: 'upcoming_visit' };
+  if (ongoingAnchor) return { ...ongoingAnchor, liveReason: 'ongoing_series' };
+  return null;
+}
+
+// One phrase for every writer that refuses on findLiveFutureVisit's result —
+// an ongoing series anchor reads differently than a dated upcoming visit
+// (its own scheduled_date may be a past, already-completed occurrence).
+function describeLiveVisit(liveVisit) {
+  if (liveVisit.liveReason === 'ongoing_series') {
+    return 'This customer has an ongoing recurring plan that will keep scheduling visits';
+  }
+  const date = liveVisit.scheduled_date instanceof Date
+    ? liveVisit.scheduled_date.toISOString().slice(0, 10)
+    : liveVisit.scheduled_date;
+  return `This customer still has a scheduled visit on ${date}`;
 }
 
 // A prepay term whose paid coverage is live as of today — reuses
@@ -91,6 +121,7 @@ function billingWindDownStamps() {
 
 module.exports = {
   findLiveFutureVisit,
+  describeLiveVisit,
   findActivePrepayTerm,
   billingWindDownStamps,
 };

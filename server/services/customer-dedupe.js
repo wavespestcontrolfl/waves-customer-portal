@@ -1222,19 +1222,29 @@ async function dbLevelMergeConflict(database, winner, loser) {
   // ADMIN-BUG-R15: the generic FK sweep has no per-table business check, so
   // it used to repoint the loser's live recurring parent (and its future
   // children) onto the winner wholesale even when the winner already has a
-  // live series of the same family — the winner ends up with two live
-  // "Monthly Pest Control"-style series that both dispatch and (on
-  // per-visit billing) both bill. Refuse here, under the same rule the
+  // live series of the same family AT THE SAME PROPERTY — the winner ends up
+  // with two live "Monthly Pest Control"-style series that both dispatch and
+  // (on per-visit billing) both bill. Refuse here, under the same rule the
   // booking path already applies (findActiveRecurringSeries + a 409 unless
   // the operator explicitly chooses a surviving series) — shared with the
   // IB preview via this same function, so an operator never sees a
   // confirmation card for a merge the executor would refuse anyway.
-  const seriesConflict = await duplicateSeriesMergeConflict(database, winner.id, loser.id);
-  if (seriesConflict) {
-    return {
-      code: 'duplicate_series_conflict',
-      message: `both customers have a live recurring series of the same family (${seriesConflict.family}) — cancel or reassign one series before merging, or the merge would leave two live series`,
-    };
+  //
+  // Scoped to a MATCHING customer-level address only: /link-as-property
+  // exists precisely to merge an address_conflict pair (two different
+  // homes), and two legitimate same-family series at two different
+  // properties are not a duplicate — a scoped merge there must not be told
+  // to cancel one plan. addressCompat was already computed above when the
+  // winner has an address; recompute here for the (address-less winner)
+  // case that skipped it, at negligible cost (pure/no I/O).
+  if (addressCompat(winner, loser).status === 'match') {
+    const seriesConflict = await duplicateSeriesMergeConflict(database, winner.id, loser.id);
+    if (seriesConflict) {
+      return {
+        code: 'duplicate_series_conflict',
+        message: `both customers have a live recurring series of the same family (${seriesConflict.family}) at the same property — cancel or reassign one series before merging, or the merge would leave two live series`,
+      };
+    }
   }
   return null;
 }
