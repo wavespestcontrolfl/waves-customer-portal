@@ -2410,3 +2410,46 @@ it('round 23 (:4994) gate-off parity: Remove stays enabled on the discounted leg
   await waitForMoneyReady();
   expect(screen.getByRole('button', { name: 'Remove' })).toBeEnabled();
 });
+
+// ---------------------------------------------------------------------
+// Pre-push fallback audit P1 on #4657 round 24b (:3242): a negative or
+// non-numeric primary Price mapped to `undefined` in every payload, so an
+// UNDISCOUNTED visit's "-50" was posted as "leave the price alone" — the
+// server never saw it, the preview showed the stored total and Save closed
+// the modal with the edit discarded.
+// ---------------------------------------------------------------------
+
+it('round 24b fallback P1 (:3242): a negative primary Price on an undiscounted visit blocks Save with a reason and posts nothing; a valid price re-enables', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: undiscountedVisit }));
+  const onSaved = vi.fn();
+  render(<Harness service={undiscountedVisit} onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  const priceInput = screen.getAllByPlaceholderText('0.00').find((i) => Number(i.value) === 100);
+  expect(priceInput).toBeTruthy();
+  fireEvent.change(priceInput, { target: { value: '-50' } });
+  await waitFor(() => expect(screen.getByText(/A price must be a number of \$0 or more/)).toBeInTheDocument());
+  const save = screen.getByRole('button', { name: 'Save', exact: true });
+  expect(save).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save & take payment' })).toBeDisabled();
+  fireEvent.click(save);
+  expect(writes()).toHaveLength(0);
+  expect(onSaved).not.toHaveBeenCalled();
+  // (a non-finite entry such as 1e309 is sanitized to blank by the number
+  // input itself before React sees it — blank is "no price", not an error)
+  fireEvent.change(priceInput, { target: { value: '120' } });
+  await waitFor(() => expect(screen.queryByText(/A price must be a number of \$0 or more/)).not.toBeInTheDocument());
+});
+
+it('round 24b fallback P1 (:3242): a negative price on an undiscounted add-on line blocks Save the same way', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: undiscountedVisit }));
+  render(<Harness service={undiscountedVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  const fertPriceInput = screen.getAllByPlaceholderText('0.00').find((i) => Number(i.value) === 40);
+  // (a non-numeric entry is sanitized to blank by the number input itself —
+  // blank is "no price", the contract every caller already has)
+  fireEvent.change(fertPriceInput, { target: { value: '-1' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled());
+  expect(screen.getByText(/A price must be a number of \$0 or more/)).toBeInTheDocument();
+});

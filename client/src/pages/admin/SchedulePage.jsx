@@ -2975,6 +2975,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Block Save here with a reason instead of letting the operator hit
   // that refusal after the fact.
   const appointmentDiscountPriceMissing = discountDirty && parseFinitePrice(form.price) == null;
+  // Pre-push fallback audit P1 on #4657 round 24b (:3242): every payload
+  // builder maps a typed price through `parseFinitePrice(...) ?? undefined`,
+  // so a NEGATIVE or non-numeric entry ("-50", "1e309", "abc") was posted
+  // as "leave the price alone" — the server's negativePricePosted refusal
+  // never saw it, the preview and the PUT both reported the STORED total,
+  // and Save closed the modal with the edit silently discarded. The two
+  // gates above only fire while a discount is in play. Any NON-BLANK price
+  // entry that parses to nothing (primary Price, or any named add-on
+  // line's Price) now blocks Save with the reason; blank stays "no price",
+  // the contract every caller already has.
+  const priceEntryInvalid = (v) => String(v ?? "").trim() !== "" && parseFinitePrice(v) == null;
+  const invalidPriceEntered =
+    priceEntryInvalid(form.price) || serviceLines.some((l) => l.serviceType && priceEntryInvalid(l.price));
 
   // Codex pre-push audit structural round on #4657 (:3526/:2394's class):
   // extracted so the preview debounce below can send the SAME add-on
@@ -3115,7 +3128,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   const handleSave = async ({ takePayment = false } = {}) => {
     if (stackingUnconfirmedBlocksSave) return;
-    if (lineDiscountPriceMissing || appointmentDiscountPriceMissing) return;
+    if (lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) return;
     // Codex pre-push audit structural round on #4657: Save is blocked while
     // a discount is in play until the server's OWN dry-run (moneyPreview)
     // has confirmed what THIS exact form would persist — moneyPreviewBlocksSave
@@ -4582,7 +4595,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             )}{" "}
             <button
               onClick={() => handleSave({ takePayment: true })}
-              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing}
+              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -4591,8 +4604,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#fff",
                 border: "none",
                 fontSize: 13,
-                cursor: (saving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing) ? "wait" : "pointer",
-                opacity: (saving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing) ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -4600,7 +4613,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </button>{" "}
             <button
               onClick={() => handleSave()}
-              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing}
+              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -4609,8 +4622,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#111827",
                 border: `1px solid ${D.inputBorder}`,
                 fontSize: 13,
-                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing) ? "wait" : "pointer",
-                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing) ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -5355,6 +5368,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   }}
                 >
                   Confirming totals with the server…
+                </div>
+              )}
+              {invalidPriceEntered && (
+                <div
+                  style={{
+                    background: "#DC262615",
+                    border: "1px solid #DC262655",
+                    borderRadius: 8,
+                    padding: 10,
+                    marginBottom: 14,
+                    fontSize: 14,
+                    color: "#DC2626",
+                  }}
+                >
+                  A price must be a number of $0 or more. Fix the price before saving.
                 </div>
               )}
               {appointmentDiscountPriceMissing && (
