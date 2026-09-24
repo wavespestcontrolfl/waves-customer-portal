@@ -1747,7 +1747,7 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId, { includeMer
 // A failed createSelfBooking mapped to the page's responses: ALREADY_BOOKED
 // resolves to GET's already_booked shape; a 409 is SLOT_TAKEN with fresh
 // times; anything else passes through.
-async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, profileIds = [] }) {
+async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, profileIds = [], verified }) {
   // A validated, in-area address the lead supplied through their own
   // link stays on the customer even when this attempt fails (owner
   // ruling 2026-09-24): undoing it raced concurrent bookings that had
@@ -1768,9 +1768,15 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
     // moved AFTER phase 1 committed (Codex #4737 r8 P2) — `bookingLocation`
     // is the pin as it stood then, now stale. Answer with fresh times at
     // the address on file RIGHT NOW, not the pin that just lost the race.
-    const fresh = await db('customers').where({ id: custRow.id }).first(
-      'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip'
-    );
+    // The customer is re-read THROUGH the trust rules (Codex #4737 r10
+    // pre-push P0): the race can also be a phone change that ends this
+    // token's authority over the customer — then nothing about it is
+    // returned (fail closed, recoverable).
+    const freshLead = await loadLead(db, lead.id);
+    const fresh = freshLead ? await loadTrustedCustomer(db, freshLead, verified) : null;
+    if (!fresh || String(fresh.id) !== String(custRow.id)) {
+      return res.status(422).json({ error: 'address_unresolved' });
+    }
     const currentLocation = (fresh?.latitude != null && fresh?.longitude != null)
       ? { lat: parseFloat(fresh.latitude), lng: parseFloat(fresh.longitude) }
       : bookingLocation;
@@ -1948,7 +1954,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
     if (!result.ok) {
       const profileIds = result.code === 'ALREADY_BOOKED' ? await resolveCustomerIds(db) : [custRow.id];
-      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, profileIds });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, profileIds, verified });
     }
 
     return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));

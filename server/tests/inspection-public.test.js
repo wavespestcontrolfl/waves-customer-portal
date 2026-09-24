@@ -549,6 +549,26 @@ describe('Codex #4737 r9: lead-scoped dedupe, trusted-customer change to null, c
   });
 });
 
+describe('Codex #4737 r10 pre-push P0: a race that ends the token\'s authority returns no customer details', () => {
+  test('CUSTOMER_CHANGED_RETRY after a phone change → 422 address_unresolved, no address, no availability', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      // Staff moved the customer to another phone (and address) mid-booking.
+      firstResults.customers = { ...firstResults.customers, phone: '9415559999', address_line1: '77 Private Way', latitude: 27.9, longitude: -82.9 };
+      return { ok: false, status: 409, error: 'Your account details just changed — please refresh and book again.', code: 'CUSTOMER_CHANGED_RETRY' };
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ error: 'address_unresolved' });
+    expect(JSON.stringify(res.body)).not.toContain('Private Way');
+  });
+});
+
 describe('Codex #4737 r8 P2: LOCATION_CHANGED_RETRY answers like a slot race, at the CURRENT stored pin', () => {
   // Codex #4737 r9 P2: CUSTOMER_CHANGED_RETRY (an address TEXT edit caught
   // by the comms fingerprint) answers the same way.
