@@ -9048,8 +9048,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // overwritten with a manual method, and completion would skip
             // the annual coverage validator for an already-paid visit
             // (Codex #4030 r7 P1).
+            // NULL status is a live visit (same service-cadence convention
+            // fetchSeriesRows' own live-row lock uses): a bare whereNotIn
+            // evaluates unknown against NULL and would drop a legacy
+            // null-status row from eligibility, reporting it as if it
+            // carried annual coverage instead of stamping it.
             const stamped = await withoutAnnualCoverage(db('scheduled_services').where({ id }))
-              .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
+              .where(function liveStatus() { this.whereNull('status').orWhereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES); })
               .update({
                 prepaid_amount: amt,
                 prepaid_method: payload?.method || 'cash',

@@ -80,9 +80,17 @@ jest.mock('../models/db', () => {
         // Honour the id + status predicates so a terminal row matches 0 rows
         // (the single-visit prepaid guard) and the annual-coverage predicates
         // (whereNull + IS DISTINCT FROM) — other updates match everything.
+        const nullCols = b._nullCols || [];
+        // whereNull('status').orWhereNotIn('status', X) is an OR-composed
+        // group (live = NULL or non-terminal), not two independent AND
+        // predicates. Every other whereNull column (e.g.
+        // annual_prepay_term_id in the annual-coverage guard) stays a
+        // plain "must be null" AND predicate.
+        const statusIsOrGrouped = nullCols.includes('status') && b._statusNotIn;
+        const plainNullCols = nullCols.filter((col) => col !== 'status' || !statusIsOrGrouped);
         const match = (r) => Object.entries(b._where).every(([k, v]) => r[k] === v)
-          && !(b._statusNotIn && b._statusNotIn.includes(r.status))
-          && (b._nullCols || []).every((col) => r[col] == null)
+          && (statusIsOrGrouped ? (r.status == null || !b._statusNotIn.includes(r.status)) : !(b._statusNotIn && b._statusNotIn.includes(r.status)))
+          && plainNullCols.every((col) => r[col] == null)
           && (b._distinctFrom || []).every(([col, val]) => r[col] !== val);
         const rows = table === 'scheduled_services' && b._where.id
           ? state.rows.filter(match) : [{ id: null }];

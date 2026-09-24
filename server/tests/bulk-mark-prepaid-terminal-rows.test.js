@@ -72,9 +72,18 @@ jest.mock('../models/db', () => {
         // Honour the id + status predicates so a terminal row matches 0 rows
         // (the single-visit prepaid guard) and the annual-coverage predicates
         // (whereNull + IS DISTINCT FROM) — other updates match everything.
+        const nullCols = b._nullCols || [];
+        // whereNull('status').orWhereNotIn('status', X) is an OR-composed
+        // group (live = NULL or non-terminal), not two independent AND
+        // predicates — a bare AND would require status to be BOTH null
+        // and non-terminal, matching nothing. Every other whereNull column
+        // (e.g. annual_prepay_term_id in the annual-coverage guard) stays
+        // a plain "must be null" AND predicate.
+        const statusIsOrGrouped = nullCols.includes('status') && b._statusNotIn;
+        const plainNullCols = nullCols.filter((col) => col !== 'status' || !statusIsOrGrouped);
         const match = (r) => Object.entries(b._where).every(([k, v]) => r[k] === v)
-          && !(b._statusNotIn && b._statusNotIn.includes(r.status))
-          && (b._nullCols || []).every((col) => r[col] == null)
+          && (statusIsOrGrouped ? (r.status == null || !b._statusNotIn.includes(r.status)) : !(b._statusNotIn && b._statusNotIn.includes(r.status)))
+          && plainNullCols.every((col) => r[col] == null)
           && (b._distinctFrom || []).every(([col, val]) => r[col] !== val);
         const rows = table === 'scheduled_services' && b._where.id
           ? state.rows.filter(match) : [{ id: null }];
@@ -152,6 +161,11 @@ function seed() {
     { id: 'child-completed', technician_id: 'tech-1', customer_id: 'cust-1', status: 'completed', scheduled_date: future(-30), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null, prepaid_method: null },
     { id: 'child-cancelled', technician_id: 'tech-1', customer_id: 'cust-1', status: 'cancelled', scheduled_date: future(33), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null, prepaid_method: null },
     { id: 'child-noshow', technician_id: 'tech-1', customer_id: 'cust-1', status: 'no_show', scheduled_date: future(-2), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null, prepaid_method: null },
+    // Legacy null-status row: the service-cadence convention treats a NULL
+    // status as live (fetchSeriesRows' own lock predicate), so this row
+    // must be stamped like any other live visit, not refused as if it
+    // carried annual coverage.
+    { id: 'child-null-status', technician_id: 'tech-1', customer_id: 'cust-1', status: null, scheduled_date: future(45), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null, prepaid_method: null },
   ];
   db.__state.writes = []; db.__state.hasTableCalls = []; db.__state.reads = [];
 }
@@ -168,11 +182,11 @@ test('CONTRAST: POST /:id/prepaid refuses the cancelled row with 409 visit_termi
   expect(db.__state.writes.filter((w) => w.op === 'update')).toHaveLength(0);
 });
 
-test('EXPECTED: bulk mark_prepaid refuses completed, cancelled and no_show rows — only the live parent is stamped', async () => {
+test('EXPECTED: bulk mark_prepaid refuses completed, cancelled and no_show rows — only live rows (incl. a legacy null-status row) are stamped', async () => {
   seed();
   const res = await fetch(`${baseUrl}/api/admin/schedule/bulk-action`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'mark_prepaid', serviceIds: ['parent', 'child-completed', 'child-cancelled', 'child-noshow'], payload: { totalAmount: 360, method: 'cash' } }),
+    body: JSON.stringify({ action: 'mark_prepaid', serviceIds: ['parent', 'child-completed', 'child-cancelled', 'child-noshow', 'child-null-status'], payload: { totalAmount: 360, method: 'cash' } }),
   });
   expect(res.status).toBe(200);
   const body = await res.json();
@@ -180,13 +194,14 @@ test('EXPECTED: bulk mark_prepaid refuses completed, cancelled and no_show rows 
   const stamps = db.__state.writes.filter((w) => w.op === 'update' && w.u.prepaid_amount != null);
   console.log('stamp writes:', stamps.length, 'each amount:', stamps.map((w) => w.u.prepaid_amount));
   // EXPECTED (symmetry with the single-visit writer, admin-schedule.js:13384):
-  // only the live parent is stamped; the three terminal rows land in
-  // failed[] instead of silently taking a PAID stamp for a visit that never
-  // runs (or already ran).
-  expect(body.updated).toEqual(['parent']);
+  // the live parent AND the legacy null-status row are stamped; the three
+  // terminal rows land in failed[] instead of silently taking a PAID stamp
+  // for a visit that never runs (or already ran). A bare whereNotIn would
+  // evaluate unknown against a NULL status and wrongly refuse this row too.
+  expect(body.updated.sort()).toEqual(['child-null-status', 'parent']);
   expect(body.failed).toHaveLength(3);
   expect(body.failed.map((f) => f.id).sort()).toEqual(['child-cancelled', 'child-completed', 'child-noshow']);
   for (const f of body.failed) expect(f.reason).toMatch(/already \w+/);
-  expect(stamps).toHaveLength(1);
-  expect(stamps[0].u.prepaid_amount).toBe(360);
+  expect(stamps).toHaveLength(2);
+  for (const s of stamps) expect(s.u.prepaid_amount).toBe(360);
 });
