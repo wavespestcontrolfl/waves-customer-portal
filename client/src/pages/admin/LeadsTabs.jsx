@@ -757,7 +757,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const compactQueue = useIsMobile(1280);
   const [tab, setTab] = useState("pipeline");
   const openMessages = useCustomerSms();
-  const messageLead = (lead, initialDraft = "") =>
+  // appendDraft: unlike initialDraft (only seeds an EMPTY draft — an
+  // existing per-lead draft silently wins and the text never lands), this
+  // is joined onto whatever draft already exists, matching how the
+  // Communications composer's own Insert Link actions add a clause to the
+  // current body instead of losing it. "Send consultation link" uses this
+  // (pre-push Codex P2); a plain click-to-message keeps seeding as before.
+  const messageLead = (lead, initialDraft = "", { append = false } = {}) =>
     openMessages?.(
       {
         id: lead.customer_id,
@@ -767,7 +773,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       },
       {
         leadId: lead.id,
-        initialDraft,
+        ...(append ? { appendDraft: initialDraft } : { initialDraft }),
         onSent: () => {
           loadLeads();
           loadLeadActivities(lead.id, {
@@ -1120,7 +1126,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     setPipelineView("table");
     setActiveLead(linkedLeadId);
     loadLeadActivities(linkedLeadId);
-  }, [linkedLeadId, setActiveLead, loadLeadActivities, setPipelineView]);
+    // The row-expand click path (expandLead) loads this too — the ?lead=
+    // deep link expands the same row without going through that handler,
+    // so it must run the same loader or "Send consultation link" shows no
+    // link at all until the operator collapses and re-expands the row.
+    loadConsultationLink(linkedLeadId);
+  }, [linkedLeadId, setActiveLead, loadLeadActivities, loadConsultationLink, setPipelineView]);
 
   // Drill-down from the dashboard Marketing Attribution panel:
   // /admin/leads?source_name=<name>&from=<YYYY-MM-DD>&to=<YYYY-MM-DD>&period_label=<label>
@@ -2047,6 +2058,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       messageLead(
                                         lead,
                                         consultationLinks[lead.id]?.line || "",
+                                        { append: true },
                                       )
                                     }
                                   >

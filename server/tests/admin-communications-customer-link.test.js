@@ -116,6 +116,11 @@ const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-
 const ReviewService = require('../services/review-request');
 
 const CUSTOMER_UUID = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
+// leadId is UUID-format-gated (pre-push Codex P2) — the consultation
+// lead-only fallback tests below use real UUID shapes, not bare strings.
+const LEAD_UUID_2 = 'b2b2b2b2-2222-4222-8222-222222222222';
+const LEAD_UUID_3 = 'c3c3c3c3-3333-4333-8333-333333333333';
+const LEAD_UUID_4 = 'd4d4d4d4-4444-4444-8444-444444444444';
 
 function makeCustomersBuilder({ firstRow = null, selectResults = [] } = {}) {
   const queue = [...selectResults];
@@ -199,17 +204,31 @@ function makeVisitsBuilder(rows = []) {
 
 // leads: consultation's lead-only fallback (resolveConsultationLeadOnly).
 // `rows` is consumed in call order across the two possible db('leads')
-// queries (the leadId lookup, then the phone-based fallback); the last
+// queries: the explicit leadId lookup (terminal .first(), one row or
+// null) and the open-lead-by-phone fallback (terminal .select() after
+// .whereIn/.limit(2), an ARRAY — up to two rows, so ambiguity can be
+// judged without a third query). Each call takes the next queued value;
+// .first() returns it as-is, .select() wraps a truthy value as a
+// one-element array (or [] for null/undefined) — a test that wants the
+// ambiguous-match case queues an array of 2+ rows directly. The last
 // value repeats once exhausted, so a single-row array covers a test that
 // only ever makes one call.
 function makeLeadsBuilder(rows = [null]) {
   const queue = [...rows];
+  const next = () => (queue.length > 1 ? queue.shift() : queue[0]);
   const b = {};
   b.where = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
   b.whereRaw = jest.fn(() => b);
+  b.whereIn = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
-  b.first = jest.fn(async () => (queue.length > 1 ? queue.shift() : queue[0]));
+  b.limit = jest.fn(() => b);
+  b.first = jest.fn(async () => next());
+  b.select = jest.fn(async () => {
+    const value = next();
+    if (value == null) return [];
+    return Array.isArray(value) ? value : [value];
+  });
   return b;
 }
 
@@ -347,13 +366,13 @@ describe('POST /admin/communications/customer-link', () => {
       });
 
       test('a leadId whose phone does not match the destination is rejected — 404 with a reason, no link, and the phone-based lookup never runs', async () => {
-        const leads = makeLeadsBuilder([{ id: 'lead-2', first_name: 'Robin', phone: '+19995551234' }]);
+        const leads = makeLeadsBuilder([{ id: 'lead-2', first_name: 'Robin', phone: '+19995551234', status: 'new', converted_at: null }]);
         wireDb({ customers: makeCustomersBuilder(), leads });
         await withServer(async (baseUrl) => {
           const res = await post(baseUrl, 'customer-link', {
             phone: '+15551234567',
             kind: 'consultation',
-            leadId: 'lead-2',
+            leadId: LEAD_UUID_2,
           });
           expect(res.status).toBe(404);
           expect((await res.json()).error).toMatch(/does not match/i);
@@ -362,6 +381,7 @@ describe('POST /admin/communications/customer-link', () => {
           // Only the leadId lookup ran — never fell through to a phone-based
           // second query that could mint a different lead's link.
           expect(leads.first).toHaveBeenCalledTimes(1);
+          expect(leads.select).not.toHaveBeenCalled();
         });
       });
 
@@ -375,10 +395,71 @@ describe('POST /admin/communications/customer-link', () => {
           const res = await post(baseUrl, 'customer-link', {
             phone: '+15551234567',
             kind: 'consultation',
-            leadId: 'lead-stale',
+            leadId: LEAD_UUID_3,
           });
           expect(res.status).toBe(200);
           expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-3', 'Sam');
+          // Rides back so the composer's eventual send can route through
+          // the leads-page send route and get its audit trail (pre-push
+          // Codex P2).
+          expect((await res.json()).leadId).toBe('lead-3');
+        });
+      });
+
+      // Pre-push Codex P2: a malformed leadId must 400 before either leads
+      // query, never fall through to the phone-only lookup as if no
+      // override had been supplied.
+      test('a malformed (non-UUID) leadId is rejected with 400 before any leads query', async () => {
+        const leads = makeLeadsBuilder([{ id: 'lead-1', first_name: 'Jamie', phone: '+15551234567' }]);
+        wireDb({ customers: makeCustomersBuilder(), leads });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            leadId: 'not-a-real-uuid',
+          });
+          expect(res.status).toBe(400);
+          expect((await res.json()).error).toMatch(/leadId/i);
+          expect(leads.first).not.toHaveBeenCalled();
+          expect(leads.select).not.toHaveBeenCalled();
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+        });
+      });
+
+      // Pre-push Codex P1: the fallback used to accept ANY non-deleted lead
+      // by id — a converted/closed lead (already a real customer, or lost/
+      // disqualified/etc.) must be refused, not silently minted a link for.
+      test('a converted lead, named explicitly by id, is refused — no link, no fallback substitution', async () => {
+        const leads = makeLeadsBuilder([{ id: 'lead-4', first_name: 'Won', phone: '+15551234567', status: 'won', converted_at: new Date('2026-01-01') }]);
+        wireDb({ customers: makeCustomersBuilder(), leads });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            leadId: LEAD_UUID_4,
+          });
+          expect(res.status).toBe(404);
+          expect((await res.json()).error).toMatch(/already converted or closed/i);
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+          expect(leads.select).not.toHaveBeenCalled();
+        });
+      });
+
+      // Pre-push Codex P1: the phone-only fallback used to .first() the
+      // newest match without checking whether the phone was ambiguous.
+      test('two open leads share the phone and no leadId was given: refused rather than silently picking the newest', async () => {
+        wireDb({
+          customers: makeCustomersBuilder(),
+          leads: makeLeadsBuilder([[
+            { id: 'lead-5', first_name: 'Newer', phone: '+15551234567' },
+            { id: 'lead-6', first_name: 'Older', phone: '+15551234567' },
+          ]]),
+        });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+          expect(res.status).toBe(409);
+          expect((await res.json()).error).toBe('multiple leads share this number; pick the lead');
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
         });
       });
 

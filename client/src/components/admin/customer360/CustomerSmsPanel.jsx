@@ -125,7 +125,20 @@ function MessageBubble({ m }) {
   );
 }
 
-export default function CustomerSmsPanel({ customer, open, onClose, onSent, leadId, initialDraft = "" }) {
+// initialDraft only SEEDS an empty draft — an existing per-identity draft
+// (sessionStorage) wins over it, same as opening the panel fresh. A caller
+// whose text must actually land in the box regardless of what's already
+// there (Send consultation link) passes appendDraft instead: joined onto
+// whatever draft already exists (existing, matching how the Communications
+// composer's own Insert Link actions add a clause to the current body
+// rather than silently losing it — CommunicationsPageV2 insertCustomerLinkLine).
+function combineAppendedDraft(existing, addition) {
+  if (!addition) return existing;
+  const base = String(existing || "").replace(/\s+$/, "");
+  return base ? `${base}\n\n${addition}` : addition;
+}
+
+export default function CustomerSmsPanel({ customer, open, onClose, onSent, leadId, initialDraft = "", appendDraft = "" }) {
   const isMobile = useIsMobile();
   const customerId = customer?.id ? String(customer.id) : null;
   const phone = customer?.phone || "";
@@ -138,7 +151,7 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [draft, setDraft] = useState(() => (identity ? readDraft(identity) || initialDraft : ""));
+  const [draft, setDraft] = useState(() => (identity ? combineAppendedDraft(readDraft(identity) || initialDraft, appendDraft) : ""));
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const [sentNote, setSentNote] = useState("");
@@ -170,6 +183,26 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
     knownIdsRef.current = new Set();
     setDraft(identity ? readDraft(identity) || initialDraft : "");
   }, [identity, initialDraft]);
+
+  // appendDraft joins onto the draft the panel already holds — including
+  // whatever the operator may have typed already, or an appendDraft-aware
+  // mount the reset effect above (which does not know about appendDraft)
+  // would otherwise clobber back to the plain seeded value in the SAME
+  // post-mount effect flush. Started at a sentinel that never equals a
+  // real appendDraft value, so this DOES fire on mount too — after the
+  // reset effect's setDraft — and is guarded only against re-applying the
+  // SAME value again on a later re-render that does not change it.
+  const appliedAppendDraftRef = useRef(undefined);
+  useEffect(() => {
+    if (appendDraft && appendDraft !== appliedAppendDraftRef.current) {
+      setDraft((prev) => {
+        const next = combineAppendedDraft(prev, appendDraft);
+        if (identity) writeDraft(identity, next);
+        return next;
+      });
+    }
+    appliedAppendDraftRef.current = appendDraft;
+  }, [appendDraft, identity]);
 
   const isNearBottom = () => {
     const el = listRef.current;

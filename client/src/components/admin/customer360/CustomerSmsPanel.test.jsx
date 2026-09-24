@@ -89,6 +89,32 @@ describe("CustomerSmsPanel", () => {
     expect(await screen.findByLabelText(/Message to Avery Sample/)).toHaveValue("draft for Avery");
   });
 
+  // Pre-push Codex P2: initialDraft only seeds an EMPTY draft — an existing
+  // stored draft silently wins and a caller's text (e.g. "Send consultation
+  // link") is lost. appendDraft joins onto whatever draft already exists
+  // instead, matching how the Communications composer's own Insert Link
+  // actions add a clause to the current body rather than dropping it.
+  it("appendDraft joins onto an existing draft instead of being silently dropped by it", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem("c360:sms-draft:staff-a:cust-a", "already typed this");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Pick a time: https://waves.link/l/abc\n\n"} />);
+    expect(await screen.findByLabelText(/Message to Avery Sample/))
+      .toHaveValue("already typed this\n\nPick a time: https://waves.link/l/abc\n\n");
+  });
+
+  it("appendDraft with no existing draft becomes the whole body (never dropped for an empty draft either)", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Pick a time: https://waves.link/l/abc\n\n"} />);
+    expect(await screen.findByLabelText(/Message to Avery Sample/))
+      .toHaveValue("Pick a time: https://waves.link/l/abc\n\n");
+  });
+
   it("sends once per click through the canonical route, pinned to the customer, and keeps the draft on failure", async () => {
     const send = deferred();
     adminFetch.mockImplementation(async (path, options = {}) => {

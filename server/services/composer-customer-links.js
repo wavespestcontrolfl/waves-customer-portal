@@ -795,7 +795,13 @@ async function shortRowDestination(row, hosts) {
   if (payTarget && (row.kind === 'receipt' || await payLinkOpensReceipt(payTarget))) {
     return { kind: 'receipt', token: payTarget, payTarget: true };
   }
-  if (['appointment', 'service_report', 'receipt'].includes(row.kind)) return { kind: row.kind, token: null };
+  // Consultation is always short-wrapped (buildLeadConsultationLink never
+  // hands out the long /inspection/:token form), so its own target never
+  // matches a regex above — trusted by row.kind like the other three,
+  // token: null since there is nothing further to re-verify here (this
+  // fence only needs presence; consultation carries no account-bound
+  // send-time re-check the way appointment/service_report/receipt do).
+  if (['appointment', 'service_report', 'receipt', 'consultation'].includes(row.kind)) return { kind: row.kind, token: null };
   return null;
 }
 // /l/:code answers 410 past expires_at (public-shortlinks) — the same
@@ -855,6 +861,10 @@ async function immediateOnlyLinkSendCheck(body) {
   if (appointmentLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Appointment page' };
   if (reportLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Service report' };
   if (shortRows.some((row) => row.kind === 'receipt')) return { present: true, label: 'Receipt' };
+  // Consultation's 14-day token TTL (pre-push Codex P1): always short-
+  // wrapped, so presence is judged by short_codes.kind like appointment/
+  // service_report/receipt above, never a long-form path regex.
+  if (shortRows.some((row) => row.kind === 'consultation')) return { present: true, label: 'Consultation link' };
   return { present: false };
 }
 

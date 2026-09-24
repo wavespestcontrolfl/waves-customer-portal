@@ -68,7 +68,12 @@ async function buildLeadConsultationLink(leadOrId) {
       // would just redirect to a long URL the page rejects as expired.
       expiresAt,
     });
-    return { url: shortUrl, line: consultationSmsLineFor(shortUrl) };
+    // expiresAt (the 14-day token TTL) + immediateOnly ride to the composer
+    // the same way the other expiring bearer links do (pre-push Codex P1):
+    // the server-side scheduled-link fence (composer-customer-links.js
+    // immediateOnlyLinkSendCheck) refuses to schedule this kind past the
+    // window a queued send could deliver an already-expired token in.
+    return { url: shortUrl, line: consultationSmsLineFor(shortUrl), expiresAt, immediateOnly: true };
   } catch (err) {
     logger.warn(`[lead-consultation-link] build failed: ${err.message}`);
     return { url: null, line: '', reason: 'Could not build a consultation link' };
@@ -97,21 +102,38 @@ const CONSULTATION_SMS_TEMPLATE_KEY = 'lead_consultation_link';
  * caller supplies it (this module's own DB reads intentionally select only
  * id/phone for buildLeadConsultationLink's stale-object-mistrust rule
  * above).
+ *
+ * An admin-DISABLED template (is_active: false) is a deliberate kill
+ * switch, not a render defect (pre-push Codex P1): it must never fall back
+ * to the bare buildLeadConsultationLink clause, which has no "Reply STOP
+ * to opt out." footer — sending it to a first-contact lead is a keep-list
+ * violation as well as bypassing the toggle. Checked BEFORE getTemplate
+ * (same is_active pre-check composer-customer-links.js's autopaySmsLever
+ * uses for the same reason): a disabled template returns an unavailable
+ * result, url null, same as any other "nothing to insert" outcome. A
+ * MISSING template row (never seeded) is a different case — getTemplate's
+ * own audit trail catches that — and still falls back below, unchanged.
  */
 async function buildLeadConsultationSmsLine(leadOrId, firstName) {
   const built = await buildLeadConsultationLink(leadOrId);
   if (!built.url) return built;
   try {
+    const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');
+    if (row && row.is_active === false) {
+      return { url: null, line: '', reason: 'template disabled' };
+    }
     const templates = require('../routes/admin-sms-templates');
     const body = await templates.getTemplate(CONSULTATION_SMS_TEMPLATE_KEY, {
       first_name: firstName || 'there',
       consultation_url: built.url,
-    });
+    }, {}, { requiredVars: ['consultation_url'] });
     if (body) {
       return {
         url: built.url,
         line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
         standalone: true,
+        expiresAt: built.expiresAt || null,
+        immediateOnly: built.immediateOnly,
       };
     }
   } catch (err) {

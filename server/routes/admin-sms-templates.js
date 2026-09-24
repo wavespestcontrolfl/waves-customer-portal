@@ -61,6 +61,12 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // renders nothing the worker can send, so every promise on the queue parks
   // for manual review instead (codex #4293 r1 P2).
   reschedule_link_promise: Object.freeze(['link']),
+  // Lead consultation-booking link: the URL IS the ask — a body edited to
+  // drop {consultation_url} would otherwise render as a normal (greeted,
+  // STOP-footed) standalone text with no way to actually book (pre-push
+  // Codex P2). buildLeadConsultationSmsLine passes this same requiredVars
+  // list to getTemplate at render time.
+  lead_consultation_link: Object.freeze(['consultation_url']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {

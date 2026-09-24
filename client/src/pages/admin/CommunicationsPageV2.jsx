@@ -1500,37 +1500,50 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           text: `Scheduled for ${formatScheduledForToast(scheduledFor)}.`,
         });
       } else {
-        const sent = await adminFetch("/admin/communications/sms", {
-          method: "POST",
-          body: JSON.stringify({
-            to: toNumber.trim(),
-            body: msgBody.trim(),
-            customerId: selectedCustomerId || undefined,
-            // The inbox row this answers: a recruiting row keeps the reply on the
-            // recruiting rail even when the shared phone is a linked customer's.
-            replyToMessageId: carriedReplyToMessageId,
-            messageType: "manual",
-            fromNumber,
-            mediaUrls:
-              attachments.length > 0
-                ? attachments.map((a) => a.url)
-                : undefined,
-            mediaAttachments:
-              attachments.length > 0
-                ? attachments.map(({ previewUrl, ...a }) => a)
-                : undefined,
-            agentDecisionId: selectedAgentDraft?.decisionId || undefined,
-            agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
-            // The send that just left IS the review ask — the server marks
-            // the inline review_requests row delivered (see /sms route).
-            reviewRequestId: insertedCustomerLinks.review_request?.requestId || undefined,
-            // Both: email the same ask once the text has really sent.
-            reviewRequestEmail: insertedCustomerLinks.review_request?.emailToo ? true : undefined,
-            // A freshly inserted contract signing link is unwritten until
-            // this send activates it — the server needs the contract it names.
-            contractId: insertedCustomerLinks.contract?.contractId || undefined,
-          }),
-        });
+        // Consultation can resolve to a lead with no customer row at all —
+        // the resolved lead rides on the inserted link (server: the
+        // lead-only fallback in /customer-link). Routing the send through
+        // the SAME route the Leads page uses (POST /admin/leads/:id/send-sms)
+        // — instead of duplicating its audit trail here — gets the identical
+        // lead_activities row, first-response timestamp, and new→contacted
+        // transition (pre-push Codex P2) that any other lead SMS gets.
+        const consultationLeadId = !selectedCustomerId ? insertedCustomerLinks.consultation?.leadId : null;
+        const sent = consultationLeadId
+          ? await adminFetch(`/admin/leads/${consultationLeadId}/send-sms`, {
+              method: "POST",
+              body: JSON.stringify({ to: toNumber.trim(), message: msgBody.trim() }),
+            })
+          : await adminFetch("/admin/communications/sms", {
+              method: "POST",
+              body: JSON.stringify({
+                to: toNumber.trim(),
+                body: msgBody.trim(),
+                customerId: selectedCustomerId || undefined,
+                // The inbox row this answers: a recruiting row keeps the reply on the
+                // recruiting rail even when the shared phone is a linked customer's.
+                replyToMessageId: carriedReplyToMessageId,
+                messageType: "manual",
+                fromNumber,
+                mediaUrls:
+                  attachments.length > 0
+                    ? attachments.map((a) => a.url)
+                    : undefined,
+                mediaAttachments:
+                  attachments.length > 0
+                    ? attachments.map(({ previewUrl, ...a }) => a)
+                    : undefined,
+                agentDecisionId: selectedAgentDraft?.decisionId || undefined,
+                agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
+                // The send that just left IS the review ask — the server marks
+                // the inline review_requests row delivered (see /sms route).
+                reviewRequestId: insertedCustomerLinks.review_request?.requestId || undefined,
+                // Both: email the same ask once the text has really sent.
+                reviewRequestEmail: insertedCustomerLinks.review_request?.emailToo ? true : undefined,
+                // A freshly inserted contract signing link is unwritten until
+                // this send activates it — the server needs the contract it names.
+                contractId: insertedCustomerLinks.contract?.contractId || undefined,
+              }),
+            });
         if (!isAcceptedSms(sent)) {
           throw new Error(sent?.reason || sent?.error || "Text was not handed to the provider. Your draft is retained.");
         }
@@ -2070,6 +2083,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         customerId: linkCustomerId,
         requestId: d.requestId || null,
         contractId: d.contract?.id || null,
+        // Consultation's lead-only fallback (no customer row yet): the
+        // resolved lead id, so the send can route through the leads-page
+        // send route and get its audit trail (pre-push Codex P2).
+        leadId: d.leadId || null,
         // Both: the send posts reviewRequestEmail so the same ask is
         // emailed once the text has really gone out.
         emailToo: channel === "both",

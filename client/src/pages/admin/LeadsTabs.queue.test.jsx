@@ -97,4 +97,37 @@ describe('Pipeline queue navigation', () => {
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
   });
 
+  // Pre-push Codex P2: CustomerSmsPanel's initialDraft only seeds an EMPTY
+  // draft — an existing per-lead draft in sessionStorage silently wins and
+  // the consultation text never lands. "Send consultation link" must pass
+  // appendDraft (joined onto whatever draft already exists) instead of
+  // initialDraft, and still carry leadId so the send gets the leads-page
+  // audit trail (lead_activities row, new→contacted transition).
+  it('Send consultation link appends via appendDraft (not initialDraft), and carries leadId', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => (String(url).includes('/consultation-link')
+      ? { ok: true, json: async () => ({ url: 'https://waves.link/l/abc123', line: "Hi QA, it's Waves. Pick a time...\n\n", standalone: true } ) }
+      : base(url, opts)));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    const sendLinkBtn = await screen.findByRole('button', { name: 'Send consultation link' });
+    await waitFor(() => expect(sendLinkBtn).not.toBeDisabled());
+    fireEvent.click(sendLinkBtn);
+    expect(openMessages).toHaveBeenCalled();
+    const [, options] = openMessages.mock.calls.at(-1);
+    expect(options.leadId).toBe('lead-qa');
+    expect(options.appendDraft).toBe("Hi QA, it's Waves. Pick a time...\n\n");
+    expect(options.initialDraft).toBeUndefined();
+  });
+
+  // Pre-push Codex P2: the ?lead= deep-link expansion path skipped the
+  // consultation loader that row-click expansion (expandLead) already runs
+  // — the Send consultation link button showed no link at all until the
+  // operator manually collapsed and re-expanded the row.
+  it('the ?lead= deep link runs the consultation loader too', async () => {
+    mount('/admin/pipeline?lead=lead-qa');
+    await screen.findByRole('button', { name: 'QA Prospect' });
+    await waitFor(() => expect(calls.some(({ path }) => path.includes('/admin/leads/lead-qa/consultation-link'))).toBe(true));
+  });
+
 });

@@ -2756,8 +2756,12 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSe
 // Builder fields that ride to the composer verbatim when set. immediateOnly:
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
-// inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'receipt', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
+// inserted as-is. leadId: consultation's lead-only fallback (no customer
+// row yet) hands back the resolved lead so the composer's eventual send
+// can route through the leads-page send route and get its audit trail
+// (pre-push Codex P2) instead of going out as an unverified conversational
+// text with no lead_activities row or new→contacted transition.
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'receipt', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone', 'leadId'];
 
 // One response shape for every /customer-link outcome — used by both the
 // normal customer-resolved path and consultation's lead-only fallback below,
@@ -2779,30 +2783,54 @@ function customerLinkResponse(kind, channel, result, firstName, customerId) {
 // resolveComposerRecipient's customer-only lookup 404s before Insert Link
 // ever reaches buildConsultationLink for that lead. Tried only after the
 // customer path finds nothing. A supplied leadId is NEVER trusted alone —
-// it must resolve to a lead whose OWN phone is the destination number, or
-// this refuses outright (a leadId for a different phone must not mint a
-// link the caller could not otherwise reach); an id that resolves to no
-// lead at all (stale/deleted) is treated as no override and falls through
-// to the plain newest-non-deleted-lead-by-phone lookup, same fallback
-// shape as buildConsultationLink's own leadIdOverride.
+// it must be a well-formed id (else 400, before any query — pre-push
+// Codex P2), resolve to a lead whose OWN phone is the destination number
+// (else refuse outright: a leadId for a different phone must not mint a
+// link the caller could not otherwise reach), and be a still-open,
+// unconverted lead (leads.converted_at IS NULL and status in
+// lead-statuses.js's OPEN_LEAD_STATUSES, the same canonical predicate the
+// blocked-numbers route already applies to this table — pre-push Codex
+// P1: a converted/closed lead is refused, never silently minted a link
+// for or silently swapped for a different open lead on a fall-through).
+// An id that resolves to no lead at all (stale/deleted) is treated as no
+// override and falls through to the plain newest-non-deleted-OPEN-lead-by-
+// phone lookup, same fallback shape as buildConsultationLink's own
+// leadIdOverride. That phone-only lookup fetches up to two matches and
+// refuses on ambiguity (pre-push Codex P1) rather than silently taking the
+// newest — but only when no leadId was supplied at all: an explicit
+// (stale) leadId still falls through to the best-effort newest match, the
+// caller having already named a lead.
 // Returns null (no lead either — caller keeps the original customer-not-
 // found error), { status, error } (reject), or { lead }.
 async function resolveConsultationLeadOnly(last10, leadId) {
+  if (leadId && !UUID_RE.test(String(leadId))) {
+    return { status: 400, error: 'leadId must be a valid id' };
+  }
+  const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
   if (leadId) {
-    const byId = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'first_name', 'phone');
+    const byId = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'first_name', 'phone', 'status', 'converted_at');
     if (byId) {
       if (fullPhoneLast10(byId.phone) !== last10) {
         return { status: 404, error: 'That lead does not match the destination number' };
       }
+      if (byId.converted_at || !OPEN_LEAD_STATUSES.includes(byId.status)) {
+        return { status: 404, error: 'That lead has already converted or closed — pick a different lead' };
+      }
       return { lead: byId };
     }
   }
-  const lead = await db('leads')
+  const matches = await db('leads')
+    .whereIn('status', OPEN_LEAD_STATUSES)
+    .whereNull('converted_at')
     .whereNull('deleted_at')
     .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
     .orderBy('created_at', 'desc')
-    .first('id', 'first_name', 'phone');
-  return lead ? { lead } : null;
+    .limit(2)
+    .select('id', 'first_name', 'phone');
+  if (!leadId && matches.length > 1) {
+    return { status: 409, error: 'multiple leads share this number; pick the lead' };
+  }
+  return matches.length ? { lead: matches[0] } : null;
 }
 
 // The lead-only response to send for consultation when the customer path
@@ -2817,6 +2845,9 @@ async function consultationLeadOnlyResponse(kind, last10, leadId) {
   const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
   const result = (await buildLeadConsultationSmsLine(leadOnly.lead.id, leadOnly.lead.first_name)) || {};
   if (!result.url) return { status: 404, body: { error: result.reason || 'Nothing to link for this lead' } };
+  // Rides back so the composer's eventual send can route through the
+  // leads-page send route and pick up its audit trail (pre-push Codex P2).
+  result.leadId = leadOnly.lead.id;
   return { status: 200, body: customerLinkResponse(kind, undefined, result, leadOnly.lead.first_name || '') };
 }
 

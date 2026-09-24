@@ -87,6 +87,9 @@ describe('buildLeadConsultationLink — gate on', () => {
       expect.stringContaining(`/inspection/${LEAD_ID}.`),
       expect.objectContaining({ kind: 'consultation', leadId: LEAD_ID, expiresAt: expect.any(Date) })
     );
+    // Rides to the composer for the scheduled-link fence (pre-push Codex P1).
+    expect(result.expiresAt).toBeInstanceOf(Date);
+    expect(result.immediateOnly).toBe(true);
   });
 
   test('fails closed when the short code cannot be minted (never passes the token URL through)', async () => {
@@ -157,7 +160,10 @@ describe('consultationSmsLineFor', () => {
 
 describe('buildLeadConsultationSmsLine', () => {
   test('renders the admin template with {first_name, consultation_url}, collapsed to one line and flagged standalone', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
     getTemplate.mockResolvedValue(
       "Hi Pat, it's Waves. Pick a time for us to stop by for a free consultation: https://waves.link/l/abc123\n\nOr reply here and we'll set it up.\n\nReply STOP to opt out.",
     );
@@ -165,7 +171,7 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(getTemplate).toHaveBeenCalledWith('lead_consultation_link', {
       first_name: 'Pat',
       consultation_url: 'https://waves.link/l/abc123',
-    });
+    }, {}, { requiredVars: ['consultation_url'] });
     expect(result.url).toBe('https://waves.link/l/abc123');
     expect(result.standalone).toBe(true);
     // Collapsed to one line (no embedded newlines other than the
@@ -175,17 +181,26 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(result.line.slice(0, -2)).not.toMatch(/\n/);
     expect(result.line).toContain("Hi Pat, it's Waves.");
     expect(result.line).toContain('Reply STOP to opt out.');
+    // Rides through for the scheduled-link fence (pre-push Codex P1).
+    expect(result.expiresAt).toBeInstanceOf(Date);
+    expect(result.immediateOnly).toBe(true);
   });
 
   test('missing first name falls back to "there"', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
     getTemplate.mockResolvedValue('Hi {first_name}');
     await buildLeadConsultationSmsLine(LEAD_ID, null);
-    expect(getTemplate).toHaveBeenCalledWith('lead_consultation_link', expect.objectContaining({ first_name: 'there' }));
+    expect(getTemplate).toHaveBeenCalledWith('lead_consultation_link', expect.objectContaining({ first_name: 'there' }), {}, expect.objectContaining({ requiredVars: ['consultation_url'] }));
   });
 
-  test('an inactive/missing template row falls back to the bare builder clause, no standalone flag', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+  test('a missing template row (never seeded) falls back to the bare builder clause, no standalone flag', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      sms_templates: chainBuilder({ firstRow: null }),
+    };
     getTemplate.mockResolvedValue(null);
     const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
     expect(result.url).toBe('https://waves.link/l/abc123');
@@ -193,8 +208,27 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(result.standalone).toBeUndefined();
   });
 
+  // Pre-push Codex P1: an admin-disabled template is a deliberate kill
+  // switch — it must never fall back to the bare clause (no "Reply STOP to
+  // opt out." footer, a keep-list violation on a first-contact lead text)
+  // and getTemplate must never even be asked to render it.
+  test('a DISABLED template returns an unavailable result — never the bare fallback clause, never rendered', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: false } }),
+    };
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toBe('template disabled');
+    expect(getTemplate).not.toHaveBeenCalled();
+  });
+
   test('a template render that throws falls back to the bare builder clause', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
     getTemplate.mockRejectedValue(new Error('render exploded'));
     const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
     expect(result.url).toBe('https://waves.link/l/abc123');

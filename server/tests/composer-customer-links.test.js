@@ -1487,6 +1487,15 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck('evil.example/l/Ab12cD')).toEqual({ present: false });
   });
 
+  // Pre-push Codex P1: consultation is always short-wrapped (the long
+  // /inspection/:token form never rides an SMS raw), so its own target
+  // never matches a long-form regex — presence is judged by
+  // short_codes.kind, like appointment/service_report/receipt above.
+  test('a consultation link (branded short form of kind consultation) is immediate-only — its 14-day token TTL fences a scheduled send past it', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'cons1', kind: 'consultation', target_url: 'https://portal.wavespestcontrol.com/inspection/abc.123.def' } }) };
+    expect(await immediateOnlyLinkSendCheck('Pick a time: wavespest.co/l/cons1')).toEqual({ present: true, label: 'Consultation link' });
+  });
+
   test('a statement pay link and a visit-lane card request are immediate-only; a customer-kind /secure link is the Auto Pay seam\'s', async () => {
     expect(await immediateOnlyLinkSendCheck(`Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`)).toEqual({ present: true, label: 'Statement pay' });
     mockBuilders = { appointment_card_requests: chainBuilder({ firstRow: { kind: 'visit' } }) };

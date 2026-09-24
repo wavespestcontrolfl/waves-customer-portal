@@ -35,7 +35,9 @@ exports.up = async function up(knex) {
     .first();
   if (existing) return;
 
-  await knex('sms_templates').insert({
+  // recordAuditEvent after a successful insert, matching the current
+  // seeded-template migration pattern (20260906000040_recurring_dispatch_sms).
+  const inserted = await knex('sms_templates').insert({
     template_key: TEMPLATE.template_key,
     name: TEMPLATE.name,
     category: TEMPLATE.category,
@@ -43,7 +45,16 @@ exports.up = async function up(knex) {
     variables: JSON.stringify(TEMPLATE.variables),
     sort_order: TEMPLATE.sort_order,
     is_active: true,
-  });
+  }).returning('id');
+
+  if (inserted.length && await knex.schema.hasTable('audit_log')) {
+    await require('../../services/audit-log').recordAuditEvent({
+      actor_type: 'system', action: 'sms_template.seeded', resource_type: 'sms_template',
+      resource_id: inserted[0].id,
+      metadata: { templateKey: TEMPLATE.template_key, migration: '20260923000020_lead_consultation_link_sms_template' },
+      trx: knex, critical: true,
+    });
+  }
 };
 
 // Documented no-op (waves-db skill §4): a seed migration's down() must
