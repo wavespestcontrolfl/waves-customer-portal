@@ -1387,6 +1387,19 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
       .onConflict('email')
       .ignore();
 
+    // The expansion interest itself lives on the LEAD (local audit P1): the
+    // subscriber insert above is ignored for an email already on file
+    // (active, unsubscribed, or an earlier waitlist row), and that row's
+    // consent/opt-out must stay exactly as it is. This activity row is
+    // always written, so the request is never silently lost.
+    await db('lead_activities').insert({
+      lead_id: lead.id,
+      activity_type: 'expansion_waitlist',
+      description: `Asked to hear when Waves serves ${county || 'their area'}`,
+      performed_by: 'consultation_page',
+      metadata: JSON.stringify({ email, county: county || null }),
+    });
+
     return res.json({ ok: true });
   } catch (err) {
     next(err);

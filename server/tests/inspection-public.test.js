@@ -1674,6 +1674,21 @@ describe('POST /:token/waitlist', () => {
     expect(insert.payload.status).not.toBe('pending');
     expect(insert.payload.source).toBe('expansion_waitlist:Hardee');
   });
+
+  // Local audit P1: the subscriber insert is ignored for an email already on
+  // file, so the interest itself is always recorded on the lead instead —
+  // and never as an update to the existing subscriber row.
+  test('every request writes an expansion_waitlist lead activity, even when the email is already a subscriber', async () => {
+    firstResults.leads = LEAD_ROW;
+    const token = mintLeadConsultationToken(LEAD_ID);
+    await callWaitlist(token, { email: 'someone@example.com', county: 'Hardee' });
+    await callWaitlist(token, { email: 'someone@example.com', county: 'Hardee' });
+    const activities = insertCalls.filter((c) => c.table === 'lead_activities');
+    expect(activities).toHaveLength(2);
+    expect(activities[0].payload).toMatchObject({ lead_id: LEAD_ID, activity_type: 'expansion_waitlist' });
+    expect(JSON.parse(activities[0].payload.metadata)).toEqual({ email: 'someone@example.com', county: 'Hardee' });
+    expect(updateCalls.some((c) => c.table === 'newsletter_subscribers')).toBe(false);
+  });
 });
 
 describe('assessment-not-a-win invariant backstop', () => {
