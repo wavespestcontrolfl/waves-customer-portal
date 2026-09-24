@@ -146,12 +146,14 @@ jest.mock('../services/dispatch-alerts', () => ({
   resolveAlert: jest.fn(),
 }));
 jest.mock('../sockets', () => ({ getIo: jest.fn() }));
+jest.mock('../services/estimate-slot-availability', () => ({ invalidateAllEstimates: jest.fn() }));
 
 const db = require('../models/db');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const { lockTechDays } = require('../services/scheduling/tech-day-lock');
 const { createAlert, resolveAlert } = require('../services/dispatch-alerts');
 const { getIo } = require('../sockets');
+const { invalidateAllEstimates } = require('../services/estimate-slot-availability');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
@@ -477,6 +479,35 @@ describe('absence broadcast (pre-push auditor P1 on #4678: other open boards)', 
     getIo.mockReturnValue(null);
     await expect(markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR })).resolves.toBeTruthy();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('skipping absence broadcast'));
+  });
+});
+
+describe('slot-offer cache + grouped ranking (Codex r6)', () => {
+  test('mark-out and clear each drop the public estimate slot cache after commit; a failed mark drops nothing', async () => {
+    await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    expect(invalidateAllEstimates).toHaveBeenCalledTimes(1);
+    expect(invalidateAllEstimates.mock.invocationCallOrder[0]).toBeGreaterThan(db.transaction.mock.invocationCallOrder[0]);
+    await expect(markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR })).rejects.toMatchObject({ code: 'ALREADY_OUT' });
+    expect(invalidateAllEstimates).toHaveBeenCalledTimes(1);
+    await clearTechOut({ technicianId: TECH.id, date: DATE, actorId: ACTOR });
+    expect(invalidateAllEstimates).toHaveBeenCalledTimes(2);
+  });
+
+  test('a grouped unit is ranked by its most protected member: a confirmed one-time sibling makes the unit "bump last"', async () => {
+    dayStopsQuery.mockImplementation(() => fakeQuery([
+      stop({ id: 'solo-pending', is_recurring: true, status: 'pending', window_start: '13:00:00' }),
+      // Representative (earliest) is a pending routine stop …
+      stop({ id: 'grp-rep', visit_id: 'v1', is_recurring: true, status: 'pending', window_start: '08:00:00' }),
+      // … but its sibling is a confirmed one-time visit.
+      stop({ id: 'grp-sib', visit_id: 'v1', is_recurring: false, status: 'confirmed', window_start: '08:30:00' }),
+    ]));
+    const { summary } = await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    const byJob = Object.fromEntries(summary.parked.map((p) => [p.job_id, p.bump_order]));
+    expect(byJob).toEqual({ 'solo-pending': 1, 'grp-rep': 2, 'grp-sib': 2 });
+    const unitCall = createAlert.mock.calls.map(([c]) => c).find((c) => c.jobId === 'grp-rep');
+    expect(unitCall.payload.bump_reason).toMatch(/bump last/);
+    expect(_test.unitRankingFields([{ is_recurring: true, status: 'pending' }, { is_recurring: true, status: 'pending' }]))
+      .toEqual({ is_recurring: true, status: 'pending' });
   });
 });
 

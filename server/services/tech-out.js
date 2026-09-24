@@ -30,7 +30,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, validCalendarDate } = require('../utils/datetime-et');
+const { etDateString, validCalendarDate, dateOnlyString } = require('../utils/datetime-et');
 const { gateEnvValue } = require('../config/feature-gates');
 const { dayStopsQuery } = require('./scheduling/day-stops');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
@@ -156,6 +156,21 @@ async function openStopsForTechDay(trx, { technicianId, date }) {
 }
 
 /**
+ * A grouped unit is ranked by its MOST protected member, never by whichever
+ * member happens to be earliest (Codex r6 P2): it counts as recurring only
+ * if every member is a series visit, and as confirmed if any member is —
+ * so a unit holding a confirmed one-time visit is bumped last even when its
+ * representative is a pending routine stop. A single-stop unit is
+ * unchanged.
+ */
+function unitRankingFields(members) {
+  return {
+    is_recurring: members.every((m) => m.is_recurring === true),
+    status: members.some((m) => m.status === 'confirmed') ? 'confirmed' : members[0].status,
+  };
+}
+
+/**
  * Rank `stops` and park each unit as a `tech_out_overflow` alert, inside the
  * caller's transaction. Shared by `parkTechDay` (marking a tech out — the
  * day's full open stop list) and `sweepAbsentTechDays` (the safety net —
@@ -170,7 +185,7 @@ async function parkStops(trx, {
   technicianId, date, reason, absentTechName, stops, absenceId = null, extraPayload = {},
 }) {
   const units = unitsOf(stops);
-  const ranked = rankBumpOrder(units.map((u) => ({ ...u.representative, _members: u.members })));
+  const ranked = rankBumpOrder(units.map((u) => ({ ...u.representative, ...unitRankingFields(u.members), _members: u.members })));
   const parked = [];
   // Insert alerts in REVERSE bump order (bump #1 created LAST): the Action
   // Queue hydrates by created_at DESC and prepends socket events, so the
@@ -224,15 +239,6 @@ async function parkTechDay(trx, { technicianId, date, reason, absentTechName, ab
   });
 }
 
-/** Normalize a technician_absences.absence_date read back from Postgres (a
- * DATE column, returned as a JS Date at UTC midnight) to YYYY-MM-DD. A date
- * already a plain string (fake-db tests, or a value this process wrote in
- * the same tick) passes through unchanged. */
-function absenceDateString(value) {
-  if (!value) return value;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  return String(value).slice(0, 10);
-}
 
 /**
  * The safety net for every writer that can land a stop on a marked-out
@@ -268,7 +274,7 @@ async function sweepAbsentTechDays({ now } = {}) {
   let parked = 0;
   for (const absence of absences) {
     const technicianId = absence.technician_id;
-    const date = absenceDateString(absence.absence_date);
+    const date = dateOnlyString(absence.absence_date);
     // Serial on purpose — each absence gets its own transaction, and these
     // are independent tech-days on a 5-minute cadence; nothing gained by
     // parallelizing a handful of rows against Railway's shared Postgres.
@@ -350,6 +356,13 @@ const ADMIN_ROOM = 'dispatch:admins';
  * Fire-and-forget; io unset (unit tests, boot order) just logs.
  */
 function emitAbsenceChange({ technicianId, date, out, absenceId }) {
+  // Public estimate slot offers are memoized for up to five minutes
+  // (estimate-slot-availability wrapperCache); a cached list could keep
+  // offering — or keep hiding — this tech's day after the absence changed
+  // while reserveSlot already answers from the live table (Codex r6 P1).
+  // Same schedule-wide drop admin-schedule.js uses after an edit; lazy
+  // require because that module is far heavier than this one.
+  require('./estimate-slot-availability').invalidateAllEstimates();
   const io = getIo();
   if (!io) {
     logger.warn('[tech-out] io not initialized; skipping absence broadcast');
@@ -455,5 +468,5 @@ module.exports = {
   parkTechDay,
   sweepAbsentTechDays,
   rankBumpOrder,
-  _test: { unitsOf, customerDisplayName, isUncommittedHold },
+  _test: { unitsOf, customerDisplayName, isUncommittedHold, unitRankingFields },
 };

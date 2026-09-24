@@ -14,6 +14,7 @@
  * never derived from either flag.
  */
 const db = require('../models/db');
+const { dateOnlyString } = require('../utils/datetime-et');
 
 const EMPLOYMENT_STATUSES = Object.freeze(['prospective', 'active', 'inactive']);
 const NOT_ASSIGNABLE = 'TECH_NOT_ASSIGNABLE';
@@ -97,18 +98,6 @@ function employmentPatch(status) {
   return { employment_status: status, active: status === 'active' };
 }
 
-/** Normalize a technician_absences.absence_date read back from Postgres (a
- * DATE column, returned as a JS Date at UTC midnight) to YYYY-MM-DD. A date
- * already a plain string (fake-db tests, or a value this process wrote in
- * the same tick) passes through unchanged. Mirrors tech-out.js's own
- * absenceDateString — kept local rather than imported so this foundational
- * module never depends on the feature module (tech-out.js) built on top of
- * it. */
-function absenceDateString(value) {
-  if (!value) return value;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  return String(value).slice(0, 10);
-}
 
 /**
  * Every (technician, date) pair an uncleared technician_absences row marks
@@ -136,7 +125,7 @@ async function absentTechDays(conn, { dateFrom, dateTo, technicianIds = null } =
   const rows = await query.select('technician_id', 'absence_date');
   const days = new Set();
   for (const row of rows) {
-    days.add(`${row.technician_id}:${absenceDateString(row.absence_date)}`);
+    days.add(`${row.technician_id}:${dateOnlyString(row.absence_date)}`);
   }
   return days;
 }
