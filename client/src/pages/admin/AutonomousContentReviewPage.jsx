@@ -80,7 +80,14 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   selectedIdRef.current = selectedId;
   const selectedLinkIdRef = useRef(selectedLinkId);
   selectedLinkIdRef.current = selectedLinkId;
+  const linkReviewNoteRef = useRef(linkReviewNote);
+  linkReviewNoteRef.current = linkReviewNote;
   const actionType = view === "review" ? "other" : "new_supporting_blog";
+
+  const updateLinkReviewNote = useCallback((value) => {
+    linkReviewNoteRef.current = value;
+    setLinkReviewNote(value);
+  }, []);
 
   const load = useCallback(
     async (background = false) => {
@@ -127,6 +134,9 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     try {
       const next = await adminFetch("/admin/content/internal-links?status=all&limit=100");
       if (request !== linksRequest.current) return;
+      // Check at response time so a poll that started before typing cannot
+      // replace the selected row and clear its unsaved reviewer note.
+      if (linkReviewNoteRef.current !== "") return;
       setLinkData(next);
       if (next.items?.some((item) => item.id === selectedLinkIdRef.current)) {
         setLinkDetailVersion((version) => version + 1);
@@ -174,8 +184,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     setReviewNote("");
   }, [selectedId]);
   useEffect(() => {
-    setLinkReviewNote("");
-  }, [selectedLinkId]);
+    updateLinkReviewNote("");
+  }, [selectedLinkId, updateLinkReviewNote]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -277,7 +287,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       });
       if (selectedLinkIdRef.current === actionLinkId) {
         setLinkDetail(next.item);
-        setLinkReviewNote("");
+        updateLinkReviewNote("");
       }
       await loadLinks();
     } catch (err) {
@@ -420,7 +430,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
           selectedLink={selectedLink}
           linkDetailLoading={linkDetailLoading}
           linkReviewNote={linkReviewNote}
-          setLinkReviewNote={setLinkReviewNote}
+          setLinkReviewNote={updateLinkReviewNote}
           linkActionPending={linkActionPending}
           submitLinkDecision={submitLinkDecision}
         />

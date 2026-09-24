@@ -406,6 +406,101 @@ describe('3916 follow-ups', () => {
 });
 
 describe('internal-link refresh ownership', () => {
+  it('keeps a blurred dirty link note and selection when a background poll no longer contains it', async () => {
+    const original = fetch.getMockImplementation();
+    let links = [linkItem('link-1')];
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links?')) {
+        return Promise.resolve({ ok: true, json: async () => ({ items: links }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      if (url.endsWith('/internal-links/link-2')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-2', 2) }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    const note = screen.getByPlaceholderText('Reviewer note (optional)');
+    fireEvent.change(note, { target: { value: 'Keep this link note' } });
+    note.blur();
+
+    links = [linkItem('link-2', 2)];
+    await resumeRefresh();
+    expect(screen.getByText('Link detail revision 1')).toBeTruthy();
+    expect(screen.getByDisplayValue('Keep this link note')).toBeTruthy();
+    expect(screen.queryByText('Link detail revision 2')).toBeNull();
+  });
+
+  it('keeps a link note typed after its background poll has started', async () => {
+    const original = fetch.getMockImplementation();
+    let listReads = 0;
+    let finishPoll;
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links?')) {
+        listReads += 1;
+        if (listReads === 2) return new Promise((resolve) => { finishPoll = resolve; });
+        return Promise.resolve({ ok: true, json: async () => ({ items: [linkItem('link-1')] }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    act(() => { window.dispatchEvent(new Event('online')); });
+    await waitFor(() => expect(finishPoll).toBeTypeOf('function'));
+
+    const note = screen.getByPlaceholderText('Reviewer note (optional)');
+    fireEvent.change(note, { target: { value: 'Typed during the poll' } });
+    note.blur();
+    await act(async () => finishPoll({
+      ok: true,
+      json: async () => ({ items: [linkItem('link-2', 2)] }),
+    }));
+
+    expect(screen.getByText('Link detail revision 1')).toBeTruthy();
+    expect(screen.getByDisplayValue('Typed during the poll')).toBeTruthy();
+  });
+
+  it('allows a later poll to change selection after the dirty link note is cleared', async () => {
+    const original = fetch.getMockImplementation();
+    let links = [linkItem('link-1')];
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links?')) {
+        return Promise.resolve({ ok: true, json: async () => ({ items: links }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      if (url.endsWith('/internal-links/link-2')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-2', 2) }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    const note = screen.getByPlaceholderText('Reviewer note (optional)');
+    fireEvent.change(note, { target: { value: 'Temporary note' } });
+    links = [linkItem('link-2', 2)];
+    await resumeRefresh();
+    expect(screen.getByText('Link detail revision 1')).toBeTruthy();
+
+    fireEvent.change(note, { target: { value: '' } });
+    await resumeRefresh();
+    expect(await screen.findByText('Link detail revision 2')).toBeTruthy();
+    expect(screen.queryByText('Link detail revision 1')).toBeNull();
+  });
+
   it('refetches retained link detail after a background list poll', async () => {
     const original = fetch.getMockImplementation();
     let linkRevision = 1;
