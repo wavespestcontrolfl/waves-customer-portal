@@ -84,50 +84,53 @@
  *   nothing books. checkServiceArea applies uniformly to every resolved
  *   location, including a customer's STORED coordinates, which otherwise
  *   never pass through the geocoder's own box test at all (the short-circuit
- *   branch in resolveServiceAddress returns them directly). The slot is
- *   re-validated against a
- *   fresh single-day availability build (anti-forgery, matching
- *   reservice-public). Booking goes through booking.js's createSelfBooking
- *   with the internal-only `callbackVisit` option — `isCallback: false` and
- *   `dedupeLane: false` (see booking.js: this is a free internal booking
- *   like a re-service callback in every way that matters for skipping the
- *   funnel's signed-offer/card-capture/ad-attribution/customer-promotion
- *   machinery, but it is NOT a re-service warranty callback, so it must not
- *   set is_callback or take the reservice-lane dedupe, which is keyed to
- *   pest/lawn re-service lanes and would false-hit on an unrelated open
- *   re-service). createSelfBooking's own dedupe (dedupeLane:false) only
- *   catches an exact repeat customer/date/time — it does NOT catch two
- *   different slots for the same lead, so the customer-provisioning +
- *   eligibility re-check runs under a per-lead `pg_advisory_xact_lock`
- *   (key convention matches admin-agents.js/admin-dashboard.js's single-
- *   hashtext-arg form) in TWO short, SEPARATE lock acquisitions on the same
- *   key — never one transaction held open across createSelfBooking, which
- *   opens its OWN transaction on a SEPARATE pooled connection (its payload
- *   has no `trx`/knex-handle param to join ours) and does a fresh customer
- *   re-read there: a customer row (or address update) held uncommitted
- *   inside an outer lock transaction would make that fresh read block on
- *   the outer transaction's own FK check — a guaranteed deadlock — and,
- *   even without a literal deadlock, holding our connection open for the
- *   whole createSelfBooking call while it opens a SECOND connection means
- *   every concurrent commit ties up two pool slots at once, risking pool
- *   exhaustion under load (Codex pre-push P1, 2026-09-24). Phase 1 (lock →
- *   re-read the lead fresh → re-run eligibility → provision the customer,
- *   re-resolving the address against the FRESH customer row so a second
- *   concurrent commit can never overwrite the first's just-persisted
- *   address with its own stale supplied one → re-validate the picked slot
- *   if the address changed → COMMIT, releasing the lock) makes the
- *   customer row a durable, visible fact before anything calls
- *   createSelfBooking. Phase 2 is now ONLY a short lock + eligibility
- *   re-check that also commits before createSelfBooking runs — the lock is
- *   NOT held during the booking call itself, so the two-connections-at-once
- *   problem above never occurs. The residual race this opens (a commit
- *   that slips past phase 2's re-check in the brief window before
- *   createSelfBooking's own insert lands) is caught by a post-booking
- *   safety-net recheck: if the customer's open assessment turns out to be
- *   a DIFFERENT visit than the one just created, the response reports
- *   already_booked against the survivor rather than a misleading second
- *   success (both visits are real, committed rows either way — this only
- *   controls what that one response says). The lead gets (or keeps) a
+ *   branch in resolveServiceAddress returns them directly).
+ *
+ *   Phase 1 (lock on a per-lead key → re-read the lead fresh → re-run
+ *   eligibility → provision the customer, re-resolving the address against
+ *   the FRESH customer row so a second concurrent commit can never
+ *   overwrite the first's just-persisted address with its own stale
+ *   supplied one → re-validate the picked SLOT if the address changed,
+ *   keeping the matched slot object (technician/end_time can differ at a
+ *   different location, not just the start_time — Codex pre-push P1,
+ *   2026-09-24) → COMMIT, releasing the lock) makes the customer row a
+ *   durable, visible fact, and the slot correct, before anything calls
+ *   createSelfBooking (key convention matches admin-agents.js/admin-
+ *   dashboard.js's single-hashtext-arg form).
+ *
+ *   Booking itself goes through booking.js's createSelfBooking with the
+ *   internal-only `callbackVisit` option — `isCallback: false` (this is NOT
+ *   a re-service warranty callback) and `dedupeLane` left at its TRUE
+ *   DEFAULT (Codex pre-push P1, 2026-09-24 — round 4 disabled it here,
+ *   fearing a false-hit on an unrelated pest/lawn re-service; round 5 fixes
+ *   that at the source instead of opting out of the mechanism entirely):
+ *   services/reservice-scheduler.js's `laneForCallbackRow` now classifies
+ *   ASSESSMENT_SERVICE_KEY as its own `'assessment'` lane — checked BEFORE
+ *   the pest/lawn cases, so an assessment row can never fall through to the
+ *   pest default — and `openCallbackExistsForLane`'s query was widened to
+ *   also match rows on that service_key. Neither change touches
+ *   RESERVICE_LANES itself (reservice-public.js's loadLaneCatalog iterates
+ *   that map to build the /reservice page's own two-lane catalog; a third
+ *   entry there would wrongly offer "Waves Assessment" as a bookable
+ *   RE-SERVICE), and the 'pest'/'lawn' lanes' own query RESULT is
+ *   unaffected (an assessment row is now fetched but classifies as
+ *   'assessment', so it never matches those lanes' `.some(...)` check) —
+ *   reservice-public.js's own tests pass unmodified. With dedupeLane on,
+ *   the lane check and the insert both run inside createSelfBooking's
+ *   SINGLE insert transaction, on ONE connection, under the reservice-lane
+ *   advisory lock keyed `${custId}:${ASSESSMENT_SERVICE_KEY}` (a DIFFERENT
+ *   key from the real pest/lawn lanes for the same customer, so no
+ *   cross-lane blocking) — genuinely atomic: two concurrent commits at
+ *   DIFFERENT slots can no longer both insert (the prior design's separate
+ *   phase-2 lock-then-release-then-book-then-recheck could not close this
+ *   without either deadlocking or risking pool exhaustion against
+ *   createSelfBooking's own second connection — see git history). A
+ *   duplicate throws `ALREADY_BOOKED`, mapped here to the SAME `{ state:
+ *   'already_booked', visit, rescheduleUrl }` shape GET returns, resolved
+ *   against whichever visit survived. The pre-lock idempotent short-circuit
+ *   above still exists as a fast path (skips geocoding/address work
+ *   entirely for an obviously-already-booked lead) — it is NOT what
+ *   prevents the race; the lane dedupe is. The lead gets (or keeps) a
  *   customer row and is linked (`leads.customer_id`) but nothing else on
  *   the lead changes — status/pipeline_stage/
  *   converted_at/member_since all stay untouched, matching
@@ -863,23 +866,27 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
       // Re-validate the chosen slot when the fresh location differs from
       // what it was checked against pre-lock (only possible when another
-      // commit's address won above).
-      let slotStillOpen = true;
+      // commit's address won above) — and return the MATCHED slot object,
+      // not just a boolean: a different location can carry a different
+      // technician/end_time for the same start_time, and the booking call
+      // below must use the refreshed slot's own fields, never the original
+      // pre-lock slot's (Codex pre-push P1, 2026-09-24).
+      let matchedSlot = slot;
       if (location.lat !== resolved.location.lat || location.lng !== resolved.location.lng) {
         const dayAvailability = await buildAvailabilityForLead(location, {
           rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
         });
-        slotStillOpen = !!dayAvailability?.days?.find((d) => d.date === date)?.slots
-          ?.find((s) => s.start_time === time);
+        matchedSlot = dayAvailability?.days?.find((d) => d.date === date)?.slots
+          ?.find((s) => s.start_time === time) || null;
       }
 
-      return { custRow: provisioned, location, slotStillOpen };
+      return { custRow: provisioned, location, slot: matchedSlot };
     });
 
     if (phase1.eligibility) {
       return res.json(eligibilityResponse(phase1.eligibility, leadPayload));
     }
-    if (!phase1.slotStillOpen) {
+    if (!phase1.slot) {
       let refreshed = null;
       try {
         refreshed = await buildAvailabilityForLead(phase1.location, { ...range, config, duration: catalog.durationMinutes });
@@ -894,35 +901,33 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
     custRow = phase1.custRow;
     const bookingLocation = phase1.location;
+    const bookingSlot = phase1.slot;
 
-    // Phase 2 — re-acquire the SAME per-lead lock in a SHORT transaction
-    // that does ONLY the authoritative eligibility re-check, then commits —
-    // the lock (and our pooled connection) is released BEFORE
-    // createSelfBooking ever runs. createSelfBooking opens its OWN
-    // transaction on a SEPARATE pooled connection (its payload has no
-    // `trx`/knex-handle param to join ours — confirmed against its
-    // signature); holding our transaction open across that call let
-    // concurrent commits occupy two pool connections apiece (lock-waiters
-    // blocked on the advisory lock, plus lock-holders blocked waiting on
-    // createSelfBooking's own second connection), risking pool exhaustion
-    // under load (Codex pre-push P1, 2026-09-24). The short window this
-    // opens between our eligibility check and createSelfBooking's own
-    // insert is covered by the post-booking safety-net recheck below.
-    const phase2Check = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${COMMIT_LOCK_NS}:${lead.id}`]);
-      return { eligibility: await resolveEligibility(trx, lead, custRow) };
-    });
-
-    if (phase2Check.eligibility.state !== 'ok') {
-      return res.json(eligibilityResponse(phase2Check.eligibility, leadPayload));
-    }
-
+    // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
+    // (dedupeLane, left at its true default — no transaction of ours wraps
+    // this call, so no connection of ours is held while it opens its own;
+    // see the file header). The lane check and the insert both run inside
+    // createSelfBooking's single insert transaction, on ONE connection,
+    // under the SAME `pg_advisory_xact_lock(['reservice-lane', custId+':'+
+    // serviceKey])` reservice-public.js's pest/lawn lanes use — genuinely
+    // atomic, unlike the prior "release the lock, then book, then recheck"
+    // design (Codex pre-push P1, 2026-09-24): two concurrent commits at
+    // DIFFERENT slots can no longer both insert. `laneForCallbackRow`
+    // (services/reservice-scheduler.js) classifies ASSESSMENT_SERVICE_KEY
+    // as its own 'assessment' lane — checked before the pest/lawn cases, so
+    // it can never fall through to the pest default — and
+    // `openCallbackExistsForLane`'s query was widened to also match on
+    // that service_key; both are additive changes that leave 'pest'/'lawn'
+    // byte-identical (reservice-public's own tests still pass unmodified).
+    // A duplicate throws ALREADY_BOOKED, caught below and mapped to the
+    // same `{ state: 'already_booked', visit, rescheduleUrl }` shape GET
+    // returns, resolved against whichever visit survived.
     const { createSelfBooking } = booking._internals;
     const result = await createSelfBooking({
       slot_date: date,
-      slot_start: slot.start_time,
-      slot_end: slot.end_time,
-      technician_id: slot.technician_id || null,
+      slot_start: bookingSlot.start_time,
+      slot_end: bookingSlot.end_time,
+      technician_id: bookingSlot.technician_id || null,
       // The customer-VISIBLE `notes` column stays generic — the free-text
       // note rides internal_notes below (never customer/tech visible notes).
       customer_notes: null,
@@ -936,15 +941,23 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         serviceId: catalog.serviceId,
         serviceType: catalog.serviceType,
         durationMinutes: catalog.durationMinutes,
-        // Not a re-service warranty callback, and not a pest/lawn re-service
-        // lane — see booking.js's callbackVisit contract.
+        // Not a re-service warranty callback — see booking.js's callbackVisit
+        // contract. dedupeLane is left at its true default (on): the
+        // 'assessment' lane above is what makes this call atomic.
         isCallback: false,
-        dedupeLane: false,
         alertLabel: '🔁 Free consultation self-booked:',
       },
     });
 
     if (!result.ok) {
+      if (result.code === 'ALREADY_BOOKED') {
+        // The atomic lane dedupe inside createSelfBooking's own insert
+        // transaction caught a duplicate — resolve and return the SAME
+        // already_booked shape GET returns, pointing at whichever visit is
+        // now the customer's open assessment.
+        const eligibility = await resolveEligibility(db, lead, custRow);
+        return res.json(eligibilityResponse(eligibility, leadPayload));
+      }
       if (result.status === 409) {
         let refreshed = null;
         try {
@@ -971,20 +984,6 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       logger.warn(`[inspection-public] reschedule-link lookup failed for booking ${result.body?.booking?.id}: ${err.message}`);
     }
 
-    // Safety-net recheck: the lock was released before createSelfBooking
-    // ran, so a racing commit could in principle have booked in that short
-    // window. If the customer's open assessment is now a DIFFERENT visit
-    // than the one we just created, we lost a very tight race — answer
-    // already_booked pointing at the surviving one instead of a misleading
-    // second success. Both visits are real, committed rows either way;
-    // this only controls what THIS response tells this caller.
-    if (scheduledServiceId) {
-      const raceCheck = await resolveEligibility(db, lead, custRow);
-      if (raceCheck.state === 'already_booked' && raceCheck.visit?.id !== scheduledServiceId) {
-        return res.json(eligibilityResponse(raceCheck, leadPayload));
-      }
-    }
-
     if (notes && scheduledServiceId) {
       try {
         await db('scheduled_services').where({ id: scheduledServiceId }).update({ internal_notes: notes });
@@ -997,9 +996,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       success: true,
       state: 'ok',
       replayed: !!result.body?.replayed,
-      visit: { date, window: { start: slot.start_time, end: slot.end_time } },
-      startLabel: slot.start_label,
-      endLabel: slot.end_label,
+      visit: { date, window: { start: bookingSlot.start_time, end: bookingSlot.end_time } },
+      startLabel: bookingSlot.start_label,
+      endLabel: bookingSlot.end_label,
       rescheduleUrl,
     });
   } catch (err) {

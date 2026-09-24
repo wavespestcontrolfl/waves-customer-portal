@@ -542,19 +542,25 @@ describe('POST /:token commit', () => {
       serviceId: 'svc-catalog-1',
       serviceType: 'Waves Assessment',
       isCallback: false,
-      dedupeLane: false,
       alertLabel: expect.stringContaining('Free consultation self-booked'),
     }));
+    // dedupeLane is left at its TRUE default (round 5, Codex pre-push P1,
+    // 2026-09-24) — createSelfBooking's own atomic 'assessment' lane is
+    // what closes the double-booking race now, not an outer lock of ours.
+    expect(callArgs.callbackVisit.dedupeLane).not.toBe(false);
     expect(isAssessmentServiceType(callArgs.callbackVisit.serviceType)).toBe(true);
 
     // The customer's own address already resolved — no address write-back.
     expect(updateCalls.some((c) => c.table === 'customers')).toBe(false);
   });
 
-  // P1 :532/:544 — the two-phase per-lead advisory lock: both phases take
-  // the SAME hashtext key (the coordinator's literal spec), and the whole
-  // provisioning/booking critical section runs inside `db.transaction`.
-  test('the commit takes a per-lead advisory lock (same key, twice) around provisioning + booking', async () => {
+  // P1 :532/:544 (round 4) / round 5 restructure — phase 1 takes a per-lead
+  // advisory lock (customer provisioning + address-race fix), commits, and
+  // releases it. The double-assessment dedupe that phase 1's lock does NOT
+  // cover is now createSelfBooking's own atomic 'assessment' lane (see the
+  // callbackVisit.dedupeLane test above and the round-5 tests below) — no
+  // second lock of ours wraps the booking call.
+  test('the commit takes ONE per-lead advisory lock, for provisioning only — the booking itself is NOT wrapped in a lock of ours', async () => {
     firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
     const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     firstResults.customers = custRow;
@@ -569,16 +575,10 @@ describe('POST /:token commit', () => {
     const res = await callPost(token, okBody());
     expect(res.statusCode).toBe(200);
 
-    // Two SHORT transactions (phase 1: provisioning, phase 2: the
-    // eligibility re-check only — see the :834 test below for proof
-    // createSelfBooking runs outside both), each taking the SAME
-    // per-lead key.
-    expect(db.transaction).toHaveBeenCalledTimes(2);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
     const lockCalls = db.raw.mock.calls.filter(([sql]) => String(sql).includes('pg_advisory_xact_lock'));
-    expect(lockCalls).toHaveLength(2);
-    for (const [, args] of lockCalls) {
-      expect(args).toEqual([`inspection_commit:${LEAD_ID}`]);
-    }
+    expect(lockCalls).toHaveLength(1);
+    expect(lockCalls[0][1]).toEqual([`inspection_commit:${LEAD_ID}`]);
   });
 
   // P1 :834 — phase 2 used to hold a lock-owning transaction (one pooled
@@ -629,8 +629,7 @@ describe('POST /:token commit', () => {
     });
     // Same row id in both fixtures (as the real DB would be — the self_
     // booking_id lookup and findOpenVisit both read the ONE row the commit
-    // creates) so the post-booking safety-net recheck sees its own booking,
-    // not a false mismatch.
+    // creates).
     firstResults.scheduled_services = { id: 'ss-1', reschedule_token: 'tok-1' };
 
     // The first booking's side effect: the lead's customer now has an open
@@ -654,6 +653,63 @@ describe('POST /:token commit', () => {
     expect(second.body.code).toBe('ALREADY_BOOKED');
     // Still just the one booking — the second commit never reaches createSelfBooking.
     expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+  });
+
+  // Round 5, Codex pre-push P1 :911, 2026-09-24 — the STRUCTURAL fix: two
+  // truly overlapping commits at DIFFERENT slots, where NEITHER commit's
+  // cheap pre-check sees the other (both read an empty listResults.
+  // scheduled_services at pre-check time — genuine concurrency, unlike the
+  // test above, which relies on the fast path). What actually stops the
+  // second is createSelfBooking's own atomic 'assessment'-lane dedupe,
+  // simulated here via the mock's own ALREADY_BOOKED failure shape (real
+  // booking.js throws this from inside its insert transaction — see
+  // reservice-scheduler.js's laneForCallbackRow/openCallbackExistsForLane).
+  test('two overlapping commits at different slots: exactly one createSelfBooking insert succeeds, the other maps ALREADY_BOOKED to already_booked with the survivor', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.customers = custRow;
+    listResults.scheduled_services = []; // BOTH commits' pre-checks see this — neither observes the other first
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockBuildAvailability.mockResolvedValue({
+      days: [{ date: FUTURE_DATE, slots: [
+        { start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' },
+        { start_time: '10:00', end_time: '10:30', start_label: '10:00 AM', end_label: '10:30 AM', technician_id: 'tech-1' },
+      ] }],
+    });
+    firstResults.scheduled_services = { id: 'ss-first', reschedule_token: 'tok-first' };
+
+    // First commit (09:00): createSelfBooking's own insert succeeds.
+    mockCreateSelfBooking.mockImplementationOnce(async () => (
+      { ok: true, body: { booking: { id: 'sb-first' } } }
+    ));
+    // Second commit (10:00, a DIFFERENT slot): createSelfBooking's own
+    // atomic lane dedupe — inside ITS insert transaction, under the
+    // reservice-lane advisory lock keyed on this customer+ASSESSMENT_
+    // SERVICE_KEY — finds the first's row and refuses BEFORE inserting a
+    // second one. The survivor becomes visible to a subsequent read as a
+    // side effect of that same atomic check having run.
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      listResults.scheduled_services = [
+        { id: 'ss-first', scheduled_date: FUTURE_DATE, window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok-first' },
+      ];
+      return { ok: false, status: 409, error: 'You already have a re-service visit on the books.', code: 'ALREADY_BOOKED' };
+    });
+
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const first = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
+    expect(first.statusCode).toBe(200);
+    expect(first.body.success).toBe(true);
+
+    const second = await callPost(token, { date: FUTURE_DATE, time: '10:00' });
+    expect(second.statusCode).toBe(200);
+    expect(second.body.state).toBe('already_booked');
+    expect(second.body.visit.date).toBe(FUTURE_DATE);
+    expect(second.body.visit.window.start).toBe('09:00'); // the SURVIVOR's slot, not the second commit's own 10:00
+
+    // Exactly one insert attempt on each side — the second never wrote a
+    // second row (it got the atomic refusal instead), and neither commit's
+    // cheap pre-check is what caught this.
+    expect(mockCreateSelfBooking).toHaveBeenCalledTimes(2);
   });
 
   // P1 :546/:597 — a stored address that fails to geocode must not block a
@@ -793,6 +849,58 @@ describe('POST /:token commit', () => {
       expect(second.statusCode).toBe(409);
       expect(second.body.code).toBe('SLOT_TAKEN');
       expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    });
+
+    // P1 :872 — when the location changes under the lock, the booking must
+    // use the REFRESHED slot's own technician_id/end_time (a different
+    // location can route to a different tech, or a different job-block end,
+    // for the SAME start_time) — never the original pre-lock slot's fields.
+    test('the refreshed slot at the fresh stored address has a different technician — the booking receives the refreshed one, not the original', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.customers = addresslessCustomer();
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockImplementation(async (addressStr) => {
+        if (String(addressStr).includes('222 B St')) {
+          firstResults.customers = {
+            id: 'cust-1', address_line1: '111 A St', address_line2: null,
+            city: 'Bradenton', state: 'FL', zip: '34209', latitude: LOC_A.lat, longitude: LOC_A.lng,
+          };
+          return { location: LOC_B };
+        }
+        if (String(addressStr).includes('111 A St')) return { location: LOC_A };
+        return { location: null };
+      });
+      // Same start_time (09:00) at both locations, but A's route assigns a
+      // DIFFERENT technician and a longer job block (end_time 09:45, not
+      // 09:30) than B's — the second commit supplied B; the booking must
+      // reflect A (the fresh stored address that won).
+      const slotAtB = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-B' }] }] };
+      const slotAtA = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:45', start_label: '9:00 AM', end_label: '9:45 AM', technician_id: 'tech-A' }] }] };
+      // Sequence: (1) first commit's own anti-forgery check at A; (2)
+      // second commit's pre-lock check at ITS supplied B; (3) second
+      // commit's phase-1 re-check at the fresh stored A.
+      mockBuildAvailability
+        .mockResolvedValueOnce(slotAtA)
+        .mockResolvedValueOnce(slotAtB)
+        .mockResolvedValueOnce(slotAtA);
+      firstResults.scheduled_services = { id: 'ss-872', reschedule_token: 'tok-872' };
+
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '111 A St, Bradenton, FL 34209' });
+      expect(first.statusCode).toBe(200);
+
+      mockCreateSelfBooking.mockClear();
+      const second = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '222 B St, Bradenton, FL 34209' });
+
+      expect(second.statusCode).toBe(200);
+      expect(second.body.success).toBe(true);
+      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+      const bookingArgs = mockCreateSelfBooking.mock.calls[0][0];
+      expect(bookingArgs.technician_id).toBe('tech-A');
+      expect(bookingArgs.slot_end).toBe('09:45');
+      expect(second.body.visit.window.end).toBe('09:45');
+      expect(second.body.endLabel).toBe('9:45 AM');
     });
   });
 

@@ -20,6 +20,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { RE_SERVICE_SERVICE_KEYS, isReService } = require('./re-service');
+const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType } = require('./assessment-booking');
 
 // The two self-bookable callback lanes. serviceKey resolves the catalog row
 // (services.service_key) at commit time — id/name/duration are read live from
@@ -65,7 +66,18 @@ function laneForCoverageRow({ category, serviceType } = {}) {
 // Same lane split for an EXISTING callback row (open-callback dedupe): the
 // catalog key is authoritative, the "Re-Service" label regex is the safety
 // net (mirrors services/re-service.js).
+//
+// 'assessment' (Codex pre-push P1, 2026-09-24) is inspection-public.js's
+// dedupe lane for the free Waves Assessment — checked FIRST so an
+// assessment row can never fall through to the pest default below. It is
+// deliberately NOT a RESERVICE_LANES member: that map is iterated by
+// reservice-public.js's loadLaneCatalog to build the /reservice page's own
+// two-lane (pest/lawn) catalog, and a third entry there would offer "Waves
+// Assessment" as a bookable RE-SERVICE lane, which it categorically is not
+// (a re-service is a free callback for an ACTIVE recurring/WaveGuard
+// customer; an assessment is the free first-visit consultation for a lead).
 function laneForCallbackRow({ serviceKey, serviceType } = {}) {
+  if (serviceKey === ASSESSMENT_SERVICE_KEY || isAssessmentServiceType(serviceType)) return 'assessment';
   if (serviceKey === RESERVICE_LANES.lawn.serviceKey) return 'lawn';
   if (serviceKey === RESERVICE_LANES.pest.serviceKey) return 'pest';
   return /\blawn\b|\bturf\b/i.test(String(serviceType || '')) ? 'lawn' : 'pest';
@@ -246,8 +258,22 @@ async function openReserviceCallbacks(customerId, dbh = db) {
  * check is racy on its own (two parallel commits with different slots both
  * pass it before either insert; codex P1 on #3194).
  */
+// 'assessment' (Codex pre-push P1, 2026-09-24) is accepted here even though
+// it is not a RESERVICE_LANES member — see laneForCallbackRow's comment —
+// so inspection-public.js's createSelfBooking call (callbackVisit.serviceKey
+// = ASSESSMENT_SERVICE_KEY, dedupeLane left at its true default) gets the
+// SAME atomic per-customer dedupe reservice-public.js relies on: the row
+// this reads is fetched inside createSelfBooking's own insert transaction,
+// under the reservice-lane advisory lock keyed on this exact lane, so two
+// concurrent commits for the same lead's customer can never both pass this
+// check and both insert — one throws ALREADY_BOOKED before its insert ever
+// runs. Widening the WHERE clause's OR to also match ASSESSMENT_SERVICE_KEY
+// does not change the result for 'pest'/'lawn' callers: an assessment row is
+// now fetched, but laneForCallbackRow classifies it 'assessment', so the
+// final `.some(... === lane)` for lane 'pest'/'lawn' is unaffected —
+// reservice's own behavior and tests stay byte-identical.
 async function openCallbackExistsForLane(dbh, customerId, lane) {
-  if (!customerId || !RESERVICE_LANES[lane]) return false;
+  if (!customerId || !(RESERVICE_LANES[lane] || lane === 'assessment')) return false;
   const rows = await dbh('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
@@ -255,7 +281,8 @@ async function openCallbackExistsForLane(dbh, customerId, lane) {
     .where('s.scheduled_date', '>=', etDateString())
     .where((qb) => qb
       .where('s.is_callback', true)
-      .orWhereIn('sv.service_key', Array.from(RE_SERVICE_SERVICE_KEYS)))
+      .orWhereIn('sv.service_key', Array.from(RE_SERVICE_SERVICE_KEYS))
+      .orWhere('sv.service_key', ASSESSMENT_SERVICE_KEY))
     .select('s.service_type', 'sv.service_key')
     .limit(50);
   return rows.some((row) => laneForCallbackRow({ serviceKey: row.service_key, serviceType: row.service_type }) === lane);
