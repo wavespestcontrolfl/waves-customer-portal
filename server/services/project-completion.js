@@ -254,7 +254,13 @@ async function resolveProjectCompletionBilling({
     knex,
   });
   if (invoice) {
-    if (COMPLETION_DELIVERED_INVOICE_STATUSES.includes(invoice.status)) {
+    // A NET-terms payer invoice accrued to a monthly statement stays 'draft'
+    // BY DESIGN — admin-projects.js deliberately suppresses its individual
+    // delivery/finalization because it bills as a line on the consolidated
+    // statement instead (invoice.js stamps payer_statement_id at create
+    // time, before any send). That is a resolved billing state, not an
+    // unsent draft nobody chose to send.
+    if (COMPLETION_DELIVERED_INVOICE_STATUSES.includes(invoice.status) || invoice.payer_statement_id) {
       return {
         required: true,
         resolved: true,
@@ -263,10 +269,10 @@ async function resolveProjectCompletionBilling({
         invoice,
       };
     }
-    // A never-sent draft (or any other non-terminal, non-delivered status)
-    // does not resolve billing — nothing in the close path sends or charges
-    // it, so treating it as resolved would close the visit as billed while
-    // the money sits uncollected in an orphan draft.
+    // A never-sent draft (or any other non-terminal, non-delivered,
+    // non-accrued status) does not resolve billing — nothing in the close
+    // path sends or charges it, so treating it as resolved would close the
+    // visit as billed while the money sits uncollected in an orphan draft.
     return {
       required: true,
       resolved: false,

@@ -16,14 +16,18 @@ jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => n
 const fs = require('fs');
 const path = require('path');
 
-function knexWithDraftInvoice() {
+function knexWithInvoice(invoiceRow) {
   const chain = {
     whereNot: jest.fn(() => chain),
     where: jest.fn(() => chain),
     orderBy: jest.fn(() => chain),
-    first: jest.fn(async () => ({ id: 'inv-draft-1', status: 'draft', invoice_number: 'WPC-2026-9999', total: '175.00' })),
+    first: jest.fn(async () => invoiceRow),
   };
   return jest.fn(() => chain);
+}
+
+function knexWithDraftInvoice() {
+  return knexWithInvoice({ id: 'inv-draft-1', status: 'draft', invoice_number: 'WPC-2026-9999', total: '175.00' });
 }
 
 describe('r1-projects-docs-4: Close billing guard vs an unsent draft', () => {
@@ -38,6 +42,26 @@ describe('r1-projects-docs-4: Close billing guard vs an unsent draft', () => {
     // Bug: current code returns { required: true, resolved: true, reason: 'invoice_exists', invoice: {status:'draft'} }
     expect(result.required).toBe(true);
     expect(result.resolved).toBe(false);
+  });
+
+  // Codex round-1 P1 on the fix: a NET-terms payer invoice accrued to a
+  // monthly statement stays 'draft' BY DESIGN (admin-projects.js
+  // deliberately suppresses its individual delivery) — that must still
+  // count as billing resolved, not get caught by the new unsent-draft guard.
+  test('a draft invoice accrued to a payer statement (payer_statement_id set) still counts as resolved', async () => {
+    const { resolveProjectCompletionBilling } = require('../services/project-completion');
+    const result = await resolveProjectCompletionBilling({
+      scheduledService: { id: 'ss-1', customer_id: 'cust-1', estimated_price: '175.00' },
+      customer: {},
+      project: { id: 'proj-1', project_type: 'termite_treatment' },
+      knex: knexWithInvoice({
+        id: 'inv-accrued-1', status: 'draft', invoice_number: 'WPC-2026-9998', total: '175.00',
+        payer_statement_id: 'stmt-1',
+      }),
+    });
+    expect(result.required).toBe(true);
+    expect(result.resolved).toBe(true);
+    expect(result.reason).toBe('invoice_exists');
   });
 });
 
