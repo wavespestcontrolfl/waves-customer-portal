@@ -2616,7 +2616,8 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
   const { leadInspectionLinkLive } = require('../config/feature-gates');
   const BODY = 'Pick a time: wavespest.co/l/cons1 Reply STOP to opt out.';
   const LEAD_ROW = { id: 'lead-1', phone: '+19415550100', status: 'new', converted_at: null };
-  const CODE_ROW = { code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' };
+  // target_url: the redirect's own signed token, re-verified at send (r19 P2).
+  const CODE_ROW = { code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1', target_url: `https://portal.wavespestcontrol.com/inspection/${require('../utils/lead-consultation-token').mintLeadConsultationToken('lead-1')}` };
 
   function wireConsultation({ codeRows = [CODE_ROW], leadRow = LEAD_ROW, templateRow = { is_active: true } } = {}) {
     mockBuilders = {
@@ -2790,6 +2791,38 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
       expect((await checkConsultationLinkSend(`Pick a time: ${text} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
       expect(await immediateOnlyLinkSendCheck(text)).toEqual({ present: true, label: 'Consultation link' });
     }
+  });
+
+  // Codex #4709 r19 P1: decoded until stable — five encoding levels still
+  // expose the bearer; escapes that would survive fail closed.
+  test('a bearer percent-encoded five levels deep in a foreign wrapper → refused and fenced', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    let inner = `https://portal.wavespestcontrol.com/inspection/${mintLeadConsultationToken('lead-1')}`;
+    for (let i = 0; i < 5; i += 1) inner = encodeURIComponent(inner).replace(/\./g, '%2E');
+    const wrapper = `https://tracker.example/?u=${inner}`;
+    wireConsultation({ codeRows: [] });
+    expect((await checkConsultationLinkSend(`Pick a time: ${wrapper} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck(wrapper)).toEqual({ present: true, label: 'Consultation link' });
+  });
+
+  // Codex #4709 r19 P1: an international owner number sharing the lead's
+  // US last ten digits is not the same phone.
+  test('a linked customer on an international number sharing the last ten digits → refused', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-1' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+449415550100' } });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different phone/);
+  });
+
+  // Codex #4709 r19 P2: the short code's own signed target is re-verified.
+  test('a short code whose target token no longer verifies (rotated secret) → refused as not valid', async () => {
+    wireConsultation({ codeRows: [{ ...CODE_ROW, target_url: 'https://portal.wavespestcontrol.com/inspection/lead-1.9999999999.forged' }] });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/not valid/);
   });
 
   // Codex #4709 r14 P1: on a shared phone, a lead linked to customer A never

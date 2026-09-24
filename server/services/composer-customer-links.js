@@ -510,15 +510,24 @@ function decodedRuns(body) {
 }
 // A URL fragment percent-decoded until stable (bounded) — a wrapper may
 // encode the inner link more than once.
+// Until stable, not a fixed depth (Codex #4709 r19 P1): every pass
+// decodes each %XX escape byte-wise (never throws on a malformed sequence,
+// so one bad escape cannot shield the rest), and each pass that changes
+// the text shortens it, so the loop is bounded by the input length; the
+// cap is a backstop. Callers treat escapes that SURVIVE as fail-closed
+// (stillEncoded).
+const DECODE_PASS_CAP = 64;
 function fullyDecoded(text) {
-  let out = text;
-  for (let i = 0; i < 3; i += 1) {
-    let next;
-    try { next = decodeURIComponent(out); } catch { break; }
+  let out = String(text || '');
+  for (let i = 0; i < DECODE_PASS_CAP; i += 1) {
+    const next = out.replace(/%([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
     if (next === out) break;
     out = next;
   }
   return out;
+}
+function stillEncoded(text) {
+  return /%[0-9a-f]{2}/i.test(text);
 }
 // A consultation credential ANYWHERE in the message other than a canonical
 // owned consultation link (Codex #4709 r12–r17 P1 — widened after four
@@ -540,7 +549,10 @@ async function strayConsultationCredentialPresent(runs, hosts) {
     const canonical = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, ANY_SCHEME)
       || canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME);
     if (canonical) continue;
-    for (const piece of fullyDecoded(run).split(/[^A-Za-z0-9._-]+/).filter(Boolean)) {
+    const decoded = fullyDecoded(run);
+    // Escapes that survive the cap could still hide a bearer — refuse.
+    if (stillEncoded(decoded)) return true;
+    for (const piece of decoded.split(/[^A-Za-z0-9._-]+/).filter(Boolean)) {
       if (piece.includes('.') && verifyLeadConsultationToken(piece, 0)) return true;
       // Only the consultation code SHAPE (short-url.js generateCode: 10–11
       // chars of its ambiguity-free alphabet, no prefix for this kind) — so
@@ -1430,12 +1442,18 @@ async function consultationLinkRows(body) {
     .map((code) => code.toLowerCase()));
   const rows = [];
   if (codes.length) {
-    const shortRows = await db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id');
+    const shortRows = await db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id', 'target_url');
+    const { verifyLeadConsultationToken: verifyTarget } = require('../utils/lead-consultation-token');
     for (const row of shortRows) {
+      // The redirect's own signed target, re-verified at send (Codex #4709
+      // r19 P2): a rotated signing secret leaves the short row live while
+      // the /inspection token it points at no longer verifies.
+      const targetToken = (/\/inspection\/([A-Za-z0-9._-]+)/.exec(String(row.target_url || '')) || [])[1];
+      const signed = targetToken ? verifyTarget(targetToken, 0) : null;
       rows.push({
         lead_id: row.lead_id,
-        expired: expiredShortRow(row),
-        invalid: false,
+        expired: expiredShortRow(row) || Boolean(signed && !verifyTarget(targetToken)),
+        invalid: !signed || String(signed.leadId) !== String(row.lead_id),
         plaintext: plaintextCodes.has(String(row.code).toLowerCase()),
       });
     }
@@ -1491,7 +1509,11 @@ async function linkedCustomerRefusal(lead, toLast10, ctx) {
   if (!owner) {
     return refuseSend("This lead's customer record is archived — update the lead before sending the consultation link.");
   }
-  if (digitsLast10(owner.phone) !== String(toLast10 || '')) {
+  // Full identity (Codex #4709 r19 P1): the destination is US-only (the
+  // bearer rule), so its identity is its last ten; an international owner
+  // number sharing them is a different phone.
+  const { phoneIdentityKey } = require('../utils/phone');
+  if (phoneIdentityKey(owner.phone) !== String(toLast10 || '')) {
     return refuseSend("This lead's customer has a different phone on file now — update the lead before sending the consultation link.");
   }
   // A shared phone must not let one customer's lead bearer ride another
@@ -1548,7 +1570,7 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLea
     }
     const ownerRefusal = await linkedCustomerRefusal(lead, toLast10, ctx);
     if (ownerRefusal) return ownerRefusal;
-    if (digitsLast10(lead.phone) !== String(toLast10 || '')) {
+    if (require('../utils/phone').phoneIdentityKey(lead.phone) !== String(toLast10 || '')) {
       return refuseSend('This consultation link belongs to a different lead — remove it before sending.');
     }
     if (ctx) ctx.consultationLeadIds = [...new Set([...(ctx.consultationLeadIds || []), String(row.lead_id)])];

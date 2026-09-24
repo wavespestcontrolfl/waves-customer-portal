@@ -154,6 +154,8 @@ describe('buildLeadConsultationLink — gate on', () => {
   test.each([
     ['archived', null, /archived/],
     ['on a different phone', { phone: '+19415559999' }, /different phone/],
+    // Codex #4709 r19 P1: same last ten digits, different country.
+    ['on an international number sharing the last ten digits', { phone: '+449415550100' }, /different phone/],
   ])('a lead whose linked customer is %s mints nothing', async (_label, ownerRow, reason) => {
     mockBuilders = {
       leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null, customer_id: 'cust-1' } }),

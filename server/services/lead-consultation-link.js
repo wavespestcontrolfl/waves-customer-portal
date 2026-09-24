@@ -73,8 +73,10 @@ async function leadLinkRefusal(lead) {
   if (!lead.customer_id) return null;
   const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
   if (!owner) return "This lead's customer record is archived — update the lead first";
-  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-  if (last10(owner.phone) !== last10(lead.phone)) {
+  // Full phone identity, never a last-10 suffix (Codex #4709 r19 P1): an
+  // international number sharing a US number's last ten digits is not it.
+  const { phoneIdentityKey } = require('../utils/phone');
+  if (!phoneIdentityKey(owner.phone) || phoneIdentityKey(owner.phone) !== phoneIdentityKey(lead.phone)) {
     return "This lead's customer has a different phone on file now — update the lead first";
   }
   return null;

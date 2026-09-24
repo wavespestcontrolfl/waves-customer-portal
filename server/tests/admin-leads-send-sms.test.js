@@ -1,3 +1,4 @@
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(async () => ({})); return db; });
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
@@ -207,7 +208,7 @@ describe('a consultation short code in the message is re-checked at THIS send bo
 
   beforeEach(() => {
     process.env.GATE_LEAD_INSPECTION_LINK = 'true';
-    shortCodeRows = [{ code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-qa' }];
+    shortCodeRows = [{ code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-qa', target_url: `https://portal.wavespestcontrol.com/inspection/${require('../utils/lead-consultation-token').mintLeadConsultationToken('lead-qa')}` }];
     wireConsultationDb();
   });
 
@@ -274,7 +275,7 @@ describe('a consultation short code in the message is re-checked at THIS send bo
   });
 
   test('the short code itself expired since the insert → 409, never sent', async () => {
-    shortCodeRows = [{ code: 'cons1', expires_at: new Date(Date.now() - 1000), lead_id: 'lead-qa' }];
+    shortCodeRows = [{ code: 'cons1', expires_at: new Date(Date.now() - 1000), lead_id: 'lead-qa', target_url: `https://portal.wavespestcontrol.com/inspection/${require('../utils/lead-consultation-token').mintLeadConsultationToken('lead-qa')}` }];
     const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1 Reply STOP to opt out.', to: '+19415550103' });
     expect(response.status).toBe(409);
     expect(response.body.error).toMatch(/expired/);

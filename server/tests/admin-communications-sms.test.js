@@ -2906,7 +2906,7 @@ test('a consultation link to an active applicant phone is refused before the rec
   db.mockImplementation((table) => {
     const b = makeUniversalBuilder();
     if (table === 'short_codes') {
-      b.select = jest.fn(async () => [{ code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'aaaaaaaa-1111-4111-8111-111111111111' }]);
+      b.select = jest.fn(async () => [{ code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'aaaaaaaa-1111-4111-8111-111111111111', target_url: `https://portal.wavespestcontrol.com/inspection/${require('../utils/lead-consultation-token').mintLeadConsultationToken('aaaaaaaa-1111-4111-8111-111111111111')}` }]);
     }
     return b;
   });
