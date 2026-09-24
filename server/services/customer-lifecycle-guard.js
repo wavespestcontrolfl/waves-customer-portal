@@ -149,9 +149,12 @@ async function findActivePrepayTerm(dbh, customerId) {
 // syncTermForInvoicePayment) with no live guard left to catch it. Refusing
 // here (rather than voiding it ourselves) matches the same engine's own
 // posture: the invoice tools own the void, this guard only surfaces it.
-async function findPendingPrepayInvoiceConflict(customerId) {
+async function findPendingPrepayInvoiceConflict(dbh, customerId) {
   const { findPendingPrepayInvoice } = require('./admin-cancellation');
-  return findPendingPrepayInvoice(customerId);
+  // On the CALLER's connection: every churn/archive writer holds a
+  // transaction + customers row lock here, so a pool checkout would wait
+  // on itself under load (pre-push audit P1 on 951f966e1d).
+  return findPendingPrepayInvoice(customerId, null, dbh);
 }
 
 // One-shot per-row decision for a write entering (or re-saving)
@@ -179,7 +182,7 @@ async function churnGuardForRow(dbh, customerId) {
   const [liveVisit, liveTerm, pendingPrepayInvoice] = await Promise.all([
     findLiveFutureVisit(dbh, customerId),
     findActivePrepayTerm(dbh, customerId),
-    findPendingPrepayInvoiceConflict(customerId),
+    findPendingPrepayInvoiceConflict(dbh, customerId),
   ]);
   if (liveVisit || liveTerm || pendingPrepayInvoice) {
     return {
