@@ -89,6 +89,15 @@ describe('buildAltText', () => {
 });
 
 describe('buildPrompt', () => {
+  test.each(['blog-hero', 'blog-body'])('keeps %s explanatory without fabricated evidence or source branding', (mode) => {
+    const prompt = buildPrompt({ title: 'Shrub assessment photos', topic: 'UF/IFAS photo guidance', mode });
+    expect(prompt).toContain('Editorial illustration only');
+    expect(prompt).toContain('Do not invent measured results');
+    expect(prompt).toContain('Source organizations mentioned in the context are attribution, not image subjects');
+    expect(prompt).toContain('Keep anatomy and relative scale plausible');
+  });
+
+
   test('includes title + city when present', () => {
     const p = buildPrompt({ title: 'Pest Control Bradenton', city: 'Bradenton', mode: 'blog-hero' });
     expect(p).toMatch(/Pest Control Bradenton/);

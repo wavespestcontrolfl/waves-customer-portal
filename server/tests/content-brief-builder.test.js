@@ -79,13 +79,15 @@ describe('applyListicleTreatment', () => {
     expect(r.schemaTypes).toEqual([...SCHEMA_TYPES['supporting-blog'], 'FAQPage']);
   });
 
-  test('every item carries a concrete sourced figure — never invented, never a dollar amount', () => {
+  test('figures are useful and sourced without a statistics quota', () => {
     const notes = applyListicleTreatment(base()).voiceConstraints.listicle_notes;
     const stat = notes.find((n) => /concrete figure/i.test(n));
     expect(stat).toMatch(/facts pack/i);
     expect(stat).toMatch(/NEVER invent/);
     expect(stat).toMatch(/never a dollar amount/i);
-    expect(stat).toMatch(/pest-control-calculator/);
+    expect(stat).toMatch(/no statistics quota/i);
+    expect(stat).toMatch(/source date and geographic\/species scope/i);
+    expect(stat).toMatch(/approved service CTA/i);
   });
 
   test('question-shaped list query adds the question-form item-heading section', () => {
@@ -137,11 +139,12 @@ describe('applyListicleTreatment', () => {
     expect(r.requiredSections).toEqual(REQUIRED_SECTIONS['supporting-blog']);
   });
 
-  test('methodology note is plain-text sourced — never demands external links', () => {
+  test('methodology note permits supporting citations under the existing source policy', () => {
     const r = applyListicleTreatment(base());
     const note = r.requiredSections.find((s) => /how we put this list together/i.test(s));
-    expect(note).toMatch(/PLAIN TEXT/);
-    expect(note).toMatch(/no external links/i);
+    expect(note).toMatch(/outbound-link policy permits/i);
+    expect(note).toMatch(/never invent testing, field experience/i);
+    expect(note).not.toMatch(/no external links/i);
   });
 
   test('stacks on top of the AEO overlay without losing its additions', () => {

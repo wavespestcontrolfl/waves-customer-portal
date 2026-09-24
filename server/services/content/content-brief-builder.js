@@ -258,7 +258,7 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
     // r26/r34), so the note is simply OMITTED without facts; the per-item
     // figure rule already says 'where one exists / NEVER invent'.
     ...(factsAvailable
-      ? ['"how we put this list together" note (2–3 sentences grounded in the brief\'s facts pack, naming sources in PLAIN TEXT only — no external links (off-fleet links are rejected by the publish guardrail), and never an invented methodology)']
+      ? ['"how we put this list together" note (2–3 sentences grounded in the brief\'s facts pack, naming the actual sources and linking their supporting pages only when the outbound-link policy permits them; never invent testing, field experience, or a selection methodology)']
       : []),
   ];
   const voice = {
@@ -267,7 +267,7 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
       'The item count in the title MUST equal the number of numbered H2 sections — recount before finishing.',
       "Each item's first sentence is self-contained and declarative so it can be quoted standalone by an answer engine.",
       'No filler between an item heading and its answer — the payoff sentence comes first, color commentary after.',
-      'Anchor each item with one concrete figure from the brief\'s facts pack or a brief-named source (a measurement, timeframe, temperature, count) where one exists — answer engines cite numbers over vague claims. NEVER invent a figure, and never a dollar amount (cost questions link /pest-control-calculator/ instead).',
+      'Use a concrete figure from the brief\'s facts pack or a permitted primary source only where it helps the reader (a measurement, timeframe, temperature, count). There is no statistics quota. Preserve units, source date and geographic/species scope. NEVER invent a figure, and never a dollar amount (use the brief\'s approved service CTA for cost questions).',
       'This is an informational list, never a ranked vendor roundup — do not rank or compare companies.',
     ],
   };
