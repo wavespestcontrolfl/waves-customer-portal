@@ -36,6 +36,7 @@ const {
 const CHAIN_METHODS = [
   'where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNot', 'whereNotIn',
   'whereIn', 'whereNull', 'whereNotNull', 'whereILike', 'andWhereILike', 'orderBy',
+  'forUpdate',
 ];
 
 /**
@@ -43,17 +44,20 @@ const CHAIN_METHODS = [
  * (missing/exhausted queues resolve null); inserts and updates are recorded
  * for assertions.
  */
-function setupDb(firstResults = {}) {
+function setupDb(firstResults = {}, updateResults = {}) {
   const state = { inserts: [], updates: [], firstTables: [], raws: [] };
   const queues = Object.fromEntries(
     Object.entries(firstResults).map(([table, rows]) => [table, [...rows]])
+  );
+  const updateQueues = Object.fromEntries(
+    Object.entries(updateResults).map(([table, rows]) => [table, [...rows]])
   );
 
   db.mockImplementation((table) => {
     const builder = {};
     for (const method of CHAIN_METHODS) {
       builder[method] = jest.fn((...args) => {
-        if (typeof args[0] === 'function') args[0].call(builder);
+        if (typeof args[0] === 'function') args[0].call(builder, builder);
         if (method.toLowerCase().includes('raw')) {
           state.raws.push({ table, sql: args[0], bindings: args[1] });
         }
@@ -67,7 +71,8 @@ function setupDb(firstResults = {}) {
     });
     builder.update = jest.fn(async (patch) => {
       state.updates.push({ table, patch });
-      return 1;
+      const queue = updateQueues[table];
+      return queue && queue.length ? queue.shift() : 1;
     });
     builder.insert = jest.fn((row) => {
       state.inserts.push({ table, row });
@@ -82,6 +87,7 @@ function setupDb(firstResults = {}) {
     });
     return builder;
   });
+  db.transaction = jest.fn(async (callback) => callback(db));
 
   return state;
 }
@@ -463,7 +469,7 @@ describe('handleLeadInquiry — lead-creation guards', () => {
   });
 
   test('existing open lead still links instead of creating (unchanged behavior)', async () => {
-    const state = setupDb({ leads: [{ id: 'lead-77' }] });
+    const state = setupDb({ leads: [{ id: 'lead-77' }, { id: 'lead-77' }] });
 
     const result = await handleLeadInquiry(makeEmail(), makeClassification());
 
@@ -472,6 +478,52 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     expect(emailUpdates(state)).toContainEqual(
       expect.objectContaining({ lead_id: 'lead-77', auto_action: 'linked_to_existing_lead' })
     );
+    expect(insertsFor(state, 'lead_activities')).toEqual([
+      expect.objectContaining({
+        row: expect.objectContaining({
+          lead_id: 'lead-77',
+          activity_type: 'email_received',
+          description: 'Inbound email linked to existing lead',
+          metadata: JSON.stringify({ emailId: 'email-1' }),
+          created_at: new Date('2026-07-01T12:00:00Z'),
+        }),
+      }),
+    ]);
+    expect(state.updates.filter((u) => u.table === 'leads')).toHaveLength(0);
+  });
+
+  test('retrying an existing-lead email reuses its evidence activity', async () => {
+    const lead = { id: 'lead-77' };
+    const state = setupDb({
+      leads: [lead, lead, lead, lead],
+      lead_activities: [null, { id: 'activity-1' }],
+    });
+
+    await handleLeadInquiry(makeEmail(), makeClassification());
+    await handleLeadInquiry(makeEmail(), makeClassification());
+
+    expect(insertsFor(state, 'lead_activities')).toHaveLength(1);
+    expect(emailUpdates(state).filter((patch) => patch.auto_action === 'linked_to_existing_lead')).toHaveLength(2);
+  });
+
+  test('a lead deleted after matching receives neither linkage nor activity', async () => {
+    const state = setupDb({ leads: [{ id: 'lead-77' }, null] });
+
+    await expect(handleLeadInquiry(makeEmail(), makeClassification()))
+      .rejects.toThrow('Matched lead is no longer available');
+
+    expect(emailUpdates(state)).toHaveLength(0);
+    expect(insertsFor(state, 'lead_activities')).toHaveLength(0);
+  });
+
+  test('a concurrently changed email linkage aborts before activity insertion', async () => {
+    const lead = { id: 'lead-77' };
+    const state = setupDb({ leads: [lead, lead] }, { emails: [0] });
+
+    await expect(handleLeadInquiry(makeEmail(), makeClassification()))
+      .rejects.toThrow('Email lead linkage changed before commit');
+
+    expect(insertsFor(state, 'lead_activities')).toHaveLength(0);
   });
 });
 

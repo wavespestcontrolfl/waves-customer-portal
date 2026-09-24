@@ -15,6 +15,7 @@ const {
 
 const { phoneMatchDigits } = require('../utils/phone');
 const { lockCustomerComms, withSmsConsentLock } = require('../utils/customer-comms-lock');
+const PRE_CONTACT_LEAD_STATUSES = ['new', 'pending', 'started'];
 
 // Authority comes from the server's assigned session, never model arguments.
 async function resolveLeadSubject(input, context, conn = db, lock = false) {
@@ -352,11 +353,19 @@ async function executeLeadTool(toolName, input, context) {
           const { lead } = current;
           if (lead?.first_contact_at) {
             const responseMinutes = Math.round((Date.now() - new Date(lead.first_contact_at).getTime()) / 60000);
-            await trx('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at').update({
-              response_time_minutes: responseMinutes,
-              status: 'contacted',
-              updated_at: new Date(),
-            });
+            await trx('leads')
+              .where({ id: context.leadId, customer_id: context.customerId })
+              .whereNull('deleted_at')
+              // Match deferred-delivery settlement: a later auto-reply may
+              // record its send, but it cannot regress an advanced/closed
+              // lead or replace the SLA captured by the first response.
+              .whereNull('response_time_minutes')
+              .where((q) => q.whereIn('status', PRE_CONTACT_LEAD_STATUSES).orWhereNull('status'))
+              .update({
+                response_time_minutes: responseMinutes,
+                status: 'contacted',
+                updated_at: new Date(),
+              });
             // Funnel-row mirror (monotonic in SQL — can never downgrade a row
             // that already advanced past 'contacted'; best-effort inside).
             const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
@@ -638,7 +647,7 @@ async function recordLeadAutoReplyDelivered({ leadId = null, customerId = null }
         // Pre-contact states ONLY — an existing 'contacted' stamp belongs
         // to whoever contacted first (their response_time must not be
         // overwritten by a replay landing seconds later).
-        .where((q) => q.whereIn('status', ['new', 'pending', 'started']).orWhereNull('status'))
+        .where((q) => q.whereIn('status', PRE_CONTACT_LEAD_STATUSES).orWhereNull('status'))
         .update({
           response_time_minutes: responseMinutes,
           status: 'contacted',
