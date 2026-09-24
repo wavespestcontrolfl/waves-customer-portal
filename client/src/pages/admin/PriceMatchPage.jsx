@@ -82,13 +82,35 @@ export default function PriceMatchPage() {
   // Always-current selection, so an in-flight refresh can't clobber the pane after
   // the operator has moved on to a different draft.
   const selectedIdRef = useRef(null);
+  const detailRequest = useRef(0);
+  const interactionVersion = useRef(0);
   const selectDraft = useCallback((id) => {
+    if (selectedIdRef.current !== id) detailRequest.current += 1;
     selectedIdRef.current = id;
     setSelectedId(id);
     if (!id) {
       setDetail(null);
       setDetailLoading(false);
       setConfirmSend(false);
+    }
+  }, []);
+
+  const refreshDetail = useCallback(async (id, { foreground = false } = {}) => {
+    if (selectedIdRef.current !== id) return;
+    const request = ++detailRequest.current;
+    const interaction = interactionVersion.current;
+    if (foreground) setDetailLoading(true);
+    try {
+      const data = await adminFetch(`/admin/price-match/drafts/${id}`);
+      if (request === detailRequest.current && selectedIdRef.current === id &&
+          (foreground || interaction === interactionVersion.current))
+        setDetail(data?.draft || null);
+    } catch {
+      if (foreground && request === detailRequest.current && selectedIdRef.current === id)
+        setDetail(null);
+    } finally {
+      if (request === detailRequest.current && selectedIdRef.current === id)
+        setDetailLoading(false);
     }
   }, []);
 
@@ -115,13 +137,15 @@ export default function PriceMatchPage() {
       setDrafts(nextDrafts);
       setRecipient((data && data.recipient) || null);
       setReadError(null);
+      if (background && selectedIdRef.current)
+        await refreshDetail(selectedIdRef.current);
     } catch (err) {
       if (seq === loadSeqRef.current)
         setReadError(err.message || "Failed to load drafts");
     } finally {
       if (!background && seq === foregroundRead.current) setLoading(false);
     }
-  }, [filter, selectDraft]);
+  }, [filter, selectDraft, refreshDetail]);
 
   useEffect(() => {
     loadDrafts();
@@ -129,45 +153,21 @@ export default function PriceMatchPage() {
   useVisiblePageRefresh(() => loadDrafts({ background: true }), {
     intervalMs: 60000, enabled: !loading && !busy && !scanning && !confirmSend,
   });
-  useEffect(() => { if (busy || scanning) loadSeqRef.current += 1; }, [busy, scanning]);
-
-  // Load the selected draft's full body whenever the selection changes.
   useEffect(() => {
-    if (!selectedId) {
-      setDetail(null);
-      return;
+    if (busy || scanning || confirmSend) {
+      loadSeqRef.current += 1;
+      interactionVersion.current += 1;
     }
-    let active = true;
-    setDetailLoading(true);
-    setConfirmSend(false);
-    adminFetch(`/admin/price-match/drafts/${selectedId}`)
-      .then((d) => {
-        if (active && selectedIdRef.current === selectedId)
-          setDetail((d && d.draft) || null);
-      })
-      .catch(() => {
-        if (active && selectedIdRef.current === selectedId) setDetail(null);
-      })
-      .finally(() => {
-        if (active && selectedIdRef.current === selectedId)
-          setDetailLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [selectedId]);
+  }, [busy, scanning, confirmSend]);
 
-  const refreshDetail = useCallback(async (id) => {
-    try {
-      const d = await adminFetch(`/admin/price-match/drafts/${id}`);
-      // Only apply if this draft is STILL selected — the operator may have clicked
-      // another draft while the action/refresh was in flight (would otherwise show
-      // and let them act on the wrong draft).
-      if (selectedIdRef.current === id) setDetail((d && d.draft) || null);
-    } catch {
-      /* leave existing detail */
-    }
-  }, []);
+  // Selection and poll reads share a sequence so an older response cannot
+  // restore stale controls after a newer read or mutation.
+  useEffect(() => {
+    if (!selectedId) return;
+    setConfirmSend(false);
+    void refreshDetail(selectedId, { foreground: true });
+    return () => { detailRequest.current += 1; };
+  }, [selectedId, refreshDetail]);
 
   // send | dismiss | reset. The send target is an external rep, so send is two-step.
   const act = useCallback(

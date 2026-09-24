@@ -157,3 +157,122 @@ it("clears a recovered poll error without hiding an action failure", async () =>
   expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   expect(screen.getByText("Synthetic scan failure")).toBeInTheDocument();
 });
+
+it("refreshes a selected draft that remains in the list and removes obsolete actions", async () => {
+  const pending = draft("draft-a", "Draft A");
+  const sending = { ...pending, status: "sending", claimed_at: new Date().toISOString() };
+  let current = pending;
+  adminFetch.mockImplementation((path) => Promise.resolve(
+    path.includes("?status=") ? list([current]) : { draft: current },
+  ));
+  render(<PriceMatchPage />);
+  fireEvent.click(await screen.findByText("Draft A"));
+  expect(await screen.findByRole("button", { name: "Send to rep…" })).toBeInTheDocument();
+  current = sending;
+  await act(async () => refresh.callback());
+  expect(screen.getByRole("heading", { name: "Draft A" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Send to rep…" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+  expect(screen.getAllByText("sending")).toHaveLength(2);
+});
+
+it("does not let an older detail poll overwrite a newer one", async () => {
+  const pending = draft("draft-a", "Draft A");
+  const sent = { ...pending, status: "sent" };
+  let detailReads = 0;
+  let resolveOld;
+  adminFetch.mockImplementation((path) => {
+    if (path.includes("?status=")) return Promise.resolve(list([pending]));
+    detailReads += 1;
+    if (detailReads === 2) return new Promise(resolve => { resolveOld = resolve; });
+    return Promise.resolve({ draft: detailReads === 1 ? pending : sent });
+  });
+  render(<PriceMatchPage />);
+  fireEvent.click(await screen.findByText("Draft A"));
+  await screen.findByRole("button", { name: "Send to rep…" });
+  let older;
+  act(() => { older = refresh.callback(); });
+  await waitFor(() => expect(detailReads).toBe(2));
+  await act(async () => refresh.callback());
+  expect(screen.queryByRole("button", { name: "Send to rep…" })).toBeNull();
+  await act(async () => { resolveOld({ draft: pending }); await older; });
+  expect(screen.queryByRole("button", { name: "Send to rep…" })).toBeNull();
+  expect(screen.getByText("sent")).toBeInTheDocument();
+});
+
+it("ignores a detail poll after the operator selects another draft", async () => {
+  const first = draft("draft-a", "Draft A");
+  const second = draft("draft-b", "Draft B");
+  let reads = 0;
+  let resolveOld;
+  adminFetch.mockImplementation((path) => {
+    if (path.includes("?status=")) return Promise.resolve(list([first, second]));
+    if (path.endsWith("draft-b")) return Promise.resolve({ draft: second });
+    if (++reads === 1) return Promise.resolve({ draft: first });
+    return new Promise(resolve => { resolveOld = resolve; });
+  });
+  render(<PriceMatchPage />);
+  fireEvent.click(await screen.findByText("Draft A"));
+  await screen.findByRole("heading", { name: "Draft A" });
+  let older;
+  act(() => { older = refresh.callback(); });
+  await waitFor(() => expect(reads).toBe(2));
+  fireEvent.click(screen.getByText("Draft B"));
+  await screen.findByRole("heading", { name: "Draft B" });
+  await act(async () => { resolveOld({ draft: first }); await older; });
+  expect(screen.getByRole("heading", { name: "Draft B" })).toBeInTheDocument();
+});
+
+it("keeps an in-flight poll from changing the draft during send confirmation", async () => {
+  const pending = draft("draft-a", "Draft A");
+  let reads = 0;
+  let resolvePoll;
+  adminFetch.mockImplementation((path) => {
+    if (path.includes("?status=")) return Promise.resolve(list([pending]));
+    if (++reads === 1) return Promise.resolve({ draft: pending });
+    return new Promise(resolve => { resolvePoll = resolve; });
+  });
+  render(<PriceMatchPage />);
+  fireEvent.click(await screen.findByText("Draft A"));
+  await screen.findByRole("button", { name: "Send to rep…" });
+  let poll;
+  act(() => { poll = refresh.callback(); });
+  await waitFor(() => expect(reads).toBe(2));
+  fireEvent.click(screen.getByRole("button", { name: "Send to rep…" }));
+  await act(async () => {
+    resolvePoll({ draft: { ...pending, subject: "Changed after confirmation" } });
+    await poll;
+  });
+  expect(screen.getByRole("heading", { name: "Draft A" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Confirm send" })).toBeInTheDocument();
+});
+
+it("does not restore stale detail while a dismiss action is in flight", async () => {
+  const pending = draft("draft-a", "Draft A");
+  let detailReads = 0;
+  let resolvePoll;
+  let resolveDismiss;
+  let dismissed = false;
+  adminFetch.mockImplementation((path, options) => {
+    if (options?.method === "POST") return new Promise(resolve => { resolveDismiss = resolve; });
+    if (path.includes("?status=")) return Promise.resolve(list(dismissed ? [] : [pending]));
+    if (++detailReads === 1) return Promise.resolve({ draft: pending });
+    return new Promise(resolve => { resolvePoll = resolve; });
+  });
+  render(<PriceMatchPage />);
+  fireEvent.click(await screen.findByText("Draft A"));
+  await screen.findByRole("button", { name: "Dismiss" });
+  let poll;
+  act(() => { poll = refresh.callback(); });
+  await waitFor(() => expect(detailReads).toBe(2));
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  await act(async () => {
+    resolvePoll({ draft: { ...pending, subject: "Stale poll result" } });
+    await poll;
+  });
+  expect(screen.getByRole("heading", { name: "Draft A" })).toBeInTheDocument();
+  dismissed = true;
+  await act(async () => { resolveDismiss({ ok: true }); });
+  expect(await screen.findByText("Draft dismissed.")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Draft A" })).toBeNull();
+});
