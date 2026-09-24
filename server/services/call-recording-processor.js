@@ -10032,6 +10032,12 @@ const CallRecordingProcessor = {
             // additive merge would otherwise keep the old door on the card
             // and make the resolver wait for it (codex r17 P2).
             if (addressEvidence.stated_unit === undefined) addressEvidence.stated_unit = null;
+            // A fresh dispute re-opens the question: the durable "cleared"
+            // marker an earlier positive pass stamped must not survive
+            // the refresh, or the nightly rule would close the new
+            // disagreement on booking evidence alone (local audit P1).
+            addressEvidence.address_dispute_cleared_at = null;
+            addressEvidence.cleared_on_file_street = null;
             const landed = await trx('triage_items')
               .insert(conflictCard)
               .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
