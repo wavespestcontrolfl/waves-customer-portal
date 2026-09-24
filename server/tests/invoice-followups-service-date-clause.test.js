@@ -1,11 +1,17 @@
-// Audit repro r1-timezone-2: invoice follow-up sequence touches (fireTouch)
-// format the invoices.service_date pg DATE column through an ET instant
-// formatter. node-postgres deserializes DATE as local midnight; Railway runs
-// TZ=UTC so that is UTC midnight, and America/New_York formatting yields the
-// PREVIOUS calendar day. Run: cd server && TZ=UTC NODE_ENV=test npx jest --runInBand tests/audit-repro/r1-timezone-2-invoice-followups-service-date.test.js
-if (process.env.TZ !== 'UTC') {
-  throw new Error('This repro must run with TZ=UTC (production zone); see header.');
-}
+// Audit repro r1-timezone-2 (adapted): invoice follow-up sequence touches
+// (fireTouch) used to format the invoices.service_date pg DATE column
+// through an ET INSTANT formatter. node-postgres deserializes DATE as local
+// midnight; under production's TZ=UTC that is UTC midnight, and
+// America/New_York instant formatting yielded the PREVIOUS calendar day.
+// The fixture below (`new Date(Date.UTC(...))`) reproduces exactly that
+// shape regardless of the machine or CI runner's own TZ — a JS Date is
+// always a fixed instant, and the fix (formatDateOnly, server/utils/date-only.js)
+// extracts the calendar day from a Date's UTC components before formatting,
+// so this test needs no TZ=UTC precondition (the original audit repro this
+// was adapted from ran only under TZ=UTC to prove the PRE-FIX bug; codex
+// caught that the guard breaks the standard `npm test` command on any
+// non-UTC host — removed here since the fix under test no longer depends
+// on process.env.TZ).
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
