@@ -12,6 +12,15 @@
  * real-Postgres proof that this actually blocks/is blocked by an old
  * pod's own unmodified pg_try_advisory_lock. This file exercises the
  * orchestration logic in isolation with a mocked connection.
+ *
+ * Codex round-2 PUSH review, a second P1: holding this compatibility lock
+ * on 'billing-monthly' let a single in-flight customer op make the
+ * scheduler's OWN 8 AM runExclusive('billing-monthly', ...) report
+ * lease_held and skip processMonthlyBilling for its ENTIRE cohort, with
+ * no recovery until next month (see the file header). Only
+ * 'billing-retries' is held this way now — its own worst case if it's
+ * ever the one contended is a bounded, self-healing one-day retry delay.
+ * The last two tests below lock that asymmetry in.
  */
 jest.mock('../models/db', () => ({
   // Just enough shape for crossProcessLockCapable() to see a "real pool".
@@ -53,7 +62,7 @@ describe('withCustomerBillingLock — rollout-compatibility (held shared job-loc
     getHeldConnection.mockClear();
   });
 
-  test('refuses when a named job lock (not excluded) is currently held exclusively elsewhere', async () => {
+  test('refuses when the billing-retries job lock (not excluded) is currently held exclusively elsewhere', async () => {
     mockConn = makeConn(['cron:billing-retries']);
     await expect(withCustomerBillingLock('cust-x', async () => 'ran'))
       .rejects.toMatchObject({ code: 'BILLING_CLAIM_HELD_ELSEWHERE' });
@@ -65,30 +74,33 @@ describe('withCustomerBillingLock — rollout-compatibility (held shared job-loc
     expect(result).toBe('ran');
   });
 
-  test('a caller excluding its own job lock still refuses when the OTHER job is held', async () => {
-    mockConn = makeConn(['cron:billing-monthly']);
-    await expect(withCustomerBillingLock('cust-x3', async () => 'ran', { excludeJobLocks: ['billing-retries'] }))
-      .rejects.toMatchObject({ code: 'BILLING_CLAIM_HELD_ELSEWHERE' });
-  });
-
-  test('runs normally, and releases every shared lock it took, when no job lock is held', async () => {
+  test('runs normally, and releases the shared lock it took, when no job lock is held', async () => {
     mockConn = makeConn([]);
     const result = await withCustomerBillingLock('cust-y', async () => 'ok');
     expect(result).toBe('ok');
     const locks = mockConn.calls.filter(([t]) => t.includes('pg_try_advisory_lock_shared'));
     const unlocks = mockConn.calls.filter(([t]) => t.includes('pg_advisory_unlock_shared'));
-    expect(locks.map((c) => c[1][0]).sort()).toEqual(['cron:billing-monthly', 'cron:billing-retries']);
-    expect(unlocks.map((c) => c[1][0]).sort()).toEqual(['cron:billing-monthly', 'cron:billing-retries']);
+    expect(locks.map((c) => c[1][0])).toEqual(['cron:billing-retries']);
+    expect(unlocks.map((c) => c[1][0])).toEqual(['cron:billing-retries']);
   });
 
-  test('releases only the lock it actually acquired when a later one in the list fails', async () => {
+  test('never takes or checks a lock on billing-monthly — a customer op must not be able to suppress the scheduler\'s own monthly cohort tick', async () => {
+    // billing-monthly reports as held elsewhere; if this layer checked it
+    // at all, the operation would refuse. It must not even try.
+    mockConn = makeConn(['cron:billing-monthly']);
+    const result = await withCustomerBillingLock('cust-w', async () => 'ok');
+    expect(result).toBe('ok');
+    const keysTried = mockConn.calls
+      .filter(([t]) => t.includes('pg_try_advisory_lock_shared'))
+      .map((c) => c[1][0]);
+    expect(keysTried).not.toContain('cron:billing-monthly');
+  });
+
+  test('excluding billing-retries when it is the only compatibility lock means no job lock is taken at all', async () => {
     mockConn = makeConn(['cron:billing-retries']);
-    await expect(withCustomerBillingLock('cust-z', async () => 'nope')).rejects.toMatchObject({ code: 'BILLING_CLAIM_HELD_ELSEWHERE' });
-    // billing-monthly is tried first (ROLLOUT_COMPAT_JOB_LOCKS order),
-    // succeeds, and must still be released even though billing-retries
-    // then failed and was never held.
-    const unlocks = mockConn.calls.filter(([t]) => t.includes('pg_advisory_unlock_shared'));
-    expect(unlocks).toHaveLength(1);
-    expect(unlocks[0][1]).toEqual(['cron:billing-monthly']);
+    const result = await withCustomerBillingLock('cust-v', async () => 'ok', { excludeJobLocks: ['billing-retries'] });
+    expect(result).toBe('ok');
+    const locks = mockConn.calls.filter(([t]) => t.includes('pg_try_advisory_lock_shared'));
+    expect(locks).toHaveLength(0);
   });
 });

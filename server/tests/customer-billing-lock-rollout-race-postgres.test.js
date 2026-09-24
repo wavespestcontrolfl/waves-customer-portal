@@ -22,6 +22,16 @@
  *      withCustomerBillingLock's shared acquire FAILS and it refuses
  *      (BILLING_CLAIM_HELD_ELSEWHERE) rather than let the charge proceed
  *      unfenced — proving the reverse direction too.
+ *
+ * Codex round-2 PUSH review, a second P1: only 'billing-retries' is held
+ * this way. Holding it on 'billing-monthly' too let a single in-flight
+ * customer op make the scheduler's OWN runExclusive('billing-monthly',
+ * processMonthlyBilling) — a single non-blocking pg_try_advisory_lock
+ * over the WHOLE function — report lease_held and skip its entire cohort
+ * for that tick, with no recovery until next month. The last test below
+ * proves against real Postgres that an old pod's exclusive hold on
+ * 'cron:billing-monthly' specifically does NOT block a customer op (the
+ * new, intentional asymmetry), while 'cron:billing-retries' still does.
  */
 const connection = process.env.DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -71,7 +81,7 @@ postgres('withCustomerBillingLock — rollout-compatibility holds a claim for th
 
   test('an old pod already holding its exclusive job lock blocks our shared claim — we refuse rather than charge unfenced', async () => {
     const acquired = await oldPodConn.query({
-      text: "SELECT pg_try_advisory_lock(hashtext('cron:billing-monthly')) AS locked",
+      text: "SELECT pg_try_advisory_lock(hashtext('cron:billing-retries')) AS locked",
     });
     expect(acquired.rows[0].locked).toBe(true);
 
@@ -79,14 +89,32 @@ postgres('withCustomerBillingLock — rollout-compatibility holds a claim for th
       await expect(withCustomerBillingLock('rollout-race-customer-2', async () => 'should-not-run'))
         .rejects.toMatchObject({ code: 'BILLING_CLAIM_HELD_ELSEWHERE' });
     } finally {
-      await oldPodConn.query({ text: "SELECT pg_advisory_unlock(hashtext('cron:billing-monthly'))" });
+      await oldPodConn.query({ text: "SELECT pg_advisory_unlock(hashtext('cron:billing-retries'))" });
     }
   });
 
   test('excludeJobLocks lets a caller inside that SAME job proceed even while it holds that job\'s lock itself', async () => {
-    // The caller's own exclusion means it never tries billing-monthly at
-    // all here — it only takes the shared lock on billing-retries.
-    const result = await withCustomerBillingLock('rollout-race-customer-3', async () => 'ok', { excludeJobLocks: ['billing-monthly'] });
+    const result = await withCustomerBillingLock('rollout-race-customer-3', async () => 'ok', { excludeJobLocks: ['billing-retries'] });
     expect(result).toBe('ok');
+  });
+
+  test('an old pod holding cron:billing-monthly exclusively does NOT block a customer op — only billing-retries is a compatibility lock', async () => {
+    // This is the round-2 push-review regression: holding a shared
+    // compatibility lock on billing-monthly would make the scheduler's
+    // own exclusive acquire for its 8 AM tick report lease_held and skip
+    // its whole cohort. Proven here against real Postgres: an old pod
+    // holding billing-monthly exclusively must have NO effect on a
+    // customer op, in either direction.
+    const acquired = await oldPodConn.query({
+      text: "SELECT pg_try_advisory_lock(hashtext('cron:billing-monthly')) AS locked",
+    });
+    expect(acquired.rows[0].locked).toBe(true);
+
+    try {
+      const result = await withCustomerBillingLock('rollout-race-customer-4', async () => 'charged');
+      expect(result).toBe('charged');
+    } finally {
+      await oldPodConn.query({ text: "SELECT pg_advisory_unlock(hashtext('cron:billing-monthly'))" });
+    }
   });
 });

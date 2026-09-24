@@ -95,16 +95,50 @@
  * Callers MUST hold this lock across BOTH the already-collected read and
  * the charge() call — locking only the write leaves the classic
  * check-then-act race open.
+ *
+ * ONLY 'billing-retries' is held this way (Codex round-2 push review, a
+ * SECOND P1 on top of the one above): services/scheduler.js's OWN
+ * runExclusive('billing-monthly', processMonthlyBilling) is a single
+ * non-blocking pg_try_advisory_lock over the ENTIRE function — it has no
+ * way to tell "a customer op's compatibility claim is held" apart from "a
+ * genuine competing instance of this exact job is already running", so a
+ * held shared lock on 'cron:billing-monthly' makes the 8 AM tick itself
+ * report lease_held and skip processMonthlyBilling ENTIRELY — not just
+ * the one contended customer. That's a fresh, single tick's WHOLE
+ * cohort silently missed, with nothing to recover it: the per-customer
+ * deferred-retry-row logic added for lock CONTENTION lives inside
+ * processMonthlyBilling and never runs if the job never starts, and
+ * isBillingDayMatch only matches a given customer once a month, so the
+ * miss stands until next month. That failure mode is worse than the
+ * narrow double-charge this layer exists to close.
+ *
+ * 'billing-retries' does not have this asymmetry: if ITS tick reports
+ * lease_held and skips, every armed row it would have picked up simply
+ * stays armed (next_retry_at unchanged) and is picked up by the very next
+ * day's sweep — a bounded, self-healing one-day delay, not a permanent
+ * loss. So 'billing-retries' stays in the compatibility set (closing the
+ * exact cross-pod race named in the round-2 finding, which used
+ * billing-retries as its own example) while 'billing-monthly' is
+ * deliberately left out. The residual exposure this trades away — a true
+ * simultaneous cross-pod race for the SAME customer on their monthly
+ * billing_day specifically — is still narrowed by the per-customer
+ * `billing-customer:<id>` lock (same-version overlaps) and by the shared
+ * bare Stripe idempotency key both charge-now and the monthly cron use
+ * for a customer's first attempt of the day (retry-collectibility.js's
+ * deriveMonthlyChargeIdempotencyKey) collapsing a genuine simultaneous
+ * first attempt to one PaymentIntent at Stripe's own layer.
  */
 const db = require('../models/db');
 const { runExclusive, getHeldConnection } = require('./cron-lock');
 
 const locks = new Map(); // customerId -> tail promise (never rejects)
 
-// The two named jobs every version of this code already serializes
-// cluster-wide (services/scheduler.js) — see the rollout-compatibility
-// note above.
-const ROLLOUT_COMPAT_JOB_LOCKS = ['billing-monthly', 'billing-retries'];
+// Only 'billing-retries' — NOT 'billing-monthly' — see the file header's
+// "ONLY 'billing-retries' is held this way" note for why holding this
+// compatibility lock on 'billing-monthly' would let an unrelated
+// customer op silently suppress the scheduler's own entire monthly-cohort
+// tick, with no recovery until next month.
+const ROLLOUT_COMPAT_JOB_LOCKS = ['billing-retries'];
 
 function crossProcessLockName(customerId) {
   return `billing-customer:${customerId}`;
