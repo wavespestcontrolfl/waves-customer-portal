@@ -409,6 +409,24 @@ describe('POST /admin/communications/customer-link', () => {
         });
       });
 
+      // Codex #4709 r14 P1: a selected customer that went stale is reported,
+      // never replaced by a lead on the same phone.
+      test('a stale selected customerId is a 404, never the lead-only fallback', async () => {
+        wireDb({
+          customers: makeCustomersBuilder(),
+          leads: makeLeadsBuilder([{ id: 'lead-1', first_name: 'Jamie', phone: '+15551234567' }]),
+        });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            customerId: '11111111-2222-4333-8444-555555555555',
+          });
+          expect(res.status).toBe(404);
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+        });
+      });
+
       // Pre-push Codex P2: a malformed leadId must 400 before either leads
       // query, never fall through to the phone-only lookup as if no
       // override had been supplied.

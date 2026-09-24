@@ -549,6 +549,18 @@ const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
 function decodedRuns(body) {
   return String(body || '').split(/\s+/).filter(Boolean).map(decodeLinkText);
 }
+// A URL fragment percent-decoded until stable (bounded) — a wrapper may
+// encode the inner link more than once.
+function fullyDecoded(text) {
+  let out = text;
+  for (let i = 0; i < 3; i += 1) {
+    let next;
+    try { next = decodeURIComponent(out); } catch { break; }
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
 function linkRuns(runs, fragmentRe) {
   return runs
     .filter((run) => fragmentRe.test(run))
@@ -895,7 +907,7 @@ async function immediateOnlyLinkSendCheck(body) {
     return { present: true, label: 'Consultation link' };
   }
   // ...and a consultation SHORT code on any host (Codex #4709 r13 P1).
-  const anyHostCodes = linkRuns(runs, /\/l\//i)
+  const anyHostCodes = linkRuns(runs, /\/l\/|%2fl%2f/i)
     .filter((run) => {
       // Owned hosts are already judged by shortRows above; only a FOREIGN
       // wrapper needs this extra lookup.
@@ -904,9 +916,8 @@ async function immediateOnlyLinkSendCheck(body) {
         return !hosts.includes(host);
       } catch { return false; }
     })
-    .map((run) => (/\/l\/([A-Za-z0-9_-]+)/i.exec(run) || [])[1])
-    .filter(Boolean)
-    .map((c) => c.toLowerCase());
+    // Anywhere in the wrapper, encoded or not (Codex #4709 r14 P1).
+    .flatMap((run) => [...fullyDecoded(run).matchAll(/\/l\/([A-Za-z0-9_-]+)/gi)].map((m) => m[1].toLowerCase()));
   if (anyHostCodes.length) {
     const foreignRows = await db('short_codes').whereIn('code', [...new Set(anyHostCodes)]).where({ kind: 'consultation' }).select('code', 'kind');
     if ((foreignRows || []).some((r) => r.kind === 'consultation')) return { present: true, label: 'Consultation link' };
@@ -914,10 +925,8 @@ async function immediateOnlyLinkSendCheck(body) {
   // ...and a SIGNED consultation token on any host (Codex #4709 r12 P1):
   // parked here so the send-time check refuses it.
   const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
-  if (linkRuns(runs, /\/inspection\//i).some((run) => {
-    const m = /\/inspection\/([A-Za-z0-9._-]+)/i.exec(run);
-    return m && verifyLeadConsultationToken(m[1], 0);
-  })) {
+  if (linkRuns(runs, /inspection/i).some((run) => [...fullyDecoded(run).matchAll(/\/inspection\/([A-Za-z0-9._-]+)/gi)]
+    .some((m) => verifyLeadConsultationToken(m[1], 0)))) {
     return { present: true, label: 'Consultation link' };
   }
   return { present: false };
@@ -1454,27 +1463,22 @@ async function consultationLinkRows(body) {
       });
     }
   }
-  // A signed consultation token on a host we do NOT own (Codex #4709 r12
-  // P1) — a tracker or redirector wrapping the real link — is refused
-  // outright: the third party could harvest the 14-day bearer.
-  for (const run of linkRuns(runs, /\/inspection\//i)) {
-    let url;
-    try { url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`); } catch { continue; }
-    if ([].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
-    const m = /\/inspection\/([A-Za-z0-9._-]+)\/?$/i.exec(url.pathname);
-    const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
-    if (m && verifyLeadConsultationToken(m[1], 0)) rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
-  }
-  // ...and a CONSULTATION short code (/l/<code>) under a foreign host
-  // (Codex #4709 r13 P1) — the generated bearer is the short link, so the
-  // wrapper check must cover it too, independent of the surrounding host.
+  // A consultation bearer ANYWHERE inside a URL on a host we do NOT own
+  // (Codex #4709 r12/r13/r14 P1) — its path, query or fragment, encoded or
+  // not, e.g. a tracker's ?next=<real link> — is refused outright: the
+  // third party could harvest the 14-day bearer. Both shapes count: a
+  // signed /inspection/<token> and a consultation short code /l/<code>.
+  const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
   const foreignCodes = [];
-  for (const run of linkRuns(runs, /\/l\//i)) {
+  for (const run of linkRuns(runs, /inspection|\/l\/|%2fl%2f/i)) {
     let url;
     try { url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`); } catch { continue; }
     if ([].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
-    const m = /\/l\/([A-Za-z0-9_-]+)\/?$/i.exec(url.pathname);
-    if (m) foreignCodes.push(m[1].toLowerCase());
+    const inner = fullyDecoded(`${url.pathname}${url.search}${url.hash}`);
+    for (const m of inner.matchAll(/\/inspection\/([A-Za-z0-9._-]+)/gi)) {
+      if (verifyLeadConsultationToken(m[1], 0)) rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
+    }
+    for (const m of inner.matchAll(/\/l\/([A-Za-z0-9_-]+)/gi)) foreignCodes.push(m[1].toLowerCase());
   }
   if (foreignCodes.length) {
     const wrapped = await db('short_codes').whereIn('code', [...new Set(foreignCodes)]).where({ kind: 'consultation' }).select('code', 'kind');
@@ -1487,7 +1491,6 @@ async function consultationLinkRows(body) {
     .map((run) => ({ run, token: canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME) }))
     .filter((t) => t.token);
   if (tokenRuns.length) {
-    const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
     for (const { run, token } of tokenRuns) {
       const signed = verifyLeadConsultationToken(token, 0); // signature only, expiry ignored
       rows.push(signed
@@ -1503,6 +1506,41 @@ async function consultationLinkRows(body) {
 // thread past the consultation checks.
 async function bodyCarriesConsultationLink(body) {
   return (await consultationLinkRows(body)).length > 0;
+}
+
+// Per-row refusals for a consultation link's own state, in order.
+const CONSULTATION_ROW_REFUSALS = [
+  { fails: (row) => row.foreignHost, message: 'This consultation link is wrapped in another website\'s address — remove it and insert a fresh one.' },
+  { fails: (row) => row.plaintext, message: 'Consultation links must use https — remove the http:// link and insert a fresh one.' },
+  { fails: (row) => row.invalid, message: 'This consultation link is not valid — remove it and insert a fresh one.' },
+  { fails: (row) => row.expired, message: 'This consultation link has expired — remove it and insert a fresh one.' },
+  { fails: (row) => !row.lead_id, message: 'This consultation link no longer resolves to a lead — remove it and insert a fresh one.' },
+];
+
+// A lead linked to a customer: that customer must be live, still on this
+// phone, and the one selected for the send. Null when the lead has none.
+async function linkedCustomerRefusal(lead, toLast10, ctx) {
+  if (!lead.customer_id) return null;
+  // A lead linked to a customer must still be reachable at that customer's
+  // CURRENT phone (Codex #4709 r10 P1): a stale or reassigned intake
+  // number must never carry this lead's bearer to whoever owns it now.
+  const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
+  // An archived (soft-deleted) linked customer fails closed too (Codex
+  // #4709 r11 P1): the lead's retained number may belong to someone
+  // else by now.
+  if (!owner) {
+    return refuseSend("This lead's customer record is archived — update the lead before sending the consultation link.");
+  }
+  if (digitsLast10(owner.phone) !== String(toLast10 || '')) {
+    return refuseSend("This lead's customer has a different phone on file now — update the lead before sending the consultation link.");
+  }
+  // A shared phone must not let one customer's lead bearer ride another
+  // customer's send (Codex #4709 r14 P1): the selected customer is the
+  // lead's own.
+  if (ctx?.trustedCustomerId && String(ctx.trustedCustomerId) !== String(lead.customer_id)) {
+    return refuseSend('This consultation link belongs to a different customer — remove it before sending.');
+  }
+  return null;
 }
 
 // expectedLeadId (Codex #4709 r3 P1): when the sending route knows which
@@ -1542,40 +1580,14 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLea
   }
   const { isOpenLeadRow } = require('./lead-statuses');
   for (const row of rows) {
-    if (row.foreignHost) {
-      return refuseSend('This consultation link is wrapped in another website\'s address — remove it and insert a fresh one.');
-    }
-    if (row.plaintext) {
-      return refuseSend('Consultation links must use https — remove the http:// link and insert a fresh one.');
-    }
-    if (row.invalid) {
-      return refuseSend('This consultation link is not valid — remove it and insert a fresh one.');
-    }
-    if (row.expired) {
-      return refuseSend('This consultation link has expired — remove it and insert a fresh one.');
-    }
-    if (!row.lead_id) {
-      return refuseSend('This consultation link no longer resolves to a lead — remove it and insert a fresh one.');
-    }
+    const rowRefusal = CONSULTATION_ROW_REFUSALS.find((rule) => rule.fails(row));
+    if (rowRefusal) return refuseSend(rowRefusal.message);
     const lead = await db('leads').where({ id: row.lead_id }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at', 'customer_id');
     if (!lead || !isOpenLeadRow(lead)) {
       return refuseSend('This lead has already converted or closed — remove the consultation link before sending.');
     }
-    // A lead linked to a customer must still be reachable at that customer's
-    // CURRENT phone (Codex #4709 r10 P1): a stale or reassigned intake
-    // number must never carry this lead's bearer to whoever owns it now.
-    if (lead.customer_id) {
-      const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
-      // An archived (soft-deleted) linked customer fails closed too (Codex
-      // #4709 r11 P1): the lead's retained number may belong to someone
-      // else by now.
-      if (!owner) {
-        return refuseSend("This lead's customer record is archived — update the lead before sending the consultation link.");
-      }
-      if (digitsLast10(owner.phone) !== String(toLast10 || '')) {
-        return refuseSend("This lead's customer has a different phone on file now — update the lead before sending the consultation link.");
-      }
-    }
+    const ownerRefusal = await linkedCustomerRefusal(lead, toLast10, ctx);
+    if (ownerRefusal) return ownerRefusal;
     if (digitsLast10(lead.phone) !== String(toLast10 || '')) {
       return refuseSend('This consultation link belongs to a different lead — remove it before sending.');
     }

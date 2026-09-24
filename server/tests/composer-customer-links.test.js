@@ -2783,6 +2783,47 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(await immediateOnlyLinkSendCheck('https://tracker.example/l/cons1')).toEqual({ present: true, label: 'Consultation link' });
   });
 
+  // Codex #4709 r14 P1: a bearer hidden in a foreign URL's query or
+  // fragment — encoded or not — is refused and fenced too.
+  test('a consultation bearer inside a foreign URL query/fragment → refused and fenced', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    const token = mintLeadConsultationToken('lead-1');
+    const inner = `https://portal.wavespestcontrol.com/inspection/${token}`;
+    for (const wrapper of [
+      `https://tracker.example/?next=${inner}`,
+      `https://tracker.example/?next=${encodeURIComponent(inner)}`,
+      `https://tracker.example/#${encodeURIComponent(encodeURIComponent(inner))}`,
+    ]) {
+      wireConsultation({ codeRows: [] });
+      const refusal = await checkConsultationLinkSend(`Pick a time: ${wrapper} Reply STOP to opt out.`, '9415550100');
+      expect(refusal.error).toMatch(/another website/);
+      mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+      expect(await immediateOnlyLinkSendCheck(wrapper)).toEqual({ present: true, label: 'Consultation link' });
+    }
+    mockBuilders = {
+      short_codes: chainBuilder({ rows: [{ code: 'cons1', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+      leads: chainBuilder({ firstRow: LEAD_ROW }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    const shortWrapped = `https://tracker.example/?u=${encodeURIComponent('https://wavespest.co/l/cons1')}`;
+    expect((await checkConsultationLinkSend(`Pick a time: ${shortWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+    expect(await immediateOnlyLinkSendCheck(shortWrapped)).toEqual({ present: true, label: 'Consultation link' });
+  });
+
+  // Codex #4709 r14 P1: on a shared phone, a lead linked to customer A never
+  // rides a send for customer B.
+  test('a linked lead whose customer is not the selected customer → refused', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-a' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415550100' } });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100', { trustedCustomerId: 'cust-b', bearers: 0 });
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different customer/);
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-a' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415550100' } });
+    expect(await checkConsultationLinkSend(BODY, '9415550100', { trustedCustomerId: 'cust-a', bearers: 0 })).toBeNull();
+  });
+
   // Codex #4709 r13 P2: the validated lead rides back for outreach bookkeeping.
   test('bearerLinkSendCheck returns the validated consultation lead id', async () => {
     wireConsultation();

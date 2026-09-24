@@ -270,6 +270,22 @@ describe("CustomerSmsPanel", () => {
     expect(box.value).not.toContain("old111");
   });
 
+  // Codex #4709 r14 P2: an edit to the remembered URL itself falls back to
+  // the wording + host heuristic, and the old STOP footer is not doubled.
+  it("an edited remembered URL falls back to the heuristic and never doubles the STOP line", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem("c360:sms-consult-line:staff-a:cust-a", "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old111");
+    sessionStorage.setItem("c360:sms-draft:staff-a:cust-a", "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old11X\n\nReply STOP to opt out.");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/new222\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old11X");
+    expect((box.value.match(/Reply STOP to opt out\./g) || []).length).toBe(1);
+  });
+
   it("sends once per click through the canonical route, pinned to the customer, and keeps the draft on failure", async () => {
     const send = deferred();
     adminFetch.mockImplementation(async (path, options = {}) => {

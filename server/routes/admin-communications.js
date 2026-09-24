@@ -3013,7 +3013,12 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     const { customerId } = body;
     const recipient = await resolveComposerRecipient(customerId, last10);
     if (recipient.error) {
-      const fallback = recipient.status === 404 ? await consultationLeadOnlyResponse(kind, last10, body.leadId) : null;
+      // Lead-only fallback only when NO customer was selected (Codex #4709
+      // r14 P1): a selected customer that went stale is reported as such,
+      // never silently swapped for a lead on the same phone.
+      const fallback = recipient.status === 404 && !customerId
+        ? await consultationLeadOnlyResponse(kind, last10, body.leadId)
+        : null;
       if (fallback) return res.status(fallback.status).json(fallback.body);
       return res.status(recipient.status).json({ error: recipient.error });
     }

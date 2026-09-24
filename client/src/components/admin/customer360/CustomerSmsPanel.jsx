@@ -238,15 +238,22 @@ function combineAppendedDraft(existing, addition, remembered) {
     // invite ("inspection" for "consultation") never leaves the old bearer
     // behind. The wording + host heuristic is only for when nothing is
     // remembered at all.
+    // ...and when the remembered URL itself was edited away (Codex #4709 r14
+    // P2), the wording + host heuristic takes over.
     const rememberedUrl = remembered ? firstUrlIn(remembered) : null;
+    const baseLines = base.split("\n");
+    const rememberedUrlPresent = Boolean(rememberedUrl) && baseLines.some((line) => line.includes(rememberedUrl));
     const isPriorClauseLine = (line) => {
       if (rememberedPresent) return line === remembered;
-      if (rememberedUrl) return line.includes(rememberedUrl);
+      if (rememberedUrlPresent) return line.includes(rememberedUrl);
       return urlHost(firstUrlIn(line)) === newHost && CONSULTATION_WORDING_RE.test(line);
     };
-    const withoutPriorClause = base
-      .split("\n")
-      .filter((line) => !isPriorClauseLine(line))
+    // The replaced invite's own footer (the STOP line) goes with it, so the
+    // new one is never doubled.
+    const replacing = baseLines.some(isPriorClauseLine);
+    const additionFooters = new Set(addition.split("\n").map((line) => line.trim()).filter((line) => line && !firstUrlIn(line)));
+    const withoutPriorClause = baseLines
+      .filter((line) => !isPriorClauseLine(line) && !(replacing && additionFooters.has(line.trim())))
       .join("\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
