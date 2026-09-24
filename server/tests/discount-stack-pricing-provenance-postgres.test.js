@@ -1811,4 +1811,150 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     const rowAfter = await mockPg('scheduled_services').where({ id }).first();
     expect(Number(rowAfter.estimated_price)).toBe(updates.estimated_price);
   });
+
+  // GitHub Codex round 22 P1 (#4657, :11627), END TO END through real
+  // Postgres rows: round 21 fixed the financial CAS for the addons-array
+  // branch only — a visit opened with NO add-ons at all takes
+  // computeSingleServiceEstimatedPricePlan's branch instead, which never
+  // built a financialCasSnapshot, so this witness was checked only before
+  // the write transaction. A concurrent price change landing between the
+  // pre-transaction read and the route's row lock would have let the
+  // stale request persist its pre-change estimated_price. This plans a
+  // genuine (non-no-op) primary-price save on a zero-add-on visit first,
+  // then lands a concurrent parent price change before the route's own
+  // locked recheck would run.
+  test('PUT /:id/update-details (planner, real rows, NO add-ons): a concurrent price change on the parent drifts the financial CAS the single-service branch now builds', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-27', service_type: 'Fixture Round-22 No-Addon Financial CAS',
+      primary_line_price: 100, estimated_price: 100,
+    });
+
+    // A genuine primary-price edit (100 -> 120), desktop gross convention
+    // (primaryLinePrice posted) — never touches an addons array at all, so
+    // computeUpdateDetailsFinancialPlan takes the single-service branch.
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 120, estimatedPrice: 120,
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    // This assertion FAILS WITHOUT THE FIX: a pre-fix
+    // computeSingleServiceEstimatedPricePlan returns a bare boolean, so
+    // computeUpdateDetailsFinancialPlan's own financialCasSnapshot stays
+    // null for this branch.
+    expect(plan.financialCasSnapshot).toBeTruthy();
+    expect(plan.financialCasSnapshot.addons).toHaveLength(0);
+
+    // Concurrent caller reprices the SAME visit before the planning
+    // request reaches the row lock.
+    await mockPg('scheduled_services').where({ id }).update({ estimated_price: 150, primary_line_price: 150 });
+
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    // This assertion FAILS WITHOUT THE FIX: with financialCasSnapshot
+    // null, financialStateDrifted short-circuits to false and the stale
+    // desktop save would proceed and overwrite the concurrent price.
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(true);
+  });
+
+  // Companion case: the concurrent change is a NEW add-on row (not a
+  // parent price edit) — a row the snapshot (built when the visit had
+  // zero add-ons) never saw. financialStateDrifted's own missing-row loop
+  // only walks the snapshot's rows looking for one gone from `fresh`; it
+  // never previously checked the opposite direction (a fresh row absent
+  // from the snapshot), so this needed its own fix inside
+  // financialStateDrifted too (see the unit case below).
+  test('PUT /:id/update-details (planner, real rows, NO add-ons): a concurrently ADDED add-on row drifts the financial CAS', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-28', service_type: 'Fixture Round-22 No-Addon Concurrent Add',
+      primary_line_price: 100, estimated_price: 100,
+    });
+
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 120, estimatedPrice: 120,
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.financialCasSnapshot).toBeTruthy();
+    expect(plan.financialCasSnapshot.addons).toHaveLength(0);
+
+    // Concurrent caller adds a brand-new add-on line to this visit — no
+    // parent field changes, but the visit's true total is no longer what
+    // this plan priced against.
+    const newAddonRowId = randomUUID();
+    await mockPg('scheduled_service_addons').insert({
+      id: newAddonRowId, scheduled_service_id: id, service_name: 'Fixture Concurrently Added Add-On', base_price: 25, estimated_price: 25,
+    });
+
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    // This assertion FAILS WITHOUT THE FIX for two independent reasons:
+    // financialCasSnapshot is null pre-fix (short-circuits false), AND
+    // even given a snapshot, the pre-fix financialStateDrifted only
+    // walked the snapshot's own rows looking for one missing from
+    // `fresh` — a row present in `fresh` but absent from the snapshot
+    // (this exact case) passed through undetected.
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(true);
+  });
+
+  // Control: no concurrent change at all — the no-add-on path's own
+  // locked recheck must proceed exactly like round 21's addons-array
+  // control case.
+  test('PUT /:id/update-details (planner, real rows, NO add-ons): no concurrent write — the locked recheck proceeds (financial CAS not drifted)', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-29', service_type: 'Fixture Round-22 No-Addon Control',
+      primary_line_price: 100, estimated_price: 100,
+    });
+
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 120, estimatedPrice: 120,
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.financialCasSnapshot).toBeTruthy();
+
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(false);
+
+    await mockPg('scheduled_services').where({ id }).update(updates);
+    const rowAfter = await mockPg('scheduled_services').where({ id }).first();
+    expect(Number(rowAfter.estimated_price)).toBe(updates.estimated_price);
+  });
+
+  // GitHub Codex round 22 P1 (#4657, :11627): the fix must still produce a
+  // financialCasSnapshot on the NO-OP price path — computeSingleServiceEstimatedPricePlan
+  // throws 'noop-price-save' internally for an unchanged price, but the
+  // route still writes `updates.estimated_price` (the stored net, echoed
+  // back) on that path, so the witness must exist to guard THAT write too.
+  test('PUT /:id/update-details (planner, real rows, NO add-ons): a no-op price save still produces a financial CAS snapshot', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-30', service_type: 'Fixture Round-22 No-Addon Noop',
+      primary_line_price: 100, estimated_price: 100,
+    });
+
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100, estimatedPrice: 100, // unchanged — takes the no-op branch
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(updates.estimated_price).toBe(100);
+    expect(plan.financialCasSnapshot).toBeTruthy();
+  });
 });

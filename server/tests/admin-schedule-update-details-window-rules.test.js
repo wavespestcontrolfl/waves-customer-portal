@@ -581,19 +581,43 @@ describe('expectedTotal witness — GitHub Codex round 15 P1 (#4657, :11355); ro
 // (a changed estimated_price / a cleared add-on discount / an identical
 // re-read proceeding) is proven behaviorally in financialStateDrifted's
 // own unit suite and the real-Postgres end-to-end proof named above.
-describe('financialStateDrifted wiring under the write lock (source-pattern guard — round 21 P1)', () => {
+describe('financialStateDrifted wiring under the write lock (source-pattern guard — round 21 P1, extended round 22 P1)', () => {
   const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
-  const idCheckIdx = ud.indexOf('if (addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))) {');
+  // GitHub Codex round 22 P1 (#4657, :11627): round 21 gated this whole
+  // block on `addonsReplaced && Array.isArray(expectedAddonRowIds)` alone
+  // — a visit opened with no add-ons (financialCasSnapshot built by
+  // computeSingleServiceEstimatedPricePlan, replaceAddons never touched)
+  // never reached this block at all, so its financial CAS was checked
+  // only before the write transaction, never under the lock. The gate is
+  // now `(addonsReplaced && Array.isArray(expectedAddonRowIds)) ||
+  // financialCasSnapshot`, and the id-identity check itself moved inside
+  // the block as its own `addonsReplaced &&`-guarded condition (it stays
+  // meaningless — and skipped — on a save that never replaced add-on
+  // rows), while the financial-state check runs unconditionally (it's a
+  // no-op on a null snapshot already, per financialStateDrifted's own
+  // contract).
+  const gateIdx = ud.indexOf('if ((addonsReplaced && Array.isArray(expectedAddonRowIds)) || financialCasSnapshot) {');
+  const idCheckIdx = ud.indexOf('addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))');
   const moneyCheckIdx = ud.indexOf('if (financialStateDrifted(financialCasSnapshot, { parent: freshParentRow, addons: freshAddonIdRows })) {');
   const writeIdx = ud.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
 
-  test('the financial CAS check sits right after the add-on identity check, both inside the SAME addonsReplaced-gated block, before the write', () => {
+  test('the block is gated on EITHER addonsReplaced or a non-null financialCasSnapshot, so the no-add-on path reaches it too', () => {
+    expect(gateIdx).toBeGreaterThan(-1);
+    expect(gateIdx).toBeLessThan(idCheckIdx);
+  });
+
+  test('the financial CAS check sits right after the add-on identity check, both inside the SAME gated block, before the write', () => {
     expect(idCheckIdx).toBeGreaterThan(-1);
     expect(moneyCheckIdx).toBeGreaterThan(idCheckIdx);
     expect(moneyCheckIdx).toBeLessThan(writeIdx);
-    const block = ud.slice(ud.indexOf('if (addonsReplaced && Array.isArray(expectedAddonRowIds)) {'), writeIdx);
-    expect(block).toContain('if (addonRowIdsDrifted(');
+    const block = ud.slice(gateIdx, writeIdx);
+    expect(block).toContain('addonRowIdsDrifted(');
     expect(block).toContain('if (financialStateDrifted(');
+    // The id-identity check itself stays gated on addonsReplaced (it is
+    // meaningless when no add-on rows were ever replaced), unlike the
+    // money check right after it.
+    const idCheckLine = ud.slice(idCheckIdx - 200, idCheckIdx + 100);
+    expect(idCheckLine).toMatch(/addonsReplaced && Array\.isArray\(expectedAddonRowIds\)\s*\n\s*&& addonRowIdsDrifted\(/);
   });
 
   test('the parent re-read is the SAME locked .first() addonRowIdsDrifted\'s recheck already takes, selecting financialCasSnapshot\'s own field set — never a second unlocked query', () => {

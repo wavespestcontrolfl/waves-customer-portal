@@ -1570,6 +1570,16 @@ function financialStateDrifted(snapshot, fresh) {
     if (moneyValuesDiffer(before.discount_amount, after.discount_amount)) return true;
     if (moneyValuesDiffer(before.discount_dollars, after.discount_dollars)) return true;
   }
+  // GitHub Codex round 22 P1 (#4657, :11627): the loop above only proves
+  // every add-on the snapshot knew about is still on the row unchanged —
+  // it can't see a row concurrently ADDED after the snapshot was taken
+  // (a snapshot with zero add-ons, the no-add-on save path's own shape,
+  // is exactly the case a plain "missing from fresh" check can't catch).
+  // A fresh row whose id the snapshot never saw is drift too.
+  const snapshotAddonIds = new Set((snapshot.addons || []).map((r) => String(r.id)));
+  for (const after of (fresh?.addons || [])) {
+    if (!snapshotAddonIds.has(String(after.id))) return true;
+  }
   return false;
 }
 
@@ -9895,6 +9905,18 @@ async function computeSingleServiceEstimatedPricePlan({
   // eligibility, write the replay figures), not a one-use wrapper around
   // a few lines.
   let clearAddonDiscountsOnPriceEdit = false;
+  // GitHub Codex round 22 P1 (#4657, :11627): a visit opened with no
+  // add-ons never built a financialCasSnapshot at all (only the
+  // addons-array branch of computeUpdateDetailsFinancialPlan did), so the
+  // route's under-lock recheck could never see a concurrent price/add-on
+  // change on this path — a stale request would write its pre-change
+  // estimated_price, and a concurrently ADDED add-on would survive while
+  // this save reset the visit total to exclude it. Built here from the
+  // SAME `existingPrice`/`addonRows` reads this branch already does, on
+  // every path INCLUDING the no-op ('noop-price-save') one — the route
+  // still writes `updates.estimated_price` there, so the witness must
+  // still exist to guard that write.
+  let financialCasSnapshot = null;
       try {
         const cols = await db('scheduled_services').columnInfo();
         const basePrice = Number(estimatedPrice);
@@ -9905,7 +9927,13 @@ async function computeSingleServiceEstimatedPricePlan({
             ...(cols.service_id ? ['service_id'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []),
-            ...(cols.primary_line_price ? ['primary_line_price'] : []))
+            ...(cols.primary_line_price ? ['primary_line_price'] : []),
+            ...(cols.discount_dollars ? ['discount_dollars'] : []),
+            ...(cols.discount_id ? ['discount_id'] : []),
+            ...(cols.line_discount_id ? ['line_discount_id'] : []),
+            ...(cols.line_discount_type ? ['line_discount_type'] : []),
+            ...(cols.line_discount_amount ? ['line_discount_amount'] : []),
+            ...(cols.pricing_provenance ? ['pricing_provenance'] : []))
           .catch(() => null);
         // A service change in the SAME save already placed the new identity
         // in `updates` — price/scope/validate against that, not the stored
@@ -9934,6 +9962,35 @@ async function computeSingleServiceEstimatedPricePlan({
               .where({ scheduled_service_id: id })
               .catch(() => [])
           : [];
+        // GitHub Codex round 22 P1 (#4657, :11627): same shape as the
+        // addons-array branch's own financialCasSnapshot (~:10612) so
+        // financialStateDrifted can compare them identically — parent
+        // fields guarded by `cols` exactly as they were just selected
+        // above, add-on fields read verbatim off `addonRows` (already a
+        // full-row select, widened not needed).
+        financialCasSnapshot = existingPrice ? {
+          parent: {
+            estimated_price: existingPrice.estimated_price,
+            discount_type: existingPrice.discount_type,
+            discount_amount: existingPrice.discount_amount,
+            ...(cols.primary_line_price ? { primary_line_price: existingPrice.primary_line_price } : null),
+            ...(cols.discount_dollars ? { discount_dollars: existingPrice.discount_dollars } : null),
+            ...(cols.discount_id ? { discount_id: existingPrice.discount_id } : null),
+            ...(cols.line_discount_id ? { line_discount_id: existingPrice.line_discount_id } : null),
+            ...(cols.line_discount_type ? { line_discount_type: existingPrice.line_discount_type } : null),
+            ...(cols.line_discount_amount ? { line_discount_amount: existingPrice.line_discount_amount } : null),
+            ...(cols.pricing_provenance ? { pricing_provenance: existingPrice.pricing_provenance } : null),
+          },
+          addons: addonRows.map((r) => ({
+            id: r.id,
+            base_price: r.base_price,
+            estimated_price: r.estimated_price,
+            discount_id: r.discount_id,
+            discount_type: r.discount_type,
+            discount_amount: r.discount_amount,
+            discount_dollars: r.discount_dollars,
+          })),
+        } : null;
         const desktopGrossConvention = primaryLinePrice !== undefined && primaryLinePrice !== null
           && primaryLinePrice !== '' && !isNaN(Number(primaryLinePrice));
         let priceChanged;
@@ -10083,7 +10140,7 @@ async function computeSingleServiceEstimatedPricePlan({
         if (err?.message !== 'noop-price-save') throw err;
       }
 
-  return clearAddonDiscountsOnPriceEdit;
+  return { clearAddonDiscountsOnPriceEdit, financialCasSnapshot };
 }
 
 async function normalizeUpdateDetailsAddons({
@@ -11023,10 +11080,17 @@ async function computeUpdateDetailsFinancialPlan({
         }
       }
     } else if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
-      clearAddonDiscountsOnPriceEdit = await computeSingleServiceEstimatedPricePlan({
+      // GitHub Codex round 22 P1 (#4657, :11627): this branch now returns
+      // its own financialCasSnapshot too — see that function's own
+      // comment. Assigned into the SAME outer `financialCasSnapshot` the
+      // addons-array branch above populates, so the route's under-lock
+      // recheck reaches the no-add-on path identically.
+      const singleServicePlan = await computeSingleServiceEstimatedPricePlan({
         db, id, updates, discountType, discountAmount, estimatedPrice, primaryLinePrice,
         appointmentDiscountPreset, appointmentDiscountChanged, presetEligibilityCheck,
       });
+      clearAddonDiscountsOnPriceEdit = singleServicePlan.clearAddonDiscountsOnPriceEdit;
+      financialCasSnapshot = singleServicePlan.financialCasSnapshot;
     } else if (!isRecurring && (discountType !== undefined || discountAmount !== undefined)) {
       try {
         const cols = await db('scheduled_services').columnInfo();
@@ -12416,7 +12480,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // its rows, discounts and totals would otherwise be overwritten
         // with figures computed from rows that no longer exist. Same 409
         // the legacy-preservation CAS above uses; nothing is committed.
-        if (addonsReplaced && Array.isArray(expectedAddonRowIds)) {
+        // GitHub Codex round 22 P1 (#4657, :11627): this used to be gated
+        // on `addonsReplaced` alone, so a visit opened with NO add-ons
+        // (financialCasSnapshot built by computeSingleServiceEstimatedPricePlan,
+        // replaceAddons never touched) never reached the lock at all — a
+        // concurrent price change OR a concurrently ADDED add-on row landed
+        // between the pre-transaction read and this write, and the stale
+        // request still persisted its pre-change estimated_price. Gate on
+        // financialCasSnapshot (this plan priced money at all) in addition
+        // to the pre-existing addonsReplaced gate (this plan is about to
+        // delete/replace add-on rows), so either reason for needing the
+        // lock reaches it.
+        if ((addonsReplaced && Array.isArray(expectedAddonRowIds)) || financialCasSnapshot) {
           // GitHub Codex round 21 P1 (#4657, :12301): this SAME locked
           // .first() also serves financialStateDrifted's parent-side
           // re-read when this plan carries a financialCasSnapshot — select
@@ -12433,18 +12508,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             : ['id'];
           const freshAddonIdRows = await trx('scheduled_service_addons')
             .where({ scheduled_service_id: req.params.id }).select(...addonRecheckFields);
-          if (addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))) {
+          if (addonsReplaced && Array.isArray(expectedAddonRowIds)
+            && addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))) {
             throw Object.assign(new Error('This visit changed while you were editing — reload and save again.'), {
               statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
             });
           }
-          // GitHub Codex round 21 P1 (#4657, :12301): the id set matched,
-          // but another caller may have repriced this SAME set of rows in
-          // place (e.g. a primary-price edit that clears every add-on's
-          // stored discount columns without touching their ids). Compare
-          // the actual money this plan was built from against what's on
-          // the row now; only fires when this plan actually priced money
-          // (financialCasSnapshot is null on a schedule-only save).
+          // GitHub Codex round 21 P1 (#4657, :12301), extended round 22 P1
+          // (#4657, :11627) to the no-add-on path: the id set matched (or
+          // this plan never replaced add-on rows at all), but another
+          // caller may have repriced this row in place — a primary-price
+          // edit that clears every add-on's stored discount columns
+          // without touching their ids, or a concurrently ADDED add-on
+          // row this plan never knew about. Compare the actual money this
+          // plan was built from against what's on the row now; only fires
+          // when this plan actually priced money (financialCasSnapshot is
+          // null on a schedule-only save).
           if (financialStateDrifted(financialCasSnapshot, { parent: freshParentRow, addons: freshAddonIdRows })) {
             throw Object.assign(new Error('This appointment’s pricing changed while saving — reload and save again.'), {
               statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'FINANCIAL_STATE_DRIFT',

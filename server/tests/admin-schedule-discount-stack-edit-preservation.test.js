@@ -1529,4 +1529,37 @@ describe('financialStateDrifted (round 21 P1: financial CAS alongside the add-on
     fresh.addons = [];
     expect(financialStateDrifted(snap, fresh)).toBe(true);
   });
+
+  // GitHub Codex round 22 P1 (#4657, :11627): the loop above only walks
+  // the SNAPSHOT's own add-on rows looking for one gone from `fresh` — it
+  // never checked the opposite direction. A row present in `fresh` but
+  // absent from the snapshot (a concurrently ADDED add-on) must drift
+  // too, and this is the ONLY case that matters for a visit that was
+  // opened with zero add-ons in the first place (computeSingleServiceEstimatedPricePlan's
+  // own financialCasSnapshot always carries `addons: []`).
+  test('an add-on row present in the fresh read but absent from the snapshot (a concurrently ADDED add-on): drifted', () => {
+    const snap = baseSnapshot();
+    const fresh = freshFromSnapshot(snap);
+    fresh.addons = [...fresh.addons, {
+      id: 'addon-row-2', base_price: 25, estimated_price: 25, discount_id: null, discount_type: null, discount_amount: null, discount_dollars: null,
+    }];
+    expect(financialStateDrifted(snap, fresh)).toBe(true);
+  });
+
+  // The no-add-on save's own shape: a snapshot with an EMPTY addons array
+  // (never null — computeSingleServiceEstimatedPricePlan always builds one
+  // once `existingPrice` resolves) still needs a concurrently added row
+  // to register as drift.
+  test('a snapshot with zero add-ons (the no-add-on save path) drifts when a fresh add-on row now exists', () => {
+    const snap = { parent: { estimated_price: 100, primary_line_price: 100, discount_type: null, discount_amount: null }, addons: [] };
+    const fresh = {
+      parent: { ...snap.parent },
+      addons: [{
+        id: 'addon-row-new', base_price: 25, estimated_price: 25, discount_id: null, discount_type: null, discount_amount: null, discount_dollars: null,
+      }],
+    };
+    expect(financialStateDrifted(snap, fresh)).toBe(true);
+    // Control: same zero-add-on snapshot, no concurrent add — not drifted.
+    expect(financialStateDrifted(snap, { parent: { ...snap.parent }, addons: [] })).toBe(false);
+  });
 });
