@@ -15358,55 +15358,14 @@ const CallRecordingProcessor = {
               // rows are corrected by the office (or a dedicated backfill).
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
-              if (!scheduleWasReused) {
-                logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
-                await registerScheduleSideEffects({
-                  scheduledServiceId: svc.id,
-                  customerId,
-                  scheduledDate,
-                  windowStart: windowStart || '09:00',
-                  serviceType: svc.service_type,
-                });
-              } else if (attachedManualBookingId) {
-                // ATTACH reuse (call attached to a manually created booking):
-                // that booking owns its own reminder registration — only the
-                // fast redemption must re-run (Codex #3178 r37 P2) or a
-                // Charge Now / pay link in the next hour collects the full
-                // amount. Best-effort; the sweep stays the guarantee.
-                try {
-                  await require('./inspection-credit').redeemInspectionCreditForBooking({
-                    customerId,
-                    scheduledServiceId: svc.id,
-                    createdBy: 'system:inspection_credit_call_booking_replay',
-                  });
-                } catch (replayErr) {
-                  logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
-                }
-              } else if (!['pending', 'confirmed', 'rescheduled'].includes(String(svc.status || ''))) {
-                // Same-key replay reusing a row that is no longer pre-visit
-                // live (skipped / no_show / completed / mid-visit): arming
-                // reminders or re-arming a confirmation would message a
-                // customer about a visit that already resolved (Codex #3361
-                // r3 P1). Redemption stays — it is evidence-gated and the
-                // money seam must still settle.
-                try {
-                  await require('./inspection-credit').redeemInspectionCreditForBooking({
-                    customerId,
-                    scheduledServiceId: svc.id,
-                    createdBy: 'system:inspection_credit_call_booking_replay',
-                  });
-                } catch (replayErr) {
-                  logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
-                }
-              } else if (disputeHeldReuse) {
-                // A reused AI booking held on a house-number dispute gets NO
-                // replay repair: registerScheduleSideEffects re-arms the
-                // confirmation SMS / email and reminders, and no confirmation
-                // may reach the customer while the address is unresolved
-                // and the technician was just pulled (codex r9 P1). The
-                // office re-arms them from the card once the number is
-                // confirmed.
-                logger.warn(`[call-proc] replay repairs skipped for reused booking ${svc.id} (${maskSid(callSid)}): house number disputed`);
+              // The RETAINED visit's id rides on the open card: an Accept of
+              // the on-file number must direct staff to correct that live
+              // appointment's address, never to book a second one beside it
+              // (codex r29 P1). Under the triage-call lock, in its own
+              // transaction; best-effort. A helper, so the ATTACHED manual
+              // reuse (which takes the earlier replay branch) stamps it too
+              // (codex r38 P1).
+              const noteRetainedVisit = async () => {
                 // The RETAINED visit's id rides on the open card: an Accept
                 // of the on-file number must direct staff to correct that
                 // live appointment's address, never to book a second one
@@ -15414,6 +15373,11 @@ const CallRecordingProcessor = {
                 // its own transaction; best-effort.
                 await db.transaction(async (ttrx) => {
                   await lockTriageCall(ttrx, call.id);
+                  // A superseded worker (a force-reprocess replaced the
+                  // processing token) leaves the current card untouched
+                  // (codex r38 P1).
+                  const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+                  if (!stillOwner) return;
                   const noted = await ttrx('triage_items')
                     .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
                     .whereIn('status', ['open', 'in_progress'])
@@ -15466,6 +15430,58 @@ const CallRecordingProcessor = {
                     }
                   }
                 }).catch((noteErr) => logger.warn(`[call-proc] retained visit not noted on the conflict card for ${maskSid(callSid)}: ${noteErr.code || noteErr.name || 'db_error'}`));
+              };
+              if (!scheduleWasReused) {
+                logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
+                await registerScheduleSideEffects({
+                  scheduledServiceId: svc.id,
+                  customerId,
+                  scheduledDate,
+                  windowStart: windowStart || '09:00',
+                  serviceType: svc.service_type,
+                });
+              } else if (attachedManualBookingId) {
+                if (disputeHeldReuse) await noteRetainedVisit();
+                // ATTACH reuse (call attached to a manually created booking):
+                // that booking owns its own reminder registration — only the
+                // fast redemption must re-run (Codex #3178 r37 P2) or a
+                // Charge Now / pay link in the next hour collects the full
+                // amount. Best-effort; the sweep stays the guarantee.
+                try {
+                  await require('./inspection-credit').redeemInspectionCreditForBooking({
+                    customerId,
+                    scheduledServiceId: svc.id,
+                    createdBy: 'system:inspection_credit_call_booking_replay',
+                  });
+                } catch (replayErr) {
+                  logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
+                }
+              } else if (!['pending', 'confirmed', 'rescheduled'].includes(String(svc.status || ''))) {
+                // Same-key replay reusing a row that is no longer pre-visit
+                // live (skipped / no_show / completed / mid-visit): arming
+                // reminders or re-arming a confirmation would message a
+                // customer about a visit that already resolved (Codex #3361
+                // r3 P1). Redemption stays — it is evidence-gated and the
+                // money seam must still settle.
+                try {
+                  await require('./inspection-credit').redeemInspectionCreditForBooking({
+                    customerId,
+                    scheduledServiceId: svc.id,
+                    createdBy: 'system:inspection_credit_call_booking_replay',
+                  });
+                } catch (replayErr) {
+                  logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
+                }
+              } else if (disputeHeldReuse) {
+                // A reused AI booking held on a house-number dispute gets NO
+                // replay repair: registerScheduleSideEffects re-arms the
+                // confirmation SMS / email and reminders, and no confirmation
+                // may reach the customer while the address is unresolved
+                // and the technician was just pulled (codex r9 P1). The
+                // office re-arms them from the card once the number is
+                // confirmed.
+                logger.warn(`[call-proc] replay repairs skipped for reused booking ${svc.id} (${maskSid(callSid)}): house number disputed`);
+                await noteRetainedVisit();
               } else {
                 // Same-key REPLAY of this call's OWN still-live booking
                 // (idempotency conflict): the first attempt committed the
@@ -16699,6 +16715,9 @@ const CallRecordingProcessor = {
         // unreviewed (codex r31 P1).
         await db.transaction(async (ttrx) => {
           await lockTriageCall(ttrx, call.id);
+          // A superseded worker leaves the current task untouched (codex r38 P1).
+          const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+          if (!stillOwner) return;
           await ttrx('triage_items')
             .insert(buildTriageItem({
               callLogId: call.id,
@@ -16752,6 +16771,9 @@ const CallRecordingProcessor = {
           // discard that ask (codex r33 P1). Payload merged, status kept.
           await db.transaction(async (ttrx) => {
             await lockTriageCall(ttrx, call.id);
+            // A superseded worker leaves the current task untouched (codex r38 P1).
+            const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+            if (!stillOwner) return;
             await ttrx('triage_items')
               .insert(buildTriageItem({
                 callLogId: call.id,
@@ -17471,6 +17493,14 @@ const CallRecordingProcessor = {
         // shadow decision must hold exactly where enforce would hold, or
         // rollout metrics overstate safe fail-open bookings.
         routingResult = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);
+        // …and the house-number hold this pass actually applied (codex r38
+        // P1): a call whose legacy booking was HELD must not be persisted as
+        // a shadow auto-route candidate, or the promotion cohort counts an
+        // unsafe case as ready for enforcement.
+        if (houseNumberDisputed === true && routingResult?.allowed) {
+          routingResult = { ...routingResult, allowed: false, houseNumberDisputed: true };
+          if (!finalFlags.includes('on_file_house_number_conflict')) finalFlags = [...finalFlags, 'on_file_house_number_conflict'];
+        }
 
         if (!CALL_EXTRACTION_V2_DRIVES_ROUTING) {
           const shadowDecision = buildRouteDecision({
