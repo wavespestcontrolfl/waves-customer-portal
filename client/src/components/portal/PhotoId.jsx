@@ -908,7 +908,7 @@ function TreeShrubResult({ result }) {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <MetricTile label="Foliage" value={`${result.scores.foliage_fullness}%`} />
           <MetricTile label="Color" value={`${result.scores.leaf_color_vigor}%`} />
-          <MetricTile label="Overall" value={`${result.scores.overall}/10`} />
+          <MetricTile label="Overall" value={`${result.scores.overall}/100`} />
         </div>
       )}
       {Array.isArray(result.signals) && result.signals.length > 0 && (
