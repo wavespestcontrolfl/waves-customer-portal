@@ -154,38 +154,6 @@ describe('Pipeline queue navigation', () => {
     await waitFor(() => expect(calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length).toBeGreaterThan(before));
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
   });
-  it('explains automated contact evidence only when lead review is enabled', async () => {
-    const base = fetch.getMockImplementation();
-    const activities = [
-      { id: 'activity-live', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'AI Call Processor', created_at: '2040-09-05T17:00:00Z', metadata: JSON.stringify({ evidenceType: 'live_conversation', evidenceId: 'call-evidence-1234567890' }) },
-      { id: 'activity-booked', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'Fixture operator', created_at: '2040-09-05T18:00:00Z', metadata: { evidenceType: 'assessment_booked', evidenceId: 'booking_fixture_2' } },
-      { id: 'activity-completed', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'system', created_at: '2040-09-05T19:00:00Z', metadata: JSON.stringify({ evidenceType: 'assessment_completed', evidenceId: '<unsafe>' }) },
-      { id: 'activity-unsupported', activity_type: 'status_change', description: 'Unsupported automation remains visible', performed_by: 'system', created_at: '2040-09-05T20:00:00Z', metadata: JSON.stringify({ evidenceType: '__proto__', evidenceId: 'unsupported-fixture' }) },
-    ];
-    fetch.mockImplementation(async (url, opts) => new URL(String(url), 'http://localhost').pathname === '/api/admin/leads/lead-qa'
-      ? { ok: true, json: async () => ({ lead, activities, calls: [] }) }
-      : base(url, opts));
-    mount('/admin/pipeline?leadReview=1');
-    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
-    expect(await screen.findByText('Contacted after a live conversation')).toBeInTheDocument();
-    expect(screen.getByText('Contacted after an assessment was booked')).toBeInTheDocument();
-    expect(screen.getByText('Contacted after an assessment was completed')).toBeInTheDocument();
-    expect(screen.getByText(/Evidence reference call-evi.*7890/)).toBeInTheDocument();
-    expect(screen.queryByText(/unsafe/)).not.toBeInTheDocument();
-    expect(screen.getByText(/AI Call Processor/)).toBeInTheDocument();
-    expect(screen.getByText('Unsupported automation remains visible')).toBeInTheDocument();
-  });
-  it('keeps automated contact evidence hidden by default', async () => {
-    const base = fetch.getMockImplementation();
-    fetch.mockImplementation(async (url, opts) => new URL(String(url), 'http://localhost').pathname === '/api/admin/leads/lead-qa'
-      ? { ok: true, json: async () => ({ lead, activities: [{ id: 'activity-live', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'AI Call Processor', created_at: '2040-09-05T17:00:00Z', metadata: { evidenceType: 'live_conversation', evidenceId: 'call-fixture' } }], calls: [] }) }
-      : base(url, opts));
-    mount();
-    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
-    expect(await screen.findByText('Status: new → contacted')).toBeInTheDocument();
-    expect(screen.queryByText('Contacted after a live conversation')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Evidence reference/)).not.toBeInTheDocument();
-  });
   it('shows the effective callback deadline on the lead', async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation(async (url, opts) => String(url).includes('/commitments/open')
@@ -297,5 +265,37 @@ describe('Linked lead history preview', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Browser back' }));
     await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=lead-qa'));
     expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Primary record: Original Example');
+  });
+  it('explains automated contact evidence only when lead review is enabled', async () => {
+    const base = fetch.getMockImplementation();
+    const activities = [
+      { id: 'activity-live', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'AI Call Processor', created_at: '2040-09-05T17:00:00Z', metadata: JSON.stringify({ evidenceType: 'live_conversation', evidenceId: 'call-evidence-1234567890' }) },
+      { id: 'activity-booked', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'Fixture operator', created_at: '2040-09-05T18:00:00Z', metadata: { evidenceType: 'assessment_booked', evidenceId: 'booking_fixture_2' } },
+      { id: 'activity-completed', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'system', created_at: '2040-09-05T19:00:00Z', metadata: JSON.stringify({ evidenceType: 'assessment_completed', evidenceId: '<unsafe>' }) },
+      { id: 'activity-unsupported', activity_type: 'status_change', description: 'Unsupported automation remains visible', performed_by: 'system', created_at: '2040-09-05T20:00:00Z', metadata: JSON.stringify({ evidenceType: '__proto__', evidenceId: 'unsupported-fixture' }) },
+    ];
+    fetch.mockImplementation(async (url, opts) => new URL(String(url), 'http://localhost').pathname === '/api/admin/leads/lead-qa'
+      ? { ok: true, json: async () => ({ lead, activities, calls: [] }) }
+      : base(url, opts));
+    mount('/admin/pipeline?leadReview=1');
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    expect(await screen.findByText('Contacted after a live conversation')).toBeInTheDocument();
+    expect(screen.getByText('Contacted after an assessment was booked')).toBeInTheDocument();
+    expect(screen.getByText('Contacted after an assessment was completed')).toBeInTheDocument();
+    expect(screen.getByText(/Evidence reference call-evi.*7890/)).toBeInTheDocument();
+    expect(screen.queryByText(/unsafe/)).not.toBeInTheDocument();
+    expect(screen.getByText(/AI Call Processor/)).toBeInTheDocument();
+    expect(screen.getByText('Unsupported automation remains visible')).toBeInTheDocument();
+  });
+  it('keeps automated contact evidence hidden by default', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => new URL(String(url), 'http://localhost').pathname === '/api/admin/leads/lead-qa'
+      ? { ok: true, json: async () => ({ lead, activities: [{ id: 'activity-live', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'AI Call Processor', created_at: '2040-09-05T17:00:00Z', metadata: { evidenceType: 'live_conversation', evidenceId: 'call-fixture' } }], calls: [] }) }
+      : base(url, opts));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    expect(await screen.findByText('Status: new → contacted')).toBeInTheDocument();
+    expect(screen.queryByText('Contacted after a live conversation')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Evidence reference/)).not.toBeInTheDocument();
   });
 });
