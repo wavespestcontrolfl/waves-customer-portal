@@ -1114,6 +1114,15 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
     logger.warn(`[inspection-public] comms fence busy for ${matched.id}; coordinates not persisted`);
     return { customer: matched, location: resolved.location };
   }
+  // Re-read under the fence (Codex #4737 r9 pre-push P1): an address edit
+  // that committed between matching and this lock must not receive the old
+  // address's coordinates — a changed (or archived) profile is a retry.
+  const fresh = await trx('customers').where({ id: matched.id }).whereNull('deleted_at')
+    .first('id', 'account_id', ...STORED_ADDRESS_FIELDS);
+  const unchanged = fresh
+    && String(fresh.account_id || '') === String(matched.account_id || '')
+    && STORED_ADDRESS_FIELDS.every((f) => (fresh[f] ?? null) === (matched[f] ?? null));
+  if (!unchanged) return { locationFailure: 'address_unresolved' };
   const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
   await trx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
   return { customer: { ...matched, ...after }, location: resolved.location };
@@ -1442,6 +1451,7 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
       // trx-scoped DB work — no network I/O of its own.
       const linkResult = await resolveOrLinkCustomerForLead(trx, freshLead, resolved, verified);
       if (linkResult.eligibility) return { eligibility: linkResult.eligibility };
+      if (linkResult.locationFailure) return { locationFailure: linkResult.locationFailure };
       provisioned = linkResult.customer;
       // A reused (verified) profile's OWN stored location, when it has
       // one — never the lead's pre-lock resolved.location — so the

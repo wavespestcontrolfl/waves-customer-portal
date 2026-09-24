@@ -1249,6 +1249,30 @@ describe('POST /:token commit', () => {
       expect(res.body.endLabel).toBe('9:45 AM');
     });
 
+    // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
+    // comms fence; an address edited in between is a retry, never given the
+    // old address's coordinates.
+    test('a matched profile whose address changed before the fence is a retry — no coordinates written, nothing booked', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      const existingCustomer = {
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: null, longitude: null,
+      };
+      mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+      listResults.customers = [existingCustomer];
+      listResults.scheduled_services = [];
+      // The fenced re-read sees the edit.
+      firstResults.customers = { ...existingCustomer, address_line1: '9 Moved Rd' };
+      mockBuildAvailability.mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(422);
+      expect(res.body.error).toBe('address_unresolved');
+      expect(updateCalls.some((c) => c.table === 'customers' && c.payload.latitude != null)).toBe(false);
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    });
+
     // Codex #4737 r9 pre-push P1: a verified lead whose own customer_id is
     // UNTRUSTED reuses a matched profile — that profile is recorded as its
     // provenance (verification-required), so a reopened link finds it.
@@ -1807,6 +1831,7 @@ describe('POST /:token commit', () => {
         mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
         listResults.scheduled_services = [];
         firstResults.scheduled_services = { id: 'ss-reuse', reschedule_token: 'tok-reuse' };
+        firstResults.customers = existingCustomer; // the fenced re-read sees it unchanged
 
         const token = mintLeadConsultationToken(LEAD_ID);
         const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
@@ -1860,6 +1885,7 @@ describe('POST /:token commit', () => {
         const existingCustomer = existingCustomerAt('123 Palm Ave', { latitude: null, longitude: null });
         mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
         listResults.scheduled_services = [];
+        firstResults.customers = existingCustomer; // the fenced re-read sees it unchanged
 
         const token = mintLeadConsultationToken(LEAD_ID);
         const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
@@ -1951,6 +1977,7 @@ describe('POST /:token commit', () => {
         mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
         listResults.scheduled_services = [];
         firstResults.scheduled_services = { id: 'ss-sms', reschedule_token: 'tok-sms' };
+        firstResults.customers = existingCustomer; // the fenced re-read sees it unchanged
 
         const token = mintLeadConsultationToken(LEAD_ID, undefined, require('../utils/lead-consultation-token').smsChannelFor(LEAD_ROW.phone)); // this exact link was texted to the lead's current phone
         const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
