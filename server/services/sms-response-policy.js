@@ -11,6 +11,7 @@ const HUMAN_REPLY_TYPES = Object.freeze([
   'ai_assistant_reply',
   'follow_up',
 ]);
+const DRAFT_REPLY_TYPES = Object.freeze(['ai_approved', 'ai_revised']);
 
 const NON_ACTIONABLE_INBOUND_TYPES = Object.freeze([
   'opt_out',
@@ -92,15 +93,23 @@ function inboundNeedsResponse(message) {
   return flags.hasMedia || (!flags.courtesyOnly && !flags.spamEnforced);
 }
 
-function outboundIsAnswer({ direction, messageType, status, isClickFollowup = false } = {}) {
+function outboundIsAnswer({
+  direction,
+  messageType,
+  status,
+  isClickFollowup = false,
+  hasDraftProvenance = false,
+} = {}) {
   return direction === 'outbound'
     && HUMAN_REPLY_TYPES.includes(messageType)
     && ['queued', 'sent', 'delivered'].includes(status)
-    && !isClickFollowup;
+    && !isClickFollowup
+    && (!DRAFT_REPLY_TYPES.includes(messageType) || hasDraftProvenance);
 }
 
 module.exports = {
   HUMAN_REPLY_TYPES,
+  DRAFT_REPLY_TYPES,
   NON_ACTIONABLE_INBOUND_TYPES,
   phoneIdentitySql,
   draftIdSql,

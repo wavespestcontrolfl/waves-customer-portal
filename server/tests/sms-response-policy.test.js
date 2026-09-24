@@ -66,6 +66,13 @@ describe('SMS response policy', () => {
   test('only accepted conversational outbound sends answer a thread', () => {
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'manual', status: 'sent' })).toBe(true);
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'ai_approved', status: 'delivered', isClickFollowup: true })).toBe(false);
+    expect(outboundIsAnswer({ direction: 'outbound', messageType: 'ai_approved', status: 'delivered' })).toBe(false);
+    expect(outboundIsAnswer({
+      direction: 'outbound', messageType: 'ai_approved', status: 'delivered', hasDraftProvenance: true,
+    })).toBe(true);
+    expect(outboundIsAnswer({
+      direction: 'outbound', messageType: 'ai_revised', status: 'sent', hasDraftProvenance: true,
+    })).toBe(true);
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'reminder', status: 'sent' })).toBe(false);
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'manual', status: 'failed' })).toBe(false);
   });
