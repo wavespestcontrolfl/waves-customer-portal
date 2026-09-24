@@ -815,7 +815,7 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
 }
 
 const ANALYZE_PHOTOS_MAX = 5;
-// Mirrors MESSAGE_PHOTO_ALLOWED_MIME in server/routes/admin-photo-assessments.js
+// Mirrors MESSAGE_PHOTO_ALLOWED_MIME in server/services/photo-assessment-create.js
 // — only these get resized+analyzed server-side; a non-image MMS (video,
 // audio, vcard) must never appear in the picker or count toward "has photos".
 const ANALYZE_PHOTOS_ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);

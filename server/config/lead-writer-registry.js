@@ -201,10 +201,10 @@ const LEAD_WRITERS = [
 //                      literal (or the declared allowIndirect expression).
 const DYNAMIC_TABLE_INSERTS = [
   {
-    file: 'routes/admin-photo-assessments.js',
+    file: 'services/photo-assessment-create.js',
     anchor: 'const [row] = await db(config.table).insert({',
     expr: 'config.table',
-    reason: "FUNNEL_CONFIGS tables only — 'lawn_diagnostics' / 'pest_identifications' / 'tree_shrub_identifications' (routes/admin-photo-assessments.js), never leads",
+    reason: "FUNNEL_CONFIGS tables only — 'lawn_diagnostics' / 'pest_identifications' / 'tree_shrub_identifications' (services/photo-assessment-create.js), never leads",
     // Scoped to the named config OBJECT (balanced-brace extraction), where
     // spreads, shorthand, and noncanonical keys are rejected and every
     // listed prop must be a literal.
@@ -229,7 +229,7 @@ const DYNAMIC_TABLE_INSERTS = [
       helper: 'storeFunnelPhotos',
       prop: 'table',
       allowIndirect: 'config.photoTable',
-      indirectFile: 'routes/admin-photo-assessments.js',
+      indirectFile: 'services/photo-assessment-create.js',
       minCallers: 3,
     },
   },
