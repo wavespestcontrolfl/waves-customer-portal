@@ -1,9 +1,9 @@
 // Locks the LLM call-ledger contract (agent-control S2a): every provider
 // adapter in services/llm/call.js records one row_kind='call' row with the
 // provider's usage block normalised, the served model, latency and an
-// error_code / error_class on failure — WITHOUT changing what any caller
-// gets back (the adapters' own timeouts are the one new reason,
-// `<provider>_timeout`). Dark behind GATE_LLM_CALL_LEDGER (no DB touch when
+// error_code / error_class on failure. Successful adapter results expose the
+// provider-reported model additively as servedModel while preserving model as
+// the requested route. Dark behind GATE_LLM_CALL_LEDGER (no DB touch when
 // off), never throws into the call it observes, and shares one chain id
 // with the chain row dispatchWithFallback writes.
 
@@ -129,11 +129,11 @@ describe('llm call ledger', () => {
   });
 
   describe('callOpenAI', () => {
-    it('records a call row with usage, served model, provider ref and latency; return gains usage only', async () => {
+    it('records and returns the provider-reported model separately from the requested model', async () => {
       global.fetch = fetchJson(OPENAI_BODY);
       const { call } = load();
       const result = await call.callOpenAI({ model: 'openai-requested', system: 's', text: 't' });
-      expect(result).toEqual({ ok: true, text: '{"a":1}', json: { a: 1 }, model: 'openai-requested', usage: expect.objectContaining({ input_tokens: 120, output_tokens: 30 }) });
+      expect(result).toEqual({ ok: true, text: '{"a":1}', json: { a: 1 }, model: 'openai-requested', servedModel: 'openai-served', usage: expect.objectContaining({ input_tokens: 120, output_tokens: 30 }) });
       await flush();
       const [row] = callRows();
       expect(row).toMatchObject({
@@ -231,7 +231,7 @@ describe('llm call ledger', () => {
       // The Gemini leg returns its usage like the OpenAI leg does (2026-09-08),
       // so a caller can put token cost on its own provenance row.
       expect(await call.callGemini({ model: 'g', text: 't' })).toEqual({
-        ok: true, text: '{"g":true}', json: { g: true }, model: 'g',
+        ok: true, text: '{"g":true}', json: { g: true }, model: 'g', servedModel: 'gemini-served',
         usage: { input_tokens: 50, cached_input_tokens: 10, cache_write_tokens: null, output_tokens: 20, reasoning_tokens: 5 },
       });
       global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ content: { parts: [{ text: 'not json' }] } }] });
@@ -294,7 +294,7 @@ describe('llm call ledger', () => {
       mockAnthropicCreate.mockResolvedValue(ANTHROPIC_MESSAGE);
       const { call } = load();
       const result = await call.callAnthropic({ model: 'a', system: 's', text: 't' });
-      expect(result).toMatchObject({ ok: true, json: { c: 2 }, model: 'a', response: ANTHROPIC_MESSAGE });
+      expect(result).toMatchObject({ ok: true, json: { c: 2 }, model: 'a', servedModel: 'anthropic-served', response: ANTHROPIC_MESSAGE });
       await flush();
       expect(callRows()[0]).toMatchObject({
         ok: true, provider: 'anthropic', requested_model: 'a', served_model: 'anthropic-served', provider_ref: 'msg_1',
