@@ -4,6 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etParts, etDateString } = require('../utils/datetime-et');
+const { dateOnlyStamp } = require('../services/service-report/time-format');
 const { taxPeriodFor } = require('../utils/tax-period');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, salesTaxCollectedForWindow,
@@ -124,16 +125,55 @@ router.get('/dashboard', async (req, res, next) => {
 // TAX RATES
 // ═══════════════════════════════════════════════════════════════
 
+// Date-derived 'current' | 'staged' | 'superseded' per row, computed the
+// same way calculateTax (with its old-shape compatibility fallback) picks a
+// county's rate — independent of the legacy `active` column, which a
+// staged-but-not-yet-effective post leaves true on BOTH the predecessor and
+// the successor (codex round-1 P2 / round-3 P1: the raw `active` flag no
+// longer means "this is the rate in force," so a UI or report reading it
+// directly shows a stale or duplicate picture).
+function withRateStatus(rows, nowET) {
+  // dateOnlyStamp: pg hydrates a DATE column at the process's LOCAL
+  // midnight, so local getters (which it uses) read the calendar date back
+  // correctly whatever timezone the server runs in — a plain
+  // Date#toISOString or String() would shift a day for zones ahead of UTC.
+  const eachEff = rows.map((r) => dateOnlyStamp(r.effective_date));
+  const eachExp = rows.map((r) => (r.expiry_date ? dateOnlyStamp(r.expiry_date) : null));
+  const byCounty = new Map();
+  rows.forEach((r, i) => {
+    if (!byCounty.has(r.county)) byCounty.set(r.county, []);
+    byCounty.get(r.county).push(i);
+  });
+  const currentIdByCounty = new Map();
+  for (const [county, indices] of byCounty) {
+    const eligible = indices.filter((i) => eachEff[i] <= nowET && (!eachExp[i] || eachExp[i] > nowET));
+    if (eligible.length) {
+      eligible.sort((a, b) => eachEff[b].localeCompare(eachEff[a]));
+      currentIdByCounty.set(county, rows[eligible[0]].id);
+    }
+  }
+  return rows.map((r, i) => {
+    let status;
+    if (eachEff[i] > nowET) status = 'staged';
+    else if (currentIdByCounty.get(r.county) === r.id) status = 'current';
+    else status = 'superseded';
+    return { ...r, status };
+  });
+}
+
 router.get('/rates', async (req, res, next) => {
   try {
+    const nowET = etDateString();
     const rates = await db('tax_rates').orderBy([{ column: 'active', order: 'desc' }, { column: 'county' }]);
+    const withStatus = withRateStatus(rates, nowET);
     res.json({
-      rates: rates.map(r => ({
+      rates: withStatus.map(r => ({
         id: r.id, county: r.county, state: r.state,
         stateRate: parseFloat(r.state_rate), countySurtax: parseFloat(r.county_surtax),
         combinedRate: parseFloat(r.combined_rate),
         effectiveDate: r.effective_date, expiryDate: r.expiry_date,
         serviceZone: r.service_zone, notes: r.notes, active: r.active,
+        status: r.status,
       })),
     });
   } catch (err) { next(err); }

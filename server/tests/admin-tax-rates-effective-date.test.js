@@ -98,6 +98,21 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
     expect(r.rate).toBeCloseTo(0.07, 6);
     expect(r.amount).toBe(7);
   });
+
+  test('GET /rates labels the two rows current vs staged, not both active (codex round-3 P1)', async () => {
+    const { status, body } = await withServer((base) => fetch(`${base}/admin/tax/rates`)
+      .then(async (r) => ({ status: r.status, body: await r.json() })));
+    expect(status).toBe(200);
+    const sarasota = body.rates.filter((r) => r.county === 'Sarasota');
+    const current = sarasota.find((r) => r.status === 'current');
+    const staged = sarasota.find((r) => r.status === 'staged');
+    // EXPECTED: exactly one 'current' row (both rows carry active:true on
+    // the raw column, so a UI reading `active` directly would show both).
+    expect(sarasota.filter((r) => r.status === 'current')).toHaveLength(1);
+    expect(parseFloat(current.combinedRate)).toBeCloseTo(0.07, 6);
+    expect(staged).toBeDefined();
+    expect(parseFloat(staged.combinedRate)).toBeCloseTo(0.075, 6);
+  });
 });
 
 (process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('backfilling a historical rate must not touch a later rate already in force (codex round-1 P1)', () => {
