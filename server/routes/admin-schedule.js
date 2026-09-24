@@ -17457,33 +17457,79 @@ async function seriesPropertyKey(conn, row, cols) {
   const customerAddress = customer ? addressKey(customer) : '';
   return customerAddress ? `addr:${customerAddress}` : null;
 }
+// Mirrors extendSeriesOnceLocked's own candidate-date search — the SAME
+// primitives (seriesExtendAnchor, nextRecurringDate, seasonalSafeShift,
+// recurrenceOrdinalOptions, recurringCandidateTooCloseToAnchor), never a
+// second hand-rolled date-math approximation — so isCandidateTopUpBillable
+// below can probe the date a series would ACTUALLY try next, instead of a
+// fixed "today" (Codex GitHub guards-follow-up P1, round 3: a zero-base
+// sibling with an add-on due TODAY but not on its real cadence date could
+// pass a today-only probe, win the ranking, then refuse its own insert on
+// the date that actually matters). Read-only, and deliberately never calls
+// seriesCandidateDateClashes: top-up's own real insert always runs that
+// check in ADVISORY-ONLY mode (opts.overlapAdvisoryOnly), where a clash
+// never changes which date gets picked — only whether a warning is
+// logged — so skipping it here changes no outcome and spares a probe-only
+// occupancy query. Returns null when there's no live visit to anchor from,
+// or when 12 cadence steps find nothing open — the SAME give-up
+// conditions extendSeriesOnceLocked itself uses.
+async function resolveTopUpProbeCandidateDate(conn, parentId, parent, cols) {
+  const latest = await latestLiveSeriesVisit(conn, parentId);
+  if (!latest) return null;
+  const rOpts = {
+    ...recurrenceOrdinalOptions(parent.scheduled_date, {
+      nth: parent.recurring_nth,
+      weekday: parent.recurring_weekday,
+    }),
+    intervalDays: parent.recurring_interval_days,
+  };
+  const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
+  const skipParent = (cols.skip_weekends ? !!parent.skip_weekends : false)
+    || await customerPrefersNoWeekends(conn, parent.customer_id);
+  const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
+  const existingDates = await loadActiveSeriesDates(conn, parentId);
+  const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
+  let attempt = 1;
+  while (attempt <= 12) {
+    const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
+    const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
+    if (!candidate) { attempt++; continue; }
+    if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) { attempt++; continue; }
+    if (candidate <= etDateString()) { attempt++; continue; }
+    if (existingDates.has(candidate)) { attempt++; continue; }
+    return { candidate, skipParent, autoExtendBlackoutDates };
+  }
+  return null;
+}
 // Never let an unbillable candidate win a superseded-series comparison and
-// suppress a real one (Codex GitHub guards-follow-up P1, twice: a first
-// cheap "invoice stamp OR a price OR membership dues" proxy still let a
-// create_invoice_on_complete flag alone count as billable, with no price
-// or dues behind it — the SAME false-positive shape the coordinator's
-// whole prepay scope-cut saga already spent three rounds eliminating from
-// this file). An unbillable legacy duplicate with a coincidentally LATER
-// live visit could otherwise be crowned winner, suppressing the
+// suppress a real one (Codex GitHub guards-follow-up P1: round 1, a cheap
+// "invoice stamp OR a price OR membership dues" proxy let a
+// create_invoice_on_complete flag alone count as billable with nothing
+// behind it — the SAME false-positive shape the coordinator's whole
+// prepay scope-cut saga already spent three rounds eliminating from this
+// file; round 3, probing a fixed "today" instead of the series' real next
+// candidate date missed an add-on that's due today but not on the actual
+// cadence date). An unbillable legacy duplicate with a coincidentally
+// LATER live visit could otherwise be crowned winner, suppressing the
 // genuinely billable sibling — and since the "winner" then refuses every
 // insert on its own turn anyway, NEITHER series would ever replenish
 // again on any future run either. Reuses seriesExtensionUnbillable
-// directly — the SAME authoritative verdict extendSeriesOnceLocked
-// itself consults, never a second hand-rolled approximation — probed
-// against today's date with no due add-ons (an add-on could only ever
-// RESCUE an otherwise-$0 base price, never make a genuinely priced
-// series look unbillable, so ignoring them here is the safe direction: it
-// can undercount billability, never overcount it).
+// directly — the SAME authoritative verdict extendSeriesOnceLocked itself
+// consults, never a second hand-rolled approximation — against the real
+// next candidate date and its real due add-ons (resolveTopUpProbeCandidateDate
+// above). No candidate date to probe (no live visit, or 12 cadence steps
+// found nothing open) proves nothing unbillable, so it defaults to
+// billable rather than block the ranking on an inconclusive read — the
+// same "never overcount unbillable" direction as before.
 async function isCandidateTopUpBillable(conn, row, cols) {
   const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: row.id });
   const storedDiscountScope = await loadStoredDiscountScope(conn, row, parentAddons);
   const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, row.id, row);
-  const blackoutDates = await loadSeriesBlackoutDates(conn, etDateString());
-  const skipParent = (cols.skip_weekends ? !!row.skip_weekends : false)
-    || await customerPrefersNoWeekends(conn, row.customer_id);
+  const probe = await resolveTopUpProbeCandidateDate(conn, row.id, row, cols);
+  if (!probe) return true;
   const unbillable = await seriesExtensionUnbillable(conn, {
-    parent: row, dates: [etDateString()], cols, parentAddons, storedDiscountScope,
-    blackoutDates, skipParent, seriesCioc,
+    parent: row, dates: [probe.candidate], cols, parentAddons, storedDiscountScope,
+    blackoutDates: probe.autoExtendBlackoutDates, skipParent: probe.skipParent, seriesCioc,
   });
   return !unbillable;
 }
@@ -23610,6 +23656,7 @@ router._test = {
   isSupersededSeries,
   isCandidateTopUpBillable,
   isCandidateTopUpEligible,
+  resolveTopUpProbeCandidateDate,
   pickTopUpWinnerId,
   normalizeTopUpWindow,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,

@@ -968,6 +968,71 @@ describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Co
   });
 });
 
+describe('resolveTopUpProbeCandidateDate — probes the REAL next cadence date, never a fixed "today" (Codex GitHub guards follow-up P1, round 3)', () => {
+  // Pins the exact gap the review round caught: isCandidateTopUpBillable
+  // used to probe a fixed etDateString() regardless of the series' own
+  // cadence, so a zero-base sibling with an add-on due TODAY (but not on
+  // its real next visit) could pass the probe, win the superseded-series
+  // ranking, then refuse its own insert on the date that actually matters.
+  // This pins the fix's mechanism directly: the probe now runs the SAME
+  // candidate search extendSeriesOnceLocked itself uses, so it resolves to
+  // the series' real next cadence date rather than "today" whenever those
+  // differ.
+  const { resolveTopUpProbeCandidateDate } = adminScheduleRouter._test;
+
+  function probeDateConn(latestDate) {
+    return makeConn(({ table, calls, op }) => {
+      if (table === 'scheduled_services') {
+        if (op === 'columnInfo') return BASE_COLS;
+        if (op === 'first') {
+          // latestLiveSeriesVisit's own query shape (orderBy + first).
+          if (calls.some((c) => c[0] === 'orderBy')) return { scheduled_date: latestDate };
+          return null;
+        }
+        if (op === 'await') return []; // loadActiveSeriesDates: no other active dates
+      }
+      if (table === 'property_preferences') return null;
+      if (table === 'schedule_blackout_dates') return [];
+      return null;
+    });
+  }
+
+  test('a weekly series anchored a week ago resolves to next week, never today', async () => {
+    const anchor = daysOut(-7);
+    const parent = {
+      id: 10, customer_id: 5, recurring_pattern: 'weekly', scheduled_date: anchor,
+      recurring_nth: null, recurring_weekday: null, recurring_interval_days: null,
+      skip_weekends: false, weekend_shift: null,
+    };
+    const probe = await resolveTopUpProbeCandidateDate(probeDateConn(anchor), 10, parent, BASE_COLS);
+    expect(probe).not.toBeNull();
+    // The real next weekly cadence step is a week past the anchor — NOT
+    // today (today would be the pre-fix probe's fixed date, and if the
+    // anchor happens to be more than a week in the past, today could
+    // otherwise coincidentally look like a plausible "next" date).
+    expect(probe.candidate).not.toBe(etDateString());
+    expect(probe.candidate > etDateString()).toBe(true);
+    expect(probe.candidate).not.toBe(anchor);
+  });
+
+  test('a series with no live visit at all resolves to null — nothing to probe, never a fabricated "today"', async () => {
+    const parent = {
+      id: 10, customer_id: 5, recurring_pattern: 'weekly', scheduled_date: daysOut(-7),
+      recurring_nth: null, recurring_weekday: null, recurring_interval_days: null,
+    };
+    const conn = makeConn(({ table, op }) => {
+      if (table === 'scheduled_services') {
+        if (op === 'columnInfo') return BASE_COLS;
+        if (op === 'first') return null; // no latest live visit
+        if (op === 'await') return [];
+      }
+      return null;
+    });
+    const probe = await resolveTopUpProbeCandidateDate(conn, 10, parent, BASE_COLS);
+    expect(probe).toBeNull();
+  });
+});
+
 describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
   // Same shared verdict every OFFICE series writer consults
   // (seriesExtensionUnbillable) — the completion-time single-visit

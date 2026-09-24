@@ -663,9 +663,17 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // question ("which of these roots is the one actually being kept
     // current") than the anchor-for-extension use every other consumer
     // makes, but the same shared "latest live visit" definition either way.
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(7);
-    // The occupied-dates preload is shared the same way (same 4th consumer).
-    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
+    // 7th: resolveTopUpProbeCandidateDate (Codex GitHub guards follow-up
+    // P1, round 3) anchors the superseded-series billability probe's
+    // candidate-date search on the SAME latest-live-visit definition
+    // extendSeriesOnceLocked's own search uses, so the probe checks the
+    // date a series would actually try next rather than a fixed "today".
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(8);
+    // The occupied-dates preload is shared the same way — same 4th
+    // consumer, plus resolveTopUpProbeCandidateDate's own 5th (mirrors
+    // extendSeriesOnceLocked's dedupe against active series dates so the
+    // probed date can't be one already booked).
+    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(5);
   });
 
   test('isSupersededSeries classifies each sibling root through the SAME template-override overlay `parent` gets (source guard, Codex GitHub guards follow-up P1)', () => {
