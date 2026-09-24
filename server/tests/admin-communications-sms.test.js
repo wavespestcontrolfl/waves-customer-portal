@@ -2577,8 +2577,40 @@ describe('leadId in the body (consultation lead-only fallback): the send stays o
     body: JSON.stringify({ to: '+15551234567', body: "Pick a time for us to stop by.", leadId: 'aaaaaaaa-1111-4111-8111-111111111111', ...overrides }),
   });
 
+  // Codex #4709 r17 P2: outreach is recorded only for a lead the send check
+  // actually validated a consultation link for — stubbed here as validated.
+  let consultationSpy;
   beforeEach(() => {
     sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-lead-outreach' });
+    consultationSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, consultationLeadId: 'aaaaaaaa-1111-4111-8111-111111111111' });
+  });
+  afterEach(() => { consultationSpy.mockRestore(); });
+
+  test('a leadId on a text with NO validated consultation link records nothing', async () => {
+    consultationSpy.mockResolvedValue({ ok: true });
+    const leadActivities = [];
+    let leadUpdated = null;
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'new' }));
+        b.update = jest.fn(async (patch) => { leadUpdated = patch; return 1; });
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'Running a bit late today.' });
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities.some((r) => r.activity_type === 'sms_sent')).toBe(false);
+    expect(leadUpdated?.status).not.toBe('contacted');
   });
 
   test('records the lead_activities row, first-response stamp, and new→contacted transition — same as POST /admin/leads/:id/send-sms', async () => {

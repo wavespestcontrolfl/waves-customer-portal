@@ -520,35 +520,42 @@ function fullyDecoded(text) {
   }
   return out;
 }
-// Consultation credentials inside URLs on hosts we do NOT own (Codex #4709
-// r12–r15 P1): a wrapper can carry the bearer in its path, any query
-// parameter (?next=, ?token=, ?code=) or fragment, encoded or not, with or
-// without a route marker. Every token-shaped value of every foreign URL is
-// checked: signed consultation tokens by signature, short codes by a
-// short_codes lookup (kind consultation). Returns true when any is found.
-const URL_LIKE_RE = /^(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/)?[^\s/?#]+\.[^\s/?#]+[/?#]/;
-async function foreignConsultationCredentialPresent(runs, hosts) {
+// A consultation credential ANYWHERE in the message other than a canonical
+// owned consultation link (Codex #4709 r12–r17 P1 — widened after four
+// rounds of URL-shape gaps: path, query, fragment, hostname, userinfo, no
+// trailing slash, candidate cap). No URL parsing decides what is scanned:
+// every whitespace run that is not itself a canonical owned /l/<code> or
+// /inspection/<token> link is fully percent-decoded and split into
+// token-shaped pieces (dots split too, so hostname labels are pieces), and
+// EVERY piece is checked — signed tokens by signature, short codes in one
+// batched short_codes lookup per 500 candidates, never truncated. A hit
+// means the bearer rides somewhere other than a link the send check
+// validates, so the send is refused.
+const CONSULTATION_CODE_SHAPE = /^[a-hjkmnp-z2-9]{10,11}$/i;
+async function strayConsultationCredentialPresent(runs, hosts) {
   const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
-  const owned = [].concat(hosts);
   const codes = new Set();
   for (const raw of runs) {
-    const run = raw.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, '').replace(/^[^/]*?(?=https?:\/\/)/i, '');
-    if (!URL_LIKE_RE.test(run)) continue;
-    let url;
-    try { url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`); } catch { continue; }
-    if (owned.includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
-    // The authority too (Codex #4709 r16 P1): a credential can ride in a
-    // subdomain label or the userinfo (https://<code>.tracker.example/).
-    const authority = [url.username, url.password, ...url.hostname.split('.')].join('/');
-    const pieces = fullyDecoded(`${authority}/${url.pathname}${url.search}${url.hash}`).split(/[^A-Za-z0-9._-]+/).filter(Boolean);
-    for (const piece of pieces) {
+    const run = raw.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, '');
+    const canonical = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, ANY_SCHEME)
+      || canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME);
+    if (canonical) continue;
+    for (const piece of fullyDecoded(run).split(/[^A-Za-z0-9._-]+/).filter(Boolean)) {
       if (piece.includes('.') && verifyLeadConsultationToken(piece, 0)) return true;
-      if (/^[A-Za-z0-9_-]{5,40}$/.test(piece) && codes.size < 100) codes.add(piece.toLowerCase());
+      // Only the consultation code SHAPE (short-url.js generateCode: 10–11
+      // chars of its ambiguity-free alphabet, no prefix for this kind) — so
+      // ordinary words never cost a lookup, and no real code is skipped.
+      for (const part of piece.split('.')) {
+        if (CONSULTATION_CODE_SHAPE.test(part)) codes.add(part.toLowerCase());
+      }
     }
   }
-  if (!codes.size) return false;
-  const rows = await db('short_codes').whereIn('code', [...codes]).where({ kind: 'consultation' }).select('code', 'kind');
-  return (rows || []).some((r) => r.kind === 'consultation');
+  const all = [...codes];
+  for (let i = 0; i < all.length; i += 500) {
+    const rows = await db('short_codes').whereIn('code', all.slice(i, i + 500)).where({ kind: 'consultation' }).select('code', 'kind');
+    if ((rows || []).some((r) => r.kind === 'consultation')) return true;
+  }
+  return false;
 }
 
 function linkRuns(runs, fragmentRe) {
@@ -898,7 +905,7 @@ async function immediateOnlyLinkSendCheck(body) {
   }
   // ...and a consultation credential anywhere in a FOREIGN URL (Codex #4709
   // r12–r15 P1): parked here so the send-time check refuses it.
-  if (await foreignConsultationCredentialPresent(runs, hosts)) return { present: true, label: 'Consultation link' };
+  if (await strayConsultationCredentialPresent(runs, hosts)) return { present: true, label: 'Consultation link' };
   return { present: false };
 }
 
@@ -1435,7 +1442,7 @@ async function consultationLinkRows(body) {
   }
   // A consultation bearer anywhere inside a URL on a host we do NOT own is
   // refused outright: the third party could harvest the 14-day bearer.
-  if (await foreignConsultationCredentialPresent(runs, hosts)) {
+  if (await strayConsultationCredentialPresent(runs, hosts)) {
     rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
   }
   const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');

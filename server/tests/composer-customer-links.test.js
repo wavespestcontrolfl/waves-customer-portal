@@ -2699,14 +2699,14 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
   // foreign host is refused at send and parked by the fence.
   test('a consultation short code under a host we do not own → refused and fenced', async () => {
     mockBuilders = {
-      short_codes: chainBuilder({ rows: [{ code: 'cons1', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+      short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
       leads: chainBuilder({ firstRow: LEAD_ROW }),
       sms_templates: chainBuilder({ firstRow: { is_active: true } }),
     };
-    const refusal = await checkConsultationLinkSend('Pick a time: https://tracker.example/l/cons1 Reply STOP to opt out.', '9415550100');
+    const refusal = await checkConsultationLinkSend('Pick a time: https://tracker.example/l/kq7mtr2xab Reply STOP to opt out.', '9415550100');
     expect(refusal.error).toMatch(/another website/);
     const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
-    expect(await immediateOnlyLinkSendCheck('https://tracker.example/l/cons1')).toEqual({ present: true, label: 'Consultation link' });
+    expect(await immediateOnlyLinkSendCheck('https://tracker.example/l/kq7mtr2xab')).toEqual({ present: true, label: 'Consultation link' });
   });
 
   // Codex #4709 r14 P1: a bearer hidden in a foreign URL's query or
@@ -2728,11 +2728,11 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
       expect(await immediateOnlyLinkSendCheck(wrapper)).toEqual({ present: true, label: 'Consultation link' });
     }
     mockBuilders = {
-      short_codes: chainBuilder({ rows: [{ code: 'cons1', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+      short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
       leads: chainBuilder({ firstRow: LEAD_ROW }),
       sms_templates: chainBuilder({ firstRow: { is_active: true } }),
     };
-    const shortWrapped = `https://tracker.example/?u=${encodeURIComponent('https://wavespest.co/l/cons1')}`;
+    const shortWrapped = `https://tracker.example/?u=${encodeURIComponent('https://wavespest.co/l/kq7mtr2xab')}`;
     expect((await checkConsultationLinkSend(`Pick a time: ${shortWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
     expect(await immediateOnlyLinkSendCheck(shortWrapped)).toEqual({ present: true, label: 'Consultation link' });
   });
@@ -2748,9 +2748,9 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
     expect(await immediateOnlyLinkSendCheck(tokenWrapped)).toEqual({ present: true, label: 'Consultation link' });
 
-    const codeWrapped = 'https://tracker.example/r?code=cons1';
+    const codeWrapped = 'https://tracker.example/r?code=kq7mtr2xab';
     mockBuilders = {
-      short_codes: chainBuilder({ rows: [{ code: 'cons1', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+      short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
       leads: chainBuilder({ firstRow: LEAD_ROW }),
       sms_templates: chainBuilder({ firstRow: { is_active: true } }),
     };
@@ -2758,9 +2758,9 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(await immediateOnlyLinkSendCheck(codeWrapped)).toEqual({ present: true, label: 'Consultation link' });
 
     // ...and in the URL authority: a subdomain label or the userinfo (r16).
-    for (const wrapper of ['https://cons1.tracker.example/', 'https://cons1@tracker.example/x']) {
+    for (const wrapper of ['https://kq7mtr2xab.tracker.example/', 'https://kq7mtr2xab@tracker.example/x']) {
       mockBuilders = {
-        short_codes: chainBuilder({ rows: [{ code: 'cons1', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+        short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
         leads: chainBuilder({ firstRow: LEAD_ROW }),
         sms_templates: chainBuilder({ firstRow: { is_active: true } }),
       };
@@ -2770,6 +2770,26 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     // An ordinary foreign link with no credential is left alone.
     mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
     expect(await immediateOnlyLinkSendCheck('https://maps.example/place?id=abcde12345')).toEqual({ present: false });
+  });
+
+  // Codex #4709 r17 P1s: no trailing slash, and no candidate cap — the
+  // whole message is scanned, so a code after 150 decoys is still found.
+  test('a consultation code in a bare foreign hostname, after many decoys, or in plain text → refused and fenced', async () => {
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    const decoys = Array.from({ length: 150 }, (_, i) => `abcdefgh${String(i).padStart(3, '2').replace(/[01]/g, '9')}`).join('/');
+    for (const text of [
+      'https://kq7mtr2xab.tracker.example',
+      `https://tracker.example/${decoys}/kq7mtr2xab`,
+      'your code is kq7mtr2xab',
+    ]) {
+      mockBuilders = {
+        short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+        leads: chainBuilder({ firstRow: LEAD_ROW }),
+        sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+      };
+      expect((await checkConsultationLinkSend(`Pick a time: ${text} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+      expect(await immediateOnlyLinkSendCheck(text)).toEqual({ present: true, label: 'Consultation link' });
+    }
   });
 
   // Codex #4709 r14 P1: on a shared phone, a lead linked to customer A never

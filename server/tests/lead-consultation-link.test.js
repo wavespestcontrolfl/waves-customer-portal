@@ -149,6 +149,22 @@ describe('buildLeadConsultationLink — gate on', () => {
     expect(result.reason).toMatch(/no phone/i);
   });
 
+  // Codex #4709 r17 P2: the send check's linked-customer rule applies at
+  // mint time, so no unsendable 14-day code is created.
+  test.each([
+    ['archived', null, /archived/],
+    ['on a different phone', { phone: '+19415559999' }, /different phone/],
+  ])('a lead whose linked customer is %s mints nothing', async (_label, ownerRow, reason) => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null, customer_id: 'cust-1' } }),
+      customers: chainBuilder({ firstRow: ownerRow }),
+    };
+    const result = await buildLeadConsultationLink(LEAD_ID);
+    expect(result.url).toBeNull();
+    expect(result.reason).toMatch(reason);
+    expect(createShortCode).not.toHaveBeenCalled();
+  });
+
   test('no signing secret configured fails closed with a reason', async () => {
     delete process.env.LEAD_PREFILL_SECRET;
     delete process.env.JWT_SECRET;

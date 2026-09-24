@@ -444,7 +444,11 @@ router.post('/sms', async (req, res, next) => {
       // auto-send check) still applies.
       leadId,
     } = req.body;
-    let trustedLeadId = leadId && UUID_RE.test(String(leadId)) ? String(leadId) : null;
+    const trustedLeadId = leadId && UUID_RE.test(String(leadId)) ? String(leadId) : null;
+    // The lead whose outreach this send records: ONLY a lead the bearer
+    // check actually validated a consultation link for (Codex #4709 r17 P2)
+    // — a leadId riding a text with no consultation link records nothing.
+    let outreachLeadId = null;
     reviewRequestEmail = req.body.reviewRequestEmail === true;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
@@ -736,9 +740,9 @@ router.post('/sms', async (req, res, next) => {
         expectedLeadId: trustedLeadId,
       });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
-      // A pasted consultation link carries no client leadId — its validated
-      // lead drives the outreach bookkeeping (Codex #4709 r13 P2).
-      if (!trustedLeadId && bearerCheck.consultationLeadId) trustedLeadId = bearerCheck.consultationLeadId;
+      // The validated consultation lead (pasted link or composer insert)
+      // drives the outreach bookkeeping (Codex #4709 r13 + r17 P2).
+      outreachLeadId = bearerCheck.consultationLeadId || null;
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
       if (bearerCheck.preps) prepLinkSends = bearerCheck.preps;
       // A bearer send to a number exactly one live customer owns is that
@@ -1268,11 +1272,11 @@ router.post('/sms', async (req, res, next) => {
     // — the SAME function, so the two routes can never drift (pre-push
     // Codex P1: this send is never rerouted there, only leadId rides
     // along). Fail-soft, same rule as the stamp above — the text already left.
-    if (trustedLeadId) {
+    if (outreachLeadId) {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
         if (isRealProviderSend(result)) {
-          // trustedLeadId only passed a UUID-format check above — nothing
+          // outreachLeadId is the send check's validated lead; nothing
           // yet confirms it's actually the lead THIS text went to (a
           // changed recipient or a crafted request could otherwise mark an
           // unrelated lead contacted with a false audit row — pre-push
@@ -1283,16 +1287,16 @@ router.post('/sms', async (req, res, next) => {
           // open. A mismatch just skips recording — it never fails a send
           // that already went out.
           const { isOpenLeadRow } = require('../services/lead-statuses');
-          const boundLead = await db('leads').where({ id: trustedLeadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
+          const boundLead = await db('leads').where({ id: outreachLeadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
           if (boundLead && fullPhoneLast10(boundLead.phone) === fullPhoneLast10(to) && isOpenLeadRow(boundLead)) {
             const { recordLeadSmsOutreach } = require('../services/lead-outreach');
             await recordLeadSmsOutreach({
-              leadId: trustedLeadId,
+              leadId: outreachLeadId,
               message: cleanBody,
               performedBy: req.technician?.name || [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin',
             });
           } else {
-            logger.debug(`[admin-communications] lead outreach skipped — leadId ${trustedLeadId} does not bind to this destination`);
+            logger.debug(`[admin-communications] lead outreach skipped — leadId ${outreachLeadId} does not bind to this destination`);
           }
         }
       } catch (outreachErr) {

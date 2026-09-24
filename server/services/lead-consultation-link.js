@@ -64,10 +64,21 @@ async function buildLeadConsultationLink(leadOrId) {
     // the isOpenLeadRow check below — the CHOKEPOINT for every caller
     // (pre-push Codex P1): a won/lost/closed lead must never mint a
     // free-consultation invitation, however its id reached this function.
-    const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
+    const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at', 'customer_id');
     if (!lead) return { url: null, line: '', reason: 'Lead not found' };
     if (!isOpenLeadRow(lead)) return { url: null, line: '', reason: 'That lead has already converted or closed' };
     if (!lead.phone) return { url: null, line: '', reason: 'Lead has no phone number' };
+    // The send check's linked-customer rule, applied BEFORE minting (Codex
+    // #4709 r17 P2): a lead whose linked customer is archived or now on a
+    // different phone would get a live 14-day code the send then refuses.
+    if (lead.customer_id) {
+      const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
+      if (!owner) return { url: null, line: '', reason: "This lead's customer record is archived — update the lead first" };
+      const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      if (last10(owner.phone) !== last10(lead.phone)) {
+        return { url: null, line: '', reason: "This lead's customer has a different phone on file now — update the lead first" };
+      }
+    }
 
     const longUrl = consultationUrlForLead(lead.id);
     if (!longUrl) return { url: null, line: '', reason: 'Could not build a consultation link (no signing secret configured)' };
