@@ -2759,6 +2759,67 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSe
 // inserted as-is.
 const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'receipt', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
 
+// One response shape for every /customer-link outcome — used by both the
+// normal customer-resolved path and consultation's lead-only fallback below,
+// so the two can never drift apart.
+function customerLinkResponse(kind, channel, result, firstName, customerId) {
+  return {
+    kind,
+    channel,
+    url: stripSmsUrlScheme(result.url),
+    line: stripSmsUrlScheme(result.line),
+    firstName,
+    ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
+    customerId,
+  };
+}
+
+// Consultation is the one /customer-link kind whose destination phone may
+// belong to an unconverted lead with no customers row at all (GH Codex P1):
+// resolveComposerRecipient's customer-only lookup 404s before Insert Link
+// ever reaches buildConsultationLink for that lead. Tried only after the
+// customer path finds nothing. A supplied leadId is NEVER trusted alone —
+// it must resolve to a lead whose OWN phone is the destination number, or
+// this refuses outright (a leadId for a different phone must not mint a
+// link the caller could not otherwise reach); an id that resolves to no
+// lead at all (stale/deleted) is treated as no override and falls through
+// to the plain newest-non-deleted-lead-by-phone lookup, same fallback
+// shape as buildConsultationLink's own leadIdOverride.
+// Returns null (no lead either — caller keeps the original customer-not-
+// found error), { status, error } (reject), or { lead }.
+async function resolveConsultationLeadOnly(last10, leadId) {
+  if (leadId) {
+    const byId = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'first_name', 'phone');
+    if (byId) {
+      if (fullPhoneLast10(byId.phone) !== last10) {
+        return { status: 404, error: 'That lead does not match the destination number' };
+      }
+      return { lead: byId };
+    }
+  }
+  const lead = await db('leads')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .orderBy('created_at', 'desc')
+    .first('id', 'first_name', 'phone');
+  return lead ? { lead } : null;
+}
+
+// The lead-only response to send for consultation when the customer path
+// found nothing (recipient 404), or null to fall through to that original
+// error (no lead either, or a different kind). Kept as its own function so
+// the route body below stays flat.
+async function consultationLeadOnlyResponse(kind, last10, leadId) {
+  if (kind !== 'consultation') return null;
+  const leadOnly = await resolveConsultationLeadOnly(last10, leadId);
+  if (!leadOnly) return null;
+  if (leadOnly.error) return { status: leadOnly.status, body: { error: leadOnly.error } };
+  const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+  const result = (await buildLeadConsultationSmsLine(leadOnly.lead.id, leadOnly.lead.first_name)) || {};
+  if (!result.url) return { status: 404, body: { error: result.reason || 'Nothing to link for this lead' } };
+  return { status: 200, body: customerLinkResponse(kind, undefined, result, leadOnly.lead.first_name || '') };
+}
+
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
     const body = req.body || {};
@@ -2784,7 +2845,11 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
 
     const { customerId } = body;
     const recipient = await resolveComposerRecipient(customerId, last10);
-    if (recipient.error) return res.status(recipient.status).json({ error: recipient.error });
+    if (recipient.error) {
+      const fallback = recipient.status === 404 ? await consultationLeadOnlyResponse(kind, last10, body.leadId) : null;
+      if (fallback) return res.status(fallback.status).json(fallback.body);
+      return res.status(recipient.status).json({ error: recipient.error });
+    }
     const { customerIds } = recipient;
 
     const recipientFirstName = await firstNameForPhone(last10, customerIds);
@@ -2807,19 +2872,11 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     if (!result.url) {
       return res.status(404).json({ error: result.reason || 'Nothing to link for this customer' });
     }
-    res.json({
-      kind,
-      channel,
-      url: stripSmsUrlScheme(result.url),
-      line: stripSmsUrlScheme(result.line),
-      firstName: recipientFirstName,
-      ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
-      // Owner-bound kinds (and the account-scoped bearers above): the
-      // resolved owner rides back so the composer can select it — the /sms
-      // send then carries customerId and the link's owner policy applies
-      // (GH Codex #3812 r3 P1).
-      customerId: OWNER_RIDES_BACK_KINDS.includes(kind) ? primaryId : undefined,
-    });
+    // Owner-bound kinds (and the account-scoped bearers above): the
+    // resolved owner rides back so the composer can select it — the /sms
+    // send then carries customerId and the link's owner policy applies
+    // (GH Codex #3812 r3 P1).
+    res.json(customerLinkResponse(kind, channel, result, recipientFirstName, OWNER_RIDES_BACK_KINDS.includes(kind) ? primaryId : undefined));
   } catch (err) {
     logger.error(`customer-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });

@@ -90,6 +90,11 @@ jest.mock('../services/composer-customer-links', () => ({
   buildReceiptLink: jest.fn(),
   buildProjectReportLink: jest.fn(),
 }));
+// Consultation's lead-only fallback (an unconverted lead with no customers
+// row) calls this directly, bypassing composer-customer-links entirely.
+jest.mock('../services/lead-consultation-link', () => ({
+  buildLeadConsultationSmsLine: jest.fn(),
+}));
 jest.mock('../services/prep-guide-sender', () => ({
   isSupportedPestType: () => true,
   isSupportedChannel: () => true,
@@ -107,6 +112,7 @@ const express = require('express');
 const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const builders = require('../services/composer-customer-links');
+const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 const ReviewService = require('../services/review-request');
 
 const CUSTOMER_UUID = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
@@ -191,10 +197,27 @@ function makeVisitsBuilder(rows = []) {
   return b;
 }
 
-function wireDb({ customers, reviewRequests = makeReviewRequestsBuilder(), visits = makeVisitsBuilder() }) {
+// leads: consultation's lead-only fallback (resolveConsultationLeadOnly).
+// `rows` is consumed in call order across the two possible db('leads')
+// queries (the leadId lookup, then the phone-based fallback); the last
+// value repeats once exhausted, so a single-row array covers a test that
+// only ever makes one call.
+function makeLeadsBuilder(rows = [null]) {
+  const queue = [...rows];
+  const b = {};
+  b.where = jest.fn(() => b);
+  b.whereNull = jest.fn(() => b);
+  b.whereRaw = jest.fn(() => b);
+  b.orderBy = jest.fn(() => b);
+  b.first = jest.fn(async () => (queue.length > 1 ? queue.shift() : queue[0]));
+  return b;
+}
+
+function wireDb({ customers, reviewRequests = makeReviewRequestsBuilder(), visits = makeVisitsBuilder(), leads = makeLeadsBuilder() }) {
   db.mockImplementation((table) => {
     if (table === 'customers') return customers;
     if (table === 'scheduled_services') return visits;
+    if (table === 'leads') return leads;
     return reviewRequests;
   });
 }
@@ -293,6 +316,80 @@ describe('POST /admin/communications/customer-link', () => {
         const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
         expect(res.status).toBe(404);
         expect((await res.json()).error).toBe('Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)');
+      });
+    });
+
+    // GH Codex P1: an unconverted lead has no customers row at all —
+    // resolveComposerRecipient's customer-only lookup must not be the last
+    // word for this kind.
+    describe('lead-only fallback (no customers row for this phone)', () => {
+      test('a lead with no customer_id still gets a link (no leadId override needed)', async () => {
+        wireDb({
+          customers: makeCustomersBuilder(), // no customer on file for this number
+          leads: makeLeadsBuilder([{ id: 'lead-1', first_name: 'Jamie', phone: '+15551234567' }]),
+        });
+        buildLeadConsultationSmsLine.mockResolvedValue({
+          url: 'https://waves.link/l/lead1',
+          line: "Hi Jamie, it's Waves. Pick a time...\n\n",
+          standalone: true,
+        });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+          expect(res.status).toBe(200);
+          const body = await res.json();
+          expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-1', 'Jamie');
+          expect(builders.buildConsultationLink).not.toHaveBeenCalled();
+          expect(body.kind).toBe('consultation');
+          expect(body.firstName).toBe('Jamie');
+          expect(body.url).toContain('waves.link/l/lead1');
+          expect(body.standalone).toBe(true);
+        });
+      });
+
+      test('a leadId whose phone does not match the destination is rejected — 404 with a reason, no link, and the phone-based lookup never runs', async () => {
+        const leads = makeLeadsBuilder([{ id: 'lead-2', first_name: 'Robin', phone: '+19995551234' }]);
+        wireDb({ customers: makeCustomersBuilder(), leads });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            leadId: 'lead-2',
+          });
+          expect(res.status).toBe(404);
+          expect((await res.json()).error).toMatch(/does not match/i);
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+          expect(builders.buildConsultationLink).not.toHaveBeenCalled();
+          // Only the leadId lookup ran — never fell through to a phone-based
+          // second query that could mint a different lead's link.
+          expect(leads.first).toHaveBeenCalledTimes(1);
+        });
+      });
+
+      test('a stale/deleted leadId (resolves to no lead) falls through to the phone-based lookup', async () => {
+        wireDb({
+          customers: makeCustomersBuilder(),
+          leads: makeLeadsBuilder([null, { id: 'lead-3', first_name: 'Sam', phone: '+15551234567' }]),
+        });
+        buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/lead3', line: 'line\n\n', standalone: true });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            leadId: 'lead-stale',
+          });
+          expect(res.status).toBe(200);
+          expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-3', 'Sam');
+        });
+      });
+
+      test('no customer AND no lead on this number: the original customer-not-found 404', async () => {
+        wireDb({ customers: makeCustomersBuilder(), leads: makeLeadsBuilder([null]) });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+          expect(res.status).toBe(404);
+          expect((await res.json()).error).toBe('No customer found for that number');
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+        });
       });
     });
   });
