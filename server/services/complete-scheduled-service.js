@@ -4939,8 +4939,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // 2026-07-30).
             observations: reportObservations,
             recommendations: reportRecommendations,
-            pestActivityRating: Number.isInteger(effectiveClientPestRating) ? effectiveClientPestRating : null,
-            pestActivityScale: Number.isInteger(effectiveClientPestRating)
+            // Only a rating the tech chose grounds the recap. The first-visit
+            // default is scoring policy, not an observation — and it is only
+            // confirmed later, under the lock in the record transaction, so
+            // copy written now must not depend on it.
+            pestActivityRating: !firstVisitDefaultApplied && Number.isInteger(effectiveClientPestRating) ? effectiveClientPestRating : null,
+            pestActivityScale: !firstVisitDefaultApplied && Number.isInteger(effectiveClientPestRating)
               ? activityScaleNames((await loadPestPressureConfig(db).catch(() => null))?.labels)
               : null,
             visitContext: completionVisitContext,
