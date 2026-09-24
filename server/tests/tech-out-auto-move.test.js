@@ -90,6 +90,7 @@ function baseStop(overrides = {}) {
     technician_id: ABSENT_TECH,
     scheduled_date: DATE,
     customer_id: 'cust-1',
+    track_state: 'scheduled',
     ...overrides,
   };
 }
@@ -169,6 +170,16 @@ describe('autoAssignParkedAlert', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
+  test.each(['en_route', 'on_property'])('confirmed status but live tracker state %s: left parked as live_status', async (trackState) => {
+    const queue = [query(baseAlert()), query(baseStop({ status: 'confirmed', track_state: trackState })), query({})];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'live_status' });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
   test('idempotent: the stop already moved off the absent tech — no-op skip, no mover call, no re-annotation', async () => {
     const queue = [query(baseAlert()), query(baseStop({ technician_id: 'someone-else' }))];
     db.mockImplementation(() => queue.shift());
@@ -230,6 +241,7 @@ describe('autoAssignParkedAlert', () => {
       actorId: 'staff-1',
       expect: {
         technician_id: ABSENT_TECH, scheduled_date: DATE, window_start: '09:00', window_end: '11:00', status: 'confirmed',
+        track_state: 'scheduled',
       },
     });
     expect(typeof options.moveGuard).toBe('function');

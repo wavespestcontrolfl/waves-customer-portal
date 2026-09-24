@@ -39,6 +39,7 @@ const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const SmartRebooker = require('./rebooker');
 const { RESCHEDULABLE_STATUSES } = require('./reschedule-eligibility');
+const { LIVE_TRACK_STATES } = require('./cancellation-eligibility');
 const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const { assertCapabilitiesActive, inactiveCapabilitiesForServices } = require('./technician-capabilities');
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
@@ -344,6 +345,9 @@ function stopMoveRefusal(stop, absentTechId, date) {
   // human decision, same as the up-front alert-payload check.
   if (stop.visit_id) return { reason: 'grouped_visit_manual', skipped: false };
   if (!RESCHEDULABLE_STATUSES.has(String(stop.status))) return { reason: 'live_status', skipped: false };
+  // The tracker can go live (en_route / on_property) before the operational
+  // status syncs, so a 'confirmed' row may already be an active visit.
+  if (LIVE_TRACK_STATES.includes(String(stop.track_state))) return { reason: 'live_status', skipped: false };
   const scheduledDateStr = stop.scheduled_date instanceof Date
     ? stop.scheduled_date.toISOString().slice(0, 10)
     : String(stop.scheduled_date || '').slice(0, 10);
@@ -389,7 +393,7 @@ async function loadMovableStop(alertId) {
       'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.estimated_duration_minutes', 'scheduled_services.visit_id',
       'scheduled_services.technician_id', 'scheduled_services.scheduled_date',
-      'scheduled_services.customer_id', ...guardedCoordSelects(db),
+      'scheduled_services.customer_id', 'scheduled_services.track_state', ...guardedCoordSelects(db),
     );
   const refusal = stopMoveRefusal(stop, absentTechId, date);
   if (refusal) {
@@ -484,6 +488,9 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
             window_start: stop.window_start,
             window_end: stop.window_end,
             status: stop.status,
+            // The non-live tracker state we read: a tech going en_route or
+            // on_property after that read misses this CAS (409), never moves.
+            track_state: stop.track_state ?? null,
           },
           moveGuard: makeCapabilityGuard(),
           beforeMove: makeStillParkedGuard({
