@@ -2046,3 +2046,49 @@ describe('lockedWitnessDrifted — the witness is rechecked against the LOCKED r
     expect(src.match(/if \(lockedWitnessDrifted\(\{/g)).toHaveLength(1);
   });
 });
+
+// GitHub Codex round 27 P1 (#4657, :10969): appointment-discount freshness
+// must be judged against the SAME row read the planner builds its financial
+// CAS snapshot from — never the route's earlier `existingDiscount` read. A
+// concurrent A → B edit between the two reads used to leave the boolean
+// stale (false), so a request restoring A read as "pre-existing" and
+// assertNewStackGroupConflicts grandfathered it against an add-on already
+// carrying A's non-stackable group-mate, while the CAS (taken from the
+// second read, B) saw nothing to refuse.
+describe('appointmentDiscountChangedAgainst — freshness against a given row read (round 27 P1, #4657 :10969)', () => {
+  const { appointmentDiscountChangedAgainst } = require('../routes/admin-schedule')._test;
+  const cols = { discount_id: true };
+  const rowA = { discount_type: 'percentage', discount_amount: 10, discount_id: 'silver' };
+  const rowB = { discount_type: 'fixed_amount', discount_amount: 10, discount_id: 'credit' };
+
+  test('a request restoring A judged against a row that still holds A: unchanged', () => {
+    expect(appointmentDiscountChangedAgainst(rowA, { discountType: 'percentage', discountAmount: 10, discountId: 'silver', cols })).toBe(false);
+  });
+  test("the SAME request judged against the row AFTER a concurrent A → B edit: CHANGED (Codex's repro)", () => {
+    expect(appointmentDiscountChangedAgainst(rowB, { discountType: 'percentage', discountAmount: 10, discountId: 'silver', cols })).toBe(true);
+  });
+  test('identity alone counts when the column exists (same type/amount, different catalog id)', () => {
+    expect(appointmentDiscountChangedAgainst(rowA, { discountType: 'percentage', discountAmount: 10, discountId: 'gold', cols })).toBe(true);
+    expect(appointmentDiscountChangedAgainst(rowA, { discountType: 'percentage', discountAmount: 10, discountId: 'gold', cols: { discount_id: false } })).toBe(false);
+  });
+  test('a request that never touches the appointment discount (both undefined) is never a change, whatever the row holds', () => {
+    expect(appointmentDiscountChangedAgainst(rowB, { discountType: undefined, discountAmount: undefined, discountId: 'silver', cols })).toBe(false);
+  });
+  test('a null row (the read failed) with a posted discount reads as changed — fail closed toward "new"', () => {
+    expect(appointmentDiscountChangedAgainst(null, { discountType: 'percentage', discountAmount: 10, discountId: 'silver', cols })).toBe(true);
+  });
+
+  // Source pins: both planner branches re-derive against their own read
+  // and the PUT route adopts the planner's answer.
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+  test('the addons branch re-derives against `existing`, the single-service branch against `existingPrice`, and the planner returns it', () => {
+    expect(source).toMatch(/if \(existing\) \{\s*appointmentDiscountChanged = appointmentDiscountChangedAgainst\(existing, \{ discountType, discountAmount, discountId, cols \}\);/);
+    expect(source).toMatch(/if \(existingPrice\) \{\s*appointmentDiscountChanged = appointmentDiscountChangedAgainst\(existingPrice, \{ discountType, discountAmount, discountId, cols \}\);/);
+    expect(source).toMatch(/appointmentDiscountChanged = singleServicePlan\.appointmentDiscountChanged;/);
+  });
+  test('the PUT route adopts the planner\'s answer for everything after the plan', () => {
+    expect(source).toMatch(/appointmentDiscountChanged = financialPlan\.appointmentDiscountChanged;/);
+  });
+});

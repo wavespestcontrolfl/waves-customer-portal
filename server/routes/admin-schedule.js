@@ -1495,6 +1495,29 @@ function appointmentDiscountIdentityChanged(existing, discountId) {
   return String(discountId || '') !== String(existing?.discount_id || '');
 }
 
+// Did THIS request change the appointment-level discount, judged against
+// `row` (a scheduled_services read carrying discount_type/discount_amount
+// and, when the column exists, discount_id)? False when the request does
+// not touch the appointment discount at all.
+//
+// GitHub Codex round 27 P1 (#4657, :10969): the PUT and preview routes used
+// to derive this ONCE, from their own early `existingDiscount` read, and
+// hand the boolean to computeUpdateDetailsFinancialPlan — which then read
+// `existing` AGAIN for its money plan and its financial CAS snapshot. A
+// concurrent editor moving the discount A → B between those two reads left
+// the boolean stale: a request restoring A was classified "pre-existing",
+// so assertNewStackGroupConflicts grandfathered A against an add-on already
+// carrying A's non-stackable group-mate, and because the CAS snapshot was
+// taken from the SECOND read (B) the under-lock recheck saw no drift. The
+// planner now re-derives freshness from the SAME row read that feeds its
+// CAS snapshot (this helper, in both its branches) and returns the answer;
+// the routes' early read is only the pre-planner default.
+function appointmentDiscountChangedAgainst(row, { discountType, discountAmount, discountId, cols }) {
+  if (discountType === undefined && discountAmount === undefined) return false;
+  return appointmentDiscountInputChanged(row, discountType, discountAmount)
+    || (!!cols?.discount_id && appointmentDiscountIdentityChanged(row, discountId));
+}
+
 // GitHub Codex round 14 P1 (#4657, :10034): the stale-add-on-id check in
 // normalizeUpdateDetailsAddons runs on the base db BEFORE the save
 // transaction opens, so two concurrent saves can both read the same row
@@ -10115,9 +10138,14 @@ async function resolveMembershipBookingContext({
 }
 
 async function computeSingleServiceEstimatedPricePlan({
-  db, id, updates, discountType, discountAmount, estimatedPrice, primaryLinePrice,
-  appointmentDiscountPreset, appointmentDiscountChanged, presetEligibilityCheck,
+  db, id, updates, discountType, discountAmount, discountId, estimatedPrice, primaryLinePrice,
+  appointmentDiscountPreset, appointmentDiscountChanged: appointmentDiscountChangedAtRouteRead, presetEligibilityCheck,
 }) {
+  // GitHub Codex round 27 P1 (#4657, :10969): re-derived below against
+  // this branch's own `existingPrice` read (the same read its
+  // financialCasSnapshot is built from); the route's earlier answer is
+  // only the default until that read lands. See appointmentDiscountChangedAgainst.
+  let appointmentDiscountChanged = appointmentDiscountChangedAtRouteRead;
   // Codex pre-push audit P2 (structural round 3 on #4657, :9310): the
   // single-service (no addons array) estimatedPrice branch of
   // computeUpdateDetailsFinancialPlan, extracted verbatim as its own
@@ -10160,6 +10188,11 @@ async function computeSingleServiceEstimatedPricePlan({
             ...(cols.line_discount_amount ? ['line_discount_amount'] : []),
             ...(cols.pricing_provenance ? ['pricing_provenance'] : []))
           .catch(() => null);
+        // GitHub Codex round 27 P1 (#4657, :10969): freshness judged against
+        // THIS read, never the route's earlier one.
+        if (existingPrice) {
+          appointmentDiscountChanged = appointmentDiscountChangedAgainst(existingPrice, { discountType, discountAmount, discountId, cols });
+        }
         // A service change in the SAME save already placed the new identity
         // in `updates` — price/scope/validate against that, not the stored
         // row (Codex #3531 r10 P1).
@@ -10375,7 +10408,7 @@ async function computeSingleServiceEstimatedPricePlan({
         if (err?.message !== 'noop-price-save') throw err;
       }
 
-  return { clearAddonDiscountsOnPriceEdit, financialCasSnapshot };
+  return { clearAddonDiscountsOnPriceEdit, financialCasSnapshot, appointmentDiscountChanged };
 }
 
 async function normalizeUpdateDetailsAddons({
@@ -10786,11 +10819,17 @@ async function resolveReServiceConversion({
 }
 
 async function computeUpdateDetailsFinancialPlan({
-  db, id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
+  db, id, updates, discountType, discountAmount, discountId, isRecurring, serviceType, scheduledDate,
   primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
-  appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
+  appointmentDiscountPreset, appointmentDiscountChanged: appointmentDiscountChangedAtRouteRead, appointmentDiscountCols,
   presetEligibilityCheck,
 }) {
+  // GitHub Codex round 27 P1 (#4657, :10969): the route's early answer is
+  // only the DEFAULT — each branch below that reads the row re-derives
+  // this against its own read (the one its financial CAS snapshot is built
+  // from) and the final value is RETURNED for the route to adopt. See
+  // appointmentDiscountChangedAgainst.
+  let appointmentDiscountChanged = appointmentDiscountChangedAtRouteRead;
   // Extracted verbatim (structural round on #4657 — the preview endpoint
   // below, :2994/:9965/:10095/:3526/:2394) from the PUT /:id/update-details
   // handler's own addons-block + single-service estimatedPrice branch +
@@ -10900,6 +10939,15 @@ async function computeUpdateDetailsFinancialPlan({
           .where({ id: id })
           .first(...existingFields)
           .catch(() => null);
+        // GitHub Codex round 27 P1 (#4657, :10969): appointment-discount
+        // freshness judged against THIS read — the same row the financial
+        // CAS snapshot below is captured from — so the stack-group check,
+        // canonical adoption and the catalog-field clears all follow the
+        // row this plan was actually built on, and any later drift is the
+        // under-lock recheck's to catch.
+        if (existing) {
+          appointmentDiscountChanged = appointmentDiscountChangedAgainst(existing, { discountType, discountAmount, discountId, cols });
+        }
 
         // GitHub Codex round 21 P1 (#4657, :12301): captured from the SAME
         // `existing` read above and `existingAddonDiscountRows` (loaded by
@@ -11361,11 +11409,12 @@ async function computeUpdateDetailsFinancialPlan({
       // addons-array branch above populates, so the route's under-lock
       // recheck reaches the no-add-on path identically.
       const singleServicePlan = await computeSingleServiceEstimatedPricePlan({
-        db, id, updates, discountType, discountAmount, estimatedPrice, primaryLinePrice,
+        db, id, updates, discountType, discountAmount, discountId, estimatedPrice, primaryLinePrice,
         appointmentDiscountPreset, appointmentDiscountChanged, presetEligibilityCheck,
       });
       clearAddonDiscountsOnPriceEdit = singleServicePlan.clearAddonDiscountsOnPriceEdit;
       financialCasSnapshot = singleServicePlan.financialCasSnapshot;
+      appointmentDiscountChanged = singleServicePlan.appointmentDiscountChanged;
     } else if (!isRecurring && (discountType !== undefined || discountAmount !== undefined)) {
       try {
         const cols = await db('scheduled_services').columnInfo();
@@ -11440,6 +11489,9 @@ async function computeUpdateDetailsFinancialPlan({
   return {
     replaceAddons, canonicalRestackedAddonDollars, legacyPreservationCasSnapshot, clearAddonDiscountsOnPriceEdit,
     reServiceConversion, reServiceTransition, reServiceConversionZeroPrice, legacyPrimaryGrossUnknown,
+    // GitHub Codex round 27 P1 (#4657, :10969): the freshness this plan
+    // was actually built on — the route adopts it for every later use.
+    appointmentDiscountChanged,
     expectedAddonRowIds, financialCasSnapshot,
   };
 }
@@ -11566,12 +11618,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const existingDiscount = await db('scheduled_services')
         .where({ id: req.params.id })
         .first('discount_type', 'discount_amount', ...(appointmentDiscountCols.discount_id ? ['discount_id'] : []));
-      appointmentDiscountChanged = appointmentDiscountInputChanged(
-        existingDiscount,
-        discountType,
-        discountAmount
-      ) || (!!appointmentDiscountCols.discount_id
-        && appointmentDiscountIdentityChanged(existingDiscount, discountId));
+      // Pre-planner DEFAULT only — computeUpdateDetailsFinancialPlan
+      // re-derives this against its own row read and returns the answer
+      // this route adopts below (GitHub Codex round 27 P1, #4657 :10969).
+      appointmentDiscountChanged = appointmentDiscountChangedAgainst(existingDiscount, {
+        discountType, discountAmount, discountId, cols: appointmentDiscountCols,
+      });
     }
     // When the Edit appointment "Services and items" section sends an explicit
     // `addons` array, we treat it as the full desired set of additional service
@@ -11906,11 +11958,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     let reServiceConversionZeroPrice = false;
     {
       const financialPlan = await computeUpdateDetailsFinancialPlan({
-        db, id: req.params.id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
+        db, id: req.params.id, updates, discountType, discountAmount, discountId, isRecurring, serviceType, scheduledDate,
         primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
         appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
         presetEligibilityCheck,
       });
+      // GitHub Codex round 27 P1 (#4657, :10969): the planner's own answer,
+      // judged against the row read its CAS snapshot was built from.
+      appointmentDiscountChanged = financialPlan.appointmentDiscountChanged;
       replaceAddons = financialPlan.replaceAddons;
       canonicalRestackedAddonDollars = financialPlan.canonicalRestackedAddonDollars;
       legacyPreservationCasSnapshot = financialPlan.legacyPreservationCasSnapshot;
@@ -14607,8 +14662,10 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       const existingDiscount = await db('scheduled_services')
         .where({ id })
         .first('discount_type', 'discount_amount', ...(cols.discount_id ? ['discount_id'] : []));
-      appointmentDiscountChanged = appointmentDiscountInputChanged(existingDiscount, discountType, discountAmount)
-        || (!!cols.discount_id && appointmentDiscountIdentityChanged(existingDiscount, discountId));
+      // Pre-planner DEFAULT only — see the PUT route (GitHub Codex round 27 P1).
+      appointmentDiscountChanged = appointmentDiscountChangedAgainst(existingDiscount, {
+        discountType, discountAmount, discountId, cols,
+      });
     }
 
     // The SAME rule the save applies — buildPresetEligibilityCheck — so a
@@ -14620,7 +14677,7 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     });
 
     const plan = await computeUpdateDetailsFinancialPlan({
-      db, id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
+      db, id, updates, discountType, discountAmount, discountId, isRecurring, serviceType, scheduledDate,
       primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
       appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
       presetEligibilityCheck,
@@ -22144,6 +22201,7 @@ router._test = {
   lineExcludedFromPercentDiscount,
   buildPercentExclusionCatalog,
   appointmentDiscountIdentityChanged,
+  appointmentDiscountChangedAgainst,
   isPercentDiscountType,
   calculateVisitFinancialsForAddons,
   resolveUpdateDetailsAddonFinancials,

@@ -1403,6 +1403,91 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
   // row changes no discount term, so it stays on the legacy live-recompute
   // path (#4405's own open product decision about repricing existing
   // visits) and is NOT marked by this save.
+  // GitHub Codex round 27 P1 (#4657, :10969): Codex's exact repro on real
+  // rows. The route's early read saw the appointment discount as Silver
+  // (A), so its boolean says "unchanged" for a request that posts Silver
+  // again. Between that read and the planner's own read another editor
+  // moved the visit to a plain credit (B) and put Gold — Silver's
+  // non-stackable group-mate — on the add-on. The planner must judge
+  // freshness against the row it actually reads (B), classify Silver as
+  // NEW, and refuse the tier conflict — never grandfather it.
+  test('PUT /:id/update-details (planner, real rows): a concurrent A → B edit between the route read and the planner read makes a request restoring A a NEW pick — the tier conflict is refused, never grandfathered', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      const addonRowId = randomUUID();
+      const silverId = randomUUID();
+      const goldId = randomUUID();
+      const creditId = randomUUID();
+      const tag = silverId.slice(0, 8);
+      await mockPg('discounts').insert([
+        { id: silverId, discount_key: `fixture_r27_silver_${tag}`, name: 'Fixture Silver', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false },
+        { id: goldId, discount_key: `fixture_r27_gold_${tag}`, name: 'Fixture Gold', discount_type: 'fixed_amount', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false },
+        { id: creditId, discount_key: `fixture_r27_credit_${tag}`, name: 'Fixture Credit', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true },
+      ]);
+      // The row as the PLANNER reads it: already moved to the credit (B),
+      // with Gold on the add-on.
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-15', service_type: 'Fixture Round-27 Service',
+        primary_line_price: 100, estimated_price: 175,
+        discount_type: 'fixed_amount', discount_amount: 10, discount_id: creditId,
+      });
+      await mockPg('scheduled_service_addons').insert({
+        id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Add-On', base_price: 100, estimated_price: 85,
+        discount_id: goldId, discount_type: 'fixed_amount', discount_amount: 15, discount_dollars: 15,
+      });
+      const cols = await mockPg('scheduled_services').columnInfo();
+      const silver = await mockPg('discounts').where({ id: silverId }).first();
+      const restoreSilver = (appointmentDiscountChanged) => computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: {}, primaryLinePrice: 100,
+        discountType: 'fixed_amount', discountAmount: 10, discountId: silverId,
+        addons: [{
+          id: addonRowId, serviceName: 'Fixture Add-On', basePrice: 100,
+          discountId: goldId, discountName: 'Fixture Gold', discountType: 'fixed_amount', discountAmount: 15,
+        }],
+        appointmentDiscountPreset: silver,
+        // The route's STALE answer: computed while the row still held Silver.
+        appointmentDiscountChanged,
+        appointmentDiscountCols: cols,
+        presetEligibilityCheck: async () => {},
+      });
+      // The planner re-derives against ITS read (credit ≠ Silver) and
+      // refuses the Silver + Gold tier conflict regardless of the stale flag.
+      await expect(restoreSilver(false)).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+      await expect(restoreSilver(true)).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+
+      // The non-conflicting shape (add-on undiscounted) reports the
+      // re-derived freshness on the plan for the route to adopt, and stamps
+      // Silver's catalog identity.
+      await mockPg('scheduled_service_addons').where({ id: addonRowId }).update({ discount_id: null, discount_type: null, discount_amount: null, discount_dollars: null, estimated_price: 100 });
+      const updates = {};
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 100,
+        discountType: 'fixed_amount', discountAmount: 10, discountId: silverId,
+        addons: [{ id: addonRowId, serviceName: 'Fixture Add-On', basePrice: 100 }],
+        appointmentDiscountPreset: silver, appointmentDiscountChanged: false, appointmentDiscountCols: cols,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.appointmentDiscountChanged).toBe(true);
+      expect(updates.discount_id).toBe(silverId);
+      expect(updates.estimated_price).toBe(190); // $200 less the $10 tier credit
+
+      // Single-service branch (no addons array): the same re-derivation
+      // against that branch's own `existingPrice` read.
+      const singleUpdates = {};
+      const singlePlan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: singleUpdates, estimatedPrice: 100, primaryLinePrice: 100,
+        discountType: 'fixed_amount', discountAmount: 10, discountId: silverId,
+        appointmentDiscountPreset: silver, appointmentDiscountChanged: false, appointmentDiscountCols: cols,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(singlePlan.appointmentDiscountChanged).toBe(true);
+      expect(singleUpdates.discount_id).toBe(silverId);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
   test('PUT /:id/update-details (planner, real rows): a PRICE-only edit on an UNMARKED visit does not adopt — no regime marker is planned', async () => {
     process.env.GATE_DISCOUNT_STACKING = 'true';
     try {
