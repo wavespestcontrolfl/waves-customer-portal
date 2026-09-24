@@ -23,6 +23,7 @@ import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/Station
 import CancelFlow from '../components/portal/CancelFlow';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
+import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
 import { etDateString, formatETDateTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { getStripe } from '../lib/stripeLoader';
@@ -14345,7 +14346,7 @@ function PropertyProfileScopedNotice({ primaryEntry, onSwitch }) {
   );
 }
 
-function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, selectedProperty = null, scopeUnavailable = false, onSavedScopeUnavailable = null }) {
+function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, selectedProperty = null, scopeUnavailable = false, onSavedScopeUnavailable = null, initialValues = null }) {
   // A house is selected (a saved-property id on the selection) whether or
   // not the retained list has an entry for it — see scopeEchoMismatch.
   const selectionNamed = (selectedProperty && selectedProperty.propertyId) || null;
@@ -14379,6 +14380,21 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   // the server explicitly grants it.
   const [scheduleData, setScheduleData] = useState(null);
   const fileRef = useRef(null);
+  // Photo ID hands off here with a category/location/note/photos it already
+  // gathered (see PhotoId.jsx) — seed the form on the open transition only,
+  // so it never clobbers what the customer types after the sheet lands.
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (open && !wasOpenRef.current && initialValues) {
+      if (initialValues.category) setCategory(initialValues.category);
+      if (initialValues.note) setDescription(initialValues.note);
+      if (initialValues.location) setLocation(initialValues.location);
+      if (Array.isArray(initialValues.photos) && initialValues.photos.length) {
+        setPhotos(initialValues.photos.slice(0, photoLimit));
+      }
+    }
+    wasOpenRef.current = open;
+  }, [open, initialValues]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -15520,7 +15536,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
   );
 }
 
-function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MORE_TABS }) {
+function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhotoId, tabs = MORE_TABS }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
@@ -15630,6 +15646,31 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
               </button>
             );
           })}
+          {onOpenPhotoId && (
+            <button key="photoid" onClick={() => onOpenPhotoId()} style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '11px 10px',
+              border: 'none',
+              background: 'transparent',
+              borderRadius: 8,
+              cursor: 'pointer',
+              textAlign: 'left',
+              color: B.grayDark,
+              fontFamily: FONTS.body,
+            }}>
+              <span style={iconTile}>
+                <Icon name="camera" size={18} strokeWidth={2} />
+              </span>
+              <span style={{ minWidth: 0, flex: 1 }}>
+                <span style={{ display: 'block', fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text }}>Photo ID</span>
+                <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.35 }}>Bugs, lawn, trees & shrubs</span>
+              </span>
+              <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: muted }} />
+            </button>
+          )}
         </section>
 
         <section data-glass="soft" style={{ ...card, padding: 14 }}>
@@ -16185,6 +16226,15 @@ export default function PortalPage() {
   // Question handed from the Waves AI bar into the assistant on open.
   const [chatPrompt, setChatPrompt] = useState(null);
   const [showMoreSheet, setShowMoreSheet] = useState(false);
+  // Photo ID (GATE_CUSTOMER_PHOTO_ID) — one gate read shared by the floating
+  // button and the More-sheet row so they can never disagree about whether
+  // the feature is live (404 hides both). reportIssuePrefill carries the
+  // category/location/note/photos a "Request service" next-step hands to
+  // the New Request form.
+  const photoIdGate = usePhotoIdGate();
+  const [showPhotoId, setShowPhotoId] = useState(false);
+  const [reportIssuePrefill, setReportIssuePrefill] = useState(null);
+  const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount;
   // Desktop section nav floats (owner 2026-07-22): it sticks just below the
   // sticky header while the customer scrolls. The header's height varies
   // (safe-area inset, wrapping), so measure it instead of hardcoding.
@@ -16916,9 +16966,28 @@ export default function PortalPage() {
           onClose={() => setShowMoreSheet(false)}
           onRequest={cancelledAccount ? null : () => setShowReportIssue(true)}
           onChat={cancelledAccount ? null : () => setShowChat(true)}
+          onOpenPhotoId={photoIdAvailable ? () => { setShowPhotoId(true); setShowMoreSheet(false); } : null}
           tabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
       )}
+
+      {/* Photo ID — floating button + sheet (GATE_CUSTOMER_PHOTO_ID; hidden
+          entirely on a 404 from GET /api/photo-id, see usePhotoIdGate). */}
+      {photoIdAvailable && !showPhotoId && (
+        <PhotoIdFab onOpen={() => setShowPhotoId(true)} hasBottomNav={isMobileShell} />
+      )}
+      <PhotoIdSheet
+        open={showPhotoId && photoIdAvailable}
+        onClose={() => setShowPhotoId(false)}
+        items={photoIdGate.items}
+        onRefreshHistory={photoIdGate.refresh}
+        onGateUnavailable={photoIdGate.refresh}
+        onOpenRequest={(prefill) => {
+          setReportIssuePrefill(prefill);
+          setShowPhotoId(false);
+          setShowReportIssue(true);
+        }}
+      />
 
       {/* AI Chat Widget */}
       {showChat && <ChatWidget customer={customer} initialQuestion={chatPrompt} onClose={() => { setShowChat(false); setChatPrompt(null); }} />}
@@ -16935,6 +17004,7 @@ export default function PortalPage() {
         selectedProperty={selectedProperty}
         scopeUnavailable={propertyUnavailable}
         onSavedScopeUnavailable={refreshProperties}
+        initialValues={reportIssuePrefill}
       />
     </div>
     </PortalReadProvider>
