@@ -380,8 +380,12 @@ beyond pest identification or lawn care):
 - Prefer primary sources for factual claims: the responsible government
   agency, regulation, product label, original study, or UF/IFAS publication.
   Link the exact supporting page when its URL is allowed by the outbound-link
-  policy above. If no permitted primary-source URL or brief fact supports a
-  claim, omit the claim; never write that it was "verified," "confirmed," or
+  policy above. Explicitly brief-mandated secondary sources are also permitted
+  evidence: link the exact allowed page and attribute its reporting or consumer
+  allegations to that source, without presenting allegations as established
+  facts or generalizing a review into a measured prevalence claim. If no
+  allowed source or brief fact supports a claim, omit the claim;
+  never write that it was "verified," "confirmed," or
   "fact-checked" merely because a search result or secondary summary exists.
 
 FAQ POLICY (binding — the publish guardrail hard-fails violations as P0
@@ -436,9 +440,12 @@ Violating these makes the live page render broken:
 VISUAL COMPONENTS (MDX) — posts publish as .mdx, so embed an Astro infographic
 only when it makes article-specific evidence, a decision, or a procedure
 clearer than prose. There is NO visual quota; omit a visual that would be
-generic filler. Every label, level, zone, item, caption, and comparison cell
-must be supported by the brief's facts_pack, a knowledge-base result, or an
-allowed source. Use custom props that communicate that supported information;
+generic filler. Every factual claim in a label, level, zone, item, caption,
+or comparison cell must be supported by the brief's facts_pack, a knowledge-base
+result, or an allowed source. Neutral editorial criteria and questions to ask
+are permitted without provider-specific evidence when clearly framed as a
+buying checklist, not assertions about a category or business. Use custom props
+that communicate supported facts or those clearly framed editorial criteria;
 never imply that a decorative default is measured species data, a documented
 inspection, or a Waves field result. Write valid JSX, NOT in code fences.
 NOTE: the "avoid curly braces" rule above is about PROSE text — JSX component
@@ -524,8 +531,13 @@ choose; never fake a ranking or trash a competitor. Two modes:
      named businesses: columns like ["What to weigh","National chain","Local
      SWFL company","DIY"]. Rows are neutral buying criteria (licensed & insured,
      knows SWFL pests + soil/season, re-treat guarantee, recurring vs one-off,
-     who answers the phone). Let the reader conclude where a local licensed
-     company fits — never declare a winner. Needs no special data.
+     who answers the phone). Without evidence for a category's attributes,
+     cells are questions or verification steps (for example, "Ask for the
+     written re-treatment terms"), never unsupported yes/no claims, ratings,
+     or guarantees about that category. Label this as an editorial buying
+     checklist. It needs no provider-specific data for those questions;
+     factual category attributes still require the evidence described above.
+     Let the reader assess fit — never declare a winner.
   2) NAMED-COMPETITOR mode (gated + automatically checked) — call get_competitor_facts()
      FIRST. If it returns named_competitor_enabled: false or an empty competitors
      list, use CATEGORY mode (a named competitor would be blocked from

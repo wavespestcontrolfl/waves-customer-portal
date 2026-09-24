@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { ImageGenerator, _internals } = require('../services/content/image-generator');
 const {
   DEFAULT_CHAIN, MODEL_MAP, MODE_SIZES,
-  parseChain, isFatalOpenAIError, sizeFor, buildPrompt,
+  parseChain, isFatalOpenAIError, sizeFor, buildPrompt, planFor,
 } = _internals;
 
 // Helpers to build Response-like fixtures for mocked fetch.
@@ -125,6 +125,40 @@ describe('buildPrompt', () => {
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).toMatch(/Subject: k\./);
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).not.toMatch(/Framing:/);
   });
+  test('every scene mode AND the infographic pin the real Waves uniform (owner directive 2026-09-23)', () => {
+    const uniform = /red long-sleeve polo .* a baseball cap that is either light blue or red, and plain black or dark navy work pants/;
+    expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(uniform);
+    expect(buildPrompt({ keyword: 'k', topic: 'lead', mode: 'blog-body', shot: 'action' })).toMatch(uniform);
+    expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(uniform);
+    expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/never a blue shirt, never khaki or tan pants/);
+    // A captioned infographic about an inspection can still draw a technician
+    // icon, so it carries the line too (Codex P2 on #4696).
+    const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' } });
+    expect(info).toMatch(uniform);
+    expect(info).toMatch(/plain light background/);
+  });
+
+  test('the limited illustration palettes admit uniform red, and equipment/vehicles stay generic (Codex P2s on #4696)', () => {
+    for (const style of ['illustration', 'cartoon', 'infographic']) {
+      const prompt = buildPrompt({ title: 'Post', keyword: 'k', mode: 'blog-hero', captions: ['One'], plan: { style, setting: 's', timeOfDay: 'noon', vantage: 'v' } });
+      expect(prompt).toMatch(/a technician's red shirt or red cap is part of the palette/);
+    }
+    expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/equipment and vehicles are generic and unbranded/);
+  });
+
+  test('the unmarked Waves van appears in the background of SOME yard scenes only (owner ask 2026-09-23)', () => {
+    const yardPlans = Array.from({ length: 60 }, (_, i) => planFor({ slug: `post-${i}`, subject: 'chinch bug damage on a St. Augustine lawn' }));
+    const withVan = yardPlans.filter((p) => p.van);
+    expect(withVan.length).toBeGreaterThan(5);
+    expect(withVan.length).toBeLessThan(40);
+    const indoorPlans = Array.from({ length: 60 }, (_, i) => planFor({ slug: `post-${i}`, subject: 'German cockroaches in the kitchen' }));
+    expect(indoorPlans.every((p) => !p.van)).toBe(true);
+    const vanPlan = { ...withVan[0] };
+    const prompt = buildPrompt({ title: 'Post', keyword: 'chinch bug damage', mode: 'blog-hero', plan: vanPlan });
+    expect(prompt).toMatch(/Ford Transit work van .* plain and unmarked, no lettering, no logo/);
+    expect(buildPrompt({ title: 'Post', keyword: 'chinch bug damage', mode: 'blog-hero', plan: { ...vanPlan, van: false } })).not.toMatch(/Ford Transit/);
+  });
+
   test('blog-body framing rotates by shot and names the hero subject it must differ from (variation, not three of the same picture)', () => {
     const closeUp = buildPrompt({ keyword: 'Reading the pellets', topic: 'lead', mode: 'blog-body', shot: 'close-up', avoid: 'drywood termite frass' });
     const action = buildPrompt({ keyword: 'Reading the pellets', topic: 'lead', mode: 'blog-body', shot: 'action', avoid: 'drywood termite frass' });

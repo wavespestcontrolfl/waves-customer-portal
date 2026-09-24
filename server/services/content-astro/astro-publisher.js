@@ -5125,6 +5125,8 @@ module.exports = {
     legacyHeroRefs,
     imageDHash,
     hammingDistance,
+    nearDuplicateOf,
+    vetGeneratedAlt,
     committedImageBuffer,
     assertDistinctPictures,
     BODY_IMAGE_SHOTS,

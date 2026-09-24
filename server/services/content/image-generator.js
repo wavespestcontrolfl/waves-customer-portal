@@ -209,11 +209,14 @@ const EQUIPMENT_SUBJECT = /\b(controller|timer|clock|irrigation|sprinkler|spread
 // #3964).
 const INDOOR_SUBJECT = /\b(kitchen|pantry|bathroom|bedroom|attic|closet|cabinets?|indoors?|inside|baseboards?|roach(es)?|cockroach(es)?|bed bugs?|silverfish|drain flies)\b/i;
 const OUTDOOR_SUBJECT = /\b(lawn|turf|grass|sod|yard|mounds?|garden|hedges?|shrubs?|trees?|palms?|mulch|patio|lanai|pool|driveway|exterior|outdoors?|outside|perimeter|foundation)\b/i;
-function settingsFor(subject) {
+function settingCategoryFor(subject) {
   const text = String(subject || '');
-  if (EQUIPMENT_SUBJECT.test(text)) return [...SETTINGS.equipment];
-  if (INDOOR_SUBJECT.test(text) && !OUTDOOR_SUBJECT.test(text)) return [...SETTINGS.indoor];
-  return [...SETTINGS.yard];
+  if (EQUIPMENT_SUBJECT.test(text)) return 'equipment';
+  if (INDOOR_SUBJECT.test(text) && !OUTDOOR_SUBJECT.test(text)) return 'indoor';
+  return 'yard';
+}
+function settingsFor(subject) {
+  return [...SETTINGS[settingCategoryFor(subject)]];
 }
 const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];
 const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking down', 'over the shoulder', 'straight-on, centered', 'three-quarter view'];
@@ -257,13 +260,22 @@ function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject =
   if (style === 'infographic') {
     return { style, setting: pick(INFOGRAPHIC_LAYOUTS, 1), timeOfDay: '', vantage: 'straight-on, centered' };
   }
+  const category = settingCategoryFor(subject);
   return {
     style,
-    setting: pick(settingsFor(subject), 1),
+    setting: pick(SETTINGS[category], 1),
     timeOfDay: pick(TIMES_OF_DAY, 2),
     vantage: pick(VANTAGES, 3),
+    // Owner ask 2026-09-23: the Waves van in the background of SOME exterior
+    // scenes. Yard settings only (a van in a kitchen is a contradiction), and
+    // about one in three so the variation directive (2026-09-05) still holds.
+    // The van is UNMARKED by design — the real wrap carries the retired name
+    // and generators turn lettering into gibberish; the logo screen would
+    // reject it. Revisit as a reference-image path after the re-wrap.
+    van: category === 'yard' && (seed + 4 * 7919) % 3 === 0,
   };
 }
+const VAN_LINE = 'In the background, a solid Waves-blue (#009CDE) Ford Transit work van parked at the curb or in the driveway — plain and unmarked, no lettering, no logo, not the focus of the shot.';
 // The style a slot regenerates in after a failed text/logo screen: one no
 // sibling slot of the post uses (the permutation's unused fourth style, when
 // the slot can carry it), else the slot's own style under a fresh seed — a
@@ -282,9 +294,19 @@ function retryStyleFor({ slug, mode = 'blog-hero', index = 0, captions = [] } = 
 // depict" lines (a brief's rules — e.g. no repair scenes on a post that says
 // Waves does not repair irrigation; no competitor vehicles on a comparison).
 const STANDARD_GUARDS = [
-  'no company logos, brand names, or brand marks of any kind — equipment, vehicles and uniforms are generic and unbranded',
+  'no company logos, brand names, or brand marks of any kind — equipment and vehicles are generic and unbranded, and uniforms carry no logo or lettering (only the uniform COLORS follow the Waves uniform line)',
   'no invented control-panel labels, dials with fake words, or gibberish lettering',
 ];
+// Owner directive 2026-09-23 (Adam, after the Bradenton WDO hero showed a tech in
+// a blue long-sleeve and khakis): any Waves technician in a generated image wears
+// the REAL uniform. Every scene mode carries the line — a hero, body slot or social
+// tile can all put a person in frame, and a captioned infographic about an
+// inspection or treatment can still draw a technician icon (Codex P2), so the
+// infographic carries it too. The logo itself stays OFF the shirt/cap:
+// generators render marks as gibberish and the post-generation text/logo
+// screen would reject the image.
+const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering.';
+
 function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [] }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
@@ -317,8 +339,10 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     : `Composition: landscape 3:2 aspect ratio, 1536x1024.`;
   // Brand palette is Waves Blue #009CDE + Gold #FFD700 (theme-brand.js); the
   // brand brief explicitly forbids teal, so steer the grade, don't paint it.
+  // The limited illustration palettes (blue / gold / neutrals) must not
+  // steer a technician's shirt back to blue: uniform red is always allowed.
   const styleLine = style
-    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast.`
+    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast; a technician's red shirt or red cap is part of the palette.`
     : `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast).`;
   const captionList = (style && style.allowsText ? captions : []).map((c) => String(c || '').trim()).filter(Boolean);
   const textRule = captionList.length
@@ -332,7 +356,9 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const editorial = mode === 'blog-hero' || mode === 'blog-body'
     ? 'Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.'
     : '';
-  return [base, focus, local, framing, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
+  const uniform = WAVES_UNIFORM_LINE;
+  const van = plan && plan.van && !isInfographic ? VAN_LINE : '';
+  return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from

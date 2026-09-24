@@ -29,7 +29,7 @@ describe('writer-agent-config editorial evidence policy', () => {
 
   test('makes visuals evidence-driven and forbids generic component defaults', () => {
     expect(prompt).toContain('There is NO visual quota');
-    expect(prompt).toMatch(/Every label, level, zone, item, caption, and comparison cell[\s\S]*must be supported/);
+    expect(prompt).toMatch(/Every factual claim in a label[\s\S]*comparison cell must be supported/);
     expect(prompt).toMatch(/<SeasonalPressureChart \/>[\s\S]*NEVER emit it bare/);
     expect(prompt).toMatch(/<HomeZoneMap \/>[\s\S]*NEVER emit it bare/);
     expect(prompt).toMatch(/<PestEvidenceGrid \/>[\s\S]*NEVER emit it bare/);
@@ -41,6 +41,22 @@ describe('writer-agent-config editorial evidence policy', () => {
     expect(prompt).toMatch(/For a listicle or comparison[\s\S]*criterion[\s\S]*limitation or[\s\S]*tradeoff/);
     expect(prompt).toMatch(/Researching\s+public sources is not product testing/);
     expect(prompt).toMatch(/Never imply Waves tested the options[\s\S]*documented comparison methodology/);
+  });
+
+  test('permits a category buying checklist without inventing provider attributes', () => {
+    expect(prompt).toMatch(/Neutral editorial criteria and questions to ask[\s\S]*without provider-specific evidence/);
+    expect(prompt).toMatch(/Without evidence for a category's attributes,[\s\S]*cells are questions or verification steps/);
+    expect(prompt).toContain('never unsupported yes/no claims, ratings,');
+    expect(prompt).toMatch(/factual category attributes still require the evidence/);
+    expect(prompt).not.toContain('Needs no special data');
+  });
+
+  test('allows mandated secondary evidence while preserving attribution and claim limits', () => {
+    expect(prompt).toMatch(/Explicitly brief-mandated secondary sources are also permitted[\s\S]*link the exact allowed page/);
+    expect(prompt).toMatch(/attribute its reporting or consumer[\s\S]*allegations to that source/);
+    expect(prompt).toMatch(/without presenting allegations as established[\s\S]*facts/);
+    expect(prompt).toContain('If no\n  allowed source or brief fact supports a claim, omit the claim');
+    expect(prompt).not.toContain('If no permitted primary-source URL');
   });
 
   test('describes the outbound-link guard and primary-source verification accurately', () => {
