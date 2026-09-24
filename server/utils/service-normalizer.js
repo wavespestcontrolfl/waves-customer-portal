@@ -169,11 +169,23 @@ function mappedServiceLabel(raw) {
   const treeShrub = detectServiceCategory(cleaned) === 'tree_shrub';
   for (const mapping of SERVICE_TYPE_MAP) {
     if (treeShrub && !TREE_SHRUB_TYPES.has(mapping.type)) continue;
-    if (mapping.match.test(cleaned)) return mapping.type;
+    if (matchesAtWordStart(mapping.match, cleaned)) return mapping.type;
   }
   return treeShrub ? 'Tree & Shrub Care' : null;
 }
 const TREE_SHRUB_TYPES = new Set(['Tree & Shrub Care', 'Palm Injection', 'Arborjet Treatment']);
+// The legacy map patterns are prefix stems ("fertil", "aerat"), not
+// word-bounded, so /ant\s*treatment/ also matches inside "Plant Treatment"
+// and /tent/ inside "Content". For a public label only a match that begins
+// a word counts (2026-09-24 round-7 P1) — stems may still run past the end
+// of a word ("Fertilization", "Ants").
+function matchesAtWordStart(re, text) {
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  for (const m of text.matchAll(g)) {
+    if (m.index === 0 || !/[a-z0-9]/i.test(text[m.index - 1])) return true;
+  }
+  return false;
+}
 
 /**
  * Detect the service category for color coding and icon assignment.

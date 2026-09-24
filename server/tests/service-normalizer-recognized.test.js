@@ -127,3 +127,18 @@ describe('tree & shrub labels keep their family (2026-09-24 round-6 P1)', () => 
     expect(mappedServiceLabel('Fertilization - 1 hour - $85')).toBe('Lawn Fertilization');
   });
 });
+
+describe('family matches must begin a word (2026-09-24 round-7 P1)', () => {
+  test.each(['Plant Treatment', 'Important Treatment', 'Content Review'])('%s maps to nothing', (raw) => {
+    expect(mappedServiceLabel(raw)).toBeNull();
+  });
+  test.each([
+    ['Ant Treatment', 'Ant Treatment'],
+    ['Fire Ant Control', 'Ant Treatment'],
+    ['Cockroach Treatment', 'Cockroach Treatment Service'],
+    ['Pre-Slab Termidor', 'Termite Treatment'],
+    ['Core Aeration', 'Lawn Aeration'],
+  ])('%s → %s still maps', (raw, expected) => {
+    expect(mappedServiceLabel(raw)).toBe(expected);
+  });
+});

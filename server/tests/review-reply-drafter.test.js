@@ -742,6 +742,25 @@ describe('2026-09-24 round-6 P1 fixes: outcome idioms, negated membership, reply
     const g = genericGrounding('We have been a member for years.');
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for being a member.'), g)).toBeNull();
   });
+  test.each([
+    'Glad the cockroach treatment is working for you.',
+    'Glad the cockroach treatment keeps working.',
+    'Glad the cockroach treatment is keeping them away.',
+  ])('ongoing efficacy after a sourced service name needs outcome evidence (round 7): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBe('unlisted_service_claim');
+  });
+  test('"working" as ordinary prose is not an efficacy claim', () => {
+    const g = genericGrounding('Great service, the team was hard-working.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nWorking around your schedule is part of the job.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nWe enjoy working with you.'), g)).toBeNull();
+  });
+  test.each([
+    ['I am not in your program.', 'Glad to have you in our program.'],
+    ['We are not on a quarterly schedule.', 'Glad the quarterly service suits you.'],
+    ['We do not do monthly service.', 'Glad the monthly service suits you.'],
+  ])('negated account status never sources the affirmative (round 7): %s', (review, line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding(review))).toBe('negated_review_claim');
+  });
   test('REPLY_VERSION moved past reply-v1 so stored safe-copy drafts are never reused on a publish retry', () => {
     expect(Drafter.REPLY_VERSION).not.toBe('reply-v1');
   });
