@@ -144,6 +144,7 @@ function makeFakeDb(seed = {}) {
       from(tbl) { subRows = store[tbl] ? [...store[tbl]] : []; return subCtx; },
       where(...args) { subRows = applyWhereArgs(subRows, args); return subCtx; },
       whereIn(col, arr) { subRows = subRows.filter((r) => arr.includes(resolveField(r, col))); return subCtx; },
+      whereNot(col, val) { subRows = subRows.filter((r) => resolveField(r, col) !== val); return subCtx; },
     };
     fn.call(subCtx);
     return subRows.map((r) => resolveField(r, subCol));
@@ -178,6 +179,7 @@ function makeFakeDb(seed = {}) {
       where(...args) { filtered = applyWhereArgs(filtered, args); return api; },
       whereNull(col) { filtered = filtered.filter((r) => resolveField(r, col) == null); return api; },
       whereNotNull(col) { filtered = filtered.filter((r) => resolveField(r, col) != null); return api; },
+      whereNot(col, val) { filtered = filtered.filter((r) => resolveField(r, col) !== val); return api; },
       whereIn(col, valueOrFn) {
         const values = typeof valueOrFn === 'function' ? runSubquery(valueOrFn) : valueOrFn;
         filtered = filtered.filter((r) => values.includes(resolveField(r, col)));
@@ -1426,6 +1428,23 @@ describe('reconcileOpenConsultationOutcomes — no-show outcome repair (round 12
     });
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
     expect(result.no_show_repaired).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-ns')).toMatchObject({ outcome: 'lost', lost_reason: 'no_show' });
+  });
+
+  test('local audit P1: a customer-linked warm no-show WITH sale evidence closes lost/no_show — the win pass never takes it', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-ns', status: 'no_show', service_type: 'Waves Assessment', scheduled_date: '2026-09-20', customer_id: 'cust-1' },
+        { id: 'sale', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-25', customer_id: 'cust-1', created_at: new Date('2026-09-21T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-ns', scheduled_service_id: 'visit-ns', customer_id: 'cust-1', outcome: 'warm', recorded_at: new Date('2026-09-20T15:00:00Z') },
+      ],
+      customers: [{ id: 'cust-1' }],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.no_show_repaired).toBe(1);
+    expect(result.won).toBe(0);
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-ns')).toMatchObject({ outcome: 'lost', lost_reason: 'no_show' });
   });
 

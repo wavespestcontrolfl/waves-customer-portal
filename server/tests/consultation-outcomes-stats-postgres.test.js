@@ -21,6 +21,7 @@
  */
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
+const { etDateString } = require('../utils/datetime-et');
 
 const connection = process.env.CONSULTATION_STATS_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -64,7 +65,7 @@ postgres('consultationStats — real query against real migrated Postgres', () =
     await db('leads').insert({ id: ids.lead, lead_source_id: ids.leadSource, customer_id: ids.customer });
     await db('scheduled_services').insert({
       id: ids.visit, customer_id: ids.customer, technician_id: ids.technician,
-      scheduled_date: new Date().toISOString().slice(0, 10), service_type: 'Waves Assessment', status: 'completed',
+      scheduled_date: etDateString(new Date()), service_type: 'Waves Assessment', status: 'completed',
     });
     await db('consultation_outcomes').insert({
       id: ids.outcome, scheduled_service_id: ids.visit, customer_id: ids.customer, lead_id: ids.lead,

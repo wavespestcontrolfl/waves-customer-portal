@@ -847,7 +847,10 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
         .whereIn('scheduled_service_id', function liveVisits() {
           this.select('id').from('scheduled_services')
             .where('scheduled_date', '>=', cutoff)
-            .where('scheduled_date', '<=', nowDateStr);
+            .where('scheduled_date', '<=', nowDateStr)
+            // A no-showed consultation is lost/no_show, never won — even if
+            // its best-effort no-show write failed and the row is still open.
+            .whereNot('status', 'no_show');
         })
         .update({ outcome: 'won', won_at: now, won_via: via, updated_at: now })
         .returning('id');
@@ -907,6 +910,10 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
  */
 async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200 } = {}) {
   const result = { scanned: 0, won: 0, errors: 0 };
+  // No-show repair runs FIRST (local audit P1): a no-showed consultation
+  // whose best-effort lost/no_show write failed must close as lost before
+  // the win pass could see it as an open row with sale evidence.
+  await repairMissedNoShowOutcomes({ now, limit, result });
   let rows;
   try {
     const cutoff = etDateString(addETDays(now, -(WON_WINDOW_DAYS + SWEEP_GRACE_DAYS)));
@@ -922,6 +929,7 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
       .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
       .whereIn('co.outcome', ['warm', 'cold'])
       .whereNotNull('co.customer_id')
+      .whereNot('ss.status', 'no_show') // repaired to lost/no_show above, never won
       .where('ss.scheduled_date', '>=', cutoff)
       .where('ss.scheduled_date', '<=', nowDateStr)
       .orderBy([{ column: 'co.last_reconciled_at', order: 'asc', nulls: 'first' }, { column: 'co.recorded_at', order: 'asc' }])
@@ -949,7 +957,6 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
     }
   }
 
-  await repairMissedNoShowOutcomes({ now, limit, result });
   return result;
 }
 
