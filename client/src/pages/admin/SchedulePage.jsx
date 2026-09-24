@@ -9946,6 +9946,10 @@ function LawnAssessmentCompletionBlock({
   const [result, setResult] = useState(null);
   const [visitReview, setVisitReview] = useState(null);
   const [techScores, setTechScores] = useState(null);
+  // Keys the technician actually typed this session. Only these are posted:
+  // the server ignores AI-known keys anyway, and resending a server-derived
+  // value (e.g. Stress) would read as an explicit entry and freeze it.
+  const [typedKeys, setTypedKeys] = useState(() => new Set());
   const [confirmedId, setConfirmedId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -9958,6 +9962,7 @@ function LawnAssessmentCompletionBlock({
     setResult(null);
     setVisitReview(null);
     setTechScores(null);
+    setTypedKeys(new Set());
     setConfirmedId(null);
     setError("");
     onConfirmed?.(null);
@@ -9982,7 +9987,10 @@ function LawnAssessmentCompletionBlock({
           aiScores: resolveAiScores(assessment, data.visitAssessment),
           observations: assessment.observations || "",
         });
-        setTechScores(withAiScores(scores, resolveAiScores(assessment, data.visitAssessment)));
+        // A confirmed row shows exactly what was saved (and what the customer
+        // report uses); only a pending row shows the AI read for locked keys.
+        setTechScores(assessment.confirmed_by_tech ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment)));
+        setTypedKeys(new Set());
         setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
         if (assessment.confirmed_by_tech) {
           setConfirmedId(assessment.id);
@@ -10019,6 +10027,7 @@ function LawnAssessmentCompletionBlock({
       setPhotos((prev) => [...prev, ...nextPhotos].slice(0, 3));
       setResult(null);
       setTechScores(null);
+      setTypedKeys(new Set());
       setConfirmedId(null);
       onConfirmed?.(null);
     } catch (err) {
@@ -10034,6 +10043,7 @@ function LawnAssessmentCompletionBlock({
   // the same rule independently; this just keeps the tech from typing into
   // a metric that won't take effect).
   function fillScore(key, rawValue) {
+    setTypedKeys((prev) => new Set(prev).add(key));
     setTechScores((prev) => {
       if (!prev) return prev;
       if (rawValue === "") return { ...prev, [key]: null };
@@ -10074,6 +10084,7 @@ function LawnAssessmentCompletionBlock({
       setResult({ ...response, aiScores: resolveAiScores(response.assessment, response.visitAssessment) });
       setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations !== undefined ? response.assessment.observations : response.observations));
       setTechScores({ ...scores });
+      setTypedKeys(new Set());
       setConfirmedId(null);
       onConfirmed?.(null);
     } catch (err) {
@@ -10100,7 +10111,7 @@ function LawnAssessmentCompletionBlock({
         method: "POST",
         body: JSON.stringify({
           assessmentId: result.assessment.id,
-          adjustedScores: techScores || result.adjustedScores || result.displayScores,
+          adjustedScores: Object.fromEntries([...typedKeys].map((key) => [key, techScores?.[key] ?? null])),
           ...visitReviewPayload(visitReview),
         }),
       });
@@ -10110,7 +10121,11 @@ function LawnAssessmentCompletionBlock({
         visitAssessment: visitAssessment ?? prev.visitAssessment,
       }));
       // Show what the server actually saved.
-      if (savedAssessment) setTechScores(withAiScores(parseAssessmentScores(savedAssessment), result.aiScores));
+      if (savedAssessment) {
+        const saved = parseAssessmentScores(savedAssessment);
+        setTechScores(savedAssessment.confirmed_by_tech ? saved : withAiScores(saved, result.aiScores));
+        setTypedKeys(new Set());
+      }
       if (visitAssessment) {
         setVisitReview(createVisitReview(visitAssessment, savedAssessment?.observations));
       }
@@ -10392,6 +10407,7 @@ function LawnAssessmentCompletionBlock({
                 setPhotos([]);
                 setResult(null);
                 setTechScores(null);
+                setTypedKeys(new Set());
                 setConfirmedId(null);
                 setError("");
                 onConfirmed?.(null);

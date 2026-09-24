@@ -93,7 +93,8 @@ it('keeps a pending assessment out of closeout and allows a later completed conf
   expect(screen.queryByText('0/100')).toBeNull();
   expect(screen.getByText('—')).toBeTruthy();
   const confirmBody = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
-  expect(confirmBody.adjustedScores.color_health).toBeNull();
+  // Nothing was typed, so nothing is posted; the server keeps the AI read.
+  expect(confirmBody.adjustedScores).toEqual({});
   expect(screen.queryByText('Assessment confirmed')).toBeNull();
   expect(screen.getByRole('button', { name: 'Confirm assessment' }).disabled).toBe(false);
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
@@ -127,8 +128,8 @@ it('keeps a technician-filled AI-blank metric editable after reload, without reo
   fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
   await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith('lawn-assessment/confirm'))).toBe(true));
   const sent = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
-  expect(sent.adjustedScores.fungus_control).toBe(40);
-  expect(sent.adjustedScores.thatch_level).toBe(85);
+  // Only what the technician typed is posted.
+  expect(sent.adjustedScores).toEqual({ fungus_control: 40 });
 });
 
 it('shows and posts the AI read for a locked metric even when the row carries an older technician adjustment', async () => {
@@ -142,13 +143,14 @@ it('shows and posts the AI read for a locked metric even when the row carries an
   render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
   await screen.findByRole('button', { name: 'Confirm assessment' });
   expect(screen.queryByText('40/100')).toBeNull();
+  expect(screen.getAllByText('80/100').length).toBeGreaterThan(0);
   fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
   await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith('lawn-assessment/confirm'))).toBe(true));
   const sent = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
-  expect(sent.adjustedScores.turf_density).toBe(80);
+  expect(sent.adjustedScores).toEqual({});
 });
 
-it.each([null, 0])('preserves an unavailable or genuinely zero score when reloading and posting: %s', async (value) => {
+it.each([null, 0])('shows an unavailable or genuinely zero score on reload and posts no untyped scores: %s', async (value) => {
   const expected = Object.fromEntries(Object.keys(scores).map((key) => [key, value]));
   loadedAssessment = { ...assessment, ...expected };
   render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
@@ -157,7 +159,7 @@ it.each([null, 0])('preserves an unavailable or genuinely zero score when reload
   fireEvent.click(confirm);
   await screen.findByText(message);
   const sent = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
-  expect(sent.adjustedScores).toEqual(expected);
+  expect(sent.adjustedScores).toEqual({});
 });
 
 it('lets the technician fill every AI-blank confirmation score without moving a known AI component', async () => {
@@ -172,10 +174,37 @@ it('lets the technician fill every AI-blank confirmation score without moving a 
   fireEvent.click(confirm);
   await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith('lawn-assessment/confirm'))).toBe(true));
   const sent = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
-  expect(sent.adjustedScores).toEqual({
-    turf_density: 80, weed_suppression: 80, color_health: 80, stress_damage: 85,
-    fungus_control: 5, thatch_level: 5,
-  });
+  expect(sent.adjustedScores).toEqual({ fungus_control: 5, thatch_level: 5 });
+});
+
+it('two partial saves: a server-derived Stress is never posted back as an explicit entry', async () => {
+  // Stress, fungus and thatch are all AI-blank. Save 1 fills fungus; the server
+  // derives Stress 80 and returns it. Save 2 corrects fungus; the post must not
+  // carry Stress, so the server re-derives it instead of freezing 80.
+  loadedAssessment = { ...assessment, color_health: 80, fungus_control: null, thatch_level: null, stress_damage: null };
+  confirmation = { success: true, confirmed: false, missingScores: ['thatch_level'], assessment: { ...loadedAssessment, fungus_control: 80, stress_damage: 80 } };
+  render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+  const confirm = await screen.findByRole('button', { name: 'Confirm assessment' });
+  fireEvent.change(screen.getByLabelText('Enter Fungus control'), { target: { value: '80' } });
+  fireEvent.click(confirm);
+  await screen.findByText(message);
+  fireEvent.change(screen.getByLabelText('Enter Fungus control'), { target: { value: '40' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.endsWith('lawn-assessment/confirm'))).toHaveLength(2));
+  const posts = fetch.mock.calls.filter(([url]) => url.endsWith('lawn-assessment/confirm')).map(([, init]) => JSON.parse(init.body).adjustedScores);
+  expect(posts).toEqual([{ fungus_control: 80 }, { fungus_control: 40 }]);
+});
+
+it('a confirmed assessment shows its saved scores, not the AI read', async () => {
+  // Confirmed before the read-only ruling with an adjusted turf 40; the
+  // customer report uses 40, so the drawer must show 40.
+  loadedAssessment = { ...assessment, turf_density: 40, confirmed_by_tech: true };
+  visitAssessment = {
+    runId: 'fixture-run', status: 'complete',
+    aiScores: { turf_density: 80, weed_suppression: 80, color_health: null, fungus_control: 85, thatch_level: 85, stress_damage: 85 },
+  };
+  render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+  expect(await screen.findByText('40/100')).toBeTruthy();
 });
 
 it('keeps known underlying scores out of the normal four-control workflow, with no +/- controls left anywhere', async () => {
