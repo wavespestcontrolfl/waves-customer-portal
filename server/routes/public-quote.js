@@ -4121,11 +4121,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // never a book link (same rule as nextStepSummary).
     if (bookingUrl) response.booking_url = bookingUrl;
     if (websiteEstimateUrl) response.website_estimate_url = websiteEstimateUrl;
-    // Every handoff — both provider legs AND this JSON link — is behind us:
-    // release this run's delivery claim (token-fenced; the shared release
-    // also completes a deferred invalidation). Non-fatal — an uncleared
-    // claim ages out by TTL. A quarantine that lands after this point meets
-    // /booking/confirm's own locked recheck.
+    // The response is WRITTEN FIRST (codex r50 P1): the JSON link and
+    // handoff token are handed to the client before the claim goes, so a
+    // quarantine cannot land between the release and the send. Then every
+    // handoff — both provider legs and this JSON link — is behind us and
+    // this run's delivery claim is released (token-fenced; the shared
+    // release also completes a deferred invalidation). Non-fatal — an
+    // uncleared claim ages out by TTL. A quarantine that lands after this
+    // point meets /booking/confirm's own locked recheck.
+    res.json(response);
     if (quoteDeliveryClaimToken) {
       try {
         const adminEstimates = require('./admin-estimates');
@@ -4136,7 +4140,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         logger.warn(`[public-quote] quote delivery claim release failed (ages out by TTL): ${releaseErr.code || releaseErr.name || 'db_error'}`);
       }
     }
-    res.json(response);
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: `Something went wrong. Please call ${WAVES_SUPPORT_PHONE_DISPLAY} for a quote.` });

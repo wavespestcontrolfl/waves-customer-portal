@@ -201,7 +201,8 @@ describe('codex r45', () => {
     expect(release).toBeGreaterThan(src.indexOf('Customer SMS failed'));
     // …held through the HTTP handoff: released right before the JSON send (codex r49 P1).
     expect(release).toBeGreaterThan(src.lastIndexOf('    const response = {'));
-    expect(release).toBeLessThan(src.lastIndexOf('    res.json(response);'));
+    // …AFTER the response is written (codex r50 P1): the link reaches the client before the claim goes.
+    expect(release).toBeGreaterThan(src.lastIndexOf('    res.json(response);'));
   });
   test('the lookup lifts legacy blocks through the withdrawal service', () => {
     const w = require('../services/website-quote-withdrawal');
