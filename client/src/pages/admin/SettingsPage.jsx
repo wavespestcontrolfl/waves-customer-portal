@@ -107,7 +107,7 @@ const VALID_TABS = [
 const SETTINGS_TAB_GROUPS = [
   { key: "general", label: "General", Icon: Building2, tabs: ["general", "link-library"] },
   { key: "integrations", label: "Integrations", Icon: Plug, tabs: ["integrations"] },
-  { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
+  { key: "service-reports", label: "Reports", Icon: MapPinned, tabs: ["service-reports"] },
   { key: "scheduling", label: "Scheduling", Icon: CalendarOff, tabs: ["blackout-days"] },
   { key: "financials", label: "Financials", Icon: Target, tabs: ["kpi-targets", "operating-costs"] },
   { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system", "usage"] },
@@ -116,15 +116,15 @@ const SETTINGS_TAB_GROUPS = [
 // Per-leaf nav metadata for the sub-tab pill row.
 const SETTINGS_LEAF_META = {
   general: { label: "General", Icon: Building2 },
-  "link-library": { label: "Link Library", Icon: Link2 },
+  "link-library": { label: "Links", Icon: Link2 },
   integrations: { label: "Integrations", Icon: Plug },
-  "service-reports": { label: "Service Reports", Icon: MapPinned },
-  "blackout-days": { label: "Blackout Days", Icon: CalendarOff },
-  "kpi-targets": { label: "KPI Targets", Icon: Target },
-  "operating-costs": { label: "Operating Costs", Icon: DollarSign },
-  gates: { label: "Feature Gates", Icon: ToggleLeft },
+  "service-reports": { label: "Reports", Icon: MapPinned },
+  "blackout-days": { label: "Blackouts", Icon: CalendarOff },
+  "kpi-targets": { label: "Targets", Icon: Target },
+  "operating-costs": { label: "Costs", Icon: DollarSign },
+  gates: { label: "Features", Icon: ToggleLeft },
   system: { label: "System", Icon: Server },
-  usage: { label: "Portal Usage", Icon: Activity },
+  usage: { label: "Usage", Icon: Activity },
 };
 
 export default function SettingsPage() {

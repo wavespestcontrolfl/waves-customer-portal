@@ -259,7 +259,7 @@ describe('local page search', () => {
     const input = screen.getByRole('searchbox', { name: 'Search pages' });
     expect(input).toHaveFocus();
     fireEvent.change(input, { target: { value: 'payers' } });
-    expect(screen.getByRole('link', { name: /Billing accounts/ })).toHaveAttribute('href', '/admin/payers');
+    expect(screen.getByRole('link', { name: /Payers/ })).toHaveAttribute('href', '/admin/payers');
     expect(fetch).not.toHaveBeenCalled();
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(onNavigate).toHaveBeenCalledOnce();
@@ -278,7 +278,7 @@ describe('local page search', () => {
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     expect(screen.getByRole('link', { name: /Banking/ })).toHaveFocus();
     fireEvent.keyDown(document.activeElement, { key: 'ArrowDown' });
-    expect(screen.getByRole('link', { name: /Books & taxes/ })).toHaveFocus();
+    expect(screen.getByRole('link', { name: /Taxes/ })).toHaveFocus();
     fireEvent.change(input, { target: { value: 'no such page' } });
     expect(screen.getByText(/No pages match/)).toBeVisible();
     fireEvent.keyDown(document, { key: 'Escape' });
@@ -289,7 +289,7 @@ describe('local page search', () => {
   test('pins up to three pages, frees slots on unpin, and isolates accounts on reload', () => {
     const view = fixture();
     act(() => view.ref.current.openNavigation());
-    for (const label of ['Invoices', 'Pipeline', 'Books & taxes']) {
+    for (const label of ['Invoices', 'Pipeline', 'Taxes']) {
       fireEvent.change(screen.getByRole('searchbox'), { target: { value: label } });
       fireEvent.click(screen.getByRole('button', { name: `Pin ${label}`, exact: true }));
     }
@@ -310,7 +310,7 @@ describe('local page search', () => {
     const other = fixture({ id: 'fixture-tech', role: 'technician' });
     act(() => other.ref.current.openNavigation());
     expect(screen.queryByRole('button', { name: /^Unpin / })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: /Contracts|System health|Estimates/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Contracts|Health|Estimates/ })).not.toBeInTheDocument();
   });
 
   test('drops invalid pins, hides revoked pages and keeps same-page navigation dismissible', () => {

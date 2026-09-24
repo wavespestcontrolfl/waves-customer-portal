@@ -72,12 +72,12 @@ export default function AdminWorkspaceNavigation({ user, isMobile, onClose, onAs
       {isMobile ? <Button variant="ghost" onClick={onClose} aria-label="Close menu" className="!px-3"><X size={18} aria-hidden /></Button> : <NotificationBell type="admin" />}
     </div>
     <div className="shrink-0 space-y-1 px-3 py-2">
-      <Button variant="secondary" onClick={onSearch} className="w-full !justify-start" aria-label="Search pages"><Search size={18} aria-hidden /><span className="flex-1 text-left">Search pages</span><kbd className="text-14 font-normal">⌘K</kbd></Button>
-      <Button variant="ghost" onClick={onAsk} className="w-full !justify-start"><Sparkles size={18} aria-hidden />Ask Waves</Button>
+      <Button variant="secondary" onClick={onSearch} className="w-full !justify-start" aria-label="Search pages"><Search size={18} aria-hidden /><span className="flex-1 text-left">Search</span><kbd className="text-14 font-normal">⌘K</kbd></Button>
+      <Button variant="ghost" onClick={onAsk} className="w-full !justify-start"><Sparkles size={18} aria-hidden />Ask</Button>
     </div>
     <nav aria-label="Admin workspaces" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
       <PinnedWorkspaceLinks onNavigate={onClose} />
-      {['Daily work', 'Manage'].map((section) => {
+      {['Daily', 'Manage'].map((section) => {
         const entries = groups.filter((group) => group.section === section);
         return entries.length > 0 && <div key={section} role="group" aria-label={section} className="mb-2">
           <h2 className="m-0 px-3 pb-1 pt-2 text-14 font-normal text-zinc-500">{section}</h2>

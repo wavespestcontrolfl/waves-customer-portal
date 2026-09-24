@@ -104,10 +104,10 @@ describe("SEOPage workspace navigation", () => {
 
     let viewNav = screen.getByRole("navigation", { name: "Command SEO view" });
     fireEvent.click(
-      within(viewNav).getByRole("button", { name: "SEO Advisor" }),
+      within(viewNav).getByRole("button", { name: "Advisor" }),
     );
     expect(
-      within(viewNav).getByRole("button", { name: "SEO Advisor" }),
+      within(viewNav).getByRole("button", { name: "Advisor" }),
     ).toHaveAttribute("aria-current", "page");
 
     const workspaceNav = screen.getByRole("navigation", {
@@ -132,7 +132,7 @@ describe("SEOPage workspace navigation", () => {
     );
     viewNav = screen.getByRole("navigation", { name: "Command SEO view" });
     expect(
-      within(viewNav).getByRole("button", { name: "SEO Advisor" }),
+      within(viewNav).getByRole("button", { name: "Advisor" }),
     ).toHaveAttribute("aria-current", "page");
 
     await waitFor(() => expect(fetch).toHaveBeenCalled());
@@ -161,7 +161,7 @@ describe("SEOPage workspace navigation", () => {
       "?workspace=command&view=dashboard&source=audit#evidence",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "SEO Advisor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Advisor" }));
     expect(screen.getByTestId("location")).toHaveTextContent(
       "?workspace=command&view=advisor&source=audit#evidence",
     );
@@ -173,7 +173,7 @@ describe("SEOPage workspace navigation", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Browser Back" }));
-    expect(await screen.findByRole("button", { name: "SEO Advisor" })).toHaveAttribute(
+    expect(await screen.findByRole("button", { name: "Advisor" })).toHaveAttribute(
       "aria-current",
       "page",
     );

@@ -144,12 +144,12 @@ function MenuView({ onNav, onOpenProtocols }) {
     },
     {
       key: "services",
-      label: "All Services",
+      label: "Services",
       hint: "Every service in the library",
     },
     {
       key: "protocols",
-      label: "Treatment Plans",
+      label: "Treatments",
       hint: "Seasonal treatment products and instructions",
     },
   ];

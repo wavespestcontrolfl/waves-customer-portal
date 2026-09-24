@@ -444,8 +444,8 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
         ) : (
           <Tabs value={tab} onValueChange={setTab}>
             <TabList>
-              <Tab value="report">Customer report</Tab>
-              <Tab value="tech">Tech view</Tab>
+              <Tab value="report">Report</Tab>
+              <Tab value="tech">Tech</Tab>
               <Tab value="photos">Photos ({data.photos?.length || 0})</Tab>
               <Tab value="details">Details</Tab>
             </TabList>

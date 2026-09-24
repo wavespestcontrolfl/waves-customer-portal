@@ -325,7 +325,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                 Content
               </PillTab>
               <PillTab active={view === "review"} onClick={() => changeView("review")}>
-                Other content
+                Review
               </PillTab>
               <PillTab active={view === "links"} onClick={() => changeView("links")}>
                 Links

@@ -107,7 +107,7 @@ function RecordDraftExample({ role }) {
   const [section, setSection] = useState('draft');
   return <Tabs value={section} onValueChange={setSection} variant="section">
     <TabList scrollable aria-label="Example record sections">
-      <Tab value="draft">Draft</Tab><Tab value="activity">Activity</Tab><Tab value="details">Property details</Tab>
+      <Tab value="draft">Draft</Tab><Tab value="activity">Activity</Tab><Tab value="details">Details</Tab>
       {role === 'admin' && <Tab value="billing">Billing</Tab>}
     </TabList>
     <TabPanel value="draft" keepMounted><DraftFields /></TabPanel>

@@ -64,17 +64,17 @@ const TAB_LIST = [
   { key: TABS.PROTOCOLS, label: "Protocols", Icon: ClipboardList },
   {
     key: TABS.MATCH,
-    label: "Tech Match",
+    label: "Matching",
     Icon: ClipboardList,
   },
   {
     key: TABS.CSR,
-    label: "CSR Booking",
+    label: "Booking",
     Icon: Headphones,
   },
   {
     key: TABS.REVENUE,
-    label: "Job Scores",
+    label: "Scores",
     Icon: TrendingUp,
   },
   {

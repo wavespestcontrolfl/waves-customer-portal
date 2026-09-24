@@ -282,9 +282,9 @@ function DiscountsSection() {
     (a.name || "").localeCompare(b.name || ""),
   );
   const visibleTabs = [
-    { key: "catalog", label: "Discount Catalog" },
+    { key: "catalog", label: "Catalog" },
     ...(tab === "form"
-      ? [{ key: "form", label: editing ? "Edit Discount" : "Create Discount" }]
+      ? [{ key: "form", label: editing ? "Edit" : "Create" }]
       : []),
     { key: "preview", label: "Preview" },
     { key: "stats", label: "Stats" },

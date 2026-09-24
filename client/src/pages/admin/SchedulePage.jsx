@@ -5893,13 +5893,13 @@ export function ProtocolPanel({ service, onClose }) {
   }, [service, isLawn, serviceCategory, loadAttempt]);
 
   const SECTIONS = [
-    ...(jobCardEnabled ? [{ id: "job_card", label: " Job card", count: null }] : []),
+    ...(jobCardEnabled ? [{ id: "job_card", label: "Job", count: null }] : []),
     ...(protocolEnabled ? [{ id: "visit_protocol", label: " Protocol", count: null }] : []),
     ...(!protocolEnabled && isLawn
       ? [
           {
             id: "lawn_protocol",
-            label: " Lawn Protocol",
+            label: "Lawn",
             count: lawnProtocol?.visits?.length || null,
           },
         ]
@@ -5915,11 +5915,11 @@ export function ProtocolPanel({ service, onClose }) {
           },
         ]
       : []),
-    { id: "overview", label: " Overview", count: null },
-    { id: "seasonal", label: " Pest Pressure", count: seasonal.length },
-    { id: "photos", label: " ID Guide", count: photos.length },
-    { id: "scripts", label: " Scripts", count: scripts.length },
-    { id: "equipment", label: " Equipment", count: equipment.length },
+    { id: "overview", label: "Overview", count: null },
+    { id: "seasonal", label: "Pressure", count: seasonal.length },
+    { id: "photos", label: "Guide", count: photos.length },
+    { id: "scripts", label: "Scripts", count: scripts.length },
+    { id: "equipment", label: "Equipment", count: equipment.length },
     ...(canScore ? [{ id: "score", label: "Score", count: null }] : []),
   ];
 

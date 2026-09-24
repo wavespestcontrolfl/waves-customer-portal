@@ -15,24 +15,24 @@ import TokensTab from "./knowledge-base/TokensTab";
 
 const KB_TAB_KEYS = new Set(["browse", "create", "field", "audit", "tokens"]);
 
-function knowledgeBaseTabs(isMobile, isAdminRole) {
+function knowledgeBaseTabs(isAdminRole) {
   const tabs = [
     {
       key: "browse",
-      label: isMobile ? "Browse" : "Browse & search",
+      label: "Browse",
       Icon: BookOpen,
     },
-    { key: "create", label: isMobile ? "New" : "New entry", Icon: Plus },
+    { key: "create", label: "Create", Icon: Plus },
     {
       key: "field",
-      label: isMobile ? "Field intel" : "Field intelligence",
+      label: "Field",
       Icon: Sprout,
     },
   ];
   if (isAdminRole) {
     tabs.push(
-      { key: "audit", label: "AI audit", Icon: ShieldCheck },
-      { key: "tokens", label: isMobile ? "Tokens" : "Token health", Icon: Gauge },
+      { key: "audit", label: "Audit", Icon: ShieldCheck },
+      { key: "tokens", label: "Tokens", Icon: Gauge },
     );
   }
   return tabs;
@@ -108,7 +108,7 @@ export default function KnowledgeBasePage({ embedded = false }) {
     feedbackTimer.current = setTimeout(() => setFeedback(null), 3500);
   }, []);
 
-  const tabs = knowledgeBaseTabs(isMobile, isAdminRole);
+  const tabs = knowledgeBaseTabs(isAdminRole);
 
   return (
     <UiSurface

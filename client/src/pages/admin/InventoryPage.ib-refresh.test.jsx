@@ -105,9 +105,9 @@ test('inventory group and leaf changes are URL-backed and preserve unrelated URL
   mount('source=audit', { hash: '#evidence' });
   await screen.findByText('Products');
 
-  fireEvent.click(screen.getByRole('button', { name: 'Vendors & Pricing' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Vendors' }));
   expect(screen.getByTestId('location')).toHaveTextContent('?source=audit&tab=price-sync#evidence');
-  fireEvent.click(screen.getByRole('button', { name: 'Vendors', exact: true }));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Vendors', exact: true }).find((button) => !button.closest('nav')));
   expect(screen.getByTestId('location')).toHaveTextContent('?source=audit&tab=vendors#evidence');
   fireEvent.click(screen.getByText('Browser Back'));
   await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('?source=audit&tab=price-sync#evidence'));
@@ -119,7 +119,7 @@ test('inventory rejects owner-only and unknown deep links for technicians', asyn
   ))));
   mount('tab=vendors&source=audit', { role: 'tech' });
   await screen.findByText('No products found');
-  expect(screen.queryByRole('button', { name: 'Vendors & Pricing' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Vendors' })).toBeNull();
 
   fireEvent.click(screen.getByRole('button', { name: 'Planning' }));
   expect(screen.getByTestId('location')).toHaveTextContent('?tab=forecast&source=audit');
