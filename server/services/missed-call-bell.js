@@ -35,9 +35,20 @@ function outcomeUnanswered(row) {
   return UNANSWERED_STATUSES.has(row.status);
 }
 
-// Unknown prospects share the missed-call lease; withheld IDs and Nomorobo spam stay silent.
+// An unknown number that hung up inside the first seconds (a misdial, a
+// robodialer probing the line) is not a lead. Owner ruling 2026-09-24: an
+// unknown caller who waited 25 seconds or more and left no message counts
+// as a missed call someone should return. Customers on file ring regardless
+// of duration, as before. In the 30 days to 2026-09-24, 41 of 63 unknown
+// voicemail-path callers hung up under 25s; the floor keeps the bell to
+// roughly one ring a day.
+const UNKNOWN_CALLER_MIN_SECONDS = 25;
+
+// Unknown prospects share the missed-call lease; withheld IDs, quick
+// hang-ups and Nomorobo spam stay silent.
 function unknownCallerAllowed(row, opts) {
   if (!opts?.unknownCallers) return false;
+  if (!(Number(row.duration_seconds) >= UNKNOWN_CALLER_MIN_SECONDS)) return false;
   // Withheld caller ID ("anonymous") is not a number anyone can call back.
   if (isSentinelPhone(row.from_phone) || String(row.from_phone || '').replace(/\D/g, '').length < 10) return false;
   if (String(row.source || '') === 'voice_relay_sandbox') return false;
@@ -190,6 +201,7 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
         else {
           q.whereRaw("COALESCE(source, '') <> 'voice_relay_sandbox'");
           q.where(group => group.whereNotNull('customer_id').orWhere(unknown => unknown
+            .where('duration_seconds', '>=', UNKNOWN_CALLER_MIN_SECONDS)
             .whereRaw("LENGTH(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g')) >= 10")
             .whereRaw("NOT (regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g') = ANY(?))", [[...PHONE_SENTINELS].flatMap(value => [value, `1${value}`])])
             .whereRaw("NOT COALESCE(jsonb_path_exists(COALESCE(metadata, '{}'::jsonb), ?::jsonpath, '{}'::jsonb, true), false)",
@@ -230,4 +242,4 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
   return rung;
 }
 
-module.exports = { missedCallEligible, ringMissedCallIfUnanswered, sweepMissedCalls, outcomeUnanswered };
+module.exports = { missedCallEligible, ringMissedCallIfUnanswered, sweepMissedCalls, outcomeUnanswered, UNKNOWN_CALLER_MIN_SECONDS };
