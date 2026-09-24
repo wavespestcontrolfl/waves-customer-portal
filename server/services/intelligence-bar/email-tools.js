@@ -471,8 +471,9 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
     // marketplaces, ticketing) has a no-reply From with the real recipient
     // in Reply-To — mirrors the rule the draft path above and the admin
     // Email tab's manual reply already apply.
+    const effectiveRecipient = email.reply_to || email.from_address;
     const result = await gmailClient.sendMessage(
-      email.reply_to || email.from_address,
+      effectiveRecipient,
       email.subject?.startsWith('Re:') ? email.subject : `Re: ${email.subject || '(no subject)'}`,
       body.replace(/\n/g, '<br>'),
       email.gmail_thread_id
@@ -486,7 +487,10 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
       success: true,
       state: 'provider_accepted',
       providerMessageId: result.id,
-      sent_to: email.from_address,
+      // codex round on this fix: report the address actually sent to, not
+      // the relay's From, or a persisted confirmation would misstate the
+      // recipient for relayed mail.
+      sent_to: effectiveRecipient,
       message_id: result.id,
       subject: email.subject,
     };
