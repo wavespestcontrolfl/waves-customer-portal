@@ -14,7 +14,7 @@
  */
 
 const { DEFAULT_CONFIG } = require('../services/pest-pressure/config');
-const { calculatePestPressureScore } = require('../services/pest-pressure/calculate');
+const { calculatePestPressureScore, scoreSourceFromComponents } = require('../services/pest-pressure/calculate');
 
 jest.mock('../services/pest-pressure/components/technician-rating', () => ({
   extractTechnicianRating: jest.fn().mockResolvedValue({ value: null, present: false }),
@@ -104,8 +104,13 @@ describe('calculatePestPressureScore — technician direct rating override', () 
     expect(result.score).toBe(n);
     expect(result.displayedScore).toBe(n);
     expect(result.scoreSource).toBe('technician_rating');
-    // Component breakdown is still the ordinary audit view (all zero here).
-    expect(result.componentScores.clientRating).toEqual({ value: 0, weight: 25, present: true });
+    // The audit shows the tap as the whole score — never blended weights
+    // that produced nothing (codex r1 P2).
+    expect(result.componentScores).toEqual({ technicianActivityRating: { value: n, weight: 100, present: true } });
+    expect(result.componentWeights).toEqual({ technicianActivityRating: 100 });
+    expect(result.missingComponents).toEqual([]);
+    expect(scoreSourceFromComponents(result.componentScores)).toBe('technician_rating');
+    expect(scoreSourceFromComponents(JSON.stringify(result.componentScores))).toBe('technician_rating');
   });
 
   test('technician direct rating short-circuits the insufficient-data gate', () => {
@@ -123,11 +128,8 @@ describe('calculatePestPressureScore — technician direct rating override', () 
 
     expect(result.score).toBe(5);
     expect(result.label.key).toBe('high');
-    // dataCompleteness still describes the ordinary blended components
-    // (0 of 5 present here) for the audit view — it does not mean the
-    // score itself is missing; score/displayedScore/label above are the
-    // direct tap and are never null in this path.
-    expect(result.dataCompleteness).toBe('partial');
+    // The tap is the whole score, so nothing is missing from it.
+    expect(result.dataCompleteness).toBe('complete');
     expect(result.scoreSource).toBe('technician_rating');
   });
 
@@ -143,6 +145,7 @@ describe('calculatePestPressureScore — technician direct rating override', () 
 
     expect(result.score).toBe(1.0);
     expect(result.scoreSource).toBe('blended');
+    expect(scoreSourceFromComponents(result.componentScores)).toBe('blended');
   });
 
   test('rejects a non-integer technicianDirectRating', () => {

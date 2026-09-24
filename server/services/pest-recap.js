@@ -503,6 +503,17 @@ async function submitRecap({
     // never block on it.
     let serviceRecordCols = {};
     try { serviceRecordCols = await trx('service_records').columnInfo(); } catch { serviceRecordCols = {}; }
+    // Staff-entered rating: stamp the technician source (and time) so Pest
+    // Pressure scores it as the report score, same as the completion form
+    // (owner ruling 2026-09-24). Without the stamp the null source reads as
+    // a customer rating and lands on the blended path.
+    const staffRatingFields = clientPestRating != null
+      ? {
+        client_pest_rating: clientPestRating,
+        ...(serviceRecordCols.client_pest_rating_source ? { client_pest_rating_source: 'technician' } : {}),
+        ...(serviceRecordCols.client_pest_rating_at ? { client_pest_rating_at: new Date() } : {}),
+      }
+      : {};
     const existing = await trx('service_records')
       .where({ scheduled_service_id: serviceId })
       .orderBy('created_at', 'desc')
@@ -754,7 +765,7 @@ async function submitRecap({
           ? { service_line: detectServiceLine(existing.service_type || svc.service_type || 'Pest Control') }
           : {}),
         ...(mergedServiceData ? { service_data: mergedServiceData } : {}),
-        ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
+        ...staffRatingFields,
         ...smsClaim,
         // The completion TRANSITION owes the yard-sign kit: a durable marker
         // the route's consumption hook reads and clears, so a retry after a
@@ -801,7 +812,7 @@ async function submitRecap({
           ? { structured_notes: JSON.stringify({ closeoutRequirements: closeoutSnap }) }
           : {}),
         service_data: JSON.stringify({ ...frozenTraceIdentity, reportIdentitySnapshot }),
-        ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
+        ...staffRatingFields,
         ...smsClaim,
         // completion_supplies_owed: this recap performs the completion
         // transition (see the update branch above).

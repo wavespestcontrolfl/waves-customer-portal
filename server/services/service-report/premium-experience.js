@@ -1,6 +1,8 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { resolveLabel } = require('../pest-pressure/label');
+const { DEFAULT_CONFIG } = require('../pest-pressure/config');
 const { detectServiceLine } = require('./service-line-configs');
 
 // Legacy service_records rows can have a null service_line while
@@ -400,7 +402,7 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
   const anyRecommendation = findings.some((finding) => finding.recommendation);
   const lowPressure = Number.isFinite(pressure) && pressure < 2;
   const pressureLabel = Number.isFinite(pressure)
-    ? `${pressure < 2 ? 'Low' : pressure < 3.5 ? 'Moderate' : 'Elevated'} · ${Number(pressure).toFixed(1)} / 5`
+    ? `${resolveLabel(pressure, DEFAULT_CONFIG.labels)?.name || 'Tracking'} · ${Number(pressure).toFixed(1)} / 5`
     : 'Tracking after more visits';
 
   const items = [

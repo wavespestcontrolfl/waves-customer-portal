@@ -32,6 +32,19 @@ const INPUT_KEY_TO_WEIGHT_KEY = Object.freeze({
 
 const INPUT_KEYS = Object.freeze(Object.keys(INPUT_KEY_TO_WEIGHT_KEY));
 
+// Component key recorded when a technician's direct rating is the score.
+const DIRECT_COMPONENT_KEY = 'technicianActivityRating';
+
+function scoreSourceFromComponents(componentScores) {
+  let parsed = componentScores;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+  }
+  return parsed && typeof parsed === 'object' && parsed[DIRECT_COMPONENT_KEY]
+    ? 'technician_rating'
+    : 'blended';
+}
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
@@ -244,8 +257,21 @@ function calculatePestPressureScore(input, config) {
 
   const label = resolveLabel(score, config.labels);
   const { trend, delta } = resolveTrend(score, input.previousScore ?? null, config.trendThresholds);
-  const dataCompleteness = present.length === allComponents.length ? 'complete' : 'partial';
+  const dataCompleteness = hasTechnicianDirectRating || present.length === allComponents.length ? 'complete' : 'partial';
   const summary = resolveCustomerSummary({ trend, label, dataCompleteness });
+  // A direct tap is the whole score, so the audit says exactly that — one
+  // component at 100% — rather than the blended weights that produced
+  // nothing. The persisted component_scores key is the provenance
+  // (technicianActivityRating ⇔ scoreSource 'technician_rating').
+  const audit = hasTechnicianDirectRating
+    ? {
+      componentScores: { [DIRECT_COMPONENT_KEY]: { value: score, weight: 100, present: true } },
+      componentWeights: { [DIRECT_COMPONENT_KEY]: 100 },
+      missingComponents: [],
+      calculationVersion: config.calculationVersion,
+      configSnapshot: baseSnapshot,
+    }
+    : buildSharedAudit(scoringComponents, weightDenominator);
 
   return {
     score,
@@ -256,12 +282,14 @@ function calculatePestPressureScore(input, config) {
     dataCompleteness,
     scoreSource: hasTechnicianDirectRating ? 'technician_rating' : 'blended',
     summary,
-    ...buildSharedAudit(scoringComponents, weightDenominator),
+    ...audit,
   };
 }
 
 module.exports = {
   INPUT_KEYS,
+  DIRECT_COMPONENT_KEY,
+  scoreSourceFromComponents,
   INPUT_KEY_TO_WEIGHT_KEY,
   calculatePestPressureScore,
   // Exposed for tests

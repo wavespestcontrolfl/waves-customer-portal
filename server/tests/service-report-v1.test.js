@@ -796,6 +796,26 @@ describe('service report v1', () => {
     });
   });
 
+  test('property-defense Pressure row uses the report\'s six-band labels (owner ruling 2026-09-24)', () => {
+    const findPressureRow = (node) => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.key === 'pressure' && node.label === 'Pressure') return node;
+      for (const value of Object.values(node)) {
+        const hit = findPressureRow(value);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const cases = [[1, 'Very Low'], [2, 'Low'], [3, 'Moderate'], [4, 'Elevated'], [5, 'High']];
+    for (const [score, name] of cases) {
+      const context = buildPremiumExperienceContextFromRows({
+        record: { id: 'service-current', pressure_index: score },
+        dynamicContext: { pressureTrend: { current: { pressureIndex: score } } },
+      });
+      expect(findPressureRow(context)?.detail).toBe(`${name} · ${score.toFixed(1)} / 5`);
+    }
+  });
+
   test('premium experience builds customer-facing modules from service facts', () => {
     const context = buildPremiumExperienceContextFromRows({
       record: {

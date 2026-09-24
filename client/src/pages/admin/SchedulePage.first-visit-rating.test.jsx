@@ -75,13 +75,38 @@ describe('first-visit pest activity rating', () => {
   });
 
   it('never overwrites a restored draft where the tech cleared the rating', async () => {
-    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Cleared the rating', clientPestRating: null }));
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Cleared the rating', clientPestRating: null, clientPestRatingTouched: true }));
     await mount();
     fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
     // Let an autosave replace the draft snapshot before the gate answers.
     await act(async () => { await new Promise((r) => setTimeout(r, 900)); });
     await answer({ allowed: true, firstVisit: true });
     expect(pressed()).toEqual([]);
+  });
+
+  it('keeps the first-visit 5 when restoring a legacy draft that never touched the picker', async () => {
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Older draft', clientPestRating: null }));
+    await mount();
+    await answer({ allowed: true, firstVisit: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(new Set(pressed())).toEqual(new Set(['Rate pest activity 5 out of 5']));
+  });
+
+  it('applies the first-visit 5 after restoring a legacy untouched draft first', async () => {
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Older draft', clientPestRating: null }));
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 900)); });
+    await answer({ allowed: true, firstVisit: true });
+    expect(new Set(pressed())).toEqual(new Set(['Rate pest activity 5 out of 5']));
+  });
+
+  it('restores a draft rating the tech picked', async () => {
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Picked 2', clientPestRating: 2 }));
+    await mount();
+    await answer({ allowed: true, firstVisit: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(new Set(pressed())).toEqual(new Set(['Rate pest activity 2 out of 5']));
   });
 
   it('never overwrites a tap made before the gate answers', async () => {

@@ -236,7 +236,13 @@ async function customerHasPriorVisitOnLine(knex, { customerId, serviceLine }) {
     .where('customer_id', customerId)
     .where('status', 'completed');
   applyCustomerVisibleServiceRecordFilter(query);
-  if (serviceLine) query.where('service_line', serviceLine);
+  // Legacy rows with no service_line count as prior visits — the same
+  // fallback Pest Pressure's own history lookup uses (orchestrate.js).
+  if (serviceLine) {
+    query.where(function priorServiceLine() {
+      this.where('service_line', serviceLine).orWhereNull('service_line');
+    });
+  }
   return Boolean(await query.first('id'));
 }
 

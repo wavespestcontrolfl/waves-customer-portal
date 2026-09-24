@@ -13132,6 +13132,9 @@ export function CompletionPanel({
         includePayLink,
         requestReview,
         clientPestRating,
+        // Tells restore whether a null rating was a deliberate clear or an
+        // untouched picker (pre-2026-09-24 drafts never set it).
+        clientPestRatingTouched: clientPestRatingSetByTechRef.current,
         reviewTiming,
         reviewCustomAt,
         oneTimeRecapOnly,
@@ -13382,12 +13385,17 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
-    clientPestRatingSetByTechRef.current = true;
-    setClientPestRating(
-      Number.isInteger(savedDraft.clientPestRating)
-        ? savedDraft.clientPestRating
-        : null,
-    );
+    // An untouched picker (legacy drafts stored null for it) keeps whatever
+    // is showing now — including the first-visit 5; a tap or a deliberate
+    // clear is restored and locks out the late prefill.
+    if (savedDraft.clientPestRatingTouched === true || Number.isInteger(savedDraft.clientPestRating)) {
+      clientPestRatingSetByTechRef.current = true;
+      setClientPestRating(
+        Number.isInteger(savedDraft.clientPestRating)
+          ? savedDraft.clientPestRating
+          : null,
+      );
+    }
     setReviewTiming(normalizeReviewTiming(savedDraft.reviewTiming));
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
     // Bed bug hides the recap-only control (typed-era billing parity) — a

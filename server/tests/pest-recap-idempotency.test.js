@@ -127,7 +127,7 @@ function makeKnex(store) {
       // columnInfo probe still throws, keeping the tier snapshot in its
       // legacy (empty) shape for these tests.
       ...(table === 'service_records'
-        ? { columnInfo: jest.fn(async () => ({ structured_notes: {}, recap_sms_sent_at: {}, service_id: {}, service_type: {}, service_line: {} })) }
+        ? { columnInfo: jest.fn(async () => ({ structured_notes: {}, recap_sms_sent_at: {}, service_id: {}, service_type: {}, service_line: {}, ...(store.extraRecordCols || {}) })) }
         : {}),
       del: jest.fn(() => {
         if (table === 'service_products') {
@@ -173,6 +173,7 @@ function makeKnex(store) {
     q.insert = jest.fn((row) => {
       if (table === 'service_records') {
         const id = `rec-${store.records.length + 1}`;
+        store.recordInserts = (store.recordInserts || []).concat([row]);
         store.records.push({ id, recap_sms_sent_at: row.recap_sms_sent_at || null, structured_notes: row.structured_notes || null, service_line: row.service_line ?? null, service_data: row.service_data || null });
         return { returning: jest.fn().mockResolvedValue([{ id }]) };
       }
@@ -297,6 +298,32 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(second.smsError).toBe('duplicate_suppressed');
     // Both reference the same record.
     expect(second.recordId).toBe(first.recordId);
+  });
+
+  test('a staff recap rating is stamped as technician-sourced on insert and update (owner ruling 2026-09-24)', async () => {
+    const store = {
+      serviceStatus: 'scheduled',
+      records: [],
+      extraRecordCols: { client_pest_rating: {}, client_pest_rating_source: {}, client_pest_rating_at: {} },
+    };
+    const knex = makeKnex(store);
+    const args = {
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Treated kitchen + garage.',
+      products: [{ product_name: 'Termidor' }],
+      customerRecap: 'Service complete.',
+      sendSms: false,
+      clientPestRating: 4,
+      knex,
+    };
+    expect((await submitRecap(args)).ok).toBe(true);
+    expect(store.recordInserts[0]).toMatchObject({ client_pest_rating: 4, client_pest_rating_source: 'technician' });
+    expect(store.recordInserts[0].client_pest_rating_at).toBeInstanceOf(Date);
+    expect((await submitRecap({ ...args, clientPestRating: 2 })).ok).toBe(true);
+    const ratingPatch = (store.recordUpdates || []).find((patch) => 'client_pest_rating' in patch);
+    expect(ratingPatch).toMatchObject({ client_pest_rating: 2, client_pest_rating_source: 'technician' });
   });
 
   test('a recap-created record freezes the report identity snapshot from in-trx reads (codex P2 #3742)', async () => {
