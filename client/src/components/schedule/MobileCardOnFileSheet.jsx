@@ -186,8 +186,11 @@ export default function MobileCardOnFileSheet({
       // total would otherwise post the charge with expectedTotal undefined
       // — JSON.stringify drops the field and the server's changed-amount
       // guard never engages, so money would move on an unbound, unshown
-      // figure. Refuse before anything moves.
-      if (!Number.isFinite(Number(quote.total))) {
+      // figure. Refuse before anything moves. Strict: the server quotes
+      // total as a number (stripe.js quoteInvoiceSavedCardCharge), and
+      // Number(null) / Number("") coerce to 0, which would slip a null
+      // expectedTotal past the server's `!= null` guard.
+      if (typeof quote.total !== "number" || !Number.isFinite(quote.total)) {
         throw new Error("Could not price this charge — no total was quoted");
       }
       setQuotes((prev) => ({ ...prev, [card.id]: quote }));

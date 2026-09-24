@@ -156,12 +156,20 @@ describe.each(["legacy", "comfortable"])(
       expect(quoteEl.className).not.toMatch(/\btruncate\b/);
     });
 
-    it("refuses to charge when the quote comes back without a total — nothing is posted to /charge-card", async () => {
+    it.each([
+      ["no quote at all", {}],
+      ["total: null", { quote: { base: 100, surcharge: 3, total: null } }],
+      ["total: empty string", { quote: { base: 100, surcharge: 3, total: "" } }],
+      ["total: numeric string", { quote: { base: 100, surcharge: 3, total: "103" } }],
+    ])("refuses to charge when the quote comes back without a numeric total (%s) — nothing is posted to /charge-card", async (_label, quoteBody) => {
       await renderLoaded();
-      // A 200 quote with no usable total (empty body). Only ONE response
-      // is queued: if the sheet wrongly proceeded, the charge fetch would
-      // get undefined and the assertion on fetch calls below catches it.
-      fetch.mockReturnValueOnce(jsonResponse({}));
+      // A 200 quote with no usable total. Only ONE response is queued: if
+      // the sheet wrongly proceeded, the charge fetch would get undefined
+      // and the assertion on fetch calls below catches it. null / "" are
+      // the Number()-coercion hole (Number(null) === 0) the strict typeof
+      // check closes; the server skips its changed-amount guard on a null
+      // expectedTotal.
+      fetch.mockReturnValueOnce(jsonResponse(quoteBody));
 
       fireEvent.click(
         screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
