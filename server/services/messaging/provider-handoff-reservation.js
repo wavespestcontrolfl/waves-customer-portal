@@ -173,9 +173,6 @@ function settleProviderHandoffReservation(handle) {
                 reservationContext: handle.context,
               },
             });
-            if (!promoted && attempt === 1) {
-              logger.warn(`[provider-handoff] retrying accepted reservation promotion (${handle.reservationId})`);
-            }
           }
           if (!promoted) {
             logger.warn(`[provider-handoff] accepted reservation promotion failed (${handle.reservationId})`);
