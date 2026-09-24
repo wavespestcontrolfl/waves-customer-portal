@@ -27,6 +27,24 @@ async function addIfMissing(knex, table, column, build) {
   }
 }
 
+// down() narrowing the mode CHECK back to ('internal','prospect') is DDL that
+// Postgres validates against every existing row — once a real customer photo-
+// id submission exists (mode='customer'), that ADD CONSTRAINT throws and
+// aborts the whole rollback (codex r2 P1). Narrowing the constraint back is
+// safe only while no row actually uses the value being removed; otherwise
+// leave the wider (3-value) CHECK in place — permissive-but-working beats a
+// rollback that can't run at all.
+async function canNarrowModeCheck(knex, table) {
+  try {
+    const row = await knex(table).where({ mode: 'customer' }).first('id');
+    return !row;
+  } catch {
+    // Can't verify — stay on the wider (3-value) CHECK rather than risk the
+    // same ADD CONSTRAINT failure this guard exists to avoid.
+    return false;
+  }
+}
+
 exports.up = async function up(knex) {
   if (await knex.schema.hasTable('pest_identifications')) {
     await knex.raw('ALTER TABLE pest_identifications DROP CONSTRAINT IF EXISTS pest_identifications_mode_check');
@@ -79,11 +97,14 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasColumn('lawn_diagnostics', 'note')) {
       await knex.schema.alterTable('lawn_diagnostics', (t) => { t.dropColumn('note'); });
     }
-    await knex.raw('ALTER TABLE lawn_diagnostics DROP CONSTRAINT IF EXISTS lawn_diagnostics_mode_check');
-    await knex.raw(`
-      ALTER TABLE lawn_diagnostics
-      ADD CONSTRAINT lawn_diagnostics_mode_check CHECK (mode IN (${quoted(['internal', 'prospect'])}))
-    `);
+    if (await canNarrowModeCheck(knex, 'lawn_diagnostics')) {
+      await knex.raw('ALTER TABLE lawn_diagnostics DROP CONSTRAINT IF EXISTS lawn_diagnostics_mode_check');
+      await knex.raw(`
+        ALTER TABLE lawn_diagnostics
+        ADD CONSTRAINT lawn_diagnostics_mode_check CHECK (mode IN (${quoted(['internal', 'prospect'])}))
+      `);
+    }
+    // else: a real 'customer' row exists — leave the 3-value CHECK in place.
   }
 
   if (await knex.schema.hasTable('pest_identifications')) {
@@ -93,10 +114,13 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasColumn('pest_identifications', 'note')) {
       await knex.schema.alterTable('pest_identifications', (t) => { t.dropColumn('note'); });
     }
-    await knex.raw('ALTER TABLE pest_identifications DROP CONSTRAINT IF EXISTS pest_identifications_mode_check');
-    await knex.raw(`
-      ALTER TABLE pest_identifications
-      ADD CONSTRAINT pest_identifications_mode_check CHECK (mode IN (${quoted(['internal', 'prospect'])}))
-    `);
+    if (await canNarrowModeCheck(knex, 'pest_identifications')) {
+      await knex.raw('ALTER TABLE pest_identifications DROP CONSTRAINT IF EXISTS pest_identifications_mode_check');
+      await knex.raw(`
+        ALTER TABLE pest_identifications
+        ADD CONSTRAINT pest_identifications_mode_check CHECK (mode IN (${quoted(['internal', 'prospect'])}))
+      `);
+    }
+    // else: a real 'customer' row exists — leave the 3-value CHECK in place.
   }
 };

@@ -256,6 +256,29 @@ describe('POST /api/photo-id/:type happy paths', () => {
     });
   });
 
+  test('lawn: a severe reading on one photo is never masked by a healthy first photo\'s text', async () => {
+    // codex r2 P1 — severity fields take the worst photo; observations must
+    // not collapse to only the first (reassuring) photo's paragraph.
+    mockLawnAnalyzePhoto
+      .mockResolvedValueOnce({
+        composite: {
+          turf_density: 90, weed_coverage: 5, color_health: 9, fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'This front section looks healthy.',
+        },
+      })
+      .mockResolvedValueOnce({
+        composite: {
+          turf_density: 40, weed_coverage: 30, color_health: 5, fungal_activity: 'severe', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Severe fungal patches near the back fence.',
+        },
+      });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
+      const body = await res.json();
+      const fungalSignal = body.result.signals.find((s) => s.key === 'fungal_activity');
+      expect(fungalSignal.level).toBe('severe');
+      expect(body.result.observations).toContain('Severe fungal patches');
+    });
+  });
+
   test('tree_shrub: scores + signals shape the result', async () => {
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody());

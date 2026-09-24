@@ -306,7 +306,12 @@ function mergeLawnComposites(list) {
     thatch_visibility: worstOf(list.map((c) => c.thatch_visibility), THATCH_RANK, THATCH_ORDER),
     overwatering_signal: list.some((c) => !!c.overwatering_signal),
     grass_type: list.map((c) => c.grass_type).find(Boolean) || null,
-    observations: list.map((c) => c.observations).find((v) => v && String(v).trim()) || '',
+    // Every photo's text, not just the first non-empty one (codex r2 P1): the
+    // severity fields above take the WORST reading across photos, so a
+    // healthy-looking overview shot followed by a severely damaged area must
+    // not let that first photo's reassuring paragraph stand in for the whole
+    // submission and silently outrun what the signals above actually say.
+    observations: list.map((c) => (c.observations || '').trim()).filter(Boolean).join(' ').slice(0, 1000),
   };
 }
 
