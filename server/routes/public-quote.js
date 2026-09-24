@@ -2377,6 +2377,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // not now: a flag another lookup committed after that stamp
           // outranks it too (pre-push audit P1).
           const cachedCleanAt = profileEvidence && countyRollAnswered(trustedTurf) ? (trustedProfileCachedAt || null) : null;
+          // The newest clean evidence the locked reconciliation accepted
+          // (a staff/lookup verdict newer than the cache) — the persisted
+          // clean stamp must never fall back to the older cache time
+          // (pre-push audit P1 on r24).
+          let acceptedCleanAt = 0;
           // Reconciled BOTH ways under the lock, whatever the pre-lock value:
           // a flag committed since the unlocked scan outranks a recovered
           // clean verdict when it is newer than that verdict's ORIGINAL
@@ -2400,6 +2405,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
               .reduce((max, at) => Math.max(max, at), 0);
             const cleanAt = Math.max(lockedClean, Date.parse(cleanEvidenceAt || cachedCleanAt || '') || 0);
+            acceptedCleanAt = cleanAt;
             const lockedFlags = lockedRows
               .map((row) => recoverAddressUnverified(parseLocked(row)))
               .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress));
@@ -2481,8 +2487,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             profileFound: profileEvidence || leadCleanVerdict,
             address: normalizedAddress,
           });
-          if (verdict.status === 'clean' && cleanEvidenceAt && !cachedCleanAt) verdict.at = cleanEvidenceAt;
-          else if (verdict.status === 'clean' && cachedCleanAt) verdict.at = cachedCleanAt;
+          if (verdict.status === 'clean') {
+            const newestCleanAt = Math.max(acceptedCleanAt, Date.parse(cleanEvidenceAt || '') || 0, Date.parse(cachedCleanAt || '') || 0);
+            if (newestCleanAt) verdict.at = new Date(newestCleanAt).toISOString();
+          }
           await trx('leads').where({ id: lead.id }).update({
             extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
               address_unverified: addressUnverified || null,
@@ -3306,12 +3314,26 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // A carried draft block puts its structured audit back on the CURRENT
     // lead (own row, this run's insert/update above) so the lead card shows
     // the callback ask the draft still enforces (pre-push audit P1).
+    // Written under the contact-pair lock, and only if the carried
+    // evidence still wins: a lookup or staff confirmation committed after
+    // the draft transaction must not have its newer verdict overwritten.
+    // Both keys land together so address_unverified never disagrees with
+    // address_verdict (pre-push audit P1 on r24).
     const carryFlagToLead = async () => {
       if (!(draftAddressBlockCarried && carriedAddressFlag && lead?.id)) return;
       try {
-        await db('leads').where({ id: lead.id }).update({
-          extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: carriedAddressFlag })]),
-          updated_at: new Date(),
+        await db.transaction(async (trx) => {
+          await draftVerdictLock(trx);
+          const rec = await reconcileUnderLock(trx, { carriedFlag: carriedAddressFlag });
+          if (rec.newerClean) {
+            logger.info('[public-quote] carried address flag not written — a clean verdict committed after it');
+            return;
+          }
+          const verdict = { ...buildAddressVerdict({ flag: carriedAddressFlag, address: normalizedAddress }), at: carriedAddressFlag.flagged_at || new Date().toISOString() };
+          await trx('leads').where({ id: lead.id }).update({
+            extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: carriedAddressFlag, address_verdict: verdict })]),
+            updated_at: new Date(),
+          });
         });
       } catch (carryErr) {
         logger.warn(`[public-quote] carried address flag not written to the lead: ${carryErr.code || carryErr.name || 'error'}`);
