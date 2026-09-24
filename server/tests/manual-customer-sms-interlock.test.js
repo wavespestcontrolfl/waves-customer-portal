@@ -39,7 +39,7 @@ const input = () => ({
   purpose: 'conversational',
   customerId: 'customer-1',
   entryPoint: 'fixture',
-  metadata: { adminUserId: 'admin-1' },
+  metadata: { adminUserId: 'intelligence_bar' },
 });
 
 const reservation = () => ({
@@ -104,6 +104,7 @@ test('the durable reservation and actual derived endpoint precede canonical deli
     to: '+19415550100',
     fromNumber: '+19413529161',
     customerId: 'customer-1',
+    adminUserId: null,
     blockOnActiveManualReservation: true,
   }));
   expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
@@ -113,9 +114,22 @@ test('the durable reservation and actual derived endpoint precede canonical deli
     }),
   }));
   expect(mockSettleHumanReply).toHaveBeenCalledWith(expect.objectContaining({
-    reservationId: 'reservation-1', sent: true, reviewedBy: 'admin-1',
+    reservationId: 'reservation-1', sent: true, reviewedBy: 'intelligence_bar',
     acceptedResult: expect.objectContaining({ providerMessageId: 'SM-accepted' }),
   }));
+  expect(mockSendCustomerMessage.mock.calls[0][0].metadata.adminUserId).toBe('intelligence_bar');
+});
+
+test('a real authenticated staff UUID remains the reservation attribution', async () => {
+  mockGate.enabled = true;
+  const staffId = '11111111-1111-4111-8111-111111111111';
+  const original = { ...input(), metadata: { adminUserId: staffId } };
+
+  await sendManualCustomerSms(original);
+
+  expect(mockReserveHumanReply).toHaveBeenCalledWith(expect.objectContaining({ adminUserId: staffId }));
+  expect(mockSendCustomerMessage.mock.calls[0][0].metadata.adminUserId).toBe(staffId);
+  expect(mockSettleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ reviewedBy: staffId }));
 });
 
 test('an accepted provider outcome on a thrown audit error finalizes as accepted', async () => {

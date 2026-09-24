@@ -13,6 +13,11 @@ const {
 } = require('../sms-suggest-mode');
 
 const INTERLOCK_FIELD = 'manualSmsInterlock';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function reservationAdminUserId(value) {
+  return UUID_RE.test(String(value || '')) ? value : null;
+}
 
 function deliveryState(outcome) {
   const certainty = classifyDeliveryCertainty(outcome);
@@ -143,7 +148,11 @@ async function sendManualCustomerSms(input) {
   if (!isEnabled('smsGratitudeReplies')) return sendCustomerMessage(input);
 
   const reviewedBy = input.metadata?.adminUserId || null;
-  const prepared = await prepareReservation(input, reviewedBy);
+  // Canonical send metadata historically also carries symbolic provenance
+  // (for example, `intelligence_bar`). Keep that contract unchanged, but do
+  // not put a symbolic label into sms_log.admin_user_id: the reservation row
+  // uses the real UUID when available and NULL otherwise.
+  const prepared = await prepareReservation(input, reservationAdminUserId(reviewedBy));
   if (!prepared) return blockedResult(
     'MANUAL_REPLY_RESERVATION_FAILED',
     'Could not reserve this conversation for delivery. Try again in a moment.',
