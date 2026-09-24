@@ -114,6 +114,40 @@ function unitsOf(stops) {
 }
 
 /**
+ * An uncommitted estimate hold on the calendar (slot-reservation.js): a
+ * scheduled_services row with no customer and a reservation expiry. Same
+ * predicate rain-out.js and estimate-slot-availability.js use. Nobody has
+ * booked it, its "Open job" has no customer to open, and a marked-out tech's
+ * hold is refused at commit time anyway (dated assertAssignableTechnician),
+ * so it is never something a dispatcher must decide about (auditor P1).
+ */
+function isUncommittedHold(stop) {
+  return !stop.customer_id && stop.reservation_expires_at != null;
+}
+
+/**
+ * The open stops on one tech-day that tech-out can park — the ONE read
+ * shared by `parkTechDay` (mark-out) and `sweepAbsentTechDays` (safety net),
+ * so both agree on what counts: statuses in ABSENT_STOP_EXCLUDE_STATUSES are
+ * out (on_site left alone, en_route kept), and so are uncommitted holds.
+ */
+async function openStopsForTechDay(trx, { technicianId, date }) {
+  const rows = await dayStopsQuery(trx, {
+    dateStr: date,
+    technicianId,
+    excludeStatuses: ABSENT_STOP_EXCLUDE_STATUSES,
+    select: [
+      'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
+      'scheduled_services.window_start', 'scheduled_services.window_end',
+      'scheduled_services.is_recurring', 'scheduled_services.visit_id',
+      'scheduled_services.customer_id', 'scheduled_services.reservation_expires_at',
+      'customers.first_name', 'customers.last_name',
+    ],
+  }).orderBy('scheduled_services.window_start', 'asc');
+  return rows.filter((row) => !isUncommittedHold(row));
+}
+
+/**
  * Rank `stops` and park each unit as a `tech_out_overflow` alert, inside the
  * caller's transaction. Shared by `parkTechDay` (marking a tech out — the
  * day's full open stop list) and `sweepAbsentTechDays` (the safety net —
@@ -175,17 +209,7 @@ async function parkStops(trx, {
  * stored on the absence row. Exported for tests.
  */
 async function parkTechDay(trx, { technicianId, date, reason, absentTechName, absenceId = null }) {
-  const stops = await dayStopsQuery(trx, {
-    dateStr: date,
-    technicianId,
-    excludeStatuses: ABSENT_STOP_EXCLUDE_STATUSES,
-    select: [
-      'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
-      'scheduled_services.window_start', 'scheduled_services.window_end',
-      'scheduled_services.is_recurring', 'scheduled_services.visit_id',
-      'customers.first_name', 'customers.last_name',
-    ],
-  }).orderBy('scheduled_services.window_start', 'asc');
+  const stops = await openStopsForTechDay(trx, { technicianId, date });
 
   return parkStops(trx, {
     technicianId, date, reason, absentTechName, stops, absenceId,
@@ -255,17 +279,7 @@ async function sweepAbsentTechDays({ now } = {}) {
         .first('id');
       if (!stillOut) return { total: 0, units: 0, skipped: 'cleared' };
 
-      const stops = await dayStopsQuery(trx, {
-        dateStr: date,
-        technicianId,
-        excludeStatuses: ABSENT_STOP_EXCLUDE_STATUSES,
-        select: [
-          'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
-          'scheduled_services.window_start', 'scheduled_services.window_end',
-          'scheduled_services.is_recurring', 'scheduled_services.visit_id',
-          'customers.first_name', 'customers.last_name',
-        ],
-      }).orderBy('scheduled_services.window_start', 'asc');
+      const stops = await openStopsForTechDay(trx, { technicianId, date });
       if (stops.length === 0) return { total: 0, units: 0 };
 
       // Open AND resolved alerts for this tech-day: the resolved ones are
@@ -428,5 +442,5 @@ module.exports = {
   parkTechDay,
   sweepAbsentTechDays,
   rankBumpOrder,
-  _test: { unitsOf, customerDisplayName },
+  _test: { unitsOf, customerDisplayName, isUncommittedHold },
 };

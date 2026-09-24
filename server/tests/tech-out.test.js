@@ -337,6 +337,45 @@ describe('markTechOut', () => {
   });
 });
 
+describe('uncommitted estimate holds are never parked (auditor P1)', () => {
+  const hold = (overrides) => stop({ customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z', first_name: null, last_name: null, ...overrides });
+
+  test('isUncommittedHold: no customer + a reservation expiry; a booked row or a customer-linked hold is a real stop', () => {
+    expect(_test.isUncommittedHold(hold({ id: 'h' }))).toBe(true);
+    expect(_test.isUncommittedHold(stop({ id: 's', customer_id: 'cust-1' }))).toBe(false);
+    expect(_test.isUncommittedHold(stop({ id: 'c', customer_id: 'cust-1', reservation_expires_at: '2099-01-01T00:00:00Z' }))).toBe(false);
+    expect(_test.isUncommittedHold(stop({ id: 'n', customer_id: null, reservation_expires_at: null }))).toBe(false);
+  });
+
+  test('markTechOut skips a hold on the day: only the booked stop is parked and the summary counts only it', async () => {
+    dayStopsQuery.mockImplementation(() => fakeQuery([hold({ id: 'hold-1', window_start: '08:00:00' }), stop({ id: 'booked', customer_id: 'cust-1' })]));
+    const { summary } = await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    expect(createAlert).toHaveBeenCalledTimes(1);
+    expect(createAlert.mock.calls[0][0].jobId).toBe('booked');
+    expect(summary).toMatchObject({ total: 1, units: 1 });
+    expect(summary.parked.map((p) => p.job_id)).toEqual(['booked']);
+    // The read asks for the two columns the predicate needs.
+    expect(dayStopsQuery.mock.calls[0][1].select).toEqual(expect.arrayContaining([
+      'scheduled_services.customer_id', 'scheduled_services.reservation_expires_at',
+    ]));
+  });
+
+  test('the sweep skips a hold too: a hold that landed on the absent day parks nothing', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    try {
+      db.__state.absences['absence-1'] = {
+        id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+      };
+      dayStopsQuery.mockImplementation(() => fakeQuery([hold({ id: 'hold-late' })]));
+      const result = await sweepAbsentTechDays();
+      expect(result).toEqual({ absences: 1, parked: 0 });
+      expect(createAlert).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_TECH_OUT_REDISTRIBUTE;
+    }
+  });
+});
+
 describe('parkTechDay', () => {
   test('passes a plain connection through and returns the summary shape', async () => {
     dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'only' })]));
