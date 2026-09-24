@@ -101,7 +101,7 @@ function makeError(message, statusCode, code) {
 // Railway's preview has already run it, so an in-place edit is a silent
 // no-op there, and the pre-push migration guard blocks the edit anyway. A
 // SEPARATE migration, server/models/migrations/
-// 20260924000003_drop_consultation_outcomes_lead_fk.js, DROPS the foreign
+// 20260924000004_drop_consultation_outcomes_lead_fk.js, DROPS the foreign
 // key constraint on `lead_id` (keeps the column and its index; leads are
 // soft-deleted only, so there was no cascade behavior riding on the FK).
 // With no FK, the INSERT takes NO lock of any kind on the referenced lead

@@ -7,7 +7,7 @@
  *     pushed branch, so it can never be edited again: Railway's preview has
  *     run it, and the pre-push migration guard blocks any edit to an
  *     already-pushed migration file).
- *   - 20260924000003_drop_consultation_outcomes_lead_fk.js is the NEW,
+ *   - 20260924000004_drop_consultation_outcomes_lead_fk.js is the NEW,
  *     separate migration that removes the FK (round 6's original fix — see
  *     the comment above lockCustomerRow in
  *     server/services/consultation-outcomes.js for why: recordOutcome's
@@ -28,7 +28,7 @@
  */
 
 const migration0010 = require('../models/migrations/20260923000010_consultation_outcomes');
-const migrationDropFk = require('../models/migrations/20260924000003_drop_consultation_outcomes_lead_fk');
+const migrationDropFk = require('../models/migrations/20260924000004_drop_consultation_outcomes_lead_fk');
 
 const LEAD_FK_NAME = 'consultation_outcomes_lead_id_foreign';
 
@@ -157,7 +157,7 @@ describe('20260923000010_consultation_outcomes — unchanged (already pushed, ne
   });
 });
 
-describe('20260924000003_drop_consultation_outcomes_lead_fk — the actual round-6 fix', () => {
+describe('20260924000004_drop_consultation_outcomes_lead_fk — the actual round-6 fix', () => {
   // Every test here runs 0010 FIRST (as `knex migrate:latest` would apply
   // both files in filename order against one real database), then the new
   // migration on the SAME schema state.
