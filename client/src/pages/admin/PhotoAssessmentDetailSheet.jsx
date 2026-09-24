@@ -7,6 +7,10 @@
  * click plus a confirm dialog, and the server mints/refreshes the tokenized
  * link either way so copy-link always works when email can't.
  *
+ * Tree & shrub assessments have no customer report page yet: the sheet
+ * shows the admin-side view (five health scores, signal copy, findings,
+ * photos) and the server withholds Get link / Send report (can_release).
+ *
  * Tier 1 V2 — components/ui + Tailwind zinc; alert-fg only for genuine
  * safety flags (venomous / structural).
  */
@@ -32,7 +36,7 @@ import {
 import { adminFetch } from "../../lib/adminFetch";
 import { stageOf } from "./PhotoAssessmentsPage";
 
-const TYPE_LABELS = { lawn: "Lawn Assessment", pest: "Pest Identification" };
+const TYPE_LABELS = { lawn: "Lawn Assessment", pest: "Pest Identification", tree_shrub: "Tree & Shrub Assessment" };
 
 const dateTimeET = (v) =>
   v
@@ -346,6 +350,127 @@ function CustomerPreview({ type, preview }) {
   );
 }
 
+const TREE_SHRUB_STATUS_LABELS = {
+  strong: "Strong",
+  healthy: "Healthy",
+  watch: "Watch",
+  needs_attention: "Needs attention",
+  tracking: "Tracking",
+};
+
+// Admin-side tree & shrub report: there is no customer report page for this
+// type yet, so this is the whole "report" — the five 0-100 health scores
+// with their status, and the observation paragraph from the photo that
+// drives the worst signal.
+function TreeShrubReportView({ techView }) {
+  const categories = techView?.categories || [];
+  return (
+    <div className="space-y-3">
+      <div className="text-[14px] text-zinc-600 border border-hairline border-zinc-200 rounded-md p-3 bg-zinc-50">
+        No customer report for tree &amp; shrub yet — this view is admin-only, so Get link and Send report are unavailable. Follow up with the customer directly.
+      </div>
+      <Row label="Overall health">{techView?.scores?.overallScore != null ? `${techView.scores.overallScore}/100` : null}</Row>
+      <Row label="Worst signal">{techView?.worst_signal?.label || "No flagged signals"}</Row>
+      {categories.map((c) => (
+        <div key={c.key} className="border border-hairline border-zinc-200 rounded-md p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[15px] text-zinc-900">{c.label}</span>
+            <span className="text-[14px] text-zinc-600 tabular-nums">
+              {c.score != null ? `${c.score}/100` : "—"} · {TREE_SHRUB_STATUS_LABELS[c.status] || c.status}
+            </span>
+          </div>
+        </div>
+      ))}
+      {techView?.observations ? (
+        <div>
+          <div className="text-[14px] text-zinc-500 mb-1">Model observations</div>
+          <div className="text-[14px] text-zinc-700">{techView.observations}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Tree & shrub tech view: the flagged findings (signals, never a confirmed
+// pest/disease), the admin next step, scoring coverage, and each photo's own
+// observation paragraph beside its own worst signal.
+// The server always sends tech_view for this type, filled over defaults
+// (treeShrubTechView), so no per-field fallbacks here.
+function TreeShrubTechView({ techView }) {
+  const findings = techView.findings;
+  return (
+    <div className="space-y-3">
+      <Row label="AI summary">{techView.ai_summary}</Row>
+      <Row label="Suggested next step">{techView.suggested_customer_action}</Row>
+      <Row label="Photos scored">{techView.photo_count != null ? `${techView.scored_count ?? 0} of ${techView.photo_count}` : null}</Row>
+      {findings.map((f) => (
+        <div key={f.key} className="border border-hairline border-zinc-200 rounded-md p-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[15px] text-zinc-900">{f.label}</span>
+            <Badge tone="neutral">{f.status}</Badge>
+            {f.score != null ? <Badge tone="neutral">{f.score}/100</Badge> : null}
+          </div>
+          {f.detail ? <div className="mt-1 text-[14px] text-zinc-600">{f.detail}</div> : null}
+        </div>
+      ))}
+      <TreeShrubPhotoObservations entries={techView.photo_observations} />
+    </div>
+  );
+}
+
+// Each scored photo's own observation paragraph, in upload order. The merge
+// takes the worst signal across photos, so a clean overview and a flagged
+// close-up can read differently — both are kept.
+function TreeShrubPhotoObservations({ entries = [] }) {
+  if (!entries.length) return null;
+  return (
+    <div>
+      <div className="text-[14px] text-zinc-500 mb-1">Observations by photo</div>
+      {entries.map((entry) => (
+        <div key={entry.index} className="text-[14px] text-zinc-700 mb-1">
+          <span className="text-zinc-900">Photo {entry.index + 1}{entry.worst_signal ? ` · ${entry.worst_signal.replace(/_/g, " ")}` : ""}:</span>{" "}
+          {entry.observations || "—"}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Details-tab funnel timeline (unlock → first view → report sent → link
+// expiry). Only funnel types have these columns; tree & shrub has no funnel
+// and no report, so its panels render no timeline.
+function FunnelTimelineRows({ assessment }) {
+  return (
+    <>
+      <Row label="Unlocked">{dateTimeET(assessment.claimed_at)}</Row>
+      <Row label="First viewed">{dateTimeET(assessment.report_first_viewed_at)}</Row>
+      <Row label="Report sent">{dateTimeET(assessment.last_sent_at)}</Row>
+      <Row label="Link expires">{dateTimeET(assessment.report_expires_at)}</Row>
+    </>
+  );
+}
+
+// Report / Tech tab content (and the Details-tab funnel timeline) per
+// assessment type — one lookup instead of a type branch per tab. Unknown
+// types fall back to the lawn panels (the page only ever opens known types).
+const TYPE_PANELS = {
+  lawn: {
+    report: (data) => <CustomerPreview type="lawn" preview={data.customer_preview} />,
+    tech: (data) => <LawnTechView contract={data.tech_view?.contract} />,
+    timeline: (assessment) => <FunnelTimelineRows assessment={assessment} />,
+  },
+  pest: {
+    report: (data) => <CustomerPreview type="pest" preview={data.customer_preview} />,
+    tech: (data) => <PestTechView techView={data.tech_view} />,
+    timeline: (assessment) => <FunnelTimelineRows assessment={assessment} />,
+  },
+  tree_shrub: {
+    report: (data) => <TreeShrubReportView techView={data.tech_view} />,
+    tech: (data) => <TreeShrubTechView techView={data.tech_view} />,
+    timeline: () => null,
+  },
+};
+
 export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, onChanged }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -372,11 +497,11 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
 
   const assessment = data?.assessment;
   const stage = assessment ? stageOf(assessment) : null;
-  // Server contract: unclaimed public-funnel rows can't mint or send — the
-  // prospect's /claim is the only path that captures the lead and pricing.
-  const canRelease = assessment
-    && ["analyzed", "sent"].includes(assessment.status)
-    && (assessment.source !== "public_funnel" || !!assessment.claimed_at);
+  // The server computes can_release with the SAME gate generate-link /
+  // send-report enforce (releasable status, claimed public-funnel rows only,
+  // and a type that has a customer report page — never tree & shrub yet).
+  const canRelease = assessment?.can_release === true;
+  const panels = TYPE_PANELS[type] ?? TYPE_PANELS.lawn;
   const contactName = assessment
     ? [assessment.contact?.first_name, assessment.contact?.last_name].filter(Boolean).join(" ")
     : "";
@@ -450,10 +575,10 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
               <Tab value="details">Details</Tab>
             </TabList>
             <TabPanel value="report" className="pt-3">
-              <CustomerPreview type={type} preview={data.customer_preview} />
+              {panels.report(data)}
             </TabPanel>
             <TabPanel value="tech" className="pt-3">
-              {type === "lawn" ? <LawnTechView contract={data.tech_view?.contract} /> : <PestTechView techView={data.tech_view} />}
+              {panels.tech(data)}
             </TabPanel>
             <TabPanel value="photos" className="pt-3">
               {data.photos?.length ? (
@@ -476,10 +601,7 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
               <Row label="Prospect note">{assessment.prospect_note}</Row>
               <Row label="Source">{assessment.source}</Row>
               <Row label="Created">{dateTimeET(assessment.created_at)}</Row>
-              <Row label="Unlocked">{dateTimeET(assessment.claimed_at)}</Row>
-              <Row label="First viewed">{dateTimeET(assessment.report_first_viewed_at)}</Row>
-              <Row label="Report sent">{dateTimeET(assessment.last_sent_at)}</Row>
-              <Row label="Link expires">{dateTimeET(assessment.report_expires_at)}</Row>
+              {panels.timeline(assessment)}
               <Row label="Lead">{data.lead ? `${[data.lead.first_name, data.lead.last_name].filter(Boolean).join(" ")} (${data.lead.status})` : "—"}</Row>
               <Row label="Customer">{data.customer ? [data.customer.first_name, data.customer.last_name].filter(Boolean).join(" ") : "—"}</Row>
             </TabPanel>
