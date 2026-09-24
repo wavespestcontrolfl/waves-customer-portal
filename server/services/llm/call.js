@@ -5,9 +5,11 @@
  * or Anthropic (SDK) — factored from the hand-rolled, duplicated patterns in the
  * #1834 lawn-diagnostic pipeline (server/services/lawn-diagnostic-prompt.js) and
  * satellite-analyzer / call-recording-processor. Every function NEVER throws and
- * returns a uniform shape:
+ * returns a uniform shape. `model` remains the requested route model for
+ * existing callers; `servedModel` is the model identifier reported by the
+ * provider and is omitted when the provider supplies no model telemetry:
  *
- *   { ok: true,  text, json, model }
+ *   { ok: true,  text, json, model, servedModel? }
  *   { ok: false, reason: 'no_key' | '<provider>_<status>' | '<provider>_timeout' | 'empty_json' | 'error', usage? }
  *
  * `usage` rides on a failure only when the provider billed the leg (an
@@ -294,7 +296,14 @@ function settleLeg(base, served, out, jsonMode, extras) {
   if (!jsonMode && !String(out || '').trim()) return failedLeg(base, served, 'empty_text');
   const json = jsonMode ? parseLooseJson(out) : null;
   if (jsonMode && !json) return failedLeg(base, served, 'empty_json');
-  const result = { ok: true, text: out, json, ...extras };
+  const result = {
+    ok: true,
+    text: out,
+    json,
+    ...extras,
+    ...(typeof served.servedModel === 'string' && served.servedModel.trim()
+      ? { servedModel: served.servedModel } : {}),
+  };
   ledgerIdOf.set(result, recordLedgerCall(base, { ...served, ok: true }));
   return result;
 }

@@ -25,7 +25,9 @@ jest.mock('../services/logger', () => ({
 }));
 
 const db = require('../models/db');
-const { runExclusive, recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+const {
+  runExclusive, lockHeldByAnySession, recordJobStart, recordJobEnd,
+} = require('../utils/cron-lock');
 
 function mockConnection(lockGranted) {
   return {
@@ -40,6 +42,22 @@ function mockConnection(lockGranted) {
 
 const healthCalls = (conn) =>
   conn.query.mock.calls.map(([arg]) => arg).filter((arg) => arg.text.includes('job_health'));
+
+describe('cron-lock non-mutating lease probe', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('uses an injected transaction instead of checking out through the global pool', async () => {
+    const trx = {
+      raw: jest.fn(async () => ({ rows: [{ held: true }] })),
+    };
+
+    await expect(lockHeldByAnySession('qualification:run-1', trx)).resolves.toBe(true);
+    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('FROM pg_locks'), [
+      'cron:qualification:run-1',
+    ]);
+    expect(db.raw).not.toHaveBeenCalled();
+  });
+});
 
 describe('cron-lock runExclusive', () => {
   beforeEach(() => jest.clearAllMocks());
