@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey, cleanVerdictCovers, cachedAuditSuperseded } = require('../services/lead-address-unverified');
+const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey, cleanVerdictCovers, cachedAuditSuperseded, auditEvidenceAt } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
@@ -472,7 +472,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       }
     }
     const cachedAuditStale = cachedAuditSuperseded({
-      leadCleanVerdict: !!staffCleanAt, profileFound: !!result?.enriched, cachedAt: result?.meta?.cachedAt || null, cleanEvidenceAt: staffCleanAt,
+      leadCleanVerdict: !!staffCleanAt, profileFound: !!result?.enriched, cachedAt: auditEvidenceAt(result), cleanEvidenceAt: staffCleanAt,
     });
     const addressUnverified = cachedAuditStale
       ? null

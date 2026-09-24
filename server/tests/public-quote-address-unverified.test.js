@@ -131,6 +131,15 @@ describe('nextAddressUnverified', () => {
   });
 });
 
+describe('auditEvidenceAt', () => {
+  const { auditEvidenceAt } = require('../services/lead-address-unverified');
+  test('the audit\'s own stamp beats the cache row\'s save time; unstamped markers fall back to it', () => {
+    expect(auditEvidenceAt({ enriched: { addressAudit: { auditedAt: '2026-09-24T01:00:00Z' } }, meta: { cachedAt: '2026-09-01T00:00:00Z' } })).toBe('2026-09-24T01:00:00Z');
+    expect(auditEvidenceAt({ enriched: { addressAudit: { hasExactMatch: false } }, meta: { cachedAt: '2026-09-01T00:00:00Z' } })).toBe('2026-09-01T00:00:00Z');
+    expect(auditEvidenceAt(null)).toBeNull();
+  });
+});
+
 describe('cachedAuditSuperseded', () => {
   const { cachedAuditSuperseded } = require('../services/lead-address-unverified');
   test('a staff clean verdict outranks a county audit cached at or before it, never one cached after', () => {

@@ -1043,7 +1043,14 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey, cachedAuditSuperseded } = require('../services/lead-address-unverified');
+// Every non-terminal delivery state a website publication can sit in when
+// a flagged rerun withdraws it: a `sending` row is already viewable and
+// finalizes to `sent`; a `scheduled` or retried `send_failed` row would
+// otherwise deliver later with a clean stored marker (codex #4667 r12 P1).
+// The stamped marker makes the send guard refuse the row even if a worker
+// fires before the archive is observed.
+const WITHDRAWABLE_PUBLICATION_STATES = ['sent', 'viewed', 'scheduled', 'sending', 'send_failed'];
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey, cachedAuditSuperseded, auditEvidenceAt } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1182,7 +1189,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (serverLookup?.enriched) {
           trustedTurf = serverLookup.enriched;
           trustedProfileFound = true;
-          trustedProfileCachedAt = serverLookup?.meta?.cachedAt || null;
+          trustedProfileCachedAt = auditEvidenceAt(serverLookup);
         }
       } catch (turfErr) {
         logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
@@ -1319,35 +1326,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // lookup stage)? Only an answer may clear a marker an existing draft
     // already carries (see the draft refresh).
     const rollAnsweredThisRun = (profileEvidence && countyRollAnswered(trustedTurf)) || leadCleanVerdict;
-    // A clean answer for this premise SUPERSEDES the verdict riding on
-    // publications an earlier flagged run withdrew for this contact pair —
-    // otherwise a fresh lead during a later outage would recover the old
-    // warning forever (pre-push audit P1). Same ownership proof as the
-    // withdrawal: both contact factors plus the complete premise.
-    if (!addressUnverified && rollAnsweredThisRun && contactEmail && contactPhone) {
-      try {
-        const stale = await db('estimates')
-          .where({ source: 'quote_wizard' })
-          .whereNotNull('archived_at')
-          .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
-          .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
-          .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
-          .select('id', 'address');
-        const superseded = stale
-          .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
-          .map((row) => row.id);
-        if (superseded.length) {
-          await db('estimates')
-            .whereIn('id', superseded)
-            .update({
-              estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
-              updated_at: new Date(),
-            });
-        }
-      } catch (supersedeErr) {
-        logger.warn(`[public-quote] withdrawn-publication supersession failed: ${supersedeErr.code || supersedeErr.name || 'error'}`);
-      }
-    }
     // Set when an existing draft's own addressUnverified marker was carried
     // over under its row lock (a repeat lookup minted a NEW lead, so the
     // lead-level recovery above could not see it) — the handoff is then
@@ -2365,6 +2343,39 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               leadCleanVerdict = false;
             }
           }
+          // A clean answer for this premise SUPERSEDES the verdict riding on
+          // publications an earlier flagged run withdrew for this contact pair —
+          // otherwise a fresh lead during a later outage would recover the old
+          // warning forever (pre-push audit P1). Same ownership proof as the
+          // withdrawal: both contact factors plus the complete premise.
+          // Deferred to AFTER the locked reconciliation above: a flag newer
+          // than the cached clean answer restores addressUnverified there, and
+          // the archived rows must keep their off-surface marker in that case
+          // (codex r12 P1).
+          if (!addressUnverified && rollAnsweredThisRun) {
+            try {
+              const stale = await trx('estimates')
+                .where({ source: 'quote_wizard' })
+                .whereNotNull('archived_at')
+                .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+                .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
+                .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
+                .select('id', 'address');
+              const superseded = stale
+                .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
+                .map((row) => row.id);
+              if (superseded.length) {
+                await trx('estimates')
+                  .whereIn('id', superseded)
+                  .update({
+                    estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
+                    updated_at: new Date(),
+                  });
+              }
+            } catch (supersedeErr) {
+              logger.warn(`[public-quote] withdrawn-publication supersession failed: ${supersedeErr.code || supersedeErr.name || 'error'}`);
+            }
+          }
           const verdict = buildAddressVerdict({
             flag: addressUnverified,
             enriched: profileEvidence ? trustedTurf : (leadCleanVerdict ? { addressVerdict: 'audited' } : null),
@@ -3236,7 +3247,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const withdrawn = await db.transaction(async (trx) => {
           const candidates = await trx('estimates')
             .where({ source: 'quote_wizard' })
-            .whereIn('status', ['sent', 'viewed'])
+            .whereIn('status', WITHDRAWABLE_PUBLICATION_STATES)
             .whereNull('archived_at')
             .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
             .where((q) => q
@@ -3264,7 +3275,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const rows = await trx('estimates')
             .whereIn('id', toWithdraw)
             .where({ source: 'quote_wizard' })
-            .whereIn('status', ['sent', 'viewed'])
+            .whereIn('status', WITHDRAWABLE_PUBLICATION_STATES)
             .whereNull('archived_at')
             .whereNull('price_locked_at')
             .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")

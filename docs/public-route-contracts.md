@@ -949,8 +949,13 @@ render. A staff confirmation stamps a clean verdict on the linked lead
 that outranks the CACHED county audit it answered (a cache-only re-read on
 the next `/calculate` obtains no new evidence); only a profile cached after
 the confirmation may flag the premise again (the lookup stage applies the
-same rule to a cache-hit audit), and a cached clean answer is evidence from
-its cache time, so a flag committed after that stamp outranks it. A roll that never answered (GIS
+same rule to a cache-hit audit; the audit's own `auditedAt` stamp is the
+evidence time, so a live backfill on a cache hit is fresh), and a cached
+clean answer is evidence from its cache time, so a flag committed after that
+stamp outranks it. Withdrawn-publication verdicts are superseded only after
+the locked reconciliation, and a flagged rerun withdraws publications in
+every non-terminal delivery state (sent, viewed, scheduled, sending,
+send_failed). A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
 answers clean, and an existing draft's own `addressUnverified` marker is

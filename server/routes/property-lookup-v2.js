@@ -433,6 +433,10 @@ async function performPropertyLookupCore(address, options = {}) {
             : null);
         if (marker) {
           if (cachedSnapped) marker.snappedRecord = cachedSnapped;
+          // When this audit was actually obtained: a backfill on a cache
+          // hit is FRESH evidence even though the row's data_saved_at is
+          // not refreshed (codex #4667 r12 P1).
+          marker.auditedAt = new Date().toISOString();
           cached.property_record._addressAudit = marker;
           if (persist) await attachAddressAuditToCachedLookup(address, marker);
         }
@@ -641,6 +645,7 @@ async function performPropertyLookupCore(address, options = {}) {
         : null);
     if (marker) {
       if (snappedRecord) marker.snappedRecord = snappedRecord;
+      marker.auditedAt = new Date().toISOString();
       result.addressAudit = marker;
       if (result.propertyRecord) result.propertyRecord._addressAudit = marker;
     }

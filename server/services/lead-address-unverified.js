@@ -180,6 +180,17 @@ function nextAddressUnverified({ enriched = null, profileFound = false, prior = 
 // a fresh flag and undo the confirmation on the next recalculation; only
 // a profile cached AFTER it may flag again. An unstamped cache row counts
 // as older (pre-push audit P1 on #4667).
+// When a lookup result's county audit was actually obtained: the marker's
+// own stamp (a live audit or a backfill on a cache hit) beats the cache
+// row's save time, which a backfill does not refresh (codex #4667 r12 P1).
+// Older persisted markers carry no stamp — fall back to the cache time.
+function auditEvidenceAt(result) {
+  return result?.enriched?.addressAudit?.auditedAt
+    || result?.propertyRecord?._addressAudit?.auditedAt
+    || result?.meta?.cachedAt
+    || null;
+}
+
 function cachedAuditSuperseded({ leadCleanVerdict = false, profileFound = false, cachedAt = null, cleanEvidenceAt = null } = {}) {
   if (!leadCleanVerdict || !profileFound) return false;
   return !((Date.parse(cachedAt || '') || 0) > (Date.parse(cleanEvidenceAt || '') || 0));
@@ -225,4 +236,5 @@ function contactPairLockKey(email, phone) {
 }
 
 module.exports = {
-  cachedAuditSuperseded, deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey };
+  cachedAuditSuperseded,
+  auditEvidenceAt, deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey };
