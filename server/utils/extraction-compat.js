@@ -56,6 +56,10 @@ function flatView(extraction) {
     price_amount_max_usd: typeof price.amount_max_usd === 'number' ? price.amount_max_usd : null,
     price_unit: price.unit || null,
     price_accepted: typeof price.accepted === 'boolean' ? price.accepted : null,
+    // caller_response (schema 1.13.0, #4707 follow-up) — the explicit signal
+    // accepted is now derived from (accepted/declined/no_response/
+    // not_at_issue). Watched by replay variance (FIELD_GROUPS medium).
+    price_caller_response: price.caller_response || null,
     price_prepay_term: price.prepay_term || null,
     price_tier_mentioned: price.tier_mentioned || null,
     price_stated_by: price.stated_by || null,
@@ -63,6 +67,12 @@ function flatView(extraction) {
     // later extractor that keeps the numbers and drops the quote must show
     // up in replay variance (codex #4707 r3).
     price_has_evidence: typeof price.evidence_quote === 'string' && price.evidence_quote.trim() ? true : (price.amount_usd != null ? false : null),
+    // prices[] (schema 1.13.0, #4707 follow-up) — one call can state more
+    // than one distinct price (a one-time price AND a monthly price); price
+    // above stays the single PRIMARY entry so every existing reader keeps
+    // working. Only the COUNT is flattened here — each array entry is not
+    // flattened individually, per the #4707 follow-up scope.
+    price_count: Array.isArray(svc.prices) ? svc.prices.length : null,
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
     service_address_occupancy: property.service_address_occupancy || null,
     service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'

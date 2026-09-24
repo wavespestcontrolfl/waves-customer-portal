@@ -1155,7 +1155,7 @@ describe('extraction plumbing for the new booking fields', () => {
   // a v8 extractor regression here goes unnoticed by the weekly bake-off.
   test('flatView exposes service_request.price fields', () => {
     const flat = flatView({
-      meta: { schema_version: '1.12.0' },
+      meta: { schema_version: '1.13.0' },
       service_request: {
         primary_service_category: 'mosquito',
         price: {
@@ -1163,6 +1163,7 @@ describe('extraction plumbing for the new booking fields', () => {
           amount_max_usd: 100,
           unit: 'per_quarter',
           accepted: false,
+          caller_response: 'declined',
           stated_by: 'agent',
           prepay_term: 'annual',
           tier_mentioned: 'gold',
@@ -1174,39 +1175,66 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(flat.price_amount_max_usd).toBe(100);
     expect(flat.price_unit).toBe('per_quarter');
     expect(flat.price_accepted).toBe(false);
+    expect(flat.price_caller_response).toBe('declined');
     expect(flat.price_prepay_term).toBe('annual');
     expect(flat.price_tier_mentioned).toBe('gold');
     expect(flat.price_stated_by).toBe('agent');
     expect(flat.price_has_evidence).toBe(true);
-    const noQuote = flatView({ meta: { schema_version: '1.12.0' }, service_request: { price: { amount_usd: 65, unit: 'one_time' } } });
+    const noQuote = flatView({ meta: { schema_version: '1.13.0' }, service_request: { price: { amount_usd: 65, unit: 'one_time' } } });
     expect(noQuote.price_has_evidence).toBe(false);
   });
 
   test('flatView defaults every price field to null when price is absent or empty', () => {
-    const absent = flatView({ meta: { schema_version: '1.12.0' }, service_request: {} });
+    const absent = flatView({ meta: { schema_version: '1.13.0' }, service_request: {} });
     expect(absent.price_amount_usd).toBeNull();
     expect(absent.price_amount_max_usd).toBeNull();
     expect(absent.price_unit).toBeNull();
     expect(absent.price_accepted).toBeNull();
+    expect(absent.price_caller_response).toBeNull();
     expect(absent.price_prepay_term).toBeNull();
     expect(absent.price_tier_mentioned).toBeNull();
     expect(absent.price_stated_by).toBeNull();
     expect(absent.price_has_evidence).toBeNull();
+    expect(absent.price_count).toBeNull();
 
     const empty = flatView({
-      meta: { schema_version: '1.12.0' },
-      service_request: { price: { amount_usd: null, amount_max_usd: null, unit: null, accepted: null, stated_by: null, prepay_term: null, tier_mentioned: null, evidence_quote: null } },
+      meta: { schema_version: '1.13.0' },
+      service_request: { price: { amount_usd: null, amount_max_usd: null, unit: null, accepted: null, caller_response: null, stated_by: null, prepay_term: null, tier_mentioned: null, evidence_quote: null } },
     });
     expect(empty.price_amount_usd).toBeNull();
     expect(empty.price_accepted).toBeNull();
+    expect(empty.price_caller_response).toBeNull();
   });
 
   test('flatView keeps price_accepted a genuine tri-state (false survives, unlike a truthy-only flag)', () => {
     const declined = flatView({
-      meta: { schema_version: '1.12.0' },
-      service_request: { price: { amount_usd: 65, accepted: false } },
+      meta: { schema_version: '1.13.0' },
+      service_request: { price: { amount_usd: 65, accepted: false, caller_response: 'declined' } },
     });
     expect(declined.price_accepted).toBe(false);
+    expect(declined.price_caller_response).toBe('declined');
+  });
+
+  // service_request.prices[] (schema 1.13.0, #4707 follow-up 2): only the
+  // COUNT is flattened — the array entries themselves are never flattened
+  // individually, so readers must go to the nested extraction for detail.
+  test('flatView exposes price_count as the length of service_request.prices, null when absent', () => {
+    const absent = flatView({ meta: { schema_version: '1.13.0' }, service_request: { price: {} } });
+    expect(absent.price_count).toBeNull();
+
+    const withPrices = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        price: { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+        prices: [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', caller_response: 'accepted' },
+        ],
+      },
+    });
+    expect(withPrices.price_count).toBe(2);
+    expect(withPrices.price_amount_usd).toBe(65);
+    expect(withPrices).not.toHaveProperty('prices');
   });
 
   test('normalizeCallExtraction sanitizes the new V1 fields', () => {

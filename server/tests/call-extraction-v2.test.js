@@ -136,8 +136,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.12.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.12.0');
+  test('schema version is 1.13.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.13.0');
   });
 
   describe('model-output schema', () => {
@@ -430,6 +430,116 @@ describe('schema validation', () => {
         data.meta.schema_version = SCHEMA_VERSION;
         data.service_request.quoted_price_usd = null;
         data.service_request.price = { amount_usd: 65, amount_max_usd: null, unit: 'per_application', accepted: null, stated_by: 'agent', prepay_term: null, tier_mentioned: null, evidence_quote: '$65 per application' };
+        const { valid, errors } = validatePersisted(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      // caller_response (schema 1.13.0, #4707 follow-up 1): replaces the
+      // boolean-only accepted, which conflated "declined" with "never
+      // responded". accepted stays for backward compatibility, derived.
+      describe('caller_response', () => {
+        test('every caller_response enum value validates alongside its derived accepted', () => {
+          const cases = [
+            { caller_response: 'accepted', accepted: true },
+            { caller_response: 'declined', accepted: false },
+            { caller_response: 'no_response', accepted: false },
+            { caller_response: 'not_at_issue', accepted: null },
+            { caller_response: null, accepted: null },
+          ];
+          for (const { caller_response, accepted } of cases) {
+            const data = validModelOutput();
+            data.service_request.price = { amount_usd: 65, caller_response, accepted };
+            const { valid, errors } = validateModelOutput(data);
+            expect(errors).toBeNull();
+            expect(valid).toBe(true);
+          }
+        });
+
+        test('an invalid caller_response value fails', () => {
+          const data = validModelOutput();
+          data.service_request.price = { amount_usd: 65, caller_response: 'maybe' };
+          const { valid } = validateModelOutput(data);
+          expect(valid).toBe(false);
+        });
+
+        test('a price object omitting caller_response is still valid (backward compatible with pre-1.13.0 prompts)', () => {
+          const data = validModelOutput();
+          data.service_request.price = { amount_usd: 65, accepted: false };
+          const { valid, errors } = validateModelOutput(data);
+          expect(errors).toBeNull();
+          expect(valid).toBe(true);
+        });
+
+        test('caller_response survives persisted validation', () => {
+          const data = validPersisted();
+          data.meta.schema_version = SCHEMA_VERSION;
+          data.service_request.price = { amount_usd: 65, caller_response: 'declined', accepted: false };
+          const { valid, errors } = validatePersisted(data);
+          expect(errors).toBeNull();
+          expect(valid).toBe(true);
+        });
+      });
+    });
+
+    // prices[] (schema 1.13.0, #4707 follow-up 2): one price per call — a
+    // call that states both a one-time and a monthly price keeps every one
+    // of them here; `price` stays the single primary entry.
+    describe('service_request.prices', () => {
+      test('an array of distinct prices validates, with price kept as the primary entry', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true };
+        data.service_request.prices = [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true },
+          { amount_usd: 40, unit: 'per_month', caller_response: 'not_at_issue', accepted: null },
+        ];
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('omitting prices entirely is valid (backward compatible)', () => {
+        const data = validModelOutput();
+        delete data.service_request.prices;
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('an empty prices array is valid', () => {
+        const data = validModelOutput();
+        data.service_request.prices = [];
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('more than 6 prices fails maxItems', () => {
+        const data = validModelOutput();
+        data.service_request.prices = Array.from({ length: 7 }, (_, i) => ({ amount_usd: i, unit: 'one_time' }));
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an unknown field on a prices[] entry fails (additionalProperties: false)', () => {
+        const data = validModelOutput();
+        data.service_request.prices = [{ amount_usd: 65, extra: 'nope' }];
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an invalid unit inside a prices[] entry fails', () => {
+        const data = validModelOutput();
+        data.service_request.prices = [{ amount_usd: 65, unit: 'weekly' }];
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('prices[] survives persisted validation', () => {
+        const data = validPersisted();
+        data.meta.schema_version = SCHEMA_VERSION;
+        data.service_request.prices = [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true },
+          { amount_usd: 40, unit: 'per_month', caller_response: 'not_at_issue', accepted: null },
+        ];
         const { valid, errors } = validatePersisted(data);
         expect(errors).toBeNull();
         expect(valid).toBe(true);

@@ -651,10 +651,12 @@ describe('call extraction replay variance reporting', () => {
         'price_amount_max_usd',
         'price_unit',
         'price_accepted',
+        'price_caller_response',
         'price_prepay_term',
         'price_tier_mentioned',
         'price_stated_by',
         'price_has_evidence',
+        'price_count',
       ]) {
         expect(allFields.has(field)).toBe(true);
       }
@@ -720,6 +722,35 @@ describe('call extraction replay variance reporting', () => {
       expect(normalizeField('price_accepted', false)).toBe(false);
       expect(normalizeField('price_accepted', true)).toBe(true);
       expect(normalizeField('price_accepted', null)).not.toBe(normalizeField('price_accepted', false));
+    });
+
+    // caller_response (schema 1.13.0, #4707 follow-up 1): an enum string,
+    // so the default normalizeString comparison applies — no special case
+    // needed, unlike price_accepted's tri-state boolean.
+    test('compareFlatFields reports a variance when caller_response changes', () => {
+      const variances = compareFlatFields(
+        { price_caller_response: 'declined' },
+        { price_caller_response: 'no_response' },
+        true
+      );
+      expect(variances.find((v) => v.field === 'price_caller_response')).toBeDefined();
+    });
+
+    test('normalizeField lowercases and trims price_caller_response like any other enum string', () => {
+      expect(normalizeField('price_caller_response', 'Declined')).toBe(normalizeField('price_caller_response', 'declined'));
+      expect(normalizeField('price_caller_response', null)).toBeNull();
+    });
+
+    // prices[] count (schema 1.13.0, #4707 follow-up 2): a v9 extractor that
+    // stops listing every stated price in prices[] should surface here even
+    // if the primary `price` field is unchanged.
+    test('compareFlatFields reports a variance when price_count drops', () => {
+      const variances = compareFlatFields(
+        { price_amount_usd: 65, price_count: 2 },
+        { price_amount_usd: 65, price_count: 1 },
+        true
+      );
+      expect(variances.find((v) => v.field === 'price_count')).toBeDefined();
     });
   });
 });

@@ -78,8 +78,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v8');
-    expect(PROMPT_HASH).toMatch(/^v8-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v9');
+    expect(PROMPT_HASH).toMatch(/^v9-[a-f0-9]{12}$/);
   });
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
@@ -90,6 +90,27 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('per_application');
     expect(prompt).toContain('prepay_term');
     expect(prompt).toContain('tier_mentioned');
+  });
+
+  // #4707 follow-up 1: caller_response replaces the boolean-only accepted
+  // signal (which conflated "declined" with "never responded"); accepted is
+  // now derived from it.
+  test('includes the price.caller_response rule and derives accepted from it', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('caller_response');
+    expect(prompt).toContain('no_response');
+    expect(prompt).toContain('not_at_issue');
+    expect(prompt).toContain('DERIVED from caller_response');
+  });
+
+  // #4707 follow-up 2: one price per call regression — a call that states
+  // both a one-time and a monthly price keeps every one of them in prices[],
+  // with price staying the single primary entry.
+  test('includes the prices[] multi-price rule and keeps price as the primary', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('- prices:');
+    expect(prompt).toContain('list EVERY distinct price here, most consequential first');
+    expect(prompt).toContain('The PRIMARY price stated on the call — the accepted one if any, else the first stated.');
   });
 
   test('extractionPromptVersion appends an order-sensitive catalog hash', () => {
@@ -194,7 +215,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.12.0');
+    expect(SCHEMA_VERSION).toBe('1.13.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {
