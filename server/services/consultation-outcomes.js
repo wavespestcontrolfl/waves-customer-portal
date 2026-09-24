@@ -33,6 +33,64 @@ function makeError(message, statusCode, code) {
   return err;
 }
 
+// P1-A (round 4 on this branch): a customer-scoped, transaction-level
+// advisory lock serializing recordOutcome's write+evidence-check against
+// markWonForCustomer's reconciling UPDATE. Without it, both reconciliation
+// directions can miss a concurrent sale:
+//   - markWonForCustomer runs first and finds zero open rows (the outcome
+//     hasn't been recorded yet) — it commits having done nothing;
+//   - recordOutcome's own evidence check then runs (and commits) before
+//     that markWonForCustomer's writer fully commits, so it can't see it
+//     either — a warm/cold row can be inserted whose sale already closed
+//     and never gets reconciled either way.
+// A SAVEPOINT does not fix this — a savepoint isolates a FAILURE inside a
+// transaction from the rest of it; it does nothing about two SEPARATE,
+// concurrently-committing transactions each missing the other's write.
+// Serializing both sides on ONE lock does: whichever side takes it first
+// runs to completion (commit or rollback) before the other proceeds, so
+// the second side's reads are always against the first side's fully
+// committed state.
+//
+// Both callers take this SAME key, FIRST — before either touches
+// consultation_outcomes/leads/estimates/scheduled_services for that
+// customer: recordOutcome at the top of the transaction wrapping its
+// insert/merge + evidence check (see recordOutcome below); markWonForCustomer
+// at the top of the caller's own booking/estimate-accept transaction,
+// before its reconciling UPDATE.
+//
+// Key convention: same two-arg pg_advisory_xact_lock(hashtext(namespace),
+// hashtext(id::text)) idiom as triage-locks.js / customer-comms-lock.js's
+// lockSmsPhone (grepped for `pg_advisory_xact_lock` first) — a distinct
+// namespace string, not string concatenation, so this key space can never
+// collide with theirs.
+//
+// DEADLOCK CHECK: every existing markWonForCustomer caller (admin-leads.js
+// schedule-appointment, proposal-win.js promoteLinkedCustomerForProposalWin,
+// estimate-converter.js's accept path) already holds an UPDATE-acquired row
+// lock on the SAME customer's `customers` row (and, in admin-leads.js, a
+// `leads` FOR UPDATE row lock plus the occupancy/customer-comms advisory
+// locks) by the time it calls markWonForCustomer — i.e. this new advisory
+// lock is acquired AFTER those row locks in that transaction, which on its
+// face looks like it violates the repo's documented "advisory-before-row"
+// order (estimate-manual-acceptance.js). That convention exists to prevent
+// TWO transactions that both take the SAME set of locks from taking them in
+// different orders. It does not apply here: recordOutcome — the only other
+// taker of THIS key — never locks or updates a `customers` or `leads` row
+// (deriveLinkage and findSaleEvidenceForConsultation only run plain,
+// non-FOR-UPDATE SELECTs). So there is no resource recordOutcome holds that
+// a markWonForCustomer caller's earlier row locks would ever wait on — the
+// two sides only ever contend on this one advisory key, which cannot form a
+// cycle by itself.
+const CONSULTATION_LOCK_NAMESPACE = 'consultation-outcome';
+
+async function lockConsultationOutcome(database, customerId) {
+  if (!customerId) return;
+  await database.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    [CONSULTATION_LOCK_NAMESPACE, String(customerId)],
+  );
+}
+
 // Sync check for a caller that already has a scheduled_services row (with or
 // without the joined catalog columns) — reuses the shared predicate rather
 // than re-deriving it. Callers that only have a bare service_type string, or
@@ -66,8 +124,24 @@ async function deriveLinkage(svcRow, database) {
   return { customerId, technicianId, leadId };
 }
 
+// P1-B: followUpAt is a caller-supplied datetime, often typed by a
+// technician as a naive local string ("2026-09-25T09:00", no offset). Railway
+// runs TZ=UTC, so a bare `new Date(followUpAt)` on that string reads it as
+// UTC — 9am ET became 9am UTC, four hours early. parseETDateTime already
+// carries the exact fix for this shape of bug (server/utils/datetime-et.js):
+// a naive "YYYY-MM-DDTHH:mm[:ss]" string is treated as ET wall-clock; a
+// string with an explicit offset/Z, an already-absolute Date, or anything
+// else passes straight to `new Date(...)` unchanged. recordOutcome validates
+// followUpAt up front (see below) and rejects an invalid one with 400 before
+// this is ever called, so a truthy followUpAt reaching here is always valid.
+function isValidFollowUpAt(followUpAt) {
+  if (followUpAt == null || followUpAt === '') return true; // optional — not a validation failure
+  const parsed = parseETDateTime(followUpAt);
+  return parsed instanceof Date && !Number.isNaN(parsed.getTime());
+}
+
 function defaultFollowUpAt(outcome, followUpAt) {
-  if (followUpAt) return new Date(followUpAt);
+  if (followUpAt) return parseETDateTime(followUpAt);
   if (outcome === 'warm') return addETDays(new Date(), 3);
   if (outcome === 'cold') return addETDays(new Date(), 30);
   return null;
@@ -209,6 +283,13 @@ async function recordOutcome(params = {}, { trx } = {}) {
   if (quotedAmount != null && !Number.isFinite(Number(quotedAmount))) {
     throw makeError('quotedAmount must be a number', 400, 'VALIDATION');
   }
+  if (!isValidFollowUpAt(followUpAt)) {
+    throw makeError(
+      'followUpAt must be a valid date/time — a naive local time like "2026-09-25T09:00" is read as ET, or pass an ISO string with an explicit offset/Z',
+      400,
+      'VALIDATION',
+    );
+  }
 
   const svcRow = await database('scheduled_services').where({ id: scheduledServiceId }).first();
   if (!svcRow) throw makeError('Scheduled service not found', 404, 'NOT_FOUND');
@@ -235,67 +316,80 @@ async function recordOutcome(params = {}, { trx } = {}) {
     updated_at: now,
   };
 
-  // Atomic upsert guard (waves-db-adjacent — no read-then-write TOCTOU
-  // against markWonForCustomer's concurrent reconciliation): the conflict
-  // UPDATE only fires while the existing row's outcome is NOT 'won'. A
-  // genuine insert (no conflicting row) is unaffected by this WHERE — it
-  // only gates the UPDATE branch — so `saved` is undefined in exactly one
-  // case: a conflicting row exists AND it is already 'won'.
-  const [saved] = await database('consultation_outcomes')
-    .insert(row)
-    .onConflict('scheduled_service_id')
-    .merge({
-      lead_id: row.lead_id,
-      customer_id: row.customer_id,
-      technician_id: row.technician_id,
-      outcome: row.outcome,
-      lost_reason: row.lost_reason,
-      interests: row.interests,
-      quoted_amount: row.quoted_amount,
-      quoted_cadence: row.quoted_cadence,
-      quote_notes: row.quote_notes,
-      follow_up_at: row.follow_up_at,
-      recorded_by: row.recorded_by,
-      recorded_at: row.recorded_at,
-      updated_at: row.updated_at,
-    })
-    .where('consultation_outcomes.outcome', '<>', 'won')
-    .returning('*');
+  // P1-A: the insert/merge below AND the evidence check that follows it must
+  // run as ONE unit under the shared per-customer advisory lock (see
+  // lockConsultationOutcome above) — a transaction of its own (a SAVEPOINT
+  // when `database` is already a caller transaction), starting with the
+  // lock, BEFORE either the write or the evidence reads. This is what
+  // closes the round-4 race: whichever of this call and a concurrent
+  // markWonForCustomer takes the lock first now runs to completion — write
+  // AND evidence check together — before the other proceeds, so the second
+  // side's reads are always against the first side's committed state.
+  return database.transaction(async (locked) => {
+    await lockConsultationOutcome(locked, customerId);
 
-  if (!saved) {
-    throw makeError('This consultation already converted — its outcome cannot be edited', 409, 'ALREADY_WON');
-  }
+    // Atomic upsert guard (waves-db-adjacent — no read-then-write TOCTOU
+    // against markWonForCustomer's concurrent reconciliation): the conflict
+    // UPDATE only fires while the existing row's outcome is NOT 'won'. A
+    // genuine insert (no conflicting row) is unaffected by this WHERE — it
+    // only gates the UPDATE branch — so `saved` is undefined in exactly one
+    // case: a conflicting row exists AND it is already 'won'.
+    const [saved] = await locked('consultation_outcomes')
+      .insert(row)
+      .onConflict('scheduled_service_id')
+      .merge({
+        lead_id: row.lead_id,
+        customer_id: row.customer_id,
+        technician_id: row.technician_id,
+        outcome: row.outcome,
+        lost_reason: row.lost_reason,
+        interests: row.interests,
+        quoted_amount: row.quoted_amount,
+        quoted_cadence: row.quoted_cadence,
+        quote_notes: row.quote_notes,
+        follow_up_at: row.follow_up_at,
+        recorded_by: row.recorded_by,
+        recorded_at: row.recorded_at,
+        updated_at: row.updated_at,
+      })
+      .where('consultation_outcomes.outcome', '<>', 'won')
+      .returning('*');
 
-  // P1-1: the sale may have already closed BEFORE the tech got around to
-  // recording this outcome — markWonForCustomer ran against zero rows in
-  // that case, and a warm/cold row saved afterward would sit open forever.
-  // Savepoint-isolated (waves-db §5b) and best-effort, same as
-  // markWonForCustomer: an evidence-lookup hiccup must never fail the record
-  // itself, or (if `database` is a caller's live transaction) abort it.
-  if (['warm', 'cold'].includes(saved.outcome)) {
-    try {
-      let won = null;
-      await database.transaction(async (sp) => {
-        const evidence = await findSaleEvidenceForConsultation(sp, {
-          customerId,
-          scheduledDateStr: toDateOnlyString(svcRow.scheduled_date),
-          now,
-        });
-        if (!evidence) return;
-        const [wonRow] = await sp('consultation_outcomes')
-          .where({ id: saved.id })
-          .whereIn('outcome', ['warm', 'cold'])
-          .update({ outcome: 'won', won_at: evidence.won_at, won_via: evidence.won_via, updated_at: new Date() })
-          .returning('*');
-        won = wonRow || null;
-      });
-      if (won) return won;
-    } catch (err) {
-      logger.warn(`[consultation-outcomes] post-record sale-evidence reconciliation failed for ${scheduledServiceId}: ${err.message}`);
+    if (!saved) {
+      throw makeError('This consultation already converted — its outcome cannot be edited', 409, 'ALREADY_WON');
     }
-  }
 
-  return saved;
+    // P1-1: the sale may have already closed BEFORE the tech got around to
+    // recording this outcome — markWonForCustomer ran against zero rows in
+    // that case, and a warm/cold row saved afterward would sit open forever.
+    // Savepoint-isolated (waves-db §5b) and best-effort: an evidence-lookup
+    // hiccup must never fail the record itself, or abort the lock-holding
+    // transaction above it.
+    if (['warm', 'cold'].includes(saved.outcome)) {
+      try {
+        let won = null;
+        await locked.transaction(async (sp) => {
+          const evidence = await findSaleEvidenceForConsultation(sp, {
+            customerId,
+            scheduledDateStr: toDateOnlyString(svcRow.scheduled_date),
+            now,
+          });
+          if (!evidence) return;
+          const [wonRow] = await sp('consultation_outcomes')
+            .where({ id: saved.id })
+            .whereIn('outcome', ['warm', 'cold'])
+            .update({ outcome: 'won', won_at: evidence.won_at, won_via: evidence.won_via, updated_at: new Date() })
+            .returning('*');
+          won = wonRow || null;
+        });
+        if (won) return won;
+      } catch (err) {
+        logger.warn(`[consultation-outcomes] post-record sale-evidence reconciliation failed for ${scheduledServiceId}: ${err.message}`);
+      }
+    }
+
+    return saved;
+  });
 }
 
 /**
@@ -312,6 +406,12 @@ async function recordOutcome(params = {}, { trx } = {}) {
 async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {}) {
   if (!customerId || !trx || !via) return 0;
   try {
+    // P1-A: take the shared per-customer lock FIRST — on the caller's own
+    // already-open transaction, before the savepoint below and before any
+    // read of leads/consultation_outcomes/scheduled_services for this
+    // customer. See lockConsultationOutcome for the full contract and the
+    // deadlock check against this function's existing callers' locks.
+    await lockConsultationOutcome(trx, customerId);
     let winCount = 0;
     await trx.transaction(async (sp) => {
       const leadRows = await sp('leads').where({ customer_id: customerId }).select('id');

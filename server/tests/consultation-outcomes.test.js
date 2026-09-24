@@ -15,7 +15,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const {
   recordOutcome,
   markWonForCustomer,
@@ -177,6 +177,11 @@ function makeFakeDb(seed = {}) {
     return api;
   }
   table.transaction = async (fn) => fn(table);
+  // P1-A: recordOutcome/markWonForCustomer take an advisory lock via
+  // `database.raw(...)` before their write/reconciliation — a no-op stub is
+  // enough for tests that don't care about lock ORDER; the P1-A-specific
+  // tests below install their own spying `.raw` to assert it.
+  table.raw = async () => ({ rows: [] });
   table.__store = store;
   return table;
 }
@@ -275,6 +280,35 @@ describe('recordOutcome — success + upsert', () => {
     expect(lostSaved.lost_reason).toBe('price');
   });
 
+  test('P1-B: a naive followUpAt string is read as ET wall-clock, not UTC', async () => {
+    // Railway runs TZ=UTC — a bare `new Date('2026-09-25T09:00')` would have
+    // read this as 09:00 UTC (05:00 ET), four hours early.
+    const saved = await recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt: '2026-09-25T09:00' },
+      { trx: seededDb() },
+    );
+    expect(new Date(saved.follow_up_at).toISOString()).toBe(parseETDateTime('2026-09-25T09:00').toISOString());
+    // 2026-09-25 is EDT (UTC-4): 9am ET is 13:00 UTC.
+    expect(new Date(saved.follow_up_at).toISOString()).toBe('2026-09-25T13:00:00.000Z');
+  });
+
+  test('P1-B: an explicit-offset/Z followUpAt is taken as-is, not re-interpreted as ET', async () => {
+    const saved = await recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt: '2026-09-25T09:00:00Z' },
+      { trx: seededDb() },
+    );
+    expect(new Date(saved.follow_up_at).toISOString()).toBe('2026-09-25T09:00:00.000Z');
+  });
+
+  test('P1-B: an invalid followUpAt is rejected with 400 before any write', async () => {
+    const fakeDb = seededDb();
+    await expect(recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt: 'not-a-real-date' },
+      { trx: fakeDb },
+    )).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+    expect(fakeDb.__store.consultation_outcomes).toHaveLength(0);
+  });
+
   test('re-recording the same visit upserts (one row, latest values win)', async () => {
     const fakeDb = seededDb();
     await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', interests: ['mosquito'] }, { trx: fakeDb });
@@ -301,6 +335,8 @@ describe('recordOutcome — success + upsert', () => {
     });
     const tableCalls = [];
     const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
+    spyDb.transaction = async (fn) => fn(spyDb);
+    spyDb.raw = (...args) => fakeDb.raw(...args);
 
     await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb }))
       .rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_WON' });
@@ -309,6 +345,26 @@ describe('recordOutcome — success + upsert', () => {
     // could land in. Exactly one touch of consultation_outcomes now: the
     // insert/onConflict/merge/where/returning statement itself.
     expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(1);
+  });
+
+  test('P1-A: takes the customer-scoped advisory lock FIRST, before the insert/merge (also on the ALREADY_WON path)', async () => {
+    const fakeDb = seededDb();
+    const calls = [];
+    const spyDb = (name) => { calls.push({ type: 'table', name }); return fakeDb(name); };
+    spyDb.transaction = async (fn) => fn(spyDb);
+    spyDb.raw = (sql, bindings) => { calls.push({ type: 'raw', sql, bindings }); return fakeDb.raw(sql, bindings); };
+
+    await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb });
+
+    const rawIdx = calls.findIndex((c) => c.type === 'raw');
+    const outcomesIdx = calls.findIndex((c) => c.type === 'table' && c.name === 'consultation_outcomes');
+    expect(rawIdx).toBeGreaterThanOrEqual(0);
+    expect(calls[rawIdx].sql).toMatch(/pg_advisory_xact_lock/);
+    expect(calls[rawIdx].bindings).toEqual(['consultation-outcome', 'cust-1']);
+    // The lock precedes the write it's meant to serialize — and by
+    // extension the evidence check that follows it in the same locked
+    // transaction (see the reconciliation describe block below).
+    expect(outcomesIdx).toBeGreaterThan(rawIdx);
   });
 });
 
@@ -525,6 +581,7 @@ describe('markWonForCustomer', () => {
     const tableCalls = [];
     const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
     spyDb.transaction = async (fn) => fn(spyDb);
+    spyDb.raw = (...args) => fakeDb.raw(...args);
 
     const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
     expect(count).toBe(2);
@@ -544,6 +601,25 @@ describe('markWonForCustomer', () => {
     // there is no separate JS branch that could diverge from the WHERE.
     const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
     expect(byId['co-already-lost'].outcome).toBe('lost');
+  });
+
+  test('P1-A: takes the customer-scoped advisory lock FIRST, before any read/write of leads or consultation_outcomes', async () => {
+    const fakeDb = seededDb();
+    const calls = [];
+    const spyDb = (name) => { calls.push({ type: 'table', name }); return fakeDb(name); };
+    spyDb.transaction = async (fn) => fn(spyDb);
+    spyDb.raw = (sql, bindings) => { calls.push({ type: 'raw', sql, bindings }); return fakeDb.raw(sql, bindings); };
+
+    await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
+
+    // The SAME key convention recordOutcome's companion test asserts
+    // (namespace 'consultation-outcome', hashtext(id::text)) — the two
+    // sides only ever serialize correctly if they take the identical key.
+    expect(calls[0]).toMatchObject({ type: 'raw' });
+    expect(calls[0].sql).toMatch(/pg_advisory_xact_lock/);
+    expect(calls[0].bindings).toEqual(['consultation-outcome', 'cust-1']);
+    expect(calls.slice(1).some((c) => c.type === 'table' && c.name === 'leads')).toBe(true);
+    expect(calls.slice(1).some((c) => c.type === 'table' && c.name === 'consultation_outcomes')).toBe(true);
   });
 });
 
