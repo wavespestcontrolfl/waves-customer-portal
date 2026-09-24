@@ -83,6 +83,40 @@ function loadUniformLogo() {
   return uniformLogoCache;
 }
 
+// ── Waves van wrap reference ─────────────────────────────────────────
+// Owner ruling 2026-09-24 (Adam): a generated scene that shows the Waves van
+// shows the REAL van — a Ford Transit 250 medium-roof cargo van wearing the
+// CURRENT wrap — instead of a plain unmarked stand-in. The owner explicitly
+// chose the current wrap (it reads "WAVES" / "Lawn & Pest") over waiting for
+// a re-wrap. Two reference photos (side three-quarter + rear doors) ride on
+// the OpenAI legs the same way the uniform logo does — /v1/images/edits,
+// attached only when the caller opts in (generate({ vanWrap: true })) AND
+// the image's plan actually places a van in the scene (plan.van). A leg that
+// REJECTS the request with the references attached (a non-retryable 4xx from
+// /v1/images/edits) is retried once with no references at all (logo-free AND
+// van-plain), exactly like the logo path. Gemini legs never take a
+// reference and keep the plain VAN_LINE.
+// OPT-IN per call, independent of the logo opt-in, so either can be revoked
+// on its own: only a caller whose screen knows to allow the van wrap (the
+// astro publisher) may attach it.
+// Kill switch: BLOG_IMAGE_VAN_WRAP=false (prompt falls back to the plain van).
+const VAN_WRAP_ENV = 'BLOG_IMAGE_VAN_WRAP';
+const VAN_WRAP_SIDE_PATH = path.join(__dirname, '..', '..', 'assets', 'brand', 'waves-van-side.png');
+const VAN_WRAP_REAR_PATH = path.join(__dirname, '..', '..', 'assets', 'brand', 'waves-van-rear.png');
+function vanWrapEnabled() { return !/^(false|0|off|no)$/i.test(String(process.env[VAN_WRAP_ENV] || '').trim()); }
+let vanWrapCache;
+function loadVanWrapReferences() {
+  if (!vanWrapEnabled()) return null;
+  if (vanWrapCache !== undefined) return vanWrapCache;
+  try {
+    vanWrapCache = [fs.readFileSync(VAN_WRAP_SIDE_PATH), fs.readFileSync(VAN_WRAP_REAR_PATH)];
+  } catch (err) {
+    logger.warn(`[image-generator] van wrap reference unavailable (${err.message}) — generating without the van wrap`);
+    vanWrapCache = null;
+  }
+  return vanWrapCache;
+}
+
 // Chain order (bake-off 2026-09-05, the same three prompts on every provider):
 // gpt-image-2 best on photo, cartoon and infographic (it honored an exact
 // caption list; ~75–90 s, ~$0.17); gpt-image-1.5 next (~35–40 s); gpt-image-1
@@ -341,13 +375,20 @@ function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject =
     // Owner ask 2026-09-23: the Waves van in the background of SOME exterior
     // scenes. Yard settings only (a van in a kitchen is a contradiction), and
     // about one in three so the variation directive (2026-09-05) still holds.
-    // The van is UNMARKED by design — the real wrap carries the retired name
-    // and generators turn lettering into gibberish; the logo screen would
-    // reject it. Revisit as a reference-image path after the re-wrap.
+    // Whether that van is UNMARKED or wears the real wrap is a
+    // GENERATION-TIME decision, not a planning one — see the van wrap
+    // reference block above and VAN_WRAP_LINE (owner ruling 2026-09-24).
     van: category === 'yard' && (seed + 4 * 7919) % 3 === 0,
   };
 }
-const VAN_LINE = 'In the background, a solid Waves-blue (#009CDE) Ford Transit work van parked at the curb or in the driveway — plain and unmarked, no lettering, no logo, not the focus of the shot.';
+const VAN_LINE = 'In the background, a solid Waves-blue (#009CDE) Ford Transit 250 medium-roof cargo van parked at the curb or in the driveway — plain and unmarked, no lettering, no logo, not the focus of the shot.';
+// Owner ruling 2026-09-24 (Adam): the van in the background wears the REAL
+// current wrap, reproduced faithfully from the two attached reference
+// photos (waves-van-side.png, waves-van-rear.png) — the owner chose the
+// current wrap (it reads the retired "WAVES" / "Lawn & Pest" name) over
+// waiting for a re-wrap. Used only when the caller opts in
+// (generate({ vanWrap: true })) and the references actually attach.
+const VAN_WRAP_LINE = 'In the background, a Ford Transit 250 medium-roof cargo van wearing the Waves wrap — reproduced faithfully from the attached van reference photos: a sky-blue gradient background with halftone dots, the wave mascot character in a red cap and overalls, "WAVES" and "Lawn & Pest" lettering, "Wave Goodbye to Pests!", the phone number "941-241-2459", and "GoWavesFL.com" — parked at the curb or in the driveway, not the focus of the shot. These wrap graphics and text belong ONLY on this one van; do not repeat any of them on any other vehicle, sign, piece of equipment, or surface in the picture.';
 // The style a slot regenerates in after a failed text/logo screen: one no
 // sibling slot of the post uses (the permutation's unused fourth style, when
 // the slot can carry it), else the slot's own style under a fresh seed — a
@@ -375,6 +416,17 @@ const STANDARD_GUARDS_WITH_LOGO = [
   'no company logos, brand names, or brand marks other than the Waves logo on the technician\'s cap and chest — equipment and vehicles are generic and unbranded',
   STANDARD_GUARDS[1],
 ];
+// With the van wrap reference attached, the ONLY branded vehicle is the one
+// Ford Transit described in VAN_WRAP_LINE; every other vehicle and all
+// equipment stay unbranded — mirrors STANDARD_GUARDS_WITH_LOGO for the van.
+const STANDARD_GUARDS_WITH_VAN_WRAP = [
+  'no company logos, brand names, or brand marks other than the Waves wrap on the one van described above — every other vehicle, and all equipment, is generic and unbranded',
+  STANDARD_GUARDS[1],
+];
+const STANDARD_GUARDS_WITH_LOGO_AND_VAN_WRAP = [
+  'no company logos, brand names, or brand marks other than the Waves logo on the technician\'s cap and chest and the Waves wrap on the one van described above — every other vehicle, and all equipment, is generic and unbranded',
+  STANDARD_GUARDS[1],
+];
 // Owner directive 2026-09-23 (Adam, after the Bradenton WDO hero showed a tech in
 // a blue long-sleeve and khakis): any Waves technician in a generated image wears
 // the REAL uniform. Every scene mode carries the line — a hero, body slot or social
@@ -395,7 +447,7 @@ const WAVES_UNIFORM_LOGO_LINE = 'If a Waves technician appears, they wear the re
 // #4761, superseding the "infographic carries the uniform line" P2 on #4696).
 const INFOGRAPHIC_NO_PEOPLE_LINE = 'Do not draw people, technician figures, faces, hands or mascots — flat icons of tools, pests, plants, homes and yards only.';
 
-function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [], uniformLogo = false }) {
+function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [], uniformLogo = false, vanWrap = false }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
   const base = style
@@ -415,6 +467,9 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   // An infographic never carries the reference (no scene, and its text rule
   // is caption-only).
   const withLogo = Boolean(uniformLogo) && !isInfographic;
+  // The van wrap is only meaningful when the plan actually places a van in
+  // the scene — an infographic has no scene either.
+  const withVanWrap = Boolean(vanWrap) && !isInfographic && Boolean(plan && plan.van);
   const local = isInfographic
     ? `Layout: ${plan.setting}, ${plan.vantage}, on a plain light background — no photographic scene, no time of day; at most one small Southwest Florida cue (a palm or wave icon).`
     : plan
@@ -436,12 +491,20 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast; a technician's red shirt or red cap is part of the palette.`
     : `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast).`;
   const captionList = (style && style.allowsText ? captions : []).map((c) => String(c || '').trim()).filter(Boolean);
+  const textExceptions = [
+    ...(withLogo ? ["the Waves logo on the technician's cap and right chest"] : []),
+    ...(withVanWrap ? ['the Waves wrap text and graphics on the one van described above'] : []),
+  ];
   const textRule = captionList.length
     ? `The ONLY text in the image is exactly: ${captionList.map((c) => `"${c}"`).join(', ')} — spelled exactly, nothing else written anywhere.`
-    : (withLogo
-      ? 'No text, words, letters, numbers, watermarks, or logos anywhere in the image, other than the Waves logo on the technician\'s cap and right chest.'
+    : (textExceptions.length
+      ? `No text, words, letters, numbers, watermarks, or logos anywhere in the image, other than ${textExceptions.join(' and ')}.`
       : 'No text, words, letters, numbers, watermarks, or logos anywhere in the image.');
-  const guards = `Must not depict: ${[...(withLogo ? STANDARD_GUARDS_WITH_LOGO : STANDARD_GUARDS), ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
+  const guardSet = withLogo && withVanWrap ? STANDARD_GUARDS_WITH_LOGO_AND_VAN_WRAP
+    : withLogo ? STANDARD_GUARDS_WITH_LOGO
+    : withVanWrap ? STANDARD_GUARDS_WITH_VAN_WRAP
+    : STANDARD_GUARDS;
+  const guards = `Must not depict: ${[...guardSet, ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
   const framing = mode === 'blog-body' && !isInfographic ? (BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up']) : '';
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
@@ -450,7 +513,7 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     ? 'Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.'
     : '';
   const uniform = isInfographic ? INFOGRAPHIC_NO_PEOPLE_LINE : (withLogo ? WAVES_UNIFORM_LOGO_LINE : WAVES_UNIFORM_LINE);
-  const van = plan && plan.van && !isInfographic ? VAN_LINE : '';
+  const van = plan && plan.van && !isInfographic ? (withVanWrap ? VAN_WRAP_LINE : VAN_LINE) : '';
   return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
 
@@ -622,9 +685,13 @@ function logLegFailure(slug, result) {
 class ImageGenerator {
   // uniformLogo: Buffer (the reference) | null (never attach) | undefined
   // (load the bundled asset lazily, honoring BLOG_IMAGE_UNIFORM_LOGO).
-  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed(), uniformLogo } = {}) {
+  // vanWrap: [sideBuffer, rearBuffer] (the two references) | null (never
+  // attach) | undefined (load the bundled assets lazily, honoring
+  // BLOG_IMAGE_VAN_WRAP).
+  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed(), uniformLogo, vanWrap } = {}) {
     this.chain = parseChain(envChain, { allowPixelWatermark });
     this._uniformLogo = uniformLogo;
+    this._vanWrapRefs = vanWrap;
     this._chainBudgetMs = chainBudgetMs;
     this._now = now;
     if (!this.chain.length) {
@@ -640,10 +707,12 @@ class ImageGenerator {
    * generate({ title, topic, keyword, city, mode })
    *
    * mode: 'blog-hero' (default) or 'social-square'.
-   * Returns: { dataUrl, mimeType, model, attempts: [...], prompt, alt, logoReference }
+   * Returns: { dataUrl, mimeType, model, attempts: [...], prompt, alt, logoReference, vanWrapReference }
    *   prompt — the exact generation prompt used;
    *   logoReference — true when the winning leg carried the Waves logo
    *   reference image (the publisher's screen allows the uniform logo then);
+   *   vanWrapReference — true when the winning leg carried the two van wrap
+   *   reference photos (the publisher's screen allows the van wrap then);
    *   alt — accessibility text derived from the same subject/setting inputs
    *   as the prompt, so callers can stamp an alt that describes the ACTUAL
    *   generated image (null when a customPrompt made the fields unreliable).
@@ -652,20 +721,24 @@ class ImageGenerator {
   // deadlineAt — an absolute ms timestamp the whole call must respect; a
   // caller that generates more than once for one slot (screen retry) passes
   // the same deadline to both calls so the slot never gets a second budget.
-  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, plan = null, captions = [], avoidDepicting = [], prompt: customPrompt, deadlineAt = null, uniformLogo = false } = {}) {
+  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, plan = null, captions = [], avoidDepicting = [], prompt: customPrompt, deadlineAt = null, uniformLogo = false, vanWrap = false } = {}) {
     const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting });
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode, plan });
     const attempts = [];
     const deadline = Number.isFinite(deadlineAt) ? deadlineAt : this._now() + this._chainBudgetMs;
     const logoBuffer = this._logoReference({ customPrompt, plan, uniformLogo });
-    const logoPrompt = logoBuffer ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: true }) : null;
+    const vanBuffers = this._vanWrapReference({ customPrompt, plan, vanWrap });
+    const referencePrompt = (logoBuffer || vanBuffers)
+      ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: Boolean(logoBuffer), vanWrap: Boolean(vanBuffers) })
+      : null;
 
     for (const slug of this.chain) {
-      const { result, legLogo } = await this._runLeg({ slug, mode, prompt, logoPrompt, logoBuffer, deadline, attempts });
-      attempts.push({ provider: slug, logoReference: legLogo, result });
+      const { result, legLogo, legVanWrap } = await this._runLeg({ slug, mode, prompt, referencePrompt, logoBuffer, vanBuffers, deadline, attempts });
+      attempts.push({ provider: slug, logoReference: legLogo, vanWrapReference: legVanWrap, result });
       if (result.dataUrl) {
-        logger.info(`[image-generator] generated via ${slug}${legLogo ? ' with the uniform logo reference' : ''} (${result.mimeType}, ${result.dataUrl.length} chars)`);
-        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt: legLogo ? logoPrompt : prompt, alt, plan: plan || null, logoReference: legLogo };
+        const note = `${legLogo ? ' with the uniform logo reference' : ''}${legVanWrap ? ' with the van wrap reference' : ''}`;
+        logger.info(`[image-generator] generated via ${slug}${note} (${result.mimeType}, ${result.dataUrl.length} chars)`);
+        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt: (legLogo || legVanWrap) ? referencePrompt : prompt, alt, plan: plan || null, logoReference: legLogo, vanWrapReference: legVanWrap };
       }
       // Skipped / fatal / retryable → next provider. The whole point
       // of the chain is resilience: a 408/429/5xx on OpenAI should fall
@@ -689,6 +762,16 @@ class ImageGenerator {
     return Buffer.isBuffer(logo) && logo.length ? logo : null;
   }
 
+  // The van wrap references ride only on a prompt this module built, only
+  // when the caller opted in, and only when the plan actually places a van
+  // in the scene (plan.van) — attaching a van reference to a scene with no
+  // van would have nothing to anchor it to.
+  _vanWrapReference({ customPrompt, plan, vanWrap }) {
+    if (vanWrap !== true || customPrompt || !(plan && plan.van)) return null;
+    const refs = this._vanWrapRefs === undefined ? loadVanWrapReferences() : this._vanWrapRefs;
+    return Array.isArray(refs) && refs.length === 2 && refs.every((b) => Buffer.isBuffer(b) && b.length) ? refs : null;
+  }
+
   _budgetSpent() {
     // A spent budget is a timing condition, not a verdict on the provider:
     // retryable so the runner retries the post instead of parking it
@@ -696,36 +779,45 @@ class ImageGenerator {
     return { skipped: true, retryable: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` };
   }
 
-  // One provider leg → { result, legLogo }. Only OpenAI legs take the
-  // reference; Gemini's prompt is the logo-free one. An OpenAI leg that
-  // REJECTS the request with the reference attached (400/413/415/422) runs
-  // once more logo-free inside the same deadline — a retryable failure, an
-  // auth/model failure or an empty response falls through to the next
-  // provider, never a second call on the same leg (pre-push fallback P1 on
-  // ae29283fcc; Codex r1 P2 on #4761).
-  async _runLeg({ slug, mode, prompt, logoPrompt, logoBuffer, deadline, attempts }) {
+  // One provider leg → { result, legLogo, legVanWrap }. Only OpenAI legs take
+  // references; Gemini's prompt is the fully plain one. An OpenAI leg that
+  // REJECTS the request with references attached (400/413/415/422) runs once
+  // more with NO references at all (logo-free AND van-plain) inside the same
+  // deadline — a retryable failure, an auth/model failure or an empty
+  // response falls through to the next provider, never a second call on the
+  // same leg (pre-push fallback P1 on ae29283fcc; Codex r1 P2 on #4761).
+  async _runLeg({ slug, mode, prompt, referencePrompt, logoBuffer, vanBuffers, deadline, attempts }) {
     const cfg = MODEL_MAP[slug];
     const size = sizeFor(mode, cfg.api);
     const timeoutMs = legTimeoutMs(deadline, this._now());
-    let legLogo = Boolean(logoPrompt) && cfg.api === 'openai';
-    if (timeoutMs === null) return { result: this._budgetSpent(), legLogo };
+    let legLogo = Boolean(logoBuffer) && cfg.api === 'openai';
+    let legVanWrap = Boolean(vanBuffers) && cfg.api === 'openai';
+    if (timeoutMs === null) return { result: this._budgetSpent(), legLogo, legVanWrap };
     if (cfg.api === 'gemini') {
       const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
-      return { result: await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs }), legLogo: false };
+      return { result: await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs }), legLogo: false, legVanWrap: false };
     }
-    if (cfg.api !== 'openai') return { result: { fatal: true, status: 'unknown_api' }, legLogo: false };
-    const referenceImages = legLogo ? [{ buffer: logoBuffer, mimeType: 'image/png', filename: 'waves-logo.png' }] : [];
-    let result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: legLogo ? logoPrompt : prompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
-    if (legLogo && result.fatal && REFERENCE_REJECT_STATUSES.has(result.status)) {
-      attempts.push({ provider: slug, logoReference: true, result });
-      logger.warn(`[image-generator] ${slug} rejected the request with the logo reference (${result.status} ${result.body || ''}) — retrying this leg without it`);
+    if (cfg.api !== 'openai') return { result: { fatal: true, status: 'unknown_api' }, legLogo: false, legVanWrap: false };
+    const referenceImages = [];
+    if (legLogo) referenceImages.push({ buffer: logoBuffer, mimeType: 'image/png', filename: 'waves-logo.png' });
+    if (legVanWrap) {
+      referenceImages.push(
+        { buffer: vanBuffers[0], mimeType: 'image/png', filename: 'waves-van-side.png' },
+        { buffer: vanBuffers[1], mimeType: 'image/png', filename: 'waves-van-rear.png' },
+      );
+    }
+    let result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: (legLogo || legVanWrap) ? referencePrompt : prompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
+    if ((legLogo || legVanWrap) && result.fatal && REFERENCE_REJECT_STATUSES.has(result.status)) {
+      attempts.push({ provider: slug, logoReference: legLogo, vanWrapReference: legVanWrap, result });
+      logger.warn(`[image-generator] ${slug} rejected the request with ${referenceImages.length} reference image(s) (${result.status} ${result.body || ''}) — retrying this leg without them`);
       legLogo = false;
+      legVanWrap = false;
       const retryMs = legTimeoutMs(deadline, this._now());
       result = retryMs === null
         ? this._budgetSpent()
         : await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn, timeoutMs: retryMs });
     }
-    return { result, legLogo };
+    return { result, legLogo, legVanWrap };
   }
 
   /**
@@ -791,16 +883,26 @@ module.exports.IMAGE_CHAIN_BUDGET_MS = IMAGE_CHAIN_BUDGET_MS;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
 module.exports.pixelWatermarkAllowed = pixelWatermarkAllowed;
 module.exports.uniformLogoEnabled = uniformLogoEnabled;
+module.exports.vanWrapEnabled = vanWrapEnabled;
 module.exports._internals = {
   UNIFORM_LOGO_ENV,
   UNIFORM_LOGO_PATH,
   uniformLogoEnabled,
   loadUniformLogo,
+  VAN_WRAP_ENV,
+  VAN_WRAP_SIDE_PATH,
+  VAN_WRAP_REAR_PATH,
+  vanWrapEnabled,
+  loadVanWrapReferences,
+  VAN_LINE,
+  VAN_WRAP_LINE,
   WAVES_UNIFORM_LINE,
   WAVES_UNIFORM_LOGO_LINE,
   INFOGRAPHIC_NO_PEOPLE_LINE,
   STANDARD_GUARDS,
   STANDARD_GUARDS_WITH_LOGO,
+  STANDARD_GUARDS_WITH_VAN_WRAP,
+  STANDARD_GUARDS_WITH_LOGO_AND_VAN_WRAP,
   stylePermutation,
   retryStyleFor,
   settingsFor,

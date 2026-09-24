@@ -235,3 +235,92 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(r.logos).toEqual(['Waves logo on left chest']);
   });
 });
+
+describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks/text allowed ON the van only)', () => {
+  const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
+  const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
+  const van = (extra = {}) => ({ present: true, wrapped: true, wrap_text: ['WAVES', 'Lawn & Pest', 'Wave Goodbye to Pests!', '941-241-2459', 'GoWavesFL.com'], wrap_mascot: true, ...extra });
+  const branded = (extra = {}) => answer({ readable_text: [], logos_or_brand_marks: [], van: van(), van_wrap_elsewhere: [], forbidden_scenes: [], notes: '', ...extra });
+  const screen = (extra) => { mockDispatch.mockResolvedValue(branded(extra)); return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true }); };
+  beforeEach(() => mockDispatch.mockReset());
+
+  test('the screen prompt asks for the van/elsewhere fields and names the exception only when the caller allows it', () => {
+    const plain = buildScreenPrompt({});
+    expect(plain).not.toMatch(/van_wrap_elsewhere|"van":/);
+    const p = buildScreenPrompt({ allowVanWrap: true });
+    expect(p).toMatch(/"van": \{"present": boolean, "wrapped": boolean, "wrap_text": string\[\], "wrap_mascot": boolean\} \| null, "van_wrap_elsewhere": string\[\]/);
+    expect(p).toMatch(/EXCEPTION: that one van's own wrap graphics and its own wrap text are expected/);
+  });
+
+  test('the wrap on the van, nothing off it, exact wrap strings → clean', async () => {
+    const r = await screen();
+    expect(r).toMatchObject({ ok: true, checked: true, reasons: [], violations: 0, logos: [] });
+    expect(mockDispatch.mock.calls[0][1].maxTokens).toBe(_internals.SCREEN_MAX_TOKENS_WITH_VAN_WRAP);
+  });
+
+  test('garbled wrap text on the van (a mangled phone number or URL) fails as gibberish lettering', async () => {
+    const r = await screen({ van: van({ wrap_text: ['WAVES', '941-XX9-ZZ59'] }) });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toEqual(['garbled van wrap text: 941-XX9-ZZ59']);
+    expect(r.logos).toEqual(['garbled van wrap text: 941-XX9-ZZ59']);
+  });
+
+  test('a TRUNCATED phone number or URL on the van fails too — matchCaptions calls it "incomplete", not stray, and that must still regenerate (Codex r1 P2 on #4784)', async () => {
+    const truncatedPhone = await screen({ van: van({ wrap_text: ['WAVES', '941-241'] }) });
+    expect(truncatedPhone.ok).toBe(false);
+    expect(truncatedPhone.reasons).toEqual(['garbled van wrap text: 941-241-2459']);
+    expect(truncatedPhone.violations).toBe(1);
+    const truncatedUrl = await screen({ van: van({ wrap_text: ['GoWavesFL'] }) });
+    expect(truncatedUrl.ok).toBe(false);
+    expect(truncatedUrl.reasons).toEqual(['garbled van wrap text: GoWavesFL.com']);
+    // a caption legitimately split across two fragments that TOGETHER cover it
+    // is not a truncation — the existing in-order coverage still passes.
+    const split = await screen({ van: van({ wrap_text: ['941-241', '2459'] }) });
+    expect(split.ok).toBe(true);
+  });
+
+  test('a van present WITHOUT the wrap fails (the editor kept the van but dropped the reference) — no van at all stays clean (Codex r1 P2 on #4784)', async () => {
+    const unwrapped = await screen({ van: { present: true, wrapped: false, wrap_text: [], wrap_mascot: false } });
+    expect(unwrapped.ok).toBe(false);
+    expect(unwrapped.reasons).toEqual(['van present without the wrap']);
+    expect(unwrapped.logos).toEqual(['van present without the wrap']);
+    const noVanAtAll = await screen({ van: null });
+    expect(noVanAtAll).toMatchObject({ ok: true, reasons: [] });
+  });
+
+  test('the same wrap marks anywhere other than the one van fail (a second vehicle, sign, or equipment)', async () => {
+    const r = await screen({ van_wrap_elsewhere: ['a second van in the driveway'] });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toEqual(['van wrap off the van: a second van in the driveway']);
+    expect(r.logos).toEqual(['van wrap off the van: a second van in the driveway']);
+  });
+
+  test('no van in frame at all is clean — nothing to judge', async () => {
+    const r = await screen({ van: null });
+    expect(r).toMatchObject({ ok: true, reasons: [] });
+  });
+
+  test('an answer without the van/elsewhere fields, or a malformed van, is unusable → unchecked (fail-open), never clean', async () => {
+    mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }));
+    expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true })).toMatchObject({ ok: true, checked: false });
+    expect(await screen({ van: { present: true } })).toMatchObject({ ok: true, checked: false });
+    expect(await screen({ van: { present: true, wrapped: true } })).toMatchObject({ ok: true, checked: false });
+    expect(await screen({ van_wrap_elsewhere: 'none' })).toMatchObject({ ok: true, checked: false });
+  });
+
+  test('without the allowance, van wrap fields are ignored — a logo-free/wrap-free generation is screened as before', async () => {
+    mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }));
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER });
+    expect(r).toMatchObject({ ok: true, checked: true });
+    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/van_wrap_elsewhere/);
+    expect(mockDispatch.mock.calls[0][1].maxTokens).toBe(_internals.SCREEN_MAX_TOKENS);
+  });
+
+  test('the logo and van wrap allowances combine: both technicians and van fields are asked for, with the larger token budget', () => {
+    const p = buildScreenPrompt({ allowUniformLogo: true, allowVanWrap: true });
+    expect(p).toMatch(/"technicians":/);
+    expect(p).toMatch(/"van":/);
+    expect(_internals.screenMaxTokens({ allowUniformLogo: true, allowVanWrap: true })).toBe(_internals.SCREEN_MAX_TOKENS_WITH_LOGO_AND_VAN_WRAP);
+    expect(_internals.SCREEN_MAX_TOKENS_WITH_LOGO_AND_VAN_WRAP).toBeGreaterThan(_internals.SCREEN_MAX_TOKENS_WITH_LOGO);
+  });
+});

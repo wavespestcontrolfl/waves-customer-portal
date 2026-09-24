@@ -216,7 +216,7 @@ describe('buildPrompt', () => {
     expect(indoorPlans.every((p) => !p.van)).toBe(true);
     const vanPlan = { ...withVan[0] };
     const prompt = buildPrompt({ title: 'Post', keyword: 'chinch bug damage', mode: 'blog-hero', plan: vanPlan });
-    expect(prompt).toMatch(/Ford Transit work van .* plain and unmarked, no lettering, no logo/);
+    expect(prompt).toMatch(/Ford Transit 250 medium-roof cargo van .* plain and unmarked, no lettering, no logo/);
     expect(buildPrompt({ title: 'Post', keyword: 'chinch bug damage', mode: 'blog-hero', plan: { ...vanPlan, van: false } })).not.toMatch(/Ford Transit/);
   });
 
@@ -631,5 +631,136 @@ describe('uniform logo reference (owner directive 2026-09-24: logo on cap + righ
     const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, now, chainBudgetMs: 400_000, uniformLogo: LOGO });
     await expect(gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true })).rejects.toThrow(/all providers failed/);
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Waves van wrap reference (owner ruling 2026-09-24) ─────────────────
+
+describe('van wrap reference (owner ruling 2026-09-24: real current wrap on the background van)', () => {
+  const SIDE = Buffer.from('89504e470d0a1a0a', 'hex');
+  const REAR = Buffer.from('89504e470d0a1a0b', 'hex');
+  const VAN_PLAN = { style: 'photo', setting: 'along a front walk beside a stucco wall and mulched bed', timeOfDay: 'noon', vantage: 'eye level', van: true };
+  const NO_VAN_PLAN = { ...VAN_PLAN, van: false };
+
+  afterEach(() => { delete process.env.BLOG_IMAGE_VAN_WRAP; });
+
+  test('the bundled assets exist and the kill switch reads only an explicit false', () => {
+    expect(require('fs').existsSync(_internals.VAN_WRAP_SIDE_PATH)).toBe(true);
+    expect(require('fs').existsSync(_internals.VAN_WRAP_REAR_PATH)).toBe(true);
+    delete process.env.BLOG_IMAGE_VAN_WRAP;
+    expect(_internals.vanWrapEnabled()).toBe(true);
+    process.env.BLOG_IMAGE_VAN_WRAP = 'false';
+    expect(_internals.vanWrapEnabled()).toBe(false);
+    expect(_internals.loadVanWrapReferences()).toBeNull();
+  });
+
+  test('buildPrompt with vanWrap + plan.van names the Ford Transit 250 wearing the wrap; without either it stays plain or absent', () => {
+    const withWrap = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: VAN_PLAN, vanWrap: true });
+    expect(withWrap).toMatch(/Ford Transit 250 medium-roof cargo van wearing the Waves wrap — reproduced faithfully from the attached van reference photos/);
+    expect(withWrap).toMatch(/"WAVES" and "Lawn & Pest" lettering/);
+    expect(withWrap).toMatch(/941-241-2459/);
+    expect(withWrap).toMatch(/GoWavesFL\.com/);
+    expect(withWrap).toMatch(/belong ONLY on this one van/);
+    expect(withWrap).toMatch(/other than .*the Waves wrap text and graphics on the one van described above/);
+    expect(withWrap).toMatch(/no company logos, brand names, or brand marks other than .*the Waves wrap on the one van described above/);
+    // plan.van true but no opt-in → the plain unmarked line
+    const plainVan = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: VAN_PLAN });
+    expect(plainVan).toMatch(/plain and unmarked, no lettering, no logo/);
+    expect(plainVan).not.toMatch(/wearing the Waves wrap/);
+    // vanWrap opted in but the plan has no van at all → no van line whatsoever
+    const noVan = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: NO_VAN_PLAN, vanWrap: true });
+    expect(noVan).not.toMatch(/Ford Transit/);
+  });
+
+  test('the uniform logo and van wrap exceptions combine when both are attached', () => {
+    const both = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: VAN_PLAN, uniformLogo: true, vanWrap: true });
+    expect(both).toMatch(/other than the Waves logo on the technician's cap and right chest and the Waves wrap text and graphics on the one van described above/);
+    expect(both).toMatch(/no company logos, brand names, or brand marks other than the Waves logo on the technician's cap and chest and the Waves wrap on the one van described above/);
+  });
+
+  test('an infographic never carries the van wrap reference (it draws no scene at all)', () => {
+    const info = buildPrompt({ title: 'X', mode: 'blog-body', plan: { style: 'infographic', setting: 'three-step row', vantage: 'straight-on' }, captions: ['One'], vanWrap: true });
+    expect(info).not.toMatch(/Ford Transit/);
+    expect(info).not.toMatch(/reference photos/);
+  });
+
+  test('OpenAI legs post both van reference photos to /v1/images/edits as multipart; the result says vanWrapReference', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, vanWrap: [SIDE, REAR] });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: VAN_PLAN, vanWrap: true });
+    expect(r.vanWrapReference).toBe(true);
+    expect(r.logoReference).toBe(false);
+    expect(r.prompt).toMatch(/reference photos/);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://api.openai.com/v1/images/edits');
+    const files = opts.body.getAll('image[]');
+    expect(files).toHaveLength(2);
+    expect(files[0].size).toBe(SIDE.length);
+    expect(files[1].size).toBe(REAR.length);
+    expect(r.attempts[0]).toMatchObject({ provider: 'gpt-image-2', logoReference: false, vanWrapReference: true });
+  });
+
+  test('the logo and van wrap references attach together as three files when both opt in', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const LOGO = Buffer.from('89504e470d0a1a0c', 'hex');
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO, vanWrap: [SIDE, REAR] });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: VAN_PLAN, uniformLogo: true, vanWrap: true });
+    expect(r.logoReference).toBe(true);
+    expect(r.vanWrapReference).toBe(true);
+    const [, opts] = mockFetch.mock.calls[0];
+    expect(opts.body.getAll('image[]')).toHaveLength(3);
+  });
+
+  test('vanWrap: true has no effect without plan.van, and no effect when the plan has no van at all (social tiles, newsletter never opt in either)', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, vanWrap: [SIDE, REAR] });
+    const noPlan = await gen.generate({ title: 'Test', mode: 'social-square' });
+    expect(noPlan.vanWrapReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+    const noVanPlan = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: NO_VAN_PLAN, vanWrap: true });
+    expect(noVanPlan.vanWrapReference).toBe(false);
+  });
+
+  test('vanWrap: null (or the kill switch) keeps the plain generations call and the plain van line', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, vanWrap: null });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: VAN_PLAN, vanWrap: true });
+    expect(r.vanWrapReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+    expect(r.prompt).not.toMatch(/reference photos/);
+  });
+
+  test('a caller-supplied custom prompt never gets the van wrap reference attached', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, vanWrap: [SIDE, REAR] });
+    const r = await gen.generate({ prompt: 'custom', mode: 'blog-hero', plan: VAN_PLAN, vanWrap: true });
+    expect(r.vanWrapReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+  });
+
+  test('a leg that REJECTS the request with the van references (non-retryable 4xx) is retried once with no references before the chain moves on', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn()
+      .mockReturnValueOnce(err(400, 'unsupported reference'))
+      .mockReturnValueOnce(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5', fetchFn: mockFetch, vanWrap: [SIDE, REAR] });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: VAN_PLAN, vanWrap: true });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/edits');
+    expect(mockFetch.mock.calls[1][0]).toBe('https://api.openai.com/v1/images/generations');
+    expect(r.model).toBe('gpt-image-2');
+    expect(r.vanWrapReference).toBe(false);
+    expect(r.prompt).not.toMatch(/reference photos/);
+    expect(r.attempts.map((a) => `${a.provider}:${a.vanWrapReference}`)).toEqual(['gpt-image-2:true', 'gpt-image-2:false']);
+  });
+
+  test('the unbranded VAN_LINE names the Ford Transit 250 medium-roof cargo van', () => {
+    expect(_internals.VAN_LINE).toMatch(/Ford Transit 250 medium-roof cargo van/);
+    expect(_internals.VAN_LINE).not.toMatch(/Sprinter/);
   });
 });
