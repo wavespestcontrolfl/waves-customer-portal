@@ -1752,6 +1752,11 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       const out = await run({ serviceType: 'Rodent Trapping Service', serviceCategory: 'rodent', serviceKey });
       expect([serviceKey, out.lines, out.note]).toEqual([serviceKey, [], 'No treatment protocol for this service (rodent)']);
     }
+    // Mosquito misting SYSTEM (design visit / equipment service): mosquito by catalog, but no barrier chemical plan, primary or add-on. Barrier keys keep the program.
+    const misting = await run({ serviceType: 'Mosquito Misting System Service', serviceCategory: 'mosquito', serviceKey: 'mosquito_misting_system' });
+    expect([misting.lines, misting.note]).toEqual([[], 'No treatment protocol for this service (mosquito)']);
+    const mistingAddon = await run({ addons: [{ name: 'Mosquito Misting System Service', category: 'mosquito', serviceKey: 'mosquito_misting_system' }] });
+    expect(mistingAddon.addons).toMatchObject([{ name: 'Mosquito Misting System Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (mosquito)' }]);
     // The bait-station services keep the program: the trap-only add-on gets no Contrac Blox line, the quarterly bait service does (r9 P1).
     const rodentProtocols = { ...protocols, rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }, { visit: 2, month: 'Any', primary: 'Install exterior bait stations — Contrac Blox\nSet snap traps in attic zones' }] } };
     const rodent = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: 'Rodent Trapping Service', category: 'rodent', serviceKey: 'rodent_trapping' }, { name: 'Quarterly Rodent Bait Station Service', category: 'rodent', serviceKey: 'rodent_bait_quarterly' }] }, protocols: rodentProtocols, catalog: [...catalog, { id: 'blox', name: 'Contrac Blox' }], dbh: () => ({}) });

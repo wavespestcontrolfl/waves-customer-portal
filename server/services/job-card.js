@@ -335,7 +335,7 @@ async function loadAddons(dbh, serviceId) {
 const ADDON_PROGRAMS = Object.freeze({
   pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest' },
   lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
-  mosquito: { any: ['mosquito'], fallback: 'mosquito' },
+  mosquito: { any: ['mosquito'], fallback: 'mosquito', nonChemical: ['mosquito_misting_system'] },
   termite: { any: ['termite'], fallback: 'termite' },
   rodent: {
     any: ['rodent'],
