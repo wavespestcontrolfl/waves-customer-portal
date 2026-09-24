@@ -293,11 +293,29 @@ function baseMovedError(number, baseRef, detail) {
 // Any inconsistency throws the same retryable BLOG_BASE_MOVED code the old
 // pre-check used, so callers that already treat that code as "re-verify
 // next tick" need no changes.
+//
+// Steps below are split into small, single-purpose helpers (each under the
+// eslint complexity cap) — behavior is identical to the inlined original.
 async function mergePrAtomic(number, { title, message, sha, expectBaseSha, baseRef, verifyPaths }) {
   const { owner, repo } = env();
   const headSha = String(sha || '');
   if (!headSha) throw new Error('mergePr: sha (head) is required when expectBaseSha is supplied');
 
+  const current = await assertMergeablePrSnapshot(number, { headSha, expectBaseSha, baseRef });
+  const treeSha = await assertVerifiedTestMerge(number, {
+    owner, repo, expectBaseSha, headSha, baseRef, mergeCommitSha: current.merge_commit_sha,
+  });
+  await assertVerifiedPaths(number, { verifyPaths, mergeCommitSha: current.merge_commit_sha, headSha, baseRef });
+  const newSha = await createAndFastForward(number, { owner, repo, title, message, treeSha, expectBaseSha, headSha, baseRef });
+
+  return settleAdvancedHead(number, headSha, newSha);
+}
+
+// 1. Re-read the PR: base/head/mergeable must match exactly what the caller
+// gated, and GitHub must already have computed a test-merge commit — else
+// there is nothing trustworthy to build the real merge from yet. Returns the
+// fresh PR (its merge_commit_sha feeds the next step).
+async function assertMergeablePrSnapshot(number, { headSha, expectBaseSha, baseRef }) {
   const current = await getPr(number);
   const currentBaseSha = String(current?.base?.sha || '').toLowerCase();
   const currentBaseRef = String(current?.base?.ref || '');
@@ -313,25 +331,43 @@ async function mergePrAtomic(number, { title, message, sha, expectBaseSha, baseR
   if (current.mergeable !== true || !current.merge_commit_sha) {
     throw baseMovedError(number, baseRef, `PR not cleanly mergeable (mergeable=${current.mergeable})`);
   }
+  return current;
+}
 
-  const testMerge = await ghFetch(`/repos/${owner}/${repo}/git/commits/${current.merge_commit_sha}`);
+// 2. GitHub's own test-merge commit proves the merge isn't stale: its
+// parents must be exactly [base, head] as gated. Returns its tree sha, which
+// the real merge commit reuses verbatim.
+async function assertVerifiedTestMerge(number, { owner, repo, expectBaseSha, headSha, baseRef, mergeCommitSha }) {
+  const testMerge = await ghFetch(`/repos/${owner}/${repo}/git/commits/${mergeCommitSha}`);
   const parents = Array.isArray(testMerge?.parents) ? testMerge.parents.map((p) => String(p?.sha || '').toLowerCase()) : [];
   if (parents.length !== 2 || parents[0] !== String(expectBaseSha).toLowerCase() || parents[1] !== headSha.toLowerCase()) {
     throw baseMovedError(number, baseRef, 'GitHub test-merge commit is stale');
   }
   const treeSha = testMerge?.tree?.sha;
   if (!treeSha) throw baseMovedError(number, baseRef, 'GitHub test-merge commit has no tree');
+  return treeSha;
+}
 
+// 3. Each verified path (signed editorial articles + sidecars) must resolve
+// to the same blob at the test merge as at head — proves the base's own
+// edits, if any, didn't touch the signed bytes. No-op when verifyPaths is
+// empty/undefined.
+async function assertVerifiedPaths(number, { verifyPaths, mergeCommitSha, headSha, baseRef }) {
   for (const path of verifyPaths || []) {
     const [atMerge, atHead] = await Promise.all([
-      getFile(path, current.merge_commit_sha),
+      getFile(path, mergeCommitSha),
       getFile(path, headSha),
     ]);
     const absentAtBoth = atMerge === null && atHead === null;
     const sameBlob = typeof atMerge?.sha === 'string' && atMerge.sha && atMerge.sha === atHead?.sha;
     if (!absentAtBoth && !sameBlob) throw baseMovedError(number, baseRef, `verified path changed by the merge: ${path}`);
   }
+}
 
+// 4–5. Create the real merge commit from the verified tree, then
+// fast-forward-only PATCH the base ref onto it — force:false IS the atomic
+// compare-and-swap (422 if base moved). Returns the new commit sha.
+async function createAndFastForward(number, { owner, repo, title, message, treeSha, expectBaseSha, headSha, baseRef }) {
   const commitMessage = [title, message].filter(Boolean).join('\n\n') || `Merge pull request #${number}`;
   const newCommit = await ghFetch(`/repos/${owner}/${repo}/git/commits`, {
     method: 'POST',
@@ -353,32 +389,53 @@ async function mergePrAtomic(number, { title, message, sha, expectBaseSha, baseR
       // the ref before concluding base moved: if it's already our commit,
       // the merge went through and this is a false alarm, not base drift.
       const refNow = await getBranchSha(baseRef);
-      if (refNow === newSha) return settleAdvancedHead(number, headSha, newSha);
+      if (refNow === newSha) return newSha;
       throw baseMovedError(number, baseRef, 'main moved during merge (ref update rejected)');
     }
     throw err;
   }
-
-  return settleAdvancedHead(number, headSha, newSha);
+  return newSha;
 }
 
 // The ref update published exactly the verified head. If the PR received a
-// push in the meantime, GitHub leaves it open with commits nothing reviewed
-// or published — close it as superseded so no open PR implies they will ship.
-// Best effort: the merge already happened and must still be reported.
+// push in the meantime, GitHub leaves it open with a commit nothing reviewed
+// or published — close it as superseded so no open PR implies they will
+// ship it. Close FIRST: an unreviewed extra commit sitting open (and, once
+// GitHub recomputes mergeable, human-mergeable) is the real risk; the
+// explanatory comment is cosmetic and must never gate or undo the close.
+//
+// `retired` reports whether the close itself landed. false means the
+// caller MUST persist a durable retirement debt — the existing
+// astro_retire_pr_number mechanism (blog_posts / autonomous_runs), swept
+// every poll tick by reconcileTopicBlockedPostPrs / reconcileHeadAdvancedPrs
+// — so a lost response here still converges instead of leaving the PR open
+// and mergeable indefinitely.
 async function settleAdvancedHead(number, headSha, newSha) {
   const result = { sha: newSha, merged: true };
+  let after;
   try {
-    const after = await getPr(number);
-    const afterHead = String(after?.head?.sha || '').toLowerCase();
-    if (after?.state === 'open' && afterHead && afterHead !== headSha.toLowerCase()) {
-      result.headAdvanced = afterHead;
-      logger.warn(`[github] PR #${number}: head advanced to ${afterHead.slice(0, 9)} during merge; published verified head ${headSha.slice(0, 9)}`);
-      await createIssueComment(number, `Merged the verified head ${headSha.slice(0, 9)} as ${newSha.slice(0, 9)}. Commit ${afterHead.slice(0, 9)} arrived during the merge and was not published; closing this PR. Open a new PR for that change.`);
-      await closePr(number);
-    }
+    after = await getPr(number);
   } catch (err) {
     logger.warn(`[github] PR #${number}: post-merge head check failed: ${err.message}`);
+    return result;
+  }
+  const afterHead = String(after?.head?.sha || '').toLowerCase();
+  if (after?.state !== 'open' || !afterHead || afterHead === headSha.toLowerCase()) return result;
+
+  result.headAdvanced = afterHead;
+  logger.warn(`[github] PR #${number}: head advanced to ${afterHead.slice(0, 9)} during merge; published verified head ${headSha.slice(0, 9)}`);
+  try {
+    await closePr(number);
+    result.retired = true;
+  } catch (err) {
+    result.retired = false;
+    logger.warn(`[github] PR #${number}: close after head-advance failed: ${err.message} (retried via the caller's retirement debt)`);
+  }
+  // Independently best-effort — its failure must never skip or undo the close.
+  try {
+    await createIssueComment(number, `Merged the verified head ${headSha.slice(0, 9)} as ${newSha.slice(0, 9)}. Commit ${afterHead.slice(0, 9)} arrived during the merge and was not published; closing this PR. Open a new PR for that change.`);
+  } catch (err) {
+    logger.warn(`[github] PR #${number}: post-merge explanatory comment failed: ${err.message}`);
   }
   return result;
 }

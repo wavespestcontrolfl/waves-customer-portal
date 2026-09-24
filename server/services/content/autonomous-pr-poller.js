@@ -517,6 +517,12 @@ async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
 // close idempotently — reconcileTopicBlockedPrs repeats it every tick for
 // parked runs whose PR is still open, so a lost response or partial closure
 // converges. Best-effort; never throws.
+//
+// Shared: reconcileHeadAdvancedPrs reuses this same primitive for a
+// different debt source (a mergePrAtomic head-advance whose inline close
+// failed) — `run` here is only ever used for its `id` (logging + the
+// terminal-stamp mark), never read or mutated, so both callers pass any row
+// carrying one.
 async function retireTopicBlockedPr(run, prNumber, gh, { pr = null } = {}) {
   try {
     const current = pr || await gh.getPr(prNumber);
@@ -525,22 +531,79 @@ async function retireTopicBlockedPr(run, prNumber, gh, { pr = null } = {}) {
       await gh.closePr(prNumber);
       const ref = current.head?.ref;
       if (ref && typeof gh.deleteRef === 'function') {
-        try { await gh.deleteRef(ref); } catch (err) { logger.warn(`[autonomous-pr-poller] branch delete after topic-block park failed for PR #${prNumber}: ${err.message}`); }
+        try { await gh.deleteRef(ref); } catch (err) { logger.warn(`[autonomous-pr-poller] branch delete after park failed for PR #${prNumber}: ${err.message}`); }
       }
-      logger.warn(`[autonomous-pr-poller] retired PR #${prNumber} for topic-blocked run ${run.id}`);
+      logger.warn(`[autonomous-pr-poller] retired PR #${prNumber} (run ${run.id})`);
     }
     // Closed is not retired until the head branch is VERIFIED gone (a
     // surviving branch lets the closed PR be reopened and merged); the run
     // stays in the reconcile set until it is.
     if (!current.merged && !(await gh.retireBranch(current.head?.ref))) {
-      logger.warn(`[autonomous-pr-poller] PR #${prNumber} for topic-blocked run ${run.id} is closed but its branch ${current.head?.ref} still exists (reconciled next tick)`);
+      logger.warn(`[autonomous-pr-poller] PR #${prNumber} (run ${run.id}) is closed but its branch ${current.head?.ref} still exists (reconciled next tick)`);
       return { retired: false, reason: 'branch_not_deleted' };
     }
     if (!await stampTerminal(prNumber, current.merged ? 'merged' : 'closed', run)) return { retired: false, reason: 'terminal_stamp_failed' };
     return { retired: true };
   } catch (err) {
-    logger.warn(`[autonomous-pr-poller] PR retire for topic-blocked run ${run.id} failed: ${err.message} (reconciled next tick)`);
+    logger.warn(`[autonomous-pr-poller] PR retire for run ${run.id} failed: ${err.message} (reconciled next tick)`);
     return { retired: false, reason: err.message };
+  }
+}
+
+// autonomous_runs.astro_retire_pr_number — mirrors blog_posts' column: a PR
+// this run's own atomic merge left owing GitHub a close (mergePrAtomic's
+// settleAdvancedHead detected a push landed after the verified head was
+// merged, and its own inline close attempt failed). The run itself already
+// finalized through finalizeMerged by the time this debt can exist — this
+// reconcile is independent of the run's outcome: it only closes the
+// leftover PR and clears the debt, never touches finalize/park/supersede
+// machinery. Reused primitive (retireTopicBlockedPr) — merged found on
+// re-read (current.merged) just terminal-stamps 'merged' and clears the
+// debt without applying any publish side effect, since finalizeMerged
+// already ran one for this run.
+async function reconcileHeadAdvancedPrs(gh) {
+  let rows = [];
+  try {
+    rows = await db('autonomous_runs')
+      .whereNotNull('astro_retire_pr_number')
+      .orderByRaw('random()')
+      .limit(25)
+      .select('id', 'astro_retire_pr_number');
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] head-advanced PR reconcile query failed: ${err.message}`);
+    return { count: 0 };
+  }
+  let retired = 0;
+  for (const row of rows) {
+    const prNumber = row.astro_retire_pr_number;
+    if (!prNumber) continue;
+    const r = await retireTopicBlockedPr(row, prNumber, gh);
+    if (r.retired) {
+      await db('autonomous_runs').where({ id: row.id, astro_retire_pr_number: prNumber })
+        .update({ astro_retire_pr_number: null, updated_at: new Date() });
+      retired += 1;
+    }
+  }
+  return { count: rows.length, retired };
+}
+
+// Persists the debt for a run whose own successful merge left a PR open with
+// an unreviewed extra commit (mergePrAtomic's settleAdvancedHead, inline
+// close attempt failed). Best-effort and independent of the merge's own
+// success — a write failure here is a durable-bookkeeping miss, never a
+// reason to fail a merge that already happened. An older debt (should one
+// somehow already be outstanding) is never overwritten — a row can only ever
+// owe ONE close through this column.
+async function persistHeadAdvancedRetireDebt(run, prNumber) {
+  try {
+    const updated = await db('autonomous_runs')
+      .where({ id: run.id, astro_retire_pr_number: null })
+      .update({ astro_retire_pr_number: prNumber, updated_at: new Date() });
+    if (!updated) {
+      logger.warn(`[autonomous-pr-poller] run ${run.id}: PR #${prNumber} needs retirement after a head-advanced merge, but an older debt is already outstanding — not overwritten (reconciled independently)`);
+    }
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] could not persist head-advanced retirement debt for run ${run.id} PR #${prNumber}: ${err.message} (the PR stays open and unretired until an operator or a future reconcile closes it)`);
   }
 }
 
@@ -1753,6 +1816,14 @@ async function maybeAutoMerge(run, pr) {
     throw err; // anything else → transient via pollRun's catch
   }
   logger.info(`[autonomous-pr-poller] auto-merged PR #${pr.number} for run ${run.id} (build green + ${p2MergeInfo ? 'P2-only merge bar' : 'Codex clear'})`);
+  // mergePrAtomic's settleAdvancedHead already tried to close this PR inline
+  // when a push landed on it during the merge; if that close itself failed
+  // (retired:false), persist the durable debt so reconcileHeadAdvancedPrs
+  // retries it every poll tick — else the leftover PR (an unreviewed extra
+  // commit) stays open and human-mergeable.
+  if (mergeRes?.headAdvanced && mergeRes?.retired === false) {
+    await persistHeadAdvancedRetireDebt(run, pr.number);
+  }
   if (p2MergeInfo) {
     // The merge actually happened — NOW record that it went through on the
     // P2 bar. Best-effort (append-only, fresh read like the park/pending
@@ -2045,7 +2116,13 @@ async function pollPending() {
   // tick (a retire that failed or half-completed after the durable park).
   let topicBlocked = { count: 0, retired: 0 };
   try { topicBlocked = await reconcileTopicBlockedPrs(require('../content-astro/github-client')); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked reconcile failed: ${err.message}`); }
-  if (!rows.length) return { count: 0, results: [], topicBlocked };
+  // Runs whose own auto-merge left a PR open with a later, unreviewed push
+  // (mergePrAtomic's settleAdvancedHead, inline close attempt failed)
+  // converge here — independent of the topic-block park above; the run
+  // itself already finalized.
+  let headAdvancedRetire = { count: 0, retired: 0 };
+  try { headAdvancedRetire = await reconcileHeadAdvancedPrs(require('../content-astro/github-client')); } catch (err) { logger.warn(`[autonomous-pr-poller] head-advanced PR reconcile failed: ${err.message}`); }
+  if (!rows.length) return { count: 0, results: [], topicBlocked, headAdvancedRetire };
 
   // Human review-queue actions (requeue/dismiss) update ONLY the
   // opportunity_queue row and leave the run's parked outcome/skip_reason in
@@ -2096,7 +2173,7 @@ async function pollPending() {
     results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
   }
   logger.info(`[autonomous-pr-poller] polled ${results.length} parked autonomous PR run(s) (${autoMerges} auto-merged)`);
-  return { count: results.length, results, autoMerges, topicBlocked };
+  return { count: results.length, results, autoMerges, topicBlocked, headAdvancedRetire };
 }
 
 module.exports = {
@@ -2109,6 +2186,8 @@ module.exports = {
     maxAutoMergesPerPoll,
     prNumberFromUrl,
     reconcileTopicBlockedPrs,
+    reconcileHeadAdvancedPrs,
+    persistHeadAdvancedRetireDebt,
     queueRowStillParkedLocked,
     retireTopicBlockedPr,
     pendingSkipReasonForRun,

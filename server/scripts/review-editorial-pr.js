@@ -39,6 +39,82 @@ async function readArticles(pr) {
   return files;
 }
 
+// Grade metadata changes against the immutable base revision on every
+// unsigned/tampered article. A branch name can never waive policy.
+async function baseMetaDescription(pr, file) {
+  if (file.status === 'added') return '';
+  const basePath = file.previousPath || file.path;
+  const baseFile = await gh.getFile(basePath, pr.base.sha);
+  if (!baseFile?.content) throw new Error(`Cannot read ${basePath} at the reviewed base`);
+  let baseParsed;
+  try { baseParsed = fm.parse(baseFile.content); }
+  catch (err) { throw new Error(`Cannot parse ${basePath} at the reviewed base: ${err.message}`); }
+  const baseMeta = baseParsed.data?.metaDescription ?? baseParsed.data?.meta_description;
+  return typeof baseMeta === 'string' ? baseMeta : '';
+}
+
+// Repair + existing-policy validation for an unsigned/tampered article.
+// Returns the (possibly repaired) document and any repair commit it produced.
+async function validateAndRepair(pr, file) {
+  const originalMetaDescription = await baseMetaDescription(pr, file);
+  const parsed = fm.parse(file.document);
+  let document = file.document;
+  const commits = [];
+  // Reserve content/* body repairs for the portal's mirror workflow to
+  // avoid changing article bytes without updating its DB-backed state.
+  if (!pr.head.ref.startsWith('content/')) {
+    const draft = await editorial.prepareDraft({ frontmatter: parsed.data, body: parsed.content }, { page_type: 'supporting-blog' });
+    if (draft.body.trim() !== parsed.content.trim()) {
+      document = fm.stringify(parsed.data, draft.body);
+      commits.push({ path: file.path, content: document });
+    }
+  }
+  const check = await require('../services/content/codex-remediation').validateFixedBlogFile(document, {
+    originalMetaDescription, requireFactCheck: true,
+  });
+  if (check.requiresHumanReview) throw new Error('Document is outside the autonomous publishing policy; leave unpublished');
+  if (!check.ok) throw new Error(`Document failed existing publishing checks: ${check.reason}`);
+  return { document, commits };
+}
+
+// Reviews one stale/unsigned article, returning its evidence-carrying commits.
+async function reviewFile(pr, file) {
+  let document = file.document;
+  const commits = [];
+  // A still-valid signature over these exact bytes proves the legacy
+  // publishing policy already ran. Expiry alone requires a new independent
+  // review/signature, not a context-free replay of those older gates.
+  if (!file.previouslyVerified) {
+    const repaired = await validateAndRepair(pr, file);
+    document = repaired.document;
+    commits.push(...repaired.commits);
+  }
+  commits.push(...await editorial.filesForDocument({ document, path: file.path }));
+  return commits;
+}
+
+// Read/validate/repair phase. All-or-nothing: a failed article never rides
+// another article's evidence commit, so failures are collected, not thrown.
+async function reviewFiles(pr, files) {
+  const commits = [];
+  const failures = [];
+  for (const file of files.filter((item) => !item.fresh)) {
+    try { commits.push(...await reviewFile(pr, file)); }
+    catch (err) { failures.push({ path: file.path, reason: err.message }); }
+  }
+  return { commits, failures };
+}
+
+// Atomic-commit phase: re-verify the PR hasn't moved since review started,
+// then land every evidence/repair commit in one push.
+async function commitReviewedFiles(pr, number, commits) {
+  const current = await gh.getPr(number);
+  if (current?.state !== 'open' || current.head?.sha !== pr.head.sha || current.head?.ref !== pr.head.ref
+      || current.base?.sha !== pr.base.sha) throw new Error('PR changed during review; retry on the new head or base');
+  return gh.commitFiles({ branch: pr.head.ref, expectedHeadSha: pr.head.sha,
+    message: 'chore(content): attach verified editorial evidence', files: commits });
+}
+
 async function reviewPr(number) {
   if (!Number.isSafeInteger(number) || number < 1) throw new Error('A positive PR number is required');
   if (!editorial.enabled()) return { skipped: 'gate_disabled' };
@@ -52,57 +128,10 @@ async function reviewPr(number) {
       sha: Joi.string().required() }).unknown().required(),
   }).unknown().required(), 'Only open, same-repository PRs against the default branch are supported');
   const files = await readArticles(pr);
-  const commits = [];
-  const failures = [];
-  for (const file of files.filter((item) => !item.fresh)) {
-    try {
-      let document = file.document;
-      // A still-valid signature over these exact bytes proves the legacy
-      // publishing policy already ran. Expiry alone requires a new independent
-      // review/signature, not a context-free replay of those older gates.
-      if (!file.previouslyVerified) {
-        // Grade metadata changes against the immutable base revision on every
-        // unsigned/tampered article. A branch name can never waive policy.
-        let originalMetaDescription = '';
-        if (file.status !== 'added') {
-          const basePath = file.previousPath || file.path;
-          const baseFile = await gh.getFile(basePath, pr.base.sha);
-          if (!baseFile?.content) throw new Error(`Cannot read ${basePath} at the reviewed base`);
-          let baseParsed;
-          try { baseParsed = fm.parse(baseFile.content); }
-          catch (err) { throw new Error(`Cannot parse ${basePath} at the reviewed base: ${err.message}`); }
-          const baseMeta = baseParsed.data?.metaDescription ?? baseParsed.data?.meta_description;
-          originalMetaDescription = typeof baseMeta === 'string' ? baseMeta : '';
-        }
-        const parsed = fm.parse(document);
-        // Reserve content/* body repairs for the portal's mirror workflow to
-        // avoid changing article bytes without updating its DB-backed state.
-        if (!pr.head.ref.startsWith('content/')) {
-          const draft = await editorial.prepareDraft({ frontmatter: parsed.data, body: parsed.content }, { page_type: 'supporting-blog' });
-          if (draft.body.trim() !== parsed.content.trim()) {
-            document = fm.stringify(parsed.data, draft.body);
-            commits.push({ path: file.path, content: document });
-          }
-        }
-        const check = await require('../services/content/codex-remediation').validateFixedBlogFile(document, {
-          originalMetaDescription, requireFactCheck: true,
-        });
-        if (check.requiresHumanReview) throw new Error('Document is outside the autonomous publishing policy; leave unpublished');
-        if (!check.ok) throw new Error(`Document failed existing publishing checks: ${check.reason}`);
-      }
-      commits.push(...await editorial.filesForDocument({ document, path: file.path }));
-    } catch (err) {
-      failures.push({ path: file.path, reason: err.message });
-    }
-  }
-  // All-or-nothing. A failed article never rides another article's evidence commit.
+  const { commits, failures } = await reviewFiles(pr, files);
   if (failures.length) return { pass: false, deferred: true, failures };
   if (!commits.length) return { pass: true, unchanged: true };
-  const current = await gh.getPr(number);
-  if (current?.state !== 'open' || current.head?.sha !== pr.head.sha || current.head?.ref !== pr.head.ref
-      || current.base?.sha !== pr.base.sha) throw new Error('PR changed during review; retry on the new head or base');
-  const result = await gh.commitFiles({ branch: pr.head.ref, expectedHeadSha: pr.head.sha,
-    message: 'chore(content): attach verified editorial evidence', files: commits });
+  const result = await commitReviewedFiles(pr, number, commits);
   return { pass: true, commit: result.commit.sha, requiresFreshBuild: true };
 }
 

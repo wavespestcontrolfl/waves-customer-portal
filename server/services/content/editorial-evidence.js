@@ -104,52 +104,57 @@ async function evaluate(document, brief = {}) {
     domain, sourceUrls: sourceUrls(document, brief), factsPack: brief.facts_pack || null });
 }
 
-// Repairs happen BEFORE existing schema, claims, privacy and SEO gates. A final
-// independent review below still checks the exact bytes emitted by the publisher.
-async function prepareDraft(draft, brief = {}) {
-  if (!enabled()) return draft;
-  let reviewFrontmatter = draft.frontmatter || {};
-  if (brief.action_type === 'refresh_existing_page') {
-    // Match publishRefresh's target precedence, then let its own resolver tell
-    // us whether this is a blog. Refresh briefs deliberately use the generic
-    // page_type=refresh, so trusting page_type would skip blog repairs (or,
-    // conversely, applying the review to every refresh would pull service and
-    // location pages into a blog-only contract).
-    const target = draft.file_path || brief.target_url || brief.page_url || draft.page_url;
-    let resolved;
-    try {
-      // Dynamic to avoid the load-time cycle: astro-publisher imports this
-      // module for final evidence generation.
-      const publisher = require('../content-astro/astro-publisher');
-      if (!target || typeof publisher.resolveExistingAstroFileForTarget !== 'function') throw new Error('refresh target resolver unavailable');
-      resolved = await publisher.resolveExistingAstroFileForTarget(target);
-    } catch {
-      throw reviewError(null);
-    }
-    if (!resolved?.path) throw reviewError(null);
-    if (!applicable(resolved.path)) return draft;
+// Refresh document assembly: starts from the live page's frontmatter
+// (publishRefresh's own sparse-edit contract) and overlays only the
+// non-empty meta fields the draft actually touched. Returns null when the
+// resolved refresh target isn't a blog, meaning the caller should return the
+// draft unreviewed.
+async function refreshReviewFrontmatter(draft, brief) {
+  // Match publishRefresh's target precedence, then let its own resolver tell
+  // us whether this is a blog. Refresh briefs deliberately use the generic
+  // page_type=refresh, so trusting page_type would skip blog repairs (or,
+  // conversely, applying the review to every refresh would pull service and
+  // location pages into a blog-only contract).
+  const target = draft.file_path || brief.target_url || brief.page_url || draft.page_url;
+  let resolved;
+  try {
+    // Dynamic to avoid the load-time cycle: astro-publisher imports this
+    // module for final evidence generation.
+    const publisher = require('../content-astro/astro-publisher');
+    if (!target || typeof publisher.resolveExistingAstroFileForTarget !== 'function') throw new Error('refresh target resolver unavailable');
+    resolved = await publisher.resolveExistingAstroFileForTarget(target);
+  } catch {
+    throw reviewError(null);
+  }
+  if (!resolved?.path) throw reviewError(null);
+  if (!applicable(resolved.path)) return null;
 
-    // The refresh sink is intentionally sparse: publishRefresh starts with
-    // the live frontmatter and accepts only non-empty edits to fields already
-    // present on that page. Review those effective bytes too, while returning
-    // the original sparse draft frontmatter for the publisher to freeze.
-    let liveFrontmatter;
-    try {
-      if (typeof resolved.file?.content !== 'string') throw new Error('resolved refresh file has no content');
-      liveFrontmatter = fm.parse(resolved.file.content).data || {};
-    } catch {
-      throw reviewError(null);
+  // The refresh sink is intentionally sparse: publishRefresh starts with
+  // the live frontmatter and accepts only non-empty edits to fields already
+  // present on that page. Review those effective bytes too, while returning
+  // the original sparse draft frontmatter for the publisher to freeze.
+  let liveFrontmatter;
+  try {
+    if (typeof resolved.file?.content !== 'string') throw new Error('resolved refresh file has no content');
+    liveFrontmatter = fm.parse(resolved.file.content).data || {};
+  } catch {
+    throw reviewError(null);
+  }
+  const reviewFrontmatter = { ...liveFrontmatter };
+  for (const field of REFRESH_REVIEW_META_FIELDS) {
+    if (liveFrontmatter[field] !== undefined
+        && draft.frontmatter?.[field] !== undefined
+        && String(draft.frontmatter[field]).trim()) {
+      reviewFrontmatter[field] = String(draft.frontmatter[field]).trim();
     }
-    reviewFrontmatter = { ...liveFrontmatter };
-    for (const field of REFRESH_REVIEW_META_FIELDS) {
-      if (liveFrontmatter[field] !== undefined
-          && draft.frontmatter?.[field] !== undefined
-          && String(draft.frontmatter[field]).trim()) {
-        reviewFrontmatter[field] = String(draft.frontmatter[field]).trim();
-      }
-    }
-  } else if (!['supporting-blog', 'customer-question'].includes(brief.page_type)
-      && brief.action_type !== 'new_supporting_blog') return draft;
+  }
+  return reviewFrontmatter;
+}
+
+// Review/repair loop: evaluates the assembled document, attempts one repair
+// pass on a clean (non-error) failure, then re-evaluates. Frontmatter is
+// frozen for the whole loop — repair may only change the body bytes.
+async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
   const original = fm.stringify(reviewFrontmatter, draft.body || '');
   let document = original;
   let result;
@@ -173,6 +178,20 @@ async function prepareDraft(draft, brief = {}) {
     }
   }
   throw reviewError(result);
+}
+
+// Repairs happen BEFORE existing schema, claims, privacy and SEO gates. A final
+// independent review below still checks the exact bytes emitted by the publisher.
+async function prepareDraft(draft, brief = {}) {
+  if (!enabled()) return draft;
+  let reviewFrontmatter = draft.frontmatter || {};
+  if (brief.action_type === 'refresh_existing_page') {
+    const resolved = await refreshReviewFrontmatter(draft, brief);
+    if (resolved === null) return draft;
+    reviewFrontmatter = resolved;
+  } else if (!['supporting-blog', 'customer-question'].includes(brief.page_type)
+      && brief.action_type !== 'new_supporting_blog') return draft;
+  return reviewAndRepairDraft(draft, reviewFrontmatter, brief);
 }
 
 async function filesForDocument({ document, path, brief = {} }) {
@@ -203,18 +222,11 @@ async function filesForDocument({ document, path, brief = {} }) {
   return [{ path: contract.evidencePath(path), content: JSON.stringify(manifest, null, 2) + '\n' }];
 }
 
-// Check the immutable PR head, never a mutable branch name. Required even if a
-// PR was created before this gate was enabled or remediation edited the article.
-async function assertPrEvidence(pr) {
-  if (!enabled()) return;
-  const gh = require('../content-astro/github-client');
+// Snapshot acquisition: re-fetches the PR (poller snapshots can be minutes
+// old), its changed files, and their merge base — throwing fail-closed
+// unless the PR is still open at the exact head this call was given.
+async function acquirePrSnapshot(gh, pr) {
   const { owner, repo } = gh.env();
-  if (!pr?.number || !pr.head?.sha) throw reviewError(null);
-  // Evidence authenticates the PR head bytes, but GitHub's clean merge may
-  // also carry non-overlapping edits made to the same article on the base.
-  // Refresh the PR here (poller snapshots can be minutes old), derive its
-  // merge base, and require every touched article's base blob to be unchanged
-  // since that fork. Unrelated base movement remains mergeable.
   const current = await gh.getPr(pr.number);
   const headSha = String(pr.head.sha);
   const currentHeadSha = String(current?.head?.sha || '');
@@ -225,6 +237,56 @@ async function assertPrEvidence(pr) {
   const compared = await gh.compareFiles(headSha, baseSha);
   const mergeBaseSha = String(compared?.mergeBaseSha || '');
   if (!mergeBaseSha) throw reviewError(null);
+  return { headSha, baseSha, baseRef, mergeBaseSha, files };
+}
+
+// Base-drift validation: every applicable article's base-side blob (current
+// path, and its pre-rename path too) must be byte-identical to what it was
+// at the PR's merge-base fork — proves GitHub's clean-merge story never
+// silently carries a conflicting base edit into a signed article.
+async function assertNoBaseDrift(gh, file, { mergeBaseSha, baseSha }) {
+  const basePaths = [file.filename];
+  if (file.status === 'renamed' && file.previous_filename) basePaths.push(file.previous_filename);
+  for (const articlePath of basePaths) {
+    const [atFork, atBase] = await Promise.all([
+      gh.getFile(articlePath, mergeBaseSha),
+      gh.getFile(articlePath, baseSha),
+    ]);
+    const absentAtBoth = atFork === null && atBase === null;
+    const sameBlob = typeof atFork?.sha === 'string' && atFork.sha
+      && typeof atBase?.sha === 'string' && atFork.sha === atBase.sha;
+    if (!absentAtBoth && !sameBlob) throw reviewError(null);
+  }
+}
+
+// Per-article manifest verification at the immutable head: domain from the
+// article's own bytes (never assumed), signature over those exact bytes.
+async function verifyArticleEvidence(gh, contract, file, headSha) {
+  const document = await gh.getFile(file.filename, headSha);
+  const evidence = await gh.getFile(contract.evidencePath(file.filename), headSha);
+  let manifest;
+  try { manifest = JSON.parse(evidence?.content); } catch { throw reviewError(null); }
+  // Domain from the article's own bytes at head — never assumed — so a
+  // spoke-targeted article is verified against its own spoke, not the hub.
+  const domain = document ? domainContextFromDocument(document.content)?.hostname : null;
+  if (!document || !domain) throw reviewError(null);
+  const result = contract.verifyManifest({ document: document.content, path: file.filename,
+    domain, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
+  if (!result.pass) throw reviewError(null);
+}
+
+// Check the immutable PR head, never a mutable branch name. Required even if a
+// PR was created before this gate was enabled or remediation edited the article.
+async function assertPrEvidence(pr) {
+  if (!enabled()) return;
+  const gh = require('../content-astro/github-client');
+  if (!pr?.number || !pr.head?.sha) throw reviewError(null);
+  // Evidence authenticates the PR head bytes, but GitHub's clean merge may
+  // also carry non-overlapping edits made to the same article on the base.
+  // Refresh the PR here (poller snapshots can be minutes old), derive its
+  // merge base, and require every touched article's base blob to be unchanged
+  // since that fork. Unrelated base movement remains mergeable.
+  const { headSha, baseSha, baseRef, mergeBaseSha, files } = await acquirePrSnapshot(gh, pr);
   const contract = require('../../../packages/editorial-evidence/index.cjs');
   // Head-side filenames of every applicable, non-removed article verified
   // below — callers (e.g. the PR poller) use this to know exactly which
@@ -232,29 +294,8 @@ async function assertPrEvidence(pr) {
   const articlePaths = [];
   for (const file of files) {
     if (file.status === 'removed' || !applicable(file.filename)) continue;
-    const basePaths = [file.filename];
-    if (file.status === 'renamed' && file.previous_filename) basePaths.push(file.previous_filename);
-    for (const articlePath of basePaths) {
-      const [atFork, atBase] = await Promise.all([
-        gh.getFile(articlePath, mergeBaseSha),
-        gh.getFile(articlePath, baseSha),
-      ]);
-      const absentAtBoth = atFork === null && atBase === null;
-      const sameBlob = typeof atFork?.sha === 'string' && atFork.sha
-        && typeof atBase?.sha === 'string' && atFork.sha === atBase.sha;
-      if (!absentAtBoth && !sameBlob) throw reviewError(null);
-    }
-    const document = await gh.getFile(file.filename, headSha);
-    const evidence = await gh.getFile(contract.evidencePath(file.filename), headSha);
-    let manifest;
-    try { manifest = JSON.parse(evidence?.content); } catch { throw reviewError(null); }
-    // Domain from the article's own bytes at head — never assumed — so a
-    // spoke-targeted article is verified against its own spoke, not the hub.
-    const domain = document ? domainContextFromDocument(document.content)?.hostname : null;
-    if (!document || !domain) throw reviewError(null);
-    const result = contract.verifyManifest({ document: document.content, path: file.filename,
-      domain, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
-    if (!result.pass) throw reviewError(null);
+    await assertNoBaseDrift(gh, file, { mergeBaseSha, baseSha });
+    await verifyArticleEvidence(gh, contract, file, headSha);
     articlePaths.push(file.filename);
   }
   return { baseSha, baseRef, articlePaths };
@@ -267,6 +308,40 @@ async function assertPrEvidence(pr) {
 // every renamed path and the merge base; requiring the publisher pin as the
 // merge base proves strict ancestry, while requiring every listed path to
 // exist at head rejects removals and renames.
+// Ancestry/delta proof: the descendant's entire diff from the pinned commit
+// must be strict ancestry plus a non-empty, duplicate-free file list. GitHub
+// caps a compare response at 300 files; the boundary itself (exactly 300) is
+// rejected too since it gives no proof the list was complete.
+async function evidenceOnlyDelta(gh, { pinned, head }) {
+  if (typeof gh.compareFiles !== 'function') return null;
+  const compared = await gh.compareFiles(head, pinned);
+  const changed = compared?.files;
+  if (String(compared?.mergeBaseSha || '').toLowerCase() !== pinned
+      || !Array.isArray(changed) || changed.length === 0 || changed.length >= 300
+      || new Set(changed).size !== changed.length) return null;
+  return changed;
+}
+
+// Per-sidecar validation: a canonically-named path whose manifest's own
+// declared article, at head, verifies under the domain the article's own
+// bytes declare.
+async function verifySidecarAtHead(gh, contract, evidencePath, head) {
+  if (!/^content-ops\/editorial-evidence\/[0-9a-f]{64}\.json$/.test(String(evidencePath))) return false;
+  const evidence = await gh.getFile(evidencePath, head);
+  let manifest;
+  try { manifest = JSON.parse(evidence?.content); } catch { return false; }
+  const articlePath = manifest?.path;
+  if (!applicable(articlePath) || contract.evidencePath(articlePath) !== evidencePath) return false;
+  const article = await gh.getFile(articlePath, head);
+  if (typeof article?.content !== 'string') return false;
+  // Domain from the article's own bytes at head, same as assertPrEvidence.
+  const domain = domainContextFromDocument(article.content)?.hostname;
+  if (!domain) return false;
+  const verified = contract.verifyManifest({ document: article.content, path: articlePath,
+    domain, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
+  return verified.pass;
+}
+
 async function verifyEvidenceOnlyAdvance({ pinnedSha, headSha }, deps = {}) {
   if (!enabled()) return false;
   const pinned = String(pinnedSha || '').toLowerCase();
@@ -274,31 +349,12 @@ async function verifyEvidenceOnlyAdvance({ pinnedSha, headSha }, deps = {}) {
   if (!/^[0-9a-f]{40}$/.test(pinned) || !/^[0-9a-f]{40}$/.test(head) || pinned === head) return false;
 
   const gh = deps.gh || require('../content-astro/github-client');
-  if (typeof gh.compareFiles !== 'function') return false;
-  const compared = await gh.compareFiles(head, pinned);
-  const changed = compared?.files;
-  // GitHub caps a compare response at 300 files. Reject the boundary too:
-  // exactly 300 gives no proof that the list was complete.
-  if (String(compared?.mergeBaseSha || '').toLowerCase() !== pinned
-      || !Array.isArray(changed) || changed.length === 0 || changed.length >= 300
-      || new Set(changed).size !== changed.length) return false;
+  const changed = await evidenceOnlyDelta(gh, { pinned, head });
+  if (!changed) return false;
 
   const contract = require('../../../packages/editorial-evidence/index.cjs');
   for (const evidencePath of changed) {
-    if (!/^content-ops\/editorial-evidence\/[0-9a-f]{64}\.json$/.test(String(evidencePath))) return false;
-    const evidence = await gh.getFile(evidencePath, head);
-    let manifest;
-    try { manifest = JSON.parse(evidence?.content); } catch { return false; }
-    const articlePath = manifest?.path;
-    if (!applicable(articlePath) || contract.evidencePath(articlePath) !== evidencePath) return false;
-    const article = await gh.getFile(articlePath, head);
-    if (typeof article?.content !== 'string') return false;
-    // Domain from the article's own bytes at head, same as assertPrEvidence.
-    const domain = domainContextFromDocument(article.content)?.hostname;
-    if (!domain) return false;
-    const verified = contract.verifyManifest({ document: article.content, path: articlePath,
-      domain, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
-    if (!verified.pass) return false;
+    if (!await verifySidecarAtHead(gh, contract, evidencePath, head)) return false;
   }
   return true;
 }

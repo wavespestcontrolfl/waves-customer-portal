@@ -942,18 +942,22 @@ async function cleanupStaleAstroPr(post) {
   }
 }
 
-// Pay the close a merge-time topic block left owing (astro_retire_pr_number):
-// verify the PR's state on GitHub, close + delete its branch while it is
-// still open, and clear the debt ONLY on a verified terminal state — a
-// swallowed close failure therefore cannot leave the rejected PR
+// Pay a close the row owes GitHub for a PR it must not leave open
+// (astro_retire_pr_number): verify the PR's state on GitHub, close + delete
+// its branch while it is still open, and clear the debt ONLY on a verified
+// terminal state — a swallowed close failure therefore cannot leave the PR
 // human-mergeable, because pages-poll calls this again every tick
-// (reconcileTopicBlockedPostPrs). Bound to the PR NUMBER, not the row's
-// current markers: a republish that opened a fresh PR meanwhile is never the
-// one closed here, and only that PR's own head branch is deleted. Found
-// merged (a human merged it between the park and the close) the violation is
-// live: the row follows the merge — the same transition mergeAstro applies to
-// an already-merged PR — while this PR still is the row's PR. Best-effort;
-// never throws.
+// (reconcileTopicBlockedPostPrs). Two independent sources stamp this debt:
+// a merge-time topic-targeting block (the PR is rejected outright), and
+// mergeAstro's headAdvanced case (the PR WAS merged — at its verified head —
+// but a push during the merge left it open with an extra, unreviewed
+// commit; see persistHeadAdvancedRetireDebt). Bound to the PR NUMBER, not
+// the row's current markers: a republish that opened a fresh PR meanwhile is
+// never the one closed here, and only that PR's own head branch is deleted.
+// Found merged (a human merged it between the park and the close) the
+// violation is live: the row follows the merge — the same transition
+// mergeAstro applies to an already-merged PR — while this PR still is the
+// row's PR. Best-effort; never throws.
 async function retireTopicBlockedPostPr(post) {
   const prNumber = post.astro_retire_pr_number;
   if (!prNumber) return { retired: false, reason: 'nothing_owed' };
@@ -3953,6 +3957,27 @@ function articleVerifyPaths(editorialBaseProof) {
   return articlePaths.flatMap((p) => [p, contract.evidencePath(p)]);
 }
 
+// mergePrAtomic already published the verified head; this only persists the
+// debt for the leftover PR its own inline close attempt failed to retire
+// (settleAdvancedHead's retired:false). Best-effort and independent of the
+// merge's own success — a write failure here is a durable-bookkeeping miss,
+// never a reason to fail a merge that already happened. An older debt is
+// never overwritten (mirrors the topic-block park below): a row can only
+// ever owe ONE close through this column, and republishAstro already
+// refuses a new PR while one is outstanding, so this is belt-and-braces.
+async function persistHeadAdvancedRetireDebt(postId, post) {
+  try {
+    const updated = await db('blog_posts')
+      .where({ id: postId, astro_retire_pr_number: null })
+      .update({ astro_retire_pr_number: post.astro_pr_number, updated_at: new Date() });
+    if (!updated) {
+      logger.warn(`[astro-publisher] post ${postId}: PR #${post.astro_pr_number} needs retirement after a head-advanced merge, but an older debt is already outstanding — not overwritten (reconciled independently)`);
+    }
+  } catch (err) {
+    logger.warn(`[astro-publisher] could not persist head-advanced retirement debt for post ${postId} PR #${post.astro_pr_number}: ${err.message} (the PR stays open and unretired until an operator or a future reconcile closes it)`);
+  }
+}
+
 // `expectBaseSha`: the default-branch tip a caller's body-image check
 // validated unchanged assets against (pages-poll) — re-read inside the
 // topic-merge lock immediately before the merge call, since the gates
@@ -4046,6 +4071,15 @@ async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null }
 
     await applyMergeEffect(postId, post, new Date(), isUnpublish, result?.sha);
     if (!isUnpublish) queueInternalLinkPlanning(post);
+    // mergePrAtomic's settleAdvancedHead already tried to close the PR
+    // inline when a push landed on it during the merge; if that close
+    // itself failed (retired:false), persist the durable retirement debt so
+    // reconcileTopicBlockedPostPrs retries it every pages-poll tick — else
+    // the leftover PR (an unreviewed extra commit) stays open and
+    // human-mergeable indefinitely.
+    if (!isUnpublish && result?.headAdvanced && result?.retired === false) {
+      await persistHeadAdvancedRetireDebt(postId, post);
+    }
 
     logger.info(`[astro-publisher] merged PR #${post.astro_pr_number} for post ${postId}${isUnpublish ? ' (unpublish)' : ''}`);
     return { merged: true, pr_number: post.astro_pr_number, sha: result?.sha, unpublished: isUnpublish, live_url: isUnpublish ? null : liveUrlForPost(post) };

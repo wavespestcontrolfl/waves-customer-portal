@@ -1333,6 +1333,18 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     expect(result).toEqual({ ok: false, reason: 'factcheck did not complete' });
   });
 
+  test('the editorial evidence gate requires a completed fact check without the caller flag', async () => {
+    const prior = process.env.GATE_EDITORIAL_EVIDENCE;
+    process.env.GATE_EDITORIAL_EVIDENCE = 'true';
+    try {
+      const result = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true }, gateDeps);
+      expect(result).toEqual({ ok: false, reason: 'factcheck did not complete' });
+    } finally {
+      if (prior === undefined) delete process.env.GATE_EDITORIAL_EVIDENCE;
+      else process.env.GATE_EDITORIAL_EVIDENCE = prior;
+    }
+  });
+
   test('validateFixedBlogFile: termite post with a pre-existing FAQ blocks without the flag, passes with it', async () => {
     const strict = await rem.validateFixedBlogFile(FAQ_MD, {}, gateDeps);
     expect(strict.ok).toBe(false);

@@ -755,7 +755,11 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
     keyword: fc.keyword || data.primary_keyword || '',
     tag: fc.tag || data.tag || data.category || '',
   });
-  if (opts.requireFactCheck && factResult?.checked !== true) return { ok: false, reason: 'factcheck did not complete' };
+  // Signed editorial evidence promises a completed fact check, so every
+  // remediation path requires one while that gate is on — not only callers
+  // that pass requireFactCheck.
+  const requireFactCheck = opts.requireFactCheck || require('./editorial-evidence').enabled();
+  if (requireFactCheck && factResult?.checked !== true) return { ok: false, reason: 'factcheck did not complete' };
   if (factResult && !factResult.pass) {
     const p0 = (factResult.findings || []).filter((f) => f.severity === 'P0');
     if (p0.length) return { ok: false, reason: `factcheck ${p0.map((f) => f.message).slice(0, 2).join('; ')}` };
