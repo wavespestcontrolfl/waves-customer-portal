@@ -10058,8 +10058,13 @@ const CallRecordingProcessor = {
       // St Apt 2" with no line 2): the resolver enforces a unit only when
       // the card records one (codex r19 P1).
       const { splitStreetLineUnit: splitAuthorityUnit } = require('../utils/address-normalizer');
+      // The caller's AUTHORITATIVE street is parsed first: a decisive AV
+      // verdict's normalized line carries number + route only, so a unit the
+      // caller gave inside street_line_1 would otherwise never be seen and
+      // the card would omit the door (codex r28 P1).
       const statedUnit = statedUnitExplicit
-        || String(splitAuthorityUnit(String(avNormalized.street_line_1 || corroboratingStreet || '')).unit || '').trim()
+        || String(splitAuthorityUnit(String(corroboratingStreet || '')).unit || '').trim()
+        || String(splitAuthorityUnit(String(avNormalized.street_line_1 || '')).unit || '').trim()
         || null;
       let knownIndependentProperty = false;
       if (houseConflict && process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
@@ -10357,8 +10362,14 @@ const CallRecordingProcessor = {
           // (codex r14 + r15 P1). A card with no stated street (backlog)
           // is taken to cover the call.
           const standingPayload = typeof standing.payload === 'string' ? (() => { try { return JSON.parse(standing.payload); } catch { return null; } })() : standing.payload;
+          // A pass with NO current street evidence (AV unavailable, neither
+          // extraction carries an address) keeps the standing hold — only a
+          // nonempty, positively different street releases it (codex r28
+          // P1).
+          const currentStreet = String(corroboratingStreet || extracted?.address_line1 || '').trim();
           standingConflictCoversCall = !standingPayload?.stated_street
-            || sameHouseNumberStreet(standingPayload.stated_street, corroboratingStreet || extracted?.address_line1);
+            || !currentStreet
+            || sameHouseNumberStreet(standingPayload.stated_street, currentStreet);
           if (standingConflictCoversCall && disputePositivelyResolved) {
             // The card stands for its confirmed scheduling ask only; this
             // pass established the address is not in dispute, so nothing
@@ -14508,8 +14519,15 @@ const CallRecordingProcessor = {
                               severity: 'advisory',
                               extraPayload: { skipped_reason: 'house_number_disputed', follow_up_plan: followUpPlanPayload },
                             }))
+                            // A standing (open or claimed) follow-up card from a
+                            // prior reprocess takes the CURRENT promised plan,
+                            // as the main follow-up path does (codex r28 P1).
                             .onConflict(sp.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                            .ignore();
+                            .merge({
+                              payload: sp.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                              summary: sp.raw('EXCLUDED.summary'),
+                              updated_at: new Date(),
+                            });
                         }
                       });
                     } catch (planErr) {

@@ -937,14 +937,18 @@ const filled = (v) => String(v || '').trim() !== '';
 // and suffix spelling aside) and, where both sides carry one, the same ZIP.
 // Leading digits alone would let '120 Unrelated Ave' close a card about
 // '120 Example St' (pre-push audit P1).
+// The card is settled only for the customer it was FILED against: after
+// a relink the newly linked customer's columns say nothing about the
+// original dispute — the human path refuses until a reprocess refreshes
+// the card, and the sweep must not settle it either (codex r27 + r28 P1).
+function disputeBoundToCallCustomer(item) {
+  const payload = parseMaybeJson(item.payload);
+  if (!payload?.dispute_customer_id || item.call_customer_id === undefined) return true;
+  return String(payload.dispute_customer_id) === String(item.call_customer_id || '');
+}
 function recordCarriesStatedStreet(item) {
   const payload = parseMaybeJson(item.payload);
-  // The card is settled only for the customer it was FILED against: after
-  // a relink the newly linked customer's columns say nothing about the
-  // original dispute — the human path refuses until a reprocess refreshes
-  // the card, and the sweep must not settle it either (codex r27 P1).
-  if (payload?.dispute_customer_id && item.call_customer_id !== undefined
-    && String(payload.dispute_customer_id) !== String(item.call_customer_id || '')) return false;
+  if (!disputeBoundToCallCustomer(item)) return false;
   // The detector's own street key, so N / North and St / Street resolve
   // exactly as they were detected (codex #4666 P2).
   // …including the suffix-less equivalence the detector applies ("1250
@@ -1031,6 +1035,10 @@ const CLASSIFY_RULES = [
   { rule: 'house_number_adopted', action: 'resolve',
     when: (item, ev) => item.reason_code === 'on_file_house_number_conflict'
       && !item.customer_deleted_at
+      // Settled only for the customer the card was FILED against, on BOTH
+      // branches — the durable cleared marker must not bypass the identity
+      // check after a relink (codex r28 P1).
+      && disputeBoundToCallCustomer(item)
       // …or the processor cleared the disagreement durably (the record's
       // own number validated on a later pass) and the card stands only for
       // its scheduling ask (codex r23 P1).
