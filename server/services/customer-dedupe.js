@@ -1282,31 +1282,24 @@ function seriesEffectiveAddress(match, ownerCustomer, propertiesById) {
   };
 }
 
-// The full property identity key for a resolved address (see
-// seriesEffectiveAddress) — never street alone: line2/unit, city and ZIP all
-// ride along, so two units of one building, or the same street name in two
-// different cities, do not collapse onto one key.
-function seriesAddressKey(address) {
-  if (!address) return null;
-  const streetKey = normalizeStreetKey(address.address_line1);
-  if (!streetKey) return null;
-  const unit = streetKey.unit || unitFromLine2(address.address_line2) || '';
-  const city = String(address.city || '').trim().toLowerCase();
-  const zip = String(address.zip || '').slice(0, 5);
-  return `${streetKey.key}|${unit}|${city}|${zip}`;
-}
-
 // Do two findActiveRecurringSeries matches (one per side) serve the SAME
-// property? Always by resolved address key (see seriesEffectiveAddress) —
-// there is no separate property_id fast path, because a bare id compare
+// property? Reuses addressCompat (the SAME street/unit/ZIP/city compatibility
+// rule the account-level pre-filter above and the auto-merge address gate
+// already apply) over each side's resolved address (see
+// seriesEffectiveAddress) — NOT a composite string key: an exact-key compare
+// would read a missing optional field (no ZIP stamped on one side, say) as a
+// mismatch, when addressCompat's own rule is to compare an optional
+// component (unit, ZIP, city) ONLY when BOTH sides provide it, and still
+// reject a genuine mismatch (different ZIPs, different units) when they do.
+// There is no separate property_id fast path, because a bare id compare
 // cannot tell "two different customers' own rows for the same address"
 // (should match) apart from "two different addresses" (should not);
-// resolving property_id to its row's address folds both correctly into one
-// comparison.
+// resolving property_id to its row's address (seriesEffectiveAddress) folds
+// both correctly into the one comparison.
 function seriesSameProperty(matchA, ownerA, matchB, ownerB, propertiesById) {
-  const keyA = seriesAddressKey(seriesEffectiveAddress(matchA, ownerA, propertiesById));
-  const keyB = seriesAddressKey(seriesEffectiveAddress(matchB, ownerB, propertiesById));
-  return !!keyA && keyA === keyB;
+  const addressA = seriesEffectiveAddress(matchA, ownerA, propertiesById);
+  const addressB = seriesEffectiveAddress(matchB, ownerB, propertiesById);
+  return ADDRESS_COMPATIBLE.has(addressCompat(addressA, addressB).status);
 }
 
 // A genuinely ACTIVE (not lapsed) recurring series of the same identity AT

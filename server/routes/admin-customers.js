@@ -4528,7 +4528,16 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     // twin of its OWN email).
     const { relinkSubscribersFromArchivedCustomer } = require('../services/newsletter-subscribers');
     const relink = await db.transaction(async (trx) => {
-      await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
+      // ADMIN-BUG-R14 (round 2): archiving used to leave active/autopay_
+      // enabled/next_charge_date untouched — a monthly member with no
+      // scheduled visit and no prepay term (so neither guard above fires)
+      // still passed through with live billing, and restore (which only
+      // clears deleted_at) would put the row straight back into
+      // processMonthlyBilling's candidate set the moment anyone restored
+      // it. Wind billing down in the SAME write the churn path already
+      // uses, unconditionally — an archived customer should never read as
+      // billing-live, restored or not.
+      await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date(), ...LifecycleGuard.billingWindDownStamps() });
       const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
       await auditCustomerMutation(req, 'customer.archive', req.params.id, {
         previousDeletedAt: customer.deleted_at || null,

@@ -153,4 +153,34 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
     expect(conflict).not.toBeNull();
     expect(conflict.code).toBe('duplicate_series_conflict');
   });
+
+  test('same street + unit, one side missing ZIP → still conflicts (round-2 GitHub Codex P1)', async () => {
+    // addressCompat's own rule: an optional locality component (ZIP, city,
+    // unit) only disqualifies a match when BOTH sides provide it and they
+    // disagree — a missing ZIP on one side must not read as a mismatch.
+    const winnerId = await makeCustomer({ address_line1: '500 Ocean Dr', address_line2: 'Apt 101', city: 'Sarasota', zip: '34231' });
+    const loserId = await makeCustomer({ address_line1: '500 Ocean Dr', address_line2: 'Apt 101', city: 'Sarasota', zip: null });
+    await seedParent(winnerId, {});
+    await seedParent(loserId, {});
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).not.toBeNull();
+    expect(conflict.code).toBe('duplicate_series_conflict');
+  });
+
+  test('same street, DIFFERENT ZIP on both sides → no conflict (round-2 GitHub Codex P1)', async () => {
+    // Both sides provide a ZIP and they genuinely disagree — a real mismatch
+    // addressCompat must still reject, not a missing-field false negative.
+    const winnerId = await makeCustomer({ address_line1: '500 Ocean Dr', city: 'Sarasota', zip: '34231' });
+    const loserId = await makeCustomer({ address_line1: '500 Ocean Dr', city: 'Sarasota', zip: '34285' });
+    await seedParent(winnerId, {});
+    await seedParent(loserId, {});
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).toBeNull();
+  });
 });
