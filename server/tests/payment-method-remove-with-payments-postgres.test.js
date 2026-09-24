@@ -1,0 +1,102 @@
+/**
+ * Bug fixed by migration 20260924000021 (confirmed in prod 2026-09-24):
+ * `payments_payment_method_id_foreign` carried no ON DELETE action, so
+ * StripeService.removeCard's `payment_methods` delete threw a foreign-key
+ * violation for any card that had ever taken a payment — AFTER the Stripe
+ * detach already ran, leaving a DB row pointing at a detached Stripe PM.
+ * 62 distinct payment methods in prod had payments rows and were stuck.
+ *
+ * This proves against a real Postgres schema that a payment method with a
+ * payments row can now be removed end-to-end through StripeService.removeCard,
+ * that the payment row survives with its card_brand/card_last_four snapshot
+ * intact, and that only its payment_method_id pointer goes NULL — mirroring
+ * the other four FKs onto payment_methods, which were already ON DELETE
+ * SET NULL. Skips cleanly without DATABASE_URL, like the other Postgres
+ * suites (see .github/workflows/tests.yml).
+ */
+const connection = process.env.DATABASE_URL;
+const postgres = connection ? describe : describe.skip;
+jest.setTimeout(30000);
+
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+postgres('payment method removal with an existing payments row (real Postgres)', () => {
+  let db;
+  let StripeService;
+
+  beforeAll(() => {
+    db = require('../models/db');
+    StripeService = require('../services/stripe');
+  });
+  afterAll(async () => { await db.destroy(); });
+
+  test('payments_payment_method_id_foreign is ON DELETE SET NULL', async () => {
+    const { rows } = await db.raw(`
+      SELECT pg_get_constraintdef(oid) AS def
+      FROM pg_constraint
+      WHERE conname = 'payments_payment_method_id_foreign'
+    `);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].def).toMatch(/ON DELETE SET NULL/);
+  });
+
+  test('removeCard succeeds for a card with a payments row; the payment keeps its snapshot with payment_method_id nulled', async () => {
+    const ROLLBACK = new Error('rollback-sentinel');
+    let result;
+    await db.transaction(async (trx) => {
+      const [customer] = await trx('customers')
+        .insert({ first_name: 'FkProbe', last_name: 'Card', phone: '+15550001234' })
+        .returning('id');
+      const customerId = customer.id ?? customer;
+
+      // No stripe_payment_method_id → StripeService.removeCard takes the
+      // "Fallback — just remove from DB" branch (no live Stripe call needed
+      // to prove the FK behavior).
+      const [method] = await trx('payment_methods')
+        .insert({
+          customer_id: customerId, processor: 'stripe', method_type: 'card',
+          card_brand: 'VISA', last_four: '4242',
+        })
+        .returning('id');
+      const methodId = method.id ?? method;
+
+      const [payment] = await trx('payments')
+        .insert({
+          customer_id: customerId, payment_method_id: methodId,
+          payment_date: '2026-09-24', amount: '42.50', status: 'paid',
+          card_brand: 'VISA', card_last_four: '4242',
+        })
+        .returning('id');
+      const paymentId = payment.id ?? payment;
+
+      // Exercises the real production removal path — this used to throw
+      // "violates foreign key constraint payments_payment_method_id_foreign".
+      await expect(StripeService.removeCard(customerId, methodId, { cascadeAutopay: false, db: trx }))
+        .resolves.toEqual({ success: true });
+
+      const methodRow = await trx('payment_methods').where({ id: methodId }).first();
+      const paymentRow = await trx('payments').where({ id: paymentId }).first();
+
+      result = {
+        methodGone: !methodRow,
+        payment: paymentRow && {
+          payment_method_id: paymentRow.payment_method_id,
+          amount: paymentRow.amount,
+          status: paymentRow.status,
+          card_brand: paymentRow.card_brand,
+          card_last_four: paymentRow.card_last_four,
+        },
+      };
+      throw ROLLBACK;
+    }).catch((err) => { if (err !== ROLLBACK) throw err; });
+
+    expect(result.methodGone).toBe(true);
+    expect(result.payment).toEqual({
+      payment_method_id: null,
+      amount: '42.50',
+      status: 'paid',
+      card_brand: 'VISA',
+      card_last_four: '4242',
+    });
+  });
+});
