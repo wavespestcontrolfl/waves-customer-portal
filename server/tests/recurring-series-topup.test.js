@@ -698,29 +698,27 @@ describe('topUpRecurringSeries — the writing wrapper', () => {
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
   });
 
-  test('always opens its OWN transaction, even when handed a conn that claims to already be one (Codex GitHub r4 P2)', async () => {
+  test('refuses a conn that is already an open transaction, rather than nesting a savepoint that would self-deadlock (Codex GitHub r4 P1)', async () => {
     // A caller-supplied open transaction used to be run on directly
-    // (conn.isTransaction) and could self-deadlock: the reminder registered
-    // below inserts through a FRESH connection with a foreign key to the
-    // just-inserted scheduled_services row, which blocks until the
-    // referencing row's own transaction commits — but that transaction is
-    // the caller's, and the caller would be synchronously awaiting this
-    // very call. Fixed by never special-casing conn.isTransaction: this
-    // always calls conn.transaction(...) to open its own, so it always
-    // commits before the loop below runs, regardless of what `conn` claims
-    // to be.
+    // (conn.isTransaction), and a first fix attempt tried unconditionally
+    // calling conn.transaction(...) instead — Codex's local pre-push audit
+    // caught that this does NOT actually solve it: knex's .transaction() on
+    // a conn that is ALREADY a transaction opens a SAVEPOINT, not an
+    // independently-committing one, and releasing a savepoint doesn't make
+    // its writes visible outside the OUTER transaction (which this
+    // function doesn't own and can't commit) — registerSpawnedVisitReminder
+    // below would still block on that outer transaction's own commit,
+    // which the caller is synchronously waiting on THIS call to return
+    // before doing. There is no safe way to run this function inside a
+    // caller's own open transaction, so it refuses outright instead of
+    // pretending to fix it.
     const { conn, inserted } = topupScenario({
       parentOverrides: { recurring_pattern: 'weekly' },
       seriesDates: [daysOut(0)],
     });
-    const transactionCalls = [];
-    const originalTransaction = conn.transaction;
     conn.isTransaction = true; // what a caller's own open transaction would report
-    conn.transaction = (...args) => { transactionCalls.push(args); return originalTransaction(...args); };
-    const result = await topUpRecurringSeries(conn, 10, { horizonDays: 14 });
-    expect(transactionCalls).toHaveLength(1);
-    expect(inserted.length).toBeGreaterThan(0);
-    expect(result.spawnedVisits).toHaveLength(inserted.length);
+    await expect(topUpRecurringSeries(conn, 10, { horizonDays: 14 })).rejects.toThrow(/already-open transaction/);
+    expect(inserted).toHaveLength(0); // refused before touching anything
   });
 
   test('defers to the next tick when a merge-undo repoints the parent to a new customer TWICE under the comms fence', async () => {

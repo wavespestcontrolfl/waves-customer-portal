@@ -15426,8 +15426,21 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
 // before it can commit, so neither side could ever finish. Nothing in
 // this codebase ever exercised that path (verified: the sweep and the ops
 // script both call this with the plain `db` handle, never an open
-// transaction), so it's removed rather than fixed — reminders are
-// registered only after this function's own commit, unconditionally.
+// transaction). REJECTED outright now, not "fixed" by opening a nested
+// transaction on the caller's conn — Codex's local pre-push audit caught
+// that a first attempt at this (unconditionally calling conn.transaction())
+// does NOT actually solve it: calling .transaction() on a conn that is
+// ITSELF already a transaction opens a knex/Postgres SAVEPOINT, not an
+// independent, separately-committing transaction, and releasing a
+// savepoint does not make its writes visible outside the OUTER
+// transaction — which this function does not own and cannot commit. The
+// self-deadlock is identical either way. There is no way to make this
+// safe short of not registering reminders until the OUTER transaction
+// commits, which this function has no visibility into, so it refuses
+// instead: see the isTransaction check below, and use
+// topUpRecurringSeriesLocked/topUpRecurringSeriesWithLocks directly
+// inside your own transaction, registering reminders yourself after your
+// own commit, if that's what you need.
 // Exported for the nightly cron (services/recurring-series-topup.js) and
 // the one-shot ops script's --apply mode. For a dry run / the gate-off
 // shadow pass, call topUpRecurringSeriesLocked directly inside a
@@ -15464,6 +15477,9 @@ async function topUpRecurringSeriesWithLocks(trx, parentId, opts = {}) {
 }
 
 async function topUpRecurringSeries(conn, parentId, opts = {}) {
+  if (conn.isTransaction) {
+    throw new Error('topUpRecurringSeries must not be called with an already-open transaction — it registers a reminder for each spawned visit through a FRESH connection right after commit, and a nested savepoint on your transaction would not make its inserts visible outside it. Call with the plain db handle, or drive topUpRecurringSeriesWithLocks/topUpRecurringSeriesLocked yourself inside your own transaction and register reminders after your own commit.');
+  }
   const result = await conn.transaction((trx) => topUpRecurringSeriesWithLocks(trx, parentId, opts));
   for (const spawnedVisit of result.spawnedVisits) {
     // No confirmation SMS (sendConfirmation:false, matching every other
