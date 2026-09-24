@@ -43,7 +43,7 @@ exports.up = async function up(knex) {
     t.timestamp('recorded_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
     t.timestamp('won_at', { useTz: true }).nullable();
     t.string('won_via', 32).nullable()
-      .checkIn(['closeout_booking', 'office_booking', 'estimate_accept', 'no_show']);
+      .checkIn(['closeout_booking', 'office_booking', 'estimate_accept']);
     t.timestamps(true, true);
 
     t.index(['lead_id'], 'consultation_outcomes_lead_id_idx');
