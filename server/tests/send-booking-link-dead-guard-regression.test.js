@@ -85,13 +85,16 @@ describe('r1-estimates-2 send-booking-link duplicate-appointment guard', () => {
           }),
           orWhere: jest.fn(function (w) { this._conds.push(w); scheduledServicesWheres.push(w); return this; }),
           whereNotIn: jest.fn().mockReturnThis(),
-          // The reservation-liveness predicate (andWhere((q) => q.whereNull(...)
-          // .orWhereRaw(...))) — the fixture visit has no reservation_expires_at
-          // (undefined, i.e. not an expired hold), so this is a no-op passthrough
-          // rather than modeling real SQL evaluation; expiry itself is covered
+          // The reservation-liveness predicate (andWhere((q) => q.whereNotNull
+          // ('customer_id').orWhereNull(...).orWhereRaw(...))) — the fixture
+          // visit is a committed row (customer_id set), so this is a no-op
+          // passthrough rather than modeling real SQL evaluation; the
+          // unclaimed-hold / committed-with-stale-expiry cases are covered
           // by send-booking-link-dead-guard-repro.test.js.
           andWhere: jest.fn(function (w) { if (typeof w === 'function') w.call(this, this); return this; }),
           whereNull: jest.fn().mockReturnThis(),
+          whereNotNull: jest.fn().mockReturnThis(),
+          orWhereNull: jest.fn().mockReturnThis(),
           orWhereRaw: jest.fn().mockReturnThis(),
           orderBy: jest.fn().mockReturnThis(),
           first: jest.fn(async function () {

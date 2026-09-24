@@ -81,8 +81,12 @@ async function postSend() {
 
 function installDb({ suppressionRows = [], prefs = null } = {}) {
   const tablesTouched = [];
+  const outlineEvents = [];
   db.mockImplementation((table) => {
     tablesTouched.push(table);
+    if (table === 'service_outline_events') {
+      return chain({ insert: jest.fn(async (row) => { outlineEvents.push(row); return 1; }) });
+    }
     if (table === 'service_outline_packets') {
       const packetChain = chain({
         first: jest.fn().mockResolvedValue({
@@ -108,14 +112,14 @@ function installDb({ suppressionRows = [], prefs = null } = {}) {
     if (table === 'notification_prefs') return chain({ first: jest.fn().mockResolvedValue(prefs) });
     return chain();
   });
-  return tablesTouched;
+  return { tablesTouched, outlineEvents };
 }
 
 describe('lawn service-outline send honors suppressions and the portal opt-out', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('a do_not_email-suppressed address is blocked, not sent, and the packet is not stamped sent', async () => {
-    const tablesTouched = installDb({
+    const { tablesTouched, outlineEvents } = installDb({
       suppressionRows: [{ id: 's1', email: SUPPRESSED, suppression_type: 'do_not_email', status: 'active', group_key: null }],
     });
     const suppressionSpy = jest.spyOn(EmailTemplateLibrary, 'activeSuppressionFor');
@@ -128,17 +132,28 @@ describe('lawn service-outline send honors suppressions and the portal opt-out',
     expect(tablesTouched).toContain('email_suppressions');
     expect(body.outcomes.email).toMatchObject({ blocked: true });
     expect(body.packet.status).not.toBe('sent');
+    // Codex round-2 P2: the composer modal reads outcomes.email.error for
+    // every blocked shape, so the reason must ride on `error` too, not only
+    // `reason`, or the operator sees "Email failed: unknown".
+    expect(body.outcomes.email.error).toBe(body.outcomes.email.reason);
+    expect(body.outcomes.email.error).toMatch(/^Suppressed:/);
+    // Codex round-2 P2: packet history must say the email was BLOCKED, not
+    // "sent" — logEvent('sent_email') previously fired unconditionally.
+    expect(outlineEvents.some((e) => e.event_type === 'sent_email')).toBe(false);
+    expect(outlineEvents.some((e) => e.event_type === 'email_blocked')).toBe(true);
   });
 
   test('a portal-opted-out customer (email_enabled=false) is blocked, not sent', async () => {
-    const tablesTouched = installDb({ prefs: { customer_id: 'cust-1', email_enabled: false } });
+    const { tablesTouched, outlineEvents } = installDb({ prefs: { customer_id: 'cust-1', email_enabled: false } });
 
     const { status, body } = await postSend();
 
     expect(status).toBe(200);
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(tablesTouched).toContain('notification_prefs');
-    expect(body.outcomes.email).toMatchObject({ blocked: true, reason: 'email_opted_out' });
+    expect(body.outcomes.email).toMatchObject({ blocked: true, reason: 'email_opted_out', error: 'email_opted_out' });
     expect(body.packet.status).not.toBe('sent');
+    expect(outlineEvents.some((e) => e.event_type === 'sent_email')).toBe(false);
+    expect(outlineEvents.some((e) => e.event_type === 'email_blocked')).toBe(true);
   });
 });

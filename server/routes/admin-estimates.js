@@ -4969,13 +4969,20 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     // TERMINAL_STATUSES (cancelled/completed/no_show/skipped/rescheduled),
     // the same terminal set waveguard-existing-services.js uses, so a
     // skipped or no-show visit doesn't block a legitimate replacement
-    // booking link. A row is only truly "booked" once reservation_expires_at
-    // is cleared (or still in the future) — the same liveness predicate
-    // slot-reservation.js's own conflict checks use — because a customer who
-    // abandoned a self-booking hold stays a pending row with this
-    // source_estimate_id link until the 15-minute sweep reclaims it; without
-    // this an abandoned hold would block the very replacement link staff are
-    // trying to send.
+    // booking link. An UNCLAIMED hold (customer_id NULL) is only truly
+    // "booked" once reservation_expires_at is cleared or still in the
+    // future — because a customer who abandoned a self-booking hold stays a
+    // pending, customer-less row with this source_estimate_id link until
+    // the 15-minute sweep reclaims it, and without this an abandoned hold
+    // would block the very replacement link staff are trying to send. A
+    // COMMITTED row (customer_id set) counts regardless of its
+    // reservation_expires_at: estimate-public.js's public-contract comment
+    // and slot-reservation.js's own rescue sweep (which selects
+    // `reservation_expires_at < now AND customer_id IS NOT NULL` as
+    // "expiredCommitted") both document that a real, booked appointment can
+    // carry a stray expired timestamp the rescue hasn't cleared yet — the
+    // expiry test must never apply to it, or a live appointment reads as
+    // gone and a duplicate link goes out.
     try {
       const estData = typeof estimate.estimate_data === 'string'
         ? JSON.parse(estimate.estimate_data)
@@ -4989,7 +4996,9 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
         })
         .whereNotIn('status', TERMINAL_STATUSES)
         .andWhere((q) => {
-          q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
+          q.whereNotNull('customer_id')
+            .orWhereNull('reservation_expires_at')
+            .orWhereRaw('reservation_expires_at > NOW()');
         })
         .first();
       if (linked) {

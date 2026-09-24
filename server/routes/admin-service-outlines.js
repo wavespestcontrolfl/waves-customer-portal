@@ -560,14 +560,16 @@ router.post('/:id/send', async (req, res, next) => {
       } else if (!sendgrid.isConfigured()) {
         outcomes.email = { ok: false, error: 'SendGrid is not configured' };
       } else if (emailSuppression) {
-        outcomes.email = {
-          ok: false,
-          sent: false,
-          blocked: true,
-          reason: `Suppressed: ${emailSuppression.suppression_type}${emailSuppression.group_key ? ` (${emailSuppression.group_key})` : ''}`,
-        };
+        // Both `reason` (the structured field every other blocked-send
+        // outcome in this route/codebase uses) and `error` — the composer
+        // modal (ServiceOutlineComposerModal.jsx) reads outcomes.email.error
+        // for every OTHER blocked shape here ("No email on estimate",
+        // "SendGrid is not configured"), so without `error` too the operator
+        // saw "Email failed: unknown" instead of the actual reason.
+        const reason = `Suppressed: ${emailSuppression.suppression_type}${emailSuppression.group_key ? ` (${emailSuppression.group_key})` : ''}`;
+        outcomes.email = { ok: false, sent: false, blocked: true, reason, error: reason };
       } else if (emailOptedOut) {
-        outcomes.email = { ok: false, sent: false, blocked: true, reason: 'email_opted_out' };
+        outcomes.email = { ok: false, sent: false, blocked: true, reason: 'email_opted_out', error: 'email_opted_out' };
       } else {
         await persistGeneratedTokenBeforeDelivery();
         const title = packet.title || 'Your Waves Lawn Care Program Overview';
@@ -596,7 +598,8 @@ router.post('/:id/send', async (req, res, next) => {
       }
     }
 
-    const hasSuccess = (outcomes.sms?.sent === true) || !!outcomes.email?.messageId;
+    const emailDelivered = !!outcomes.email?.messageId;
+    const hasSuccess = (outcomes.sms?.sent === true) || emailDelivered;
     const [updated] = await db.transaction(async (trx) => {
       const packetUpdate = {
         status: hasSuccess ? 'sent' : packet.status,
@@ -609,7 +612,12 @@ router.post('/:id/send', async (req, res, next) => {
         .update(packetUpdate)
         .returning('*');
       if (sendSms) await logEvent(trx, row, 'sent_sms', req, outcomes.sms || {});
-      if (sendEmail) await logEvent(trx, row, 'sent_email', req, outcomes.email || {});
+      if (sendEmail) {
+        // 'sent_email' must mean the provider actually accepted it — logging
+        // it unconditionally (as before) told packet history "Email sent"
+        // for a suppressed/opted-out address the send never reached.
+        await logEvent(trx, row, emailDelivered ? 'sent_email' : 'email_blocked', req, outcomes.email || {});
+      }
       if (!hasSuccess) await logEvent(trx, row, 'failed', req, outcomes);
       return [row];
     });

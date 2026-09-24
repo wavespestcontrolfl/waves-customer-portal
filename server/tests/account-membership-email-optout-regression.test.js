@@ -90,3 +90,39 @@ describe('account-membership-email honors notification_prefs.email_enabled=false
     expect(result).toMatchObject({ ok: false, skipped: true, reason: 'email_opted_out' });
   });
 });
+
+// Codex round-2 P2 follow-up: a genuine opt-out and a TRANSIENT prefs lookup
+// failure must not collapse to the same {skipped:true} shape. Several
+// callers treat `skipped` as a definitive recipient state that closes the
+// run without retrying (cancellation-confirmations.js's emailBlocked check,
+// deferred-replay-registry.js's `skipped !== true` retry gate) — reporting a
+// DB blip that way would settle those callers as "nothing more to do"
+// instead of retrying, so a customer whose other channel also failed would
+// get NO confirmation at all over one brief hiccup.
+describe('account-membership-email distinguishes a transient prefs failure from a real opt-out', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('a notification_prefs lookup error fails closed (no send) but reports a non-skipped, transient failure', async () => {
+    const tablesRead = [];
+    db.mockImplementation((table) => {
+      tablesRead.push(table);
+      if (table === 'notification_prefs') {
+        return { where: () => ({ first: () => Promise.reject(new Error('connection terminated')) }) };
+      }
+      return chain({ first: customer() });
+    });
+
+    const result = await AccountMembershipEmail.sendMembershipUpdated({
+      customerId: 'cust-1',
+      before: { waveguard_tier: 'Gold', monthly_rate: '89.00', billing_mode: 'monthly_membership' },
+      after: { waveguard_tier: 'Gold', monthly_rate: '98.00', billing_mode: 'monthly_membership' },
+    });
+
+    expect(tablesRead).toContain('notification_prefs');
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    // Not sent, and NOT reported as `skipped` — the shape a genuine opt-out
+    // uses and that downstream callers treat as final.
+    expect(result).toMatchObject({ ok: false, sent: false, transient: true, reason: 'prefs_unavailable' });
+    expect(result.skipped).not.toBe(true);
+  });
+});

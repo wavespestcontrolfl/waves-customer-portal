@@ -185,8 +185,26 @@ async function sendTemplate({
     const prefs = await db('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
     emailOptedOut = prefs ? prefs.email_enabled === false : false;
   } catch (err) {
+    // A lookup FAILURE is not the same fact as a genuine opt-out, and the
+    // two must not collapse to the same {skipped:true} shape: several
+    // callers treat `skipped` as a DEFINITIVE recipient state that closes
+    // the run without retrying (cancellation-confirmations.js's emailBlocked
+    // check, deferred-replay-registry.js's `skipped !== true` retry gate). A
+    // transient DB blip reported as skipped/email_opted_out would settle
+    // those callers as "nothing more to do" instead of retrying — a
+    // customer whose SMS leg also failed would then get NO confirmation at
+    // all over one brief DB hiccup. Still fail closed (no send this attempt)
+    // but report it as a non-definitive, retryable failure.
     logger.warn(`[account-membership-email] notification_prefs lookup failed for ${recipientCustomer.id}: ${err.message}`);
-    emailOptedOut = true;
+    await logLifecycleEmailAttempt({
+      customerId: recipientCustomer.id,
+      templateKey,
+      eventType,
+      status: 'failed',
+      failureReason: 'prefs_unavailable',
+      metadata,
+    });
+    return { ok: false, sent: false, transient: true, reason: 'prefs_unavailable' };
   }
   if (emailOptedOut) {
     await logLifecycleEmailAttempt({

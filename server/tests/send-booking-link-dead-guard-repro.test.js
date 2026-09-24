@@ -106,15 +106,19 @@ const ESTIMATE = {
 // The live appointment that every real booking path produces. Mutable
 // status per test (LINKED_APPT_STATUS) so a skipped/no-show linked visit
 // can be exercised without duplicating the whole fixture. LINKED_APPT_EXPIRED
-// simulates an abandoned self-booking hold whose reservation_expires_at has
-// passed — the row is still there (the 15-minute sweep hasn't reclaimed it
-// yet) but is no longer "live".
+// simulates a stale reservation_expires_at (in the past) on the row.
+// LINKED_APPT_CUSTOMER_ID distinguishes an UNCLAIMED hold (null — the
+// customer never finished booking) from a COMMITTED appointment (set — a
+// real booking, which can still carry a stray expired timestamp per
+// estimate-public.js and slot-reservation.js's rescue sweep; the expiry
+// check must apply only to the unclaimed case).
 let LINKED_APPT_STATUS = 'confirmed';
 let LINKED_APPT_EXPIRED = false;
+let LINKED_APPT_CUSTOMER_ID = 'cust-1';
 function linkedAppt() {
   return {
     id: 'ss-1',
-    customer_id: 'cust-1',
+    customer_id: LINKED_APPT_CUSTOMER_ID,
     source_estimate_id: 'est-1',
     status: LINKED_APPT_STATUS,
     scheduled_date: TOMORROW,
@@ -128,7 +132,7 @@ const scheduledServicesQueries = [];
 
 function makeBuilder(table) {
   const b = { table, wheres: [] };
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotIn', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereIn', 'orWhereRaw', 'andWhere', 'whereNot', 'forUpdate', 'select', 'orderBy', 'limit', 'modify']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotIn', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereIn', 'orWhereRaw', 'orWhereNull', 'andWhere', 'whereNot', 'forUpdate', 'select', 'orderBy', 'limit', 'modify']) {
     b[m] = jest.fn((...args) => {
       if (typeof args[0] === 'function') args[0].call(b, b);
       b.wheres.push([m, ...args]);
@@ -153,8 +157,16 @@ function makeBuilder(table) {
       const excludedStatuses = b.wheres.find(([m, col]) => m === 'whereNotIn' && col === 'status')?.[2] || [];
       if (excludedStatuses.includes(LINKED_APPT_STATUS)) return null;
       const appt = linkedAppt();
-      const checksReservationLiveness = b.wheres.some(([m, col]) => m === 'whereNull' && col === 'reservation_expires_at');
-      if (checksReservationLiveness && appt.reservation_expires_at && new Date(appt.reservation_expires_at) <= new Date()) return null;
+      // The fixed liveness predicate: customer_id IS NOT NULL (a committed
+      // row always counts, regardless of expiry) OR reservation_expires_at
+      // IS NULL OR it's still in the future. Detected here by the presence
+      // of the whereNotNull('customer_id') the guard now issues.
+      const checksReservationLiveness = b.wheres.some(([m, col]) => m === 'whereNotNull' && col === 'customer_id');
+      if (checksReservationLiveness) {
+        const committed = appt.customer_id != null;
+        const notExpired = !appt.reservation_expires_at || new Date(appt.reservation_expires_at) > new Date();
+        if (!committed && !notExpired) return null;
+      }
       return appt;
     }
     return null;
@@ -182,6 +194,7 @@ describe('AUDIT r1-estimates-2: send-booking-link on an already-booked estimate'
     ESTIMATE_DATA_OVERRIDE = null;
     LINKED_APPT_STATUS = 'confirmed';
     LINKED_APPT_EXPIRED = false;
+    LINKED_APPT_CUSTOMER_ID = 'cust-1';
     db.mockImplementation((table) => makeBuilder(table));
   });
 
@@ -239,9 +252,10 @@ describe('AUDIT r1-estimates-2: send-booking-link on an already-booked estimate'
   // this source_estimate_id link and a reservation_expires_at in the past —
   // the 15-minute sweep hasn't reclaimed it yet. That dead hold must not
   // block staff from sending a real, working booking link.
-  test('an EXPIRED reservation hold (abandoned self-booking, pending status) does NOT block a fresh booking link', async () => {
+  test('an EXPIRED UNCLAIMED hold (abandoned self-booking, no customer_id, pending status) does NOT block a fresh booking link', async () => {
     LINKED_APPT_STATUS = 'pending';
     LINKED_APPT_EXPIRED = true;
+    LINKED_APPT_CUSTOMER_ID = null;
     const res = await withServer(async (baseUrl) => {
       const r = await fetch(`${baseUrl}/estimates/est-1/send-booking-link`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
@@ -252,9 +266,30 @@ describe('AUDIT r1-estimates-2: send-booking-link on an already-booked estimate'
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
-  test('a LIVE (not yet expired) reservation hold still blocks a fresh booking link', async () => {
+  test('a LIVE (not yet expired) UNCLAIMED hold still blocks a fresh booking link', async () => {
     LINKED_APPT_STATUS = 'pending';
     LINKED_APPT_EXPIRED = false;
+    LINKED_APPT_CUSTOMER_ID = null;
+    const res = await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/estimates/est-1/send-booking-link`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      });
+      return { status: r.status, body: await r.json() };
+    });
+    expect(res.status).toBe(409);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // Codex round-2 P2: a COMMITTED appointment (customer_id set) can carry a
+  // stray, stale reservation_expires_at that the rescue sweep
+  // (slot-reservation.js "expiredCommitted") hasn't cleared yet — per
+  // estimate-public.js's public-contract comment, this is still a REAL,
+  // booked visit, not an abandoned hold. The expiry test must not apply to
+  // it, or a live appointment reads as gone and a duplicate link goes out.
+  test('a COMMITTED appointment with a stale reservation_expires_at (rescue-sweep timing gap) still blocks a fresh booking link', async () => {
+    LINKED_APPT_STATUS = 'confirmed';
+    LINKED_APPT_EXPIRED = true;
+    LINKED_APPT_CUSTOMER_ID = 'cust-1';
     const res = await withServer(async (baseUrl) => {
       const r = await fetch(`${baseUrl}/estimates/est-1/send-booking-link`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
