@@ -294,12 +294,19 @@ const BillingCron = {
         // + description-marker match.
         const monthKey = `${year}-${String(month).padStart(2, '0')}`;
         // ADMIN-BUG-R11: run the already-collected read + chargeMonthly call
-        // under the SAME per-customer in-process lock the admin "Charge now"
-        // route holds (utils/customer-billing-lock.js) — both run in this
-        // one Node process, so a manual charge-now click landing while THIS
-        // customer's iteration is mid-charge (or vice versa) is serialized
-        // instead of both passing the guard and both charging.
-        const lockOutcome = await withCustomerBillingLock(customer.id, async () => {
+        // under the SAME per-customer lock the admin "Charge now" route and
+        // the retry sweep hold (utils/customer-billing-lock.js) so a manual
+        // charge-now click (or a deploy-overlap retry sweep instance)
+        // landing while THIS customer's iteration is mid-charge can't both
+        // pass the guard and both charge. This is the ONE collector with no
+        // natural next-day retry (isBillingDayMatch above only matches
+        // customer.billing_day, once a month) — a bare skip on lock
+        // contention would silently miss a whole billing cycle, so a
+        // held-elsewhere claim gets a few short in-tick retries (the
+        // colliding operation is a brief deploy-overlap window, seconds
+        // long) before falling back to an alert an operator can act on with
+        // a manual "Charge now".
+        const chargeMonthlyUnderLock = () => withCustomerBillingLock(customer.id, async () => {
           const existingCharge = await db('payments')
             .where({ customer_id: customer.id })
             .whereIn('status', ['paid', 'processing'])
@@ -318,17 +325,43 @@ const BillingCron = {
           const service = await require('./stripe');
           const paymentResult = await service.chargeMonthly(customer.id);
           return { paymentResult };
-        }).catch((err) => {
-          // Cross-process claim held elsewhere (a deploy overlap racing
-          // charge-now or the retry sweep for this SAME customer) — skip
-          // this tick, stay eligible for the next one. No write, no
-          // supersede: nothing conclusive happened here.
-          if (err.code === 'BILLING_CLAIM_HELD_ELSEWHERE') return { claimHeldElsewhere: true };
-          throw err;
         });
 
+        const MONTHLY_LOCK_RETRY_ATTEMPTS = 3;
+        const MONTHLY_LOCK_RETRY_DELAY_MS = 3000;
+        let lockOutcome;
+        for (let attempt = 1; attempt <= MONTHLY_LOCK_RETRY_ATTEMPTS; attempt++) {
+          try {
+            lockOutcome = await chargeMonthlyUnderLock();
+            break;
+          } catch (lockErr) {
+            if (lockErr.code !== 'BILLING_CLAIM_HELD_ELSEWHERE') throw lockErr;
+            if (attempt < MONTHLY_LOCK_RETRY_ATTEMPTS) {
+              logger.warn(`[billing-cron] Monthly charge for customer ${customer.id} deferred (attempt ${attempt}/${MONTHLY_LOCK_RETRY_ATTEMPTS}) — collection lock held elsewhere; retrying shortly`);
+              await new Promise((r) => setTimeout(r, MONTHLY_LOCK_RETRY_DELAY_MS));
+            } else {
+              lockOutcome = { claimHeldElsewhere: true };
+            }
+          }
+        }
+
         if (lockOutcome.claimHeldElsewhere) {
-          logger.warn(`[billing-cron] Monthly charge for customer ${customer.id} deferred — collection lock held elsewhere; will retry next tick`);
+          logger.error(`[billing-cron] Monthly charge for customer ${customer.id} could not confirm exclusive collection after ${MONTHLY_LOCK_RETRY_ATTEMPTS} attempts — dues NOT collected today; billing_day only recurs next month, so this needs a manual "Charge now"`);
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: customer.id,
+              alert_type: 'billing_collection_deferred',
+              severity: 'high',
+              title: 'Monthly dues NOT collected — collection lock held elsewhere',
+              description: `The daily dues cron could not confirm exclusive collection for this customer after ${MONTHLY_LOCK_RETRY_ATTEMPTS} short retries (another process held the same customer's billing lock the whole time — expected only during a deploy overlap). Today's billing_day will not recur until next month with no further automatic attempt. Use Customer 360 "Charge now" to collect ${monthKey} manually.`,
+              trigger_data: JSON.stringify({ billed_month: monthKey, source: 'billing_monthly_cron_lock_contention' }),
+            });
+          } catch (alertErr) {
+            logger.error(`[billing-cron] Deferred-collection alert creation failed for customer ${customer.id}: ${alertErr.message}`);
+          }
+          await logAutopay(customer.id, 'skipped_lock_contention', {
+            details: { source: 'autopay', billed_month: monthKey },
+          }).catch(() => {});
           skipped++;
           continue;
         }
