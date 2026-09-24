@@ -57,6 +57,13 @@ export default function TechOutSection({ techId, techName, onChanged }) {
   // 'loading' | 'off' | 'ready'
   const [phase, setPhase] = useState('loading');
   const [absence, setAbsence] = useState(null);
+  // GATE_TECH_OUT_AUTO_MOVE, read off every status GET (see fetchStatus) —
+  // shows/hides the "Auto-assign parked stops" action without a second
+  // round trip.
+  const [autoMoveEnabled, setAutoMoveEnabled] = useState(false);
+  const [autoAssigning, setAutoAssigning] = useState(false);
+  const [autoAssignError, setAutoAssignError] = useState(null);
+  const [autoAssignResult, setAutoAssignResult] = useState(null);
 
   const [reason, setReason] = useState('sick');
   const [note, setNote] = useState('');
@@ -110,6 +117,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
         return;
       }
       setAbsence(data.absence || null);
+      setAutoMoveEnabled(!!data.auto_move_enabled);
       setPhase('ready');
     } catch {
       // No error UI is specified for the status GET itself — treat a
@@ -127,6 +135,10 @@ export default function TechOutSection({ techId, techName, onChanged }) {
     fetchSeqRef.current += 1;
     setPhase('loading');
     setAbsence(null);
+    setAutoMoveEnabled(false);
+    setAutoAssigning(false);
+    setAutoAssignError(null);
+    setAutoAssignResult(null);
     setConfirming(false);
     setSubmitError(null);
     setSubmitting(false);
@@ -264,16 +276,75 @@ export default function TechOutSection({ techId, techName, onChanged }) {
     }
   }
 
+  // GATE_TECH_OUT_AUTO_MOVE (PR B): try the canonical mover on every open
+  // overflow alert for this tech-day. Same discard-guard shape as the
+  // mark-out / tech-is-back handlers above — a response landing after the
+  // dispatcher switched tech (or this drawer unmounted) is dropped.
+  async function handleAutoAssign() {
+    if (autoAssigning) return;
+    const seq = fetchSeqRef.current;
+    const requestTechId = techId;
+    setAutoAssigning(true);
+    setAutoAssignError(null);
+    setAutoAssignResult(null);
+    let discarded = false;
+    try {
+      const date = etDateString();
+      const res = await fetch(`${API_BASE}/admin/tech-out/${requestTechId}/auto-assign`, {
+        method: 'POST',
+        headers: adminAuthHeaders(),
+        body: JSON.stringify({ date }),
+      });
+      const data = await res.json().catch(() => ({}));
+      // The move (if any) already committed server-side — refresh the board
+      // (job pins, tech current-job) unconditionally on success, same as the
+      // mark-out/clear handlers.
+      if (res.ok) onChangedRef.current?.(requestTechId);
+      if (fetchSeqRef.current !== seq || techIdRef.current !== requestTechId) {
+        discarded = true;
+        return;
+      }
+      if (res.status === 404) {
+        // Either gate closed mid-drawer, matching handleConfirmMarkOut.
+        if (data.enabled === false) {
+          setPhase('off');
+          setAbsence(null);
+        } else {
+          setAutoMoveEnabled(false);
+        }
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const moved = Array.isArray(data.moved) ? data.moved.length : 0;
+      const leftParked = Array.isArray(data.left_parked) ? data.left_parked.length : 0;
+      setAutoAssignResult({ moved, leftParked });
+      // Re-read status so the parked count (parked_open_count) and any
+      // resolved cards reflect what the batch just did.
+      await fetchStatus(requestTechId);
+    } catch (err) {
+      if (discarded) return;
+      setAutoAssignError(err.message || 'Auto-assign failed');
+    } finally {
+      if (!discarded || techIdRef.current === requestTechId) setAutoAssigning(false);
+    }
+  }
+
   if (phase !== 'ready') return null;
 
   if (absence) {
     const redistribution = absence.redistribution || {};
     // Park-only foundation (Codex r4 + r5 on PR #4678): a mark-out parks
-    // EVERY open stop as a "Needs a decision" alert and moves nothing
-    // automatically. The summary's moved / failed lists are not rendered —
-    // the server never populates them in this version; the follow-up PR
-    // that adds automatic reassignment brings its own UI for them.
-    const parked = redistribution.parked || [];
+    // EVERY open stop as a "Needs a decision" alert; PR B (GATE_TECH_OUT_
+    // AUTO_MOVE) adds the "Auto-assign parked stops" action below, still
+    // opt-in per tech-day — nothing moves without the dispatcher asking.
+    // parked_open_count (Codex r8 P2 on #4678) is a LIVE read of open
+    // overflow alerts as of the last status fetch — not the frozen
+    // mark-out snapshot, which never reflected a card resolved by hand or
+    // by a prior auto-assign run. Falls back to the snapshot's own count
+    // only for a stale/cached response shape that predates that field.
+    const parkedCount = absence.parked_open_count != null
+      ? absence.parked_open_count
+      : (redistribution.parked || []).length;
     return (
       <Card className="p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
@@ -282,11 +353,24 @@ export default function TechOutSection({ techId, techName, onChanged }) {
           </Badge>
         </div>
         <div className="text-14 text-ink-primary mb-3">
-          {parked.length} stop{parked.length === 1 ? '' : 's'} parked in the Action Queue — decide who to move
+          {parkedCount} stop{parkedCount === 1 ? '' : 's'} parked in the Action Queue — decide who to move
         </div>
         <div className="text-12 text-ink-tertiary mb-3">
           Parked stops are in the Action Queue as &quot;Needs a decision&quot;.
         </div>
+        {autoMoveEnabled && parkedCount > 0 && (
+          <div className="mb-3">
+            <Button variant="secondary" onClick={handleAutoAssign} disabled={autoAssigning}>
+              {autoAssigning ? 'Assigning…' : 'Auto-assign parked stops'}
+            </Button>
+            {autoAssignResult && (
+              <div className="text-12 text-ink-tertiary mt-1">
+                Moved {autoAssignResult.moved}, left {autoAssignResult.leftParked} parked for a decision.
+              </div>
+            )}
+            {autoAssignError && <div className="text-12 text-alert-fg mt-1">{autoAssignError}</div>}
+          </div>
+        )}
         {submitError && <div className="text-14 text-alert-fg mb-3">{submitError}</div>}
         <Button variant="secondary" onClick={handleTechIsBack} disabled={clearing}>
           {clearing ? 'Clearing…' : 'Tech is back'}

@@ -378,3 +378,95 @@ describe('a remote refetch that supersedes an in-flight mutation (pre-push audit
     expect(await screen.findByRole('button', { name: 'Confirm' })).toBeEnabled();
   });
 });
+
+// PR B — GATE_TECH_OUT_AUTO_MOVE.
+describe('auto-assign parked stops (GATE_TECH_OUT_AUTO_MOVE)', () => {
+  const outAbsence = (overrides = {}) => ({
+    id: 'abs-1', technician_id: 'tech-1', absence_date: '2026-09-23', reason: 'emergency', note: null,
+    redistribution: { total: 2, moved: [], parked: [{ job_id: 'j1' }, { job_id: 'j2' }], failed: [] },
+    parked_open_count: 2,
+    ...overrides,
+  });
+
+  it('hides the button when the auto-move gate is off, even while out with parked stops', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: false }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Out today · Emergency');
+    expect(screen.queryByRole('button', { name: 'Auto-assign parked stops' })).toBeNull();
+  });
+
+  it('hides the button when nothing is parked, even with the gate on', async () => {
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ enabled: true, absence: outAbsence({ parked_open_count: 0, redistribution: { total: 0, parked: [] } }), auto_move_enabled: true }),
+    });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Out today · Emergency');
+    expect(screen.queryByRole('button', { name: 'Auto-assign parked stops' })).toBeNull();
+  });
+
+  it('shows the button when the gate is on and stops are parked; POSTs and shows moved/left-parked counts', async () => {
+    const onChanged = vi.fn();
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" onChanged={onChanged} />);
+    await screen.findByText('Out today · Emergency');
+
+    const btn = screen.getByRole('button', { name: 'Auto-assign parked stops' });
+    let releasePost;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { releasePost = resolve; }));
+    fireEvent.click(btn);
+    expect(await screen.findByRole('button', { name: 'Assigning…' })).toBeDisabled();
+
+    // Refetch after the POST resolves picks up the new live count.
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ enabled: true, absence: outAbsence({ parked_open_count: 1 }), auto_move_enabled: true }),
+    });
+    await act(async () => {
+      releasePost({ ok: true, json: async () => ({ enabled: true, auto_move_enabled: true, moved: [{ alert_id: 'a1', job_id: 'j1', to_technician_id: 'tech-2' }], left_parked: [{ alert_id: 'a2', reason: 'no_eligible_candidate' }] }) });
+    });
+
+    expect(await screen.findByText('Moved 1, left 1 parked for a decision.')).toBeInTheDocument();
+    expect(screen.getByText('1 stop parked in the Action Queue — decide who to move')).toBeInTheDocument();
+    expect(onChanged).toHaveBeenCalledWith('tech-1');
+
+    const postCall = fetch.mock.calls[1];
+    expect(postCall[0]).toBe('/api/admin/tech-out/tech-1/auto-assign');
+    expect(postCall[1].method).toBe('POST');
+    expect(JSON.parse(postCall[1].body)).toEqual({ date: expect.any(String) });
+  });
+
+  it('shows an inline error on failure and re-enables the button', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Out today · Emergency');
+
+    fetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-assign parked stops' }));
+
+    expect(await screen.findByText('boom')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Auto-assign parked stops' })).toBeEnabled();
+  });
+
+  it('a response landing after the tech selection changed is discarded', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
+    const { rerender } = render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Out today · Emergency');
+
+    let releasePost;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { releasePost = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-assign parked stops' }));
+    await screen.findByRole('button', { name: 'Assigning…' });
+
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null, auto_move_enabled: false }) });
+    rerender(<TechOutSection techId="tech-2" techName="Tech Two" />);
+    await screen.findByText('Availability');
+
+    await act(async () => {
+      releasePost({ ok: true, json: async () => ({ enabled: true, moved: [{ alert_id: 'a1' }], left_parked: [] }) });
+    });
+    // Nothing from the stale response leaked into tech-2's view.
+    expect(screen.queryByText(/Moved 1/)).toBeNull();
+    expect(screen.getByText('Availability')).toBeInTheDocument();
+  });
+});

@@ -60,13 +60,41 @@ function customerDisplayName(row) {
   return first || null;
 }
 
+/**
+ * Live count of stops still parked for this tech-day — the number of
+ * OPEN tech_out_overflow alerts' units, counted by stop (a grouped unit's
+ * payload.visit_member_ids all count, matching how the stored
+ * redistribution.parked snapshot always counted — one entry per member),
+ * not by card. Read fresh on every call: unlike the stored
+ * `redistribution.parked` summary (frozen at mark-out time, only amended by
+ * the late-arrival sweep), this reflects a dispatcher resolving cards by
+ * hand or an auto-move run resolving them since — a Codex r8 P2 on #4678
+ * (TechOutSection was showing a permanently stale count).
+ */
+async function openParkedStopCount({ technicianId, date, conn = db }) {
+  const rows = await conn('dispatch_alerts')
+    .where({ type: ALERT_TYPE, tech_id: technicianId })
+    .whereNull('resolved_at')
+    .whereRaw("payload->>'date' = ?", [date])
+    .select('payload');
+  let count = 0;
+  for (const row of rows) {
+    const payload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) || {};
+    const memberIds = payload.visit_member_ids;
+    count += Array.isArray(memberIds) && memberIds.length ? memberIds.length : 1;
+  }
+  return count;
+}
+
 /** The uncleared technician_absences row for a tech+date, or null. */
 async function getTechOut({ technicianId, date, conn = db }) {
   const row = await conn('technician_absences')
     .where({ technician_id: technicianId, absence_date: date })
     .whereNull('cleared_at')
     .first();
-  return row || null;
+  if (!row) return null;
+  const parked_open_count = await openParkedStopCount({ technicianId, date, conn });
+  return { ...row, parked_open_count };
 }
 
 /**
@@ -511,5 +539,7 @@ module.exports = {
   parkTechDay,
   sweepAbsentTechDays,
   rankBumpOrder,
-  _test: { unitsOf, customerDisplayName, isUncommittedHold, unitRankingFields },
+  _test: {
+    unitsOf, customerDisplayName, isUncommittedHold, unitRankingFields, openParkedStopCount,
+  },
 };

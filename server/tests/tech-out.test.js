@@ -396,6 +396,25 @@ describe('getTechOut / clearTechOut', () => {
     expect(await getTechOut({ technicianId: TECH.id, date: DATE })).toMatchObject({ technician_id: TECH.id, absence_date: DATE });
   });
 
+  // Codex r8 P2 on #4678: the drawer's parked count must reflect a
+  // dispatcher (or an auto-move run) resolving cards by hand, not just the
+  // frozen mark-out snapshot — parked_open_count is read fresh every call.
+  test('parked_open_count is a live read of OPEN overflow alerts, one stop per visit_member_ids entry (or 1 for an ungrouped card)', async () => {
+    await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    db.__state.alerts.push(
+      { id: 'a1', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: null, payload: { date: DATE } },
+      { id: 'a2', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: null, payload: { date: DATE, visit_member_ids: ['m1', 'm2'] } },
+      // Resolved already — never counted.
+      { id: 'a3', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: 'now', payload: { date: DATE } },
+      // A different date's card for the same tech — never counted.
+      { id: 'a4', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: null, payload: { date: '2099-01-01' } },
+    );
+    expect((await getTechOut({ technicianId: TECH.id, date: DATE })).parked_open_count).toBe(3);
+
+    db.__state.alerts.find((a) => a.id === 'a1').resolved_at = 'now';
+    expect((await getTechOut({ technicianId: TECH.id, date: DATE })).parked_open_count).toBe(2);
+  });
+
   test('clearTechOut locks the row, stamps cleared_at/by, and resolves that day\'s open overflow alerts on the same trx (auto: true)', async () => {
     await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
     db.__state.alerts.push(
