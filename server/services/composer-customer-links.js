@@ -882,10 +882,15 @@ async function immediateOnlyLinkSendCheck(body) {
   if (appointmentLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Appointment page' };
   if (reportLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Service report' };
   if (shortRows.some((row) => row.kind === 'receipt')) return { present: true, label: 'Receipt' };
-  // Consultation's 14-day token TTL (pre-push Codex P1): always short-
-  // wrapped, so presence is judged by short_codes.kind like appointment/
-  // service_report/receipt above, never a long-form path regex.
+  // Consultation's 14-day token TTL (pre-push Codex P1): the short form by
+  // short_codes.kind like appointment/service_report/receipt above, AND a
+  // pasted long /inspection/<token> URL (local audit P1 on #4709 r5 — the
+  // send-time check reads both, so the fence must too). Presence only: any
+  // owned-host /inspection/ path parks the message, valid token or not.
   if (shortRows.some((row) => row.kind === 'consultation')) return { present: true, label: 'Consultation link' };
+  if (linkRuns(runs, /\/inspection\//i).some((run) => canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME))) {
+    return { present: true, label: 'Consultation link' };
+  }
   return { present: false };
 }
 

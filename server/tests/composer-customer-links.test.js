@@ -1564,6 +1564,16 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   // /inspection/:token form never rides an SMS raw), so its own target
   // never matches a long-form regex — presence is judged by
   // short_codes.kind, like appointment/service_report/receipt above.
+  // Local audit P1 (#4709 r5): a pasted long-form /inspection/<token> URL is
+  // fenced from scheduled/draft sends exactly like its short wrapper.
+  test('a long-form /inspection/<token> consultation URL is immediate-only too', async () => {
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck('Pick a time: https://wavespest.co/inspection/lead-1.1999999999.abcdef Reply STOP to opt out.'))
+      .toEqual({ present: true, label: 'Consultation link' });
+    expect(await immediateOnlyLinkSendCheck('See you Tuesday.')).toEqual({ present: false });
+  });
+
   test('a consultation link (branded short form of kind consultation) is immediate-only — its 14-day token TTL fences a scheduled send past it', async () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'cons1', kind: 'consultation', target_url: 'https://portal.wavespestcontrol.com/inspection/abc.123.def' } }) };
     expect(await immediateOnlyLinkSendCheck('Pick a time: wavespest.co/l/cons1')).toEqual({ present: true, label: 'Consultation link' });
