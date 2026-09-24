@@ -2712,7 +2712,13 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
     return (table) => {
       const state = { where: {} };
       const chain = {
-        where(cond) { if (cond && typeof cond === 'object') Object.assign(state.where, cond); return chain; },
+        where(cond, val) {
+          if (cond && typeof cond === 'object') Object.assign(state.where, cond);
+          else if (typeof cond === 'string') state.where[cond.split('.').pop()] = val;
+          return chain;
+        },
+        leftJoin() { return chain; },
+        modify() { return chain; },
         whereNull() { return chain; },
         whereNotNull() { return chain; },
         whereNot() { return chain; },
@@ -2735,7 +2741,9 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
         then(resolve, reject) {
           // Only trustedLeadProfileIds awaits a table directly (after
           // .select(), no .first()) — the consultation_prospect list.
-          const rows = table === 'lead_activities' ? activityRows : [];
+          const rows = table === 'lead_activities' ? activityRows
+            : table === 'scheduled_services' ? (openVisitsByCustomer[state.where.customer_id] || [])
+              : [];
           return Promise.resolve(rows).then(resolve, reject);
         },
         catch(fn) { return Promise.resolve([]).catch(fn); },

@@ -34,7 +34,7 @@ jest.mock('../models/db', () => {
   // is_callback/a re-service catalog key the way the pest/lawn query still
   // does.
   function stripAlias(field) {
-    return String(field).replace(/^[a-z]+\./, '');
+    return String(field).replace(/^[a-z_]+\./, '');
   }
   function evalClause(row, field, op, value) {
     const f = stripAlias(field);
@@ -43,6 +43,11 @@ jest.mock('../models/db', () => {
     if (op === '=') return rv === value;
     if (op === '>=') return rv >= value;
     return true;
+  }
+  function rawClause(sql, bindings) {
+    if (!Array.isArray(bindings) || !/LOWER\(TRIM\(\?\?\)\)\s*=\s*\?/i.test(sql)) return () => null;
+    const f = stripAlias(bindings[0]);
+    return (row) => (row[f] === undefined ? null : String(row[f]).trim().toLowerCase() === String(bindings[1]));
   }
   const mkChain = () => {
     const filters = [];
@@ -64,8 +69,11 @@ jest.mock('../models/db', () => {
             const rv = row[stripAlias(f)];
             return rv === undefined ? null : arr.includes(rv);
           }); return subQb; },
+          // scopeToAssessmentBookings' LOWER(TRIM(??)) = ? shape.
+          whereRaw: (sql, b) => { subClauses.push(rawClause(sql, b)); return subQb; },
+          orWhereRaw: (sql, b) => { subClauses.push(rawClause(sql, b)); return subQb; },
         };
-        args[0](subQb);
+        args[0].call(subQb, subQb);
         filters.push((row) => {
           const results = subClauses.map((fn) => fn(row));
           if (results.some((r) => r === true)) return true;
@@ -94,6 +102,7 @@ jest.mock('../models/db', () => {
       });
       return q;
     };
+    q.modify = (fn) => { fn(q); return q; };
     q.first = async () => null;
     const rows = () => listResults.scheduled_services.filter((row) => filters.every((f) => f(row)));
     q.then = (onOk, onErr) => Promise.resolve(rows()).then(onOk, onErr);

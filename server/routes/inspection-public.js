@@ -196,7 +196,7 @@ const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { isInServiceAreaBox } = require('../services/service-area');
-const { isAssessmentBooking, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
+const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
 // the offer (buildAvailabilityForLead) and the commit (callbackVisit).
 const ASSESSMENT_EXPECTED_IDENTITY = Object.freeze({ catalogServiceKey: ASSESSMENT_SERVICE_KEY, serviceType: 'Waves Assessment' });
@@ -735,13 +735,22 @@ async function rescheduleUrlFor(visitId) {
 // Takes an explicit `dbConn` (plain `db` or a `trx`) so the commit path can
 // re-run this exact query under its advisory lock.
 async function findOpenVisit(dbConn, customerId, { assessmentOnly = false, excludeAssessment = false, futureOnly = false } = {}) {
+  // The assessment identity is applied IN SQL, before anything could bound
+  // the scan (Codex #4737 r12 pre-push P1) — and no LIMIT: a customer with
+  // many visits never hides an open assessment. The JS check below stays as
+  // the per-row confirmation.
   let q = dbConn('scheduled_services')
-    .where({ customer_id: customerId })
-    .whereNotIn('status', TERMINAL_STATUSES)
-    .orderBy([{ column: 'scheduled_date', order: 'asc' }, { column: 'window_start', order: 'asc' }])
-    .select('id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'service_id', 'reschedule_token');
-  if (futureOnly) q = q.where('scheduled_date', '>=', etDateString());
-  const rows = await q.limit(50);
+    .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+    .where('scheduled_services.customer_id', customerId)
+    .whereNotIn('scheduled_services.status', TERMINAL_STATUSES)
+    .orderBy([{ column: 'scheduled_services.scheduled_date', order: 'asc' }, { column: 'scheduled_services.window_start', order: 'asc' }])
+    .select(
+      'scheduled_services.id', 'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end',
+      'scheduled_services.service_type', 'scheduled_services.service_id', 'scheduled_services.reschedule_token',
+    );
+  if (assessmentOnly) q = q.modify((qq) => scopeToAssessmentBookings(qq));
+  if (futureOnly) q = q.where('scheduled_services.scheduled_date', '>=', etDateString());
+  const rows = await q;
   for (const row of rows) {
     // The catalog identity too (Codex #4737 r9 P2): a row linked to the
     // assessment service with a customized service_type is still one.

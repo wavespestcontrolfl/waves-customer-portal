@@ -20,7 +20,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { RE_SERVICE_SERVICE_KEYS, isReService } = require('./re-service');
-const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentBooking } = require('./assessment-booking');
+const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentBooking, scopeToAssessmentBookings } = require('./assessment-booking');
 
 // The two self-bookable callback lanes. serviceKey resolves the catalog row
 // (services.service_key) at commit time — id/name/duration are read live from
@@ -283,11 +283,15 @@ async function openReserviceCallbacks(customerId, dbh = db) {
 async function openCallbackExistsForLane(dbh, customerId, lane) {
   if (!customerId || !(RESERVICE_LANES[lane] || lane === 'assessment')) return false;
   if (lane === 'assessment') {
+    // The assessment identity IN SQL, never after a LIMIT (Codex #4737 r12
+    // pre-push P1): any non-terminal row that is an assessment by name or
+    // catalog — the same scope findOpenVisit(assessmentOnly) uses.
     const rows = await dbh('scheduled_services')
-      .where({ customer_id: customerId })
-      .whereNotIn('status', TERMINAL_STATUSES)
-      .select('service_type', 'service_id')
-      .limit(50);
+      .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+      .where('scheduled_services.customer_id', customerId)
+      .whereNotIn('scheduled_services.status', TERMINAL_STATUSES)
+      .modify((q) => scopeToAssessmentBookings(q))
+      .select('scheduled_services.service_type', 'scheduled_services.service_id');
     for (const row of rows) {
       if (await isAssessmentBooking(row, dbh)) return true;
     }
