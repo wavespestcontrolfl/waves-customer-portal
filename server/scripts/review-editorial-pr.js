@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-/** Trusted CI entry point. Reads PR documents as data; never executes PR code. */
+/**
+ * Trusted CI entry point. Reads PR documents as data; never executes PR code.
+ * Called by wavespestcontrol-astro/.github/workflows/editorial-evidence-review.yml
+ * on article PR events and twice-hourly stale-evidence recovery.
+ */
 const gh = require('../services/content-astro/github-client');
 const editorial = require('../services/content/editorial-evidence');
 const fm = require('../services/content-astro/frontmatter');
