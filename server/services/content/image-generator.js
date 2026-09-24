@@ -378,9 +378,8 @@ const STANDARD_GUARDS_WITH_LOGO = [
 // Owner directive 2026-09-23 (Adam, after the Bradenton WDO hero showed a tech in
 // a blue long-sleeve and khakis): any Waves technician in a generated image wears
 // the REAL uniform. Every scene mode carries the line — a hero, body slot or social
-// tile can all put a person in frame, and a captioned infographic about an
-// inspection or treatment can still draw a technician icon (Codex P2), so the
-// infographic carries it too. Without a reference image (Gemini legs, kill
+// tile can all put a person in frame. Infographics draw no people at all
+// (INFOGRAPHIC_NO_PEOPLE_LINE). Without a reference image (Gemini legs, kill
 // switch, missing asset) the logo stays OFF the shirt/cap: generators render
 // a prompt-only mark as gibberish and the text/logo screen would reject it.
 const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering.';
@@ -389,6 +388,12 @@ const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Wa
 // reference image, the technician carries it on the cap and the RIGHT chest —
 // and nowhere else in the picture.
 const WAVES_UNIFORM_LOGO_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo with the Waves logo — reproduced faithfully from the attached reference image — as a small badge on the wearer\'s RIGHT chest (the side of the wearer\'s right arm, not the left), a baseball cap that is either light blue or red with that same Waves logo centered on the front of the cap, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants. The reference logo appears ONLY on the technician\'s cap and right chest, at badge scale; never anywhere else in the picture and never as a standalone graphic. If no technician appears, do not use the reference image at all.';
+
+// An infographic draws no people: it can carry neither the logo reference
+// nor a judgeable uniform, and the audit would flag any logo-free technician
+// icon it produced — so the style excludes figures outright (Codex r3 P2 on
+// #4761, superseding the "infographic carries the uniform line" P2 on #4696).
+const INFOGRAPHIC_NO_PEOPLE_LINE = 'Do not draw people, technician figures, faces, hands or mascots — flat icons of tools, pests, plants, homes and yards only.';
 
 function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [], uniformLogo = false }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
@@ -444,7 +449,7 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const editorial = mode === 'blog-hero' || mode === 'blog-body'
     ? 'Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.'
     : '';
-  const uniform = withLogo ? WAVES_UNIFORM_LOGO_LINE : WAVES_UNIFORM_LINE;
+  const uniform = isInfographic ? INFOGRAPHIC_NO_PEOPLE_LINE : (withLogo ? WAVES_UNIFORM_LOGO_LINE : WAVES_UNIFORM_LINE);
   const van = plan && plan.van && !isInfographic ? VAN_LINE : '';
   return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
@@ -602,6 +607,16 @@ async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch, tim
   }
 }
 
+function logLegFailure(slug, result) {
+  if (result.skipped) {
+    logger.info(`[image-generator] ${slug} skipped: ${result.reason}`);
+  } else if (result.fatal) {
+    logger.warn(`[image-generator] ${slug} fatal: ${result.status} ${result.body || ''}`);
+  } else if (result.retryable) {
+    logger.warn(`[image-generator] ${slug} retryable: ${result.status || result.error} — trying next provider`);
+  }
+}
+
 // ── public API ───────────────────────────────────────────────────────
 
 class ImageGenerator {
@@ -642,74 +657,75 @@ class ImageGenerator {
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode, plan });
     const attempts = [];
     const deadline = Number.isFinite(deadlineAt) ? deadlineAt : this._now() + this._chainBudgetMs;
-    // The logo reference rides only on a prompt this module built (a caller's
-    // custom prompt says nothing about a reference) and never on an infographic.
-    const logo = uniformLogo === true ? (this._uniformLogo === undefined ? loadUniformLogo() : this._uniformLogo) : null;
-    const logoBuffer = !customPrompt && Buffer.isBuffer(logo) && logo.length && !(plan && plan.style === 'infographic') ? logo : null;
+    const logoBuffer = this._logoReference({ customPrompt, plan, uniformLogo });
     const logoPrompt = logoBuffer ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: true }) : null;
 
-    const done = (slug, result, legLogo) => {
-      logger.info(`[image-generator] generated via ${slug}${legLogo ? ' with the uniform logo reference' : ''} (${result.mimeType}, ${result.dataUrl.length} chars)`);
-      return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt: legLogo ? logoPrompt : prompt, alt, plan: plan || null, logoReference: legLogo };
-    };
-    const budgetSpent = () => ({ skipped: true, retryable: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` });
-
     for (const slug of this.chain) {
-      const cfg = MODEL_MAP[slug];
-      const size = sizeFor(mode, cfg.api);
-      const timeoutMs = legTimeoutMs(deadline, this._now());
-      // Only OpenAI legs take the reference; Gemini's prompt is the logo-free one.
-      let legLogo = Boolean(logoPrompt) && cfg.api === 'openai';
-      let result;
-      if (timeoutMs === null) {
-        // A spent budget is a timing condition, not a verdict on the provider:
-        // retryable so the runner retries the post instead of parking it
-        // (Codex r10 P2 on #3964).
-        result = budgetSpent();
-      } else if (cfg.api === 'openai') {
-        const referenceImages = legLogo ? [{ buffer: logoBuffer, mimeType: 'image/png', filename: 'waves-logo.png' }] : [];
-        result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: legLogo ? logoPrompt : prompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
-        if (legLogo && result.fatal && REFERENCE_REJECT_STATUSES.has(result.status)) {
-          // The request itself was refused with the reference attached (a
-          // 400/413/415/422): the same leg once more, logo-free, inside the
-          // same deadline. A retryable failure, an auth/model failure or an
-          // empty response falls through to the next provider as before —
-          // never a second call on the same leg (pre-push fallback P1 on
-          // ae29283fcc; Codex r1 P2 on #4761).
-          attempts.push({ provider: slug, logoReference: true, result });
-          logger.warn(`[image-generator] ${slug} rejected the request with the logo reference (${result.status} ${result.body || ''}) — retrying this leg without it`);
-          legLogo = false;
-          const retryMs = legTimeoutMs(deadline, this._now());
-          result = retryMs === null
-            ? budgetSpent()
-            : await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn, timeoutMs: retryMs });
-        }
-      } else if (cfg.api === 'gemini') {
-        const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
-        result = await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs });
-      } else {
-        result = { fatal: true, status: 'unknown_api' };
-      }
+      const { result, legLogo } = await this._runLeg({ slug, mode, prompt, logoPrompt, logoBuffer, deadline, attempts });
       attempts.push({ provider: slug, logoReference: legLogo, result });
-
-      if (result.dataUrl) return done(slug, result, legLogo);
+      if (result.dataUrl) {
+        logger.info(`[image-generator] generated via ${slug}${legLogo ? ' with the uniform logo reference' : ''} (${result.mimeType}, ${result.dataUrl.length} chars)`);
+        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt: legLogo ? logoPrompt : prompt, alt, plan: plan || null, logoReference: legLogo };
+      }
       // Skipped / fatal / retryable → next provider. The whole point
       // of the chain is resilience: a 408/429/5xx on OpenAI should fall
       // through to Gemini, not abort the chain. Admin and social
       // callers do not retry, so bailing here used to defeat the
       // fallback entirely.
-      if (result.skipped) {
-        logger.info(`[image-generator] ${slug} skipped: ${result.reason}`);
-      } else if (result.fatal) {
-        logger.warn(`[image-generator] ${slug} fatal: ${result.status} ${result.body || ''}`);
-      } else if (result.retryable) {
-        logger.warn(`[image-generator] ${slug} retryable: ${result.status || result.error} — trying next provider`);
-      }
+      logLegFailure(slug, result);
     }
 
     const err = new Error(`image-generator: all providers failed (chain: ${this.chain.join(', ')})`);
     err.attempts = attempts;
     throw err;
+  }
+
+  // The logo reference rides only on a prompt this module built (a caller's
+  // custom prompt says nothing about a reference), only when the caller opted
+  // in, and never on an infographic (which draws no people at all).
+  _logoReference({ customPrompt, plan, uniformLogo }) {
+    if (uniformLogo !== true || customPrompt || (plan && plan.style === 'infographic')) return null;
+    const logo = this._uniformLogo === undefined ? loadUniformLogo() : this._uniformLogo;
+    return Buffer.isBuffer(logo) && logo.length ? logo : null;
+  }
+
+  _budgetSpent() {
+    // A spent budget is a timing condition, not a verdict on the provider:
+    // retryable so the runner retries the post instead of parking it
+    // (Codex r10 P2 on #3964).
+    return { skipped: true, retryable: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` };
+  }
+
+  // One provider leg → { result, legLogo }. Only OpenAI legs take the
+  // reference; Gemini's prompt is the logo-free one. An OpenAI leg that
+  // REJECTS the request with the reference attached (400/413/415/422) runs
+  // once more logo-free inside the same deadline — a retryable failure, an
+  // auth/model failure or an empty response falls through to the next
+  // provider, never a second call on the same leg (pre-push fallback P1 on
+  // ae29283fcc; Codex r1 P2 on #4761).
+  async _runLeg({ slug, mode, prompt, logoPrompt, logoBuffer, deadline, attempts }) {
+    const cfg = MODEL_MAP[slug];
+    const size = sizeFor(mode, cfg.api);
+    const timeoutMs = legTimeoutMs(deadline, this._now());
+    let legLogo = Boolean(logoPrompt) && cfg.api === 'openai';
+    if (timeoutMs === null) return { result: this._budgetSpent(), legLogo };
+    if (cfg.api === 'gemini') {
+      const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
+      return { result: await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs }), legLogo: false };
+    }
+    if (cfg.api !== 'openai') return { result: { fatal: true, status: 'unknown_api' }, legLogo: false };
+    const referenceImages = legLogo ? [{ buffer: logoBuffer, mimeType: 'image/png', filename: 'waves-logo.png' }] : [];
+    let result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: legLogo ? logoPrompt : prompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
+    if (legLogo && result.fatal && REFERENCE_REJECT_STATUSES.has(result.status)) {
+      attempts.push({ provider: slug, logoReference: true, result });
+      logger.warn(`[image-generator] ${slug} rejected the request with the logo reference (${result.status} ${result.body || ''}) — retrying this leg without it`);
+      legLogo = false;
+      const retryMs = legTimeoutMs(deadline, this._now());
+      result = retryMs === null
+        ? this._budgetSpent()
+        : await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn, timeoutMs: retryMs });
+    }
+    return { result, legLogo };
   }
 
   /**
@@ -782,6 +798,7 @@ module.exports._internals = {
   loadUniformLogo,
   WAVES_UNIFORM_LINE,
   WAVES_UNIFORM_LOGO_LINE,
+  INFOGRAPHIC_NO_PEOPLE_LINE,
   STANDARD_GUARDS,
   STANDARD_GUARDS_WITH_LOGO,
   stylePermutation,

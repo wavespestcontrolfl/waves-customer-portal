@@ -190,10 +190,12 @@ describe('buildPrompt', () => {
     expect(buildPrompt({ keyword: 'k', topic: 'lead', mode: 'blog-body', shot: 'action' })).toMatch(uniform);
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(uniform);
     expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/never a blue shirt, never khaki or tan pants/);
-    // A captioned infographic about an inspection can still draw a technician
-    // icon, so it carries the line too (Codex P2 on #4696).
-    const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' } });
-    expect(info).toMatch(uniform);
+    // An infographic draws no people at all — neither a uniform line nor the
+    // logo reference (Codex r3 P2 on #4761, superseding the #4696 P2).
+    const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' }, uniformLogo: true });
+    expect(info).not.toMatch(uniform);
+    expect(info).toMatch(/Do not draw people, technician figures, faces, hands or mascots/);
+    expect(info).not.toMatch(/reference image/);
     expect(info).toMatch(/plain light background/);
   });
 
@@ -500,10 +502,16 @@ describe('uniform logo reference (owner directive 2026-09-24: logo on cap + righ
     expect(without).not.toMatch(/reference image/);
   });
 
-  test('an infographic never carries the reference line even when asked', () => {
+  test('an infographic never carries the reference (it draws no people), even when asked', async () => {
     const info = buildPrompt({ title: 'X', mode: 'blog-body', plan: { style: 'infographic', setting: 'three-step row', vantage: 'straight-on' }, captions: ['One'], uniformLogo: true });
     expect(info).not.toMatch(/reference image/);
-    expect(info).toMatch(/carry no readable logo or lettering/);
+    expect(info).toMatch(/Do not draw people/);
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'X', mode: 'blog-body', plan: { style: 'infographic', setting: 'three-step row', vantage: 'straight-on' }, captions: ['One'], uniformLogo: true });
+    expect(r.logoReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
   });
 
   test('OpenAI legs post the reference to /v1/images/edits as multipart; the result says logoReference', async () => {
