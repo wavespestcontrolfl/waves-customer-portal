@@ -856,6 +856,16 @@ describe('topUpRecurringSeriesLocked — duplicate active series (Codex GitHub #
     });
   });
 
+  test('an unstamped legacy series scopes on the customer primary address, never the property-blind guard (Codex pre-push P1)', async () => {
+    const { conn } = topupScenario({
+      parentOverrides: { service_address_line1: null, service_address_line2: null, property_id: null },
+      customerOverrides: { address_line1: '7 Home Rd', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    const call = buildSeriesAddressScope.mock.calls[0];
+    expect(call[1].address).toBe('7 Home Rd, Parrish, FL 34219');
+  });
+
   test('keeps an explicit unit as its own comma-separated segment so the canonical parser stays unit-aware (Codex GitHub r6 P1)', async () => {
     const { conn } = topupScenario({
       parentOverrides: {

@@ -17445,7 +17445,26 @@ async function resolveDuplicateActiveSeries(conn, parent, parentId) {
   // current address, never a stale stamped one, exactly as
   // findActiveRecurringSeries itself already resolves every CANDIDATE
   // parent's address internally (the same function, same call).
-  const addr = recurringServiceAddress(parent);
+  let addr = recurringServiceAddress(parent);
+  // An unstamped legacy series (no street, no property link) lives at the
+  // customer's primary address — the same reading findActiveRecurringSeries
+  // gives unstamped CANDIDATE parents (customerPrimaryStreet). Without this
+  // its scope collapses to the property-blind legacy guard and a legitimate
+  // series at the customer's other property blocks it (Codex pre-push P1).
+  if (!String(addr.service_address_line1 || '').trim() && !addr.property_id) {
+    const cust = await conn('customers').where({ id: parent.customer_id })
+      .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+    if (cust && String(cust.address_line1 || '').trim()) {
+      addr = {
+        ...addr,
+        service_address_line1: cust.address_line1,
+        service_address_line2: cust.address_line2,
+        service_address_city: cust.city,
+        service_address_state: cust.state,
+        service_address_zip: cust.zip,
+      };
+    }
+  }
   const address = [
     // Comma-join street + unit so the canonical parser (makeEstimateScopeKeys)
     // sees the unit as address_line2 and stays unit-aware — a space-joined
