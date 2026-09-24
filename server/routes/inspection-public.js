@@ -86,28 +86,35 @@
  *   never pass through the geocoder's own box test at all (the short-circuit
  *   branch in resolveServiceAddress returns them directly).
  *
- *   Phase 1 (lock on a per-lead key → re-read the lead fresh → re-run
- *   eligibility → provision the customer, re-resolving the address against
- *   the FRESH customer row so a second concurrent commit can never
- *   overwrite the first's just-persisted address with its own stale
- *   supplied one → re-validate the picked SLOT if the address changed,
- *   keeping the matched slot object (technician/end_time can differ at a
- *   different location, not just the start_time — Codex pre-push P1,
- *   2026-09-24) → COMMIT, releasing the lock) makes the customer row a
- *   durable, visible fact, and the slot correct, before anything calls
- *   createSelfBooking. If the fresh re-resolve itself FAILS (geocoder
- *   error/timeout — distinct from "another commit's address won"): a
- *   customer row that's STILL addressless is safe to persist the pre-lock
- *   VALIDATED address onto (nothing stored to conflict with); a customer
- *   row that already has a DIFFERENT stored address we simply couldn't
- *   re-resolve this attempt is never touched and never combined with the
- *   pre-lock location — that pairing is exactly what would let
- *   createSelfBooking's fresh reload dispatch to whatever's actually
- *   stored while the slot was validated for a different address (Codex
- *   pre-push P1, 2026-09-24) — the commit answers 422 `address_unresolved`
- *   instead, recoverable, no booking, no customer update. (key convention
- *   matches admin-agents.js/admin-
- *   dashboard.js's single-hashtext-arg form).
+ *   Phase 1 (lock on a per-lead key → re-read the lead + customer fresh via
+ *   `trx` → re-run eligibility → provision the customer → COMMIT, releasing
+ *   the lock) makes the customer row a durable, visible fact before
+ *   anything calls createSelfBooking. NOTHING inside this transaction does
+ *   network I/O or opens a second connection (Codex pre-push P1,
+ *   2026-09-24) — a Google geocode/county lookup, buildAvailabilityForLead
+ *   (always the global `db` connection, plus a gated weather-outlook call
+ *   of its own), or resolveEligibility's rescheduleUrlFor (same: hardwired
+ *   to the global `db`, no trx parameter to give it) stalling while the
+ *   lock is held risks exhausting the connection pool against itself under
+ *   load. So: an existing customer's fresh row is never RE-RESOLVED here —
+ *   its stored-address fields are compared against the PRE-LOCK snapshot
+ *   the pre-lock resolution was actually computed against (`resolved`,
+ *   already geocoded + area-checked before the lock was ever taken).
+ *   Identical → `resolved` still describes this row, reused outright (an
+ *   address that was still empty gets `resolved`'s validated value written
+ *   back, a plain trx UPDATE with no new resolution). Different — another
+ *   commit changed the row, or the lead linked to a customer, in the
+ *   window between the pre-lock read and the lock — fails closed to 422
+ *   `address_unresolved`, recoverable: the client retries, and the retry's
+ *   own pre-lock read sees the row as it now stands. The chosen SLOT is
+ *   re-validated (keeping the matched slot object — technician/end_time
+ *   can differ at a different location, not just the start_time) AFTER
+ *   this transaction commits and the lock releases, not inside it, for the
+ *   same network-I/O reason — a verified unlinked lead reusing an existing
+ *   property (resolveOrLinkCustomerForLead, below) can hand back a
+ *   location that differs from the lead's own pre-lock one. (key
+ *   convention matches admin-agents.js/admin-dashboard.js's
+ *   single-hashtext-arg form).
  *
  *   Booking itself goes through booking.js's createSelfBooking with the
  *   internal-only `callbackVisit` option — `isCallback: false` (this is NOT
@@ -297,6 +304,14 @@ async function loadCustomer(dbConn, customerId) {
     'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude'
   );
 }
+
+// Every field the commit's phase-1 lock uses to decide whether a fresh
+// customer re-read still matches what the pre-lock resolution was computed
+// against — round 13 (Codex pre-push P1, 2026-09-24): re-resolving a
+// changed address under the lock would mean a geocode/county network call
+// while holding it, never allowed, so an actual difference here fails
+// closed instead (see the commit handler's phase 1).
+const STORED_ADDRESS_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude'];
 
 // The booking window mirrors reservice-public's — the config-driven range
 // the /book funnel and reschedule page also use.
@@ -557,11 +572,26 @@ async function findOpenVisit(dbConn, customerId, { assessmentOnly = false, exclu
 // (first as a cheap pre-lock fast path, then again under the per-lead
 // advisory lock) without the two ever drifting apart. `dbConn` lets the
 // commit path run this against a `trx` for the lock-protected re-checks.
-async function resolveEligibility(dbConn, lead, custRow) {
+// `includeRescheduleUrl` (round 13, Codex pre-push P1, 2026-09-24) defaults
+// true for every ordinary (unlocked) caller — GET, the pre-lock fast path,
+// the post-createSelfBooking ALREADY_BOOKED resolve — but MUST be passed
+// `false` by any caller running under the phase-1 advisory lock:
+// rescheduleUrlFor's buildRescheduleLink hits the module-level global `db`
+// directly (it has no way to accept a trx), so calling it while a
+// transaction holds that lock + a pooled connection risks a second
+// connection stalling on the very lock the first is holding. The lock-
+// protected callers get `rescheduleUrl: null` here and the route fills it
+// in with a SEPARATE, safe rescheduleUrlFor call once the transaction has
+// committed and the lock is released.
+async function resolveEligibility(dbConn, lead, custRow, { includeRescheduleUrl = true } = {}) {
   if (custRow) {
     const openAssessment = await findOpenVisit(dbConn, custRow.id, { assessmentOnly: true });
     if (openAssessment) {
-      return { state: 'already_booked', visit: openAssessment, rescheduleUrl: await rescheduleUrlFor(openAssessment.id) };
+      return {
+        state: 'already_booked',
+        visit: openAssessment,
+        rescheduleUrl: includeRescheduleUrl ? await rescheduleUrlFor(openAssessment.id) : null,
+      };
     }
   }
   // 'converted' fires on the lead's own converted_at even without a
@@ -573,7 +603,11 @@ async function resolveEligibility(dbConn, lead, custRow) {
       ? await findOpenVisit(dbConn, custRow.id, { excludeAssessment: true, futureOnly: true })
       : null;
     if (lead.converted_at || futureOtherVisit) {
-      return { state: 'converted', visit: futureOtherVisit || null, rescheduleUrl: futureOtherVisit ? await rescheduleUrlFor(futureOtherVisit.id) : null };
+      return {
+        state: 'converted',
+        visit: futureOtherVisit || null,
+        rescheduleUrl: (futureOtherVisit && includeRescheduleUrl) ? await rescheduleUrlFor(futureOtherVisit.id) : null,
+      };
     }
   }
   return { state: 'ok', visit: null, rescheduleUrl: null };
@@ -677,9 +711,16 @@ function coordsClose(a, b) {
 // itself doesn't line up (a customer's zip on file can be stale even
 // though the rooftop is the same) — never a bare street-name match, which
 // would treat "123 Main St" in one zip as the same property as "123 Main
-// St" in another (Codex pre-push P1, 2026-09-24). When the lead has no
-// address text to compare at all, falls back to the account's primary (or
-// only) property. Returns null when ensureCustomerAccount found no
+// St" in another (Codex pre-push P1, 2026-09-24). The primary/only-property
+// fallback is gated on the lead having NO address text at all
+// (`!address?.line1` — round 13, Codex pre-push P1, 2026-09-24): a
+// SUPPLIED address that simply doesn't normalize to a street key (a PO
+// box, an address streetKey can't parse) is never treated the same as "no
+// address" — that used to fall into the same `!key` branch and match the
+// primary profile regardless of whether it was actually the right
+// property, dispatching the visit to the wrong address. An unresolvable
+// key with an address present returns null (a new profile), same as any
+// other non-match. Returns null when ensureCustomerAccount found no
 // existing customer (ordinary new-account create applies), or when an
 // address WAS supplied but matches none of the account's live properties —
 // a genuinely different property, created under the SAME account by the
@@ -694,8 +735,9 @@ async function matchExistingAccountProfile(dbConn, account, address, location) {
     .orderBy('created_at', 'asc');
   const rows = profiles.length ? profiles : [account.existingCustomer];
   const addressLine1 = address?.line1;
-  const key = addressLine1 ? streetKey(addressLine1) : null;
-  if (!key) return rows[0];
+  if (!addressLine1) return rows[0];
+  const key = streetKey(addressLine1);
+  if (!key) return null;
   const zip = normalizeZip(address?.zip);
   return rows.find((row) => {
     if (streetKey(row.address_line1) !== key) return false;
@@ -739,7 +781,10 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   if (verifiedContact) {
     const matched = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
     if (matched) {
-      const eligibility = await resolveEligibility(trx, freshLead, matched);
+      // includeRescheduleUrl:false — this runs under the caller's advisory
+      // lock (round 13, Codex pre-push P1, 2026-09-24); see
+      // resolveEligibility's own docblock.
+      const eligibility = await resolveEligibility(trx, freshLead, matched, { includeRescheduleUrl: false });
       if (eligibility.state !== 'ok') return { eligibility };
       const matchedLocation = matched.latitude != null && matched.longitude != null
         ? { lat: parseFloat(matched.latitude), lng: parseFloat(matched.longitude) }
@@ -992,20 +1037,29 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
     // Phase 1 — lock, re-read the lead's customer_id FRESH (a concurrent
     // commit's phase 1 may have just linked one), re-run eligibility, then
-    // provision the customer (create for an unlinked lead, or fix up an
-    // addressless/unresolvable one) INSIDE this transaction so it's a
-    // committed fact — never left open across the createSelfBooking call in
-    // phase 2, which reloads the customer on a separate connection (see the
-    // file header for why that would deadlock). Also re-runs
-    // resolveServiceAddress against the FRESH customer row (Codex pre-push
-    // P1, 2026-09-24): two concurrent commits for the same addressless lead
-    // can each resolve a DIFFERENT address before either takes the lock —
-    // without this re-check, the second would blindly overwrite the
-    // first's just-persisted address with its own stale supplied one, and
-    // the first's own createSelfBooking (which reloads the customer fresh)
-    // would then book against the second's address instead of its own. The
-    // fresh customer row's own address always wins now; a supplied address
-    // is only ever persisted when the fresh row still has none.
+    // provision the customer (create for an unlinked lead, or confirm an
+    // existing one's stored address is unchanged) INSIDE this transaction
+    // so it's a committed fact — never left open across the createSelfBooking
+    // call in phase 2, which reloads the customer on a separate connection
+    // (see the file header for why that would deadlock). EVERY read/write
+    // in here runs on `trx`, and NOTHING in here does network I/O or opens
+    // a second connection (Codex pre-push P1, 2026-09-24): the per-lead
+    // advisory lock is held for the duration, and a network call (a Google
+    // geocode/county lookup, buildAvailabilityForLead's own DB+weather
+    // work) or a second pooled connection (resolveEligibility's
+    // rescheduleUrlFor, unless told to skip it — see its own docblock)
+    // stalling while that lock is held risks exhausting the pool against
+    // itself under load. Two consequences of that rule: (1) an existing
+    // customer's fresh row is compared against the PRE-LOCK snapshot's own
+    // stored-address fields rather than re-resolved — identical, `resolved`
+    // (computed before the lock, already geocoded + area-checked) is still
+    // valid and reused outright; different (another commit changed it, or
+    // the lead linked to a customer between the pre-lock read and the
+    // lock) fails closed with a recoverable error instead of re-geocoding
+    // under the lock — the client retries, and the retry's own pre-lock
+    // resolve sees the row as it stands now. (2) the chosen slot is
+    // re-validated AFTER this transaction commits and the lock releases,
+    // never inside it — see below.
     const phase1 = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${COMMIT_LOCK_NS}:${lead.id}`]);
 
@@ -1013,7 +1067,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       if (!freshLead) return { eligibility: { state: 'gone', visit: null, rescheduleUrl: null } };
       const freshCustRow = freshLead.customer_id ? await loadCustomer(trx, freshLead.customer_id) : null;
 
-      const eligibility = await resolveEligibility(trx, freshLead, freshCustRow);
+      // includeRescheduleUrl:false — see resolveEligibility's own docblock.
+      const eligibility = await resolveEligibility(trx, freshLead, freshCustRow, { includeRescheduleUrl: false });
       if (eligibility.state !== 'ok') return { eligibility };
 
       let provisioned = freshCustRow;
@@ -1025,13 +1080,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         // resolveOrLinkCustomerForLead's docblock (Codex pre-push P1,
         // 2026-09-24). Its eligibility short-circuit (already_booked on
         // the MATCHED customer's own open assessment) takes priority over
-        // ever linking or inserting anything.
+        // ever linking or inserting anything. Everything it does is
+        // trx-scoped DB work — no network I/O of its own.
         const linkResult = await resolveOrLinkCustomerForLead(trx, freshLead, resolved, verified);
         if (linkResult.eligibility) return { eligibility: linkResult.eligibility };
         provisioned = linkResult.customer;
         // A reused (verified) profile's OWN stored location, when it has
         // one — never the lead's pre-lock resolved.location — so the
-        // existing "location differs from pre-lock" re-check below
+        // post-transaction "location differs from pre-lock" re-check below
         // re-validates the slot against the REAL property and fails
         // closed (SLOT_TAKEN) on any mismatch instead of booking a
         // technician dispatched for a different address (Codex pre-push
@@ -1039,43 +1095,31 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         if (linkResult.location) location = linkResult.location;
         await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
       } else {
-        // finalizeBookingLocation (not raw resolveServiceAddress) — the
-        // fresh re-resolve must run checkServiceArea too, or a location it
-        // discovers (e.g. the customer's OWN stored address, unresolvable
-        // pre-lock, resolving now) could replace the already-checked
-        // pre-lock location with one that's never been checked at all
-        // (Codex pre-push P1, 2026-09-24).
-        const freshResolved = await finalizeBookingLocation(lead, freshCustRow, addressInput);
-        if (freshResolved.failure === 'out_of_area' || freshResolved.failure === 'service_area_unavailable') {
-          // A location WAS found under the lock but failed the area check —
-          // never fall back to the pre-lock location either (same "never
-          // combine locations from different resolutions" rule as the
-          // address_unresolved case below): the fresh location is the
-          // truthful one (it's what a re-read customer row / re-typed
-          // address actually says), so report its own verdict rather than
-          // silently booking the different pre-lock address instead.
-          return { locationFailure: freshResolved.failure, county: freshResolved.county || null };
+        // Compare the fresh row's stored-address fields against the
+        // PRE-LOCK custRow snapshot `resolved` was actually computed
+        // against (Codex pre-push P1, 2026-09-24) — never re-resolve here,
+        // which would mean a geocode/county network call while holding the
+        // lock. Identical → the pre-lock resolution still describes this
+        // exact row, safe to reuse outright, no new work needed.
+        const addressUnchanged = STORED_ADDRESS_FIELDS.every(
+          (f) => (freshCustRow[f] ?? null) === (custRow?.[f] ?? null)
+        );
+        if (!addressUnchanged) {
+          // Another commit changed this row's stored address between the
+          // pre-lock read and the lock, or the lead linked to a customer
+          // in that same window — the pre-lock resolution may no longer
+          // describe this row, and re-resolving here is exactly the
+          // network call under the lock this rule forbids. Fail closed
+          // and recoverable; the client retries.
+          return { locationFailure: 'address_unresolved' };
         }
-        if (freshResolved.failure) {
-          // address_unresolved (or, defensively, address_required) —
-          // nothing resolved under the lock at all.
-          if (freshCustRow.address_line1) {
-            // The customer has a DIFFERENT stored address on file that we
-            // simply couldn't re-resolve on this attempt — never combine
-            // the pre-lock LOCATION (validated for the supplied address)
-            // with this customer ROW (whose stored address might describe
-            // a different property): createSelfBooking reloads the
-            // customer fresh and would dispatch to whatever's actually in
-            // the DB, not the location the slot was checked against. We
-            // can't tell here whether the stored address is still good (a
-            // transient blip) or genuinely broken, so refuse recoverably
-            // rather than guess — the client can retry.
-            return { locationFailure: 'address_unresolved' };
-          }
-          // Still no stored address at all (nothing to conflict with) —
-          // safe to persist the address that WAS validated pre-lock, so
-          // createSelfBooking's fresh reload sees the SAME location the
-          // slot was checked against.
+        provisioned = freshCustRow;
+        if (resolved.source !== 'customer') {
+          // The pre-lock resolution did NOT come from this row's own
+          // stored address (it was empty, or the stored one failed to
+          // geocode and a lead/supplied fallback won) — write the
+          // validated resolution back so a missing/bad address isn't
+          // asked for again (this file's own contract — see the header).
           await trx('customers').where({ id: freshCustRow.id }).update({
             address_line1: resolved.address.line1,
             address_line2: resolved.address.line2,
@@ -1092,64 +1136,22 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             city: resolved.address.city, state: resolved.address.state, zip: resolved.address.zip,
             latitude: resolved.location.lat, longitude: resolved.location.lng,
           };
-          // `location` already defaults to resolved.location at the top of
-          // this callback — unchanged, now backed by a matching customer row.
-        } else if (freshResolved.source === 'customer') {
-          // Another commit already fixed up this customer's address (and it
-          // passed the area check inside finalizeBookingLocation) — THAT
-          // one wins, not our (possibly different) pre-lock supplied
-          // address. The slot above was validated against OUR location;
-          // the re-validation below re-checks it against this one.
-          provisioned = freshCustRow;
-          location = freshResolved.location;
-        } else {
-          // Still no working stored address on the fresh row, but the
-          // lead/supplied fallback resolved AND passed the area check —
-          // persist it (re-derived fresh rather than reusing the pre-lock
-          // value, though in the common single-commit case they're
-          // identical).
-          await trx('customers').where({ id: freshCustRow.id }).update({
-            address_line1: freshResolved.address.line1,
-            address_line2: freshResolved.address.line2,
-            city: freshResolved.address.city,
-            state: freshResolved.address.state,
-            zip: freshResolved.address.zip,
-            latitude: freshResolved.location.lat,
-            longitude: freshResolved.location.lng,
-            updated_at: new Date(),
-          });
-          provisioned = {
-            ...freshCustRow,
-            address_line1: freshResolved.address.line1, address_line2: freshResolved.address.line2,
-            city: freshResolved.address.city, state: freshResolved.address.state, zip: freshResolved.address.zip,
-            latitude: freshResolved.location.lat, longitude: freshResolved.location.lng,
-          };
-          location = freshResolved.location;
         }
+        // else resolved.source === 'customer': the pre-lock resolution WAS
+        // this row's own already-good stored address/coords — nothing to
+        // write back; `location` stays resolved.location, set above.
       }
 
-      // Re-validate the chosen slot when the fresh location differs from
-      // what it was checked against pre-lock — another commit's address
-      // won above, OR (round 11) a verified unlinked lead reused an
-      // existing property whose own stored location differs from the
-      // lead's pre-lock resolved one — and return the MATCHED slot object,
-      // not just a boolean: a different location can carry a different
-      // technician/end_time for the same start_time, and the booking call
-      // below must use the refreshed slot's own fields, never the original
-      // pre-lock slot's (Codex pre-push P1, 2026-09-24).
-      let matchedSlot = slot;
-      if (location.lat !== resolved.location.lat || location.lng !== resolved.location.lng) {
-        const dayAvailability = await buildAvailabilityForLead(location, {
-          rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
-        });
-        matchedSlot = dayAvailability?.days?.find((d) => d.date === date)?.slots
-          ?.find((s) => s.start_time === time) || null;
-      }
-
-      return { custRow: provisioned, location, slot: matchedSlot };
+      return { custRow: provisioned, location };
     });
 
     if (phase1.eligibility) {
+      // The lock-protected eligibility check above skipped the reschedule
+      // URL (no second connection while the lock was held) — the lock is
+      // released now, so a normal, unlocked call is safe.
+      if (phase1.eligibility.visit && !phase1.eligibility.rescheduleUrl) {
+        phase1.eligibility.rescheduleUrl = await rescheduleUrlFor(phase1.eligibility.visit.id);
+      }
       return res.json(eligibilityResponse(phase1.eligibility, leadPayload));
     }
     if (phase1.locationFailure) {
@@ -1157,10 +1159,37 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       if (phase1.locationFailure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
       return res.status(422).json({ error: 'address_unresolved' });
     }
-    if (!phase1.slot) {
+    custRow = phase1.custRow;
+    const bookingLocation = phase1.location;
+
+    // Re-validate the chosen slot when the final location differs from
+    // what it was checked against pre-lock — a verified unlinked lead's
+    // reused profile (above) can carry a different stored location than
+    // the lead's own pre-lock resolution — and use the MATCHED slot
+    // object, not just a boolean: a different location can carry a
+    // different technician/end_time for the same start_time. This runs
+    // AFTER phase 1's transaction has committed and the advisory lock
+    // released (Codex pre-push P1, 2026-09-24): buildAvailabilityForLead
+    // always uses the global `db` connection and can do real network I/O
+    // of its own (a gated weather-outlook call), neither of which may run
+    // while that lock is held.
+    let bookingSlot = slot;
+    if (bookingLocation.lat !== resolved.location.lat || bookingLocation.lng !== resolved.location.lng) {
+      let refreshedDay = null;
+      try {
+        refreshedDay = await buildAvailabilityForLead(bookingLocation, {
+          rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
+        });
+      } catch (err) {
+        logger.warn(`[inspection-public] slot re-validation failed for lead ${lead.id}: ${err.message}`);
+      }
+      bookingSlot = refreshedDay?.days?.find((d) => d.date === date)?.slots
+        ?.find((s) => s.start_time === time) || null;
+    }
+    if (!bookingSlot) {
       let refreshed = null;
       try {
-        refreshed = await buildAvailabilityForLead(phase1.location, { ...range, config, duration: catalog.durationMinutes });
+        refreshed = await buildAvailabilityForLead(bookingLocation, { ...range, config, duration: catalog.durationMinutes });
       } catch (err) {
         logger.warn(`[inspection-public] refresh availability failed for lead ${lead.id}: ${err.message}`);
       }
@@ -1170,9 +1199,6 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         availability: refreshed ? shapeAvailability(refreshed, range) : null,
       });
     }
-    custRow = phase1.custRow;
-    const bookingLocation = phase1.location;
-    const bookingSlot = phase1.slot;
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps

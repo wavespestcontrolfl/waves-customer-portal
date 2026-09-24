@@ -792,179 +792,114 @@ describe('POST /:token commit', () => {
     expect(customerUpdate.payload.longitude).toBe(-82.6);
   });
 
-  // P1 :800 — two concurrent submissions for an addressless lead can each
-  // resolve a DIFFERENT address before either takes the lock; without a
-  // fresh re-check under the lock the second would overwrite the first's
-  // just-persisted address with its own stale supplied one, and the
-  // first's own createSelfBooking (which reloads the customer fresh) would
-  // then book against the second's address. Simulated interleaving: the
-  // SECOND commit's geocode call for its OWN supplied address ("222 B St")
-  // is the moment (via a mockGeocode side effect) the FIRST commit's
-  // address lands on the customer row — by the time phase 1 re-reads the
-  // customer fresh under the lock, it sees A, not B.
-  describe('address-resolution interleaving under the lock (P1 :800)', () => {
+  // Round 13 (Codex pre-push P1 :845, 2026-09-24) replaced the OLD
+  // re-resolve-under-the-lock design these three tests pinned (P1 :800,
+  // :872) — re-geocoding a fresh customer row while holding the per-lead
+  // advisory lock + a pooled connection was exactly the network-I/O-
+  // under-lock risk the rule now forbids. The new design never re-resolves
+  // under the lock at all: it compares the fresh row's stored-address
+  // fields against the PRE-LOCK snapshot the pre-lock resolution was
+  // computed against, and fails closed (recoverable) on ANY difference —
+  // simulated interleaving below is the SAME mockGeocode side-effect
+  // trick, now proving the abort instead of a seamless address adoption.
+  describe('a stored-address change detected under the lock (P1 :845, round 13)', () => {
     const LOC_A = { lat: 27.55, lng: -82.55 };
-    const LOC_B = { lat: 27.7, lng: -82.7 };
     const addresslessCustomer = () => ({
       id: 'cust-1', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null,
     });
 
-    test('the second commit sees the first\'s persisted address and books against it, never overwriting with its own supplied one', async () => {
+    test('another commit\'s address landing on the row between the pre-lock read and the lock aborts recoverably — never adopts it, never overwrites it, never re-geocodes under the lock', async () => {
       firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
       firstResults.customers = addresslessCustomer();
       listResults.scheduled_services = [];
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       mockGeocode.mockImplementation(async (addressStr) => {
         if (String(addressStr).includes('222 B St')) {
-          // The interleaving: while resolving B, the first commit's address
-          // lands on the customer row.
+          // The interleaving: while resolving B pre-lock, ANOTHER commit's
+          // address lands on the row — by the time phase 1 re-reads it
+          // under the lock, it no longer matches the addressless snapshot
+          // the pre-lock resolution of B was computed against.
           firstResults.customers = {
             id: 'cust-1', address_line1: '111 A St', address_line2: null,
             city: 'Bradenton', state: 'FL', zip: '34209', latitude: LOC_A.lat, longitude: LOC_A.lng,
           };
-          return { location: LOC_B };
+          return { location: { lat: 27.7, lng: -82.7 } };
         }
-        if (String(addressStr).includes('111 A St')) return { location: LOC_A };
         return { location: null };
       });
-      // Same valid slot at both locations — this test proves the address
-      // choice and the no-overwrite, not the slot-mismatch branch (see the
-      // 409 test below for that).
       mockBuildAvailability.mockImplementation(async () => ({
         days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
       }));
-      firstResults.scheduled_services = { id: 'ss-800', reschedule_token: 'tok-800' };
 
       const token = mintLeadConsultationToken(LEAD_ID);
-      // First commit: address A, addressless customer — persists A.
-      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '111 A St, Bradenton, FL 34209' });
-      expect(first.statusCode).toBe(200);
-      expect(first.body.success).toBe(true);
-      const firstUpdate = updateCalls.find((c) => c.table === 'customers');
-      expect(firstUpdate.payload.address_line1).toMatch(/111 A St/);
+      const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '222 B St, Bradenton, FL 34209' });
 
-      updateCalls.length = 0;
-      mockCreateSelfBooking.mockClear();
-
-      // Second commit: supplies B, but by the time phase 1 re-reads the
-      // customer under the lock, A is already there (the mockGeocode side
-      // effect above).
-      const second = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '222 B St, Bradenton, FL 34209' });
-      expect(second.statusCode).toBe(200);
-      expect(second.body.success).toBe(true);
-      // Books against A, not B — authedCustomer carries A's address.
-      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
-      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.address_line1).toBe('111 A St');
-      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(LOC_A.lat);
-      // Never overwrites the customer's now-persisted A with the supplied B.
-      expect(updateCalls.find((c) => c.table === 'customers')).toBeUndefined();
-    });
-
-    test('on a slot mismatch between the supplied and the fresh stored address, 409s with fresh availability instead of booking the wrong location', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-      firstResults.customers = addresslessCustomer();
-      listResults.scheduled_services = [];
-      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
-      mockGeocode.mockImplementation(async (addressStr) => {
-        if (String(addressStr).includes('222 B St')) {
-          firstResults.customers = {
-            id: 'cust-1', address_line1: '111 A St', address_line2: null,
-            city: 'Bradenton', state: 'FL', zip: '34209', latitude: LOC_A.lat, longitude: LOC_A.lng,
-          };
-          return { location: LOC_B };
-        }
-        if (String(addressStr).includes('111 A St')) return { location: LOC_A };
-        return { location: null };
-      });
-      // Call sequence: (1) first commit's own anti-forgery check at A —
-      // succeeds; (2) second commit's pre-lock anti-forgery check at ITS
-      // supplied B — succeeds; (3) second commit's phase-1 re-check at the
-      // fresh stored A — this specific slot is gone there, forcing the 409.
-      const openSlot = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] };
-      mockBuildAvailability
-        .mockResolvedValueOnce(openSlot)
-        .mockResolvedValueOnce(openSlot)
-        .mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [] }] });
-      firstResults.scheduled_services = { id: 'ss-800b', reschedule_token: 'tok-800b' };
-
-      const token = mintLeadConsultationToken(LEAD_ID);
-      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '111 A St, Bradenton, FL 34209' });
-      expect(first.statusCode).toBe(200);
-
-      mockCreateSelfBooking.mockClear();
-      const second = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '222 B St, Bradenton, FL 34209' });
-      expect(second.statusCode).toBe(409);
-      expect(second.body.code).toBe('SLOT_TAKEN');
+      expect(res.statusCode).toBe(422);
+      expect(res.body).toEqual({ error: 'address_unresolved' });
       expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+      // Never overwrites the now-persisted A with the supplied B.
+      expect(updateCalls.find((c) => c.table === 'customers')).toBeUndefined();
+      // Exactly ONE geocode call, the pre-lock resolution of B — nothing
+      // under the lock ever re-geocodes the fresh row.
+      expect(mockGeocode).toHaveBeenCalledTimes(1);
     });
 
-    // P1 :872 — when the location changes under the lock, the booking must
-    // use the REFRESHED slot's own technician_id/end_time (a different
-    // location can route to a different tech, or a different job-block end,
-    // for the SAME start_time) — never the original pre-lock slot's fields.
-    test('the refreshed slot at the fresh stored address has a different technician — the booking receives the refreshed one, not the original', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-      firstResults.customers = addresslessCustomer();
-      listResults.scheduled_services = [];
+    // P1 :872's rule (the booking must use the REFRESHED slot's own
+    // technician_id/end_time when the final location differs from the
+    // pre-lock one, never the original pre-lock slot's) still applies —
+    // just via the ONE remaining way `location` can differ post-phase-1
+    // now: a verified unlinked lead reusing an existing property whose own
+    // stored coordinates differ from the lead's pre-lock resolution (round
+    // 11/13), re-validated AFTER the transaction commits.
+    test('a verified lead reusing a matched profile at a different stored location books the REFRESHED slot\'s own technician, never the pre-lock one', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
-      mockGeocode.mockImplementation(async (addressStr) => {
-        if (String(addressStr).includes('222 B St')) {
-          firstResults.customers = {
-            id: 'cust-1', address_line1: '111 A St', address_line2: null,
-            city: 'Bradenton', state: 'FL', zip: '34209', latitude: LOC_A.lat, longitude: LOC_A.lng,
-          };
-          return { location: LOC_B };
-        }
-        if (String(addressStr).includes('111 A St')) return { location: LOC_A };
-        return { location: null };
-      });
-      // Same start_time (09:00) at both locations, but A's route assigns a
-      // DIFFERENT technician and a longer job block (end_time 09:45, not
-      // 09:30) than B's — the second commit supplied B; the booking must
-      // reflect A (the fresh stored address that won).
-      const slotAtB = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-B' }] }] };
-      const slotAtA = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:45', start_label: '9:00 AM', end_label: '9:45 AM', technician_id: 'tech-A' }] }] };
-      // Sequence: (1) first commit's own anti-forgery check at A; (2)
-      // second commit's pre-lock check at ITS supplied B; (3) second
-      // commit's phase-1 re-check at the fresh stored A.
+      const slotAtSupplied = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-pre' }] }] };
+      const slotAtMatched = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:45', start_label: '9:00 AM', end_label: '9:45 AM', technician_id: 'tech-matched' }] }] };
       mockBuildAvailability
-        .mockResolvedValueOnce(slotAtA)
-        .mockResolvedValueOnce(slotAtB)
-        .mockResolvedValueOnce(slotAtA);
-      firstResults.scheduled_services = { id: 'ss-872', reschedule_token: 'tok-872' };
+        .mockResolvedValueOnce(slotAtSupplied) // pre-lock anti-forgery check
+        .mockResolvedValueOnce(slotAtMatched); // post-phase-1 re-validation at the matched row's own location
+      const existingCustomer = {
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 30.0, longitude: -85.0, // far from the default mockGeocode location — matched via zip, not coords
+      };
+      mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+      listResults.scheduled_services = [];
+      firstResults.scheduled_services = { id: 'ss-refresh', reschedule_token: 'tok-refresh' };
 
       const token = mintLeadConsultationToken(LEAD_ID);
-      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '111 A St, Bradenton, FL 34209' });
-      expect(first.statusCode).toBe(200);
+      const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
 
-      mockCreateSelfBooking.mockClear();
-      const second = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '222 B St, Bradenton, FL 34209' });
-
-      expect(second.statusCode).toBe(200);
-      expect(second.body.success).toBe(true);
+      expect(res.statusCode).toBe(200);
+      expect(res.body.success).toBe(true);
       expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
       const bookingArgs = mockCreateSelfBooking.mock.calls[0][0];
-      expect(bookingArgs.technician_id).toBe('tech-A');
+      expect(bookingArgs.technician_id).toBe('tech-matched');
       expect(bookingArgs.slot_end).toBe('09:45');
-      expect(second.body.visit.window.end).toBe('09:45');
-      expect(second.body.endLabel).toBe('9:45 AM');
+      expect(res.body.visit.window.end).toBe('09:45');
+      expect(res.body.endLabel).toBe('9:45 AM');
     });
   });
 
-  // Codex pre-push P1 :858, round 6, 2026-09-24 — the fresh re-resolve under
-  // the lock can itself FAIL (geocoder error/timeout), distinct from
-  // "another commit's address won" above. Never combine coordinates from
-  // one resolution with a customer row whose stored address differs.
-  describe('address re-resolve failure under the lock (P1 :858)', () => {
+  // Round 13 (Codex pre-push P1 :845, 2026-09-24) — phase 1 no longer
+  // re-resolves a customer's address under the lock at all (that would be
+  // a geocode network call while the lock + a pooled connection are held).
+  // When the fresh row's stored-address fields are UNCHANGED from the
+  // pre-lock snapshot, the pre-lock resolution (`resolved` — already
+  // geocoded + area-checked) is reused outright, regardless of whether it
+  // came from an empty stored address or one that simply failed to
+  // geocode: either way `resolved.source !== 'customer'` and the validated
+  // resolution is written back, fixing up the missing/bad address so it
+  // isn't asked for again (this file's own header contract).
+  describe('address write-back when the stored row is unchanged under the lock (P1 :845, round 13)', () => {
     test('stored address absent: the pre-lock validated supplied address is persisted, booking proceeds at that location', async () => {
       firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
       firstResults.customers = { id: 'cust-1', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null };
       listResults.scheduled_services = [];
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       const LOC = { lat: 27.55, lng: -82.55 };
-      mockGeocode
-        .mockResolvedValueOnce({ location: LOC }) // pre-lock: supplied address resolves
-        .mockResolvedValueOnce({ location: null }); // phase-1 re-resolve: fails (timeout)
+      mockGeocode.mockResolvedValueOnce({ location: LOC }); // pre-lock: supplied address resolves
       mockBuildAvailability.mockResolvedValueOnce({
         days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
       });
@@ -977,10 +912,11 @@ describe('POST /:token commit', () => {
       expect(res.body.success).toBe(true);
       expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
       // The customer row passed to createSelfBooking carries the SAME
-      // location the slot was validated against — never left addressless
-      // while the booking proceeds at the pre-lock location.
+      // location the slot was validated against.
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(LOC.lat);
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.longitude).toBe(LOC.lng);
+      // Exactly ONE geocode call — nothing under the lock re-resolves.
+      expect(mockGeocode).toHaveBeenCalledTimes(1);
 
       const customerUpdate = updateCalls.find((c) => c.table === 'customers');
       expect(customerUpdate).toBeTruthy();
@@ -988,7 +924,7 @@ describe('POST /:token commit', () => {
       expect(customerUpdate.payload.longitude).toBe(LOC.lng);
     });
 
-    test('a DIFFERING stored address on file: recoverable address_unresolved, no booking, no customer update', async () => {
+    test('stored address present but unresolvable, unchanged under the lock: the validated supplied replacement wins and is written back, fixing up the bad stored address', async () => {
       firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
       firstResults.customers = {
         id: 'cust-1', address_line1: '999 Existing Rd', address_line2: null,
@@ -999,31 +935,44 @@ describe('POST /:token commit', () => {
       const LOC = { lat: 27.55, lng: -82.55 };
       mockGeocode
         .mockResolvedValueOnce({ location: null }) // pre-lock: stored "999 Existing Rd" fails
-        .mockResolvedValueOnce({ location: LOC })   // pre-lock: supplied replacement resolves
-        .mockResolvedValueOnce({ location: null }) // phase-1: stored fails again
-        .mockResolvedValueOnce({ location: null }); // phase-1: supplied ALSO fails this attempt (transient)
+        .mockResolvedValueOnce({ location: LOC });  // pre-lock: supplied replacement resolves
       mockBuildAvailability.mockResolvedValueOnce({
         days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
       });
+      firstResults.scheduled_services = { id: 'ss-858b', reschedule_token: 'tok-858b' };
 
       const token = mintLeadConsultationToken(LEAD_ID);
       const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '456 Replacement Ave, Bradenton, FL 34209' });
 
-      expect(res.statusCode).toBe(422);
-      expect(res.body).toEqual({ error: 'address_unresolved' });
-      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
-      expect(updateCalls.find((c) => c.table === 'customers')).toBeUndefined();
+      expect(res.statusCode).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(LOC.lat);
+      // Exactly TWO geocode calls (the stored address's own failed attempt,
+      // then the supplied replacement) — nothing under the lock re-tries
+      // either one.
+      expect(mockGeocode).toHaveBeenCalledTimes(2);
+
+      const customerUpdate = updateCalls.find((c) => c.table === 'customers');
+      expect(customerUpdate).toBeTruthy();
+      expect(customerUpdate.payload.address_line1).toBe('456 Replacement Ave');
+      expect(customerUpdate.payload.latitude).toBe(LOC.lat);
     });
   });
 
   // Codex pre-push P1 :839, round 7, 2026-09-24 — checkServiceArea used to
-  // run only ONCE, on the pre-lock location; under the lock, freshResolved
-  // could replace it with a NEW location (the customer's own stored
-  // address, unresolvable pre-lock, now resolving) that was never checked
-  // against the service area at all. finalizeBookingLocation closes this:
-  // it is now the ONLY place a location is produced, and it always runs
-  // checkServiceArea before returning success.
-  test('stored out-of-area address unresolvable pre-lock, resolvable under lock: 422 out_of_area, no booking, no customer update (P1 :839)', async () => {
+  // run only ONCE, on the pre-lock location; under the OLD lock-protected
+  // re-resolve, a fresh attempt could replace it with a NEW location that
+  // was never checked against the service area at all. Round 13 (P1 :845)
+  // closes this even more strongly than the round-7 fix did: phase 1 no
+  // longer re-resolves ANY address under the lock, so the exact race this
+  // test originally pinned — the customer's own stored address failing
+  // pre-lock, then resolving to something out-of-area on a SECOND attempt
+  // moments later, under the lock — can no longer happen at all. The
+  // pre-lock resolution (already geocoded + area-checked before the lock
+  // was ever taken) is what wins, unconditionally, once the fresh row is
+  // confirmed unchanged.
+  test('stored address unresolvable pre-lock, unchanged under the lock: the pre-lock in-area supplied resolution wins, books successfully (P1 :839, :845)', async () => {
     firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
     firstResults.customers = {
       id: 'cust-1', address_line1: '1 Rooftop Rd', address_line2: null,
@@ -1032,25 +981,26 @@ describe('POST /:token commit', () => {
     listResults.scheduled_services = [];
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
     const IN_AREA = { lat: 27.4989, lng: -82.5748 }; // Bradenton
-    const OUT_OF_AREA = { lat: 32.7555, lng: -97.3308 }; // Fort Worth, TX
     mockGeocode
-      .mockResolvedValueOnce({ location: null })       // pre-lock: stored "1 Rooftop Rd" fails to geocode
-      .mockResolvedValueOnce({ location: IN_AREA })    // pre-lock: supplied replacement resolves, in area
-      .mockResolvedValueOnce({ location: OUT_OF_AREA }); // phase-1: stored NOW resolves — out of area
-    mockCounty
-      .mockResolvedValueOnce('Manatee') // checkServiceArea for the pre-lock (supplied) location
-      .mockResolvedValueOnce('Tarrant'); // checkServiceArea for the fresh (stored) location — not served
+      .mockResolvedValueOnce({ location: null })    // pre-lock: stored "1 Rooftop Rd" fails to geocode
+      .mockResolvedValueOnce({ location: IN_AREA }); // pre-lock: supplied replacement resolves, in area
+    mockCounty.mockResolvedValueOnce('Manatee'); // checkServiceArea for the pre-lock (supplied) location — served
     mockBuildAvailability.mockResolvedValueOnce({
       days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
     });
+    firstResults.scheduled_services = { id: 'ss-839', reschedule_token: 'tok-839' };
 
     const token = mintLeadConsultationToken(LEAD_ID);
     const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
 
-    expect(res.statusCode).toBe(422);
-    expect(res.body).toEqual({ error: 'out_of_area', county: 'Tarrant' });
-    expect(mockCreateSelfBooking).not.toHaveBeenCalled();
-    expect(updateCalls.find((c) => c.table === 'customers')).toBeUndefined();
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+    // Exactly ONE county lookup — nothing under the lock re-checks the
+    // service area either.
+    expect(mockCounty).toHaveBeenCalledTimes(1);
+    const customerUpdate = updateCalls.find((c) => c.table === 'customers');
+    expect(customerUpdate.payload.latitude).toBe(IN_AREA.lat);
   });
 
   // P1 :355 — a null county (provider timeout/outage) must never silently
@@ -1332,11 +1282,34 @@ describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightenin
     expect(await matchExistingAccountProfile(db, { accountId: 'acct-1', existingCustomer: null }, { line1: '123 Palm Ave' }, null)).toBe(null);
   });
 
-  test('no address to compare → falls back to the primary/only live property', async () => {
+  test('no address to compare at all (address:null) → falls back to the primary/only live property', async () => {
     const primary = { id: 'cust-1', is_primary_profile: true, address_line1: '1 Main St' };
     listResults.customers = [primary, { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main St' }];
     const account = { accountId: 'acct-1', existingCustomer: primary };
     expect(await matchExistingAccountProfile(db, account, null, null)).toEqual(primary);
+  });
+
+  // Round 13, Codex pre-push P1, 2026-09-24 (:520): a SUPPLIED address that
+  // simply doesn't normalize to a street key (unlike no address at ALL)
+  // must never fall back to the primary profile — `address?.line1` is
+  // always populated on this path (finalizeBookingLocation only ever
+  // succeeds with a real line1), so the old `!key` check silently matched
+  // the primary profile for an un-normalizable address and dispatched the
+  // visit to the wrong property.
+  test('an address WAS supplied but streetKey yields no key → null (a new profile), never the primary-fallback', async () => {
+    const primary = { id: 'cust-1', is_primary_profile: true, address_line1: '1 Main St' };
+    listResults.customers = [primary];
+    const account = { accountId: 'acct-1', existingCustomer: primary };
+    // Punctuation-only line1 — streetKey strips every non-alphanumeric
+    // character, leaving an empty key.
+    expect(await matchExistingAccountProfile(db, account, { line1: '---', zip: '34209' }, null)).toBe(null);
+  });
+
+  test('an address with NO line1 but a truthy zip still falls back to the primary — only line1 gates the fallback', async () => {
+    const primary = { id: 'cust-1', is_primary_profile: true, address_line1: '1 Main St' };
+    listResults.customers = [primary];
+    const account = { accountId: 'acct-1', existingCustomer: primary };
+    expect(await matchExistingAccountProfile(db, account, { line1: '', zip: '34209' }, null)).toEqual(primary);
   });
 
   test('street + zip both match (streetKey, suffix-normalized) → that profile, coordinates never checked', async () => {
@@ -1531,6 +1504,75 @@ describe('structural: loadLead selects every field these functions read off the 
 
   test('first_contact_channel is present in LEAD_ROW_FIELDS — the exact column this round\'s audit found missing from production', () => {
     expect(LEAD_ROW_FIELDS).toContain('first_contact_channel');
+  });
+});
+
+// Round 13, Codex pre-push P1 :845, 2026-09-24: phase 1 holds the per-lead
+// advisory lock AND a pooled connection for its whole duration — nothing in
+// there may do network I/O (a Google geocode/county lookup,
+// buildAvailabilityForLead's own DB+weather work) or open a SECOND
+// connection (resolveEligibility's rescheduleUrlFor, hardwired to the
+// global `db`), either of which stalling while the lock is held risks
+// exhausting the connection pool against itself under load. This reads the
+// route file's own source, brace-balances phase 1's `db.transaction(async
+// (trx) => {...})` callback to isolate its exact body, and asserts none of
+// the network/second-connection call sites appear inside it — fails loudly
+// the moment a future edit reintroduces one.
+describe('structural: phase 1 never does network I/O or opens a second connection while holding the lock (P1 :845, round 13)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../routes/inspection-public.js'), 'utf8');
+
+  function phase1TransactionBody() {
+    const marker = 'db.transaction(async (trx) => {';
+    const start = source.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const openBrace = start + marker.length - 1; // the callback's own '{'
+    expect(source[openBrace]).toBe('{');
+    let depth = 0;
+    for (let i = openBrace; i < source.length; i += 1) {
+      if (source[i] === '{') depth += 1;
+      else if (source[i] === '}') {
+        depth -= 1;
+        if (depth === 0) return source.slice(openBrace, i + 1);
+      }
+    }
+    throw new Error('unbalanced braces reading phase 1\'s transaction callback');
+  }
+
+  const body = phase1TransactionBody();
+
+  test('sanity: the phase-1 body was actually captured, not an empty/truncated slice', () => {
+    expect(body).toContain('pg_advisory_xact_lock');
+    expect(body).toContain('resolveOrLinkCustomerForLead');
+    expect(body.length).toBeGreaterThan(200);
+  });
+
+  test('never calls finalizeBookingLocation / resolveServiceAddress / geocodeAddressWithStatus (Google geocode)', () => {
+    expect(body).not.toMatch(/\bfinalizeBookingLocation\(/);
+    expect(body).not.toMatch(/\bresolveServiceAddress\(/);
+    expect(body).not.toMatch(/\bgeocodeAddressWithStatus\(/);
+  });
+
+  test('never calls checkServiceArea / reverseGeocodeCounty (Google county lookup)', () => {
+    expect(body).not.toMatch(/\bcheckServiceArea\(/);
+    expect(body).not.toMatch(/\breverseGeocodeCounty\(/);
+  });
+
+  test('never calls buildAvailabilityForLead / buildBookingAvailability (global-db connection + a gated weather network call)', () => {
+    expect(body).not.toMatch(/\bbuildAvailabilityForLead\(/);
+    expect(body).not.toMatch(/\bbuildBookingAvailability\(/);
+  });
+
+  test('never references the global `db` connection — every read/write in here is trx-scoped', () => {
+    // Bare `db(` or `db.`, never part of another identifier (dbConn,
+    // freshCustRow, etc.) and never `trx(`/`trx.`.
+    expect(body).not.toMatch(/(?<![A-Za-z0-9_.])db\s*[(.]/);
+  });
+
+  test('never calls rescheduleUrlFor / buildRescheduleLink directly — resolveEligibility is given includeRescheduleUrl:false instead', () => {
+    expect(body).not.toMatch(/\brescheduleUrlFor\(/);
+    expect(body).not.toMatch(/\bbuildRescheduleLink\(/);
   });
 });
 
