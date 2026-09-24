@@ -2092,3 +2092,42 @@ describe('appointmentDiscountChangedAgainst — freshness against a given row re
     expect(source).toMatch(/appointmentDiscountChanged = financialPlan\.appointmentDiscountChanged;/);
   });
 });
+
+// Follow-up to #4657 (owner-approved 2026-09-24): a generic row-version CAS
+// beneath the field comparators. The planner records the Postgres xmin of
+// the visit row and each add-on row it read; the route re-reads them under
+// the lock and refuses ANY change — a column no comparator lists included.
+describe('rowVersionsDrifted — generic row-version CAS beneath the field comparators (follow-up to #4657)', () => {
+  const { rowVersionsDrifted, rowVersionsFor } = require('../routes/admin-schedule')._test;
+  const parentRow = { id: 'visit-1', estimated_price: 160, row_version: '1001' };
+  const addonRows = [{ id: 'addon-1', row_version: '2001' }, { id: 'addon-2', row_version: '2002' }];
+  const snapshot = { parent: { estimated_price: 160 }, addons: [], versions: rowVersionsFor(parentRow, addonRows) };
+
+  test('rowVersionsFor records the parent xmin and every add-on xmin keyed by row id, as strings', () => {
+    expect(snapshot.versions).toEqual({ parent: '1001', addons: { 'addon-1': '2001', 'addon-2': '2002' } });
+  });
+  test('identical versions under the lock: no drift', () => {
+    expect(rowVersionsDrifted(snapshot, { parent: { row_version: '1001' }, addons: addonRows })).toBe(false);
+  });
+  test('the parent row was written by anyone, on any column: drift', () => {
+    expect(rowVersionsDrifted(snapshot, { parent: { row_version: '1005' }, addons: addonRows })).toBe(true);
+  });
+  test('one add-on row was written: drift; a missing add-on row: drift', () => {
+    expect(rowVersionsDrifted(snapshot, { parent: { row_version: '1001' }, addons: [addonRows[0], { id: 'addon-2', row_version: '2999' }] })).toBe(true);
+    expect(rowVersionsDrifted(snapshot, { parent: { row_version: '1001' }, addons: [addonRows[0]] })).toBe(true);
+  });
+  test('a parent whose locked re-read carries no version (row gone): drift', () => {
+    expect(rowVersionsDrifted(snapshot, { parent: null, addons: addonRows })).toBe(true);
+  });
+  test('numeric vs string xmin compare by value', () => {
+    expect(rowVersionsDrifted(snapshot, { parent: { row_version: 1001 }, addons: [{ id: 'addon-1', row_version: 2001 }, { id: 'addon-2', row_version: 2002 }] })).toBe(false);
+  });
+  test('no recorded versions (a mock connection with no raw(), or no snapshot at all): the check is skipped, never a false 409', () => {
+    expect(rowVersionsDrifted({ parent: {}, addons: [], versions: rowVersionsFor({ id: 'v' }, [{ id: 'a' }]) }, { parent: { row_version: '9' }, addons: [] })).toBe(false);
+    expect(rowVersionsDrifted({ parent: {}, addons: [] }, { parent: { row_version: '9' }, addons: [] })).toBe(false);
+    expect(rowVersionsDrifted(null, { parent: { row_version: '9' }, addons: [] })).toBe(false);
+  });
+  test('a concurrently ADDED add-on row the plan never saw is not this check\'s job (financialStateDrifted covers it) — recorded rows only', () => {
+    expect(rowVersionsDrifted(snapshot, { parent: { row_version: '1001' }, addons: [...addonRows, { id: 'addon-3', row_version: '3001' }] })).toBe(false);
+  });
+});
