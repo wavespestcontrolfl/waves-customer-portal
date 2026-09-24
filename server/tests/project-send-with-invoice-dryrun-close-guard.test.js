@@ -83,6 +83,30 @@ describe('r1-projects-docs-4: Close billing guard vs an unsent draft', () => {
     expect(result.resolved).toBe(true);
     expect(result.reason).toBe('invoice_exists');
   });
+
+  // Codex round-2 P1: a manually created, visit-linked draft can be paid by
+  // ACH through its own returned pay URL with NO email/SMS send at all — so
+  // sent_at/sms_sent_at is never stamped — and its status moves straight
+  // from 'draft' to 'processing'. resolveOrCreateProjectInvoice's own
+  // already-billed re-checks (admin-projects.js) already treat 'processing'
+  // as billed ("paid OR in-flight ... settled or settling"); the closeout
+  // guard must not classify money already in flight as an unsent draft and
+  // block Close for days while the ACH payment clears.
+  test('a processing invoice (ACH in flight, no sent_at) still counts as billing resolved', async () => {
+    const { resolveProjectCompletionBilling } = require('../services/project-completion');
+    const result = await resolveProjectCompletionBilling({
+      scheduledService: { id: 'ss-1', customer_id: 'cust-1', estimated_price: '175.00' },
+      customer: {},
+      project: { id: 'proj-1', project_type: 'termite_treatment' },
+      knex: knexWithInvoice({
+        id: 'inv-processing-1', status: 'processing', invoice_number: 'WPC-2026-9996', total: '175.00',
+        sent_at: null, sms_sent_at: null,
+      }),
+    });
+    expect(result.required).toBe(true);
+    expect(result.resolved).toBe(true);
+    expect(result.reason).toBe('invoice_exists');
+  });
 });
 
 describe('r1-projects-docs-4: non-WDO dry_run must not mint a real invoice', () => {

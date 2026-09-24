@@ -33,13 +33,25 @@ const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_s
 // closeout-status.js's canonical INVOICE_DELIVERED_STATUSES vocabulary
 // (imported above) instead of a second, driftable copy — that set already
 // includes 'partially_paid' (a customer who received and paid part of the
-// invoice was clearly shown it) — and, like that module, a stamped
-// sent_at/sms_sent_at OUTRANKS the status check: a 'processing' invoice
-// (ACH mid-flight) was necessarily sent first, and its status no longer
-// says 'sent' once the customer starts paying it.
+// invoice was clearly shown it) — and a stamped sent_at/sms_sent_at also
+// counts, matching that module's own invoiceDelivery fact.
 function invoiceCountsAsDelivered(invoice) {
   return !!(invoice.sent_at || invoice.sms_sent_at || INVOICE_DELIVERED_STATUSES.has(String(invoice.status)));
 }
+
+// Codex round-2 P1: 'processing' is deliberately NOT in the customer-
+// delivery vocabulary above (a manually created, visit-linked draft can be
+// paid by ACH via its own returned pay URL — no email/SMS send at all, so
+// sent_at/sms_sent_at is never stamped — and its status moves straight
+// from 'draft' to 'processing'). But money already in flight is not an
+// "unsent draft" either: resolveOrCreateProjectInvoice's own already-
+// billed / locked-billed re-checks (admin-projects.js :2899, :3072,
+// `.whereIn('status', ['paid', 'processing'])`) already treat a
+// 'processing' invoice as billed for this exact reason ("paid OR
+// in-flight ('processing', ACH) ... means the work is settled or
+// settling"). Mirror that vocabulary here so a for-real ACH payment does
+// not block closeout for days while it clears.
+const MONEY_IN_FLIGHT_INVOICE_STATUSES = new Set(['processing']);
 
 function normalizeDateOnly(value) {
   if (!value) return null;
@@ -271,7 +283,8 @@ async function resolveProjectCompletionBilling({
     // statement instead (invoice.js stamps payer_statement_id at create
     // time, before any send). That is a resolved billing state, not an
     // unsent draft nobody chose to send.
-    if (invoiceCountsAsDelivered(invoice) || invoice.payer_statement_id) {
+    if (invoiceCountsAsDelivered(invoice) || invoice.payer_statement_id
+      || MONEY_IN_FLIGHT_INVOICE_STATUSES.has(String(invoice.status))) {
       return {
         required: true,
         resolved: true,
