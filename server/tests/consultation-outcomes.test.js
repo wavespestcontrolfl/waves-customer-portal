@@ -1793,6 +1793,21 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
     expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'cold', won_via: null, won_at: null });
   });
 
+  test('local audit P1: a win whose booking now belongs to ANOTHER customer is reopened', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-other' },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.reopened).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'warm', won_evidence_booking_id: null });
+  });
+
   test('a live evidence booking, or a win with no recorded evidence, is left won', async () => {
     const fakeDb = install({
       scheduled_services: [

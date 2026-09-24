@@ -1199,9 +1199,13 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
           .first(
             'id', 'service_type', 'service_id', 'status', 'source_action', 'customer_confirmed',
             'is_callback', 'recurring_parent_id', 'followup_included', 'estimated_price',
-            'annual_prepay_term_id', 'is_recurring', 'create_invoice_on_complete',
+            'annual_prepay_term_id', 'is_recurring', 'create_invoice_on_complete', 'customer_id',
           );
-        if (evidenceBooking && isQualifyingSaleBooking(evidenceBooking)
+        // ...and still THIS consultation's customer's (local audit P1): a
+        // booking moved to another customer (e.g. a merge reverted) is no
+        // longer this consultation's sale.
+        const stillOwned = evidenceBooking && String(evidenceBooking.customer_id || '') === String(row.customer_id || '');
+        if (evidenceBooking && stillOwned && isQualifyingSaleBooking(evidenceBooking)
           && !(await isAssessmentBooking(evidenceBooking, locked))) {
           await locked('consultation_outcomes').where({ id: row.id }).update({ last_reconciled_at: now });
           return 0;
