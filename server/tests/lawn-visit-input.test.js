@@ -166,3 +166,11 @@ describe('pairBeforeAfterPhotos', () => {
     expect(pairBeforeAfterPhotos([p('b', 'front')], [p('a', 'back')])).toEqual({ before: p('b', 'front'), after: null });
   });
 });
+
+// Customer-facing slot labels (V2 photo strip, Codex #4768): never the raw
+// stored value.
+test('photoZoneLabel turns stored zones into customer wording', () => {
+  const { photoZoneLabel } = require('../services/lawn-visit-input');
+  expect(['front', 'close_up', 'trouble', 'back', 'side', null, 'garage'].map(photoZoneLabel))
+    .toEqual(['Front yard', 'Close-up', 'Trouble spot', 'Back yard', 'Side yard', null, null]);
+});

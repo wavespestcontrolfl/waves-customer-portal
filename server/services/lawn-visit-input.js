@@ -246,6 +246,16 @@ function photoTypeForZone(zone) {
   return PHOTO_TYPE_BY_ZONE[zone] || 'general';
 }
 
+// Customer-facing label for a stored photo zone (current slots plus the
+// retired back/side values), matching the legacy report's wording.
+const PHOTO_ZONE_LABELS = Object.freeze({
+  front: 'Front yard', close_up: 'Close-up', trouble: 'Trouble spot', back: 'Back yard', side: 'Side yard',
+});
+function photoZoneLabel(zone) {
+  const key = String(zone || '').trim().toLowerCase();
+  return key ? (PHOTO_ZONE_LABELS[key] || null) : null;
+}
+
 // Before/after photo pair for the progress slider (report + customer portal).
 // Candidates arrive best-first. Only a same-spot zone pairs: 'front', plus
 // legacy 'back'/'side' rows from before the 2026-09-24 rename. 'close_up' and
@@ -328,5 +338,5 @@ function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) 
 }
 
 module.exports = {
-  GATE, PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, PROMPT_DIGEST, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
+  GATE, PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, PROMPT_DIGEST, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
 };
