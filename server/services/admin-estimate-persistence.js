@@ -2214,8 +2214,18 @@ async function createOrReuseAdminEstimate({
           {
             const reuseData = parseStoredEstimateData(writeFields.estimate_data) || {};
             const lockedReuseData = parseStoredEstimateData(existingEstimate.estimate_data) || {};
+            const reusePremiseChanged = premiseChanged(existingEstimate.address, writeFields.address);
+            // A premise CORRECTION of a flagged draft is a revision's job:
+            // only reviseAdminEstimate owns the guarded lead / customer /
+            // property fan-out that moves the rejected on-file premise with
+            // it (pre-push audit P1 after r45). Reuse refuses it with the
+            // path to take; a same-premise reuse or an explicit confirmation
+            // proceeds.
+            if (reusePremiseChanged && (lockedReuseData.addressUnverified === true || lockedReuseData.addressUnverifiedFlag)) {
+              throw errorWithStatus('This lead\'s draft carries a county address warning — correct its address by editing the saved estimate (Revise), which moves the lead and customer records with it. Nothing was saved.', 409);
+            }
             carryAddressBlockAcrossRevise(reuseData, lockedReuseData, {
-              addressChanged: premiseChanged(existingEstimate.address, writeFields.address),
+              addressChanged: false,
               explicitConfirm: body?.confirmAddress === true,
             });
             // The helper's return also reports a COPIED hold; the lead

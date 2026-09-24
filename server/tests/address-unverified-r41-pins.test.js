@@ -158,7 +158,7 @@ describe('codex r44', () => {
     const claim = ext.slice(ext.indexOf('const deliveryClaimToken = '), ext.indexOf('let smsResult = '));
     expect(claim).toContain("COALESCE(disposition, '') <> 'expired_unsent'");
     const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
-    expect(ppl).toContain('const evidenceAt = auditEvidenceAt(result) || null;');
+    expect(ppl).toContain('const evidenceAt = auditEvidenceAt(result) || result?.meta?.timestamp || null;');
     expect(ppl).not.toContain("const evidenceAt = result?.meta?.cache === 'hit' ? auditEvidenceAt(result) : null;");
   });
   test('one shared contact-pair verdict read and precedence decision', () => {
@@ -244,7 +244,11 @@ describe('pre-push audit after r45: linked-draft reuse keeps the county hold', (
     const start = src.indexOf('async function createOrReuseAdminEstimate(');
     const block = src.slice(start, src.indexOf("throw errorWithStatus('Estimate draft changed; refresh and try again.', 409);", start));
     expect(block).toContain('carryAddressBlockAcrossRevise(reuseData, lockedReuseData, {');
-    expect(block).toContain('addressChanged: premiseChanged(existingEstimate.address, writeFields.address),');
+    expect(block).toContain('const reusePremiseChanged = premiseChanged(existingEstimate.address, writeFields.address);');
+    expect(block).toContain("if (reusePremiseChanged && (lockedReuseData.addressUnverified === true || lockedReuseData.addressUnverifiedFlag)) {");
+    expect(block).toContain('addressChanged: false,');
+    const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
+    expect(ppl).toContain('const evidenceAt = auditEvidenceAt(result) || result?.meta?.timestamp || null;');
     expect(block).toContain("explicitConfirm: body?.confirmAddress === true,");
     expect(block.indexOf('writeFields.estimate_data = JSON.stringify(reuseData);')).toBeLessThan(block.indexOf("const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };"));
     // The contact-pair lock opens the transaction, ahead of the group locks;

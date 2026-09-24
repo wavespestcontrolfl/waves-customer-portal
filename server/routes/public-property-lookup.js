@@ -597,7 +597,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
                 // audit P1 after r45): with overlapping lookups a clean audit
                 // obtained BEFORE a rejection could otherwise persist later
                 // with the write's timestamp and falsely supersede it.
-                const evidenceAt = auditEvidenceAt(result) || null;
+                // A live county_record match carries no audit stamp — its
+                // profile timestamp is the evidence time, the same fallback
+                // the locked reconciliation uses (pre-push audit P1 after r45).
+                const evidenceAt = auditEvidenceAt(result) || result?.meta?.timestamp || null;
                 if (verdict.status === 'clean' && evidenceAt) verdict.at = evidenceAt;
                 // An UNANSWERED lookup (a county outage) that reattached to a
                 // lead the reconciliation found clean for this premise must
