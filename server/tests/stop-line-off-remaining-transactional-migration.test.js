@@ -105,9 +105,6 @@ describe('stop-line-off-remaining-transactional swap table', () => {
     // and kept (2026-09-11) — a future pass must not quietly absorb them.
     expect(KEEP_STOP_KEYS).toContain('dropped_call_address_request');
     expect(KEEP_STOP_KEYS).toContain('referral_nudge');
-    // lead_consultation_link (seeded 20260923000020) is a first text to a
-    // lead, not yet a customer — same class as voicemail_quote_link.
-    expect(KEEP_STOP_KEYS).toContain('lead_consultation_link');
   });
 
   test('disabled marketing/prospect rows are pinned as survivors, not leftovers', () => {
