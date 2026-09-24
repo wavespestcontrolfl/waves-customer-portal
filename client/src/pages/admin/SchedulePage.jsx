@@ -9821,6 +9821,17 @@ function parseAssessmentScores(row = {}) {
 // including that stress_damage is read raw, never parseAssessmentScores's
 // derived worst-of-fungus/thatch guess, which could already be non-null
 // while the server still considers Stress unknown.
+// Locked metrics always show the AI's own read. A row adjusted before the
+// read-only ruling can still carry an old technician value in its columns;
+// only AI-blank metrics keep the saved technician fill.
+function withAiScores(scores, aiScores) {
+  const out = { ...(scores || {}) };
+  for (const [key, value] of Object.entries(aiScores || {})) {
+    if (lawnScores.lawnScoreValue(value) != null) out[key] = value;
+  }
+  return out;
+}
+
 function resolveAiScores(assessment = {}, visitAssessment) {
   if (visitAssessment?.aiScores) return visitAssessment.aiScores;
   const raw = (a, b) => lawnScores.lawnScoreValue(assessment[a] ?? assessment[b]);
@@ -9971,7 +9982,7 @@ function LawnAssessmentCompletionBlock({
           aiScores: resolveAiScores(assessment, data.visitAssessment),
           observations: assessment.observations || "",
         });
-        setTechScores(scores);
+        setTechScores(withAiScores(scores, resolveAiScores(assessment, data.visitAssessment)));
         setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
         if (assessment.confirmed_by_tech) {
           setConfirmedId(assessment.id);
@@ -10098,6 +10109,8 @@ function LawnAssessmentCompletionBlock({
         assessment: savedAssessment || prev.assessment,
         visitAssessment: visitAssessment ?? prev.visitAssessment,
       }));
+      // Show what the server actually saved.
+      if (savedAssessment) setTechScores(withAiScores(parseAssessmentScores(savedAssessment), result.aiScores));
       if (visitAssessment) {
         setVisitReview(createVisitReview(visitAssessment, savedAssessment?.observations));
       }

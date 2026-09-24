@@ -131,6 +131,23 @@ it('keeps a technician-filled AI-blank metric editable after reload, without reo
   expect(sent.adjustedScores.thatch_level).toBe(85);
 });
 
+it('shows and posts the AI read for a locked metric even when the row carries an older technician adjustment', async () => {
+  // Adjusted to 40 under the old +/- buttons before the read-only ruling;
+  // the immutable AI read is 80, and that is what the server will save.
+  loadedAssessment = { ...assessment, turf_density: 40 };
+  visitAssessment = {
+    runId: 'fixture-run', status: 'complete',
+    aiScores: { turf_density: 80, weed_suppression: 80, color_health: null, fungus_control: 85, thatch_level: 85, stress_damage: 85 },
+  };
+  render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+  await screen.findByRole('button', { name: 'Confirm assessment' });
+  expect(screen.queryByText('40/100')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith('lawn-assessment/confirm'))).toBe(true));
+  const sent = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
+  expect(sent.adjustedScores.turf_density).toBe(80);
+});
+
 it.each([null, 0])('preserves an unavailable or genuinely zero score when reloading and posting: %s', async (value) => {
   const expected = Object.fromEntries(Object.keys(scores).map((key) => [key, value]));
   loadedAssessment = { ...assessment, ...expected };
