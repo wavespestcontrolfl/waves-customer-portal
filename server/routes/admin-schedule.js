@@ -3722,22 +3722,12 @@ async function coveringTermForDate(conn, termIds, coverageDate) {
 // statement leaves a PostgreSQL transaction aborted (25P02) even when
 // JavaScript catches it, so a lookup outside the savepoint would poison the
 // caller and roll back the visit that was just inserted.
-// `extraTermIds`: additional candidate term ids beyond what seriesTermIds'
-// own link discovery finds — for topUpRecurringSeriesLocked's
-// customer-wide, service-matched scan (resolveTopUpTermCap), which can
-// discover a PAID term with no scheduled_services row stamped yet (bought
-// ahead of its first linked visit). Without this, that term correctly capped
-// the top-up's horizon but the newly inserted visit itself never got
-// stamped — annualPrepayCoversVisit requires an explicit stamp, so an
-// invoice-on-complete customer would be billed again for prepaid work
-// (Codex pre-push P0). seriesTermIds already dedupes, so re-passing an
-// already-linked id here is a harmless no-op.
-async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null, extraTermIds = []) {
+async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null) {
   const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
   let resolvedTerm = null;
   const run = async (c) => {
     const termIds = await seriesTermIds(
-      c, parent?.id, svc?.annual_prepay_term_id, parent?.annual_prepay_term_id, ...extraTermIds,
+      c, parent?.id, svc?.annual_prepay_term_id, parent?.annual_prepay_term_id,
     );
     const term = await coveringTermForDate(c, termIds, coverageDate);
     if (!term) return;
@@ -14748,11 +14738,7 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // string), when set, refuses any candidate past it instead of inserting —
 // topUp's horizon/annual-prepay-term_end cap; omitted (the completion path)
 // the search is unbounded except by the existing 12-cadence-step attempt
-// budget, byte-identical to before this extraction. `opts.extraTermIds`
-// (array) feeds applyExtensionPrepayCoverage additional candidate term ids
-// beyond svcLike/parent's own stamped column — topUp's discovered-but-
-// not-yet-linked customer term (see resolveTopUpTermCap); omitted, coverage
-// discovery is byte-identical to before this extraction. `opts.checkUnbillable`
+// budget, byte-identical to before this extraction. `opts.checkUnbillable`
 // (bool), when true, refuses (never inserts) a candidate the shared
 // seriesExtensionUnbillable verdict rejects — topUp's OFFICE-writer-class
 // billable-amount gate, checked against this ACTUAL candidate date; omitted
@@ -14764,13 +14750,33 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // rows from a legacy template (AGENTS.md: windows start on the hour); a
 // windowless template is untouched either way. Omitted (the completion
 // path), the window is copied verbatim, byte-identical to before this
-// extraction. `opts.checkStrictPrepayCoverage` (bool), when true, re-reads
-// the inserted row after coverage runs and deletes it (stopping this call)
-// if the canonical annualPrepayCoversVisit authority doesn't see it as
-// covered — topUp's guard against a term running out of coverage_visit_count
-// silently minting an uncovered row (applyExtensionPrepayCoverage itself
-// fails soft by design). Omitted (the completion path), an uncovered
-// extension is left standing, byte-identical to before this extraction.
+// extraction. Top-up v1 excludes every annual-prepay series outright
+// (topupSeriesSkipReason, below) rather than reproducing the coverage
+// authority's own term-selection logic a second time — the existing
+// activation-time seeder (ensureCoverageRowsForTerm) already keeps a
+// prepay customer's covered rows booked; see the module header for the
+// scope-cut rationale.
+// Pure (no DB) off-hour window floor for the top-up path — shared by
+// topUpRecurringSeriesLocked's upfront per-series check and
+// extendSeriesOnceLocked's own per-insert normalization, so the exact same
+// arithmetic decides both "should this series even be attempted" and "what
+// window does the insert actually use." Returns null when nothing needs
+// normalizing (a windowless template, or a start already on the hour) — the
+// caller keeps its existing window fields. Returns
+// `{ unplaceable: true }` (Codex GitHub r3 P2) when flooring the start would
+// push the duration-derived end to or past 24:00 — never build an
+// out-of-range "24:15" time; the caller skips instead.
+function normalizeTopUpWindow(windowStart, durationMinutes) {
+  if (!windowStart) return null;
+  const startMin = parseHHMM(windowStart);
+  if (startMin == null || startMin % 60 === 0) return null;
+  const flooredMin = startMin - (startMin % 60);
+  const durationMin = Number.parseInt(durationMinutes, 10);
+  const endMin = flooredMin + (Number.isInteger(durationMin) && durationMin > 0 ? durationMin : 60);
+  if (endMin >= 24 * 60) return { unplaceable: true };
+  return { start: minutesToHHMM(flooredMin), end: minutesToHHMM(endMin) };
+}
+
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
@@ -14812,13 +14818,20 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // real conflict slip past the probe (Codex GitHub r2 P1).
     let nextWindowStart = parent.window_start;
     let nextWindowEnd = parent.window_end;
-    if (opts.normalizeOffHourStart && nextWindowStart) {
-      const startMin = parseHHMM(nextWindowStart);
-      if (startMin != null && startMin % 60 !== 0) {
-        const flooredMin = startMin - (startMin % 60);
-        const durationMin = Number.parseInt(parent.estimated_duration_minutes, 10);
-        nextWindowStart = minutesToHHMM(flooredMin);
-        nextWindowEnd = minutesToHHMM(flooredMin + (Number.isInteger(durationMin) && durationMin > 0 ? durationMin : 60));
+    if (opts.normalizeOffHourStart) {
+      const normalized = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes);
+      if (normalized) {
+        if (normalized.unplaceable) {
+          // topUpRecurringSeriesLocked already skips the series upfront on
+          // this exact condition (skipped: 'window_unplaceable') — reached
+          // here only in defense-in-depth (a direct extendSeriesOnceLocked
+          // caller). Never build an out-of-range "24:15" time; refuse
+          // rather than insert.
+          logger.warn(`[recurring-topup] parent=${parentId} window_start ${parent.window_start} + duration would push past 24:00 — refusing to insert`);
+          return spawnedVisit;
+        }
+        nextWindowStart = normalized.start;
+        nextWindowEnd = normalized.end;
         logger.warn(`[recurring-topup] parent=${parentId} window_start ${parent.window_start} is off-hour — flooring to ${nextWindowStart} for this top-up insert`);
       }
     }
@@ -14993,47 +15006,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // The transient completion-race bell is quiet (this fires per
       // generated visit and reconciliation settles that case); the
       // cancelled-paid-slot bell still rings — nothing re-seeds it.
-      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr, opts.extraTermIds || []);
-      // opts.checkStrictPrepayCoverage (topUp only, when a term genuinely
-      // applies to this series — never set by the completion path, which
-      // keeps its existing fail-soft posture): applyExtensionPrepayCoverage
-      // above fails SOFT by design (a completion must never be blocked by a
-      // coverage-application hiccup) and applyPrepaidCoverageForTerm itself
-      // leaves a row unstamped once coverage_visit_count is exhausted —
-      // either way, an unattended top-up run must never leave an inserted
-      // row silently uncovered and get billed again at completion (Codex
-      // GitHub r2 P1). Re-read the row and consult the SAME canonical
-      // coverage authority every completion-billing check uses
-      // (annualPrepayCoversVisit — requires the explicit stamp AND the
-      // term's paid coverage still live); if it isn't covered, delete the
-      // row (it has no add-on mirror or reminder yet at this point — both
-      // happen further below) and stop this series for the run rather than
-      // leaving an unbillable-looking gap in the ledger.
-      if (opts.checkStrictPrepayCoverage && autoExtRow?.id) {
-        const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
-        let covered = false;
-        let verificationError = null;
-        try {
-          const freshExtRow = await conn('scheduled_services').where({ id: autoExtRow.id }).first();
-          covered = !!freshExtRow && await annualPrepayCoversVisit(freshExtRow, conn);
-        } catch (e) {
-          // Fail CLOSED, same convention as resolveTopUpTermCap's own lookup
-          // failure: an unverifiable stamp (a transient read error, not a
-          // confirmed "not covered") is never optimistically treated as
-          // fine — a bad row is recoverable next run, a silent double-bill
-          // is not.
-          verificationError = e;
-        }
-        if (!covered) {
-          await conn('scheduled_services').where({ id: autoExtRow.id, status: 'pending' }).del();
-          if (verificationError) {
-            logger.warn(`[recurring-topup] parent=${parentId} — coverage verification for ${nextStr} failed (${verificationError.message}); rolled back and stopping this series for the run`);
-          } else {
-            logger.warn(`[recurring-topup] parent=${parentId} — ${nextStr} would be uncovered under an applicable annual-prepay term (coverage_visit_count likely exhausted); rolled back and stopping this series for the run`);
-          }
-          return spawnedVisit;
-        }
-      }
+      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr);
       // Post-insert re-check closes the remaining race: a
       // cancellation can stop the series between the pre-insert
       // read above and this insert. The row hasn't been mirrored,
@@ -15138,104 +15111,6 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
   return spawnedVisit;
 }
 
-// Annual-prepay cap for the nightly top-up: the widest still-paid term_end
-// among every term this series' rows carry (seriesTermIds' link discovery)
-// UNION every term the customer holds directly (a term bought ahead of its
-// first linked visit, or one no scheduled_services row has been stamped
-// with yet). coveredTermsAsOf(conn, null) is the existing "still validly
-// paid" authority (annual-prepay-renewals.js) with no date-window filter, so
-// a term whose window has technically lapsed but hasn't been decided
-// (renewed/lapsed) yet still counts — never book past it speculatively.
-// Excludes any row whose term_end already fell in the past (Codex pre-push
-// P1): coveredTermsAsOf(conn, null) also returns DECIDED historical
-// coverage with no date floor — a customer who switched off annual prepay
-// (status switch_plan) or rode out a declined renewal (cancelled +
-// renewal_decision=cancel) keeps that OLD, already-ended term_end in the
-// result forever. Without this filter that stale date would cap every
-// future top-up run permanently, even though the customer's TODAY-active
-// billing has nothing to do with that closed term. A term whose window is
-// still open (including a declined-renewal term riding out its already-paid
-// remainder) keeps capping normally. Multiple valid terms (a renewal chain)
-// take the LATEST term_end: an older row's own end already reflects any
-// renewal that in fact extended it. Fails CLOSED (never returns a cap that
-// turns out to be wrong): a lookup error reports `failed: true` and the
-// caller skips the series for this run rather than guessing "no cap" and
-// risking a visit that bills per-visit against a still-active prepay term.
-async function resolveTopUpTermCap(conn, parent, parentId, cols) {
-  if (!cols.annual_prepay_term_id) return { cap: null, failed: false, extraTermIds: [] };
-  try {
-    const linkedIds = await seriesTermIds(conn, parentId, parent?.annual_prepay_term_id);
-    const { serviceMatchesCoverage, coveredTermsAsOf } = require('../services/annual-prepay-renewals');
-    // Customer-wide scan (a term bought/paid ahead of its first linked
-    // visit, or one no scheduled_services row has been stamped with yet)
-    // MUST be scoped to THIS series' own service — a customer can hold
-    // separate annual-prepay terms for different services (pest vs. lawn,
-    // etc.), and an unscoped scan let an unrelated term's term_end either
-    // extend this series past its OWN real paid window or freeze it on an
-    // unrelated service's overdue renewal (Codex pre-push P1). `linkedIds`
-    // needs no such filter — a term explicitly stamped on one of THIS
-    // series' own rows is trusted regardless of coverage_service_type.
-    // Uses the SAME matcher every other coverage consumer uses
-    // (serviceMatchesCoverage + term.coverage_service_type) so this can
-    // never disagree with what actually gets stamped as covered.
-    const customerTerms = await conn('annual_prepay_terms')
-      .where({ customer_id: parent.customer_id })
-      .select('id', 'coverage_service_type');
-    // Not a child-insert payload — a throwaway shape for the matcher, which
-    // only ever reads `.service_type` off whatever row it's handed (see
-    // series-child-catalog-identity.test.js's source guard, which bans a
-    // child row inheriting the parent's service name field verbatim instead
-    // of resolving the current catalog identity; this reads the PARENT's own
-    // field for a term-service comparison and inserts nothing).
-    const parentServiceType = parent.service_type;
-    const scopedCustomerIds = customerTerms
-      .filter((t) => serviceMatchesCoverage({ service_type: parentServiceType }, t.coverage_service_type))
-      .map((t) => t.id);
-    const allIds = [...new Set([...linkedIds, ...scopedCustomerIds].map(String))];
-    if (!allIds.length) return { cap: null, failed: false, extraTermIds: [] };
-    const rows = await coveredTermsAsOf(conn, null).whereIn('t.id', allIds)
-      .select('t.term_end', 't.status', 't.renewal_decision');
-    const todayStr = etDateString();
-    // Only drop a term once it is BOTH decided AND its own window has
-    // closed. "Decided" = renewed (superseded by a new term, which — if it
-    // exists — is a separate row in this same set with its own later end)
-    // or switch_plan (the customer left annual prepay outright), or a
-    // declined-renewal lapse (cancelled + renewal_decision=cancel) whose
-    // paid remainder has fully run out. An undecided term (active,
-    // renewal_pending, payment_pending, or a lapse still riding out its
-    // window) keeps capping even past its own term_end — the outcome isn't
-    // settled yet, so booking speculatively past it is exactly the mistake
-    // this cap exists to prevent (Codex pre-push P1: an unconditional
-    // "drop every expired row" filter let an overdue-but-undecided renewal
-    // book a full uncapped horizon).
-    const DECIDED_CLOSED_STATUSES = new Set(['renewed', 'switch_plan']);
-    const ends = rows
-      .map((r) => ({ end: dateOnly(r.term_end), status: String(r.status || '').toLowerCase(), decision: String(r.renewal_decision || '').toLowerCase() }))
-      .filter((r) => {
-        if (!r.end) return false;
-        const decidedLapse = r.status === 'cancelled' && r.decision === 'cancel';
-        const decidedClosed = DECIDED_CLOSED_STATUSES.has(r.status) || decidedLapse;
-        return !decidedClosed || r.end >= todayStr;
-      })
-      .map((r) => r.end)
-      .sort();
-    // extraTermIds: every service-matched, customer-held candidate — fed
-    // through to extendSeriesOnceLocked's applyExtensionPrepayCoverage call
-    // (opts.extraTermIds) so a term this scan discovers (no scheduled_
-    // services row stamped yet) doesn't just cap the horizon but ALSO gets
-    // the newly inserted visit properly stamped as covered (Codex pre-push
-    // P0: capping without stamping left the new visit looking uncovered,
-    // billing prepaid work again on invoice-on-complete). coveringTermForDate
-    // still requires the candidate's own window to contain the visit's
-    // date, so passing every candidate (not just the one that produced the
-    // cap) is harmless — an out-of-window id simply never matches there.
-    return { cap: ends.length ? ends[ends.length - 1] : null, failed: false, extraTermIds: scopedCustomerIds };
-  } catch (e) {
-    logger.warn(`[recurring-topup] term cap lookup failed for parent=${parentId}: ${e.message}`);
-    return { cap: null, failed: true, extraTermIds: [] };
-  }
-}
-
 // Nightly top-up horizon fill: keeps an ONGOING recurring plan booked out to
 // `horizonDays` (default 365 — RECURRING_TOPUP_HORIZON_DAYS) by repeatedly
 // calling extendSeriesOnceLocked, the SAME candidate-search/insert/prepay/
@@ -15259,7 +15134,13 @@ async function resolveTopUpTermCap(conn, parent, parentId, cols) {
 // 'autopay_final_failure' — see TOPUP_CUSTOMER_INELIGIBILITY_RULES),
 // active !== false, and a pipeline_stage outside FORMER_CUSTOMER_STAGES
 // (customer-stages.js — the one churned/former vocabulary every KPI/
-// eligibility surface shares).
+// eligibility surface shares) — read with FOR UPDATE, the same row lock
+// PUT /:id/stage takes, so a concurrent stage save serializes against this
+// run instead of racing it. The series itself must not touch annual prepay
+// at all (topupSeriesSkipReason/isAnnualPrepaySeries — v1 scope cut, see
+// that function's own comment) and its window_start, once floored to the
+// hour, must not push its duration-derived end past 24:00
+// (normalizeTopUpWindow — 'window_unplaceable').
 //
 // Hard-capped at TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN inserts per call — a
 // runaway pattern or a horizon misconfiguration can never seed an unbounded
@@ -15296,6 +15177,68 @@ function topupCustomerSkipReason(customer) {
   return hit ? hit[0] : null;
 }
 
+// Top-up v1 scope cut (Codex GitHub rounds 2-3): the customer-wide,
+// service-matched annual-prepay term_end cap this lane originally shipped
+// with kept landing findings on a fresh site every round — structural, not
+// a one-off bug (deciding whether an unrelated service's term applies to
+// THIS series, re-selecting which term "wins" a renewal chain, keeping a
+// newly-inserted row's coverage stamp in sync with a second allocator).
+// A prepay customer's covered rows are already seeded at term activation
+// (ensureCoverageRowsForTerm, annual-prepay-renewals.js) — that's the ONE
+// authority for prepay coverage — so v1 simply never touches an
+// annual-prepay series rather than reproducing its term-selection logic a
+// second time here. Deliberately NOT scoped by service (unlike the removed
+// term-cap's scan): v1 excludes the customer's WHOLE prepay footprint,
+// never judging whether a term on one service should constrain a
+// different one — that judgment call is exactly what kept producing fresh
+// findings. Follow-up: route prepay top-up through the existing coverage
+// authority instead of a parallel one.
+//
+// A series is excluded when EITHER: the root or any of its rows already
+// carries a prepay stamp (annual_prepay_term_id or prepaid_method — a
+// series can be linked before its first COVERED visit sets prepaid_method,
+// so both columns are checked), OR the customer holds any
+// annual_prepay_terms row still live or undecided — active, renewal_pending
+// (ACTIVE_STATUSES) or payment_pending (an invoice not yet paid;
+// PAYMENT_PENDING_STATUS) — reusing the SAME status vocabulary
+// coveredTermsAsOf already treats as live, never a second hand-picked list
+// that could drift from it.
+async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
+  if (cols.annual_prepay_term_id || cols.prepaid_method) {
+    const stampedRow = await conn('scheduled_services')
+      .where(function seriesRows() {
+        this.where('recurring_parent_id', parentId).orWhere('id', parentId);
+      })
+      .where(function stamped() {
+        if (cols.annual_prepay_term_id) this.orWhereNotNull('annual_prepay_term_id');
+        if (cols.prepaid_method) this.orWhereNotNull('prepaid_method');
+      })
+      .first('id');
+    if (stampedRow) return true;
+  }
+  const { ACTIVE_STATUSES, PAYMENT_PENDING_STATUS } = require('../services/annual-prepay-renewals');
+  const liveTerm = await conn('annual_prepay_terms')
+    .where({ customer_id: parent.customer_id })
+    .whereIn('status', [...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS])
+    .first('id');
+  return !!liveTerm;
+}
+// Table-driven (async — needs a DB read, unlike the synchronous customer
+// rules above) so a future prepay-aware top-up is one more row, not a
+// rewritten function.
+const TOPUP_SERIES_INELIGIBILITY_RULES = [
+  ['annual_prepay_series', isAnnualPrepaySeries],
+];
+async function topupSeriesSkipReason(conn, parent, parentId, cols) {
+  for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
+    // Sequential, not parallel: one rule today, and each is a DB read, so
+    // there's nothing to gain from Promise.all here and it'd only cost
+    // clarity.
+    if (await test(conn, parent, parentId, cols)) return reason;
+  }
+  return null;
+}
+
 async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } = {}) {
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
@@ -15315,17 +15258,34 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
   if (!isOngoing) return { spawnedVisits: [], skipped: 'not_ongoing' };
 
+  // FOR UPDATE (Codex GitHub r3 P1): the SAME row lock PUT /:id/stage takes
+  // (admin-customers.js) before it writes pipeline_stage — same row, same
+  // lock kind, taken here BEFORE any scheduled_services write in this
+  // transaction (the stage route never locks scheduled_services, so this
+  // ordering can't form a new deadlock cycle with it). Without this, an
+  // unlocked read here could land between a concurrent active→churned
+  // stage save's own read and its commit, letting this run insert visits
+  // for a customer the OTHER transaction is one write away from churning.
   const customer = await conn('customers').where({ id: parent.customer_id })
+    .forUpdate()
     .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
   const customerSkip = topupCustomerSkipReason(customer);
   if (customerSkip) return { spawnedVisits: [], skipped: customerSkip };
 
-  const { cap: termCap, failed: termCapFailed, extraTermIds } = await resolveTopUpTermCap(conn, parent, parentId, cols);
-  if (termCapFailed) return { spawnedVisits: [], skipped: 'prepay_cap_unresolved' };
+  const seriesSkip = await topupSeriesSkipReason(conn, parent, parentId, cols);
+  if (seriesSkip) return { spawnedVisits: [], skipped: seriesSkip };
+
+  // Pure/no-DB — depends only on parent.window_start + duration, so it's
+  // the SAME verdict extendSeriesOnceLocked's own per-insert normalization
+  // would reach on every attempt this run; check once upfront rather than
+  // discover it 24 times (Codex GitHub r3 P2 — never build an out-of-range
+  // "24:15" end time).
+  if (normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes)?.unplaceable) {
+    return { spawnedVisits: [], skipped: 'window_unplaceable' };
+  }
 
   const todayStr = etDateString();
-  const desiredHorizon = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), horizonDays));
-  const effectiveHorizon = (termCap && termCap < desiredHorizon) ? termCap : desiredHorizon;
+  const effectiveHorizon = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), horizonDays));
 
   const spawnedVisits = [];
   // The raw (non-fast-forwarded) date of the series' latest live visit as of
@@ -15370,14 +15330,8 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // extendSeriesOnceLocked (price varies by date), not a coarse upfront
     // guess — a series can fill partway then stop exactly where billability
     // breaks down, same as running out of horizon or hitting the cap.
-    // checkStrictPrepayCoverage only when a term genuinely applies to this
-    // series (termCap non-null — resolveTopUpTermCap found at least one
-    // live, service-matched candidate): an unattended run must never leave
-    // an inserted row silently uncovered under an active prepay term (Codex
-    // GitHub r2 P1) — see extendSeriesOnceLocked's own comment.
     const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, {
-      maxDate: effectiveHorizon, extraTermIds, checkUnbillable: true, normalizeOffHourStart: true,
-      checkStrictPrepayCoverage: termCap !== null,
+      maxDate: effectiveHorizon, checkUnbillable: true, normalizeOffHourStart: true,
     });
     if (!spawned) break;
     spawnedVisits.push(spawned);
@@ -15389,7 +15343,7 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   const reportedServiceType = parent.service_type;
   const reportedPattern = parent.recurring_pattern;
   return {
-    spawnedVisits, skipped: null, effectiveHorizon, termCap,
+    spawnedVisits, skipped: null, effectiveHorizon,
     priorBookedThrough, customerId: parent.customer_id,
     serviceType: reportedServiceType, recurringPattern: reportedPattern,
   };
@@ -21133,7 +21087,9 @@ router._test = {
   topUpRecurringSeries,
   topUpRecurringSeriesWithLocks,
   topUpRecurringSeriesLocked,
-  resolveTopUpTermCap,
+  topupSeriesSkipReason,
+  isAnnualPrepaySeries,
+  normalizeTopUpWindow,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
   latestLiveSeriesVisit,
   acquireRecurringSeriesMaintenanceLock,

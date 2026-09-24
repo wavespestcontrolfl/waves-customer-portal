@@ -5723,6 +5723,15 @@ module.exports = {
   // route validation and stored behavior can never drift apart.
   normalizeWindowStart,
   findVisitWindowConflict,
+  // Root exports: the "still live/undecided" term-status vocabulary
+  // (recurring-series-topup's own eligibility scope cut needs the SAME
+  // set coveredTermsAsOf treats as live, never a second hand-picked list
+  // that can drift from it). ACTIVE_STATUSES excludes payment_pending
+  // deliberately (a term stays payment_pending until its invoice is
+  // actually paid) — callers that also treat an UNPAID payment_pending
+  // term as "still deciding" add PAYMENT_PENDING_STATUS explicitly.
+  ACTIVE_STATUSES,
+  PAYMENT_PENDING_STATUS,
   _private: {
     PENDING_COMPLETION_REVERSAL_IDENTITIES,
     dateOnly,

@@ -55,9 +55,22 @@ const HORIZON_DAYS_ARG = argValue('--horizon-days');
 // --horizon-days is omitted (Codex pre-push P1).
 const { horizonDaysFromEnv } = require('../server/services/recurring-series-topup');
 let horizonDays = horizonDaysFromEnv();
-if (HORIZON_DAYS_ARG) {
+// An explicit --horizon-days is an operator typo risk (a stray decimal, a
+// negative, a value orders of magnitude too large) that topUpOneSeries has
+// no reason to validate itself — it only ever sees the env-sourced default
+// otherwise. Reject before any DB work rather than silently falling back to
+// the default (which would mask the typo) or passing a bad value through
+// (Codex GitHub r3 P2). 730 (two years) is a generous sanity ceiling — no
+// legitimate recurring plan needs a longer look-ahead, and it keeps a
+// fat-fingered "18000" from asking the sweep to walk years of candidate
+// dates per series.
+if (HORIZON_DAYS_ARG != null) {
   const n = Number(HORIZON_DAYS_ARG);
-  if (Number.isFinite(n) && n > 0) horizonDays = Math.floor(n);
+  if (!Number.isInteger(n) || n < 1 || n > 730) {
+    console.error(`Invalid --horizon-days "${HORIZON_DAYS_ARG}" — must be a positive integer from 1 to 730.`);
+    process.exit(1);
+  }
+  horizonDays = n;
 }
 const horizonOpt = { horizonDays };
 
@@ -119,6 +132,12 @@ async function main() {
   }
 
   await db.destroy();
+  // A per-series failure is caught and tallied above so one bad series
+  // never stops the run, but the process must still leave a nonzero exit
+  // code behind it — a cron/CI wrapper checking $? off a summary that says
+  // "errors: 3" and exit 0 would report the whole run healthy (Codex
+  // GitHub r3 P2).
+  if (summary.errors > 0) process.exitCode = 1;
 }
 
 main().catch(async (err) => {

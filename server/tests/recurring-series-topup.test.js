@@ -9,6 +9,17 @@
  * extracted horizon-fill loop directly with a scripted fake connection
  * (house style — see recurring-series-maintenance.test.js), so it exercises
  * the SAME extendSeriesOnceLocked insert step the completion path uses.
+ *
+ * v1 scope cut (Codex GitHub rounds 2-3): top-up never touches an
+ * annual-prepay series at all (see topupSeriesSkipReason's own comment in
+ * admin-schedule.js) — the customer-wide term_end cap this lane originally
+ * shipped with kept landing findings on a fresh site every round. No
+ * annual-prepay-renewals mocking is needed here as a result: every fixture
+ * in this suite is a plain per-visit/CIOC/dues series, so
+ * applyExtensionPrepayCoverage's own term discovery always finds nothing
+ * (seriesTermIds resolves empty and coveringTermForDate short-circuits
+ * before ever calling into that module) — a real, unmocked deep-cover of
+ * exactly the "not a prepay series" path v1 relies on.
  */
 jest.mock('../services/service-completion-profiles', () => ({
   ...jest.requireActual('../services/service-completion-profiles'),
@@ -18,18 +29,6 @@ jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue(undefined),
   resolveCommittedVisitTime: jest.fn(async () => null),
   alertRegistrationFailure: jest.fn().mockResolvedValue(undefined),
-}));
-jest.mock('../services/annual-prepay-renewals', () => ({
-  // serviceMatchesCoverage is pure (no DB) — keep the REAL implementation so
-  // the term-cap's customer-wide service scoping is exercised for real;
-  // coveredTermsAsOf (the DB query) is mocked per-test. annualPrepayCoversVisit
-  // defaults to resolving true below (beforeEach) — the term-cap describe
-  // block is about DATE math, not coverage-stamping mechanics, which get
-  // their own dedicated describe block further down with this mock
-  // overridden per-test.
-  ...jest.requireActual('../services/annual-prepay-renewals'),
-  coveredTermsAsOf: jest.fn(),
-  annualPrepayCoversVisit: jest.fn(),
 }));
 jest.mock('../services/scheduling/occupancy', () => ({
   // acquireOccupancyLock/acquireOccupancyLocks are real (pure lock-key
@@ -46,10 +45,9 @@ const {
   topUpRecurringSeriesLocked, topUpRecurringSeries, topUpRecurringSeriesWithLocks, TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
 } = adminScheduleRouter._test;
 const AppointmentReminders = require('../services/appointment-reminders');
-const { coveredTermsAsOf, annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
+const { ACTIVE_STATUSES, PAYMENT_PENDING_STATUS } = require('../services/annual-prepay-renewals');
 beforeEach(() => {
-  annualPrepayCoversVisit.mockReset().mockResolvedValue(true);
   findConflictingVisits.mockReset().mockResolvedValue([]);
 });
 const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
@@ -71,8 +69,7 @@ const BASE_COLS = {
 };
 
 // Scriptable fake knex connection — same shape/conventions as
-// recurring-series-maintenance.test.js's makeConn, extended with `pluck`
-// (seriesTermIds / the customer-level term scan) and a `customers` table.
+// recurring-series-maintenance.test.js's makeConn.
 function makeConn(handler, opts = {}) {
   const buildTable = (table) => {
     const calls = [];
@@ -81,7 +78,7 @@ function makeConn(handler, opts = {}) {
       if ((name === 'where' || name === 'whereNotExists') && typeof args[0] === 'function') {
         const nested = [];
         const sub = {};
-        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw', 'orWhereNotIn']) {
+        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw', 'orWhereNotIn', 'orWhereNotNull']) {
           sub[nm] = (...a) => { nested.push([nm, ...a]); return sub; };
         }
         args[0].call(sub, sub);
@@ -91,7 +88,7 @@ function makeConn(handler, opts = {}) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'forShare', 'distinct', 'andWhere']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'forShare', 'forUpdate', 'distinct', 'andWhere']) {
       b[m] = record(m);
     }
     b.modify = (fn) => { fn(b); return b; };
@@ -136,9 +133,16 @@ function makeConn(handler, opts = {}) {
 // so a repeated topUpRecurringSeriesLocked loop sees its own prior inserts
 // as the new "latest" on the next iteration — the real anchor-chaining
 // behavior extendSeriesOnceLocked relies on.
+//
+// `stampedSeriesRow` / `customerLiveTerm`: control isAnnualPrepaySeries'
+// two DB probes (a stamped scheduled_services row anywhere in the series;
+// any live/undecided annual_prepay_terms row for the customer) — both
+// default to "no prepay footprint" so every OTHER describe block's
+// fixtures are unaffected by the v1 scope cut.
 function topupScenario({
   parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
-  colsOverrides = {}, linkedTermIds = [], customerTerms = [],
+  colsOverrides = {}, stampedSeriesRow = false, customerLiveTerm = false,
+  captureCustomerCalls = null,
 } = {}) {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'weekly',
@@ -163,15 +167,22 @@ function topupScenario({
   const inserted = [];
   const insertedById = new Map();
   let nextId = 900;
-  const handler = ({ table, calls, op, data, field }) => {
+  const handler = ({ table, calls, op, data }) => {
     if (table === 'scheduled_services') {
       if (op === 'columnInfo') return cols;
-      if (op === 'pluck' && field === 'annual_prepay_term_id') return linkedTermIds;
+      if (op === 'pluck') return []; // seriesTermIds' own-series scan — no prepay fixture in this suite links one
       if (op === 'first') {
         const firstCall = calls.find((c) => c[0] === 'first');
         if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: parent.recurring_ongoing };
         if (firstCall[1] === 'customer_id') return { customer_id: parent.customer_id };
         if (firstCall[1] === 'status') return { status: 'pending' };
+        if (firstCall[1] === 'id' && calls.some((c) => c[0] === 'whereFn')) {
+          // isAnnualPrepaySeries' own stamped-row probe (root or any child
+          // carries annual_prepay_term_id/prepaid_method) — a combined
+          // recurring_parent_id-or-id + IS NOT NULL predicate, so it never
+          // matches the plain-object where() branch below.
+          return stampedSeriesRow ? { id: 'stamped-row' } : undefined;
+        }
         if (calls.some((c) => c[0] === 'orderBy')) {
           if (!seriesDates.size) return undefined;
           const latest = [...seriesDates].sort().slice(-1)[0];
@@ -180,10 +191,10 @@ function topupScenario({
         const whereCall = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'id' in c[1]);
         if (whereCall) {
           if (whereCall[1].id === parent.id) return parent;
-          // A freshly-inserted row's own id (e.g. the strict prepay-coverage
-          // re-read, or a spawned-reminder terminal recheck) — tracked
-          // separately from `parent` so a plain bare `.first()` by id
-          // returns the actual row, not a stale copy of the parent.
+          // A freshly-inserted row's own id (e.g. a spawned-reminder
+          // terminal recheck) — tracked separately from `parent` so a plain
+          // bare `.first()` by id returns the actual row, not a stale copy
+          // of the parent.
           return insertedById.get(whereCall[1].id);
         }
         return parent;
@@ -191,10 +202,9 @@ function topupScenario({
       if (op === 'await') {
         if (calls.some((c) => c[0] === 'del')) {
           // A row-scoped compensating delete (post-insert cancellation
-          // re-check, or the strict prepay-coverage rollback) — remove it
-          // from both the id map and the audit array so an assertion
-          // checking `inserted` correctly reflects the rollback instead of
-          // still showing a row this same call deleted.
+          // re-check) — remove it from both the id map and the audit array
+          // so an assertion checking `inserted` correctly reflects the
+          // rollback instead of still showing a row this same call deleted.
           const whereCall = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'id' in c[1]);
           const targetId = whereCall?.[1]?.id;
           if (targetId != null && insertedById.has(targetId)) {
@@ -226,10 +236,14 @@ function topupScenario({
       return [];
     }
     if (table === 'customers') {
-      if (op === 'first') return customer;
+      if (op === 'first') {
+        if (captureCustomerCalls) captureCustomerCalls.push(calls);
+        return customer;
+      }
     }
     if (table === 'annual_prepay_terms') {
-      if (op === 'await') return customerTerms; // .select('id', 'coverage_service_type')
+      // isAnnualPrepaySeries' customer-wide live/undecided-term probe.
+      if (op === 'first') return customerLiveTerm ? { id: 'live-term' } : undefined;
     }
     if (table === 'system_settings') return null;
     if (table === 'schedule_blackout_dates') return [];
@@ -322,6 +336,80 @@ describe('topUpRecurringSeriesLocked — eligibility', () => {
     const { conn } = topupScenario();
     const result = await topUpRecurringSeriesLocked(conn, 999, { horizonDays: 365 });
     expect(result.skipped).toBe('not_found');
+  });
+
+  test('reads the customer row FOR UPDATE — the same lock PUT /:id/stage takes (Codex GitHub r3 P1)', async () => {
+    const customerCalls = [];
+    const { conn } = topupScenario({ seriesDates: [daysOut(0)], captureCustomerCalls: customerCalls });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(customerCalls.length).toBeGreaterThan(0);
+    expect(customerCalls[0].some((c) => c[0] === 'forUpdate')).toBe(true);
+  });
+});
+
+describe('topUpRecurringSeriesLocked — annual-prepay scope cut v1 (Codex GitHub rounds 2-3)', () => {
+  // The customer-wide, service-matched term_end cap this lane originally
+  // shipped with kept landing findings on a fresh site every round —
+  // structural. v1 excludes the series outright instead: a prepay
+  // customer's covered rows are already seeded at term activation
+  // (ensureCoverageRowsForTerm), so top-up simply never touches one.
+  test('skips a series whose root or any child row already carries a prepay stamp (annual_prepay_term_id)', async () => {
+    const { conn, inserted } = topupScenario({
+      colsOverrides: { annual_prepay_term_id: {} },
+      stampedSeriesRow: true,
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('annual_prepay_series');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('skips on a prepaid_method stamp too, on a schema without annual_prepay_term_id', async () => {
+    const { conn, inserted } = topupScenario({
+      colsOverrides: { prepaid_method: {} },
+      stampedSeriesRow: true,
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('annual_prepay_series');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('skips a series whose customer holds ANY live/undecided annual_prepay_terms row, even with no scheduled_services link at all', async () => {
+    // No annual_prepay_term_id/prepaid_method column even in scope — the
+    // customer-level check runs independently of the series-level one.
+    const { conn, inserted } = topupScenario({ customerLiveTerm: true });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('annual_prepay_series');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('queries the exact live/undecided status vocabulary — reused from annual-prepay-renewals.js, never a second hand-picked list', async () => {
+    const capturedCalls = [];
+    const { customer, parent } = topupScenario();
+    const conn = makeConn(({ table, calls, op }) => {
+      if (table === 'scheduled_services' && op === 'columnInfo') return BASE_COLS;
+      if (table === 'scheduled_services' && op === 'first') {
+        const firstCall = calls.find((c) => c[0] === 'first');
+        if (!firstCall[1]) return parent;
+        return null;
+      }
+      if (table === 'customers' && op === 'first') return customer;
+      if (table === 'annual_prepay_terms') {
+        if (op === 'first') { capturedCalls.push(calls); return undefined; }
+      }
+      return null;
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(capturedCalls).toHaveLength(1);
+    const whereInCall = capturedCalls[0].find((c) => c[0] === 'whereIn');
+    expect(whereInCall).toBeDefined();
+    expect(whereInCall[2].slice().sort()).toEqual([...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS].sort());
+  });
+
+  test('a series with no prepay stamp anywhere and no live customer term proceeds normally', async () => {
+    const { conn, inserted } = topupScenario({ colsOverrides: { annual_prepay_term_id: {}, prepaid_method: {} } });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
   });
 });
 
@@ -423,6 +511,21 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
       expect(row.window_end).toBeFalsy();
     }
   });
+
+  test('skips a series whose floored window would push its duration-derived end past 24:00 (Codex GitHub r3 P2)', async () => {
+    // 23:45 floors to 23:00; +60min duration lands the end at 24:00 —
+    // never build that out-of-range time. Checked upfront, so the whole
+    // series is skipped rather than discovered mid-loop.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '23:45', window_end: '00:45',
+        estimated_duration_minutes: 60,
+      },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(result.skipped).toBe('window_unplaceable');
+    expect(inserted).toHaveLength(0);
+  });
 });
 
 describe('topUpRecurringSeriesLocked — horizon fill', () => {
@@ -474,268 +577,6 @@ describe('topUpRecurringSeriesLocked — horizon fill', () => {
     expect(result.skipped).toBeNull();
     expect(inserted).toHaveLength(0);
     expect(result.priorBookedThrough).toBe(daysOut(60));
-  });
-});
-
-describe('topUpRecurringSeriesLocked — annual-prepay term_end cap', () => {
-  test('never inserts past a linked term\'s term_end, even though the horizon allows more', async () => {
-    const termEnd = daysOut(20);
-    coveredTermsAsOf.mockReturnValue({
-      whereIn: () => ({ select: async () => [{ term_end: termEnd }] }),
-    });
-    const { conn, inserted } = topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly' },
-      seriesDates: [daysOut(0)],
-      colsOverrides: { annual_prepay_term_id: {} },
-      linkedTermIds: ['term-A'],
-    });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
-    expect(result.skipped).toBeNull();
-    expect(result.termCap).toBe(termEnd);
-    expect(result.effectiveHorizon).toBe(termEnd);
-    for (const row of inserted) {
-      expect(row.scheduled_date < termEnd).toBe(true);
-    }
-    expect(inserted.length).toBeGreaterThan(0);
-  });
-
-  test('discovers a term the customer holds directly, with no scheduled_services link yet', async () => {
-    const termEnd = daysOut(10);
-    coveredTermsAsOf.mockReturnValue({
-      whereIn: () => ({ select: async () => [{ term_end: termEnd }] }),
-    });
-    const { conn, inserted } = topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly' },
-      seriesDates: [daysOut(0)],
-      colsOverrides: { annual_prepay_term_id: {} },
-      linkedTermIds: [],
-      customerTerms: [{ id: 'term-B', coverage_service_type: 'Weekly Pest Control' }],
-    });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
-    expect(result.effectiveHorizon).toBe(termEnd);
-    for (const row of inserted) expect(row.scheduled_date < termEnd).toBe(true);
-  });
-
-  test('ignores an already-ended DECIDED term (switch_plan/declined-renewal) — never permanently caps a customer no longer on that term', async () => {
-    // coveredTermsAsOf(conn, null) has no date-window filter, so a customer
-    // who switched off annual prepay months ago still surfaces that closed
-    // term. Its term_end is in the past, so it must never win the cap —
-    // otherwise a customer with no live term would never top up again.
-    const pastTermEnd = daysOut(-30);
-    coveredTermsAsOf.mockReturnValue({
-      whereIn: () => ({ select: async () => [{ term_end: pastTermEnd, status: 'switch_plan', renewal_decision: null }] }),
-    });
-    const { conn, inserted } = topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly' },
-      seriesDates: [daysOut(0)],
-      colsOverrides: { annual_prepay_term_id: {} },
-      linkedTermIds: ['term-old'],
-    });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    expect(result.termCap).toBeNull();
-    // Falls back to the ordinary horizon (30 days), not the stale term_end.
-    expect(result.effectiveHorizon).toBe(daysOut(30));
-    expect(inserted.length).toBeGreaterThan(0);
-  });
-
-  test('keeps capping an expired-but-UNDECIDED term (active/renewal_pending past its own term_end)', async () => {
-    // The renewal decision hasn't been made yet — booking past this term
-    // would be speculative. Unlike the decided-and-closed case above, this
-    // term must keep capping even though its window already ended.
-    const pastTermEnd = daysOut(-5);
-    coveredTermsAsOf.mockReturnValue({
-      whereIn: () => ({ select: async () => [{ term_end: pastTermEnd, status: 'active', renewal_decision: null }] }),
-    });
-    const { conn, inserted } = topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly' },
-      seriesDates: [daysOut(0)],
-      colsOverrides: { annual_prepay_term_id: {} },
-      linkedTermIds: ['term-overdue'],
-    });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
-    expect(result.termCap).toBe(pastTermEnd);
-    // The cap is already in the past, so nothing new can legally be booked.
-    expect(inserted).toHaveLength(0);
-  });
-
-  test('a declined-renewal lapse still riding out its paid remainder keeps capping until its (future) term_end', async () => {
-    const futureTermEnd = daysOut(15);
-    coveredTermsAsOf.mockReturnValue({
-      whereIn: () => ({ select: async () => [{ term_end: futureTermEnd, status: 'cancelled', renewal_decision: 'cancel' }] }),
-    });
-    const { conn, inserted } = topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly' },
-      seriesDates: [daysOut(0)],
-      colsOverrides: { annual_prepay_term_id: {} },
-      linkedTermIds: ['term-lapsing'],
-    });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
-    expect(result.termCap).toBe(futureTermEnd);
-    for (const row of inserted) expect(row.scheduled_date < futureTermEnd).toBe(true);
-  });
-
-  test('scopes the customer-wide term scan to THIS series\' service — an unrelated service\'s longer term never extends past this one\'s real window', async () => {
-    const pestTermEnd = daysOut(20);
-    const lawnTermEnd = daysOut(200); // longer, but a DIFFERENT service
-    const termRows = [
-      { id: 'term-pest', term_end: pestTermEnd, status: 'active', renewal_decision: null },
-      { id: 'term-lawn', term_end: lawnTermEnd, status: 'active', renewal_decision: null },
-    ];
-    coveredTermsAsOf.mockReturnValue({
-      whereIn: (col, ids) => ({ select: async () => termRows.filter((r) => ids.includes(r.id)) }),
-    });
-    const { conn, inserted } = topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly', service_type: 'Weekly Pest Control' },
-      seriesDates: [daysOut(0)],
-      colsOverrides: { annual_prepay_term_id: {} },
-      customerTerms: [
-        { id: 'term-pest', coverage_service_type: 'Pest Control' },
-        { id: 'term-lawn', coverage_service_type: 'Lawn Care Program' },
-      ],
-    });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
-    // Capped at the PEST term's own end, never stretched to the unrelated
-    // (longer) lawn term.
-    expect(result.termCap).toBe(pestTermEnd);
-    for (const row of inserted) expect(row.scheduled_date < pestTermEnd).toBe(true);
-  });
-
-  test('an unrelated service\'s overdue/undecided term never freezes this series', async () => {
-    // A pest series with NO annual-prepay term of its own; the customer
-    // separately holds an overdue, undecided LAWN term. That must not cap
-    // (let alone freeze) this unrelated pest series.
-    const overdueLawnTermEnd = daysOut(-10);
-    coveredTermsAsOf.mockReturnValue({
-      whereIn: (col, ids) => ({
-        select: async () => (ids.includes('term-lawn-overdue')
-          ? [{ id: 'term-lawn-overdue', term_end: overdueLawnTermEnd, status: 'active', renewal_decision: null }]
-          : []),
-      }),
-    });
-    const { conn, inserted } = topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly', service_type: 'Weekly Pest Control' },
-      seriesDates: [daysOut(0)],
-      colsOverrides: { annual_prepay_term_id: {} },
-      customerTerms: [{ id: 'term-lawn-overdue', coverage_service_type: 'Lawn Care Program' }],
-    });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    expect(result.termCap).toBeNull();
-    expect(result.effectiveHorizon).toBe(daysOut(30));
-    expect(inserted.length).toBeGreaterThan(0);
-  });
-
-  test('fails closed (skips the series) when the term-cap lookup errors — never guesses "no cap"', async () => {
-    coveredTermsAsOf.mockImplementation(() => { throw new Error('boom'); });
-    const { conn, inserted } = topupScenario({
-      colsOverrides: { annual_prepay_term_id: {} },
-      linkedTermIds: ['term-A'],
-    });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
-    expect(result.skipped).toBe('prepay_cap_unresolved');
-    expect(inserted).toHaveLength(0);
-  });
-
-  test('a discovered-but-unlinked term is fed to coverage discovery, not just used to cap the horizon', async () => {
-    // Codex pre-push P0: resolveTopUpTermCap's customer-wide scan capped the
-    // horizon correctly, but applyExtensionPrepayCoverage (inside
-    // extendSeriesOnceLocked) only ever discovered terms via seriesTermIds
-    // (rows already stamped on THIS series) — so a term found ONLY through
-    // the customer-wide scan never reached the coverage-application step,
-    // and the newly inserted visit would look uncovered. This pins the
-    // wiring fix (opts.extraTermIds) at the one place a fake connection can
-    // observe it: the id list handed to coveredTermsAsOf when
-    // applyExtensionPrepayCoverage's coveringTermForDate probes coverage for
-    // the freshly computed candidate date (a real date, unlike
-    // resolveTopUpTermCap's own null-coverageDate call). Full end-to-end
-    // stamping (annual_prepay_term_id actually landing on the inserted row)
-    // needs the real-Postgres coverage-application machinery and is out of
-    // this fake-connection suite's reach — see
-    // recurring-prepay-coverage-inheritance.test.js's pattern for that.
-    const termEnd = daysOut(90);
-    const whereInCalls = [];
-    coveredTermsAsOf.mockImplementation((c, coverageDate) => ({
-      whereIn: (col, ids) => {
-        whereInCalls.push({ coverageDate, ids: [...ids] });
-        const matched = ids.includes('term-unlinked')
-          ? [{ id: 'term-unlinked', term_end: termEnd, status: 'active', renewal_decision: null }]
-          : [];
-        return {
-          select: async () => matched,
-          orderBy: () => ({ first: async () => matched[0] }),
-        };
-      },
-    }));
-    const { conn } = topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly', service_type: 'Weekly Pest Control' },
-      seriesDates: [daysOut(0)],
-      colsOverrides: { annual_prepay_term_id: {} },
-      customerTerms: [{ id: 'term-unlinked', coverage_service_type: 'Pest Control' }],
-    });
-    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    // resolveTopUpTermCap's own lookup (coverageDate === null) found it —
-    // proven by the earlier cap tests. Here: a SEPARATE call with a real
-    // coverageDate (coveringTermForDate, from inside
-    // applyExtensionPrepayCoverage) must ALSO carry it.
-    const coverageProbe = whereInCalls.find((c) => c.coverageDate);
-    expect(coverageProbe).toBeDefined();
-    expect(coverageProbe.ids).toContain('term-unlinked');
-  });
-});
-
-describe('topUpRecurringSeriesLocked — strict prepay coverage verification (Codex GitHub r2 P1)', () => {
-  // applyExtensionPrepayCoverage fails SOFT by design (a completion must
-  // never be blocked by a coverage-application hiccup), and
-  // applyPrepaidCoverageForTerm leaves a row unstamped once
-  // coverage_visit_count is used up — either way, an unattended top-up run
-  // must never leave an inserted row silently uncovered under an
-  // applicable term. Both cases roll back the row and stop the series for
-  // the run, verified at the one place a fake connection can observe a
-  // rollback: the tracked insert/delete pair in `inserted`.
-  function termCappedScenario(overrides = {}) {
-    const termEnd = daysOut(90);
-    coveredTermsAsOf.mockReturnValue({
-      whereIn: () => ({ select: async () => [{ term_end: termEnd, status: 'active', renewal_decision: null }] }),
-    });
-    return topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly' },
-      seriesDates: [daysOut(0)],
-      colsOverrides: { annual_prepay_term_id: {} },
-      linkedTermIds: ['term-A'],
-      ...overrides,
-    });
-  }
-
-  test('coverage_visit_count exhausted mid-run: the first uncovered date rolls back and stops the series (earlier covered dates stand)', async () => {
-    annualPrepayCoversVisit
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValue(false);
-    const { conn, inserted } = termCappedScenario();
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
-    expect(result.skipped).toBeNull();
-    expect(result.spawnedVisits).toHaveLength(2);
-    expect(inserted).toHaveLength(2);
-    expect(annualPrepayCoversVisit).toHaveBeenCalledTimes(3);
-  });
-
-  test('coverage verification throws (a transient read error): treated as unverified, fails closed the same as a confirmed exhaustion', async () => {
-    annualPrepayCoversVisit.mockRejectedValue(new Error('coverage lookup exploded'));
-    const { conn, inserted } = termCappedScenario();
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
-    expect(result.skipped).toBeNull();
-    expect(result.spawnedVisits).toHaveLength(0);
-    expect(inserted).toHaveLength(0);
-  });
-
-  test('a series with no applicable term never consults strict coverage at all', async () => {
-    const { conn, inserted } = topupScenario({
-      parentOverrides: { recurring_pattern: 'weekly' },
-      seriesDates: [daysOut(0)],
-    });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
-    expect(inserted.length).toBeGreaterThan(0);
-    expect(annualPrepayCoversVisit).not.toHaveBeenCalled();
-    expect(result).toBeTruthy();
   });
 });
 
