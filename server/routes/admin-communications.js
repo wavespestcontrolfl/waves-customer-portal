@@ -1686,11 +1686,11 @@ router.get('/log', async (req, res, next) => {
         ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
       ) sms_audit ON true`)
       .joinRaw(`LEFT JOIN LATERAL (
-        SELECT EXISTS (
-          SELECT 1 FROM message_drafts mdx
-          WHERE mdx.id = ${responseDraftId}
-            AND mdx.intent = 'click_followup'
-        ) AS is_click_followup
+        SELECT true AS has_draft_provenance,
+               mdx.intent = 'click_followup' AS is_click_followup
+        FROM message_drafts mdx
+        WHERE mdx.id = ${responseDraftId}
+        LIMIT 1
       ) sms_answer ON true`)
       .joinRaw(`LEFT JOIN LATERAL (
         SELECT prior.body
@@ -1729,6 +1729,7 @@ router.get('/log', async (req, res, next) => {
         'sms_response.metadata as response_metadata',
         'sms_audit.metadata as response_audit_metadata',
         'sms_answer.is_click_followup as response_is_click_followup',
+        'sms_answer.has_draft_provenance as response_has_draft_provenance',
         'sms_prior_outbound.body as response_prior_outbound_body',
       )
       .orderBy('messages.created_at', 'desc');
@@ -1806,6 +1807,7 @@ router.get('/log', async (req, res, next) => {
       const responseIsAnswer = require('../services/sms-response-policy').outboundIsAnswer({
         direction: m.direction, messageType: responseMessageType, status: responseStatus,
         isClickFollowup: m.response_is_click_followup === true,
+        hasDraftProvenance: m.response_has_draft_provenance === true,
       });
       return {
         id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
