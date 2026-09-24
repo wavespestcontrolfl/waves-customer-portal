@@ -217,4 +217,18 @@ describe('GET /stats — admin only', () => {
     expect(res.status).toBe(200);
     expect(mockConsultationStats).toHaveBeenCalledWith({ from: '2026-01-01', to: '2026-02-01' });
   });
+
+  // Codex #4710 r3 P2: a bad window is a 400, never a Postgres 500.
+  test.each([
+    ['?from=bad', /from must be a real/],
+    ['?from=2026-02-31', /from must be a real/],
+    ['?to=2026-13-01', /to must be a real/],
+    ['?from=2026-03-01&to=2026-02-01', /on or before/],
+  ])('rejects %s with 400 before querying', async (qs, message) => {
+    mockConsultationStats.mockClear();
+    const res = await call('get', `/api/admin/consultations/stats${qs}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(message);
+    expect(mockConsultationStats).not.toHaveBeenCalled();
+  });
 });

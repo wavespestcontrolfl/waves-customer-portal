@@ -89,6 +89,19 @@ router.get('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin
 router.get('/stats', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const { from, to } = req.query;
+    // Shape, calendar validity and order checked here (Codex #4710 r3 P2) —
+    // a bad value must be a 400, never a Postgres invalid-date 500.
+    const isCalendarDate = (v) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+      const d = new Date(`${v}T12:00:00Z`);
+      return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+    };
+    for (const [name, value] of [['from', from], ['to', to]]) {
+      if (value !== undefined && value !== '' && (typeof value !== 'string' || !isCalendarDate(value))) {
+        return res.status(400).json({ error: `${name} must be a real YYYY-MM-DD date` });
+      }
+    }
+    if (from && to && from > to) return res.status(400).json({ error: 'from must be on or before to' });
     const stats = await consultationStats({ from: from || undefined, to: to || undefined });
     res.json(stats);
   } catch (err) {

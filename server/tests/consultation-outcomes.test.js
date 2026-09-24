@@ -267,7 +267,15 @@ function makeFakeDb(seed = {}) {
         return Promise.resolve([row]);
       },
       update(fields) {
-        filtered.forEach((r) => Object.assign(r, fields));
+        // A column reference (`sp.raw('??', ['outcome'])`) reads the row's
+        // value BEFORE the update, as Postgres SET does.
+        filtered.forEach((r) => {
+          const resolved = {};
+          for (const [k, v] of Object.entries(fields)) {
+            resolved[k] = v && v.__raw ? r[v.bindings[0]] : v;
+          }
+          Object.assign(r, resolved);
+        });
         const snapshot = filtered.slice();
         const result = Promise.resolve(snapshot.length);
         result.returning = () => Promise.resolve(snapshot);
@@ -277,6 +285,7 @@ function makeFakeDb(seed = {}) {
     return api;
   }
   table.transaction = async (fn) => fn(table);
+  table.raw = (sql, bindings = []) => ({ __raw: true, sql, bindings });
   table.__store = store;
   return table;
 }
@@ -914,10 +923,11 @@ describe('markWonForCustomer', () => {
 
     const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
     expect(count).toBe(2);
-    // 'customers' first (P1-A round 5's row lock), then leads, then the one
-    // UPDATE whose own WHERE holds the outcome IN (warm,cold) guard and the
-    // visit-window subquery. No candidate SELECT precedes it.
-    expect(tableCalls).toEqual(['customers', 'leads', 'consultation_outcomes']);
+    // 'customers' first (P1-A round 5's row lock), then leads, then two
+    // guarded UPDATEs (warm, then cold — so pre_win_outcome is a literal),
+    // each holding the outcome guard and the visit-window subquery in its
+    // own WHERE. No candidate SELECT precedes them.
+    expect(tableCalls).toEqual(['customers', 'leads', 'consultation_outcomes', 'consultation_outcomes']);
 
     const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
     expect(byId['co-already-lost'].outcome).toBe('lost');
@@ -1000,6 +1010,15 @@ describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => 
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-today').outcome).toBe('warm');
   });
 
+  test('Codex #4710 r3 P1: a win records its evidence booking and each row\'s prior outcome', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-last-week').outcome = 'cold';
+    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z'), evidenceBookingId: 'sale-1' });
+    const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
+    expect(byId['co-today']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' });
+    expect(byId['co-last-week']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-1', pre_win_outcome: 'cold' });
+  });
+
   test('an explicit via closeout_booking (the PR1b tech-closeout caller) is written as passed', async () => {
     const fakeDb = seededDb();
     await markWonForCustomer('cust-1', { via: 'closeout_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
@@ -1044,7 +1063,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
 
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
 
-    expect(result).toEqual({ scanned: 1, won: 1, errors: 0, no_show_repaired: 0 });
+    expect(result).toEqual({ scanned: 1, won: 1, errors: 0, no_show_repaired: 0, reopened: 0 });
     const row = fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1');
     expect(row.outcome).toBe('won');
     expect(row.won_via).toBe('office_booking');
@@ -1064,7 +1083,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
 
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
 
-    expect(result).toEqual({ scanned: 0, won: 0, errors: 0, no_show_repaired: 0 });
+    expect(result).toEqual({ scanned: 0, won: 0, errors: 0, no_show_repaired: 0, reopened: 0 });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-old').outcome).toBe('warm');
   });
 
@@ -1094,7 +1113,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
     // period exists for).
     const result = await reconcileOpenConsultationOutcomes({ now: new Date('2026-08-31T04:27:00Z') }); // 00:27 ET day91
 
-    expect(result).toEqual({ scanned: 1, won: 1, errors: 0, no_show_repaired: 0 });
+    expect(result).toEqual({ scanned: 1, won: 1, errors: 0, no_show_repaired: 0, reopened: 0 });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').outcome).toBe('won');
   });
 
@@ -1118,7 +1137,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
     // examined — scanned: 1), but findSaleEvidenceForConsultation's own
     // strict 90-day evidence bound (untouched by this fix) still excludes
     // a booking created after the window closed — no evidence, no win.
-    expect(result).toEqual({ scanned: 1, won: 0, errors: 0, no_show_repaired: 0 });
+    expect(result).toEqual({ scanned: 1, won: 0, errors: 0, no_show_repaired: 0, reopened: 0 });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').outcome).toBe('warm');
   });
 
@@ -1134,7 +1153,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
 
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
 
-    expect(result).toEqual({ scanned: 0, won: 0, errors: 0, no_show_repaired: 0 });
+    expect(result).toEqual({ scanned: 0, won: 0, errors: 0, no_show_repaired: 0, reopened: 0 });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking'); // untouched
   });
 
@@ -1386,6 +1405,26 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
     return () => builder;
   }
 
+  test('Codex #4710 r3 P2: an even cohort reports the arithmetic midpoint (2 and 3 days → 2.5), not a rounded value', async () => {
+    const visits = [
+      { status: 'completed', scheduled_date: '2026-09-10', technician_id: 't1', technician_name: 'Adam', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T16:00:00Z') },
+      { status: 'completed', scheduled_date: '2026-09-10', technician_id: 't1', technician_name: 'Adam', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-13T16:00:00Z') },
+    ];
+    const stats = await consultationStats({ trx: statsDb(visits) });
+    expect(stats.median_days_to_close).toBe(2.5);
+  });
+
+  test('Codex #4710 r3 P2: credit goes to the technician who recorded the outcome, not the current assignee', async () => {
+    const visits = [
+      { status: 'completed', scheduled_date: '2026-09-10', technician_id: 't2', technician_name: 'Bea', outcome_technician_id: 't1', outcome_technician_name: 'Adam', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T16:00:00Z') },
+      { status: 'scheduled', scheduled_date: '2026-09-11', technician_id: 't2', technician_name: 'Bea', outcome_technician_id: null, outcome: null },
+    ];
+    const stats = await consultationStats({ trx: statsDb(visits) });
+    const byTech = Object.fromEntries(stats.by_technician.map((t) => [t.technician_id, t]));
+    expect(byTech.t1).toMatchObject({ name: 'Adam', won: 1 });
+    expect(byTech.t2).toMatchObject({ name: 'Bea', won: 0 });
+  });
+
   test('a scheduled_date read back as a UTC-midnight Date is not shifted a day by etDateString', async () => {
     // pg on Railway (TZ=UTC) hands scheduled_date '2026-09-10' back as a JS
     // Date at UTC midnight. Running it through etDateString (the bug) reads
@@ -1520,5 +1559,49 @@ describe('reconcileOpenConsultationOutcomes — no-show outcome repair (round 12
     expect(result.no_show_repaired).toBe(0);
     expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
     expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('won');
+  });
+});
+
+// ---- reopenWinsWithDeadEvidence (Codex #4710 r3 P1) ------------------------
+
+describe('reconcileOpenConsultationOutcomes — a win whose evidence booking died is reopened', () => {
+  const NOW = new Date('2026-09-23T12:00:00Z');
+  function install(seed) {
+    const fakeDb = makeFakeDb(seed);
+    db.mockImplementation(fakeDb);
+    db.transaction = fakeDb.transaction;
+    return fakeDb;
+  }
+  afterEach(() => { db.mockReset(); });
+
+  test.each(['cancelled', 'skipped', 'no_show'])('evidence booking now %s → the row returns to its prior outcome', async (status) => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-1' },
+        { id: 'sale-1', status, service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1', created_at: new Date('2026-09-12T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: 'sale-1', pre_win_outcome: 'cold' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.reopened).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'cold', won_at: null, won_via: null, won_evidence_booking_id: null });
+  });
+
+  test('a live evidence booking, or a win with no recorded evidence, is left won', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1' },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' },
+        { id: 'co-2', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'estimate_accept', won_evidence_booking_id: null },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.reopened).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes.every((r) => r.outcome === 'won')).toBe(true);
   });
 });

@@ -729,8 +729,8 @@ function initScheduledJobs() {
       await runExclusive('consultation-outcome-reconcile', async () => {
         const { reconcileOpenConsultationOutcomes } = require('./consultation-outcomes');
         const result = await reconcileOpenConsultationOutcomes();
-        if (result.won > 0 || result.no_show_repaired > 0 || result.errors > 0) {
-          logger.info(`[consultation-outcome-reconcile] scanned=${result.scanned} won=${result.won} no_show_repaired=${result.no_show_repaired || 0} errors=${result.errors}`);
+        if (result.won > 0 || result.no_show_repaired > 0 || result.reopened > 0 || result.errors > 0) {
+          logger.info(`[consultation-outcome-reconcile] scanned=${result.scanned} won=${result.won} no_show_repaired=${result.no_show_repaired || 0} reopened=${result.reopened || 0} errors=${result.errors}`);
         }
       });
     } catch (err) {

@@ -70,7 +70,7 @@ test('a tick that wins rows logs the counts', async () => {
   reconcileOpenConsultationOutcomes.mockResolvedValue({ scanned: 5, won: 2, errors: 0 });
   const handler = registeredHandler();
   await handler();
-  expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('scanned=5 won=2 no_show_repaired=0 errors=0'));
+  expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('scanned=5 won=2 no_show_repaired=0 reopened=0 errors=0'));
 });
 
 test('a tick with per-row errors still logs (visibility into the best-effort skip count)', async () => {

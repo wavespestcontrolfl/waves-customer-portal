@@ -7385,7 +7385,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // scheduled_services today (see WON_VIA PROVENANCE atop
         // consultation-outcomes.js).
         await require('../services/consultation-outcomes')
-          .markWonForCustomer(customerId, { via: 'office_booking', trx });
+          .markWonForCustomer(customerId, { via: 'office_booking', trx, evidenceBookingId: svc.id });
       }
 
       // Create recurring instances from the dates precomputed (and locked)

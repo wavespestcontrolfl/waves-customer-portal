@@ -541,15 +541,19 @@ async function findSaleEvidenceForConsultation(database, {
       'is_recurring', 'create_invoice_on_complete',
     );
   let earliestBookingAt = null;
+  let earliestBookingId = null;
   for (const booking of bookings) {
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale — separate, async, not part of the sync predicate
     if (!isQualifyingSaleBooking(booking)) continue;
     const effectiveAt = new Date(effectiveBookingTimestamp(booking));
     if (effectiveAt < lowerBound || effectiveAt > upperBound) continue; // the OR above is a superset of the true bound — re-check the row's own effective timestamp
-    if (!earliestBookingAt || effectiveAt < earliestBookingAt) earliestBookingAt = effectiveAt;
+    if (!earliestBookingAt || effectiveAt < earliestBookingAt) {
+      earliestBookingAt = effectiveAt;
+      earliestBookingId = booking.id;
+    }
   }
   if (earliestBookingAt) {
-    candidates.push({ won_via: 'office_booking', won_at: earliestBookingAt });
+    candidates.push({ won_via: 'office_booking', won_at: earliestBookingAt, booking_id: earliestBookingId });
   }
 
   if (!candidates.length) return null;
@@ -578,17 +582,33 @@ async function attemptEvidenceBasedWin(database, {
   await database.transaction(async (sp) => {
     const evidence = await findSaleEvidenceForConsultation(sp, { customerId, scheduledDateStr, now });
     if (!evidence) return;
-    const [wonRow] = await sp('consultation_outcomes')
-      .where({ id: outcomeRowId })
-      .whereIn('outcome', ['warm', 'cold'])
-      // A consultation that never happened is never won, even when
-      // re-recorded warm/cold afterwards (local audit P1) — same exclusion
-      // as markWonForCustomer and the sweep.
-      .whereIn('scheduled_service_id', function notNoShow() {
-        this.select('id').from('scheduled_services').whereNotIn('status', DEAD_CONSULTATION_STATUSES);
-      })
-      .update({ outcome: 'won', won_at: evidence.won_at, won_via: evidence.won_via, updated_at: new Date() })
-      .returning('*');
+    // One guarded UPDATE per prior outcome so pre_win_outcome is a plain
+    // literal (no raw column reference) — at most one of the two can match.
+    let wonRow = null;
+    for (const prior of ['warm', 'cold']) {
+       
+      const [row] = await sp('consultation_outcomes')
+        .where({ id: outcomeRowId })
+        .where('outcome', prior)
+        // A consultation that never happened is never won, even when
+        // re-recorded warm/cold afterwards (local audit P1) — same exclusion
+        // as markWonForCustomer and the sweep.
+        .whereIn('scheduled_service_id', function notDeadVisit() {
+          this.select('id').from('scheduled_services').whereNotIn('status', DEAD_CONSULTATION_STATUSES);
+        })
+        .update({
+          outcome: 'won',
+          won_at: evidence.won_at,
+          won_via: evidence.won_via,
+          // Remember the win's booking and prior outcome so the sweep can
+          // reopen it if that booking dies (Codex #4710 r3 P1).
+          won_evidence_booking_id: evidence.booking_id || null,
+          pre_win_outcome: prior,
+          updated_at: new Date(),
+        })
+        .returning('*');
+      if (row) { wonRow = row; break; }
+    }
     won = wonRow || null;
   });
   return won;
@@ -805,7 +825,11 @@ async function recordOutcome(params = {}, { trx } = {}) {
  * calls this with `via: 'closeout_booking'` directly — no auto-detection
  * needed, since that caller already knows contextually.
  */
-async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {}) {
+// evidenceBookingId: the scheduled_services row that triggered this win, when
+// a booking did (the admin-leads/admin-schedule hooks) — stored so the sweep
+// can reopen the win if that booking is later cancelled/skipped/no-showed
+// (Codex #4710 r3 P1). Estimate-accept callers pass none.
+async function markWonForCustomer(customerId, { via, trx, now = new Date(), evidenceBookingId = null } = {}) {
   if (!customerId || !trx || !via) return 0;
   try {
     let winCount = 0;
@@ -844,30 +868,41 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
       // median_days_to_close negative. Bounds the window on BOTH sides.
       const nowDateStr = etDateString(now);
 
-      // One atomic UPDATE: the outcome guard (only an open warm/cold row can
-      // win) and the [90-day-ago, today] window (a subquery against
-      // scheduled_services, not a prior SELECT) both live in the same
-      // statement's WHERE, so nothing can flip a row's outcome between
-      // "read" and "write" — there is no read. The win count is the rows
-      // this UPDATE actually touched, never a pre-computed candidate list.
-      const updated = await sp('consultation_outcomes')
-        .whereIn('outcome', ['warm', 'cold'])
-        .where(function matchCustomerOrItsLeads() {
-          this.where('customer_id', customerId);
-          if (leadIds.length) this.orWhereIn('lead_id', leadIds);
-        })
-        .whereIn('scheduled_service_id', function liveVisits() {
-          this.select('id').from('scheduled_services')
-            .where('scheduled_date', '>=', cutoff)
-            .where('scheduled_date', '<=', nowDateStr)
-            // A consultation that never happened (no-show, cancelled,
-            // skipped) is never won — even if its best-effort no-show write
-            // failed and the row is still open.
-            .whereNotIn('status', DEAD_CONSULTATION_STATUSES);
-        })
-        .update({ outcome: 'won', won_at: now, won_via: via, updated_at: now })
-        .returning('id');
-      winCount = updated.length;
+      // Atomic guarded UPDATEs — one per prior outcome, so pre_win_outcome
+      // is a plain literal (Codex #4710 r3 P1) with no read in between: the
+      // outcome guard (only an open warm/cold row can win) and the
+      // [90-day-ago, today] window (a subquery against scheduled_services,
+      // not a prior SELECT) both live in each statement's WHERE, so nothing
+      // can flip a row's outcome between "read" and "write". The win count
+      // is the rows these UPDATEs actually touched.
+      for (const prior of ['warm', 'cold']) {
+         
+        const updated = await sp('consultation_outcomes')
+          .where('outcome', prior)
+          .where(function matchCustomerOrItsLeads() {
+            this.where('customer_id', customerId);
+            if (leadIds.length) this.orWhereIn('lead_id', leadIds);
+          })
+          .whereIn('scheduled_service_id', function liveVisits() {
+            this.select('id').from('scheduled_services')
+              .where('scheduled_date', '>=', cutoff)
+              .where('scheduled_date', '<=', nowDateStr)
+              // A consultation that never happened (no-show, cancelled,
+              // skipped) is never won — even if its best-effort no-show
+              // write failed and the row is still open.
+              .whereNotIn('status', DEAD_CONSULTATION_STATUSES);
+          })
+          .update({
+            outcome: 'won',
+            won_at: now,
+            won_via: via,
+            won_evidence_booking_id: evidenceBookingId,
+            pre_win_outcome: prior,
+            updated_at: now,
+          })
+          .returning('id');
+        winCount += updated.length;
+      }
     });
     return winCount;
   } catch (err) {
@@ -927,6 +962,10 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
   // whose best-effort lost/no_show write failed must close as lost before
   // the win pass could see it as an open row with sale evidence.
   await repairMissedNoShowOutcomes({ now, limit, result });
+  // Then reopen any win whose evidence booking has since died (Codex #4710
+  // r3 P1), so the win pass below re-judges it against the evidence that
+  // still stands.
+  await reopenWinsWithDeadEvidence({ now, limit, result });
   let rows;
   try {
     const cutoff = etDateString(addETDays(now, -(WON_WINDOW_DAYS + SWEEP_GRACE_DAYS)));
@@ -971,6 +1010,50 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
   }
 
   return result;
+}
+
+// Codex #4710 r3 P1: a booking win stays `won` only while the booking behind
+// it is still a live sale. When that booking is later cancelled, skipped or
+// no-showed (or deleted), the row returns to the outcome it had before the
+// win (pre_win_outcome, warm when unknown) and the ordinary win pass can then
+// re-judge it against whatever evidence still stands. Each reopen is a
+// guarded UPDATE keyed on the same evidence id, so a row re-won meanwhile by
+// other evidence is left alone. Mutates `result` in place.
+async function reopenWinsWithDeadEvidence({ now, limit, result }) {
+  result.reopened = 0;
+  let rows;
+  try {
+    rows = await db('consultation_outcomes')
+      .where('outcome', 'won')
+      .whereNotNull('won_evidence_booking_id')
+      .orderBy('won_at', 'desc')
+      .limit(limit)
+      .select('id', 'won_evidence_booking_id', 'pre_win_outcome');
+  } catch (err) {
+    logger.error(`[consultation-outcomes] dead-evidence query failed: ${err.message}`);
+    result.errors += 1;
+    return;
+  }
+  for (const row of rows) {
+    try {
+      const booking = await db('scheduled_services').where({ id: row.won_evidence_booking_id }).first('id', 'status');
+      if (booking && !DEAD_CONSULTATION_STATUSES.includes(booking.status)) continue;
+      const reopened = await db('consultation_outcomes')
+        .where({ id: row.id, outcome: 'won', won_evidence_booking_id: row.won_evidence_booking_id })
+        .update({
+          outcome: ['warm', 'cold'].includes(row.pre_win_outcome) ? row.pre_win_outcome : 'warm',
+          won_at: null,
+          won_via: null,
+          won_evidence_booking_id: null,
+          pre_win_outcome: null,
+          updated_at: now,
+        });
+      if (reopened) result.reopened += 1;
+    } catch (err) {
+      result.errors += 1;
+      logger.warn(`[consultation-outcomes] reopen failed for outcome ${row.id}: ${err.message}`);
+    }
+  }
 }
 
 // Round 12, P2 job-status.js:514 (codex): the no-show transition writes the
@@ -1084,7 +1167,9 @@ function medianOf(sortedNumbers) {
   const mid = Math.floor(sortedNumbers.length / 2);
   return sortedNumbers.length % 2
     ? sortedNumbers[mid]
-    : Math.round((sortedNumbers[mid - 1] + sortedNumbers[mid]) / 2);
+    // The arithmetic midpoint (Codex #4710 r3 P2) — display rounding
+    // belongs to the analytics UI, not the metric.
+    : (sortedNumbers[mid - 1] + sortedNumbers[mid]) / 2;
 }
 
 // ET-safe whole-day difference between two calendar dates (noon-UTC
@@ -1112,8 +1197,14 @@ async function consultationStats({ from, to, trx } = {}) {
   // predicate in SQL (unavoidable for a set-based aggregate) — keep in sync.
   const visits = await database('scheduled_services as ss')
     .leftJoin('services as svc', 'ss.service_id', 'svc.id')
-    .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
     .leftJoin('consultation_outcomes as co', 'co.scheduled_service_id', 'ss.id')
+    // A dispatch reassignment after closeout never moves the credit
+    // (Codex #4710 r3 P2).
+    // Credit goes to the technician who RECORDED the outcome (its
+    // snapshot, otech), falling back to the visit's assignee (tech) when
+    // nothing is recorded yet — combined per row below.
+    .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
+    .leftJoin('technicians as otech', 'co.technician_id', 'otech.id')
     .leftJoin('leads as l', 'l.id', 'co.lead_id')
     // round 12 fix (codex P1 :1064): leads has no `lead_source` column —
     // the source is a FK, leads.lead_source_id -> lead_sources.id, with the
@@ -1135,6 +1226,8 @@ async function consultationStats({ from, to, trx } = {}) {
       'ss.scheduled_date',
       'ss.technician_id',
       'tech.name as technician_name',
+      'co.technician_id as outcome_technician_id',
+      'otech.name as outcome_technician_name',
       'co.outcome',
       'co.lost_reason',
       'co.won_via',
@@ -1185,11 +1278,13 @@ async function consultationStats({ from, to, trx } = {}) {
       }
     }
 
-    const techKey = v.technician_id || 'unassigned';
+    const creditedTechId = v.outcome_technician_id || v.technician_id || null;
+    const creditedTechName = v.outcome_technician_id ? v.outcome_technician_name : v.technician_name;
+    const techKey = creditedTechId || 'unassigned';
     if (!techMap.has(techKey)) {
       techMap.set(techKey, {
-        technician_id: v.technician_id || null,
-        name: v.technician_name || 'Unassigned',
+        technician_id: creditedTechId,
+        name: creditedTechName || 'Unassigned',
         showed: 0,
         won: 0,
       });
