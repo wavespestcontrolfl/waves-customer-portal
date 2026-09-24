@@ -135,7 +135,7 @@ describe('InspectionPage terminal states', () => {
       }),
     });
     renderPage();
-    expect(await screen.findByText(/already a Waves customer/i)).toBeInTheDocument();
+    expect((await screen.findAllByText(/already a Waves customer/i)).length).toBeGreaterThan(0);
   });
 
   // Codex #4737 r4 P2: a converted lead with no upcoming visit is never told
@@ -425,7 +425,7 @@ describe('InspectionPage booking', () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
-    expect(await screen.findByText(/already a Waves customer/i)).toBeInTheDocument();
+    expect((await screen.findAllByText(/already a Waves customer/i)).length).toBeGreaterThan(0);
     expect(screen.getByRole('link', { name: /Move that visit/i })).toHaveAttribute('href', '/reschedule/abc123');
     expect(screen.queryByText(/something went wrong/i)).not.toBeInTheDocument();
   });
@@ -544,6 +544,47 @@ describe('InspectionPage: an address race resets the held address (round-10 P2 :
       && !String(url).includes('find-slots') && !String(url).includes('availability') && !String(url).includes('waitlist'));
     expect(commitReqs).toHaveLength(2);
     expect(JSON.parse(commitReqs[1][1].body).address).toBeUndefined();
+  });
+});
+
+// Codex #4737 r11 P2: terminal states from the address gate / slot search
+// replace the page with the covered card.
+describe('InspectionPage: a terminal state from /availability replaces the gate', () => {
+  it('already_booked from the address gate shows the covered card', async () => {
+    stubFetch({
+      get: jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })),
+      availability: jsonResponse({
+        state: 'already_booked',
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: null },
+        visit: { date: '2099-01-05', window: { start: '09:00', end: '09:30' } },
+        rescheduleUrl: null,
+      }),
+    });
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    expect(await screen.findByText(/already on the calendar/i)).toBeInTheDocument();
+  });
+});
+
+describe('InspectionPage: a terminal state from the slot search replaces the picker', () => {
+  it('converted from find-slots shows the covered card', async () => {
+    stubFetch({
+      findSlots: jsonResponse({
+        state: 'converted',
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '123 Palm Ave, Bradenton 34209' },
+        visit: null,
+        rescheduleUrl: null,
+      }),
+    });
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect((await screen.findAllByText(/already a Waves customer/i)).length).toBeGreaterThan(0);
   });
 });
 

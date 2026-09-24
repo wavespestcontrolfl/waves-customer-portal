@@ -1052,6 +1052,12 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
         return;
       }
       if (!res.ok) throw new Error(body.error || 'failed');
+      // A terminal state from the eligibility re-check (Codex #4737 r11 P2)
+      // replaces the gate with the same card GET would show.
+      if (body.state && body.state !== 'ok') {
+        onResolved(body);
+        return;
+      }
       onAddressResolved?.(value);
       // The hero shows the address being booked, not the stale one on file
       // (Codex #4737 r6 P2).
@@ -1497,6 +1503,13 @@ export default function ScheduleFlowPage({ flow }) {
     const body = await res.json().catch(() => ({}));
     if (signal?.aborted) throw new Error('search superseded');
     if (!res.ok) throw new Error(body.error || 'search failed');
+    // Inspection: a terminal state (already_booked / converted / gone) from
+    // the server's eligibility re-check replaces the page, exactly as the
+    // commit path does (Codex #4737 r11 P2).
+    if (flow === 'inspection' && body.state && body.state !== 'ok') {
+      setData(body);
+      return { summary: null };
+    }
     if (body.availability) {
       setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
       setSelectedSlot(null);

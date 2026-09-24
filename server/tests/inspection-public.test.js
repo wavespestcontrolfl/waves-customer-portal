@@ -569,6 +569,39 @@ describe('Codex #4737 r9: lead-scoped dedupe, trusted-customer change to null, c
   });
 });
 
+describe('Codex #4737 r11 P2s: availability eligibility; race refresh never at a stale pin', () => {
+  test('POST /availability for an already-booked lead returns the terminal shape before any geocode', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [
+      { id: 'ss-a', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'a-tok' },
+    ];
+    const res = await callAvailability(mintLeadConsultationToken(LEAD_ID), { address: '9 Other Rd, Bradenton, FL 34209' });
+    expect(res.body.state).toBe('already_booked');
+    expect(mockGeocode).not.toHaveBeenCalled();
+    expect(mockBuildAvailability).not.toHaveBeenCalled();
+  });
+
+  test('a race whose edited address has no coordinates yet answers address_changed with NO availability (never the stale pin)', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      firstResults.customers = { ...firstResults.customers, address_line1: '8 Fresh Edit Ln', latitude: null, longitude: null };
+      return { ok: false, status: 409, error: 'Your address just changed — please pick a time again.', code: 'LOCATION_CHANGED_RETRY' };
+    });
+    const builds = mockBuildAvailability.mock.calls.length;
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toMatchObject({ code: 'SLOT_TAKEN', availability: null, address_changed: true });
+    expect(res.body.lead.address_display).toMatch(/8 Fresh Edit Ln/);
+    expect(mockBuildAvailability.mock.calls.length).toBe(builds + 1); // only the pre-lock validation, no stale refresh
+  });
+});
+
 describe('Codex #4737 r10 pre-push P0: a race that ends the token\'s authority returns no customer details', () => {
   test('CUSTOMER_CHANGED_RETRY after a phone change → 422 address_unresolved, no address, no availability', async () => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
@@ -592,7 +625,7 @@ describe('Codex #4737 r10 pre-push P0: a race that ends the token\'s authority r
 describe('Codex #4737 r8 P2: LOCATION_CHANGED_RETRY answers like a slot race, at the CURRENT stored pin', () => {
   // Codex #4737 r9 P2: CUSTOMER_CHANGED_RETRY (an address TEXT edit caught
   // by the comms fingerprint) answers the same way.
-  test.each(['LOCATION_CHANGED_RETRY', 'CUSTOMER_CHANGED_RETRY'])('%s: sendBookingFailure refreshes availability at the customer\'s CURRENT pin, not the stale pre-race bookingLocation', async (raceCode) => {
+  test.each(['LOCATION_CHANGED_RETRY', 'CUSTOMER_CHANGED_RETRY'])('%s: sendBookingFailure answers the address change with no stale availability (the page reloads)', async (raceCode) => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
     // No stored coordinates yet — phase 1 geocodes the customer's own
     // stored address TEXT (the pre-race pin) and writes it back; bookingLocation
@@ -618,10 +651,11 @@ describe('Codex #4737 r8 P2: LOCATION_CHANGED_RETRY answers like a slot race, at
     // Same shape a slot race gets — never falls through to a generic 500 or
     // a bare passthrough of createSelfBooking's error.
     expect(res.body.code).toBe('SLOT_TAKEN');
-    // The refresh ran at the CURRENT stored pin (27.9/-82.9), never the
-    // stale pre-race one (27.4/-82.5) bookingLocation carried.
-    const refreshCall = mockBuildAvailability.mock.calls.at(-1);
-    expect(refreshCall[0]).toEqual(expect.objectContaining({ lat: 27.9, lng: -82.9 }));
+    // Never a refresh at any pin (r11 P2): no availability, the address
+    // change flagged, and the page reloads through GET. The only build was
+    // the pre-lock validation — never one at the stale 27.4/-82.5 pin.
+    expect(res.body).toMatchObject({ availability: null, address_changed: true });
+    expect(mockBuildAvailability).toHaveBeenCalledTimes(1);
   });
 });
 

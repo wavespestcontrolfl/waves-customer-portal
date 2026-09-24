@@ -1274,6 +1274,13 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     const lead = await loadLead(db, verified.leadId);
     if (!lead) return res.status(404).json({ error: 'not_found' });
     const custRow = await loadTrustedCustomer(db, lead, verified);
+    // Same eligibility predicate as GET / find-slots / commit (Codex #4737
+    // r11 P2): a converted or already-booked lead gets the terminal shape
+    // before any geocoding or availability work.
+    const eligibility = await resolveEligibility(db, lead, custRow);
+    if (eligibility.state !== 'ok') {
+      return res.json(eligibilityResponse(eligibility, buildLeadPayload(lead, custRow)));
+    }
 
     const resolved = await finalizeBookingLocation(lead, custRow, addressInput);
     if (resolved.failure) {
@@ -1779,8 +1786,7 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
   if (result.code === 'LOCATION_CHANGED_RETRY' || result.code === 'CUSTOMER_CHANGED_RETRY') {
     // createSelfBooking's own fence found the customer's stored pin had
     // moved AFTER phase 1 committed (Codex #4737 r8 P2) — `bookingLocation`
-    // is the pin as it stood then, now stale. Answer with fresh times at
-    // the address on file RIGHT NOW, not the pin that just lost the race.
+    // is the pin as it stood then, now stale — no times are offered there.
     // The customer is re-read THROUGH the trust rules (Codex #4737 r10
     // pre-push P0): the race can also be a phone change that ends this
     // token's authority over the customer — then nothing about it is
@@ -1790,19 +1796,16 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
     if (!fresh || String(fresh.id) !== String(custRow.id)) {
       return res.status(422).json({ error: 'address_unresolved' });
     }
-    const currentLocation = (fresh?.latitude != null && fresh?.longitude != null)
-      ? { lat: parseFloat(fresh.latitude), lng: parseFloat(fresh.longitude) }
-      : bookingLocation;
-    // The client held its own resolvedAddress/hero copy from BEFORE this
-    // race (round-10 P2) — hand back the address actually on the customer
-    // now so it can drop the stale supplied one and stop showing it, rather
-    // than resubmitting it on the next confirm.
-    const currentLeadPayload = fresh?.address_line1
+    // Never refresh at a pin here (Codex #4737 r11 P2): the edited address
+    // may have no coordinates yet (the admin save clears them and
+    // re-geocodes asynchronously) or sit outside the service area. Answer
+    // the change with the current address and NO availability — the page
+    // reloads through GET, which resolves and area-checks it.
+    const currentLeadPayload = fresh.address_line1
       ? { ...leadPayload, has_address: true, address_display: addressDisplay({ line1: fresh.address_line1, city: fresh.city, zip: fresh.zip }) }
       : leadPayload;
-    return sendSlotTaken(res, {
-      location: currentLocation, range, config, catalog, leadId: lead.id, error: result.error,
-      leadPayload: currentLeadPayload, addressChanged: true,
+    return res.status(409).json({
+      error: result.error, code: 'SLOT_TAKEN', availability: null, lead: currentLeadPayload, address_changed: true,
     });
   }
   if (result.status === 409) {
