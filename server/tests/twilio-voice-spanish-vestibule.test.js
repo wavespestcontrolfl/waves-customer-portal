@@ -174,7 +174,7 @@ describe('Spanish voicemail failover', () => {
       const twiml = new VoiceResponse();
       appendVoicemailRecording(twiml);
       const xml = twiml.toString();
-      expect(xml).toMatch(/<Say [^>]*>Thanks for calling Waves\. We're with another customer right now\. After the tone, leave your name, number, and a quick message/);
+      expect(xml).toMatch(/<Say [^>]*>Thanks for calling Waves Pest Control\. We're with another customer right now\. After the tone, leave your name, number, and a quick message/);
       expect(xml).not.toContain('<Play>');
       expect(xml).not.toContain('Your message will be recorded');
       expect(xml).toContain('<Record ');

@@ -777,12 +777,14 @@ async function stampPreconnectScreen(callSid, value) {
 // before the beep — about 55s in all — and 17 of 20 inbound voicemail-path
 // callers that week hung up first (Twilio holds no recording for any of
 // them). The short greeting keeps the recorded script's substance (name,
-// number, quick message, or hang up for a text with options — the text-back
-// is live behind GATE_VOICEMAIL_LEAD_SMS) in about 9 seconds.
-// WAVES_VOICEMAIL_GREETING=recorded restores the asset; re-record it at
-// ~8s to keep the brand voice AND the short wait.
+// number, quick message) in about 8 seconds. It deliberately makes NO
+// text-back promise: the voicemail lead text (GATE_VOICEMAIL_LEAD_SMS) only
+// fires from call-recording-processor after a recording exists, so a caller
+// who hangs up during the greeting would never get one.
+// WAVES_VOICEMAIL_GREETING=recorded restores the asset (WAVES_VOICEMAIL_URL);
+// re-record it at ~8s to keep the brand voice AND the short wait.
 const DEFAULT_VOICEMAIL_ASSET = 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
-const VOICEMAIL_SHORT_GREETING = "Thanks for calling Waves. We're with another customer right now. After the tone, leave your name, number, and a quick message, and we'll call you right back. Or hang up now and we'll text you options to book or get a quote.";
+const VOICEMAIL_SHORT_GREETING = "Thanks for calling Waves Pest Control. We're with another customer right now. After the tone, leave your name, number, and a quick message, and we'll call you right back.";
 function voicemailGreetingMode() {
   return String(process.env.WAVES_VOICEMAIL_GREETING || 'short').trim().toLowerCase() === 'recorded' ? 'recorded' : 'short';
 }
