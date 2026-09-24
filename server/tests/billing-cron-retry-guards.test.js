@@ -469,7 +469,7 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
     // Nothing written: no disarm, no self-supersede, no alert.
     expect(mockPaymentUpdates).toHaveLength(0);
     expect(db).not.toHaveBeenCalledWith('customer_health_alerts');
-    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_lock_contention', expect.objectContaining({
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_unresolved_outcome', expect.objectContaining({
       paymentId: 'pay-failed-1',
       details: expect.objectContaining({ source: 'autopay_retry', reason: 'unresolved_orphan_charge' }),
     }));

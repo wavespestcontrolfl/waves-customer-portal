@@ -24,6 +24,8 @@ let mockPaymentsInserts = [];
 let mockHealthAlertInserts = [];
 // The post-contention already-collected recheck's read of `payments`.
 let mockCollectedRow = null;
+// hasUnresolvedSiblingStripeOutcome's read of `stripe_orphan_charges`.
+let mockOrphanRow = null;
 
 jest.mock('../models/db', () => {
   function thenableFor(resultFn) {
@@ -49,6 +51,11 @@ jest.mock('../models/db', () => {
     if (table === 'customer_health_alerts') {
       const b = thenableFor(() => []);
       b.insert = jest.fn((row) => { mockHealthAlertInserts.push(row); return Promise.resolve([1]); });
+      return b;
+    }
+    if (table === 'stripe_orphan_charges') {
+      const b = thenableFor(() => []);
+      b.first = () => Promise.resolve(mockOrphanRow);
       return b;
     }
     return thenableFor(() => []);
@@ -99,8 +106,36 @@ beforeEach(() => {
   mockPaymentsInserts = [];
   mockHealthAlertInserts = [];
   mockCollectedRow = null;
+  mockOrphanRow = null;
   jest.clearAllMocks();
 });
+
+// Pre-push fallback audit P1 (round 3): the unresolved-outcome skip has
+// no natural recovery either (billing_day matches once a month, and the
+// orphan fence is customer-scoped). It must raise an operator alert —
+// but arm NO retry row (a ladder charging again after the orphan is
+// marked resolved is the double collection the fence prevents).
+test('an unresolved Stripe orphan for the customer skips the month with an operator alert and arms nothing', async () => {
+  const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+  withCustomerBillingLock.mockImplementationOnce(async (_id, fn) => fn());
+  mockOrphanRow = { id: 'orphan-1', stripe_payment_intent_id: 'pi_orphan' };
+  const StripeService = require('../services/stripe');
+
+  const result = await BillingCron.processMonthlyBilling();
+
+  expect(result.skipped).toBe(1);
+  expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
+  expect(mockPaymentsInserts).toHaveLength(0);
+  expect(mockHealthAlertInserts).toHaveLength(1);
+  expect(mockHealthAlertInserts[0]).toMatchObject({ customer_id: 'cust-locked', alert_type: 'billing_collection_deferred', severity: 'high' });
+  expect(JSON.parse(mockHealthAlertInserts[0].trigger_data)).toMatchObject({
+    source: 'billing_monthly_cron_unresolved_outcome', reason: 'unresolved_orphan_charge', stripe_payment_intent_id: 'pi_orphan',
+  });
+  expect(logAutopay).toHaveBeenCalledWith('cust-locked', 'skipped_unresolved_outcome', expect.objectContaining({
+    details: expect.objectContaining({ reason: 'unresolved_orphan_charge' }),
+  }));
+  expect(logAutopay).not.toHaveBeenCalledWith('cust-locked', 'skipped_lock_contention', expect.anything());
+}, 15000);
 
 // Codex #4682 r3 P1: the collector holding the lock past the retry window
 // is usually mid-charge for THIS month. If its paid row has landed by the

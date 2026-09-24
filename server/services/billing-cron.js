@@ -377,7 +377,36 @@ const BillingCron = {
           // the sibling row that caused this already carries its own
           // failure/orphan record for an operator to act on.
           logger.error(`[billing-cron] Monthly charge for customer ${customer.id} skipped — unresolved Stripe outcome from a sibling attempt (${lockOutcome.unresolvedOutcome.reason}); reconcile before any further collection this month`);
-          await logAutopay(customer.id, 'skipped_lock_contention', {
+          // Pre-push fallback audit P1 (round 3): this skip has no
+          // natural recovery either — billing_day matches once a month,
+          // and the orphan fence is customer-scoped, so an orphan from an
+          // unrelated charge would silently cost this month's dues. No
+          // armed retry row here on purpose: the retry ladder charging
+          // again after an operator marks the orphan resolved (with no
+          // ledger row behind it) is the exact double collection the
+          // fence exists to prevent. An operator alert instead — the same
+          // alert_type the lock-contention deferral raises — naming what
+          // to reconcile and that "Charge now" collects the month after.
+          const unresolvedDetail = lockOutcome.unresolvedOutcome.detail || {};
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: customer.id,
+              alert_type: 'billing_collection_deferred',
+              severity: 'high',
+              title: 'Monthly dues NOT collected — unresolved Stripe outcome on a prior attempt',
+              description: `The daily dues cron skipped ${monthKey} for this customer because a prior charge attempt has an unresolved Stripe outcome (${lockOutcome.unresolvedOutcome.reason}${unresolvedDetail.stripe_payment_intent_id ? `, PI ${unresolvedDetail.stripe_payment_intent_id}` : ''}${unresolvedDetail.id ? `, record ${unresolvedDetail.id}` : ''}). Nothing was charged and NO retry is armed. Reconcile that attempt against the Stripe dashboard first — if it did collect this month, record it; if not, Customer 360 "Charge now" collects ${monthKey} manually.`,
+              trigger_data: JSON.stringify({
+                billed_month: monthKey,
+                source: 'billing_monthly_cron_unresolved_outcome',
+                reason: lockOutcome.unresolvedOutcome.reason,
+                stripe_payment_intent_id: unresolvedDetail.stripe_payment_intent_id || null,
+                record_id: unresolvedDetail.id || null,
+              }),
+            });
+          } catch (alertErr) {
+            logger.error(`[billing-cron] Unresolved-outcome alert creation failed for customer ${customer.id}: ${alertErr.message}`);
+          }
+          await logAutopay(customer.id, 'skipped_unresolved_outcome', {
             details: { source: 'autopay', billed_month: monthKey, reason: lockOutcome.unresolvedOutcome.reason },
           });
           skipped++;
@@ -973,7 +1002,7 @@ const BillingCron = {
       // this month's dues off for good. Stay armed, no write; the next
       // tick reclassifies from scratch once the orphan reconciles.
       if (verdict.reason === RETRY_REASONS.SIBLING_ORPHAN_UNRESOLVED) {
-        await logAutopay(payment.customer_id, 'skipped_lock_contention', {
+        await logAutopay(payment.customer_id, 'skipped_unresolved_outcome', {
           paymentId: payment.id,
           details: {
             source: 'autopay_retry',

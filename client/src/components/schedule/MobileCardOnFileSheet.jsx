@@ -182,6 +182,14 @@ export default function MobileCardOnFileSheet({
       // component left to receive the quote into state.
       if (abortedRef.current) return;
       const quote = quoteData.quote || {};
+      // Fail closed (pre-push fallback audit P1): a 200 with no usable
+      // total would otherwise post the charge with expectedTotal undefined
+      // — JSON.stringify drops the field and the server's changed-amount
+      // guard never engages, so money would move on an unbound, unshown
+      // figure. Refuse before anything moves.
+      if (!Number.isFinite(Number(quote.total))) {
+        throw new Error("Could not price this charge — no total was quoted");
+      }
       setQuotes((prev) => ({ ...prev, [card.id]: quote }));
 
       const r = await fetch(

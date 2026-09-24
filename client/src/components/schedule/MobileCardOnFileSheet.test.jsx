@@ -156,6 +156,29 @@ describe.each(["legacy", "comfortable"])(
       expect(quoteEl.className).not.toMatch(/\btruncate\b/);
     });
 
+    it("refuses to charge when the quote comes back without a total — nothing is posted to /charge-card", async () => {
+      await renderLoaded();
+      // A 200 quote with no usable total (empty body). Only ONE response
+      // is queued: if the sheet wrongly proceeded, the charge fetch would
+      // get undefined and the assertion on fetch calls below catches it.
+      fetch.mockReturnValueOnce(jsonResponse({}));
+
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+
+      await screen.findByText(/Could not price this charge/);
+      expect(
+        fetch.mock.calls.some(([url]) => String(url).includes("/charge-card") && !String(url).includes("/charge-card-quote")),
+      ).toBe(false);
+      // Not a terminal failure — the operator can retry once pricing works.
+      await waitFor(() => {
+        screen
+          .getAllByRole("button", { name: /^Charge(?: |$)/ })
+          .forEach((button) => expect(button).toBeEnabled());
+      });
+    });
+
     it("still charges successfully under React.StrictMode's dev double-invoked mount/cleanup", async () => {
       // StrictMode mounts, cleans up (setting abortedRef true via the
       // effect's cleanup), then mounts again for the SAME instance — the
