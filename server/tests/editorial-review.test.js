@@ -3,14 +3,13 @@ const crypto = require('crypto');
 const mockDispatch = jest.fn();
 const mockFetchPage = jest.fn();
 
-jest.mock('../services/llm/call', () => ({
-  dispatchWithFallback: (...args) => mockDispatch(...args),
+jest.mock('../services/llm/deep', () => ({
+  createDeepMessage: (...args) => mockDispatch(...args),
 }));
 jest.mock('../services/seo/contact-finder', () => ({
   fetchPage: (...args) => mockFetchPage(...args),
 }));
 
-const MODELS = require('../config/models');
 const editorial = require('../services/content/editorial-review');
 const inventory = require('../services/content/editorial-review-inventory');
 
@@ -110,11 +109,11 @@ describe('editorial review', () => {
     expect(result.sources[0].contentHash).toBe(crypto.createHash('sha256').update(result.sources[0].excerpt).digest('hex'));
     expect(mockFetchPage).toHaveBeenCalledWith('https://health.example.gov/mosquitoes', expect.objectContaining({ maxRedirects: 3 }));
     expect(mockDispatch).toHaveBeenCalledWith(
-      MODELS.TEXT_POLICIES.deepAnalysis,
-      expect.objectContaining({ laneId: 'editorial_review', maxTokens: 12000, jsonMode: true }),
-      expect.objectContaining({ validate: expect.any(Function) }),
+      null,
+      expect.objectContaining({ laneId: 'editorial_review', max_tokens: 12000 }),
+      expect.objectContaining({ jsonSchema: expect.any(Object), validate: expect.any(Function) }),
     );
-    const prompt = mockDispatch.mock.calls[0][1].text;
+    const prompt = mockDispatch.mock.calls[0][1].messages[0].content;
     expect(prompt).toContain('EXACT FINAL DOCUMENT:');
     expect(prompt).toContain(DOCUMENT);
     expect(prompt).toContain('SUPPLEMENTAL FACTS PACK (not source evidence)');
@@ -131,6 +130,12 @@ describe('editorial review', () => {
     expect(result.model).toBeNull();
     expect(result.checks.every((check) => check.status === 'error')).toBe(true);
     expect(result.checks[0].findings[0].detail).toContain('checks_coverage');
+  });
+
+  test.each(['Another title', 42])('rejects mismatched published title %s before dispatch', async (title) => {
+    const result = await editorial.review({ document: DOCUMENT.replace('title: Stop Mosquito Breeding', `title: ${title}`), title: 'Stop Mosquito Breeding' });
+    expect(result.checks.every((check) => check.status === 'error')).toBe(true);
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   test('fails closed when dispatch is unavailable', async () => {
@@ -159,6 +164,8 @@ describe('editorial review', () => {
     expect(result.pass).toBe(false);
     expect(check.status).toBe('error');
     expect(check.findings.some((item) => item.detail.includes('could not be safely retrieved'))).toBe(true);
+    await expect(editorial.repair({ document: DOCUMENT, findings: check.findings })).rejects.toThrow(/require retry/);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
   test('rejects unknown unresolved domain tokens while allowing known caller tokens', async () => {
@@ -268,9 +275,9 @@ describe('editorial section-answer plan review', () => {
     const result = await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections });
     expect(result).toMatchObject({ pass: true, findings: [], model: 'test-deep-model' });
     expect(mockDispatch).toHaveBeenCalledWith(
-      MODELS.TEXT_POLICIES.deepAnalysis,
-      expect.objectContaining({ laneId: 'editorial_plan_review', maxTokens: 5000, jsonMode: true }),
-      expect.objectContaining({ validate: expect.any(Function) }),
+      null,
+      expect.objectContaining({ laneId: 'editorial_plan_review', max_tokens: 5000 }),
+      expect.objectContaining({ jsonSchema: expect.any(Object), validate: expect.any(Function) }),
     );
   });
 
