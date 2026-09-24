@@ -2292,6 +2292,11 @@ async function createSelfBooking(payload = {}) {
     // catch below rolls the profile back for the failures that can only be
     // detected under the advisory locks.)
     let createdCustomerId = null;
+    // The parent customer_accounts row this request minted (none when the
+    // contact attached to an existing account) — rolled back with the
+    // profile on a refused booking, or each retry would strand another
+    // unreachable account (codex #4667 r16 P2).
+    let createdAccountId = null;
     if (willCreateCustomer) {
       // Account layer: attach-or-create so the new profile is login-complete
       // (portal refresh sessions FK customer_accounts). The phone-on-file gate
@@ -2305,6 +2310,7 @@ async function createSelfBooking(payload = {}) {
         phone: phoneDigits,
         email: new_customer.email || null,
       });
+      if (account?.accountId && !account.existingCustomer && account.matchType == null) createdAccountId = account.accountId;
       const [created] = await db('customers').insert(applyContactNormalization({
         account_id: account.accountId,
         is_primary_profile: !account.existingCustomer,
@@ -3268,6 +3274,16 @@ async function createSelfBooking(payload = {}) {
           await db('customers').where({ id: createdCustomerId }).del().catch((delErr) => {
             logger.warn(`[booking:confirm] Could not roll back just-created customer ${createdCustomerId}: ${delErr.message}`);
           });
+          if (createdAccountId) {
+            // Only while nothing else references the account (the profile
+            // above was its sole child).
+            const stillReferenced = await db('customers').where({ account_id: createdAccountId }).first('id').catch(() => ({ id: 'unknown' }));
+            if (!stillReferenced) {
+              await db('customer_accounts').where({ id: createdAccountId }).del().catch((delErr) => {
+                logger.warn(`[booking:confirm] Could not roll back just-created account: ${delErr.code || delErr.name || 'error'}`);
+              });
+            }
+          }
         }
         // code rides along so the reservice route can distinguish the lane
         // dedupe from a slot race; /confirm's response shape is unchanged

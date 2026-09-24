@@ -527,7 +527,16 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             // Server-owned verdict for this address (clean / flagged /
             // unanswered) — a clean one supersedes older warnings downstream.
             address_verdict: (() => {
-              if (!cachedAuditStale) return buildAddressVerdict({ flag: addressUnverified, enriched: result.enriched, profileFound: !!result?.enriched, address: normalizedAddress });
+              if (!cachedAuditStale) {
+                const verdict = buildAddressVerdict({ flag: addressUnverified, enriched: result.enriched, profileFound: !!result?.enriched, address: normalizedAddress });
+                // A clean answer served from the cache is evidence from the
+                // audit's own time, never this request's: a revisit of an
+                // older spelling must not out-date a newer flag on an
+                // equivalent premise (codex #4667 r16 P1).
+                const evidenceAt = result?.meta?.cache === 'hit' ? auditEvidenceAt(result) : null;
+                if (verdict.status === 'clean' && evidenceAt) verdict.at = evidenceAt;
+                return verdict;
+              }
               // The staff verdict is the evidence, at ITS timestamp.
               return { ...buildAddressVerdict({ flag: null, enriched: { addressVerdict: 'audited' }, profileFound: true, address: normalizedAddress }), at: staffCleanAt };
             })(),

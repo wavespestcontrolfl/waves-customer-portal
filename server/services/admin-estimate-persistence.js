@@ -3229,7 +3229,16 @@ async function reviseAdminEstimate({
       // unverified address book and reject the corrected one (codex #4667
       // r13 P1). A confirmation changes nothing but the verdict.
       const corrected = writtenData.addressUnverifiedClearedBy === 'address_corrected';
-      await trx('leads').where({ id: writtenData.lead_id }).update({
+      // The lead is touched ONLY while its current premise is still the one
+      // this estimate carried before the revision: a prefill re-lookup
+      // that already moved the lead to another premise (and maybe wrote a
+      // newer flag for it) must keep that newer verdict and address
+      // (codex #4667 r16 P1) — the same rule the customer fan-out applies.
+      const { samePremiseDisplay: leadPremiseMatches } = require('./lead-address-unverified');
+      const leadRow = await trx('leads').where({ id: writtenData.lead_id }).first('address', 'city', 'zip');
+      const leadDisplay = leadRow ? [leadRow.address, leadRow.city, leadRow.zip].filter(Boolean).join(', ') : '';
+      const leadStillPrior = !!leadRow && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address));
+      if (leadStillPrior) await trx('leads').where({ id: writtenData.lead_id }).update({
         extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
         ...(corrected && parsed.line1 ? {
           // The lead's single address column carries the whole door.
