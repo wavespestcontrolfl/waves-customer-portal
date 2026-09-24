@@ -26,7 +26,10 @@ const PENDING_PURGE_MS = 30 * 24 * 60 * 60 * 1000;    // 30 days — then delete
  *
  * Returns { subscriber, action } where action is one of:
  *   'created'             — new active row inserted (auto-confirmed path)
- *   'resubscribed'        — unsubscribed row flipped back to active
+ *   'resubscribed'        — unsubscribed/inactive row flipped back to
+ *                           active, OR a trusted (requireConfirmation:false)
+ *                           deliberate signup promoted an out-of-area
+ *                           'waitlist' row straight to active
  *   'already_active'      — existing active row, no change
  *   'already_pending'     — existing pending row, no resend triggered
  *                           (caller passed requireConfirmation=false on
@@ -114,6 +117,49 @@ async function subscribeOrResubscribe({
       if (linkCustomer) await linkToCustomer(lc);
       const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
       return { subscriber: fresh, action: 'confirmed' };
+    }
+
+    if (existing.status === 'waitlist') {
+      // Codex pre-push P1 :1087, 2026-09-24 — a 'waitlist' row (the
+      // out-of-area inspection-link prompt, inspection-public.js's POST
+      // /:token/waitlist) intentionally carries NO subscription: it skips
+      // this function entirely at insert time (status:'waitlist', never
+      // 'pending') specifically so it never enrols in ordinary sends
+      // (buildSubscriberQuery selects status='active' only) or triggers a
+      // confirmation email just for joining the waitlist. But this function
+      // didn't know the status existed, so a LATER deliberate newsletter
+      // signup by the same email fell through to the final "already
+      // active" branch below — no confirmation sent, and the row stayed
+      // excluded forever. Treated exactly like a brand-new email would be
+      // (the row is reused, not re-inserted, since email is unique):
+      // requireConfirmation lands at 'pending' + a fresh confirmation
+      // token/email, same as any new public-form signup; a trusted caller
+      // (requireConfirmation:false) promotes straight to 'active', same as
+      // an unsubscribed/inactive row's trusted resubscribe. Never resets
+      // resubscribed_at/unsubscribed_at or the sunset hygiene markers —
+      // a waitlist row was never part of that lifecycle, so those fields
+      // are already unset.
+      const updates = {
+        source,
+        first_name: firstName !== null ? firstName : existing.first_name,
+        last_name: lastName !== null ? lastName : existing.last_name,
+        updated_at: new Date(),
+      };
+      if (requireConfirmation) {
+        updates.status = 'pending';
+        updates.confirmation_sent_at = new Date();
+        updates.confirmation_token = db.raw('gen_random_uuid()');
+      } else {
+        updates.status = 'active';
+        updates.confirmed_at = new Date();
+      }
+      await db('newsletter_subscribers').where({ id: existing.id }).update(updates);
+      if (linkCustomer) await linkToCustomer(lc);
+      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+      return {
+        subscriber: fresh,
+        action: requireConfirmation ? 'confirmation_sent' : 'resubscribed',
+      };
     }
 
     if (existing.status === 'unsubscribed' || existing.status === 'inactive') {

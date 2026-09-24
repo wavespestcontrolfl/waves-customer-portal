@@ -969,6 +969,43 @@ describe('POST /:token commit', () => {
     });
   });
 
+  // Codex pre-push P1 :839, round 7, 2026-09-24 — checkServiceArea used to
+  // run only ONCE, on the pre-lock location; under the lock, freshResolved
+  // could replace it with a NEW location (the customer's own stored
+  // address, unresolvable pre-lock, now resolving) that was never checked
+  // against the service area at all. finalizeBookingLocation closes this:
+  // it is now the ONLY place a location is produced, and it always runs
+  // checkServiceArea before returning success.
+  test('stored out-of-area address unresolvable pre-lock, resolvable under lock: 422 out_of_area, no booking, no customer update (P1 :839)', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    firstResults.customers = {
+      id: 'cust-1', address_line1: '1 Rooftop Rd', address_line2: null,
+      city: 'Fort Worth', state: 'TX', zip: '76102', latitude: null, longitude: null,
+    };
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    const IN_AREA = { lat: 27.4989, lng: -82.5748 }; // Bradenton
+    const OUT_OF_AREA = { lat: 32.7555, lng: -97.3308 }; // Fort Worth, TX
+    mockGeocode
+      .mockResolvedValueOnce({ location: null })       // pre-lock: stored "1 Rooftop Rd" fails to geocode
+      .mockResolvedValueOnce({ location: IN_AREA })    // pre-lock: supplied replacement resolves, in area
+      .mockResolvedValueOnce({ location: OUT_OF_AREA }); // phase-1: stored NOW resolves — out of area
+    mockCounty
+      .mockResolvedValueOnce('Manatee') // checkServiceArea for the pre-lock (supplied) location
+      .mockResolvedValueOnce('Tarrant'); // checkServiceArea for the fresh (stored) location — not served
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ error: 'out_of_area', county: 'Tarrant' });
+    expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    expect(updateCalls.find((c) => c.table === 'customers')).toBeUndefined();
+  });
+
   // P1 :355 — a null county (provider timeout/outage) must never silently
   // pass a booking through, including for a customer's STORED coordinates
   // (which never touch the geocoder's own box test at all — checkServiceArea

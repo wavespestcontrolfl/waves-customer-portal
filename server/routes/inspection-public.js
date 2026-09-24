@@ -427,6 +427,33 @@ async function checkServiceArea(location) {
   return { ok: isInServiceAreaCounty(county), county };
 }
 
+// The ONE place a "final" booking location is ever produced — every caller
+// that needs a location to book, persist, or validate a slot against goes
+// through this, both the pre-lock resolve and (Codex pre-push P1,
+// 2026-09-24) the commit's under-the-lock re-resolve. Wraps
+// resolveServiceAddress with checkServiceArea so a location can never reach
+// a code path without having passed the area check: before this, phase 1
+// could replace an already-checked pre-lock location with
+// freshResolved.location (e.g. the customer's OWN stored address, which
+// failed to geocode pre-lock but resolves once re-tried under the lock) and
+// nothing ever ran checkServiceArea on that new location — an out-of-area
+// stored address could reach booking unchecked. Returns the SAME resolved
+// shape resolveServiceAddress does on success (`{ location, address,
+// source, unresolved: false }`); on failure, `{ location: null, failure:
+// 'address_required' | 'address_unresolved' | 'out_of_area' |
+// 'service_area_unavailable', county? }` — every caller maps `failure`
+// directly onto the matching response the file already uses for each case.
+async function finalizeBookingLocation(lead, custRow, suppliedAddress) {
+  const resolved = await resolveServiceAddress(lead, custRow, suppliedAddress);
+  if (!resolved.location) {
+    return { location: null, failure: resolved.unresolved ? 'address_unresolved' : 'address_required' };
+  }
+  const area = await checkServiceArea(resolved.location);
+  if (area.unavailable) return { location: null, failure: 'service_area_unavailable' };
+  if (!area.ok) return { location: null, failure: 'out_of_area', county: area.county || null };
+  return resolved;
+}
+
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay }) {
   const booking = require('./booking');
   const { buildBookingAvailability } = booking._internals;
@@ -648,13 +675,12 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     if (!lead) return res.status(404).json({ error: 'not_found' });
     const custRow = lead.customer_id ? await loadCustomer(db, lead.customer_id) : null;
 
-    const resolved = await resolveServiceAddress(lead, custRow, addressInput);
-    if (!resolved.location) {
+    const resolved = await finalizeBookingLocation(lead, custRow, addressInput);
+    if (resolved.failure) {
+      if (resolved.failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
+      if (resolved.failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: resolved.county || null });
       return res.status(422).json({ error: 'address_unresolved' });
     }
-    const area = await checkServiceArea(resolved.location);
-    if (area.unavailable) return res.status(503).json({ error: 'service_area_unavailable' });
-    if (!area.ok) return res.status(422).json({ error: 'out_of_area', county: area.county || null });
 
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
@@ -762,14 +788,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       return res.json(eligibilityResponse(preCheck, leadPayload));
     }
 
-    const resolved = await resolveServiceAddress(lead, custRow, addressInput);
-    if (!resolved.location) {
-      if (resolved.unresolved) return res.status(422).json({ error: 'address_unresolved' });
-      return res.status(400).json({ error: 'address required' });
+    const resolved = await finalizeBookingLocation(lead, custRow, addressInput);
+    if (resolved.failure) {
+      if (resolved.failure === 'address_required') return res.status(400).json({ error: 'address required' });
+      if (resolved.failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
+      if (resolved.failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: resolved.county || null });
+      return res.status(422).json({ error: 'address_unresolved' });
     }
-    const area = await checkServiceArea(resolved.location);
-    if (area.unavailable) return res.status(503).json({ error: 'service_area_unavailable' });
-    if (!area.ok) return res.status(422).json({ error: 'out_of_area', county: area.county || null });
 
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
@@ -836,55 +861,43 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         provisioned = await createCustomerForLead(trx, lead, resolved.address, resolved.location);
         await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
       } else {
-        const freshResolved = await resolveServiceAddress(lead, freshCustRow, addressInput);
-        if (freshResolved.source === 'customer') {
-          // Another commit already fixed up this customer's address —
-          // THAT one wins, not our (possibly different) pre-lock supplied
-          // address. The slot above was validated against OUR location;
-          // slotStillOpen (below) re-validates it against this one.
-          provisioned = freshCustRow;
-          location = freshResolved.location;
-        } else if (freshResolved.location) {
-          // Still no working stored address on the fresh row — persist
-          // whatever resolved (re-derived fresh rather than reusing the
-          // pre-lock value, though in the common single-commit case
-          // they're identical).
-          await trx('customers').where({ id: freshCustRow.id }).update({
-            address_line1: freshResolved.address.line1,
-            address_line2: freshResolved.address.line2,
-            city: freshResolved.address.city,
-            state: freshResolved.address.state,
-            zip: freshResolved.address.zip,
-            latitude: freshResolved.location.lat,
-            longitude: freshResolved.location.lng,
-            updated_at: new Date(),
-          });
-          provisioned = {
-            ...freshCustRow,
-            address_line1: freshResolved.address.line1, address_line2: freshResolved.address.line2,
-            city: freshResolved.address.city, state: freshResolved.address.state, zip: freshResolved.address.zip,
-            latitude: freshResolved.location.lat, longitude: freshResolved.location.lng,
-          };
-          location = freshResolved.location;
-        } else if (freshCustRow.address_line1) {
-          // Fresh resolution failed (geocoder error/timeout) and the
-          // customer has a DIFFERENT stored address on file that we simply
-          // couldn't re-resolve on this attempt — never combine the
-          // pre-lock LOCATION (validated for the supplied address) with
-          // this customer ROW (whose stored address might describe a
-          // different property): createSelfBooking reloads the customer
-          // fresh and would dispatch to whatever's actually in the DB, not
-          // the location the slot was checked against (Codex pre-push P1,
-          // 2026-09-24). We can't tell here whether the stored address is
-          // still good (a transient blip) or genuinely broken, so refuse
-          // recoverably rather than guess — the client can retry.
-          return { addressUnresolved: true };
-        } else {
-          // Fresh resolution failed even though the pre-lock one succeeded,
-          // but the customer STILL has no stored address at all (nothing to
-          // conflict with) — safe to persist the address that WAS validated
-          // pre-lock, so createSelfBooking's fresh reload sees the SAME
-          // location the slot was checked against.
+        // finalizeBookingLocation (not raw resolveServiceAddress) — the
+        // fresh re-resolve must run checkServiceArea too, or a location it
+        // discovers (e.g. the customer's OWN stored address, unresolvable
+        // pre-lock, resolving now) could replace the already-checked
+        // pre-lock location with one that's never been checked at all
+        // (Codex pre-push P1, 2026-09-24).
+        const freshResolved = await finalizeBookingLocation(lead, freshCustRow, addressInput);
+        if (freshResolved.failure === 'out_of_area' || freshResolved.failure === 'service_area_unavailable') {
+          // A location WAS found under the lock but failed the area check —
+          // never fall back to the pre-lock location either (same "never
+          // combine locations from different resolutions" rule as the
+          // address_unresolved case below): the fresh location is the
+          // truthful one (it's what a re-read customer row / re-typed
+          // address actually says), so report its own verdict rather than
+          // silently booking the different pre-lock address instead.
+          return { locationFailure: freshResolved.failure, county: freshResolved.county || null };
+        }
+        if (freshResolved.failure) {
+          // address_unresolved (or, defensively, address_required) —
+          // nothing resolved under the lock at all.
+          if (freshCustRow.address_line1) {
+            // The customer has a DIFFERENT stored address on file that we
+            // simply couldn't re-resolve on this attempt — never combine
+            // the pre-lock LOCATION (validated for the supplied address)
+            // with this customer ROW (whose stored address might describe
+            // a different property): createSelfBooking reloads the
+            // customer fresh and would dispatch to whatever's actually in
+            // the DB, not the location the slot was checked against. We
+            // can't tell here whether the stored address is still good (a
+            // transient blip) or genuinely broken, so refuse recoverably
+            // rather than guess — the client can retry.
+            return { locationFailure: 'address_unresolved' };
+          }
+          // Still no stored address at all (nothing to conflict with) —
+          // safe to persist the address that WAS validated pre-lock, so
+          // createSelfBooking's fresh reload sees the SAME location the
+          // slot was checked against.
           await trx('customers').where({ id: freshCustRow.id }).update({
             address_line1: resolved.address.line1,
             address_line2: resolved.address.line2,
@@ -903,6 +916,37 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           };
           // `location` already defaults to resolved.location at the top of
           // this callback — unchanged, now backed by a matching customer row.
+        } else if (freshResolved.source === 'customer') {
+          // Another commit already fixed up this customer's address (and it
+          // passed the area check inside finalizeBookingLocation) — THAT
+          // one wins, not our (possibly different) pre-lock supplied
+          // address. The slot above was validated against OUR location;
+          // the re-validation below re-checks it against this one.
+          provisioned = freshCustRow;
+          location = freshResolved.location;
+        } else {
+          // Still no working stored address on the fresh row, but the
+          // lead/supplied fallback resolved AND passed the area check —
+          // persist it (re-derived fresh rather than reusing the pre-lock
+          // value, though in the common single-commit case they're
+          // identical).
+          await trx('customers').where({ id: freshCustRow.id }).update({
+            address_line1: freshResolved.address.line1,
+            address_line2: freshResolved.address.line2,
+            city: freshResolved.address.city,
+            state: freshResolved.address.state,
+            zip: freshResolved.address.zip,
+            latitude: freshResolved.location.lat,
+            longitude: freshResolved.location.lng,
+            updated_at: new Date(),
+          });
+          provisioned = {
+            ...freshCustRow,
+            address_line1: freshResolved.address.line1, address_line2: freshResolved.address.line2,
+            city: freshResolved.address.city, state: freshResolved.address.state, zip: freshResolved.address.zip,
+            latitude: freshResolved.location.lat, longitude: freshResolved.location.lng,
+          };
+          location = freshResolved.location;
         }
       }
 
@@ -928,7 +972,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     if (phase1.eligibility) {
       return res.json(eligibilityResponse(phase1.eligibility, leadPayload));
     }
-    if (phase1.addressUnresolved) {
+    if (phase1.locationFailure) {
+      if (phase1.locationFailure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: phase1.county || null });
+      if (phase1.locationFailure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
       return res.status(422).json({ error: 'address_unresolved' });
     }
     if (!phase1.slot) {
@@ -1106,6 +1152,7 @@ router._test = {
   loadAssessmentCatalog,
   resolveServiceAddress,
   checkServiceArea,
+  finalizeBookingLocation,
   findOpenVisit,
   resolveEligibility,
   buildAvailabilityForLead,
