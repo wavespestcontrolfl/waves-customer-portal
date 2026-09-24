@@ -752,7 +752,12 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
     // rule (codex r9 P2); service, window, hour and address still bind.
     created_at: new Date(0).toISOString(), payload: pre.approvedPayload, call_customer_id: callRow?.customer_id || null,
   };
-  const evidence = await loadEvidence(trx, [heldItem], { ignoreGate: true }).catch(() => new Map());
+  // Read under a SAVEPOINT (a nested knex transaction on `trx`): a failed
+  // statement inside a Postgres transaction aborts the whole transaction
+  // (25P02), so a swallowed error here would make the task insert below
+  // fail with a 500 instead of the intended fail-closed "evidence
+  // unavailable, so file the task" (pre-push audit P1 after r27).
+  const evidence = await trx.transaction((sp) => loadEvidence(sp, [heldItem], { ignoreGate: true })).catch(() => new Map());
   // EXACTLY the visit(s) the dispute pulled (the processor notes their
   // ids on the card), still live and unassigned — never any
   // unassigned row of the call, which a reprocess may have made
