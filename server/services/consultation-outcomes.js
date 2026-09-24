@@ -929,17 +929,11 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
  * the booking/accept that is reconciling. Returns the count won (0 on any
  * failure or no match) — never throws.
  *
- * won_via is exactly `via` for every row this call wins (round 12, P2
- * consultation-outcomes.js:411 — removed the dormant per-row
- * closeout_booking auto-detection layer; see the file header). A future
- * tech-closeout PR (PR1b) that DOES know a booking was closed at the door
- * calls this with `via: 'closeout_booking'` directly — no auto-detection
- * needed, since that caller already knows contextually.
+ * won_via / won_at / won_evidence_booking_id always come from the row's own
+ * evidence (findSaleEvidenceForConsultation); a row with no qualifying
+ * evidence stays open (Codex #4710 r10 pre-push P1). `via` names the caller
+ * for the log; `evidenceBookingId` is accepted for caller compatibility.
  */
-// evidenceBookingId: the scheduled_services row that triggered this win, when
-// a booking did (the admin-leads/admin-schedule hooks) — stored so the sweep
-// can reopen the win if that booking is later cancelled/skipped/no-showed
-// (Codex #4710 r3 P1). Estimate-accept callers pass none.
 async function markWonForCustomer(customerId, { via, trx, now = new Date(), evidenceBookingId = null } = {}) {
   if (!customerId || !trx || !via) return 0;
   try {
@@ -984,8 +978,8 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date(), evid
       // sweep and recordOutcome use, so provenance and median_days_to_close
       // never depend on which hook ran first. The booking/acceptance this
       // caller just wrote is visible on this transaction and is one of the
-      // candidates; when the search finds nothing (it should not), the
-      // caller's own evidence is used as before. Each write is a guarded
+      // candidates; when the search finds nothing for a row, that row is
+      // left open. Each write is a guarded
       // UPDATE on the row's still-current outcome, under the customer lock,
       // so a row resolved meanwhile is never overwritten.
       const candidates = await sp('consultation_outcomes as co')
@@ -1016,7 +1010,11 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date(), evid
          
         const evidence = await findSaleEvidenceForConsultation(sp, {
           customerId, scheduledDateStr: toDateOnlyString(row.scheduled_date), windowStart: row.window_start || null, now,
-        }) || { won_via: via, won_at: now, booking_id: evidenceBookingId };
+        });
+        // No qualifying evidence (e.g. the sale predates this consultation's
+        // window on the same day) → not won; the caller's own write is never
+        // a fallback (Codex #4710 r10 pre-push P1).
+        if (!evidence) continue;
          
         const updated = await whereConvertible(sp('consultation_outcomes').where({ id: row.outcome_id }), row.outcome)
           .update({

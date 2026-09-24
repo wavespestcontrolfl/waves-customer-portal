@@ -964,6 +964,16 @@ describe('markWonForCustomer', () => {
         { id: 'visit-already-lost', scheduled_date: etDateString(addETDays(NOW, -3)) },
         // P1-2: scheduled NEXT WEEK — a booking landing today must not win it.
         { id: 'visit-future', scheduled_date: etDateString(addETDays(NOW, 7)) },
+        // Evidence for the wins below (the P1 fix removed the `via`
+        // fallback — every win now needs a REAL qualifying booking or
+        // accepted estimate): a confirmed non-assessment booking for
+        // cust-1, dated `now`. Its effective timestamp (>= NOW-5d ET
+        // midnight, <= now) falls inside every convertible visit's own
+        // window above — visit-recent, visit-lead and visit-already-lost —
+        // but never matters for visit-old (excluded by the 90-day
+        // candidate cutoff regardless) or visit-future (excluded before
+        // evidence is even checked, since it's scheduled after `now`).
+        { id: 'sale-evidence-1', status: 'confirmed', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: NOW },
       ],
       leads: [{ id: 'lead-9', customer_id: 'cust-1' }],
       consultation_outcomes: [
@@ -984,8 +994,12 @@ describe('markWonForCustomer', () => {
 
     const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
     expect(byId['co-recent'].outcome).toBe('won');
+    // Evidence-derived (the seeded booking, sale-evidence-1) — not `via`
+    // echoed through, and not the same Date reference as `now` (a NEW Date
+    // built from the booking's own created_at), just the same instant.
     expect(byId['co-recent'].won_via).toBe('office_booking');
-    expect(byId['co-recent'].won_at).toBe(NOW);
+    expect(byId['co-recent'].won_evidence_booking_id).toBe('sale-evidence-1');
+    expect(new Date(byId['co-recent'].won_at).getTime()).toBe(NOW.getTime());
     expect(byId['co-lead'].outcome).toBe('won');
     expect(byId['co-old'].outcome).toBe('cold'); // untouched — outside the window
     expect(byId['co-already-lost'].outcome).toBe('lost'); // untouched — not warm/cold
@@ -1105,14 +1119,56 @@ describe('markWonForCustomer', () => {
     await expect(markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW }))
       .resolves.toBe(0);
   });
+
+  test('regression: a booking earlier the SAME day, before the consultation\'s own afternoon window_start, is not its evidence (Codex #4710 r9 P2)', async () => {
+    const todayStr = etDateString(NOW);
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        {
+          id: 'visit-today-pm',
+          status: 'completed',
+          scheduled_date: todayStr,
+          window_start: '13:00', // afternoon consultation
+          customer_id: 'cust-1',
+        },
+        // The ONLY booking evidence for this customer — created that SAME
+        // morning, before the consultation's own window_start. The window
+        // opens at the consultation's own arrival time, not ET midnight
+        // (findSaleEvidenceForConsultation's doc comment, Codex #4710 r9
+        // P2), so this booking precedes the consultation and is never its
+        // sale.
+        {
+          id: 'sale-am',
+          status: 'confirmed',
+          service_type: 'Quarterly Pest Control',
+          scheduled_date: todayStr,
+          customer_id: 'cust-1',
+          created_at: parseETDateTime(`${todayStr}T09:00`),
+        },
+      ],
+      leads: [],
+      consultation_outcomes: [
+        { id: 'co-today-pm', scheduled_service_id: 'visit-today-pm', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
+      ],
+    });
+    const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: NOW });
+    expect(count).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('warm');
+  });
 });
 
-// ---- markWonForCustomer — won_via is exactly `via` (round 12, P2 :411) ---
+// ---- markWonForCustomer — won_via provenance (round 12, P2 :411 origin;
+// updated for the later evidence-only P1 fix, Codex #4710 r10, that removed
+// the `via` fallback) -------------------------------------------------------
 //
 // The dormant same-day/same-technician closeout auto-detection is gone: no
-// scheduled_services column says who BOOKED a row. 'closeout_booking' is
-// written only when a caller passes it explicitly (the future PR1b tech
-// closeout route).
+// scheduled_services column says who BOOKED a row. won_via now ALWAYS comes
+// from findSaleEvidenceForConsultation's own evidence — never the caller's
+// `via` (kept only for the log line) — so this automatic reconciliation
+// path can never produce 'closeout_booking' on its own; that value is
+// written only by a caller (the future PR1b tech-closeout route) that
+// stamps recordOutcome directly with won_via: 'closeout_booking', bypassing
+// this function entirely.
 
 describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => {
   function seededDb() {
@@ -1120,6 +1176,14 @@ describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => 
       scheduled_services: [
         { id: 'visit-last-week', scheduled_date: '2026-09-03', technician_id: 'tech-1' },
         { id: 'visit-today', scheduled_date: '2026-09-10', technician_id: 'tech-1' },
+        // Evidence for the wins below (the P1 fix removed the `via`
+        // fallback) — a confirmed non-assessment booking for cust-1, dated
+        // mid-day on 2026-09-10 (before every test's `now` of 20:00Z that
+        // day, and after both visits' own ET-midnight window starts), so
+        // it qualifies for both visit-last-week and visit-today.
+        {
+          id: 'sale-evidence-1', status: 'confirmed', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-10T12:00:00Z'),
+        },
       ],
       leads: [],
       consultation_outcomes: [
@@ -1129,13 +1193,18 @@ describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => 
     });
   }
 
-  test('every open row wins with exactly the `via` passed (office_booking), never an inferred closeout_booking', async () => {
+  test('every open row wins with the evidence-derived won_via (office_booking) — via is not echoed through', async () => {
     const fakeDb = seededDb();
     const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
     expect(count).toBe(2);
     for (const row of fakeDb.__store.consultation_outcomes) {
       expect(row.outcome).toBe('won');
+      // The seeded booking (sale-evidence-1) is BOTH rows' evidence, so
+      // both land on 'office_booking' — coincidentally the same value as
+      // `via` here, but derived from findSaleEvidenceForConsultation, not
+      // from `via` (the next test covers the case where they diverge).
       expect(row.won_via).toBe('office_booking');
+      expect(row.won_evidence_booking_id).toBe('sale-evidence-1');
     }
   });
 
@@ -1147,13 +1216,17 @@ describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => 
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-today').outcome).toBe('warm');
   });
 
-  test('Codex #4710 r3 P1: a win records its evidence booking and each row\'s prior outcome', async () => {
+  test('Codex #4710 r3 P1: a win records its OWN evidence booking id (not the caller\'s evidenceBookingId) and each row\'s prior outcome', async () => {
     const fakeDb = seededDb();
     fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-last-week').outcome = 'cold';
-    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z'), evidenceBookingId: 'sale-1' });
+    // evidenceBookingId is accepted for caller compatibility only (see the
+    // function's own doc comment) — it must NOT show up on the written
+    // row; won_evidence_booking_id always comes from the evidence search's
+    // own booking (sale-evidence-1), never this caller-supplied id.
+    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z'), evidenceBookingId: 'sale-1-ignored' });
     const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
-    expect(byId['co-today']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' });
-    expect(byId['co-last-week']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-1', pre_win_outcome: 'cold' });
+    expect(byId['co-today']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-evidence-1', pre_win_outcome: 'warm' });
+    expect(byId['co-last-week']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-evidence-1', pre_win_outcome: 'cold' });
   });
 
   test('Codex #4710 r7 P2: an outcome snapshotted to ANOTHER customer is not won through a relinked lead', async () => {
@@ -1169,10 +1242,16 @@ describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => 
     expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('warm');
   });
 
-  test('an explicit via closeout_booking (the PR1b tech-closeout caller) is written as passed', async () => {
+  test('via never becomes won_via through this automatic path — even an explicit closeout_booking is overridden by the real evidence', async () => {
     const fakeDb = seededDb();
     await markWonForCustomer('cust-1', { via: 'closeout_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
-    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-today').won_via).toBe('closeout_booking');
+    // `via` is for the log line only (see the function's doc comment) — the
+    // written won_via always comes from findSaleEvidenceForConsultation,
+    // here the seeded booking's 'office_booking', never the caller's
+    // 'closeout_booking'. That value is written only by a caller that
+    // stamps recordOutcome directly (the future PR1b tech-closeout route),
+    // never through this reconciliation.
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-today').won_via).toBe('office_booking');
   });
 });
 
