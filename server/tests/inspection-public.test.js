@@ -1463,6 +1463,77 @@ describe('structural: finalizeBookingLocation is the sole producer of a booking 
   });
 });
 
+// Round 12, Codex pre-push P1, 2026-09-24: loadLead's own select list
+// omitted `first_contact_channel`, silently making leadContactVerified's
+// inbound-call branch dead in production — every test still passed because
+// the mocked lead row was hand-built with the field already on it, never
+// routed through the real loadLead select. Fixed by making loadLead's
+// select BUILT FROM the exported LEAD_ROW_FIELDS constant (single source
+// of truth) instead of a separately hand-written column list; these tests
+// keep the constant itself honest by sweeping the three functions' own
+// source for every `lead.<field>` / `freshLead.<field>` access.
+describe('structural: loadLead selects every field these functions read off the lead row (P1 :585, round 12)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../routes/inspection-public.js'), 'utf8');
+  const { LEAD_ROW_FIELDS, loadLead } = inspectionPublicRouter._test;
+
+  function bodyOf(fnName) {
+    const start = source.indexOf(`function ${fnName}(`);
+    expect(start).toBeGreaterThan(-1);
+    const openBrace = source.indexOf('{', start);
+    let depth = 0;
+    for (let i = openBrace; i < source.length; i += 1) {
+      if (source[i] === '{') depth += 1;
+      else if (source[i] === '}') {
+        depth -= 1;
+        if (depth === 0) return source.slice(start, i + 1);
+      }
+    }
+    throw new Error(`unbalanced braces reading ${fnName}`);
+  }
+
+  function leadFieldsReadIn(fnName) {
+    const body = bodyOf(fnName);
+    const fields = new Set();
+    const re = /\b(?:lead|freshLead)\??\.([a-zA-Z_][a-zA-Z0-9_]*)/g;
+    let m;
+    while ((m = re.exec(body))) fields.add(m[1]);
+    return fields;
+  }
+
+  test('LEAD_ROW_FIELDS is a superset of every lead.<field>/freshLead.<field> access in leadContactVerified, resolveOrLinkCustomerForLead, and matchExistingAccountProfile', () => {
+    const swept = new Set([
+      ...leadFieldsReadIn('leadContactVerified'),
+      ...leadFieldsReadIn('resolveOrLinkCustomerForLead'),
+      ...leadFieldsReadIn('matchExistingAccountProfile'),
+    ]);
+    // Sanity: the sweep must actually find fields, and specifically the
+    // exact one this round's audit found missing — an empty/incomplete
+    // sweep would make this test pass for the wrong reason.
+    expect(swept.has('first_contact_channel')).toBe(true);
+    expect(swept.has('first_name')).toBe(true);
+    for (const field of swept) {
+      expect(LEAD_ROW_FIELDS).toContain(field);
+    }
+  });
+
+  test("loadLead's actual select call carries every LEAD_ROW_FIELDS column — not a separately hand-written list that could drift from it again", async () => {
+    let capturedFields = null;
+    const spyChain = {
+      where: () => spyChain,
+      whereNull: () => spyChain,
+      first: async (...fields) => { capturedFields = fields; return null; },
+    };
+    await loadLead(() => spyChain, 'any-id');
+    expect(capturedFields).toEqual(LEAD_ROW_FIELDS);
+  });
+
+  test('first_contact_channel is present in LEAD_ROW_FIELDS — the exact column this round\'s audit found missing from production', () => {
+    expect(LEAD_ROW_FIELDS).toContain('first_contact_channel');
+  });
+});
+
 describe('POST /:token/waitlist', () => {
   test('idempotent insert on email — no error on a repeat submit', async () => {
     firstResults.leads = LEAD_ROW;

@@ -270,11 +270,25 @@ function buildLeadPayload(lead, custRow) {
   };
 }
 
+// The SINGLE source of truth for loadLead's select list — every field this
+// file's lead-row readers use, including `first_contact_channel`
+// (leadContactVerified's inbound-call check). loadLead is built by
+// spreading this constant, never a separately hand-written column list, so
+// the two can never drift apart again (Codex pre-push P1, 2026-09-24:
+// loadLead's own select omitted `first_contact_channel`, silently making
+// the inbound-call verification branch dead in production — only the
+// mocked test row happened to carry the field, so every test passed while
+// the real route always fell through to the SMS-channel check). A
+// structural test sweeps leadContactVerified / resolveOrLinkCustomerForLead
+// / matchExistingAccountProfile's own source for every `lead.<field>` /
+// `freshLead.<field>` access and asserts each one is a member here.
+const LEAD_ROW_FIELDS = [
+  'id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
+  'status', 'customer_id', 'converted_at', 'first_contact_channel',
+];
+
 async function loadLead(dbConn, leadId) {
-  return dbConn('leads').where({ id: leadId }).whereNull('deleted_at').first(
-    'id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
-    'status', 'customer_id', 'converted_at'
-  );
+  return dbConn('leads').where({ id: leadId }).whereNull('deleted_at').first(...LEAD_ROW_FIELDS);
 }
 
 async function loadCustomer(dbConn, customerId) {
@@ -1324,6 +1338,8 @@ router._test = {
   buildAvailabilityForLead,
   matchExistingAccountProfile,
   leadContactVerified,
+  loadLead,
+  LEAD_ROW_FIELDS,
   COMMIT_LOCK_NS,
 };
 
