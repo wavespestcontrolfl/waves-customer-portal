@@ -337,6 +337,39 @@ describe('GET /:token state shapes', () => {
     // Stored coords short-circuit the geocode.
     expect(mockGeocode).not.toHaveBeenCalled();
   });
+
+  test('out_of_area: a stored address resolves outside the service area (P1 :638)', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    firstResults.customers = {
+      id: 'cust-1', address_line1: '1 Somewhere Rd', city: 'Wauchula', state: 'FL', zip: '33873',
+      latitude: 27.5, longitude: -81.8,
+    };
+    listResults.scheduled_services = [];
+    mockCounty.mockResolvedValueOnce('Hardee');
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callGet(token);
+    expect(res.body.state).toBe('out_of_area');
+    expect(res.body.county).toBe('Hardee');
+    expect(res.body.availability).toBeUndefined();
+    expect(mockBuildAvailability).not.toHaveBeenCalled();
+  });
+
+  test('service_area_unavailable: county lookup fails on an otherwise-resolved stored address (P1 :638)', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    firstResults.customers = {
+      id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209',
+      latitude: 27.4, longitude: -82.5,
+    };
+    listResults.scheduled_services = [];
+    mockCounty.mockResolvedValueOnce(null);
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callGet(token);
+    expect(res.body.state).toBe('ok');
+    expect(res.body.service_area_unavailable).toBe(true);
+    expect(res.body.needs_address).toBe(false);
+    expect(res.body.availability).toBe(null);
+    expect(mockBuildAvailability).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /:token/availability — address resolution (P1 :219)', () => {
@@ -1086,6 +1119,59 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
   test('key configured, county lookup throws → treated the same as a null county (unavailable, not a silent pass)', async () => {
     mockCounty.mockRejectedValueOnce(new Error('timeout'));
     expect(await checkServiceArea({ lat: 27.4989, lng: -82.5748 })).toEqual({ ok: false, county: null, unavailable: true });
+  });
+});
+
+// Structural invariant (Codex pre-push P1, 2026-09-24, round 9): a "booking
+// location" is only ever allowed to reach a caller after passing the area
+// check. That's only guaranteed if EVERY caller resolves through
+// finalizeBookingLocation — a raw resolveServiceAddress or checkServiceArea
+// call anywhere else in this file is exactly the bug GET's :638 had (a
+// stored address resolved but was never area-checked). Read the file's own
+// source rather than re-deriving line numbers by hand, so this fails loudly
+// the moment a new call site is added anywhere but inside
+// finalizeBookingLocation's own body.
+describe('structural: finalizeBookingLocation is the sole producer of a booking location', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../routes/inspection-public.js'), 'utf8');
+
+  function bodyOf(fnName) {
+    const start = source.indexOf(`async function ${fnName}(`);
+    expect(start).toBeGreaterThan(-1);
+    // Balance braces from the function's opening `{` to find its own close.
+    const openBrace = source.indexOf('{', start);
+    let depth = 0;
+    for (let i = openBrace; i < source.length; i += 1) {
+      if (source[i] === '{') depth += 1;
+      else if (source[i] === '}') {
+        depth -= 1;
+        if (depth === 0) return { start, end: i + 1 };
+      }
+    }
+    throw new Error(`unbalanced braces reading ${fnName}`);
+  }
+
+  function callSitesOutside(fnPattern, ownerFn) {
+    const owner = bodyOf(ownerFn);
+    const re = new RegExp(fnPattern, 'g');
+    const sites = [];
+    let m;
+    while ((m = re.exec(source))) {
+      const isDefinition = source.slice(Math.max(0, m.index - 20), m.index).includes('function');
+      if (isDefinition) continue; // skip the `async function x(` declaration itself
+      if (m.index >= owner.start && m.index < owner.end) continue; // inside the owner's own body
+      sites.push(m.index);
+    }
+    return sites;
+  }
+
+  test('resolveServiceAddress( is called only from finalizeBookingLocation', () => {
+    expect(callSitesOutside('resolveServiceAddress\\(', 'finalizeBookingLocation')).toEqual([]);
+  });
+
+  test('checkServiceArea( is called only from finalizeBookingLocation', () => {
+    expect(callSitesOutside('checkServiceArea\\(', 'finalizeBookingLocation')).toEqual([]);
   });
 });
 

@@ -137,6 +137,49 @@ describe('InspectionPage terminal states', () => {
     renderPage();
     expect(await screen.findByText(/already a Waves customer/i)).toBeInTheDocument();
   });
+
+  // Round 9 (Codex pre-push P1, 2026-09-24): GET now routes through
+  // finalizeBookingLocation, same as every other producer of a booking
+  // location — a stored address outside the service area stops the page
+  // right from initial load instead of falling through to needs_address:
+  // false with an empty calendar.
+  it('out_of_area (GET): a stored address that resolves outside the service area gets the same stop card as the commit-time version', async () => {
+    stubFetch({
+      get: jsonResponse({
+        state: 'out_of_area',
+        county: 'Hardee',
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '1 Somewhere Rd, Wauchula 33873' },
+      }),
+      waitlist: jsonResponse({ ok: true }),
+    });
+    renderPage();
+
+    expect(await screen.findByText(/we don.t service this area yet/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Email address'), { target: { value: 'pat@example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: /Notify me/i }));
+    expect(await screen.findByText(/you.re on the list/i)).toBeInTheDocument();
+  });
+
+  it('service_area_unavailable (GET): a recoverable retry message where the calendar would be, never an empty-times card', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse({
+        state: 'ok',
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '123 Palm Ave, Bradenton 34209' },
+        needs_address: false,
+        availability: null,
+        selfServeNotice: true,
+        service_area_unavailable: true,
+      }),
+    });
+    renderPage();
+
+    expect(await screen.findByText(/couldn.t confirm your service area/i)).toBeInTheDocument();
+    expect(screen.queryByText(/don.t have open times to offer online/i)).not.toBeInTheDocument();
+
+    const before = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: /Try again/i }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(before));
+  });
 });
 
 describe('InspectionPage address-first gate', () => {

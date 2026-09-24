@@ -635,7 +635,26 @@ router.get('/:token', async (req, res, next) => {
       return res.json(eligibilityResponse(eligibility, leadPayload));
     }
 
-    const resolved = await resolveServiceAddress(lead, custRow, null);
+    // GET goes through finalizeBookingLocation like every other producer of a
+    // booking location (see its docblock) — a stored address that resolves
+    // but sits outside the service area must stop here with the out-of-area
+    // page state, not fall through to needs_address:false with an empty
+    // calendar (Codex pre-push P1, 2026-09-24).
+    const resolved = await finalizeBookingLocation(lead, custRow, null);
+    if (resolved.failure === 'out_of_area') {
+      return res.json({ state: 'out_of_area', county: resolved.county || null, lead: leadPayload });
+    }
+    if (resolved.failure === 'service_area_unavailable') {
+      return res.json({
+        state: 'ok',
+        lead: leadPayload,
+        availability: null,
+        needs_address: false,
+        selfServeNotice: true,
+        service_area_unavailable: true,
+      });
+    }
+
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
@@ -712,10 +731,16 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const lead = await loadLead(db, verified.leadId);
     if (!lead) return res.status(404).json({ error: 'not_found' });
     const custRow = lead.customer_id ? await loadCustomer(db, lead.customer_id) : null;
-    const resolved = await resolveServiceAddress(lead, custRow, addressInput);
-    if (!resolved.location) {
+    // Routed through finalizeBookingLocation (not a raw resolveServiceAddress
+    // call) so a directly-supplied out-of-area address can't be used to pull
+    // slot availability for a location that would never survive the commit
+    // handler's own area check (Codex pre-push P1, 2026-09-24).
+    const resolved = await finalizeBookingLocation(lead, custRow, addressInput);
+    if (resolved.failure) {
+      if (resolved.failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
+      if (resolved.failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: resolved.county || null });
       return res.status(400).json({
-        error: resolved.unresolved
+        error: resolved.failure === 'address_unresolved'
           ? "We couldn't find that address. Please check it and try again."
           : 'An address is needed before we can search for times.',
       });

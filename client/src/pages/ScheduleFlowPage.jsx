@@ -230,7 +230,32 @@ function HelpCard({ children }) {
   );
 }
 
-function EmptyTimesCard({ aiFiltered }) {
+function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, onRetry }) {
+  // Inspection GET can answer state:'ok' with availability:null and
+  // service_area_unavailable:true (the county lookup itself failed, not a
+  // verdict either way — Codex pre-push P1, 2026-09-24). Same recoverable
+  // wording InspectionAddressGate already uses for the POST version of this
+  // failure, plus a retry action since there's no form to resubmit here.
+  if (serviceAreaUnavailable) {
+    return (
+      <Card>
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginBottom: 12 }}>
+          We couldn&apos;t confirm your service area just now. Please try again in a moment, or text or call us.
+        </div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            data-glass-accent=""
+            onClick={onRetry}
+            style={{ ...PRIMARY_CTA, width: 'auto', padding: '0 20px' }}
+          >
+            Try again
+          </button>
+        </div>
+        <ContactRow />
+      </Card>
+    );
+  }
   return (
     <Card>
       <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
@@ -1204,6 +1229,11 @@ const FLOWS = {
       if (data.state === 'gone') return <GoneCard />;
       if (data.state === 'expired') return <ExpiredLinkCard />;
       if (data.state === 'already_booked' || data.state === 'converted') return <InspectionCoveredCard data={data} />;
+      // GET's own out-of-area verdict (a stored address that resolves but
+      // sits outside the service area) — same stop card the commit-time
+      // out_of_area response raises, just sourced from initial load instead
+      // of a POST (Codex pre-push P1, 2026-09-24).
+      if (data.state === 'out_of_area') return <OutOfAreaCard token={ctx?.token} county={data.county} />;
       if (data.needs_address) {
         return (
           <InspectionAddressGate
@@ -1627,7 +1657,13 @@ export default function ScheduleFlowPage({ flow }) {
               {cfg.pickedNote(data, slot, { slotMovedNotice })}
             </>
           )}
-          empty={<EmptyTimesCard aiFiltered={aiFiltered} />}
+          empty={(
+            <EmptyTimesCard
+              aiFiltered={aiFiltered}
+              serviceAreaUnavailable={flow === 'inspection' && !!data?.service_area_unavailable}
+              onRetry={load}
+            />
+          )}
         />
       </>)}
       <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>

@@ -1605,18 +1605,43 @@ find-slots/availability/waitlist, noStore privacy headers, and the SPA
 shell (`/inspection/<token>`) carries noindex/no-referrer/no-store via
 sensitive-spa-headers. GET returns `{ state, lead: { first_name,
 phone_masked, has_address, address_display }, visit?, availability?,
-rescheduleUrl? }`. States: `ok`; `already_booked` (the lead's linked
-customer already has an open, non-terminal Waves Assessment visit — hands
-back that visit's `/reschedule/:token` URL via `services/reschedule-
-link.js`); `converted` (the lead converted, or already has a future booked
-NON-assessment visit — same shape as already_booked); `gone` (lead
-deleted/missing). Availability needs coordinates (the linked customer's
-stored coords, else a geocode of whichever address is on file); with none
-resolvable, `availability: null` and `needs_address: true` — the page asks
-for an address via `POST /:token/availability { address }` (ephemeral: not
-persisted until a visit actually books) before showing times. `POST
-/:token/find-slots` is the same natural-language search reservice uses,
-READ-ONLY, same booking-window clamp on both ends. `POST /:token` commit:
+rescheduleUrl?, county?, service_area_unavailable? }`. States: `ok`;
+`already_booked` (the lead's linked customer already has an open,
+non-terminal Waves Assessment visit — hands back that visit's
+`/reschedule/:token` URL via `services/reschedule-link.js`); `converted`
+(the lead converted, or already has a future booked NON-assessment visit —
+same shape as already_booked); `gone` (lead deleted/missing); `out_of_area`
+(a resolved address — commonly the linked customer's own stored one — sits
+outside the service area; 200, not an error, since the page still has to
+render the out-of-area stop card with the waitlist prompt: `{ state:
+'out_of_area', county, lead }`, no `availability` key at all). Availability
+needs coordinates (the linked customer's stored coords, else a geocode of
+whichever address is on file); with none resolvable, `availability: null`
+and `needs_address: true` — the page asks for an address via `POST
+/:token/availability { address }` (ephemeral: not persisted until a visit
+actually books) before showing times. GET is routed through the SAME
+`finalizeBookingLocation` every other producer of a booking location in
+this file uses (resolveServiceAddress wrapped by checkServiceArea) — a
+stored address that resolves is never taken as "covered" without also
+clearing the area check (Codex pre-push P1, 2026-09-24: GET previously
+called resolveServiceAddress directly and could answer `needs_address:
+false` with an empty calendar for an out-of-area stored address instead of
+stopping the page). When the area check itself can't run (Google key
+configured, county lookup returns null/throws), GET stays at `state: 'ok'`
+with `lead`, `needs_address: false`, `availability: null`, and
+`service_area_unavailable: true` — recoverable, not a verdict either way,
+so the page shows a retry message where the calendar would be rather than
+an empty one. `POST /:token/find-slots` is the same natural-language search
+reservice uses, READ-ONLY, same booking-window clamp on both ends, and
+(same P1) is likewise routed through `finalizeBookingLocation` rather than
+a raw `resolveServiceAddress` — a directly supplied out-of-area address
+422s `{ error: 'out_of_area', county }` or 503s
+`{ error: 'service_area_unavailable' }` instead of returning slot
+availability for a location that could never survive the commit handler's
+own area check. `resolveServiceAddress` and `checkServiceArea` have no
+callers anywhere in this file outside `finalizeBookingLocation`'s own body
+— a structural test on the route file's source enforces it. `POST
+/:token` commit:
 body `{ date, time, address?, notes? }`; idempotent — a lead whose customer
 already holds an open assessment short-circuits to the SAME `already_booked`
 shape (200, before geocoding or creating anything) instead of a second
