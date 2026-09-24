@@ -13,8 +13,15 @@ export default function EmailReply({ active, sender, mailbox, editor }) {
   const replyText = drafts.replies[selectedEmail.id] || "";
   const attemptKey = `reply:${selectedEmail.id}`;
   const attempt = editor.sendAttempts[attemptKey];
+  // ADMIN-BUG-R22: relayed mail (contact forms, lead marketplaces, ticketing)
+  // has a no-reply From with the real recipient in Reply-To — the reply must
+  // target and display that address, not the relay's From.
+  const effectiveRecipient = selectedEmail.reply_to || selectedEmail.from_address;
+  const replyLabel = effectiveRecipient !== selectedEmail.from_address
+    ? `Reply to ${effectiveRecipient} (via ${sender})`
+    : `Reply to ${sender}`;
   return <section aria-label="Email reply" className="rounded-md border-hairline border-zinc-200 bg-white p-4">
-    <Field label={`Reply to ${sender}`}>
+    <Field label={replyLabel}>
       <Textarea value={replyText} aria-label="Reply" onChange={(event) => setReplyDraft(selectedEmail.id, event.target.value)} placeholder="Type your reply..." rows={4} />
     </Field>
     {!sending && <EmailSendOutcome attempt={attempt} onResolve={outcome => editor.reconcileSend(attemptKey, outcome)} />}
@@ -22,7 +29,7 @@ export default function EmailReply({ active, sender, mailbox, editor }) {
     {draftResult && <ActionFeedback className="mt-2">AI draft loaded — review and edit before sending</ActionFeedback>}
     <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
       {replyText && <Button variant="ghost" onClick={() => setReplyDraft(selectedEmail.id, "")} disabled={sending} className="mr-auto">Discard reply</Button>}
-      <EmailQuickLinks key={selectedEmail.id} active={active} recipient={selectedEmail.from_address} disabled={sending}
+      <EmailQuickLinks key={selectedEmail.id} active={active} recipient={effectiveRecipient} disabled={sending}
         onInsert={(link) => setReplyDraft(selectedEmail.id, appendStaticLinkClause(replyText, link))} />
       <Button variant="secondary" onClick={() => editor.handleAiDraft(selectedEmail, mailbox.isSelected)} loading={drafting} disabled={sending} className="gap-2">
         <Sparkles size={16} aria-hidden />AI draft

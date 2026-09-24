@@ -3640,7 +3640,16 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // A partial/unverifiable unit move deliberately retains the cohort
       // hold — this unconditional post-move sync must not release it
       // (codex #3609 r37).
-      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
+      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify,
+      // willNotify=false means this move sends no replacement notice of its
+      // own (Day-grid resize/bulk move always set notifyCustomer:false; a
+      // rain-out whose moved-SMS didn't send lands here too) — a still-
+      // pending creation confirmation must stay pending so the deferred
+      // sendConfirmation / stranded sweep still delivers it with the new
+      // time, exactly like the sibling re-arms in admin-schedule.js's bulk
+      // reschedule and auto-dispatch/apply.js (ADMIN-BUG-R24).
+      ...(willNotify ? {} : { keepPendingConfirmation: true }),
+      ...(expectSchedule ? { expectSchedule } : {}) },
     );
     if (synced && synced.skippedStale === true) return 'stale';
     if (synced !== null) return true;

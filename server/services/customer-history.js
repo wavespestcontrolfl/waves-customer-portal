@@ -1,4 +1,5 @@
 const { phoneIdentityKey } = require('../utils/phone');
+const { phoneIdentitySql } = require('./sms-response-policy');
 
 const TIMELINE_TYPES = new Set([
   'all', 'interaction', 'sms', 'call', 'service', 'invoice', 'estimate',
@@ -382,7 +383,12 @@ async function listCustomerComms(db, customer, query = {}) {
   const customerId = customer.id;
   const parsed = parseCommsRequest(query, customerId);
   const readBefore = parsed.cursor?.readBefore || new Date().toISOString();
+  const currentPeer = phoneIdentitySql("COALESCE(NULLIF(c.contact_phone, ''), customer_scope.phone, '')");
+  const currentEndpoint = phoneIdentitySql("COALESCE(c.our_endpoint_id, '')");
+  const priorPeer = phoneIdentitySql("COALESCE(NULLIF(prior_conversation.contact_phone, ''), prior_customer.phone, '')");
+  const priorEndpoint = phoneIdentitySql("COALESCE(prior_conversation.our_endpoint_id, '')");
   const selectCommsColumns = queryBuilder => queryBuilder
+    .leftJoin('customers as customer_scope', 'c.customer_id', 'customer_scope.id')
     .joinRaw(`LEFT JOIN LATERAL (
       SELECT sl.message_type, sl.status, sl.metadata
       FROM sms_log sl
@@ -405,12 +411,20 @@ async function listCustomerComms(db, customer, query = {}) {
     .joinRaw(`LEFT JOIN LATERAL (
       SELECT prior.body
       FROM messages prior
-      WHERE m.direction = 'inbound'
-        AND prior.channel = 'sms'
-        AND prior.conversation_id = m.conversation_id
+      JOIN conversations prior_conversation ON prior_conversation.id = prior.conversation_id
+      LEFT JOIN customers prior_customer ON prior_customer.id = prior_conversation.customer_id
+      LEFT JOIN LATERAL (
+        SELECT sl.message_type, sl.status
+        FROM sms_log sl
+        WHERE sl.twilio_sid = prior.twilio_sid AND sl.direction = prior.direction
+        ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
+      ) prior_legacy ON true
+      WHERE m.direction = 'inbound' AND prior.channel = 'sms'
         AND prior.direction = 'outbound'
-        AND prior.delivery_status IN ('queued', 'sent', 'delivered')
-        AND COALESCE(prior.message_type, '') <> 'internal_alert'
+        AND COALESCE(prior_legacy.status, prior.delivery_status, '') IN ('queued', 'sent', 'delivered')
+        AND COALESCE(prior_legacy.message_type, prior.message_type, '') <> 'internal_alert'
+        AND ${currentPeer} <> '' AND ${currentEndpoint} <> ''
+        AND ${priorPeer} = ${currentPeer} AND ${priorEndpoint} = ${currentEndpoint}
         AND prior.created_at < m.created_at
         AND prior.created_at > m.created_at - interval '24 hours'
       ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1

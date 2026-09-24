@@ -883,6 +883,39 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(listed.body.tasks.find(task => task.id === valid.body.taskId).state).toBe('canceled');
   }, 30000);
 
+  // ADMIN-BUG-R22 (codex round on this fix): send_email_reply targets
+  // reply_to || from_address, so the approval pin must drift when Reply-To
+  // changes between proposal and confirmation — otherwise confirmation
+  // would pass and the send would go to an address the operator never saw
+  // on the card.
+  test('a Reply-To that changes between proposal and confirmation refuses the send instead of targeting the new address', async () => {
+    const emailId = crypto.randomUUID();
+    await db('emails').insert({ id: emailId, gmail_id: emailId, gmail_thread_id: emailId,
+      from_address: 'noreply@relay.example', reply_to: 'approved@example.test',
+      subject: 'Synthetic relay inquiry', received_at: new Date() });
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'send email reply' }, 'discover'))
+      .mockResolvedValueOnce(tools('send_email_reply', { email_id: emailId, body: 'Synthetic reply' }, 'reply'))
+      .mockResolvedValueOnce(answer('The reply is awaiting confirmation.'));
+    const proposed = await api('/query', request('Reply to noreply@relay.example with thanks'));
+    console.log('DEBUG proposed.body', JSON.stringify(proposed.body));
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const card = proposed.body.pendingActions[0];
+    expect(card.contract.pinned_recipient.email_masked).toBe('a***@example.test');
+
+    // A resync (or a race with another write) changes Reply-To after the
+    // card was shown and approved, before the operator confirms.
+    await db('emails').where('id', emailId).update({ reply_to: 'unapproved@attacker.test' });
+
+    const gmail = require('../services/email/gmail-client');
+    const callsBefore = gmail.sendMessage.mock.calls.length;
+    const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+    // Caught at the route's own confirm-preflight (before the executor even
+    // runs): the drifted Reply-To fails the pin re-check, HTTP 409.
+    expect(confirmed.status).toBe(409);
+    expect(confirmed.body).toMatchObject({ preview_changed: true });
+    expect(gmail.sendMessage.mock.calls).toHaveLength(callsBefore);
+  }, 30000);
+
   test('Gmail timeout produces a durable unknown receipt and blocks replay and dependent steps', async () => {
     const emailId = crypto.randomUUID();
     await db('emails').insert({ id: emailId, gmail_id: emailId, gmail_thread_id: emailId, customer_id: customerA,

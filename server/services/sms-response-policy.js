@@ -20,6 +20,14 @@ const NON_ACTIONABLE_INBOUND_TYPES = Object.freeze([
   'reschedule_reply',
 ]);
 
+function phoneIdentitySql(column) {
+  const digits = `REGEXP_REPLACE(COALESCE(${column}, ''), '[^0-9]', '', 'g')`;
+  return `(CASE WHEN ${digits} = '' THEN ''
+    WHEN ${digits} ~ '^1[0-9]{10}$' THEN RIGHT(${digits}, 10)
+    WHEN ${digits} ~ '^[0-9]{10}$' AND COALESCE(${column}, '') NOT LIKE '+%' THEN ${digits}
+    ELSE '+' || ${digits} END)`;
+}
+
 function jsonObject(value) {
   if (!value) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -88,6 +96,7 @@ function outboundIsAnswer({ direction, messageType, status, isClickFollowup = fa
 module.exports = {
   HUMAN_REPLY_TYPES,
   NON_ACTIONABLE_INBOUND_TYPES,
+  phoneIdentitySql,
   responseFlags,
   inboundNeedsResponse,
   outboundIsAnswer,

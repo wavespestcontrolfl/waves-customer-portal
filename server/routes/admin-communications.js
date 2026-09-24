@@ -12,6 +12,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
+const { phoneIdentitySql } = require('../services/sms-response-policy');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -1663,6 +1664,10 @@ router.post('/call', async (req, res, next) => {
 router.get('/log', async (req, res, next) => {
   try {
     const { customerId, direction, messageType, page, limit, search } = req.query;
+    const currentPeer = phoneIdentitySql("COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '')");
+    const currentEndpoint = phoneIdentitySql("COALESCE(conversations.our_endpoint_id, '')");
+    const priorPeer = phoneIdentitySql("COALESCE(NULLIF(prior_conversation.contact_phone, ''), prior_customer.phone, '')");
+    const priorEndpoint = phoneIdentitySql("COALESCE(prior_conversation.our_endpoint_id, '')");
 
     let query = db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
@@ -1689,12 +1694,20 @@ router.get('/log', async (req, res, next) => {
       .joinRaw(`LEFT JOIN LATERAL (
         SELECT prior.body
         FROM messages prior
-        WHERE messages.direction = 'inbound'
-          AND prior.channel = 'sms'
-          AND prior.conversation_id = messages.conversation_id
+        JOIN conversations prior_conversation ON prior_conversation.id = prior.conversation_id
+        LEFT JOIN customers prior_customer ON prior_customer.id = prior_conversation.customer_id
+        LEFT JOIN LATERAL (
+          SELECT sl.message_type, sl.status
+          FROM sms_log sl
+          WHERE sl.twilio_sid = prior.twilio_sid AND sl.direction = prior.direction
+          ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
+        ) prior_legacy ON true
+        WHERE messages.direction = 'inbound' AND prior.channel = 'sms'
           AND prior.direction = 'outbound'
-          AND prior.delivery_status IN ('queued', 'sent', 'delivered')
-          AND COALESCE(prior.message_type, '') <> 'internal_alert'
+          AND COALESCE(prior_legacy.status, prior.delivery_status, '') IN ('queued', 'sent', 'delivered')
+          AND COALESCE(prior_legacy.message_type, prior.message_type, '') <> 'internal_alert'
+          AND ${currentPeer} <> '' AND ${currentEndpoint} <> ''
+          AND ${priorPeer} = ${currentPeer} AND ${priorEndpoint} = ${currentEndpoint}
           AND prior.created_at < messages.created_at
           AND prior.created_at > messages.created_at - interval '24 hours'
         ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1
@@ -2965,7 +2978,13 @@ router.get('/ai-auto-reply-status', async (req, res) => {
   try {
     const row = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
     res.json({ enabled: row?.value === 'true' });
-  } catch { res.json({ enabled: false }); }
+  } catch (err) {
+    // ADMIN-BUG-R29: a read failure must never come back as a confident 200
+    // {enabled:false} — that reads as "AI auto-reply is off" when the true
+    // value is unknown. Answer non-2xx so the client leaves the switch at
+    // its last confirmed state instead of adopting a guess.
+    res.status(503).json({ error: err.message });
+  }
 });
 
 // POST /api/admin/communications/ai-auto-reply — toggle
@@ -2980,7 +2999,13 @@ router.post('/ai-auto-reply', async (req, res) => {
       await db('system_config').insert({ key: 'ai_sms_auto_reply', value });
     }
     res.json({ enabled: value === 'true' });
-  } catch (err) { res.json({ enabled: false, error: err.message }); }
+  } catch (err) {
+    // ADMIN-BUG-R29: never answer a failed write with HTTP 200 {enabled:false}
+    // — the operator's client would adopt that as the real (now-off) state
+    // although nothing was written and the server may still have it on.
+    // Non-2xx forces the client to treat this as a failed toggle instead.
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Marketing/retention purposes require a real stored consent record per
