@@ -85,7 +85,10 @@ export default function PriceMatchPage() {
   const detailRequest = useRef(0);
   const interactionVersion = useRef(0);
   const selectDraft = useCallback((id) => {
-    if (selectedIdRef.current !== id) detailRequest.current += 1;
+    if (selectedIdRef.current !== id) {
+      detailRequest.current += 1;
+      setDetail(null);
+    }
     selectedIdRef.current = id;
     setSelectedId(id);
     if (!id) {

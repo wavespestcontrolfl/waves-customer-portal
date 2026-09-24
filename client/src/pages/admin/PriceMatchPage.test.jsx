@@ -276,3 +276,29 @@ it("does not restore stale detail while a dismiss action is in flight", async ()
   expect(await screen.findByText("Draft dismissed.")).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Draft A" })).toBeNull();
 });
+
+it("never exposes the prior draft when a poll supersedes and fails a selection read", async () => {
+  const first = draft("draft-a", "Draft A");
+  const second = draft("draft-b", "Draft B");
+  let secondReads = 0;
+  let finishSelection;
+  adminFetch.mockImplementation((path) => {
+    if (path.includes("?status=")) return Promise.resolve(list([first, second]));
+    if (path.endsWith("draft-a")) return Promise.resolve({ draft: first });
+    if (++secondReads === 1) return new Promise(resolve => { finishSelection = resolve; });
+    return Promise.reject(new Error("Detail temporarily unavailable"));
+  });
+  render(<PriceMatchPage />);
+  fireEvent.click(await screen.findByText("Draft A"));
+  await screen.findByRole("heading", { name: "Draft A" });
+  fireEvent.click(screen.getByText("Draft B"));
+  await waitFor(() => expect(secondReads).toBe(1));
+  await act(async () => refresh.callback());
+  expect(screen.getByText("Couldn't load this draft.")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Draft A" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Send to rep…" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+  await act(async () => { finishSelection({ draft: second }); });
+  expect(screen.getByRole("button", { name: /Draft B/ })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.queryByRole("heading", { name: "Draft A" })).toBeNull();
+});
