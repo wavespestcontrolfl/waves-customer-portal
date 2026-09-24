@@ -225,11 +225,44 @@ test("P1: reschedule pins the rebooker's CAS to the authenticated technician_id 
   expect(options.expect).toMatchObject({ technician_id: 'tech-A' });
 });
 
-test("codex round-3: PATCH /:id/note now rejects a STALE (>7 days old) or COMPLETED visit for a technician — lockOwnedLiveVisit's technicianLiveVisitFilter, not a bare technician_id compare", async () => {
+test("codex round-3: PATCH /:id/note now rejects a STALE (>7 days old) visit for a technician — lockOwnedLiveVisit's ownership predicate, not a bare technician_id compare", async () => {
   db.__state.scheduledServices[0].scheduled_date = '2020-01-01';
   const { status, body } = await call('PATCH', '/api/admin/dispatch/svc-1/note', { notes: 'too old' });
   expect(status).toBe(403);
   expect(body).toEqual({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+  expect(db.__state.scheduledServices[0].notes).toBe('original');
+});
+
+// codex round-4 P2: the technician feed keeps a COMPLETED visit for the
+// 7-day post-visit window and both note editors stay open on it, so the
+// note route uses the read-window predicate (allowCompleted) — a completed
+// visit inside the window saves; a completed visit outside it, a dead
+// status, or another technician's completed visit still 403.
+test('codex round-4 P2: PATCH /:id/note saves on the technician\'s OWN recently COMPLETED visit (inside the 7-day window)', async () => {
+  db.__state.scheduledServices[0].status = 'completed';
+  const { status, body } = await call('PATCH', '/api/admin/dispatch/svc-1/note', { notes: 'post-visit paperwork' });
+  expect(status).toBe(200);
+  expect(body.notes).toBe('post-visit paperwork');
+  expect(db.__state.scheduledServices[0].notes).toBe('post-visit paperwork');
+});
+
+test('codex round-4 P2: a completed visit OUTSIDE the window, a dead-status row, and ANOTHER technician\'s completed visit still 403 on the note route', async () => {
+  const row = db.__state.scheduledServices[0];
+  row.status = 'completed'; row.scheduled_date = '2020-01-01';
+  expect((await call('PATCH', '/api/admin/dispatch/svc-1/note', { notes: 'x' })).status).toBe(403);
+  row.scheduled_date = TODAY; row.status = 'cancelled';
+  expect((await call('PATCH', '/api/admin/dispatch/svc-1/note', { notes: 'x' })).status).toBe(403);
+  row.status = 'completed'; row.technician_id = 'tech-B';
+  expect((await call('PATCH', '/api/admin/dispatch/svc-1/note', { notes: 'x' })).status).toBe(403);
+  expect(row.notes).toBe('original');
+});
+
+test('codex round-4 P2: allowCompleted is opt-in — the default (lifecycle) predicate of lockOwnedLiveVisit still refuses the same completed row', async () => {
+  const { lockOwnedLiveVisit } = require('../services/technician-visit-scope');
+  db.__state.scheduledServices[0].status = 'completed';
+  const req = { techRole: 'technician', technicianId: 'tech-A' };
+  await expect(db.transaction((trx) => lockOwnedLiveVisit(trx, req, 'svc-1', ['id']))).rejects.toMatchObject({ status: 403, code: 'service_not_assigned' });
+  await expect(db.transaction((trx) => lockOwnedLiveVisit(trx, req, 'svc-1', ['id'], { allowCompleted: true }))).resolves.toEqual({ id: 'svc-1' });
 });
 
 test('codex round-3: PUT /:id/reorder now rejects a stale visit for a technician too', async () => {

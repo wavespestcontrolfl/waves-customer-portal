@@ -177,3 +177,86 @@ test('lawn/command-center: the REAL requireAdmin refuses a technician (403) and 
   expect(res200.status).not.toHaveBeenCalled();
   expect(nextAdmin).toHaveBeenCalledTimes(1);
 });
+
+// codex round-4 P1 (PR #4673): the lawn-mix projection left the raw
+// protocols.json catalog routes untouched — GET /programs?track=… (rendered
+// by ProtocolReferenceTabV2's "View full calendar" table with Mat$/Lab$
+// columns) returned every visit's material_cost / conditional_cost /
+// labor_cost plus the "($2.18)" priced-line tags verbatim to a technician.
+const PRICED_TRACK = {
+  name: 'Fixture bermuda track',
+  notes: ['Reprice flag: >$60 YTD on spot products'],
+  visits: [
+    {
+      month: 'Sep', visit: 9, notes: 'Scout for chinch bugs',
+      primary: 'K-Flow 0-0-25 ($2.18)\nHydretain ($10.59) + Chelated AM ($1.40)',
+      secondary: 'Headway ONLY if severe ($26.13 est)',
+      material_cost: 14.17, conditional_cost: 26.13, labor_cost: 35,
+      tiers: ['bronze', 'silver'], tier_4x: true, tier_6x: true,
+    },
+  ],
+};
+const PRICED_PROGRAM = {
+  name: 'Fixture tree & shrub program',
+  notes: ['Palm injections ($12/palm min)'],
+  costing_assumptions: 'Material at $35/gal concentrate',
+  minimum_price_per_palm: 12,
+  visits: [{ month: 'Sep', visit: 1, primary: 'Arbor-Jet ($9.10)', secondary: '', material_cost: 9.1, labor_cost: 20 }],
+};
+const OWNER_ONLY_COST_KEYS = ['material_cost', 'conditional_cost', 'labor_cost', 'costing_assumptions', 'minimum_price_per_palm'];
+const dollarDigit = /\$\s?\d/;
+function collectKeysAndStrings(value, keys = new Set(), strings = []) {
+  if (typeof value === 'string') strings.push(value);
+  else if (Array.isArray(value)) value.forEach((v) => collectKeysAndStrings(v, keys, strings));
+  else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) { keys.add(k); collectKeysAndStrings(v, keys, strings); }
+  }
+  return { keys, strings };
+}
+
+beforeEach(() => {
+  protocols.lawn.bermuda = JSON.parse(JSON.stringify(PRICED_TRACK));
+  protocols.tree_shrub = JSON.parse(JSON.stringify(PRICED_PROGRAM));
+});
+
+test('programs?track=: a technician response carries none of the owner-only cost keys and no dollar figure anywhere, but keeps the recipe', async () => {
+  const body = await callAsTechnician('/programs', { track: 'bermuda' });
+  expect(body.viewerRole).toBe('technician');
+  const { keys, strings } = collectKeysAndStrings(body.track);
+  for (const key of OWNER_ONLY_COST_KEYS) expect(keys.has(key)).toBe(false);
+  for (const text of strings) expect(text).not.toMatch(dollarDigit);
+  // The recipe survives: products, months, tiers, notes text minus the tag.
+  expect(body.track.visits[0]).toMatchObject({ month: 'Sep', visit: 9, tiers: ['bronze', 'silver'], tier_4x: true });
+  expect(body.track.visits[0].primary).toBe('K-Flow 0-0-25\nHydretain + Chelated AM');
+  expect(body.track.visits[0].secondary).toBe('Headway ONLY if severe');
+  expect(body.track.notes[0]).toBe('Reprice flag: YTD on spot products');
+});
+
+test('programs?track=: control — an admin response is the raw protocols.json track, unchanged', async () => {
+  const body = await callAsTechnician('/programs', { track: 'bermuda' }, { techRole: 'admin', technicianId: 'admin-1' });
+  expect(body.viewerRole).toBe('admin');
+  expect(body.track).toEqual(PRICED_TRACK);
+});
+
+test('programs?program=: the same projection covers a service program (costing_assumptions / minimum_price_per_palm included)', async () => {
+  const tech = await callAsTechnician('/programs', { program: 'tree_shrub' });
+  const { keys, strings } = collectKeysAndStrings(tech.program);
+  for (const key of OWNER_ONLY_COST_KEYS) expect(keys.has(key)).toBe(false);
+  for (const text of strings) expect(text).not.toMatch(dollarDigit);
+  expect(tech.program.visits[0].primary).toBe('Arbor-Jet');
+  const admin = await callAsTechnician('/programs', { program: 'tree_shrub' }, { techRole: 'admin', technicianId: 'admin-1' });
+  expect(admin.program).toEqual(PRICED_PROGRAM);
+});
+
+test('programs/:track/visit/:num: the per-visit route is projected the same way', async () => {
+  const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/programs/:track/visit/:num').route.stack[0].handle;
+  const res = { json: jest.fn(), status: jest.fn() };
+  res.status.mockReturnValue(res);
+  await handler({ params: { track: 'bermuda', num: '9' }, query: {}, techRole: 'technician', technicianId: 'tech-1' }, res, jest.fn());
+  const body = JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+  const { keys, strings } = collectKeysAndStrings(body);
+  for (const key of OWNER_ONLY_COST_KEYS) expect(keys.has(key)).toBe(false);
+  for (const text of strings) expect(text).not.toMatch(dollarDigit);
+  expect(body.visit.primary).toBe('K-Flow 0-0-25\nHydretain + Chelated AM');
+  expect(body.viewerRole).toBe('technician');
+});

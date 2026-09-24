@@ -81,10 +81,21 @@ function technicianLiveVisitFilter(req, q) {
 // true only when the caller has ALREADY confirmed this is a same-status
 // resend; it drops to a bare (but still row-locked) technician_id match,
 // never staleness/dead-status, and stays admin-unscoped either way.
-async function lockOwnedLiveVisit(trx, req, visitId, columns = ['*'], { allowTerminal = false } = {}) {
+// allowCompleted: a NON-lifecycle write (the appointment note) on a visit
+// the technician can still READ — codex round 4 P2 (PR #4673): the
+// technician feed keeps a completed visit for the 7-day post-visit window
+// and both note editors stay open on it, so gating the note save on the
+// LIVE predicate made every such save 403. This swaps in the read-window
+// predicate (technicianCurrentVisitFilter: own row, not dead, inside the
+// window — completed allowed) under the same row lock; it never widens
+// past what the technician can already see, and lifecycle writes keep the
+// live predicate.
+async function lockOwnedLiveVisit(trx, req, visitId, columns = ['*'], { allowTerminal = false, allowCompleted = false } = {}) {
   const q = trx('scheduled_services').where('scheduled_services.id', visitId).forUpdate();
   if (allowTerminal) {
     if (isTechnicianRequest(req)) q.where('scheduled_services.technician_id', req.technicianId);
+  } else if (allowCompleted) {
+    technicianCurrentVisitFilter(req, q);
   } else {
     technicianLiveVisitFilter(req, q);
   }

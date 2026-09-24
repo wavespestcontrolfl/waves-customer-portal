@@ -778,14 +778,14 @@ router.get('/match', async (req, res, next) => {
 
     if (!result.program) return res.status(404).json({ error: 'Protocol program not found' });
 
-    res.json({
+    res.json(protocolCatalogForViewer(req, {
       serviceType,
       programKey: result.programKey,
       program: result.program,
       matchedVisit: result.matchedVisit,
       matched: result.matched,
       reason: result.reason,
-    });
+    }));
   } catch (err) { next(err); }
 });
 
@@ -851,6 +851,39 @@ function deepStripPriceTokens(value) {
     return out;
   }
   return value;
+}
+
+// codex round 4 P1 (PR #4673): the raw protocols.json catalog routes below
+// (/programs, /programs/:track/visit/:num, /match, /completion-actions) are
+// technician-reachable (router-level requireTechOrAdmin) and hand back the
+// track/program/visit objects verbatim — each visit carries the owner-only
+// per-visit cost figures (material_cost / conditional_cost / labor_cost, a
+// program's costing_assumptions and minimum_price_per_palm) AND the same
+// "($2.18)" priced-line convention in primary/secondary that lawn-mix
+// already strips. ProtocolReferenceTabV2's "View full calendar" table and
+// SchedulePage's protocol panels render them straight from these payloads.
+// Same rule as lawn-mix: the recipe stays, every cost figure goes, and the
+// response is tagged viewerRole so the client hides the cost columns
+// instead of rendering "—" placeholders. Only plain objects are recursed
+// (the Date-passthrough rule deepStripPriceTokens documents above).
+const OWNER_ONLY_PROTOCOL_COST_KEYS = new Set([
+  'material_cost', 'conditional_cost', 'labor_cost', 'costing_assumptions', 'minimum_price_per_palm',
+]);
+function stripOwnerOnlyProtocolCostFields(value) {
+  if (Array.isArray(value)) return value.map(stripOwnerOnlyProtocolCostFields);
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (OWNER_ONLY_PROTOCOL_COST_KEYS.has(key)) continue;
+      out[key] = stripOwnerOnlyProtocolCostFields(val);
+    }
+    return out;
+  }
+  return value;
+}
+function protocolCatalogForViewer(req, payload) {
+  if (viewerSeesPricing(req)) return { ...payload, viewerRole: 'admin' };
+  return { ...deepStripPriceTokens(stripOwnerOnlyProtocolCostFields(payload)), viewerRole: 'technician' };
 }
 
 function stripLawnMixItemPricing(item) {
@@ -1137,7 +1170,7 @@ router.get('/completion-actions', async (req, res, next) => {
       visit,
     });
 
-    res.json({
+    res.json(protocolCatalogForViewer(req, {
       serviceType,
       programKey,
       track,
@@ -1149,7 +1182,7 @@ router.get('/completion-actions', async (req, res, next) => {
         objective: visit.notes,
       },
       actions,
-    });
+    }));
   } catch (err) { next(err); }
 });
 
@@ -1765,14 +1798,14 @@ router.get('/programs', async (req, res, next) => {
     const { track, program } = req.query;
 
     if (program && PROGRAM_KEYS.includes(program) && protocols[program]) {
-      return res.json({ program: protocols[program] });
+      return res.json(protocolCatalogForViewer(req, { program: protocols[program] }));
     }
 
     // Backward compat: map old track letters to new keys
     const TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
     const resolvedTrack = TRACK_MAP[track] || track;
     if (resolvedTrack && protocols.lawn[resolvedTrack]) {
-      return res.json({ track: protocols.lawn[resolvedTrack] });
+      return res.json(protocolCatalogForViewer(req, { track: protocols.lawn[resolvedTrack] }));
     }
 
     // Return summary of all tracks
@@ -1780,7 +1813,7 @@ router.get('/programs', async (req, res, next) => {
       key, name: t.name, visits: t.visits.length, notes: t.notes.length,
     }));
 
-    res.json({
+    res.json(protocolCatalogForViewer(req, {
       operations: protocols.operations || {},
       lawn: { tracks: summary },
       programs: PROGRAM_KEYS.map((key) => programSummary(key, protocols[key])).filter(Boolean),
@@ -1792,7 +1825,7 @@ router.get('/programs', async (req, res, next) => {
       cockroach: programSummary('cockroach', protocols.cockroach),
       bed_bug: programSummary('bed_bug', protocols.bed_bug),
       termite: programSummary('termite', protocols.termite),
-    });
+    }));
   } catch (err) { next(err); }
 });
 
@@ -1804,7 +1837,7 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
 
     if (track === 'tree_shrub') {
       const visit = protocols.tree_shrub.visits.find(v => v.visit === parseInt(num));
-      return res.json({ visit, notes: protocols.tree_shrub.notes });
+      return res.json(protocolCatalogForViewer(req, { visit, notes: protocols.tree_shrub.notes }));
     }
 
     const VISIT_TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
@@ -1813,7 +1846,7 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
     if (!trackData) return res.status(404).json({ error: 'Track not found' });
 
     const visit = trackData.visits.find(v => v.visit === parseInt(num));
-    res.json({ visit, trackName: trackData.name, notes: trackData.notes });
+    res.json(protocolCatalogForViewer(req, { visit, trackName: trackData.name, notes: trackData.notes }));
   } catch (err) { next(err); }
 });
 

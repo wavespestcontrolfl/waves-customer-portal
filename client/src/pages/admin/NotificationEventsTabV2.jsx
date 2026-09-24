@@ -235,8 +235,14 @@ function SmsCard({
   );
 }
 
-function EmailCard({ automation, draft, pending, onDraft, onSave }) {
+function EmailCard({ automation, draft, pending, onDraft, onSave, readOnly }) {
   const canEditVersion = automation.active_version_id && automation.version_status === "draft";
+  // Owner-only (codex round-4 P2, PR #4673): the admin-email-templates
+  // router is requireAdmin end to end (status toggle, draft save, and the
+  // Email Templates tab those links open), so a technician gets a
+  // read-only card — no enabled switch, editable fields, Save, or links
+  // that could only 403. Same rule SmsCard applies via readOnly.
+  const canEdit = !readOnly && canEditVersion;
   return (
     <Card id={`email-template-${automation.template_key}`}>
       <CardBody className="space-y-3">
@@ -264,7 +270,7 @@ function EmailCard({ automation, draft, pending, onDraft, onSave }) {
           </div>
           <Switch
             checked={draft.status === "active"}
-            disabled={pending}
+            disabled={pending || readOnly}
             aria-label={`${draft.status === "active" ? "Pause" : "Activate"} ${automation.automation_key}`}
             onChange={(next) => onDraft({ ...draft, status: next ? "active" : "paused" })}
           />
@@ -282,7 +288,7 @@ function EmailCard({ automation, draft, pending, onDraft, onSave }) {
             <Input
               className="mt-1"
               value={draft.subject}
-              disabled={pending || !canEditVersion}
+              disabled={pending || !canEdit}
               onChange={(e) => onDraft({ ...draft, subject: e.target.value })}
             />
           </div>
@@ -291,38 +297,40 @@ function EmailCard({ automation, draft, pending, onDraft, onSave }) {
             <Input
               className="mt-1"
               value={draft.previewText}
-              disabled={pending || !canEditVersion}
+              disabled={pending || !canEdit}
               onChange={(e) => onDraft({ ...draft, previewText: e.target.value })}
             />
           </div>
-          {!canEditVersion ? (
+          {!canEditVersion && !readOnly ? (
             <div className="text-11 text-ink-tertiary">
               Create a draft in Email Templates to edit subject and preview text.
             </div>
           ) : null}
         </div>
 
-        <div className="flex gap-2 flex-wrap">
-          <Button variant="primary" size="sm" className="gap-2" disabled={pending} onClick={onSave}>
-            <Save size={14} /> Save
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="gap-2"
-            onClick={() => hashTo({ tab: "email_templates", key: automation.template_key })}
-          >
-            <ExternalLink size={14} /> Open in Email Templates
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="gap-2"
-            onClick={() => hashTo({ tab: "email_templates", key: automation.template_key })}
-          >
-            <ExternalLink size={14} /> Edit blocks / versions
-          </Button>
-        </div>
+        {!readOnly ? (
+          <div className="flex gap-2 flex-wrap">
+            <Button variant="primary" size="sm" className="gap-2" disabled={pending} onClick={onSave}>
+              <Save size={14} /> Save
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="gap-2"
+              onClick={() => hashTo({ tab: "email_templates", key: automation.template_key })}
+            >
+              <ExternalLink size={14} /> Open in Email Templates
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-2"
+              onClick={() => hashTo({ tab: "email_templates", key: automation.template_key })}
+            >
+              <ExternalLink size={14} /> Edit blocks / versions
+            </Button>
+          </div>
+        ) : null}
       </CardBody>
     </Card>
   );
@@ -391,9 +399,10 @@ function EventSection({
               pending={!!pending[`email:${automation.automation_key}`]}
               onDraft={(next) => onEmailDraft(automation.automation_key, next)}
               onSave={() => onEmailSave(automation)}
+              readOnly={!isAdminRole}
             />
           ))}
-          {!emailAutomations.length && expectedEmail ? (
+          {!emailAutomations.length && expectedEmail && isAdminRole ? (
             <MissingChannel channel="email" onClick={() => hashTo({ tab: "email_templates", view: "automations" })} />
           ) : null}
         </div>

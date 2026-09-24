@@ -1012,13 +1012,18 @@ router.patch('/:serviceId/note', async (req, res, next) => {
     const text = (notes == null ? '' : String(notes)).slice(0, 2000);
     let updatedNotes = null;
     // codex-review (PR #4673): the row is now locked FOR UPDATE and
-    // re-verified through the canonical technicianLiveVisitFilter predicate
+    // re-verified through the canonical technician ownership predicate
     // (ADMIN-BUG-R35 fixed the bare technician_id compare; this closes the
     // remaining reassignment race — a mismatch lands INSIDE the same lock
     // this update runs under, not a second unlocked SELECT that only
-    // narrows the window).
+    // narrows the window). codex round 4 P2: the note is a non-lifecycle
+    // edit the feed keeps open on a recently COMPLETED visit (7-day
+    // window, MobileAppointmentDetailSheet / ScheduleCustomerSidebar), so
+    // it uses the read-window predicate (allowCompleted →
+    // technicianCurrentVisitFilter) rather than the live one — still
+    // fenced to the technician's own, non-dead, in-window rows.
     await db.transaction(async (trx) => {
-      await lockOwnedLiveVisit(trx, req, req.params.serviceId, ['id']);
+      await lockOwnedLiveVisit(trx, req, req.params.serviceId, ['id'], { allowCompleted: true });
       const updated = await trx('scheduled_services')
         .where({ id: req.params.serviceId })
         .update({ notes: text, updated_at: new Date() })
