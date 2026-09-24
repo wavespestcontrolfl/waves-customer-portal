@@ -6,7 +6,10 @@
  * via dispatch:alert + dispatch:alert_resolved socket broadcasts).
  * Renders one <AlertCard> per unresolved alert, newest first, and
  * passes the hook's resolveAlert callback through so each card can
- * close itself.
+ * close itself. `onOpenJob(jobId)` (optional) is threaded straight
+ * through to each <AlertCard> so a card whose alert carries a job_id
+ * can offer an "Open job" action — <DispatchBoardPage> wires this to
+ * handleSelectJob, opening <JobDrawer>.
  *
  * Tier 1 V2 styling.
  */
@@ -15,7 +18,7 @@ import { useDispatchAlerts } from '../../hooks/useDispatchAlerts';
 import AlertCard from './AlertCard';
 import { Button } from '../ui';
 
-export default function ActionQueuePane() {
+export default function ActionQueuePane({ onOpenJob }) {
   const { alerts, loading, error, resolveAlert, clearAlerts } = useDispatchAlerts();
   const [clearing, setClearing] = useState(false);
   const [clearError, setClearError] = useState(null);
@@ -77,7 +80,7 @@ export default function ActionQueuePane() {
               </div>
             )}
             {alerts.map((a) => (
-              <AlertCard key={a.id} alert={a} onResolve={resolveAlert} />
+              <AlertCard key={a.id} alert={a} onResolve={resolveAlert} onOpenJob={onOpenJob} />
             ))}
           </>
         )}

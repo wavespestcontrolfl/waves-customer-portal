@@ -420,7 +420,17 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     // and precedes every per-sibling tech lock in the loop below it.
     const seriesIdx = src.indexOf('await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);');
     expect(seriesIdx).toBeGreaterThan(-1);
-    expect(src.indexOf('await lockTechDays(trx, techDays);', seriesIdx)).toBeGreaterThan(seriesIdx);
+    const seriesFenceIdx = src.indexOf('await lockTechDays(trx, techDays);', seriesIdx);
+    expect(seriesFenceIdx).toBeGreaterThan(seriesIdx);
+    // The up-front fences are UNCONDITIONAL (not inside an
+    // expectConflictSnapshot branch) and precede the loop's first dated
+    // eligibility check (technicians FOR SHARE): markTechOut takes fence →
+    // technician row, so a series move must never take technician row →
+    // fence (pre-push auditor P1 on #4678).
+    const fenceBlock = src.slice(seriesIdx, seriesFenceIdx);
+    expect(fenceBlock).not.toMatch(/if \(Object\.prototype\.hasOwnProperty\.call\(options, 'expectConflictSnapshot'\)\) \{\s*\/\/ Fence every/);
+    const firstLoopEligibilityIdx = src.indexOf('await assertAssignableSlotTechnician(anchorKeptTechId, trx', seriesIdx);
+    expect(firstLoopEligibilityIdx).toBeGreaterThan(seriesFenceIdx);
     for (const techLock of [
       "['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],",
       "['slot-reserve', `${sib.technician_id}:${String(date).split('T')[0]}`],",
