@@ -34,6 +34,7 @@ const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 
 const { isBillingDayMatch } = require('./billing-helpers');
 const { isPaused } = require('./autopay-eligibility');
+const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
 
 async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint, paymentId, attemptPaymentId, retryCount = 0 }) {
   const metadata = { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode,
@@ -292,30 +293,40 @@ const BillingCron = {
         // Legacy rows without the stamp keep the old payment_date-window
         // + description-marker match.
         const monthKey = `${year}-${String(month).padStart(2, '0')}`;
-        const existingCharge = await db('payments')
-          .where({ customer_id: customer.id })
-          .whereIn('status', ['paid', 'processing'])
-          .where(function () {
-            this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
-              .orWhere(function () {
-                this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
-                  .andWhere('payment_date', '>=', monthStart)
-                  .andWhere('payment_date', '<=', monthEnd)
-                  .andWhere('description', 'like', '%WaveGuard Monthly%');
-              });
-          })
-          .first();
+        // ADMIN-BUG-R11: run the already-collected read + chargeMonthly call
+        // under the SAME per-customer in-process lock the admin "Charge now"
+        // route holds (utils/customer-billing-lock.js) — both run in this
+        // one Node process, so a manual charge-now click landing while THIS
+        // customer's iteration is mid-charge (or vice versa) is serialized
+        // instead of both passing the guard and both charging.
+        const lockOutcome = await withCustomerBillingLock(customer.id, async () => {
+          const existingCharge = await db('payments')
+            .where({ customer_id: customer.id })
+            .whereIn('status', ['paid', 'processing'])
+            .where(function () {
+              this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+                .orWhere(function () {
+                  this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+                    .andWhere('payment_date', '>=', monthStart)
+                    .andWhere('payment_date', '<=', monthEnd)
+                    .andWhere('description', 'like', '%WaveGuard Monthly%');
+                });
+            })
+            .first();
+          if (existingCharge) return { alreadyCollected: existingCharge };
 
-        if (existingCharge) {
-          await logAutopay(customer.id, 'skipped_already_paid', { paymentId: existingCharge.id });
+          const service = await require('./stripe');
+          const paymentResult = await service.chargeMonthly(customer.id);
+          return { paymentResult };
+        });
+
+        if (lockOutcome.alreadyCollected) {
+          await logAutopay(customer.id, 'skipped_already_paid', { paymentId: lockOutcome.alreadyCollected.id });
           skipped++;
           continue;
         }
 
-        const service = await require('./stripe');
-
-        // Charge
-        const paymentResult = await service.chargeMonthly(customer.id);
+        const paymentResult = lockOutcome.paymentResult;
         const settled = paymentResult?.status === 'paid';
         if (settled) charged++;
         else processing++;

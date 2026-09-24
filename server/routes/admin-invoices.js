@@ -2681,6 +2681,23 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         } catch (err) {
           err.statusCode = locked.status === 'processing' ? 409 : 400; err.isOperational = true; throw err;
         }
+        // Saved-card claim fence (ADMIN-BUG-R20, mirrors recordManualPayment):
+        // a card charge whose process died right after the Stripe call
+        // leaves this invoice 'sent' with its stripe_invoice_charge_attempts
+        // row still 'claimed'/submitted. Every other collection rail asks
+        // assertNoInvoiceChargeReconciliationPending first — applying account
+        // credit here without it would draw down the customer's credit while
+        // that same card charge is still pending reconciliation (double
+        // collection once the webhook lands and quarantines it as an orphan).
+        try {
+          await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(id, trx);
+        } catch (fenceErr) {
+          if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
+            const err = new Error(`${fenceErr.message} — resolve it before applying credit`);
+            err.statusCode = 409; err.isOperational = true; throw err;
+          }
+          throw fenceErr;
+        }
         // A customer could have opened /pay/:token/setup between our pre-lock
         // PI triage and this row lock, minting a NEW PaymentIntent (its own
         // lock released by now). If the invoice's PI changed from the one we

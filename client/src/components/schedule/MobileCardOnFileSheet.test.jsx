@@ -35,6 +35,8 @@ describe.each(["legacy", "comfortable"])(
       vi.unstubAllGlobals();
     });
 
+    const QUOTE = { base: 100, surcharge: 3, total: 103 };
+
     async function renderLoaded() {
       fetch.mockReturnValueOnce(jsonResponse({ cards }));
       render(
@@ -49,6 +51,15 @@ describe.each(["legacy", "comfortable"])(
         </UiSurface>,
       );
       await screen.findByText("Visa 1111");
+    }
+
+    // ADMIN-BUG-R47 fix: every charge tap now quotes first
+    // (/charge-card-quote) before posting /charge-card, so each scenario
+    // below queues a quote response ahead of the charge response it's
+    // actually testing.
+    function queueQuoteThenCharge(chargeBody, chargeOpts) {
+      fetch.mockReturnValueOnce(jsonResponse({ quote: QUOTE }));
+      fetch.mockReturnValueOnce(jsonResponse(chargeBody, chargeOpts));
     }
 
     it.each([
@@ -69,9 +80,7 @@ describe.each(["legacy", "comfortable"])(
       "locks every charge action after a terminal charge response",
       async (body) => {
         await renderLoaded();
-        fetch.mockReturnValueOnce(
-          jsonResponse(body, { ok: false, status: 409 }),
-        );
+        queueQuoteThenCharge(body, { ok: false, status: 409 });
 
         fireEvent.click(
           screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
@@ -85,14 +94,23 @@ describe.each(["legacy", "comfortable"])(
           expect(blocked).toHaveLength(2);
           blocked.forEach((button) => expect(button).toBeDisabled());
         });
-        expect(fetch).toHaveBeenCalledTimes(2);
+        // cards load + quote + charge
+        expect(fetch).toHaveBeenCalledTimes(3);
+        const chargeCall = fetch.mock.calls.find(([url]) =>
+          String(url).endsWith("/charge-card"),
+        );
+        expect(JSON.parse(chargeCall[1].body)).toEqual({
+          paymentMethodId: "pm-1",
+          expectedTotal: QUOTE.total,
+        });
       },
     );
 
     it("re-enables charge after a deterministic decline", async () => {
       await renderLoaded();
-      fetch.mockReturnValueOnce(
-        jsonResponse({ error: "Card declined" }, { ok: false, status: 400 }),
+      queueQuoteThenCharge(
+        { error: "Card declined" },
+        { ok: false, status: 400 },
       );
 
       fireEvent.click(
@@ -107,6 +125,27 @@ describe.each(["legacy", "comfortable"])(
           .getAllByRole("button", { name: /^Charge(?: |$)/ })
           .forEach((button) => expect(button).toBeEnabled());
       });
+    });
+
+    it("shows the quoted card-fee total and binds it as expectedTotal on a successful charge", async () => {
+      await renderLoaded();
+      queueQuoteThenCharge({ success: true, status: "paid" }, {});
+
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+
+      await waitFor(() => {
+        expect(
+          fetch.mock.calls.some(([url]) =>
+            String(url).includes("/charge-card-quote"),
+          ),
+        ).toBe(true);
+      });
+      // The exact amount that will move — base + card fee = total — is
+      // shown before/while the charge is in flight, not just on a receipt
+      // after the fact.
+      expect(document.body.textContent).toMatch(/\$100\.00.*\$3\.00.*\$103\.00/);
     });
   },
 );

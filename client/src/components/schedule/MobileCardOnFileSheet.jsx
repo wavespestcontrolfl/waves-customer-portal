@@ -45,6 +45,30 @@ function cardTitle(c) {
   return `${brand} ${c.last_four}`;
 }
 
+function formatUsd(amount) {
+  return Number(amount || 0).toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+  });
+}
+
+// ADMIN-BUG-R47: the exact amount that will move — including the funding-
+// aware card surcharge and any post-credit reduction — priced by the same
+// /charge-card-quote endpoint CreateProjectModal already uses, so this sheet
+// never charges a figure nobody on the admin side saw first.
+function quoteAmountLabel(quote) {
+  if (!quote) return null;
+  const total = formatUsd(quote.total);
+  if (quote.coveredByCredit) {
+    return `Account credit covers the invoice — card charge ${total}`;
+  }
+  const surcharge = Number(quote.surcharge || 0);
+  if (surcharge > 0) {
+    return `${formatUsd(quote.base)} + ${formatUsd(surcharge)} card fee = ${total}`;
+  }
+  return `Total charge ${total}`;
+}
+
 export default function MobileCardOnFileSheet({
   desktopVisible = false,
   presentation = "legacy",
@@ -64,6 +88,9 @@ export default function MobileCardOnFileSheet({
   const [chargingId, setChargingId] = useState(null);
   const [error, setError] = useState(null);
   const [chargeBlocked, setChargeBlocked] = useState(false);
+  // Per-card quoted amount (base/surcharge/total from /charge-card-quote),
+  // shown next to the card and bound into the charge as expectedTotal.
+  const [quotes, setQuotes] = useState({});
 
   const resolvedCustomerId =
     customerId || service?.customerId || service?.customer_id;
@@ -112,6 +139,30 @@ export default function MobileCardOnFileSheet({
     setChargingId(card.id);
     setError(null);
     try {
+      // ADMIN-BUG-R47: quote first — the exact base / card-fee / total that
+      // will move, including any post-credit reduction — then bind that
+      // total into the charge as expectedTotal so the server's changed-
+      // amount guard actually engages (stripe.js chargeInvoiceWithSavedCard)
+      // if the invoice moved since this quote was priced. Same contract
+      // CreateProjectModal already uses against these two endpoints.
+      const quoteResponse = await fetch(
+        `${API_BASE}/admin/invoices/${invoiceId}/charge-card-quote`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          },
+          body: JSON.stringify({ paymentMethodId: card.id }),
+        },
+      );
+      const quoteData = await quoteResponse.json().catch(() => ({}));
+      if (!quoteResponse.ok) {
+        throw new Error(quoteData.error || "Could not price this charge");
+      }
+      const quote = quoteData.quote || {};
+      setQuotes((prev) => ({ ...prev, [card.id]: quote }));
+
       const r = await fetch(
         `${API_BASE}/admin/invoices/${invoiceId}/charge-card`,
         {
@@ -120,7 +171,10 @@ export default function MobileCardOnFileSheet({
             "Content-Type": "application/json",
             Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
           },
-          body: JSON.stringify({ paymentMethodId: card.id }),
+          body: JSON.stringify({
+            paymentMethodId: card.id,
+            expectedTotal: quote.total,
+          }),
         },
       );
       const d = await r.json().catch(() => ({}));
@@ -178,9 +232,16 @@ export default function MobileCardOnFileSheet({
                   key={card.id}
                   className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline border-zinc-200 pb-3"
                 >
-                  <span className="font-medium break-words">
-                    {cardTitle(card)}
-                  </span>
+                  <div className="min-w-0">
+                    <span className="font-medium break-words block">
+                      {cardTitle(card)}
+                    </span>
+                    {quotes[card.id] && (
+                      <span className="block text-ui-caption text-ink-secondary">
+                        {quoteAmountLabel(quotes[card.id])}
+                      </span>
+                    )}
+                  </div>
                   <Button
                     variant="secondary"
                     onClick={() => handleCharge(card)}
@@ -294,12 +355,22 @@ export default function MobileCardOnFileSheet({
                   >
                     {brandLabel(c)}
                   </span>
-                  <span
-                    className="font-medium text-zinc-900 truncate"
-                    style={{ fontSize: 18 }}
-                  >
-                    {cardTitle(c)}
-                  </span>
+                  <div className="min-w-0">
+                    <span
+                      className="font-medium text-zinc-900 truncate block"
+                      style={{ fontSize: 18 }}
+                    >
+                      {cardTitle(c)}
+                    </span>
+                    {quotes[c.id] && (
+                      <span
+                        className="text-ink-secondary truncate block"
+                        style={{ fontSize: 13 }}
+                      >
+                        {quoteAmountLabel(quotes[c.id])}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <button
                   type="button"
