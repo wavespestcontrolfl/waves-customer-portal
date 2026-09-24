@@ -12,6 +12,7 @@ const {
   outflowTransactionsQuery, computeQuarterlyEstimate,
 } = require('../services/pnl-report');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
+const TaxCalculator = require('../services/tax-calculator');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -220,15 +221,21 @@ router.post('/rates', async (req, res, next) => {
     }
     // A re-post of the same county must always match its existing rows
     // (audit r1-billing-1 judge note: 'sarasota' vs 'Sarasota' silently
-    // inserted a second, unmatched active row). The stored spelling is
-    // matched case-insensitively and REUSED — the readers (calculateTax,
-    // getCurrentTaxRates) match `county` exactly against the spelling the
-    // ZIP inference and the seeded rows carry, so re-casing the operator's
-    // input ('DeSoto' -> 'Desoto') wrote a rate under a key no reader ever
-    // looks up and left the real row un-retired (fallback-auditor P1 on
-    // e60c3d08d8). Only a county with NO row yet takes the operator's
-    // spelling, first letter capitalized, the rest untouched.
+    // inserted a second, unmatched active row). The readers (calculateTax,
+    // getCurrentTaxRates) match `county` EXACTLY against the spelling ZIP
+    // inference returns, so the key is that canonical spelling whenever
+    // the county is one a reader knows — never the operator's casing
+    // ('DeSoto' -> 'Desoto' wrote a key no reader looks up, fallback-
+    // auditor P1 on e60c3d08d8) and never a legacy row's casing either: a
+    // lowercase 'lee' row left by the old write path would otherwise be
+    // reused as the key, keeping every rate for that county invisible to
+    // the readers (codex round-4 P1). Every case variant already in the
+    // table is consolidated onto the key inside the same transaction, so
+    // one county has one spelling and the lookups below match all of its
+    // rows. A county no reader knows keeps a deterministic stored
+    // spelling (its newest row's), else the operator's, first letter up.
     const normalizedCounty = county.trim();
+    const canonicalCounty = TaxCalculator.canonicalCountyKey(normalizedCounty);
 
     // A future effective date is staged, not activated: the current row
     // stays in force (untouched) until its effective_date arrives, and both
@@ -239,12 +246,18 @@ router.post('/rates', async (req, res, next) => {
     const nowET = etDateString();
     const isImmediate = effectiveDate <= nowET;
     await db.transaction(async (trx) => {
-      const existingCounty = await trx('tax_rates')
+      const variants = await trx('tax_rates')
         .whereRaw('lower(county) = ?', [normalizedCounty.toLowerCase()])
-        .select('county').first();
-      const countyKey = existingCounty
-        ? existingCounty.county
-        : normalizedCounty.charAt(0).toUpperCase() + normalizedCounty.slice(1);
+        .select('id', 'county')
+        .orderBy('effective_date', 'desc').orderBy('id', 'desc');
+      const countyKey = canonicalCounty
+        || variants[0]?.county
+        || normalizedCounty.charAt(0).toUpperCase() + normalizedCounty.slice(1);
+      const strayIds = variants.filter((row) => row.county !== countyKey).map((row) => row.id);
+      if (strayIds.length) {
+        await trx('tax_rates').whereIn('id', strayIds).update({ county: countyKey });
+        logger.warn('[admin-tax] consolidated county spelling variants', { countyKey, rows: strayIds.length });
+      }
 
       // Correcting an already-posted/staged rate for the SAME effective
       // date must replace it, not sit beside it as a duplicate for that

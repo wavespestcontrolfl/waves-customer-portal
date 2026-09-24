@@ -487,6 +487,61 @@ describe('POST /admin/tax/rates rejects an impossible calendar date before touch
   });
 });
 
+(process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('a legacy lowercase county row is consolidated onto the reader\'s canonical key (codex round-4 P1)', () => {
+  // Lee is a supported (ZIP-inferred) county with no seeded row. The old
+  // write path could leave a lowercase 'lee' row; calculateTax looks up
+  // 'Lee' exactly, so every rate under 'lee' was invisible and Lee
+  // invoices used the 7% fallback — and reusing that stored spelling on a
+  // correction kept it invisible.
+  const customerId = randomUUID();
+  const legacyEffective = etDateString(addETDays(new Date(), -200));
+  let restoreLower;
+  let restoreCanonical;
+
+  beforeAll(async () => {
+    restoreLower = await snapshotCounty('lee');
+    restoreCanonical = await snapshotCounty('Lee');
+    await db('customers').insert({
+      id: customerId, first_name: 'TaxLeeLegacy', last_name: 'Commercial', phone: '9415550193',
+      email: `tax-lee-legacy-${customerId}@example.com`, zip: '33901', property_type: 'commercial',
+    });
+    await db('tax_rates').insert({
+      county: 'lee', state: 'FL', state_rate: 0.06, county_surtax: 0.005, combined_rate: 0.065,
+      effective_date: legacyEffective, active: true, notes: 'legacy lowercase row',
+    });
+  });
+
+  afterAll(async () => {
+    await db('customers').where({ id: customerId }).del();
+    await db('tax_rates').whereRaw('lower(county) = ?', ['lee']).del();
+    await restoreLower();
+    await restoreCanonical();
+  });
+
+  test('POST "Lee" re-keys the legacy row, retires it, and the reader charges the new rate', async () => {
+    // Sanity: the legacy row is invisible to the reader today.
+    expect((await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 100)).rate).toBeCloseTo(0.07, 6);
+
+    const today = etDateString();
+    const res = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ county: 'Lee', stateRate: 0.06, countySurtax: 0.015, effectiveDate: today, notes: 'canonical re-post' }),
+    }).then((r) => r.json()));
+    expect(res.success).toBe(true);
+
+    const rows = await db('tax_rates').whereRaw('lower(county) = ?', ['lee']).orderBy('effective_date');
+    // EXPECTED: one spelling — the reader's — for every row of the county.
+    expect(rows.map((r) => r.county)).toEqual(['Lee', 'Lee']);
+    const [legacy, replacement] = rows;
+    // EXPECTED: the re-keyed legacy row is the predecessor and was retired.
+    expect(legacy.active).toBe(false);
+    expect(dateOnlyStamp(legacy.expiry_date)).toBe(today);
+    expect(replacement.active).toBe(true);
+    // EXPECTED: the new rate is what Lee invoices charge (was 7% fallback).
+    expect((await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 100)).rate).toBeCloseTo(0.075, 6);
+  });
+});
+
 (process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('a re-post reuses the stored county spelling instead of re-casing it (fallback-auditor P1 on e60c3d08d8)', () => {
   // DeSoto is a service-area county whose canonical spelling has interior
   // caps: the old first-upper/rest-lower normalization wrote 'Desoto', a

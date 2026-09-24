@@ -7,6 +7,10 @@ function todayET() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 }
 
+const CANONICAL_COUNTY_KEYS = new Map(
+  ['Manatee', 'Sarasota', 'Charlotte', 'Lee', 'Collier', 'DeSoto'].map((county) => [county.toLowerCase(), county]),
+);
+
 const TaxCalculator = {
 
   /**
@@ -141,6 +145,19 @@ const TaxCalculator = {
   /**
    * Map SWFL ZIP codes to county names.
    */
+  /**
+   * The spelling every reader matches EXACTLY: inferCountyFromZip's return
+   * values, plus DeSoto (service-area county with interior caps). A rate
+   * stored under any other casing of these names is invisible to
+   * calculateTax and getCurrentTaxRates, so the write path must key on
+   * this and never on whatever a legacy row happened to carry (codex
+   * round-4 P1). Returns null for a county no reader knows.
+   */
+  canonicalCountyKey(name) {
+    const key = String(name || '').trim().toLowerCase();
+    return CANONICAL_COUNTY_KEYS.get(key) || null;
+  },
+
   inferCountyFromZip(zip) {
     if (!zip) return null;
     const z = String(zip).substring(0, 5);

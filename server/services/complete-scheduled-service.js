@@ -2606,6 +2606,53 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
       if (zeroed.length) logger.warn('[completion] declined visit station counts zeroed', { serviceId: completionInput.serviceId, zeroed });
     }
+    // Which submitted station entries carry an EXPLICIT edit. The current
+    // client marks a tap `touched`; a completion tab loaded before that
+    // marker shipped never emits it, so an edit the zero-tap default can
+    // never produce is inferred as explicit too — a shape (a moved or new
+    // pin) or a non-default status. A bare `{id, status:'ok'}` stays
+    // ambiguous and is NOT explicit (fail closed; codex round-2 P1). Shared
+    // by the post-commit sync and the reconciliation below.
+    const explicitStationEntry = (entry) => !!entry && (
+      entry.retire === true
+      || entry.touched === true
+      || entry.shape != null
+      || (typeof entry.status === 'string' && entry.status !== 'ok')
+    );
+    // inspection_only persists ONLY the explicit entries, but the typed
+    // counts freeze into the report snapshot as submitted — and a tab loaded
+    // before the client narrowed its auto-counts still posts every visible
+    // pin as checked. termite-report-v2 falls back to those typed counts
+    // when the visit has no check rows (or rejects a partial summary as
+    // inconsistent), so the report claimed every mapped station was
+    // inspected (codex round-4 P1). Derive the visit-specific counts from
+    // the explicit entries the way the client's auto-fill does, and never
+    // let a typed count exceed them (a lower hand-typed count stands —
+    // never overstate). total_stations is the roster and stays.
+    if (visitOutcome === 'inspection_only' && Array.isArray(termiteStations) && termiteStations.length) {
+      const explicit = termiteStations.filter((entry) => explicitStationEntry(entry) && entry.retire !== true);
+      const inaccessible = explicit.filter((entry) => entry.status === 'inaccessible').length;
+      const derived = {
+        stations_checked: explicit.length - inaccessible,
+        stations_inaccessible: inaccessible,
+        stations_with_activity: explicit.filter((entry) => entry.status === 'activity').length,
+        traps_checked: explicit.length - inaccessible,
+      };
+      const clamped = [];
+      for (const section of [structuredFindings, ...(Array.isArray(companionFindings) ? companionFindings : [])]) {
+        const values = section?.values;
+        if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
+        for (const key of DECLINED_VISIT_STATION_COUNT_KEYS) {
+          if (!Object.prototype.hasOwnProperty.call(values, key)) continue;
+          const typed = Number(values[key]);
+          const next = Number.isFinite(typed) && String(values[key] ?? '').trim() !== ''
+            ? Math.min(typed, derived[key]) : derived[key];
+          if (String(next) !== String(values[key])) clamped.push(`${section?.type || 'primary'}.${key}=${values[key]}->${next}`);
+          values[key] = String(next);
+        }
+      }
+      if (clamped.length) logger.warn('[completion] inspection_only station counts reconciled to explicit entries', { serviceId: completionInput.serviceId, clamped });
+    }
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
@@ -7952,12 +7999,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // serializes for every untouched pin (fail closed).
     // stationBlanketSkip is defined beside isIncompleteVisit — the
     // pre-commit station preflights share it.
-    const explicitStationEntry = (entry) => !!entry && (
-      entry.retire === true
-      || entry.touched === true
-      || entry.shape != null
-      || (typeof entry.status === 'string' && entry.status !== 'ok')
-    );
+    // explicitStationEntry is defined beside stationBlanketSkip: the
+    // inspection_only count reconciliation before the snapshot freezes
+    // uses the same predicate as this sync.
     if (Array.isArray(termiteStations) && termiteStations.length) {
       if (stationBlanketSkip || !stationProgram) {
         logger.warn('[completion] station payload skipped', {

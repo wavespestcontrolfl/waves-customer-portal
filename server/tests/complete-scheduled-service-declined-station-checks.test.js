@@ -304,4 +304,36 @@ postgres('r2-completion-panel-client-contract-1: declined / inspection-only clos
       expect(Number(frozen.total_stations)).toBe(3);
     } finally { await cleanup(f); }
   });
+
+  test('inspection_only from a PRE-deploy tab posting the full-roster auto-count freezes counts derived from the EXPLICIT entries only (codex round-4 P1)', async () => {
+    const f = await seedTermiteVisit({ stationCount: 3 });
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const legacyBody = {
+        ...body(f, 'inspection_only'),
+        // The old auto-fill counted every visible pin; only one was tapped.
+        structuredFindings: { type: 'termite_bait_station', values: { stations_checked: '3', stations_inaccessible: '0', stations_with_activity: '3', total_stations: '3', termite_activity: 'Active termites present', bait_consumption: 'Light feeding' } },
+        termiteStations: [
+          { id: f.stationIds[0], status: 'activity' },
+          { id: f.stationIds[1], status: 'ok' },
+          { id: f.stationIds[2], status: 'ok' },
+        ],
+      };
+      const out = await completeScheduledService({
+        serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body: legacyBody,
+      });
+      expect(out).toMatchObject({ status: 200 });
+      expect((await checksFor(f)).map((c) => c.status)).toEqual(['activity']);
+      const record = await mockPg('service_records').where({ customer_id: f.customerId }).first();
+      const serviceData = typeof record.service_data === 'string' ? JSON.parse(record.service_data) : record.service_data;
+      const frozen = serviceData?.typedReportSnapshot?.values || {};
+      // Before: stations_checked '3' froze beside ONE check row, and the
+      // report's typed-count fallback claimed all 3 stations were inspected.
+      expect(Number(frozen.stations_checked)).toBe(1);
+      expect(Number(frozen.stations_with_activity)).toBe(1);
+      expect(Number(frozen.stations_inaccessible)).toBe(0);
+      expect(Number(frozen.total_stations)).toBe(3);
+    } finally { await cleanup(f); }
+  });
 });
