@@ -137,6 +137,20 @@ describe('pure gratitude qualification grading', () => {
       .toMatchObject({ qualified: false, reason: 'false_positive' });
   });
 
+  test.each([undefined, {}, { model: '' }, { model: '   ' }])(
+    'an absent or empty model pin cannot qualify matching incomplete output: %j', (route) => {
+      const { exam } = loadGratitudeExam();
+      const pins = clone(PINS);
+      pins.routes.anthropic = route;
+      const results = passingResults(exam);
+      for (const result of results.filter(row => row.leg === 'anthropic')) {
+        result.output.model = route?.model;
+      }
+      expect(gradeGratitudeResults({ exam, results, pins, legs: LEGS }))
+        .toMatchObject({ qualified: false, reason: 'positive_failed' });
+    },
+  );
+
   test('every class gets the same approved copy and only factual source flags', () => {
     const { exam } = loadGratitudeExam();
     const inputs = new Map(exam.fixtures.map(fixture => [fixture.id, buildGratitudeExamInput(exam, fixture)]));
