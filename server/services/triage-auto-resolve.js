@@ -966,6 +966,13 @@ function recordCarriesStatedStreet(item) {
 // Order matters: moot-condition resolves outrank the evidence arms, which
 // outrank age-based dismissal, so a card that is BOTH old and moot records
 // the real reason it closed.
+// A conflict card whose dispute pulled technicians off visits is settled
+// by STAFF (the verdict files the reassignment task); auto-closing it
+// would strand those visits unassigned with no task.
+function cardHoldsUnassignedVisits(item) {
+  const held = parseMaybeJson(item.payload)?.held_unassigned_booking_ids;
+  return Array.isArray(held) && held.length > 0;
+}
 const CLASSIFY_RULES = [
   // Address cards are moot ONLY for a pre-existing trusted customer with a
   // full on-file address whose call supplied no address of its own
@@ -1026,7 +1033,11 @@ const CLASSIFY_RULES = [
     when: (item, ev) => item.reason_code === 'on_file_house_number_conflict'
       && !item.customer_deleted_at
       && recordCarriesStatedStreet(item)
-      && !cardConfirmedUnbooked(item, ev) },
+      && !cardConfirmedUnbooked(item, ev)
+      // A card whose dispute pulled technicians off visits is settled by
+      // STAFF (the verdict files the reassignment task); auto-closing it
+      // would strand those visits unassigned with no task (local audit P1).
+      && !cardHoldsUnassignedVisits(item) },
   { rule: 'spam_aged', action: 'dismiss', when: (item, ev, now) => item.reason_code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS },
   { rule: 'advisory_aged', action: 'dismiss',
     when: (item, ev, now) => ADVISORY_AGE_CODES.has(item.reason_code) && item.severity === 'advisory' && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS },

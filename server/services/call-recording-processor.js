@@ -10135,6 +10135,18 @@ const CallRecordingProcessor = {
             logger.info(`[call-proc] processing claim lost — existing-booking dispute pull skipped for ${maskSid(callSid)} (the owner applies it)`);
             return;
           }
+          // The card must still be OPEN under the lock: a verdict that
+          // settled it while this pass waited already filed (or declined)
+          // the recovery, so pulling a technician now would strand the
+          // visit with no card naming it (local audit P1).
+          const cardStillOpen = await trx('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+            .whereIn('status', ['open', 'in_progress'])
+            .first('id');
+          if (!cardStillOpen) {
+            logger.info(`[call-proc] house-number card settled meanwhile — existing-booking dispute pull skipped for ${maskSid(callSid)}`);
+            return;
+          }
           const parents = await trx('scheduled_services')
             .where({ source_call_log_id: call.id, booking_source: 'phone_call' })
             .whereIn('status', ['pending', 'confirmed'])

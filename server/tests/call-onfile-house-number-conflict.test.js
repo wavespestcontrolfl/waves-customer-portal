@@ -171,6 +171,16 @@ describe('triage auto-resolve: house_number_adopted', () => {
       .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 
+  test('a card whose dispute pulled technicians off visits is left to staff', () => {
+    const held = item({
+      customer_address_line1: '1250 Example Street',
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null, held_unassigned_booking_ids: ['ss-1'] },
+    });
+    expect(classifyTriageItem(held, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem({ ...held, payload: { ...held.payload, held_unassigned_booking_ids: [] } }, {}, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
   test('a stated unit must be on the record before the ask is settled', () => {
     const unitCard = item({
       customer_address_line1: '1250 Example Street', customer_address_line2: 'Apt 3',
