@@ -280,9 +280,14 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     const applies = jest.spyOn(coordination, 'directCoordinationApplies').mockReturnValue(true);
     const prepare = jest.spyOn(coordination, 'prepareProviderHandoffReservation').mockResolvedValue({ handle });
     const capture = jest.spyOn(coordination, 'captureProviderContext').mockImplementation(() => {});
-    const outcomes = [];
-    const record = jest.spyOn(coordination, 'recordProviderOutcome').mockImplementation((_handle, outcome) => outcomes.push(outcome));
-    const settle = jest.spyOn(coordination, 'settleProviderHandoffReservation').mockResolvedValue(true);
+    const events = [];
+    const record = jest.spyOn(coordination, 'recordProviderOutcome').mockImplementation((_handle, outcome) => {
+      events.push(['outcome', outcome.deliveryOutcome]);
+    });
+    const settle = jest.spyOn(coordination, 'settleProviderHandoffReservation').mockImplementation(async () => {
+      events.push(['settle']);
+      return true;
+    });
     if (sdkError) mockTwilioCreate.mockRejectedValueOnce(sdkError);
     try {
       const pending = TwilioService.sendSMS(TO, 'Reminder body', {
@@ -291,7 +296,7 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
       if (sdkError) await expect(pending).rejects.toMatchObject({ providerOutcome: { deliveryOutcome: 'uncertain' } });
       else await expect(pending).resolves.toMatchObject({ success: false, preSendBlocked: true });
       expect(settle).toHaveBeenCalledWith(handle);
-      expect(outcomes.at(-1)).toMatchObject({ deliveryOutcome: expectedOutcome });
+      expect(events.slice(-2)).toEqual([['outcome', expectedOutcome], ['settle']]);
     } finally {
       applies.mockRestore(); prepare.mockRestore(); capture.mockRestore();
       record.mockRestore(); settle.mockRestore();
