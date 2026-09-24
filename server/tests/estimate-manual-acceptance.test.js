@@ -331,6 +331,7 @@ describe('estimate manual acceptance', () => {
       bookedAppointmentIds: ['booked-1'],
       skipSetupInvoice: true,
       skipMembershipEmail: true,
+      skipWelcomeSms: true,
       deferCommercialScheduleNotification: true,
     });
     expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledWith(membershipEmail);
@@ -408,6 +409,7 @@ describe('estimate manual acceptance', () => {
       bookedAppointmentIds: [],
       skipSetupInvoice: false,
       skipMembershipEmail: true,
+      skipWelcomeSms: true,
       deferCommercialScheduleNotification: true,
       autoSendInvoice: false,
       billingTerm: 'prepay_annual',

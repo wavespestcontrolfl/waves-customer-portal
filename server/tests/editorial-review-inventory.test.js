@@ -1,0 +1,82 @@
+'use strict';
+
+const { analyzeDocument, repairViolation } = require('../services/content/editorial-review-inventory');
+
+describe('editorial review document inventory', () => {
+  test('exempts CTA, navigation, and decorative sections from semantic coverage inventories', () => {
+    const doc = '# Guide\n\nUseful introduction.\n\n## Related guides\n\n[Ant guide](/ants/)\n\n## Contact\n\nCall today for a quote.';
+    const analysis = analyzeDocument(doc, 'Guide');
+    expect(analysis.sections.map((section) => section.heading)).not.toEqual(expect.arrayContaining(['Related guides', 'Contact']));
+    expect(analysis.passages.map((passage) => passage.text)).not.toEqual(expect.arrayContaining(['[Ant guide](/ants/)', 'Call today for a quote.']));
+  });
+
+  test('includes informational prose nested inside MDX components', () => {
+    const doc = '# Guide\n\n## Identification\n\n<Callout kind="fact">\nAedes mosquitoes can breed in small containers.\n</Callout>';
+    const analysis = analyzeDocument(doc, 'Guide');
+    expect(analysis.passages).toEqual([expect.objectContaining({ text: 'Aedes mosquitoes can breed in small containers.' })]);
+    expect(analysis.claims).toEqual([expect.objectContaining({ passage: 'Aedes mosquitoes can breed in small containers.' })]);
+  });
+
+  test('inventories prose immediately following a heading with no blank line', () => {
+    const doc = '# Guide\n## Identification\nAedes mosquitoes breed in standing water.\n## Prevention\nEmpty containers every week.';
+    const analysis = analyzeDocument(doc, 'Guide');
+    expect(analysis.sections).toEqual([
+      expect.objectContaining({ heading: 'Identification', lead: 'Aedes mosquitoes breed in standing water.' }),
+      expect.objectContaining({ heading: 'Prevention', lead: 'Empty containers every week.' }),
+    ]);
+    expect(analysis.passages.map((passage) => passage.text)).toEqual([
+      'Aedes mosquitoes breed in standing water.',
+      'Empty containers every week.',
+    ]);
+  });
+});
+
+ test('preserves decimals, attributed names, and closing quotation marks in claim passages', () => {
+   const passages = ['Exactly 97.3% of surveyed homes have door gaps.', 'University researcher Dr. Maria Example said, “Every home has seven gaps.”'];
+   const analysis = analyzeDocument('## Findings\n' + passages.join('\n\n'), 'Findings');
+   expect(analysis.claims.map((claim) => claim.passage)).toEqual(passages);
+ });
+
+test('keeps factual prose that begins with a word also used in calls to action', () => {
+  const passage = 'Contact with treated surfaces kills 90% of ants.';
+  const analysis = analyzeDocument(`# Guide\n\n${passage}`, 'Guide');
+  expect(analysis.passages).toEqual([expect.objectContaining({ text: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
+});
+
+test('keeps factual sections whose headings begin with a decorative heading word', () => {
+  const passage = 'Contact insecticides kill ants when they touch treated surfaces.';
+  const analysis = analyzeDocument(`## Contact insecticides\n${passage}`, 'Guide');
+  expect(analysis.sections).toEqual([expect.objectContaining({ heading: 'Contact insecticides', lead: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
+});
+
+test('keeps prose adjacent to a fenced code block', () => {
+  const passages = ['Pests transmit pathogens.', 'Mosquitoes breed in standing water.'];
+  const analysis = analyzeDocument(`${passages[0]}\n\`\`\`text\nexample\n\`\`\`\n${passages[1]}`, 'Guide');
+  expect(analysis.passages.map((passage) => passage.text)).toEqual(passages);
+  expect(analysis.claims.map((claim) => claim.passage)).toEqual(passages);
+});
+
+test('ignores decorative headings inside fenced examples', () => {
+  const passage = 'Mosquitoes breed in standing water.';
+  const analysis = analyzeDocument(`\`\`\`md\n## Sources\nExample only.\n\`\`\`\n${passage}`, 'Guide');
+  expect(analysis.sections).toEqual([expect.objectContaining({ heading: 'Guide', lead: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
+});
+
+test('keeps deterministic factual claims phrased as questions', () => {
+  const passage = 'Did you know termites cause $5 billion in property damage every year?';
+  expect(analyzeDocument(passage, 'Guide').claims).toEqual([expect.objectContaining({ passage })]);
+});
+
+test('keeps factual sentences after an opening call to action', () => {
+  const passage = 'Termites cause $5 billion in property damage every year.';
+  const analysis = analyzeDocument(`Call us today for an inspection. ${passage}`, 'Guide');
+  expect(analysis.passages).toEqual([expect.objectContaining({ text: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
+});
+
+test('rejects repairs that change MDX tag nesting', () => {
+  expect(repairViolation('<Callout><Note>Text</Note></Callout>', '<Callout><Note>Text</Callout></Note>')).toBe('mdxTags_changed');
+});

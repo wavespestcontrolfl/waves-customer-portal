@@ -80,9 +80,17 @@ jest.mock('../models/db', () => {
         // Honour the id + status predicates so a terminal row matches 0 rows
         // (the single-visit prepaid guard) and the annual-coverage predicates
         // (whereNull + IS DISTINCT FROM) — other updates match everything.
+        const nullCols = b._nullCols || [];
+        // whereNull('status').orWhereNotIn('status', X) is an OR-composed
+        // group (live = NULL or non-terminal), not two independent AND
+        // predicates. Every other whereNull column (e.g.
+        // annual_prepay_term_id in the annual-coverage guard) stays a
+        // plain "must be null" AND predicate.
+        const statusIsOrGrouped = nullCols.includes('status') && b._statusNotIn;
+        const plainNullCols = nullCols.filter((col) => col !== 'status' || !statusIsOrGrouped);
         const match = (r) => Object.entries(b._where).every(([k, v]) => r[k] === v)
-          && !(b._statusNotIn && b._statusNotIn.includes(r.status))
-          && (b._nullCols || []).every((col) => r[col] == null)
+          && (statusIsOrGrouped ? (r.status == null || !b._statusNotIn.includes(r.status)) : !(b._statusNotIn && b._statusNotIn.includes(r.status)))
+          && plainNullCols.every((col) => r[col] == null)
           && (b._distinctFrom || []).every(([col, val]) => r[col] !== val);
         const rows = table === 'scheduled_services' && b._where.id
           ? state.rows.filter(match) : [{ id: null }];
@@ -162,8 +170,13 @@ function seed({ prepaidChild, invoices = [], terms = [{ id: 'term-1', covered: t
   db.__state.terms = terms;
   db.__state.rows = [
     { id: 'parent', technician_id: 'tech-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: future(3), service_type: 'Pest Control', is_recurring: true, recurring_parent_id: null, recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
-    { id: 'child-1', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(33), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
-    { id: 'child-2', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(63), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, ...(prepaidChild || { annual_prepay_term_id: null, prepaid_amount: null }) },
+    // Ordinary recurring cadence children (not boosters) carry is_recurring:
+    // true, same as the real booking route inserts them (admin-schedule.js
+    // child loop) — stampSeriesPrepaid now reads this flag to keep a
+    // series prepayment off booster rows (ADMIN-BUG-R09), so the fixture
+    // must match production row shapes rather than an arbitrary false.
+    { id: 'child-1', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(33), service_type: 'Pest Control', is_recurring: true, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
+    { id: 'child-2', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(63), service_type: 'Pest Control', is_recurring: true, recurring_parent_id: 'parent', recurring_ongoing: true, ...(prepaidChild || { annual_prepay_term_id: null, prepaid_amount: null }) },
   ];
   db.__state.writes = [];
   db.__state.hasTableCalls = [];

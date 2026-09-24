@@ -1130,6 +1130,10 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
+    // A new lead's validated on-file address (addressOnly) lifts the address
+    // flags below and nothing else; the confidence exemption stays with
+    // established customers (codex #4685 r1 P1).
+    const knownCustomerConfidenceTrusted = knownCustomer && !opts.knownCustomer.addressOnly;
     // Address fail-open applies ONLY when the caller did NOT give a new service
     // address on this call — i.e. we're using their on-file, Google-verified
     // address (Barbara's case: she didn't restate it). If they DID provide an
@@ -1152,7 +1156,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
       if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }
-      if (f === 'low_extraction_confidence' && knownCustomer) { failedOpenFlags.push(f); return false; }
+      if (f === 'low_extraction_confidence' && knownCustomerConfidenceTrusted) { failedOpenFlags.push(f); return false; }
       if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress && !newAddressGiven) { failedOpenFlags.push(f); return false; }
       return true;
     });
@@ -1249,7 +1253,9 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // Fail-open: a KNOWN caller with a CONFIRMED time + start isn't held over a low
   // overall-confidence score. Short familiar calls score low (Barbara scored 0),
   // but a returning customer confirming a slot is a real booking.
-  const failOpenLowConfidence = opts.failOpen && !!opts.knownCustomer
+  // addressOnly trust (a new lead's validated on-file address) never lifts
+  // this either (codex #4685 r1 P1).
+  const failOpenLowConfidence = opts.failOpen && !!opts.knownCustomer && !opts.knownCustomer.addressOnly
     && extraction.scheduling?.status === 'confirmed' && !!extraction.scheduling?.confirmed_start_at;
   if (!failOpenLowConfidence && (typeof confidence.overall !== 'number' || confidence.overall < threshold)) {
     return { allowed: false, reason: 'low_confidence', overall: confidence.overall, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };

@@ -4149,7 +4149,16 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       const afterHasMembership = hasMembership(committedAfter) && !isAutoDerivedTierLabelRow(committedAfter);
       const membershipFieldChanged = membershipDetailsChanged(committedBefore, committedAfter);
       const membershipEventAt = new Date();
-      if (updates.active === false && committedBefore.active !== false && beforeHasMembership) {
+      // A rate/tier correction or a triage "Mark handled" is routine data
+      // hygiene, not an operator decision to contact the customer — it must
+      // not silently email them (owner no-unintended-comms directive). The
+      // UI opts in per save with notifyCustomer:true; absent that, a
+      // deactivation ("Account deactivated") or a membership-detail change
+      // ("Tier"/"Monthly rate" updated) stays comms-silent. Genuinely
+      // starting or reactivating a membership is unaffected — that welcome
+      // is the existing, wanted lifecycle send (Codex #3011/#1859).
+      const notifyCustomer = req.body.notifyCustomer === true;
+      if (notifyCustomer && updates.active === false && committedBefore.active !== false && beforeHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -4181,7 +4190,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           sourceId: `admin_membership_start:${req.params.id}:${etDateString(membershipEventAt)}`,
           idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, committedBefore, committedAfter, membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.started email failed for ${req.params.id}: ${err.message}`));
-      } else if (beforeHasMembership && !afterHasMembership) {
+      } else if (notifyCustomer && beforeHasMembership && !afterHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -4190,13 +4199,37 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           monthlyRate: committedBefore.monthly_rate,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin_membership_removed', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
-      } else if (membershipFieldChanged && afterHasMembership) {
-        void AccountMembershipEmail.sendMembershipUpdated({
-          customerId: req.params.id,
-          before: committedBefore,
-          after: committedAfter,
-          effectiveDate: membershipEventAt,
-        }).catch(err => logger.warn(`[customers] membership.updated email failed for ${req.params.id}: ${err.message}`));
+      } else if (notifyCustomer && membershipFieldChanged && afterHasMembership) {
+        // Never send the "your plan pricing was updated" notice for a rate
+        // that lane never bills: when the ONLY membership field that moved
+        // is monthly_rate and the lane isn't monthly_membership, nothing the
+        // customer is actually charged changed (157 of 159 per-application
+        // customers carry a stale rate they are never billed — audit
+        // 2026-08-01), so skip the send even though the operator opted in
+        // to notifying. Both sides must resolve OFF the monthly lane, and
+        // the stored billing_mode must not have moved either — an inferred
+        // monthly member (billing_mode NULL, a real tier, a positive rate)
+        // whose rate drops to zero would otherwise flip resolveBillingLane's
+        // inference to per_visit on the AFTER side alone and wrongly read as
+        // "rate-only on an unbilled lane", suppressing a real dues change to
+        // zero for a customer who WAS billed monthly.
+        const tierUnchanged = comparableMembershipTier(committedBefore.waveguard_tier) === comparableMembershipTier(committedAfter.waveguard_tier);
+        const billingModeUnchanged = (committedBefore.billing_mode || null) === (committedAfter.billing_mode || null);
+        const { resolveBillingLane } = require('../services/billing-lane');
+        const resolvedLaneBefore = resolveBillingLane(committedBefore).mode;
+        const resolvedLaneAfter = resolveBillingLane(committedAfter).mode;
+        const rateOnlyOnUnbilledLane = tierUnchanged
+          && billingModeUnchanged
+          && resolvedLaneBefore !== 'monthly_membership'
+          && resolvedLaneAfter !== 'monthly_membership';
+        if (!rateOnlyOnUnbilledLane) {
+          void AccountMembershipEmail.sendMembershipUpdated({
+            customerId: req.params.id,
+            before: committedBefore,
+            after: committedAfter,
+            effectiveDate: membershipEventAt,
+          }).catch(err => logger.warn(`[customers] membership.updated email failed for ${req.params.id}: ${err.message}`));
+        }
       }
     }
 
