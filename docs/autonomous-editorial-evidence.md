@@ -42,6 +42,10 @@ or authoritative evidence. Exact quote inclusion, source hashes, response
 coverage, and result shapes are validated in code. Semantic truth and source
 suitability remain model judgments, not a guarantee of correctness.
 
+Purely instructional drafts with no externally verifiable claims may have an
+empty source list; external claims still require retained supporting evidence.
+No sources are fabricated to meet a quota.
+
 Source retrieval is bounded to eight URLs, 20,000 characters per source, and
 100,000 total characters. HTML/text sources are supported; inaccessible,
 unsupported, or incomplete evidence cannot pass by assumption. A writer can
