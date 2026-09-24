@@ -63,6 +63,21 @@ function humanize(value) {
   return value ? String(value).replace(/_/g, " ") : null;
 }
 
+// One service_request.prices[] entry (schema 1.13.0) as a compact
+// "Agent/Caller: amount unit · caller response · tier" fragment. The
+// Agent/Caller label (codex #4722 r2 P2) comes from stated_by, defaulting
+// to Agent when absent, so a competitor/online price the CALLER mentioned
+// is never mistaken for a Waves quote.
+function formatPriceEntry(p) {
+  if (!p) return null;
+  const amount = p.amount_usd != null
+    ? (p.amount_max_usd != null ? `$${p.amount_usd}-$${p.amount_max_usd}` : `$${p.amount_usd}`)
+    : null;
+  const rest = [amount, humanize(p.unit), humanize(p.caller_response), p.tier_mentioned ? humanize(p.tier_mentioned) : null].filter(Boolean).join(" · ");
+  if (!rest) return null;
+  return `${p.stated_by === "caller" ? "Caller" : "Agent"}: ${rest}`;
+}
+
 function Row({ label, children }) {
   if (children == null || children === "" || (Array.isArray(children) && !children.length)) return null;
   return (
@@ -228,6 +243,9 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onPlayAt,
                 ? `$${view.prices.quoted_price_usd} (${humanize(view.prices.quote_type)})`
                 : view.prices.quote_promised ? "estimate promised" : view.prices.quote_requested ? "quote requested" : null}
             </Row>
+            {Array.isArray(view.prices.list) && view.prices.list.length > 1 && (
+              <Row label="All prices">{view.prices.list.map(formatPriceEntry).filter(Boolean).join("; ")}</Row>
+            )}
             <Row label="Objections">{view.objections.join("; ")}</Row>
             <Row label="Buying signals">{view.buying_signals.join("; ")}</Row>
             <Row label="Lead quality">{[humanize(view.outcome.lead_quality), humanize(view.outcome.sentiment), view.confidence?.overall != null && `confidence ${Math.round(view.confidence.overall * 100)}%`].filter(Boolean).join(" · ")}</Row>
