@@ -414,6 +414,31 @@ function lawnRawResultHasEvidence(raw) {
   return LAWN_EVIDENCE_FIELDS.some((key) => raw[key] != null && raw[key] !== '');
 }
 
+// codex GH r7 P1: the "any evidence" check above is right for the
+// TOTAL-FAILURE 503 decision, but the 3 numeric SCORE fields customers see
+// (turf_density/weed_coverage/color_health) have their OWN synthetic
+// defaults independent of the categorical ones — averageScores gives
+// turf_density/weed_coverage a real 0 and color_health a real 5 whenever
+// EITHER model omits them, even if the other categorical fields (e.g.
+// fungal_activity) genuinely WERE reported. A photo whose raw output only
+// ever covered fungal_activity would otherwise merge as a confident
+// turf_density: 0 / color_health: 5 read. This nulls out exactly those 3
+// fields on a photo's composite when NEITHER model actually reported them,
+// so mergeLawnComposites' existing numericValues() (which already correctly
+// drops nulls before averaging) sees a true "not measured" instead of a
+// synthesized number, and noUsableScores can correctly catch it.
+function lawnSanitizeScoreFields(analysis) {
+  const { claude, gemini, composite } = analysis;
+  if (!composite) return null;
+  const sanitized = { ...composite };
+  for (const key of ['turf_density', 'weed_coverage', 'color_health']) {
+    const claudeHas = claude && claude[key] != null && claude[key] !== '';
+    const geminiHas = gemini && gemini[key] != null && gemini[key] !== '';
+    if (!claudeHas && !geminiHas) sanitized[key] = null;
+  }
+  return sanitized;
+}
+
 function mergeLawnComposites(list) {
   const turf = numericValues(list, 'turf_density');
   const weed = numericValues(list, 'weed_coverage');
@@ -503,7 +528,7 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   // Check the RAW per-model output (before that merge's defaults apply)
   // instead — see lawnRawResultHasEvidence.
   const withEvidence = analyses.filter((a) => a && (lawnRawResultHasEvidence(a.claude) || lawnRawResultHasEvidence(a.gemini)));
-  const composites = withEvidence.map((a) => a.composite).filter(Boolean);
+  const composites = withEvidence.map(lawnSanitizeScoreFields).filter(Boolean);
   if (!composites.length) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
   }

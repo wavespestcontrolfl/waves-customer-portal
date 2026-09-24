@@ -929,6 +929,38 @@ describe('real averageScores merges never leave the composite empty (why raw evi
       expect(TABLES.lawn_diagnostics).toHaveLength(0);
     });
   });
+
+  test('lawn-assessment.js averageScores with SEVERITY-ONLY raw input still synthesizes turf/weed/color (codex GH r7 P1)', () => {
+    // The exact reproduction Codex named: both models reported ONLY
+    // fungal_activity — real categorical evidence — but averageScores STILL
+    // gives turf_density/weed_coverage a real 0 and color_health a real 5,
+    // because THOSE 3 fields have their own independent default regardless
+    // of what else was reported.
+    const severityOnly = { fungal_activity: 'none' };
+    const { composite } = realLawnAssessment.averageScores(severityOnly, severityOnly);
+    expect(composite.turf_density).toBe(0);
+    expect(composite.weed_coverage).toBe(0);
+    expect(composite.color_health).toBe(5);
+    expect(composite.fungal_activity).toBe('none'); // the one field genuinely reported
+  });
+
+  test('end-to-end: severity-only real evidence (no turf/weed/color reported by either model) still reads unclear, not a confident score', async () => {
+    // Without lawnSanitizeScoreFields, this composite's turf_density: 0 /
+    // color_health: 5 would pass straight through as a confident (if
+    // low-looking) score — this proves the route nulls out exactly the 3
+    // fields neither model actually reported, so noUsableScores can catch it.
+    const severityOnly = { fungal_activity: 'none' };
+    const realResult = { claude: severityOnly, gemini: severityOnly, composite: realLawnAssessment.averageScores(severityOnly, severityOnly).composite };
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-would-win', lanes: ['lawn'] });
+    mockLawnAnalyzePhoto.mockResolvedValue(realResult);
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.next_step.kind).toBe('unclear');
+    });
+  });
 });
 
 // A tiny local mirror of the route's own check, for the assertion above —
