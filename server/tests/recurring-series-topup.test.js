@@ -371,7 +371,7 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
     const { conn, inserted } = topupScenario({
       parentOverrides: { recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00' },
     });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
     expect(inserted.length).toBeGreaterThan(0);
     for (const row of inserted) {
       expect(row.window_start).toBe('09:00');
@@ -383,7 +383,7 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
     const { conn, inserted } = topupScenario({
       parentOverrides: { recurring_pattern: 'weekly', window_start: null, window_end: null },
     });
-    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
     expect(inserted.length).toBeGreaterThan(0);
     for (const row of inserted) {
       expect(row.window_start).toBeFalsy();
