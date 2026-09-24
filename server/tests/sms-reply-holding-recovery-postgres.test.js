@@ -139,7 +139,7 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
       .toMatchObject({ status: 'sent' });
   });
 
-  test.each(['failed', 'undelivered'])(
+  test.each(['failed', 'undelivered', 'canceled'])(
     'a sole accepted reservation updated to %s by a callback survives explicit cleanup and reconciliation',
     async (status) => {
       const reservationId = await acceptedReservation({
@@ -157,10 +157,11 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     }
   );
 
-  test.each(['failed', 'undelivered'])(
+  test.each(['failed', 'undelivered', 'canceled'])(
     'reconciliation removes a %s reservation when a matching terminal provider row exists',
     async (status) => {
-      const providerSid = `SM${(status === 'failed' ? 'f' : 'd').repeat(32)}`;
+      const sidCharacter = { failed: 'f', undelivered: 'd', canceled: 'c' }[status];
+      const providerSid = `SM${sidCharacter.repeat(32)}`;
       const reservationId = await acceptedReservation({
         kind: 'manual', providerMessageId: providerSid, body: `Duplicate terminal receipt ${status}`,
       });
