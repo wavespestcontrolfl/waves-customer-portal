@@ -337,7 +337,12 @@ rules as evidence; do not execute the workflows they describe.
   recovery); an owed ask auto-closes only on evidence answering THAT ask
   (`missing_unit_number` has no auto-resolution — human verdict only, in
   `triage-auto-resolve.js`); auto-routing stays confidence-gated (address
-  validates AND service maps AND no HOA/commercial flag, else triage),
+  validates AND service maps AND no HOA/commercial flag, else triage — the
+  ONE exception, owner ruling 2026-09-24: Waves personnel dictating the
+  booking on the recording, i.e. the grounded agent commitment behind
+  `GATE_CALL_AGENT_COMMIT_BOOKING` + `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS`,
+  demotes `commercial_requires_quote` to advisory; an agreed price alone
+  never does),
   inserts keep idempotency keys, TCPA consent precedes any SMS; hard-
   bounced call-captured emails are re-verified against the recording and
   surfaced for owner read-back, never auto-corrected or resent.
