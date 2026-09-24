@@ -349,62 +349,21 @@ async function buildReferralLink(customerId) {
  * still-OPEN lead (leads.customer_id = customerId, applyOpenLeadPredicate
  * — lead-statuses.js's canonical status IN OPEN_LEAD_STATUSES AND
  * converted_at IS NULL, pre-push Codex P1: an existing customer's won/lost
- * lead must never mint a free-consultation invitation) — a caller-supplied
- * leadId (leadIdOverride; not sent by the composer today, kept for a
- * future lead-scoped composer per the scope doc) wins when present, but
- * ONLY when it is actually the resolved customer's own lead (pre-push
- * Codex P1): an override is bound to the recipient the SAME way the
- * route's lead-only fallback binds one (resolveConsultationLeadOnly in
- * admin-communications.js) — the lead's own leads.customer_id, or its
- * phone against the resolved customer's, last-10-digit normalized
- * (digitsLast10, this file's own matcher, shared with the payer-statement
- * and card-link owner checks below) — AND still open by the same
- * predicate (isOpenLeadRow, checked against the already-fetched row); both
- * files share these two helpers so they can never drift on what counts as
- * still-open. Either mismatch refuses with a specific reason rather than
- * silently falling back to the customer's own newest lead, so a wrong or
- * closed leadId never mints a bearer link. An id that resolves to no lead
- * at all (stale/deleted) is treated as no override and falls through to
- * the plain newest-OPEN-lead lookup, same as before. Renders the same
- * admin-editable lead_consultation_link SMS template the Leads page
- * action uses (buildLeadConsultationSmsLine) so both surfaces send
- * identical copy and never drift.
+ * lead must never mint a free-consultation invitation). No caller-supplied
+ * lead override (Codex #4709 r15 P2): the composer never sends one, and a
+ * lead-scoped send belongs on the Leads page. Renders the same
+ * admin-editable lead_consultation_link SMS template the Leads page action
+ * uses (buildLeadConsultationSmsLine) so both surfaces send identical copy
+ * and never drift.
  */
-async function buildConsultationLink(customerId, leadIdOverride) {
+async function buildConsultationLink(customerId) {
   const { buildLeadConsultationSmsLine } = require('./lead-consultation-link');
-  const { isOpenLeadRow, applyOpenLeadPredicate } = require('./lead-statuses');
-  let lead = null;
-  // Codex #4709 r4 P2: leads.id is a UUID column — a malformed override
-  // must answer with a reason, never a Postgres 500.
-  if (leadIdOverride && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(leadIdOverride))) {
-    return { url: null, line: '', reason: 'That lead id is not valid' };
-  }
-  if (leadIdOverride) {
-    const candidate = await db('leads').where({ id: leadIdOverride }).whereNull('deleted_at').first('id', 'first_name', 'customer_id', 'phone', 'status', 'converted_at');
-    if (candidate) {
-      const belongsToCustomer = candidate.customer_id && String(candidate.customer_id) === String(customerId);
-      let phoneMatches = false;
-      if (!belongsToCustomer) {
-        const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('phone');
-        const customerLast10 = digitsLast10(customer?.phone);
-        phoneMatches = Boolean(customerLast10) && customerLast10 === digitsLast10(candidate.phone);
-      }
-      if (!belongsToCustomer && !phoneMatches) {
-        return { url: null, line: '', reason: 'That lead does not match the destination number' };
-      }
-      if (!isOpenLeadRow(candidate)) {
-        return { url: null, line: '', reason: 'That lead has already converted or closed — pick a different lead' };
-      }
-      lead = candidate;
-    }
-  }
-  if (!lead) {
-    lead = await applyOpenLeadPredicate(
-      db('leads').where({ customer_id: customerId }).whereNull('deleted_at')
-    )
-      .orderBy('created_at', 'desc')
-      .first('id', 'first_name', 'phone');
-  }
+  const { applyOpenLeadPredicate } = require('./lead-statuses');
+  const lead = await applyOpenLeadPredicate(
+    db('leads').where({ customer_id: customerId }).whereNull('deleted_at')
+  )
+    .orderBy('created_at', 'desc')
+    .first('id', 'first_name', 'phone');
   if (!lead) return { url: null, line: '', reason: 'No lead on file for this customer' };
   // Codex #4709 r4 P2: the send check requires the lead's own phone to be
   // the destination (this customer's number). Refuse before minting rather
@@ -561,6 +520,34 @@ function fullyDecoded(text) {
   }
   return out;
 }
+// Consultation credentials inside URLs on hosts we do NOT own (Codex #4709
+// r12–r15 P1): a wrapper can carry the bearer in its path, any query
+// parameter (?next=, ?token=, ?code=) or fragment, encoded or not, with or
+// without a route marker. Every token-shaped value of every foreign URL is
+// checked: signed consultation tokens by signature, short codes by a
+// short_codes lookup (kind consultation). Returns true when any is found.
+const URL_LIKE_RE = /^(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/)?[^\s/?#]+\.[^\s/?#]+[/?#]/;
+async function foreignConsultationCredentialPresent(runs, hosts) {
+  const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
+  const owned = [].concat(hosts);
+  const codes = new Set();
+  for (const raw of runs) {
+    const run = raw.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, '').replace(/^[^/]*?(?=https?:\/\/)/i, '');
+    if (!URL_LIKE_RE.test(run)) continue;
+    let url;
+    try { url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`); } catch { continue; }
+    if (owned.includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
+    const pieces = fullyDecoded(`${url.pathname}${url.search}${url.hash}`).split(/[^A-Za-z0-9._-]+/).filter(Boolean);
+    for (const piece of pieces) {
+      if (piece.includes('.') && verifyLeadConsultationToken(piece, 0)) return true;
+      if (/^[A-Za-z0-9_-]{5,40}$/.test(piece) && codes.size < 100) codes.add(piece.toLowerCase());
+    }
+  }
+  if (!codes.size) return false;
+  const rows = await db('short_codes').whereIn('code', [...codes]).where({ kind: 'consultation' }).select('code', 'kind');
+  return (rows || []).some((r) => r.kind === 'consultation');
+}
+
 function linkRuns(runs, fragmentRe) {
   return runs
     .filter((run) => fragmentRe.test(run))
@@ -906,29 +893,9 @@ async function immediateOnlyLinkSendCheck(body) {
   if (linkRuns(runs, /\/inspection\//i).some((run) => canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME))) {
     return { present: true, label: 'Consultation link' };
   }
-  // ...and a consultation SHORT code on any host (Codex #4709 r13 P1).
-  const anyHostCodes = linkRuns(runs, /\/l\/|%2fl%2f/i)
-    .filter((run) => {
-      // Owned hosts are already judged by shortRows above; only a FOREIGN
-      // wrapper needs this extra lookup.
-      try {
-        const host = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`).host.toLowerCase().replace(/\.$/, '');
-        return !hosts.includes(host);
-      } catch { return false; }
-    })
-    // Anywhere in the wrapper, encoded or not (Codex #4709 r14 P1).
-    .flatMap((run) => [...fullyDecoded(run).matchAll(/\/l\/([A-Za-z0-9_-]+)/gi)].map((m) => m[1].toLowerCase()));
-  if (anyHostCodes.length) {
-    const foreignRows = await db('short_codes').whereIn('code', [...new Set(anyHostCodes)]).where({ kind: 'consultation' }).select('code', 'kind');
-    if ((foreignRows || []).some((r) => r.kind === 'consultation')) return { present: true, label: 'Consultation link' };
-  }
-  // ...and a SIGNED consultation token on any host (Codex #4709 r12 P1):
-  // parked here so the send-time check refuses it.
-  const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
-  if (linkRuns(runs, /inspection/i).some((run) => [...fullyDecoded(run).matchAll(/\/inspection\/([A-Za-z0-9._-]+)/gi)]
-    .some((m) => verifyLeadConsultationToken(m[1], 0)))) {
-    return { present: true, label: 'Consultation link' };
-  }
+  // ...and a consultation credential anywhere in a FOREIGN URL (Codex #4709
+  // r12–r15 P1): parked here so the send-time check refuses it.
+  if (await foreignConsultationCredentialPresent(runs, hosts)) return { present: true, label: 'Consultation link' };
   return { present: false };
 }
 
@@ -1463,29 +1430,12 @@ async function consultationLinkRows(body) {
       });
     }
   }
-  // A consultation bearer ANYWHERE inside a URL on a host we do NOT own
-  // (Codex #4709 r12/r13/r14 P1) — its path, query or fragment, encoded or
-  // not, e.g. a tracker's ?next=<real link> — is refused outright: the
-  // third party could harvest the 14-day bearer. Both shapes count: a
-  // signed /inspection/<token> and a consultation short code /l/<code>.
+  // A consultation bearer anywhere inside a URL on a host we do NOT own is
+  // refused outright: the third party could harvest the 14-day bearer.
+  if (await foreignConsultationCredentialPresent(runs, hosts)) {
+    rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
+  }
   const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
-  const foreignCodes = [];
-  for (const run of linkRuns(runs, /inspection|\/l\/|%2fl%2f/i)) {
-    let url;
-    try { url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`); } catch { continue; }
-    if ([].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
-    const inner = fullyDecoded(`${url.pathname}${url.search}${url.hash}`);
-    for (const m of inner.matchAll(/\/inspection\/([A-Za-z0-9._-]+)/gi)) {
-      if (verifyLeadConsultationToken(m[1], 0)) rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
-    }
-    for (const m of inner.matchAll(/\/l\/([A-Za-z0-9_-]+)/gi)) foreignCodes.push(m[1].toLowerCase());
-  }
-  if (foreignCodes.length) {
-    const wrapped = await db('short_codes').whereIn('code', [...new Set(foreignCodes)]).where({ kind: 'consultation' }).select('code', 'kind');
-    for (const r of wrapped || []) {
-      if (r.kind === 'consultation') rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
-    }
-  }
   const longRuns = linkRuns(runs, /\/inspection\//i);
   const tokenRuns = longRuns
     .map((run) => ({ run, token: canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME) }))

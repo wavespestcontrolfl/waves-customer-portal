@@ -299,7 +299,7 @@ describe('POST /admin/communications/customer-link', () => {
         const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
         expect(res.status).toBe(200);
         const body = await res.json();
-        expect(builders.buildConsultationLink).toHaveBeenCalledWith(CUSTOMER_UUID, undefined);
+        expect(builders.buildConsultationLink).toHaveBeenCalledWith(CUSTOMER_UUID);
         expect(body.kind).toBe('consultation');
         expect(body.firstName).toBe('PersonA');
         expect(body.url).toContain('waves.link/l/abc123');
@@ -313,7 +313,8 @@ describe('POST /admin/communications/customer-link', () => {
       });
     });
 
-    test('a composer-supplied leadId rides through to the builder', async () => {
+    // Codex #4709 r15 P2: the customer path takes no lead override.
+    test('a leadId on the customer path is ignored — the builder gets only the customer', async () => {
       wireDb({ customers: soloCustomer() });
       builders.buildConsultationLink.mockResolvedValue({
         url: 'https://waves.link/l/abc123',
@@ -326,7 +327,7 @@ describe('POST /admin/communications/customer-link', () => {
           leadId: 'lead-uuid-1',
         });
         expect(res.status).toBe(200);
-        expect(builders.buildConsultationLink).toHaveBeenCalledWith(CUSTOMER_UUID, 'lead-uuid-1');
+        expect(builders.buildConsultationLink).toHaveBeenCalledWith(CUSTOMER_UUID);
       });
     });
 

@@ -486,62 +486,13 @@ describe('buildReferralLink', () => {
 });
 
 describe('buildConsultationLink', () => {
-  const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
-
-  test('a caller-supplied leadId override wins over the customer lookup when it is the resolved customer\'s own OPEN lead', async () => {
-    mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: 'aaaaaaaa-0000-4000-8000-000000000001', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111', status: 'new', converted_at: null } }),
-      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
-    };
-    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/abc', line: 'line\n\n', standalone: true });
-    const r = await buildConsultationLink('c1', 'aaaaaaaa-0000-4000-8000-000000000001');
-    expect(r.url).toBe('https://waves.link/l/abc');
-    // Codex #4709 r9 P1: the chosen lead rides back for the send's binding.
-    expect(r.leadId).toBe('aaaaaaaa-0000-4000-8000-000000000001');
-    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000001', 'Pat');
+  // Codex #4709 r15 P2: no caller-supplied lead override — an extra
+  // argument is ignored; the customer's own newest open lead is used.
+  test('an extra lead id argument is ignored — the customer lookup decides', () => {
+    expect(buildConsultationLink.length).toBe(1);
   });
 
-  test('a caller-supplied leadId override wins when it is not the customer\'s own lead by customer_id but shares the resolved phone (and is open)', async () => {
-    mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: 'aaaaaaaa-0000-4000-8000-000000000002', first_name: 'Jamie', customer_id: 'c9', phone: '+19415550111', status: 'contacted', converted_at: null } }),
-      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
-    };
-    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/phone-match', line: 'line\n\n', standalone: true });
-    const r = await buildConsultationLink('c1', 'aaaaaaaa-0000-4000-8000-000000000002');
-    expect(r.url).toBe('https://waves.link/l/phone-match');
-    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000002', 'Jamie');
-  });
-
-  // Pre-push Codex P1: the explicit override had the same eligibility gap
-  // as the newest-lead lookup below — an existing customer's own WON/LOST
-  // lead could still mint a free-consultation invitation when named
-  // explicitly by id. Rejected outright (specific reason), never silently
-  // falls through to the customer's newest OPEN lead instead.
-  test('a caller-supplied leadId override that IS the customer\'s own lead but already converted is rejected — no fallback substitution', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'aaaaaaaa-0000-4000-8000-000000000003', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111', status: 'won', converted_at: new Date('2026-01-01') } }) };
-    const r = await buildConsultationLink('c1', 'aaaaaaaa-0000-4000-8000-000000000003');
-    expect(r.url).toBeNull();
-    expect(r.reason).toBe('That lead has already converted or closed — pick a different lead');
-    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
-  });
-
-  // Pre-push Codex P1: the customer path let leadIdOverride select ANY
-  // non-deleted lead with no check against the resolved customer at all —
-  // a request carrying customer A's phone and lead B's id would insert B's
-  // bearer consultation link into A's message. Binds the override to the
-  // resolved recipient exactly like the lead-only fallback does.
-  test('a leadId override for a DIFFERENT customer\'s lead (mismatched customer_id and phone) is rejected — no link inserted', async () => {
-    mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: 'aaaaaaaa-0000-4000-8000-000000000004', first_name: 'Robin', customer_id: 'customer-b', phone: '+19415559999' } }),
-      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
-    };
-    const r = await buildConsultationLink('customer-a', 'aaaaaaaa-0000-4000-8000-000000000004');
-    expect(r.url).toBeNull();
-    expect(r.reason).toBe('That lead does not match the destination number');
-    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
-  });
-
-  test('no leadId override: resolves the customer\'s newest non-deleted OPEN lead', async () => {
+  test('resolves the customer\'s newest non-deleted OPEN lead', async () => {
     const leads = chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris', phone: '+19415550111' } });
     mockBuilders = { leads, customers: chainBuilder({ firstRow: { phone: '+19415550111' } }) };
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/xyz', line: 'line\n\n', standalone: true });
@@ -562,6 +513,8 @@ describe('buildConsultationLink', () => {
   // the query itself (mocked here as the query finding nothing, the same
   // as a real WHERE clause would), landing on the same "no lead" outcome
   // as a customer with no lead on file at all — never a fallback mint.
+  const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+
   test('the customer\'s only lead is already converted: excluded by the open-lead predicate, same "no lead" outcome', async () => {
     const leads = chainBuilder({ firstRow: null });
     mockBuilders = { leads };
@@ -574,26 +527,6 @@ describe('buildConsultationLink', () => {
     expect(leads.whereNull).toHaveBeenCalledWith('converted_at');
   });
 
-  test('a leadId override for a deleted/missing lead falls back to the customer lookup', async () => {
-    let call = 0;
-    mockBuilders = {
-      leads: {
-        where: jest.fn(function () { return this; }),
-        whereNull: jest.fn(function () { return this; }),
-        whereIn: jest.fn(function () { return this; }),
-        orderBy: jest.fn(function () { return this; }),
-        first: jest.fn(async () => (call++ === 0 ? null : { id: 'lead-fallback', first_name: 'Sam', phone: '+19415550111' })),
-      },
-      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
-    };
-    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/fb', line: 'line\n\n', standalone: true });
-    const r = await buildConsultationLink('c1', 'aaaaaaaa-0000-4000-8000-000000000005');
-    expect(r.url).toBe('https://waves.link/l/fb');
-    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-fallback', 'Sam');
-  });
-
-  // Codex #4709 r4 P2: a lead whose own phone is not this customer's number
-  // would mint a link the send check always refuses — refused up front.
   test('the resolved lead\'s phone differs from the customer\'s number: a reason, no mint', async () => {
     mockBuilders = {
       leads: chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris', phone: '+19415559999' } }),
@@ -607,15 +540,6 @@ describe('buildConsultationLink', () => {
 
   // Codex #4709 r4 P2: a malformed override answers with a reason, never a
   // Postgres uuid-syntax 500.
-  test('a malformed leadId override: a reason, no DB lookup', async () => {
-    const leads = chainBuilder({ firstRow: null });
-    mockBuilders = { leads };
-    const r = await buildConsultationLink('c1', 'not-a-uuid');
-    expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/not valid/);
-    expect(leads.first).not.toHaveBeenCalled();
-  });
-
   test('no lead on file for the customer: a reason, no link, builder never called', async () => {
     mockBuilders = { leads: chainBuilder({ firstRow: null }) };
     const r = await buildConsultationLink('c1');
@@ -1594,6 +1518,8 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   const PREP = 'a'.repeat(32);
 
   test('a canonical contract link is present; a look-alike host or a nested URL is not', async () => {
+    // Foreign URLs are also scanned for consultation short codes (r15).
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
     expect(await expiringLinkSendCheck('Sign here: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Contract signing' });
     expect(await expiringLinkSendCheck('https://portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY.')).toEqual({ present: true, label: 'Contract signing' });
     expect(await expiringLinkSendCheck('portal.wavespestcontrol.com.evil.example/contract/abcDEF123_-xyz789QWERTY')).toEqual({ present: false });
@@ -2809,6 +2735,31 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     const shortWrapped = `https://tracker.example/?u=${encodeURIComponent('https://wavespest.co/l/cons1')}`;
     expect((await checkConsultationLinkSend(`Pick a time: ${shortWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
     expect(await immediateOnlyLinkSendCheck(shortWrapped)).toEqual({ present: true, label: 'Consultation link' });
+  });
+
+  // Codex #4709 r15 P1: no route marker needed — a raw signed token or a
+  // consultation short code in any foreign URL parameter is caught.
+  test('a raw consultation credential in a generic foreign parameter → refused and fenced', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    const tokenWrapped = `https://tracker.example/?token=${mintLeadConsultationToken('lead-1')}`;
+    wireConsultation({ codeRows: [] });
+    expect((await checkConsultationLinkSend(`Pick a time: ${tokenWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck(tokenWrapped)).toEqual({ present: true, label: 'Consultation link' });
+
+    const codeWrapped = 'https://tracker.example/r?code=cons1';
+    mockBuilders = {
+      short_codes: chainBuilder({ rows: [{ code: 'cons1', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+      leads: chainBuilder({ firstRow: LEAD_ROW }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    expect((await checkConsultationLinkSend(`Pick a time: ${codeWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+    expect(await immediateOnlyLinkSendCheck(codeWrapped)).toEqual({ present: true, label: 'Consultation link' });
+
+    // An ordinary foreign link with no credential is left alone.
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck('https://maps.example/place?id=abcde12345')).toEqual({ present: false });
   });
 
   // Codex #4709 r14 P1: on a shared phone, a lead linked to customer A never

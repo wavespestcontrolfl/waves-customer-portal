@@ -2770,7 +2770,7 @@ function composerLinkBuilders(body = {}) {
     // Lead consultation-booking link (lead-inspection-link-scope.md §4),
     // dark behind GATE_LEAD_INSPECTION_LINK. Per customer row like referral
     // above — the resolved owner's own lead, not any account sibling's.
-    consultation: (ids, primaryId) => builders.buildConsultationLink(primaryId, body.leadId),
+    consultation: (ids, primaryId) => builders.buildConsultationLink(primaryId),
     // Auto Pay is per customer row (the phone's owner), same as referral.
     // The builder delegates to autopay-setup-link's single entry point —
     // gate, payer exemption, dedup and the saved-card auto-secure all
