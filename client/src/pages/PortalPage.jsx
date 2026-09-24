@@ -16995,7 +16995,10 @@ export default function PortalPage() {
       {/* Report Issue Overlay */}
       <ReportIssueOverlay
         open={showReportIssue}
-        onClose={() => setShowReportIssue(false)}
+        // Clear the Photo ID handoff on close (submitted or cancelled) — an
+        // ordinary New Request opened afterward must never inherit a stale
+        // category/note/photos from a previous Photo ID result (Codex r1 P1).
+        onClose={() => { setShowReportIssue(false); setReportIssuePrefill(null); }}
         onSubmitted={() => setRequestRefreshKey(k => k + 1)}
         customer={customer}
         propertyAddress={activePropertyAddress}

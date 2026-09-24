@@ -162,10 +162,12 @@ export function usePhotoIdGate() {
           setItems([]);
           return;
         }
-        // A transient failure (network hiccup, 5xx) doesn't prove the
-        // feature is gated off — only an explicit 404 does. Keep the FAB up
-        // with an empty history rather than hiding the whole feature.
-        setStatus((prev) => (prev === 'unavailable' ? prev : 'available'));
+        // Fail closed (feature flags never fail open): a network hiccup or
+        // 5xx on the FIRST read is not evidence the account has access, so
+        // it stays hidden same as a 404. Once a read has actually proven
+        // 'available' this session, a later background-refresh blip doesn't
+        // retract it — that would flicker a working feature off.
+        setStatus((prev) => (prev === 'available' ? prev : 'unavailable'));
       });
   }, []);
 
@@ -268,10 +270,18 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   const [historyError, setHistoryError] = useState('');
   const [loadingHistoryId, setLoadingHistoryId] = useState(null);
 
+  // Every async op (photo add, identify, history load) captures the current
+  // generation and checks it again before touching state. Closing the sheet
+  // — or starting a newer op — bumps it, so a slow response from an
+  // abandoned flow can never overwrite what the customer is looking at now
+  // (Codex r1 P1).
+  const genRef = useRef(0);
+
   // Reset the whole flow whenever the sheet is closed, so reopening it
   // (from the FAB or the More sheet) always starts at the type picker.
   useEffect(() => {
     if (!open) {
+      genRef.current += 1;
       setStep('picker');
       setSelectedType(null);
       setPhotos([]);
@@ -279,6 +289,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       setLocation('');
       setSubmitError('');
       setSubmitting(false);
+      setBusyPhotos(false);
       setResultData(null);
       setHistoryError('');
       setLoadingHistoryId(null);
@@ -288,6 +299,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   if (!open) return null;
 
   const pickType = (value) => {
+    genRef.current += 1;
     setSelectedType(value);
     setPhotos([]);
     setNote('');
@@ -301,6 +313,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     if (remaining <= 0) return;
     const files = Array.from(fileList || []).slice(0, remaining);
     if (!files.length) return;
+    const myGen = genRef.current;
     setBusyPhotos(true);
     try {
       const added = [];
@@ -310,25 +323,29 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
         const resized = await resizeImage(original, 1600, 0.85);
         added.push({ preview: resized, data: resized, name: file.name });
       }
+      if (genRef.current !== myGen) return; // sheet closed / type changed mid-read
       setPhotos((prev) => [...prev, ...added].slice(0, PHOTO_LIMIT));
     } finally {
-      setBusyPhotos(false);
+      if (genRef.current === myGen) setBusyPhotos(false);
     }
   };
 
   const handleCameraTap = async () => {
     if (photos.length >= PHOTO_LIMIT) return;
+    const myGen = genRef.current;
     setBusyPhotos(true);
     try {
       const result = await captureCameraPhoto();
+      if (genRef.current !== myGen) return; // sheet closed / type changed mid-capture
       if (result.photo) {
         const resized = await resizeImage(result.photo.data, 1600, 0.85);
+        if (genRef.current !== myGen) return;
         setPhotos((prev) => [...prev, { preview: resized, data: resized, name: result.photo.name }].slice(0, PHOTO_LIMIT));
       } else if (result.unavailable) {
         fileInputRef.current?.click();
       }
     } finally {
-      setBusyPhotos(false);
+      if (genRef.current === myGen) setBusyPhotos(false);
     }
   };
 
@@ -336,6 +353,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
 
   const handleIdentify = async () => {
     if (!photos.length || submitting || busyPhotos) return;
+    const myGen = genRef.current;
     setSubmitting(true);
     setSubmitError('');
     setStep('analyzing');
@@ -344,12 +362,14 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       if (note.trim()) payload.note = note.trim().slice(0, NOTE_LIMIT);
       if (location) payload.location = location;
       const result = await api.createPhotoId(selectedType, payload);
+      if (genRef.current !== myGen) return; // sheet closed / reset mid-request
       setResultData(result);
       setStep('result');
       // Best-effort: the history list refreshing in the background must
       // never turn a successful identify into a failure screen.
       try { onRefreshHistory?.(); } catch { /* ignore */ }
     } catch (err) {
+      if (genRef.current !== myGen) return;
       setStep('photos');
       if (err?.status === 404) {
         onGateUnavailable?.();
@@ -358,19 +378,28 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       }
       setSubmitError(errorMessageFor(err, 'Could not identify this photo. Please try again.'));
     } finally {
-      setSubmitting(false);
+      if (genRef.current === myGen) setSubmitting(false);
     }
   };
 
   const openHistoryItem = async (item) => {
+    genRef.current += 1;
+    const myGen = genRef.current;
     setHistoryError('');
     setLoadingHistoryId(item.id);
+    // A history item's photos were never returned by GET (contract has no
+    // photo data) — clear the live flow's photos so a later "Request
+    // service" tap can't attach a DIFFERENT identification's pictures to
+    // this one (Codex r1 P1).
+    setPhotos([]);
     try {
       const result = await api.getPhotoId(item.type, item.id);
+      if (genRef.current !== myGen) return; // sheet closed / another item opened meanwhile
       setResultData(result);
       setSelectedType(item.type);
       setStep('result');
     } catch (err) {
+      if (genRef.current !== myGen) return;
       if (err?.status === 404) {
         onGateUnavailable?.();
         onClose();
@@ -378,7 +407,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       }
       setHistoryError(errorMessageFor(err, 'Could not load this report.'));
     } finally {
-      setLoadingHistoryId(null);
+      if (genRef.current === myGen) setLoadingHistoryId(null);
     }
   };
 
@@ -387,7 +416,8 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     const prefill = nextStep?.request_prefill || {};
     // Same shape as ReportIssueOverlay's own `photos` state ({ preview, data,
     // name }) — the New Request form seeds it directly, so the customer
-    // never has to re-attach what they just took.
+    // never has to re-attach what they just took. Empty for a result opened
+    // from history (see openHistoryItem — the API never returns photo data).
     onOpenRequest?.({
       category: prefill.category || '',
       location: prefill.location || '',

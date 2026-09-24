@@ -27,8 +27,8 @@ import api from '../../utils/api';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from './PhotoId';
 
 // Mirrors how PortalPage wires the two entry points to one shared gate read
-// (usePhotoIdGate.md) — the FAB and the sheet must always read the same
-// status so a 404 hides both together.
+// (usePhotoIdGate) — the FAB and the sheet must always read the same status
+// so a 404 hides both together.
 function Harness({ onOpenRequest = () => {} }) {
   const gate = usePhotoIdGate();
   const [open, setOpen] = useState(false);
@@ -103,11 +103,31 @@ describe('gate: FAB + More-sheet entry point', () => {
     expect(screen.getByText('Ghost ant')).toBeInTheDocument();
   });
 
-  it('a non-404 GET failure keeps the feature available (fail open) with empty history', async () => {
+  it('a non-404 GET failure on the first read fails closed, same as a 404 (feature flags never fail open)', async () => {
     api.getPhotoIds.mockRejectedValueOnce(new Error('Unable to reach the server. Check your connection and try again.'));
     render(<Harness />);
     await waitFor(() => expect(api.getPhotoIds).toHaveBeenCalledTimes(1));
-    expect(await screen.findByRole('button', { name: /Photo ID/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Photo ID/i })).not.toBeInTheDocument();
+  });
+
+  it('a later background-refresh blip does not retract an already-proven-available feature', async () => {
+    function GateHarness() {
+      const gate = usePhotoIdGate();
+      return (
+        <div>
+          <div>status: {gate.status}</div>
+          <button onClick={() => gate.refresh()}>refresh</button>
+        </div>
+      );
+    }
+    api.getPhotoIds.mockResolvedValueOnce({ items: [] });
+    render(<GateHarness />);
+    await screen.findByText('status: available');
+
+    api.getPhotoIds.mockRejectedValueOnce(new Error('network blip'));
+    fireEvent.click(screen.getByText('refresh'));
+    await waitFor(() => expect(api.getPhotoIds).toHaveBeenCalledTimes(2));
+    expect(screen.getByText('status: available')).toBeInTheDocument();
   });
 });
 
@@ -322,5 +342,72 @@ describe('result rendering per type + next-step CTAs', () => {
     expect(screen.queryByRole('button', { name: 'Request service' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Book free re-service' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
+  });
+});
+
+describe('stale-flow safety (Codex r1 P1s)', () => {
+  it('closing the sheet mid-identify discards a late response instead of resurrecting it on reopen', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    let resolvePost;
+    api.createPhotoId.mockImplementationOnce(() => new Promise((resolve) => { resolvePost = resolve; }));
+    render(<Harness />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await screen.findByText('Comparing against our Florida library…');
+
+    // Close while the request is still in flight.
+    fireEvent.click(screen.getByRole('button', { name: 'Close Photo ID' }));
+    expect(screen.queryByRole('dialog', { name: 'Photo ID' })).not.toBeInTheDocument();
+
+    // The abandoned request finally resolves — it must not resurrect anything.
+    resolvePost({
+      id: 'late1', type: 'pest', created_at: '2026-09-24T00:00:00Z',
+      result: { label: 'Stale roach', confidence: 'high', safety: {}, about: 'x', urgency: 'low' },
+      next_step: { kind: 'none', title: 'Fine', body: 'All good.' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText('Stale roach')).not.toBeInTheDocument();
+
+    // Reopening starts clean at the picker, not on the late result.
+    fireEvent.click(screen.getByRole('button', { name: /Photo ID/i }));
+    expect(await screen.findByText('What are you looking at?')).toBeInTheDocument();
+    expect(screen.queryByText('Stale roach')).not.toBeInTheDocument();
+  });
+
+  it('going back from a live result to a different history item never attaches the earlier live photo', async () => {
+    const items = [{ id: 'l1', type: 'lawn', created_at: '2026-09-02T00:00:00Z', headline: 'Front lawn', next_step_kind: 'request' }];
+    api.getPhotoIds.mockResolvedValue({ items });
+    api.getPhotoId.mockResolvedValue({
+      id: 'l1', type: 'lawn', created_at: '2026-09-02T00:00:00Z',
+      result: { grass_type: 'St. Augustine', scores: { turf_density: 70, weed_coverage: 10, color_health: 7 }, signals: [], observations: 'x' },
+      next_step: { kind: 'request', title: 'Send this in', body: 'y', request_prefill: { category: 'lawn_concern', location: 'front_yard', note: 'z' } },
+    });
+    const onOpenRequest = vi.fn();
+    render(<Harness onOpenRequest={onOpenRequest} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'live1', type: 'pest', created_at: '2026-09-24T00:00:00Z',
+      result: { label: 'Roach', confidence: 'high', safety: {}, about: 'x', urgency: 'low' },
+      next_step: { kind: 'none', title: 'Fine', body: 'All good.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await screen.findByText('Roach');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(await screen.findByText('Front lawn'));
+    await screen.findByText('Send this in');
+    fireEvent.click(screen.getByRole('button', { name: 'Request service' }));
+
+    expect(onOpenRequest).toHaveBeenCalledTimes(1);
+    expect(onOpenRequest.mock.calls[0][0].photos).toHaveLength(0);
   });
 });
