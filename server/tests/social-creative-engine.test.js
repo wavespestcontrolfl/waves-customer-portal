@@ -29,7 +29,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   jest.clearAllMocks();
-  for (const k of ['SOCIAL_CREATIVE_ENGINE_ENABLED', 'SOCIAL_CREATIVE_VARIANTS', 'SOCIAL_IMAGE_PROVIDER', 'SOCIAL_MEDIA_CDN_DOMAIN', 'SOCIAL_VIDEO_ENABLED', 'SOCIAL_VIDEO_INTERVAL_DAYS']) {
+  for (const k of ['SOCIAL_CREATIVE_ENGINE_ENABLED', 'SOCIAL_CREATIVE_VARIANTS', 'SOCIAL_IMAGE_PROVIDER', 'SOCIAL_MEDIA_CDN_DOMAIN', 'SOCIAL_VIDEO_ENABLED', 'SOCIAL_VIDEO_INTERVAL_DAYS', 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS']) {
     if (ORIGINAL_ENV[k] === undefined) delete process.env[k];
     else process.env[k] = ORIGINAL_ENV[k];
   }
@@ -56,12 +56,18 @@ describe('CREATIVE_FLAGS', () => {
 
   test('provider chain leads with gpt-image-2 (blog-engine parity), env-overridable', () => {
     delete process.env.SOCIAL_IMAGE_PROVIDER;
+    delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; // default-policy assertion must not inherit the caller's override
     expect(Engine.CREATIVE_FLAGS.chain).toBe(Engine.SOCIAL_DEFAULT_CHAIN);
     expect(Engine.SOCIAL_DEFAULT_CHAIN.startsWith('gpt-image-2')).toBe(true);
-    // Nano Banana line stays the immediate fallback for provider resilience.
-    expect(Engine.SOCIAL_DEFAULT_CHAIN.split(',')[1]).toBe('gemini-image-best');
-    process.env.SOCIAL_IMAGE_PROVIDER = 'gemini-image-best';
-    expect(Engine.CREATIVE_FLAGS.chain).toBe('gemini-image-best');
+    // OpenAI-only since 2026-09-24 (owner: no invisible watermarks — Gemini
+    // image output is SynthID-marked in the pixels; image-generator drops
+    // those slugs from any chain anyway).
+    expect(Engine.SOCIAL_DEFAULT_CHAIN.split(',')).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    process.env.SOCIAL_IMAGE_PROVIDER = 'gpt-image-1.5';
+    expect(Engine.CREATIVE_FLAGS.chain).toBe('gpt-image-1.5');
+    delete process.env.SOCIAL_IMAGE_PROVIDER;
+    process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = 'true';
+    expect(Engine.CREATIVE_FLAGS.chain).toBe(Engine.SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN);
   });
 });
 
