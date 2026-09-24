@@ -166,14 +166,22 @@ function mappedServiceLabel(raw) {
   // a service the customer never had (2026-09-24 round-6 P1). Same family
   // rule as detectServiceCategory: only the tree & shrub mappings apply, and
   // the family label is the fallback.
-  const treeShrub = detectServiceCategory(cleaned) === 'tree_shrub';
+  //
+  // Inspection-only labels ("Bee / Yellowjacket Inspection", "Tree & Shrub
+  // Inspection") are checked first the same way: only inspection/assessment
+  // mappings apply, so an inspection never publishes as a removal or
+  // treatment (round-8 P1).
+  const family = matchesAtWordStart(INSPECTION_LABEL_RE, cleaned) ? INSPECTION_FAMILY
+    : detectServiceCategory(cleaned) === 'tree_shrub' ? TREE_SHRUB_FAMILY : null;
   for (const mapping of SERVICE_TYPE_MAP) {
-    if (treeShrub && !TREE_SHRUB_TYPES.has(mapping.type)) continue;
+    if (family && !family.types.has(mapping.type)) continue;
     if (matchesAtWordStart(mapping.match, cleaned)) return mapping.type;
   }
-  return treeShrub ? 'Tree & Shrub Care' : null;
+  return family ? family.fallback : null;
 }
-const TREE_SHRUB_TYPES = new Set(['Tree & Shrub Care', 'Palm Injection', 'Arborjet Treatment']);
+const INSPECTION_LABEL_RE = /inspect|assessment|estimat|consultation/i;
+const INSPECTION_FAMILY = { types: new Set(['WDO Inspection', 'Termite Inspection', 'Waves Assessment', 'Inspection']), fallback: 'Inspection' };
+const TREE_SHRUB_FAMILY = { types: new Set(['Tree & Shrub Care', 'Palm Injection', 'Arborjet Treatment']), fallback: 'Tree & Shrub Care' };
 // The legacy map patterns are prefix stems ("fertil", "aerat"), not
 // word-bounded, so /ant\s*treatment/ also matches inside "Plant Treatment"
 // and /tent/ inside "Content". For a public label only a match that begins

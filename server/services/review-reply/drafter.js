@@ -760,7 +760,9 @@ function checkExperienceClaims(ctx) {
   // visit went smoothly" would invent one (2026-09-24/25 P1 fix; narrowed to
   // "visit" only in round 4 — explain/answered/communicat* now go through
   // EXPERIENCE_CLAIM_RE's own provenance check above instead).
-  if (!grounding.review.hasText && !grounding.account) {
+  // Only a COMPLETED service proves a visit: a linked customer row with no
+  // completed scheduled_services has account.relationship === null (round-8 P1).
+  if (!grounding.review.hasText && !grounding.account?.relationship) {
     const interactionMatch = body.match(INTERACTION_TERM_RE);
     if (interactionMatch) return reject('unlisted_experience_claim', interactionMatch[0]);
   }
@@ -834,7 +836,13 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   // names the reviewer wrote. Any other active technician's name, and any
   // reviewer name seen in the recent replies the model was shown (their
   // greetings), is a leak. Case-insensitive.
-  const allowedNames = new Set((grounding.allow.names || []).map((n) => n.toLowerCase()));
+  // A punctuated allowed name ("O'Neil", "Mary-Jane") is scanned below as
+  // its pieces, so each piece is allowed too (round-8 P2: the mandated
+  // "Hi O'Neil," greeting otherwise rejected every draft and parked the row).
+  const allowedNames = new Set((grounding.allow.names || []).flatMap((n) => {
+    const lower = n.toLowerCase();
+    return [lower, ...lower.split(/['’-]+/).filter(Boolean)];
+  }));
   const knownNames = new Set([
     ...(grounding.allow.forbiddenNames || []),
     ...recentReplies.map((r) => greetingName(r)).filter(Boolean),
@@ -927,7 +935,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     // first word of a new line (the greeting line ends with a comma).
     const sentenceInitial = /(?:^|[.!?]|\n)\s*$/.test(before);
     // "Adam's" is the allowed name in the possessive.
-    const w = pn[2].toLowerCase().replace(/'s?$/, '');
+    const w = pn[2].toLowerCase().replace(/'s?$/, '').replace(/[-']+$/, '');
     if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || BRAND_WORDS.has(w) || inServicePhraseSpan(pn.index + pn[1].length)) continue;
     // A sentence-initial inflection of the reviewer's own word ("Ants are"
     // for "ant problems") is sourced when an ordinary-word follower proves

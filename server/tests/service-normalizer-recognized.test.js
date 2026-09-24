@@ -142,3 +142,17 @@ describe('family matches must begin a word (2026-09-24 round-7 P1)', () => {
     expect(mappedServiceLabel(raw)).toBe(expected);
   });
 });
+
+describe('inspection labels stay inspections (2026-09-24 round-8 P1)', () => {
+  test.each([
+    ['Bee / Yellowjacket Inspection', 'Inspection'],
+    ['Rodent Inspection', 'Inspection'],
+    ['Tree & Shrub Inspection', 'Inspection'],
+    ['Termite Inspection', 'Termite Inspection'],
+    ['WDO Inspection', 'WDO Inspection'],
+    ['Real Estate WDO Inspection', 'WDO Inspection'],
+    ['Free Estimate', 'Waves Assessment'],
+  ])('%s → %s', (raw, expected) => {
+    expect(mappedServiceLabel(raw)).toBe(expected);
+  });
+});

@@ -761,6 +761,16 @@ describe('2026-09-24 round-6 P1 fixes: outcome idioms, negated membership, reply
   ])('negated account status never sources the affirmative (round 7): %s', (review, line) => {
     expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding(review))).toBe('negated_review_claim');
   });
+  test('a linked account with no completed visit does not prove a visit (round 8)', () => {
+    const g = grounding({ text: '', rating: 5, mentionedTechNames: [], topics: [], account: { relationship: null, tenure: null, serviceCategories: [], city: null } });
+    g.review.hasText = false;
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went smoothly.'), g)).toBe('unlisted_experience_claim');
+  });
+  test.each(["O'Neil", 'Mary-Jane'])('a punctuated reviewer first name is allowed in the greeting (round 8): %s', (name) => {
+    const g = grounding({ firstName: name, text: 'Great service.', mentionedTechNames: [], topics: [] });
+    g.allow.names = [name];
+    expect(Drafter.verifyReplyText(good(`Hi ${name},\n\nGlad to hear it, and thanks for writing.`), g)).toBeNull();
+  });
   test('REPLY_VERSION moved past reply-v1 so stored safe-copy drafts are never reused on a publish retry', () => {
     expect(Drafter.REPLY_VERSION).not.toBe('reply-v1');
   });
