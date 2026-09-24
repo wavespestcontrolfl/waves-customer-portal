@@ -307,59 +307,128 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
   }
 }
 
-// The Messages badge's number: contact-phone threads holding an unread inbound
-// SMS. CommunicationsPageV2.smsThreadKey groups across business numbers using
-// the last 10 digits (or "unknown"); /log prefers contact_phone to customer.phone.
-// Count that same identity across every conversation. Internal
-// admin-phone traffic is excluded exactly as the inbox log excludes it
-// (`excludePhones` = the router's ADMIN_PHONES).
-// role defaults to NON-admin (fail closed): a caller that does not say who is
-// asking never sees recruiting rows counted.
-async function countUnreadInboundSms({ excludePhones = [], customerId = null, role = null } = {}) {
-  const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
-  // Same role-aware recruiting exclusion as the display query (PR #4623):
-  // a badge must never count a message its reader cannot open.
-  let q = hideRecruitingThreadsFromNonAdmin(db('messages')
-    .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
-    .leftJoin('customers', 'conversations.customer_id', 'customers.id')
-    .where('messages.channel', 'sms')
-    .where('messages.direction', 'inbound'), { techRole: role })
-    .andWhere(function unread() { this.where({ 'messages.is_read': false }).orWhereNull('messages.is_read'); });
-  if (customerId) q = q.where('conversations.customer_id', customerId);
-  // A blocked number's existing thread must not keep the badge lit: "Mark
-  // spam" in the inbox blocks the sender and the thread stops counting.
-  // NANP blocks match on the same last-10 identity the COUNT below groups
-  // on; any other country code must match in full (utils/phone.js keeps
-  // international numbers whole — codex #4213).
-  q = q.whereNotExists(function blocked() {
-    this.select(db.raw('1')).from('blocked_numbers')
-      .whereRaw(`(
-        (regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g') ~ '^1[0-9]{10}$'
-          AND regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g') ~ '^1{0,1}[0-9]{10}$'
-          AND (COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '') NOT LIKE '+%'
-            OR COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '') LIKE '+1%')
-          AND RIGHT(regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g'), 10)
-            = RIGHT(regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g'), 10))
-        OR NULLIF(regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g'), '')
-            = regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g')
-      )`);
+// The Messages badge's number: contact-phone threads that still need a human
+// response. State is endpoint-scoped because a customer can text several
+// business numbers independently, then deduped by contact phone for the badge.
+// Unified messages/conversations remain canonical for display and customer
+// ownership. A lateral sms_log twin overlays compliance/reaction types that
+// the unified row does not consistently retain. Select only each endpoint's
+// newest actionable inbound in SQL, then use the shared JS courtesy classifier
+// for historical unstamped rows. No created_at horizon: an old unanswered
+// question remains.
+async function countUnreadInboundSms({ excludePhones = [], customerId = null } = {}) {
+  const {
+    HUMAN_REPLY_TYPES,
+    NON_ACTIONABLE_INBOUND_TYPES,
+    inboundNeedsResponse,
+  } = require('./sms-response-policy');
+  const phoneKey = (column) => {
+    const digits = `REGEXP_REPLACE(COALESCE(${column}, ''), '[^0-9]', '', 'g')`;
+    return `(CASE WHEN ${digits} = '' THEN ''
+      WHEN ${digits} ~ '^1[0-9]{10}$' THEN RIGHT(${digits}, 10)
+      WHEN ${digits} ~ '^[0-9]{10}$' AND COALESCE(${column}, '') NOT LIKE '+%' THEN ${digits}
+      ELSE '+' || ${digits} END)`;
+  };
+  const eventPeer = phoneKey('base.contact_phone');
+  const eventEndpoint = phoneKey('base.our_endpoint_id');
+  const blockedPeer = phoneKey('b.number');
+  const { rows = [] } = await db.raw(`
+    WITH base_sms AS MATERIALIZED (
+      SELECT m.id, m.direction, m.body AS message_body, m.created_at,
+             c.customer_id,
+             COALESCE(NULLIF(c.contact_phone, ''), cu.phone, '') AS contact_phone,
+             COALESCE(c.our_endpoint_id, '') AS our_endpoint_id,
+             COALESCE(legacy.message_type, m.message_type, '') AS message_type,
+             COALESCE(legacy.status, m.delivery_status, '') AS delivery_status,
+             COALESCE(m.metadata, '{}'::jsonb)
+               || COALESCE(legacy.metadata, '{}'::jsonb)
+               || COALESCE(audit.metadata, '{}'::jsonb) AS metadata,
+             COALESCE(m.media, '[]'::jsonb) AS media
+      FROM messages m
+      JOIN conversations c ON c.id = m.conversation_id
+      LEFT JOIN customers cu ON cu.id = c.customer_id
+      LEFT JOIN LATERAL (
+        SELECT sl.message_type, sl.status, sl.metadata
+        FROM sms_log sl
+        WHERE sl.twilio_sid = m.twilio_sid AND sl.direction = m.direction
+        ORDER BY sl.created_at DESC, sl.id DESC
+        LIMIT 1
+      ) legacy ON true
+      LEFT JOIN LATERAL (
+        SELECT mal.metadata
+        FROM messaging_audit_log mal
+        WHERE mal.provider_message_id = m.twilio_sid AND mal.channel = 'sms'
+        ORDER BY mal.created_at DESC, mal.id DESC
+        LIMIT 1
+      ) audit ON true
+      WHERE m.channel = 'sms'
+        AND (CAST(:customerId AS uuid) IS NULL OR c.customer_id = CAST(:customerId AS uuid))
+        AND NOT (COALESCE(c.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
+          OR COALESCE(c.contact_phone, '') = ANY(CAST(:excludePhones AS text[]))
+          OR COALESCE(cu.phone, '') = ANY(CAST(:excludePhones AS text[])))
+    ), sms_events AS MATERIALIZED (
+      SELECT base.*, ${eventPeer} AS peer, ${eventEndpoint} AS endpoint
+      FROM base_sms base
+    ), latest_inbound AS (
+      SELECT DISTINCT ON (s.peer, s.endpoint)
+        s.id, s.peer, s.endpoint, s.customer_id, s.message_body,
+        s.message_type, s.metadata, s.media, s.created_at
+      FROM sms_events s
+      WHERE s.direction = 'inbound'
+        AND s.peer <> ''
+        AND s.message_type <> ALL(CAST(:ignoredInboundTypes AS text[]))
+        -- Recruiting replies have their own inbox and notification lifecycle.
+        AND s.message_type NOT LIKE 'job\\_%'
+        AND NOT EXISTS (
+          SELECT 1 FROM blocked_numbers b WHERE ${blockedPeer} = s.peer
+        )
+      ORDER BY s.peer, s.endpoint, s.created_at DESC, s.id DESC
+    )
+    SELECT li.id, li.peer, li.endpoint, li.customer_id, li.message_body,
+           li.message_type, li.metadata, li.media, li.created_at
+    FROM latest_inbound li
+    WHERE NOT EXISTS (
+      SELECT 1 FROM sms_events os
+      WHERE os.direction = 'outbound'
+        AND os.message_type = ANY(CAST(:humanReplyTypes AS text[]))
+        AND os.delivery_status IN ('queued', 'sent', 'delivered')
+        AND os.created_at > li.created_at
+        AND os.peer = li.peer
+        AND os.endpoint = li.endpoint
+        -- Human-approved click-followup nudges are proactive marketing. Use
+        -- their exact durable draft id; a broad time/phone match can suppress
+        -- a real manual reply sent near the nudge.
+        AND NOT EXISTS (
+          SELECT 1 FROM message_drafts mdx
+          WHERE mdx.id::text = os.metadata->>'draft_id'
+            AND mdx.intent = 'click_followup'
+        )
+    )
+    -- STOP closes every business-number thread for the peer. A later genuine
+    -- inbound candidate can reopen only if it arrived after that STOP.
+    AND NOT EXISTS (
+      SELECT 1 FROM sms_events st
+      WHERE st.direction = 'inbound' AND st.message_type = 'opt_out'
+        AND st.created_at > li.created_at AND st.peer = li.peer
+    )
+  `, {
+    customerId: customerId || null,
+    excludePhones,
+    ignoredInboundTypes: NON_ACTIONABLE_INBOUND_TYPES,
+    humanReplyTypes: HUMAN_REPLY_TYPES,
   });
-  for (const phone of excludePhones) {
-    q = q
-      .whereNot('conversations.our_endpoint_id', phone)
-      .where((b) => b.whereNot('conversations.contact_phone', phone).orWhereNull('conversations.contact_phone'))
-      .where((b) => b.whereNot('customers.phone', phone).orWhereNull('customers.phone'));
-  }
-  const row = await q.first(
-    db.raw(`COUNT(DISTINCT COALESCE(NULLIF(
-      CASE WHEN COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '') NOT LIKE '+%'
-        AND regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g') ~ '^[0-9]{10}$'
-      THEN '1' || regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g')
-      ELSE regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g')
-      END, ''), 'unknown'))::int AS conversations`),
-    db.raw('COUNT(*)::int AS messages'),
-  );
-  return { conversations: Number(row?.conversations || 0), messages: Number(row?.messages || 0) };
+  const actionable = rows.filter((row) => inboundNeedsResponse({
+    direction: 'inbound',
+    body: row.message_body,
+    media: row.media,
+    metadata: row.metadata,
+  }));
+  return {
+    conversations: new Set(actionable.map((row) => row.peer)).size,
+    // Kept for response compatibility; this is now the number of endpoint
+    // threads needing a reply, rather than the number of unread rows.
+    messages: actionable.length,
+  };
 }
 
 async function customerIdsInScope(ids, convs) {

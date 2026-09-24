@@ -29,7 +29,7 @@ export function WorkspaceGroup({ group, onNavigate, unreadCount, source = 'sideb
   const Icon = group.icon;
   const label = <><Icon size={18} strokeWidth={1.75} className="shrink-0" aria-hidden /><span className="min-w-0 flex-1">{group.label}</span>
     {group.id === 'communications' && unreadCount > 0 && <>
-      <span className="sr-only">, {unreadCount} unread conversations</span>
+      <span className="sr-only">, {unreadCount} conversations needing a reply</span>
       <span aria-hidden className="rounded-full bg-alert-fg px-1.5 text-14 text-white">{unreadCount > 99 ? '99+' : unreadCount}</span>
     </>}</>;
   const expansion = <ChevronDown size={16} aria-hidden className={cn('shrink-0 transition-transform', isExpanded && 'rotate-180')} />;

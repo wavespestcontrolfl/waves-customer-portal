@@ -5259,7 +5259,7 @@ function CustomerWorkspaceHeader({
             {unreadConversations > 0 && (
               <span
                 className="c360-unread-count"
-                aria-label={`${unreadConversations} unread conversations`}
+                aria-label={`${unreadConversations} conversations needing a reply`}
               >
                 {unreadConversations}
               </span>
