@@ -10057,14 +10057,21 @@ const CallRecordingProcessor = {
       // …or the unit riding INSIDE the authoritative street line ("1250 Main
       // St Apt 2" with no line 2): the resolver enforces a unit only when
       // the card records one (codex r19 P1).
-      const { splitStreetLineUnit: splitAuthorityUnit } = require('../utils/address-normalizer');
+      const { splitStreetLineUnit: splitAuthorityUnit, splitUnitFirstLine: splitAuthorityUnitFirst } = require('../utils/address-normalizer');
       // The caller's AUTHORITATIVE street is parsed first: a decisive AV
       // verdict's normalized line carries number + route only, so a unit the
       // caller gave inside street_line_1 would otherwise never be seen and
-      // the card would omit the door (codex r28 P1).
+      // the card would omit the door (codex r28 P1). Unit-FIRST forms ("Apt
+      // 4 123 Main St", "#204 900 Bayview Ter") are peeled the same way
+      // (codex r31 P1).
+      const unitOfLine = (line) => {
+        const text = String(line || '');
+        const first = splitAuthorityUnitFirst(text);
+        return String((first && first.unit) || splitAuthorityUnit(text).unit || '').trim();
+      };
       const statedUnit = statedUnitExplicit
-        || String(splitAuthorityUnit(String(corroboratingStreet || '')).unit || '').trim()
-        || String(splitAuthorityUnit(String(avNormalized.street_line_1 || '')).unit || '').trim()
+        || unitOfLine(corroboratingStreet)
+        || unitOfLine(avNormalized.street_line_1)
         || null;
       let knownIndependentProperty = false;
       if (houseConflict && process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
