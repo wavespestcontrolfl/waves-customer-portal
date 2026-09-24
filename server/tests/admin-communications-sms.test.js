@@ -1929,6 +1929,24 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('keeps an acknowledgment actionable when it answers the prior outbound question', async () => {
+    const builder = makeQueryBuilder([smsMessageRow({
+      body: 'Okay',
+      metadata: {},
+      response_prior_outbound_body: 'Does 9am work?',
+    })]);
+    db.mockReturnValue(builder);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.messages[0].courtesyOnly).toBe(false);
+    });
+  });
+
   test('serializes exact audit-linked proactive sends as non-answers', async () => {
     const builder = makeQueryBuilder([smsMessageRow({
       direction: 'outbound',
