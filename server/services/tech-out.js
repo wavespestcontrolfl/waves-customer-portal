@@ -113,23 +113,19 @@ function unitsOf(stops) {
 }
 
 /**
- * Park every open stop on `technicianId`'s day for `date` as a ranked
- * overflow alert, inside the caller's transaction. Returns the summary
- * stored on the absence row. Exported for tests.
+ * Rank `stops` and park each unit as a `tech_out_overflow` alert, inside the
+ * caller's transaction. Shared by `parkTechDay` (marking a tech out — the
+ * day's full open stop list) and `sweepAbsentTechDays` (the safety net —
+ * only the stops some other writer already let land on the absent day,
+ * uncovered by an existing alert). `extraPayload` lets a caller stamp extra
+ * fields onto every alert's payload (the sweep adds `late_arrival: true`)
+ * without disturbing `parkTechDay`'s own shape. Returns the summary stored
+ * on the absence row (parkTechDay) or folded into the sweep's per-absence
+ * count.
  */
-async function parkTechDay(trx, { technicianId, date, reason, absentTechName }) {
-  const stops = await dayStopsQuery(trx, {
-    dateStr: date,
-    technicianId,
-    excludeStatuses: ABSENT_STOP_EXCLUDE_STATUSES,
-    select: [
-      'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
-      'scheduled_services.window_start', 'scheduled_services.window_end',
-      'scheduled_services.is_recurring', 'scheduled_services.visit_id',
-      'customers.first_name', 'customers.last_name',
-    ],
-  }).orderBy('scheduled_services.window_start', 'asc');
-
+async function parkStops(trx, {
+  technicianId, date, reason, absentTechName, stops, extraPayload = {},
+}) {
   const units = unitsOf(stops);
   const ranked = rankBumpOrder(units.map((u) => ({ ...u.representative, _members: u.members })));
   const parked = [];
@@ -158,6 +154,7 @@ async function parkTechDay(trx, { technicianId, date, reason, absentTechName }) 
         bump_total: ranked.length,
         bump_reason: rep.bump_reason,
         ...(memberIds.length > 1 ? { visit_member_ids: memberIds } : {}),
+        ...extraPayload,
       },
       trx,
     });
@@ -166,6 +163,122 @@ async function parkTechDay(trx, { technicianId, date, reason, absentTechName }) 
   for (const entries of created) parked.push(...entries);
 
   return { total: stops.length, units: ranked.length, parked, moved: [], failed: [], status: 'complete' };
+}
+
+/**
+ * Park every open stop on `technicianId`'s day for `date` as a ranked
+ * overflow alert, inside the caller's transaction. Returns the summary
+ * stored on the absence row. Exported for tests.
+ */
+async function parkTechDay(trx, { technicianId, date, reason, absentTechName }) {
+  const stops = await dayStopsQuery(trx, {
+    dateStr: date,
+    technicianId,
+    excludeStatuses: ABSENT_STOP_EXCLUDE_STATUSES,
+    select: [
+      'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
+      'scheduled_services.window_start', 'scheduled_services.window_end',
+      'scheduled_services.is_recurring', 'scheduled_services.visit_id',
+      'customers.first_name', 'customers.last_name',
+    ],
+  }).orderBy('scheduled_services.window_start', 'asc');
+
+  return parkStops(trx, {
+    technicianId, date, reason, absentTechName, stops,
+  });
+}
+
+/** Normalize a technician_absences.absence_date read back from Postgres (a
+ * DATE column, returned as a JS Date at UTC midnight) to YYYY-MM-DD. A date
+ * already a plain string (fake-db tests, or a value this process wrote in
+ * the same tick) passes through unchanged. */
+function absenceDateString(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+/**
+ * The safety net for every writer that can land a stop on a marked-out
+ * tech's day besides `markTechOut` itself (recurring-child seeding excepted
+ * — that one is date-aware at seed time). For every still-open absence
+ * today or later, park whatever open stops that tech-day carries and are
+ * NOT already covered by an open `tech_out_overflow` alert for that tech +
+ * date (covered = the stop's own id is an alert's job_id, OR it appears in
+ * an alert's payload.visit_member_ids — a grouped visit some OTHER writer
+ * added a member to after the day was parked). Each absence runs in its
+ * own transaction, fence first (same lock order as every assignment
+ * writer), so a concurrent assignment queues instead of racing the sweep.
+ * Idempotent: once a stop is covered by an alert, a later sweep tick skips
+ * it — nothing to park twice.
+ */
+async function sweepAbsentTechDays({ now } = {}) {
+  if (!techOutEnabled()) return { skipped: 'gate_off' };
+
+  const today = etDateString(now);
+  const absences = await db('technician_absences')
+    .whereNull('cleared_at')
+    .where('absence_date', '>=', today)
+    .select('id', 'technician_id', 'absence_date', 'reason');
+
+  let parked = 0;
+  for (const absence of absences) {
+    const technicianId = absence.technician_id;
+    const date = absenceDateString(absence.absence_date);
+    // Serial on purpose — each absence gets its own transaction, and these
+    // are independent tech-days on a 5-minute cadence; nothing gained by
+    // parallelizing a handful of rows against Railway's shared Postgres.
+    const summary = await db.transaction(async (trx) => {
+      // Fence first, same order as every assignment writer (markTechOut's
+      // own header comment) — an in-flight assignment on this tech-day
+      // finishes before the sweep snapshots it.
+      await lockTechDays(trx, [{ techId: technicianId, date }]);
+
+      const stops = await dayStopsQuery(trx, {
+        dateStr: date,
+        technicianId,
+        excludeStatuses: ABSENT_STOP_EXCLUDE_STATUSES,
+        select: [
+          'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
+          'scheduled_services.window_start', 'scheduled_services.window_end',
+          'scheduled_services.is_recurring', 'scheduled_services.visit_id',
+          'customers.first_name', 'customers.last_name',
+        ],
+      }).orderBy('scheduled_services.window_start', 'asc');
+      if (stops.length === 0) return { total: 0, units: 0 };
+
+      const openAlerts = await trx('dispatch_alerts')
+        .where({ type: ALERT_TYPE, tech_id: technicianId })
+        .whereNull('resolved_at')
+        .whereRaw("payload->>'date' = ?", [date])
+        .select('job_id', 'payload');
+      const covered = new Set();
+      for (const alert of openAlerts) {
+        if (alert.job_id) covered.add(alert.job_id);
+        const payload = typeof alert.payload === 'string' ? JSON.parse(alert.payload) : alert.payload;
+        const memberIds = payload?.visit_member_ids;
+        if (Array.isArray(memberIds)) memberIds.forEach((id) => covered.add(id));
+      }
+
+      const uncovered = stops.filter((s) => !covered.has(s.id));
+      if (uncovered.length === 0) return { total: 0, units: 0 };
+
+      const tech = await trx('technicians').where({ id: technicianId }).first('id', 'name');
+      return parkStops(trx, {
+        technicianId,
+        date,
+        reason: absence.reason,
+        absentTechName: tech?.name,
+        stops: uncovered,
+        extraPayload: { late_arrival: true },
+      });
+    });
+
+    parked += summary.total;
+    logger.info(`[tech-out] sweep: absence ${absence.id} (tech ${technicianId}, ${date}) — ${summary.total} uncovered stop(s) parked`);
+  }
+
+  return { absences: absences.length, parked };
 }
 
 /** Mark a technician out for a date and park their day, atomically. */
@@ -252,6 +365,7 @@ module.exports = {
   markTechOut,
   clearTechOut,
   parkTechDay,
+  sweepAbsentTechDays,
   rankBumpOrder,
   _test: { unitsOf, customerDisplayName },
 };

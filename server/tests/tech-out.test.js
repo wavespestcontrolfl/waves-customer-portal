@@ -14,9 +14,37 @@ jest.mock('../models/db', () => {
   const state = { technicians: {}, absences: {}, alerts: [] };
   const reset = () => { state.technicians = {}; state.absences = {}; state.alerts = []; };
   const chain = (table) => {
-    const c = { _cond: {}, _insert: null, _patch: null, _forUpdate: false };
-    for (const m of ['whereNull', 'whereRaw', 'select', 'orderBy']) c[m] = jest.fn(() => c);
-    c.where = jest.fn((w) => { Object.assign(c._cond, w); return c; });
+    const c = {
+      _cond: {}, _wheres: [], _whereRaws: [], _selectCols: null, _insert: null, _patch: null, _forUpdate: false,
+    };
+    for (const m of ['whereNull', 'orderBy']) c[m] = jest.fn(() => c);
+    // whereRaw args are recorded (sql + bindings) — sweepAbsentTechDays'
+    // dispatch_alerts read filters on payload->>'date'; select args are
+    // recorded too so the dispatch_alerts fake can tell that call apart
+    // from clearTechOut's existing `.select('id')` read.
+    c.whereRaw = jest.fn((sql, bindings) => { c._whereRaws.push({ sql, bindings }); return c; });
+    c.select = jest.fn((...cols) => { c._selectCols = cols; return c; });
+    // Object form (`.where({a, b})`) and 2-arg equality (`.where('col', v)`)
+    // both merge into `_cond`, exactly as before — every existing `.first()`
+    // matcher below reads `_cond` and is unaffected. 3-arg comparison
+    // (`.where('col', '>=', v)`, sweepAbsentTechDays' own absence_date
+    // floor) is recorded ONLY in `_wheres`; `_cond` also gets an entry
+    // pointing at that chain's own list-only resolver, never at a
+    // `.first()` matcher (technician_absences' `.first()` is only ever
+    // reached via a separate object-form `.where({technician_id, absence_date})`
+    // chain instance).
+    c.where = jest.fn((...args) => {
+      if (args.length === 1 && typeof args[0] === 'object') {
+        Object.assign(c._cond, args[0]);
+        for (const [k, v] of Object.entries(args[0])) c._wheres.push([k, '=', v]);
+      } else if (args.length === 2) {
+        c._cond[args[0]] = args[1];
+        c._wheres.push([args[0], '=', args[1]]);
+      } else if (args.length === 3) {
+        c._wheres.push([args[0], args[1], args[2]]);
+      }
+      return c;
+    });
     c.forUpdate = jest.fn(() => { c._forUpdate = true; return c; });
     c.insert = jest.fn((row) => { c._insert = row; return c; });
     c.update = jest.fn((patch) => { c._patch = patch; return c; });
@@ -46,10 +74,43 @@ jest.mock('../models/db', () => {
         }
         return row ? [row] : [];
       });
-    } else if (table === 'dispatch_alerts') {
+      // sweepAbsentTechDays' own list read: whereNull('cleared_at') +
+      // where('absence_date', '>=', today) + select(...). Independent of
+      // `match()`/`_cond` above — driven entirely by `_wheres` so the
+      // exact-date `.first()` matchers above are untouched.
       c.then = (res, rej) => Promise.resolve(
-        state.alerts.filter((a) => a.type === c._cond.type && a.tech_id === c._cond.tech_id && !a.resolved_at).map((a) => ({ id: a.id })),
+        Object.values(state.absences).filter((r) => (
+          (c.whereNull.mock.calls.length === 0 || !r.cleared_at)
+          && c._wheres.every(([col, op, val]) => {
+            const rv = r[col];
+            if (op === '>=') return rv >= val;
+            if (op === '<=') return rv <= val;
+            return rv === val;
+          })
+        )),
       ).then(res, rej);
+    } else if (table === 'dispatch_alerts') {
+      c.then = (res, rej) => {
+        // clearTechOut selects only 'id' and never filters by date (matches
+        // its real predicate not mattering to those tests); sweepAbsentTechDays
+        // selects 'job_id'/'payload' and DOES filter by payload->>'date'.
+        // Distinguishing on the requested columns keeps clearTechOut's
+        // existing behavior byte-identical.
+        const wantsPayload = Array.isArray(c._selectCols) && c._selectCols.includes('payload');
+        const dateFilter = wantsPayload
+          ? c._whereRaws.find((w) => /payload->>'date'/.test(w.sql))?.bindings?.[0]
+          : undefined;
+        const rows = state.alerts.filter((a) => (
+          a.type === c._cond.type
+          && a.tech_id === c._cond.tech_id
+          && !a.resolved_at
+          && (dateFilter === undefined || (a.payload && a.payload.date === dateFilter))
+        ));
+        const shaped = wantsPayload
+          ? rows.map((a) => ({ job_id: a.job_id, payload: a.payload }))
+          : rows.map((a) => ({ id: a.id }));
+        return Promise.resolve(shaped).then(res, rej);
+      };
     } else {
       throw new Error(`fake db: unexpected table ${table}`);
     }
@@ -88,7 +149,7 @@ const { lockTechDays } = require('../services/scheduling/tech-day-lock');
 const { createAlert, resolveAlert } = require('../services/dispatch-alerts');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
-  REASONS, ALERT_TYPE, markTechOut, clearTechOut, getTechOut, parkTechDay, rankBumpOrder, _test,
+  REASONS, ALERT_TYPE, markTechOut, clearTechOut, getTechOut, parkTechDay, sweepAbsentTechDays, rankBumpOrder, _test,
 } = require('../services/tech-out');
 
 const TECH = { id: '11111111-2222-4333-8444-555555555555', name: 'Adam' };
@@ -314,5 +375,158 @@ describe('getTechOut / clearTechOut', () => {
     db.__state.alerts.push({ id: 'alert-1', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: null });
     resolveAlert.mockRejectedValueOnce(new Error('resolve boom'));
     await expect(clearTechOut({ technicianId: TECH.id, date: DATE, actorId: ACTOR })).rejects.toThrow('resolve boom');
+  });
+});
+
+describe('sweepAbsentTechDays', () => {
+  const TECH2 = { id: '22222222-3333-4444-8888-999999999999', name: 'Sam' };
+
+  beforeEach(() => {
+    db.__state.technicians[TECH2.id] = TECH2;
+  });
+
+  afterEach(() => {
+    delete process.env.GATE_TECH_OUT_REDISTRIBUTE;
+  });
+
+  test('gate off is a fast no-op — no queries at all', async () => {
+    delete process.env.GATE_TECH_OUT_REDISTRIBUTE;
+    const result = await sweepAbsentTechDays();
+    expect(result).toEqual({ skipped: 'gate_off' });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(dayStopsQuery).not.toHaveBeenCalled();
+    expect(createAlert).not.toHaveBeenCalled();
+  });
+
+  test('an uncovered stop on an absent day is parked with late_arrival: true, and the fence is taken before the alert write', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'uncovered' })]));
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 1 });
+    expect(createAlert).toHaveBeenCalledTimes(1);
+    expect(createAlert.mock.calls[0][0]).toMatchObject({
+      type: ALERT_TYPE, severity: 'warn', techId: TECH.id, jobId: 'uncovered',
+    });
+    expect(createAlert.mock.calls[0][0].payload).toMatchObject({
+      date: DATE, reason: 'sick', late_arrival: true, absent_tech_name: 'Adam',
+    });
+    expect(lockTechDays).toHaveBeenCalledWith(expect.anything(), [{ techId: TECH.id, date: DATE }]);
+    expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(createAlert.mock.invocationCallOrder[0]);
+  });
+
+  test('a stop already covered by an open alert on job_id is not re-parked', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'covered' })]));
+    db.__state.alerts.push({
+      id: 'alert-x', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'covered', resolved_at: null, payload: { date: DATE },
+    });
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(createAlert).not.toHaveBeenCalled();
+  });
+
+  test('a stop covered only via an open alert\'s visit_member_ids (grouped visit) is not re-parked', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'member-b', visit_id: 'v1' })]));
+    db.__state.alerts.push({
+      id: 'alert-x',
+      type: ALERT_TYPE,
+      tech_id: TECH.id,
+      job_id: 'member-a',
+      resolved_at: null,
+      payload: { date: DATE, visit_member_ids: ['member-a', 'member-b'] },
+    });
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(createAlert).not.toHaveBeenCalled();
+  });
+
+  test('an alert open on a DIFFERENT date does not cover a same-id stop (payload->>date scoping)', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'x' })]));
+    db.__state.alerts.push({
+      id: 'alert-other-date',
+      type: ALERT_TYPE,
+      tech_id: TECH.id,
+      job_id: 'x',
+      resolved_at: null,
+      payload: { date: etDateString(addETDays(new Date(), 9)) },
+    });
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 1 });
+    expect(createAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('a second run parks nothing — idempotent once the first run\'s alert is committed', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'x' })]));
+
+    const first = await sweepAbsentTechDays();
+    expect(first).toEqual({ absences: 1, parked: 1 });
+
+    // createAlert is mocked and does not itself write into state.alerts —
+    // simulate the committed row its real insert would have left behind.
+    const [call] = createAlert.mock.calls[0];
+    db.__state.alerts.push({
+      id: `alert-${call.jobId}`, type: call.type, tech_id: call.techId, job_id: call.jobId, resolved_at: null, payload: call.payload,
+    });
+    createAlert.mockClear();
+
+    const second = await sweepAbsentTechDays();
+    expect(second).toEqual({ absences: 1, parked: 0 });
+    expect(createAlert).not.toHaveBeenCalled();
+  });
+
+  test('only uncleared absences dated today-or-later are swept; a cleared and a past absence are skipped entirely', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences.cleared = {
+      id: 'cleared', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: 'earlier',
+    };
+    db.__state.absences.past = {
+      id: 'past', technician_id: TECH2.id, absence_date: etDateString(addETDays(new Date(), -1)), reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([]));
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 0, parked: 0 });
+    expect(dayStopsQuery).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('an absent day with no open stops at all records zero parked without calling createAlert', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([]));
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(createAlert).not.toHaveBeenCalled();
   });
 });
