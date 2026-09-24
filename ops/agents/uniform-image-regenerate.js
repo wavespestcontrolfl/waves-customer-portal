@@ -122,11 +122,19 @@ function cityFrom(fm) {
       const gen = await generatePlannedImage({ title: p.title, topic: p.topic, keyword: p.keyword, city: p.city, mode: p.kind === 'hero' ? 'blog-hero' : 'blog-body', shot: p.shot, avoid: p.avoid, slug: p.slug, index: p.index });
       const webp = await compressToWebp(gen.buffer, { width: p.kind === 'hero' ? HERO_WIDTH : BODY_WIDTH });
       fs.writeFileSync(p.target, webp);
-      const vision = await describeHeroForAlt({ buffer: webp, mimeType: 'image/webp', title: p.title, keyword: p.keyword });
-      const alt = sanitizeAlt(vision) || gen.alt || null;
-      if (alt) {
-        let text = fs.readFileSync(p.postFile.startsWith('/') ? p.postFile : path.join(ASTRO, p.postFile), 'utf8');
-        if (p.kind === 'hero') {
+      // The image is on disk now; nothing below may leave the post untouched.
+      // Vision alt is best-effort (fail-open to the generator's prompt-derived
+      // alt, which always exists for a non-custom prompt); a miss on both is
+      // reported as a WARNING on a successful swap, and lastmod is bumped
+      // regardless so the sitemap sees the changed image.
+      let vision = null;
+      try { vision = await describeHeroForAlt({ buffer: webp, mimeType: 'image/webp', title: p.title, keyword: p.keyword }); } catch (err) { console.log(`    (vision alt failed: ${err.message} — using generator alt)`); }
+      const alt = sanitizeAlt(vision) || sanitizeAlt(gen.alt) || null;
+      {
+        let text = fs.readFileSync(path.join(ASTRO, p.postFile), 'utf8');
+        if (!alt) {
+          console.log(`    WARNING ${p.t}: no alt could be derived — image swapped, alt left as-is (fix by hand)`);
+        } else if (p.kind === 'hero') {
           // nested hero_image.alt — replace only the alt line inside that block
           text = text.replace(/^(hero_image:\n(?:[ \t]+\w+:.*\n)*?[ \t]+alt:[ \t]*).*$/m, (_, head) => `${head}${JSON.stringify(alt)}`);
         } else {
@@ -135,7 +143,7 @@ function cityFrom(fm) {
         }
         fs.writeFileSync(path.join(ASTRO, p.postFile), bumpModified(text));
       }
-      done++; results.push({ t: p.t, ok: true, model: gen.model, style: gen.plan.style, screen: gen.screen && gen.screen.ok, alt });
+      done++; results.push({ t: p.t, ok: true, altUpdated: Boolean(alt), model: gen.model, style: gen.plan.style, screen: gen.screen && gen.screen.ok, alt });
       console.log(`  ✓ ${p.t} via ${gen.model} (${gen.plan.style}) — alt: ${alt ? alt.slice(0, 80) : '(kept)'}`);
     } catch (err) {
       results.push({ t: p.t, ok: false, error: err.message }); console.log(`  ✗ ${p.t}: ${err.message}`);
