@@ -842,7 +842,15 @@ router.post('/assess', async (req, res, next) => {
     // and the only recorded zone (the report pairs before/after photos by it).
     const photoFieldsAt = visitAssessmentEnabled
       ? (i) => ({ photo_type: visitInput.photoTypeForZone(visitPhotos.zones[i]), zone: visitPhotos.zones[i] })
-      : (i) => ({ photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') });
+      : (i) => {
+        // Gate off: a technician-chosen slot is still recorded (the drawer's
+        // picker is ungated), so close-up/trouble photos stay out of the
+        // report's pairing and fallback. Unlabeled photos keep the legacy
+        // upload-order type.
+        const zone = visitInput.normalizePhotoZone(photos[i]?.zone);
+        if (zone) return { photo_type: visitInput.photoTypeForZone(zone), zone };
+        return { photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') };
+      };
     const photoRecords = [];
     // The stored row per prompt position, with an explicit gap where an
     // insert failed: the run's findings cite 1-based prompt positions, so its

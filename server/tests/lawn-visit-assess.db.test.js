@@ -167,6 +167,15 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     expect(await runs.priorAssessmentCount(customerId, mockKnex)).toBe(2);
   });
 
+  test('gate off still records a technician-chosen slot; unlabeled photos keep the upload-order type', async () => {
+    const customerId = await customer();
+    process.env.GATE_LAWN_VISIT_ASSESSMENT = 'false';
+    const { body } = await request({ customerId, photos });
+    const photoRows = await mockKnex('lawn_assessment_photos').where({ assessment_id: body.assessment.id }).orderBy('photo_order');
+    expect(photoRows.map((row) => row.zone)).toEqual(['front', 'close_up', null]);
+    expect(photoRows.map((row) => row.photo_type)).toEqual(['front_yard', 'close_up', 'trouble_spot']);
+  });
+
   test('the optional run table read leaves a caller transaction usable during migration lag', async () => {
     const legacy = await createLawnVisitDb(false);
     try {
