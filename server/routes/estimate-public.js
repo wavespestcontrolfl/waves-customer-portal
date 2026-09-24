@@ -18610,6 +18610,10 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   // a real estimate (codex #4667 r25 P0). The UPDATE carries the matching
   // predicate (ADDRESS_UNVERIFIED_ABSENT_SQL) for the TOCTOU window and
   // the zero-row re-read lands here too.
+  // Deliberately NOT estimateOffCustomerSurface(): that shared predicate
+  // also covers the clarify re-price hold, which the decline guard must
+  // keep answering with the documented 409 below (codex r4 P1 on #3804),
+  // never a 404. Only the address block joins the 404 set here.
   if (estimate.estimate_data !== undefined && parseEstimateDataSafe(estimate)?.addressUnverified === true) {
     return { ok: false, status: 404, error: 'Estimate not found' };
   }
