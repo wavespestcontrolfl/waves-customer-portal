@@ -16152,47 +16152,60 @@ const CallRecordingProcessor = {
     // could file a bogus follow-up, codex r5 P1).
     const csrTranscript = recordedPartOfComposite(transcription) || transcription;
     if (csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {
-      try {
-        const callMeta = typeof call.metadata === 'string'
-          ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
-          : (call.metadata || {});
-        const answeredByCsr = callMeta?.forward_acceptance?.csr_name || 'Unknown';
-        const CSRCoach = require('./csr/csr-coach');
-        const scoreResult = await CSRCoach.scoreCall({
-          // Checked inside, immediately before the score row is written: the
-          // provider await between here and there is minutes long.
-          stillOwnsClaim,
-          csrName: answeredByCsr,
-          customerId: customerId || null,
-          callDirection: 'inbound',
-          callSource: call.to_phone || 'unknown',
-          // A transferred call's composite carries Sandy's leg ahead of the
-          // staff leg: the CSR is scored on the HUMAN leg only (Sandy's
-          // greeting / empathy / closing must not be awarded to the employee,
-          // codex r4 P1). The composite stays the call record.
-          transcript: csrTranscript,
-          metadata: {
-            callSid,
-            duration: call.duration_seconds,
-            service: extracted.matched_service || extracted.requested_service,
-            sentiment: extracted.sentiment,
-          },
-        });
-        // The scorer's own post-await check found the claim gone. That is
-        // not "no score" — it is this pass being superseded, and the
-        // route-decision insert and ai_validation write below are unfenced,
-        // so a stale pass that carried on could win the unique insert or
-        // overwrite the replacement's verdict (codex #3677 P1). Abandon.
-        if (scoreResult?.skipped && scoreResult.reason === 'ownership_lost') {
-          return abandonToPeer('finalization after CSR scoring');
+      const CSRCoach = require('./csr/csr-coach');
+      // Applicability gate (2026-09-23 audit): the 15-point rubric is a
+      // SALES rubric — it only describes an inbound new_lead call. Scoring
+      // billing/service/vendor/etc. calls against it produced unusable
+      // near-zero scores. csrScoringApplies is the pure, testable rule;
+      // v2 missing/invalid falls back to scoring (see csr-coach.js).
+      const csrV2Extraction = v2Result?.extraction || null;
+      const csrV2Valid = v2Result?.status === 'valid' && !!csrV2Extraction && isV2Extraction(csrV2Extraction);
+      const csrCallNature = csrV2Valid ? (csrV2Extraction?.call_nature || null) : null;
+      const csrDirection = isOutboundCall(call) ? 'outbound' : 'inbound';
+      if (!CSRCoach.csrScoringApplies({ direction: csrDirection, callNature: csrCallNature, v2Valid: csrV2Valid })) {
+        logger.info(`[call-proc] CSR scoring skipped for ${maskSid(callSid)}: direction=${csrDirection}, call_nature=${csrCallNature || 'unknown'} — not a sales call, no csr_call_scores row written`);
+      } else {
+        try {
+          const callMeta = typeof call.metadata === 'string'
+            ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
+            : (call.metadata || {});
+          const answeredByCsr = callMeta?.forward_acceptance?.csr_name || 'Unknown';
+          const scoreResult = await CSRCoach.scoreCall({
+            // Checked inside, immediately before the score row is written: the
+            // provider await between here and there is minutes long.
+            stillOwnsClaim,
+            csrName: answeredByCsr,
+            customerId: customerId || null,
+            callDirection: 'inbound',
+            callSource: call.to_phone || 'unknown',
+            // A transferred call's composite carries Sandy's leg ahead of the
+            // staff leg: the CSR is scored on the HUMAN leg only (Sandy's
+            // greeting / empathy / closing must not be awarded to the employee,
+            // codex r4 P1). The composite stays the call record.
+            transcript: csrTranscript,
+            metadata: {
+              callSid,
+              duration: call.duration_seconds,
+              service: extracted.matched_service || extracted.requested_service,
+              sentiment: extracted.sentiment,
+            },
+          });
+          // The scorer's own post-await check found the claim gone. That is
+          // not "no score" — it is this pass being superseded, and the
+          // route-decision insert and ai_validation write below are unfenced,
+          // so a stale pass that carried on could win the unique insert or
+          // overwrite the replacement's verdict (codex #3677 P1). Abandon.
+          if (scoreResult?.skipped && scoreResult.reason === 'ownership_lost') {
+            return abandonToPeer('finalization after CSR scoring');
+          }
+          // CSRCoach.scoreCall returns the score object itself (total_score,
+          // call_outcome, ...), not a wrapper — the old `.score.` read logged
+          // "undefined/15 (undefined)" on every call (2026-09-20 audit).
+          csrScoreResult = { score: scoreResult?.total_score, outcome: scoreResult?.call_outcome };
+          logger.info(`[call-proc] CSR scored: ${csrScoreResult.score}/15 (${csrScoreResult.outcome})`);
+        } catch (err) {
+          logger.error(`[call-proc] CSR scoring failed (non-blocking): ${err.message}`);
         }
-        // CSRCoach.scoreCall returns the score object itself (total_score,
-        // call_outcome, ...), not a wrapper — the old `.score.` read logged
-        // "undefined/15 (undefined)" on every call (2026-09-20 audit).
-        csrScoreResult = { score: scoreResult?.total_score, outcome: scoreResult?.call_outcome };
-        logger.info(`[call-proc] CSR scored: ${csrScoreResult.score}/15 (${csrScoreResult.outcome})`);
-      } catch (err) {
-        logger.error(`[call-proc] CSR scoring failed (non-blocking): ${err.message}`);
       }
     }
 

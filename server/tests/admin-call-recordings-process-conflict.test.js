@@ -102,6 +102,63 @@ describe('the CSR scorer refuses to persist after ownership moves', () => {
   });
 });
 
+// The 15-point rubric is a SALES rubric — it only describes an inbound
+// new_lead call. Applying it to every transcribed call scored billing
+// questions, service calls, and vendor calls as botched sales pitches
+// (2026-09-23 audit). csrScoringApplies (pure, unit-tested on its own in
+// csr-coach-scoring-applicability.test.js) is the gate; these pin that the
+// PROCESSOR actually consults it before ever reaching CSRCoach.scoreCall —
+// and, functionally, that a billing_question call never inserts a
+// csr_call_scores row while a new_lead call still does.
+describe('the CSR sales-rubric applicability gate', () => {
+  const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the gate is checked before CSRCoach.scoreCall is ever called', () => {
+    const gateAt = source.indexOf('CSRCoach.csrScoringApplies({');
+    const callAt = source.indexOf('await CSRCoach.scoreCall({');
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(callAt).toBeGreaterThan(gateAt);
+  });
+
+  test('a skip logs and writes no csr_call_scores row', () => {
+    const gateAt = source.indexOf('if (!CSRCoach.csrScoringApplies({');
+    const elseAt = source.indexOf('} else {', gateAt);
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(elseAt).toBeGreaterThan(gateAt);
+    const skipBranch = source.slice(gateAt, elseAt);
+    expect(skipBranch).toMatch(/logger\.info\(`\[call-proc\] CSR scoring skipped/);
+    expect(skipBranch).not.toContain("db('csr_call_scores')");
+    expect(skipBranch).not.toContain('CSRCoach.scoreCall(');
+  });
+
+  test('the gate reads direction from isOutboundCall and call_nature from a valid v2 extraction', () => {
+    const gateAt = source.indexOf('const csrV2Extraction = v2Result?.extraction || null;');
+    const callAt = source.indexOf('CSRCoach.csrScoringApplies({', gateAt);
+    expect(gateAt).toBeGreaterThan(-1);
+    const setup = source.slice(gateAt, callAt);
+    expect(setup).toContain("v2Result?.status === 'valid'");
+    expect(setup).toContain('isV2Extraction(csrV2Extraction)');
+    expect(setup).toContain('isOutboundCall(call)');
+  });
+});
+
+// Functional coverage of the same rule: with the applicability gate wired
+// in, calling the real (unmocked, pure) csrScoringApplies with the exact
+// shapes the processor derives proves a billing_question call is refused
+// and a new_lead call is not — i.e. the former writes no row and the
+// latter still does (scoreCall's insert itself is covered above).
+describe('csrScoringApplies applied to the processor-derived shapes', () => {
+  const { csrScoringApplies } = require('../services/csr/csr-coach');
+
+  test('a billing_question call (v2 valid, inbound) is refused — no row written', () => {
+    expect(csrScoringApplies({ direction: 'inbound', callNature: 'billing_question', v2Valid: true })).toBe(false);
+  });
+
+  test('a new_lead call (v2 valid, inbound) still qualifies — scoreCall still runs', () => {
+    expect(csrScoringApplies({ direction: 'inbound', callNature: 'new_lead', v2Valid: true })).toBe(true);
+  });
+});
+
 describe('operator intent is distinct from force', () => {
   test('operator shortens the quiet window WITHOUT taking the force branch', () => {
     // The force branch omits the extraction_failed cap and backoff, so an

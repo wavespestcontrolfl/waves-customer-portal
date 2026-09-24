@@ -15,6 +15,40 @@ const CSR_SCORE_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 
   : 180000;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 
+// The 15-point rubric below is a SALES call rubric (greeting → close →
+// upsell). Applying it to every transcribed call (2026-09-23 audit: 61 rows,
+// avg 2.7/15, fifteen zeros) scored billing questions, tech ETA/coordination
+// calls, existing-customer service calls and vendor calls as botched sales
+// pitches — the model's own coaching text on those rows says "this is not a
+// sales call". Score only the calls the rubric actually describes: an
+// INBOUND call whose v2 extraction is valid and classifies it `new_lead`.
+// (The v2 `call_nature` enum has no separate "returning prospect asking for
+// pricing" value — those calls extract as `new_lead` too, so this single
+// check covers both.) When v2 is missing/invalid, fall back to the legacy
+// behavior (score) so a call is never silently dropped just because
+// extraction failed — the false-zero problem this gate fixes is about
+// MISCLASSIFYING a known non-sales call, not about an unknown one.
+const SALES_RUBRIC_CALL_NATURE = 'new_lead';
+
+/**
+ * Pure decision: does the 15-point sales rubric apply to this call?
+ * Exported so the rule is unit-testable independent of the DB/LLM.
+ *
+ * @param {object} opts
+ * @param {string} [opts.direction] - 'inbound' | 'outbound' (any other/missing value is treated as inbound)
+ * @param {string|null} [opts.callNature] - v2 extraction's `call_nature`, only meaningful when v2Valid
+ * @param {boolean} [opts.v2Valid] - whether a valid v2 extraction was available for this call
+ * @returns {boolean}
+ */
+function csrScoringApplies({ direction, callNature, v2Valid } = {}) {
+  const isOutbound = String(direction || '').toLowerCase().startsWith('outbound');
+  if (isOutbound) return false;
+  // v2 missing/invalid: fall back to legacy behavior rather than silently
+  // losing the call from coaching entirely.
+  if (!v2Valid) return true;
+  return callNature === SALES_RUBRIC_CALL_NATURE;
+}
+
 class CSRCoach {
 
   /**
@@ -451,3 +485,5 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
 }
 
 module.exports = new CSRCoach();
+module.exports.csrScoringApplies = csrScoringApplies;
+module.exports.SALES_RUBRIC_CALL_NATURE = SALES_RUBRIC_CALL_NATURE;
