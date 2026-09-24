@@ -22,10 +22,10 @@ const CUSTOMER_ESTIMATE_TOOLS = [
   {
     name: 'save_customer_estimate',
     _sideEffects: true,
-    description: 'Prepare a lawn estimate for an existing customer using its saved property measurements and live membership/pricing rules. Currently supports residential lawn at 6, 9 or 12 applications per year. New drafts default to the portal’s 9-application program. Revisions preserve the saved cadence unless a change is requested. Requires the saved property ID; never create a duplicate lead. The first call previews the price, source facts and options for confirmation. With estimate_id, revises that property’s existing estimate in place under the usual editability rules. Saving never sends, schedules a send or books work.',
+    description: 'Prepare a lawn estimate for an existing customer using its saved property measurements and live membership/pricing rules. Currently supports residential lawn at 9 or 12 applications per year (6/bi-monthly is retired for new sales — owner directive 2026-09-24). New drafts default to the portal’s 9-application program. Revisions preserve the saved cadence unless a change is requested; a saved 6x estimate cannot be revised here and needs the full estimate editor to requote. Requires the saved property ID; never create a duplicate lead. The first call previews the price, source facts and options for confirmation. With estimate_id, revises that property’s existing estimate in place under the usual editability rules. Saving never sends, schedules a send or books work.',
     input_schema: { type: 'object', additionalProperties: false,
       properties: { customer_id: uuid, property_id: uuid, estimate_id: uuid,
-        lawn_applications: { type: 'integer', enum: [6, 9, 12] } },
+        lawn_applications: { type: 'integer', enum: [9, 12] } },
       required: ['customer_id', 'property_id'] },
   },
 ];
@@ -106,7 +106,10 @@ function estimateBody(input, context) {
   const duplicates = duplicateCurrentServices({ lawn: true }, activeRecurringServices(context.current_services), property.address);
   if (duplicates.length) throw failure(`This property already has active ${duplicates.join(', ')} service. Quote only requested additions.`, 'duplicate_service');
   const applications = input.lawn_applications ?? 9;
-  if (![6, 9, 12].includes(applications)) throw failure('Choose 6, 9 or 12 lawn applications per year.', 'invalid_input', 400);
+  // 6x/bi-monthly is retired for new sales (owner directive 2026-09-24) — a
+  // NEW draft may only be created at 9 or 12 applications/yr. A saved 6x
+  // estimate is handled separately below (revise path), never here.
+  if (![9, 12].includes(applications)) throw failure('Choose 9 or 12 lawn applications per year.', 'invalid_input', 400);
   const engineInputs = { measuredTurfSf: Number(property.treatable_lawn_sqft), turfSource: 'measured',
     ...(property.lot_sqft ? { lotSqFt: Number(property.lot_sqft) } : {}),
     propertyType: property.property_type || 'single_family',
@@ -156,7 +159,21 @@ async function estimatePreview(input, database = db, context = null) {
     body.estimateData.inputs = { ...savedData.inputs, ...body.estimateData.inputs };
     const freshInputs = body.estimateData.engineInputs;
     const applications = input.lawn_applications ?? Number(savedInputs.services.lawn.lawnFreq);
-    if (![6, 9, 12].includes(applications)) throw failure('The saved lawn cadence needs review in the estimate editor.', 'capability_unimplemented');
+    // 6x/bi-monthly is retired for new sales (owner directive 2026-09-24).
+    // A saved estimate still carrying that cadence (preserved because the
+    // caller asked for a revision without changing lawn_applications) must
+    // NOT be silently recomputed through the engine here: LAWN_TIERS.standard
+    // is hidden now, so a plain recompute would fall back to enhanced's
+    // (9x, discounted) price for what the customer was quoted at 6x — the
+    // exact silent-reprice the retired-cadence requote gate exists to
+    // prevent on the public accept path. Refuse instead; the full estimate
+    // editor carries the explicit 409/requote UI for this.
+    if (![9, 12].includes(applications)) {
+      throw failure(
+        'This estimate’s lawn plan uses a schedule Waves no longer sells — choose 9 or 12 applications per year, or requote it in the full estimate editor.',
+        'retired_lawn_cadence_selection',
+      );
+    }
     freshInputs.services.lawn.lawnFreq = applications;
     body.estimateData.inputs.lawnFreq = String(applications);
     body.estimateData.engineInputs = { ...savedInputs, ...freshInputs,

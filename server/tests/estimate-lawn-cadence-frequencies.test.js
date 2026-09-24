@@ -28,12 +28,13 @@ function lawnEstData({ recommendedVisits = 9 } = {}) {
 }
 
 describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () => {
-  test('maps the sold tiers to Bi-monthly / Every 6 weeks / Monthly and drops the retired Quarterly cadence', () => {
-    // basic/Quarterly is retired for new sales (owner directive 2026-07-09) —
-    // stored rows still carry it, but it must never be re-offered.
+  test('maps the sold tiers to Every 6 weeks / Monthly and drops the retired Quarterly + Bi-monthly cadences', () => {
+    // basic/Quarterly is retired for new sales (owner directive 2026-07-09)
+    // and standard/Bi-monthly is retired for new sales (owner directive
+    // 2026-09-24) — stored rows still carry either, but neither is ever
+    // re-offered.
     const freqs = lawnFrequenciesFromResultStats(lawnEstData());
     expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear])).toEqual([
-      ['standard', 'Bi-monthly (6 visits)', 6],
       ['enhanced', 'Every 6 weeks (9 visits)', 9],
       ['premium', 'Monthly (12 visits)', 12],
     ]);
@@ -93,9 +94,10 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(lawnFrequenciesFromResultStats({})).toEqual([]);
   });
 
-  test('a leading Basic (4-visit) row neither aliases onto Standard nor survives the retirement filter', () => {
-    // Basic listed BEFORE Standard — must NOT alias onto standard and drop the
-    // real 6-visit Standard row; and being retired, it must not render at all.
+  test('leading Basic (4-visit) and Standard (6-visit) rows neither alias onto Enhanced nor survive the retirement filter', () => {
+    // Basic AND Standard listed BEFORE Enhanced — must NOT alias onto
+    // enhanced and drop the real 9-visit Enhanced row; and being retired
+    // (basic 2026-08-04, standard 2026-09-24), neither must render at all.
     const freqs = lawnFrequenciesFromResultStats({
       results: {
         lawn: [
@@ -106,40 +108,42 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
         ],
       },
     });
-    expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
-    const std = freqs.find((f) => f.key === 'standard');
-    expect(std.label).toBe('Bi-monthly (6 visits)');
-    expect(std.visitsPerYear).toBe(6);
-    expect(std.monthly).toBe(55.5); // the real 6-visit price, not Basic's $35
+    expect(freqs.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.label).toBe('Every 6 weeks (9 visits)');
+    expect(enhanced.visitsPerYear).toBe(9);
+    expect(enhanced.monthly).toBe(66.75); // the real 9-visit price, not Basic's $35 or Standard's $55.50
   });
 
   test('each cadence lists the program + treatments as included', () => {
-    const std = lawnFrequenciesFromResultStats(lawnEstData()).find((f) => f.key === 'standard');
-    expect(std.included.map((i) => i.key)).toEqual(['lawn_care_standard', 'lawn_care_treatments']);
-    expect(std.included[0].detail).toBe('6 visits per year');
+    const enhanced = lawnFrequenciesFromResultStats(lawnEstData()).find((f) => f.key === 'enhanced');
+    expect(enhanced.included.map((i) => i.key)).toEqual(['lawn_care_enhanced', 'lawn_care_treatments']);
+    expect(enhanced.included[0].detail).toBe('9 visits per year');
   });
 
   test('below-floor stored rows flow through UNCLAMPED at the disarmed config (owner ruling 2026-07-17)', () => {
     // "Forget all pricing floors": programMinimumMonthly is 0 (the designed
-    // disarm value), so pre-floor stored prices (e.g. the $38/mo bi-monthly
-    // bottom cell) render — and bill — exactly as stored.
+    // disarm value), so pre-floor stored prices (e.g. a low bottom cell)
+    // render — and bill — exactly as stored. Standard/6x is retired
+    // (2026-09-24) and filtered from the ladder regardless of price, so the
+    // low-price example moved to Enhanced/9x — the clamp mechanism being
+    // tested here doesn't care which sold tier carries the number.
     const freqs = lawnFrequenciesFromResultStats({
       results: {
         lawn: [
-          { name: 'Standard', v: 6, mo: 38, ann: 456, pa: 76 },
-          { name: 'Enhanced', v: 9, mo: 52, ann: 624, pa: 69.33, recommended: true },
-          { name: 'Premium', v: 12, mo: 60, ann: 720, pa: 60 },
+          { name: 'Enhanced', v: 9, mo: 38, ann: 456, pa: 50.67, recommended: true },
+          { name: 'Premium', v: 12, mo: 52, ann: 624, pa: 52 },
         ],
       },
     });
-    const std = freqs.find((f) => f.key === 'standard');
-    expect(std.monthly).toBe(38);
-    expect(std.annual).toBe(456);
-    expect(std.perTreatment).toBe(76);
-    expect(std.monthlyBase).toBe(38);
     const enhanced = freqs.find((f) => f.key === 'enhanced');
-    expect(enhanced.monthly).toBe(52);
-    expect(enhanced.annual).toBe(624);
+    expect(enhanced.monthly).toBe(38);
+    expect(enhanced.annual).toBe(456);
+    expect(enhanced.perTreatment).toBe(50.67);
+    expect(enhanced.monthlyBase).toBe(38);
+    const premium = freqs.find((f) => f.key === 'premium');
+    expect(premium.monthly).toBe(52);
+    expect(premium.annual).toBe(624);
   });
 
   test('a manual discount applies IN FULL — no floor shrinks the surfaced savings (owner ruling 2026-07-17)', () => {
@@ -178,9 +182,14 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Quarterly Lawn Care Service', service: 'lawn_care', mo: 45, frequency: 'quarterly' },
     ))).toBe(true);
-    // Sold cadences pass.
+    // Standard/6x (bi-monthly) is retired for new sales too (owner directive
+    // 2026-09-24) — an explicit 6-visit row is flagged the same way 4x is.
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Lawn Care', service: 'lawn_care', mo: 45, visitsPerYear: 6 },
+    ))).toBe(true);
+    // Sold cadences pass.
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, visitsPerYear: 9 },
     ))).toBe(false);
     // A lawn row with NO cadence data stays unflagged — never inferred as
     // quarterly by default.
@@ -201,7 +210,7 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     ))).toBe(true);
     // An explicit SOLD cadence field wins over a stale quarterly label.
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
-      { name: 'Quarterly Lawn Care Service', service: 'lawn_care', mo: 50, visitsPerYear: 6 },
+      { name: 'Quarterly Lawn Care Service', service: 'lawn_care', mo: 50, visitsPerYear: 9 },
     ))).toBe(false);
     // NUMERIC cadence fields (legacy quote-wizard rows): the seeder parses
     // numeric frequency values as visits/yr, so frequency: 4 (or '4') is the
@@ -212,8 +221,12 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency: '4' },
     ))).toBe(true);
+    // frequency: 6 (bi-monthly, numeric) is likewise retired 2026-09-24.
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency: 6 },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency: 9 },
     ))).toBe(false);
     // frequencyKey participates in both the numeric and string checks.
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
@@ -236,8 +249,12 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency_key: 'quarterly' },
     ))).toBe(true);
+    // treatmentsPerYear: 6 resolves to bi-monthly, retired 2026-09-24.
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Lawn Care', service: 'lawn_care', mo: 45, treatmentsPerYear: 6 },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, treatmentsPerYear: 9 },
     ))).toBe(false);
     // Converter precedence: a cadence FIELD beats a visit count (that is the
     // order explicitServiceCadence resolves — and therefore how the program
@@ -249,6 +266,41 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Lawn Care', service: 'lawn_care', mo: 45, v: 4 },
     ))).toBe(true);
+  });
+
+  test('accept backstop: every bi-monthly (6x) alias is flagged like quarterly — retired 2026-09-24', () => {
+    // Owner directive 2026-09-24 retired standard/6x for new sales; the
+    // backstop must catch it through the same aliases the 4x/quarterly
+    // retirement is caught by (the converter would otherwise schedule a
+    // 6-visit program the owner no longer sells).
+    const withLawnRow = (svc) => ({
+      result: { recurring: { services: [{ name: 'Pest Control', service: 'pest_control', mo: 50 }, svc] } },
+    });
+    const lawn = (extra) => withLawnRow({ name: 'Lawn Care', service: 'lawn_care', mo: 45, ...extra });
+    // Bare `v` tier-row shorthand (converter-skipped alias).
+    expect(recurringLawnRowAtRetiredCadence(lawn({ v: 6 }))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(lawn({ v: 9 }))).toBe(false);
+    // Cadence token inside the service key, both spellings.
+    expect(recurringLawnRowAtRetiredCadence(lawn({ serviceKey: 'lawn_care_bimonthly' }))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(lawn({ service_key: 'lawn_care_bimonthly' }))).toBe(true);
+    // Sold-cadence service keys stay clean.
+    expect(recurringLawnRowAtRetiredCadence(lawn({ serviceKey: 'lawn_care_6week' }))).toBe(false);
+    // Explicit cadence fields, every spelling the converter normalizes.
+    for (const frequency of ['bimonthly', 'bi_monthly', 'bi-monthly']) {
+      expect(recurringLawnRowAtRetiredCadence(lawn({ frequency }))).toBe(true);
+    }
+    expect(recurringLawnRowAtRetiredCadence(lawn({ recurringPattern: 'bimonthly' }))).toBe(true);
+    // Label-only bi-monthly row is flagged; an explicit sold visit count wins.
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', mo: 45 },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', mo: 45, visitsPerYear: 9 },
+    ))).toBe(false);
+    // Bi-monthly PEST alone never trips the lawn backstop.
+    expect(recurringLawnRowAtRetiredCadence({
+      result: { recurring: { services: [{ name: 'Pest Control', service: 'pest_control', mo: 50, frequency: 'bimonthly', visitsPerYear: 6 }] } },
+    })).toBe(false);
   });
 
   test('quote gate: an explicitly-quarterly lawn row with NO lawn tier rows is quote-required UP FRONT', () => {
@@ -283,14 +335,16 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     }).quoteRequired).toBe(true);
     // A row with an explicit SOLD cadence keeps self-serve — the converter
     // schedules lawn from the row itself, never the accepted selection.
+    // (visitsPerYear: 6/bi-monthly is retired 2026-09-24 — no longer a sold
+    // example; 9 is.)
     expect(resolveEstimateQuoteRequirement(null, {
       result: {
         recurring: {
-          services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55, visitsPerYear: 6 }],
+          services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55, visitsPerYear: 9 }],
         },
       },
     }).quoteRequired).toBe(false);
-    // Engine-invocation estimates rebuild the live 6/9/12 ladder, so a sold
+    // Engine-invocation estimates rebuild the live 9/12 ladder, so a sold
     // restamp is available — no requote even for a sparse row.
     expect(resolveEstimateQuoteRequirement(null, {
       engineInputs: { services: { lawn: { grassType: 'A' } } },
@@ -356,35 +410,39 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     // re-derive a monthly for annual-only rows is inert, so the stored
     // annual flows through and monthly stays null — accept's fallback to
     // the stored monthly_total is now the correct (unclamped) price anyway.
+    // Standard/6x is retired (2026-09-24) — moved to Enhanced/9x, still
+    // filtered like any other sold tier (this fixture just isn't testing
+    // which tiers survive the retirement filter).
     const freqs = lawnFrequenciesFromResultStats({
       results: {
         lawn: [
-          { name: 'Standard', v: 6, ann: 408, recommended: true },
+          { name: 'Enhanced', v: 9, ann: 408, recommended: true },
         ],
       },
     });
-    const std = freqs.find((f) => f.key === 'standard');
-    expect(std.annual).toBe(408);
-    expect(std.monthly).toBeNull();
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.annual).toBe(408);
+    expect(enhanced.monthly).toBeNull();
   });
 
   test('an at-$50 row takes a manual discount IN FULL — nothing is suppressed at the disarmed config (owner ruling 2026-07-17)', () => {
     // Pre-ruling this exact fixture had zero discount room at the floor and
     // set manualDiscountSuppressed. Floors disarmed: the $10/mo discount
-    // lands whole and the discount surfaces uncapped.
+    // lands whole and the discount surfaces uncapped. Standard/6x moved to
+    // Enhanced/9x (retired 2026-09-24) — see note above.
     const freqs = lawnFrequenciesFromResultStats({
       manualDiscount: { type: 'FIXED', value: 120, amount: 120, scope: 'recurring_annual_after_waveguard' },
       results: {
         lawn: [
-          { name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100, recommended: true },
+          { name: 'Enhanced', v: 9, mo: 50, ann: 600, pa: 100, recommended: true },
         ],
       },
     });
-    const std = freqs.find((f) => f.key === 'standard');
-    expect(std.monthly).toBe(40); // 50 − 120/12
-    expect(std.annual).toBe(480);
-    expect(std.manualDiscount).toMatchObject({ capped: false, capReason: null, monthlyAmount: 10 });
-    expect(std.manualDiscountSuppressed).toBeUndefined();
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.monthly).toBe(40); // 50 − 120/12
+    expect(enhanced.annual).toBe(480);
+    expect(enhanced.manualDiscount).toMatchObject({ capped: false, capReason: null, monthlyAmount: 10 });
+    expect(enhanced.manualDiscountSuppressed).toBeUndefined();
   });
 });
 
@@ -403,24 +461,25 @@ describe('program-minimum machinery re-armed at $50 — kept for potential re-ar
   });
 
   test('re-armed: clamps below-floor stored rows to the $50/mo program minimum (annual/per-app re-derived)', () => {
+    // Standard/6x is retired (2026-09-24) — the below-floor example moved
+    // to Enhanced/9x (still filtered by tier, not by price).
     const freqs = lawnFrequenciesFromResultStats({
       results: {
         lawn: [
-          { name: 'Standard', v: 6, mo: 38, ann: 456, pa: 76 },
-          { name: 'Enhanced', v: 9, mo: 52, ann: 624, pa: 69.33, recommended: true },
-          { name: 'Premium', v: 12, mo: 60, ann: 720, pa: 60 },
+          { name: 'Enhanced', v: 9, mo: 38, ann: 456, pa: 50.67, recommended: true },
+          { name: 'Premium', v: 12, mo: 52, ann: 624, pa: 52 },
         ],
       },
     });
-    const std = freqs.find((f) => f.key === 'standard');
-    expect(std.monthly).toBe(50);
-    expect(std.annual).toBe(600);
-    expect(std.perTreatment).toBe(100);
-    expect(std.monthlyBase).toBe(50); // anchor never sits below the net price
-    // Above-floor rows keep their stored numbers exactly.
     const enhanced = freqs.find((f) => f.key === 'enhanced');
-    expect(enhanced.monthly).toBe(52);
-    expect(enhanced.annual).toBe(624);
+    expect(enhanced.monthly).toBe(50);
+    expect(enhanced.annual).toBe(600);
+    expect(enhanced.perTreatment).toBeCloseTo(66.67, 2);
+    expect(enhanced.monthlyBase).toBe(50); // anchor never sits below the net price
+    // Above-floor rows keep their stored numbers exactly.
+    const premium = freqs.find((f) => f.key === 'premium');
+    expect(premium.monthly).toBe(52);
+    expect(premium.annual).toBe(624);
   });
 
   test('re-armed: SSR floor guard detects stored below-floor lawn rows; compliant and non-lawn rows pass', () => {
@@ -444,45 +503,50 @@ describe('program-minimum machinery re-armed at $50 — kept for potential re-ar
   });
 
   test('re-armed: annual-only lawn tier rows clamped by the floor derive a monthly too', () => {
+    // Standard/6x moved to Enhanced/9x (retired 2026-09-24) — see note above.
     const freqs = lawnFrequenciesFromResultStats({
       results: {
         lawn: [
-          { name: 'Standard', v: 6, ann: 408, recommended: true },
+          { name: 'Enhanced', v: 9, ann: 408, recommended: true },
         ],
       },
     });
-    const std = freqs.find((f) => f.key === 'standard');
-    expect(std.annual).toBe(600);
-    expect(std.monthly).toBe(50);
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.annual).toBe(600);
+    expect(enhanced.monthly).toBe(50);
   });
 
   test('re-armed: a manual discount fully blocked by the floor is SUPPRESSED, not just dropped', () => {
+    // Standard/6x moved to Enhanced/9x (retired 2026-09-24) — see note above.
     const freqs = lawnFrequenciesFromResultStats({
       manualDiscount: { type: 'FIXED', value: 120, amount: 120, scope: 'recurring_annual_after_waveguard' },
       results: {
         lawn: [
-          { name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100, recommended: true },
+          { name: 'Enhanced', v: 9, mo: 50, ann: 600, pa: 66.67, recommended: true },
         ],
       },
     });
-    const std = freqs.find((f) => f.key === 'standard');
-    expect(std.monthly).toBe(50);
-    expect(std.annual).toBe(600);
-    expect(std.manualDiscount).toBeNull();
-    expect(std.manualDiscountSuppressed).toBe(true);
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.monthly).toBe(50);
+    expect(enhanced.annual).toBe(600);
+    expect(enhanced.manualDiscount).toBeNull();
+    expect(enhanced.manualDiscountSuppressed).toBe(true);
   });
 
   test('re-armed: a floor-capped selected tier keeps the requested WaveGuard discount on above-floor tiers', () => {
-    // Standard (660 gross) at the floor: Silver 10% caps back to 600, so
+    // Enhanced (660 gross) at the floor: Silver 10% caps back to 600, so
     // annualAfter/annualBefore reads ~0.91 and would strip the discount from
-    // the other tiers. The ladder must use the engine's requested rate —
-    // Enhanced/Premium keep their 10% off; Standard re-clamps at the floor.
+    // the other tier. The ladder must use the engine's requested rate —
+    // Premium keeps its 10% off; Enhanced re-clamps at the floor. (Standard
+    // is retired 2026-09-24 and dropped from the ladder — moved the
+    // floor-capped-selected-tier role from Standard to Enhanced, same
+    // mechanism, one fewer live tier to check.)
     const line = {
-      service: 'lawn_care', tier: 'standard', monthly: 62.25, annual: 747,
+      service: 'lawn_care', tier: 'enhanced', monthly: 55, annual: 660,
       tiers: [
         { tier: 'basic', label: '4x applications/yr', monthly: 35, annual: 420, perApp: 105, visits: 4, freq: 4, recommended: false },
-        { tier: 'standard', label: '6x applications/yr', monthly: 55, annual: 660, perApp: 110, visits: 6, freq: 6, recommended: false },
-        { tier: 'enhanced', label: '9x applications/yr', monthly: 62.25, annual: 747, perApp: 83, visits: 9, freq: 9, recommended: true },
+        { tier: 'standard', label: '6x applications/yr', monthly: 46.75, annual: 561, perApp: 93.5, visits: 6, freq: 6, recommended: false },
+        { tier: 'enhanced', label: '9x applications/yr', monthly: 55, annual: 660, perApp: 73.33, visits: 9, freq: 9, recommended: true },
         { tier: 'premium', label: '12x applications/yr', monthly: 84, annual: 1008, perApp: 84, visits: 12, freq: 12, recommended: false },
       ],
       annualBeforeDiscount: 660,
@@ -491,13 +555,12 @@ describe('program-minimum machinery re-armed at $50 — kept for potential re-ar
       requestedDiscountPct: 0.10,
     };
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [line] });
-    const std = freqs.find((f) => f.key === 'standard');
-    expect(std.monthly).toBe(50); // 660 * 0.9 = 594 → floor holds at $50/$600
+    expect(freqs.map((f) => f.key)).toEqual(['enhanced', 'premium']); // standard/6x dropped
     const enhanced = freqs.find((f) => f.key === 'enhanced');
-    expect(enhanced.annual).toBe(672.3); // 747 * 0.9 — discount preserved
-    expect(enhanced.monthly).toBe(56.03);
+    expect(enhanced.monthly).toBe(50); // 660 * 0.9 = 594 → floor holds at $50/$600
     const premium = freqs.find((f) => f.key === 'premium');
-    expect(premium.annual).toBe(907.2); // 1008 * 0.9
+    expect(premium.annual).toBe(907.2); // 1008 * 0.9 — discount preserved
+    expect(premium.monthly).toBe(75.6);
   });
 });
 
@@ -521,29 +584,33 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     };
   }
 
-  test('expands the lawn line item tiers into the sold cadences, in order (Quarterly retired)', () => {
+  test('expands the lawn line item tiers into the sold cadences, in order (Quarterly + Bi-monthly retired)', () => {
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [lawnLineItem()] });
     expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear, f.monthly])).toEqual([
-      ['standard', 'Bi-monthly (6 visits)', 6, 55],
       ['enhanced', 'Every 6 weeks (9 visits)', 9, 62.25],
       ['premium', 'Monthly (12 visits)', 12, 84],
     ]);
     expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(true);
   });
 
+  // Standard/6x is retired (2026-09-24) and dropped from the ladder — the
+  // low-price/floor-triggering row that used to be Standard (660/55,
+  // floor 640) moved onto Enhanced, which is now the sole floor-exercised
+  // tier here; the original separate Enhanced row (747/62.25, floor 690) is
+  // gone (its identity is what "Enhanced" now means in this fixture).
+  // Premium (1008/84, floor 700, unclamped headroom) is unchanged.
   function marginFlooredLine() {
     return {
       service: 'lawn_care',
       tier: 'enhanced',
-      monthly: 57.5,
-      annual: 747,
-      annualBeforeDiscount: 747,
-      annualAfterDiscount: 690,
+      monthly: 55,
+      annual: 660,
+      annualBeforeDiscount: 660,
+      annualAfterDiscount: 594,
       marginFloorGuardApplied: true,
       requestedDiscountPct: 0.10,
       tiers: [
-        { tier: 'standard', label: '6x applications/yr', monthly: 55, annual: 660, perApp: 110, visits: 6, freq: 6, minimumCollectedAnnualPrice: 640 },
-        { tier: 'enhanced', label: '9x applications/yr', monthly: 62.25, annual: 747, perApp: 83, visits: 9, freq: 9, recommended: true, minimumCollectedAnnualPrice: 690 },
+        { tier: 'enhanced', label: '9x applications/yr', monthly: 55, annual: 660, perApp: 73.33, visits: 9, freq: 9, recommended: true, minimumCollectedAnnualPrice: 640 },
         { tier: 'premium', label: '12x applications/yr', monthly: 84, annual: 1008, perApp: 84, visits: 12, freq: 12, minimumCollectedAnnualPrice: 700 },
       ],
     };
@@ -552,14 +619,14 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
   test('margin floors on tier rows do NOT re-clamp the ladder while disarmed (owner 2026-07-17)', () => {
     // minimumCollectedAnnualPrice rides every tier row for margin REPORTING;
     // with the cost floor disarmed (useLawnCostFloor false) its presence must
-    // never move a ladder price — the 640 "floor" on standard reports only
+    // never move a ladder price — the 640 "floor" on enhanced reports only
     // and the requested 10% survives on every cadence.
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] });
     const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
-    expect(byKey.standard.monthly).toBeCloseTo(49.5, 2);
+    expect(byKey.enhanced.monthly).toBeCloseTo(49.5, 2);
     expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
-    expect(byKey.standard.flooredAtMinimum).toBe(false);
-    expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(byKey.enhanced.flooredAtMinimum).toBe(false);
+    expect(freqs.map((f) => f.key)).toEqual(['enhanced', 'premium']);
   });
 
   test('a per-estimate cost-floor re-arm (stored engine inputs) clamps the ladder while the global switch is off', () => {
@@ -576,9 +643,9 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     };
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, estData);
     const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
-    // Standard clamps at its own 640 floor (CEIL to cents) exactly as under
+    // Enhanced clamps at its own 640 floor (CEIL to cents) exactly as under
     // a global re-arm; premium keeps its headroom.
-    expect(byKey.standard.monthly).toBeCloseTo(53.34, 2);
+    expect(byKey.enhanced.monthly).toBeCloseTo(53.34, 2);
     expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
   });
 
@@ -595,7 +662,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     };
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, estData);
     const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
-    expect(byKey.standard.monthly).toBeCloseTo(53.34, 2);
+    expect(byKey.enhanced.monthly).toBeCloseTo(53.34, 2);
     expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
 
     // An explicit false on the payload is a deliberate disarm — no clamp.
@@ -607,7 +674,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
       },
     });
     const disarmedByKey = Object.fromEntries(disarmed.map((f) => [f.key, f]));
-    expect(disarmedByKey.standard.monthly).toBeCloseTo(49.5, 2);
+    expect(disarmedByKey.enhanced.monthly).toBeCloseTo(49.5, 2);
   });
 
   test('an explicit per-estimate disarm beats a global re-arm (save == accept both directions)', () => {
@@ -626,7 +693,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
         },
       });
       const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
-      expect(byKey.standard.monthly).toBeCloseTo(49.5, 2);
+      expect(byKey.enhanced.monthly).toBeCloseTo(49.5, 2);
     } finally {
       LAWN_PRICING_V2.useLawnCostFloor = priorUseFloor;
     }
@@ -638,7 +705,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     const armedStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
       result: { pricingMetadata: { lawnCostFloorArmed: true } },
     });
-    expect(Object.fromEntries(armedStamp.map((f) => [f.key, f])).standard.monthly)
+    expect(Object.fromEntries(armedStamp.map((f) => [f.key, f])).enhanced.monthly)
       .toBeCloseTo(53.34, 2);
 
     // …and a stamped-disarmed save survives a later global re-arm.
@@ -648,7 +715,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
       const disarmedStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
         result: { pricingMetadata: { lawnCostFloorArmed: false } },
       });
-      expect(Object.fromEntries(disarmedStamp.map((f) => [f.key, f])).standard.monthly)
+      expect(Object.fromEntries(disarmedStamp.map((f) => [f.key, f])).enhanced.monthly)
         .toBeCloseTo(49.5, 2);
     } finally {
       LAWN_PRICING_V2.useLawnCostFloor = priorUseFloor;
@@ -662,7 +729,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     const stamped = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
       result: { pricingMetadata: { lawnProgramMinimumMonthly: 50 } },
     });
-    expect(Object.fromEntries(stamped.map((f) => [f.key, f])).standard.monthly)
+    expect(Object.fromEntries(stamped.map((f) => [f.key, f])).enhanced.monthly)
       .toBeCloseTo(50, 2);
 
     // …and a quote stamped disarmed (0) is never clamped UP by a later
@@ -673,7 +740,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
       const disarmedStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
         result: { pricingMetadata: { lawnProgramMinimumMonthly: 0 } },
       });
-      expect(Object.fromEntries(disarmedStamp.map((f) => [f.key, f])).standard.monthly)
+      expect(Object.fromEntries(disarmedStamp.map((f) => [f.key, f])).enhanced.monthly)
         .toBeCloseTo(49.5, 2);
     } finally {
       LAWN_PRICING_V2.programMinimumMonthly = prior;
@@ -689,7 +756,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     const provStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
       result: { results: { lawn: [{ v: 6, mo: 50, ann: 600, prov: { programMinimumMonthly: 50 } }] } },
     });
-    expect(Object.fromEntries(provStamp.map((f) => [f.key, f])).standard.monthly)
+    expect(Object.fromEntries(provStamp.map((f) => [f.key, f])).enhanced.monthly)
       .toBeCloseTo(50, 2);
 
     // Client-fallback legacy row: applied flag only — its clamped monthly IS
@@ -697,7 +764,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     const appliedFlag = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
       result: { results: { lawn: [{ v: 6, mo: 50, ann: 600, programMinimumApplied: true, pricingSource: 'PROGRAM_MINIMUM' }] } },
     });
-    expect(Object.fromEntries(appliedFlag.map((f) => [f.key, f])).standard.monthly)
+    expect(Object.fromEntries(appliedFlag.map((f) => [f.key, f])).enhanced.monthly)
       .toBeCloseTo(50, 2);
 
     // Cadence rounding must not inflate the inference: the historical $50
@@ -714,7 +781,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
         },
       },
     });
-    expect(Object.fromEntries(roundedRows.map((f) => [f.key, f])).standard.monthly)
+    expect(Object.fromEntries(roundedRows.map((f) => [f.key, f])).enhanced.monthly)
       .toBeCloseTo(50, 2);
 
     // A post-disarm stamp (0) BEATS row evidence — deliberate disarm wins.
@@ -724,7 +791,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
         results: { lawn: [{ v: 6, mo: 50, ann: 600, prov: { programMinimumMonthly: 50 } }] },
       },
     });
-    expect(Object.fromEntries(disarmedStamp.map((f) => [f.key, f])).standard.monthly)
+    expect(Object.fromEntries(disarmedStamp.map((f) => [f.key, f])).enhanced.monthly)
       .toBeCloseTo(49.5, 2);
   });
 
@@ -742,7 +809,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
         }],
       },
     });
-    expect(Object.fromEntries(freqs.map((f) => [f.key, f])).standard.monthly).toBeCloseTo(53.34, 2);
+    expect(Object.fromEntries(freqs.map((f) => [f.key, f])).enhanced.monthly).toBeCloseTo(53.34, 2);
   });
 
   test('a legacy pre-disarm estimate keeps its floor re-clamp via stored enforcement stamps', () => {
@@ -757,7 +824,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     ));
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [line] }, {});
     const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
-    expect(byKey.standard.monthly).toBeCloseTo(53.34, 2);
+    expect(byKey.enhanced.monthly).toBeCloseTo(53.34, 2);
     expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
 
     // Reporting fields alone (minimumCollectedAnnualPrice on every row of
@@ -771,17 +838,17 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     try {
       const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] });
       const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
-      // Standard: 10% off 660 = 594 breaches its own 640 margin floor -> clamped
+      // Enhanced: 10% off 660 = 594 breaches its own 640 margin floor -> clamped
       // there (monthly CEILs to cents so the reconstructed annual never lands
       // below the floor).
-      expect(byKey.standard.monthly).toBeCloseTo(53.34, 2);
+      expect(byKey.enhanced.monthly).toBeCloseTo(53.34, 2);
       // Premium has headroom: the full requested 10% survives instead of the
       // selected line's capped after/before ratio.
       expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
       // A margin-floored cadence is a real, distinctly-priced choice - it is
       // NOT flagged as a program-minimum decoy for hiding.
-      expect(byKey.standard.flooredAtMinimum).toBe(false);
-      expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+      expect(byKey.enhanced.flooredAtMinimum).toBe(false);
+      expect(freqs.map((f) => f.key)).toEqual(['enhanced', 'premium']);
     } finally {
       LAWN_PRICING_V2.useLawnCostFloor = priorUseFloor;
     }
@@ -813,7 +880,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
       ],
     };
     expect(lawnFrequenciesFromEngineResult(withOneTime).map((f) => f.key))
-      .toEqual(['standard', 'enhanced', 'premium']);
+      .toEqual(['enhanced', 'premium']);
   });
 
   test('carries the WaveGuard membership discount into every tier price — no program-minimum clamp (owner ruling 2026-07-17)', () => {
@@ -828,11 +895,13 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     const enhanced = freqs.find((f) => f.key === 'enhanced');
     expect(enhanced.annual).toBe(634.95); // 747 * 0.85
     expect(enhanced.monthly).toBe(52.91); // 634.95 / 12
-    const std = freqs.find((f) => f.key === 'standard');
-    // 660 gross * 0.85 = 561 → $46.75/mo, unclamped.
-    expect(std.monthly).toBe(46.75);
-    expect(std.annual).toBe(561);
-    expect(std.perTreatment).toBe(93.5);
+    // Standard/6x is retired (2026-09-24) and dropped from the ladder — the
+    // "every tier gets the discount" check moved to Premium.
+    const premium = freqs.find((f) => f.key === 'premium');
+    // 1008 gross * 0.85 = 856.8 → $71.40/mo, unclamped.
+    expect(premium.monthly).toBe(71.4);
+    expect(premium.annual).toBe(856.8);
+    expect(premium.perTreatment).toBe(71.4);
   });
 
   test('applies a manual recurring discount surfaced on the live engine summary', () => {
@@ -849,49 +918,65 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
   });
 
   test('honors the accepted tier from customerSelection over the engine default', () => {
-    // Stored as Enhanced but accepted as Standard: the re-rendered ladder must
-    // mark Standard selected, not the engine's resolved Enhanced tier.
+    // Stored as Enhanced but accepted as Premium: the re-rendered ladder must
+    // mark Premium selected, not the engine's resolved Enhanced tier.
+    const freqs = lawnFrequenciesFromEngineResult(
+      { lineItems: [lawnLineItem()] },
+      { customerSelection: { serviceTierKey: 'premium' } },
+    );
+    expect(freqs.find((f) => f.selected)).toMatchObject({ key: 'premium' });
+    expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(false);
+  });
+
+  test('a legacy accepted Standard (bi-monthly) selection no longer resolves to a selectable cadence', () => {
+    // Standard/6x is retired for new sales (owner directive 2026-09-24) —
+    // same treatment as the Basic/quarterly retirement below: an old
+    // estimate accepted at Standard re-renders the ladder without it (and
+    // without any selected row — the view falls back to its default), so
+    // the bi-monthly cadence can never be re-accepted.
     const freqs = lawnFrequenciesFromEngineResult(
       { lineItems: [lawnLineItem()] },
       { customerSelection: { serviceTierKey: 'standard' } },
     );
-    expect(freqs.find((f) => f.selected)).toMatchObject({ key: 'standard' });
-    expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(false);
+    expect(freqs.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+    expect(freqs.find((f) => f.selected)).toBeUndefined();
   });
 
   test('a legacy guard-capped stored line still spreads the requested WaveGuard rate — now uncapped everywhere (owner ruling 2026-07-17)', () => {
     // A pre-ruling stored line carries programMinimumGuardApplied +
     // requestedDiscountPct (the floor had capped Silver 10% back to $600).
     // The requestedDiscountPct machinery must still spread the engine's
-    // requested rate across the ladder — and with floors disarmed, Standard
-    // takes the full 10% too instead of re-clamping at $50.
-    // (Re-armed behavior is pinned in the machinery describe above.)
+    // requested rate across the ladder — and with floors disarmed, Enhanced
+    // takes the full 10% too instead of re-clamping at $50. (Re-armed
+    // behavior is pinned in the machinery describe above. Standard/6x is
+    // retired 2026-09-24 and dropped from the ladder — the selected-tier
+    // role moved from Standard to Enhanced; Premium is unchanged.)
     const line = lawnLineItem();
-    line.tier = 'standard';
-    line.annualBeforeDiscount = 660;
-    line.annualAfterDiscount = 600; // legacy: program minimum had capped the Silver 10%
+    line.tier = 'enhanced';
+    line.annualBeforeDiscount = 747;
+    line.annualAfterDiscount = 680; // legacy: program minimum had capped the Silver 10% (approx)
     line.programMinimumGuardApplied = true;
     line.requestedDiscountPct = 0.10;
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [line] });
-    const std = freqs.find((f) => f.key === 'standard');
-    expect(std.monthly).toBe(49.5); // 660 * 0.9 = 594/yr — full discount, no floor
-    expect(std.annual).toBe(594);
     const enhanced = freqs.find((f) => f.key === 'enhanced');
-    expect(enhanced.annual).toBe(672.3); // 747 * 0.9 — discount preserved
-    expect(enhanced.monthly).toBe(56.03);
+    expect(enhanced.monthly).toBe(56.03); // 747 * 0.9 = 672.3/yr — full discount, no floor
+    expect(enhanced.annual).toBe(672.3);
     const premium = freqs.find((f) => f.key === 'premium');
-    expect(premium.annual).toBe(907.2); // 1008 * 0.9
+    expect(premium.annual).toBe(907.2); // 1008 * 0.9 — discount preserved
+    expect(premium.monthly).toBe(75.6);
   });
 
   test('a legacy accepted Basic selection no longer resolves to a selectable cadence', () => {
     // Quarterly is retired: an old estimate accepted at Basic re-renders the
     // ladder without it (and without any selected row — the view falls back to
-    // its default), so the $30/mo cadence can never be re-accepted.
+    // its default), so the $30/mo cadence can never be re-accepted. (Standard/
+    // 6x is also retired 2026-09-24 — see the dedicated test above — so the
+    // ladder here is Enhanced/Premium only, not Standard/Enhanced/Premium.)
     const freqs = lawnFrequenciesFromEngineResult(
       { lineItems: [lawnLineItem()] },
       { customerSelection: { serviceTierKey: 'basic' } },
     );
-    expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(freqs.map((f) => f.key)).toEqual(['enhanced', 'premium']);
     expect(freqs.find((f) => f.selected)).toBeUndefined();
   });
 
@@ -905,7 +990,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
       ],
     };
     expect(lawnFrequenciesFromEngineResult(withSpecialty).map((f) => f.key))
-      .toEqual(['standard', 'enhanced', 'premium']);
+      .toEqual(['enhanced', 'premium']);
   });
 
   test('still returns [] for a genuine recurring bundle (lawn + rodent_bait)', () => {
@@ -938,18 +1023,17 @@ describe('applySelectedLawnTierToEstimateData — accept re-stamps the picked ca
     };
   }
 
-  test('selecting Bi-monthly rewrites the recurring lawn line to 6 visits + that price', () => {
-    const freq = lawnFrequenciesFromResultStats({ results: estDataWithRecurringLawn().result.results })
-      .find((f) => f.key === 'standard');
-    const out = applySelectedLawnTierToEstimateData(estDataWithRecurringLawn(), freq);
-    const svc = out.result.recurring.services[0];
-    expect(svc.visitsPerYear).toBe(6);
-    expect(svc.monthly).toBe(55.5);
-    expect(svc.annual).toBe(666);
-    expect(svc.cadence).toBe('bi_monthly');
-    expect(out.result.recurring.monthlyTotal).toBe(55.5);
-    // results.lawn marks standard as the selected row
-    expect(out.result.results.lawn.filter((r) => r.selected).map((r) => r.name)).toEqual(['Standard']);
+  test('Bi-monthly (Standard/6x) is retired 2026-09-24 — the ladder no longer offers it, and applying a missing selection is a no-op', () => {
+    // lawnFrequenciesFromResultStats already dropped 'standard' from the
+    // ladder (same filter as basic/quarterly) — there is no Bi-monthly
+    // option left to find or apply, so the estimate is returned unchanged
+    // rather than silently repricing to another cadence.
+    const freqs = lawnFrequenciesFromResultStats({ results: estDataWithRecurringLawn().result.results });
+    expect(freqs.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+    const freq = freqs.find((f) => f.key === 'standard');
+    expect(freq).toBeUndefined();
+    const input = estDataWithRecurringLawn();
+    expect(applySelectedLawnTierToEstimateData(input, freq)).toBe(input);
   });
 
   test('is a no-op for a non-lawn (e.g. pest) selection', () => {

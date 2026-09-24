@@ -21,7 +21,13 @@ const {
 } = require('../routes/estimate-public');
 
 const TRACKS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
-const SOLD_VISITS = [6, 9, 12];
+// 6x/standard is retired for new sales (owner directive 2026-09-24): the
+// default (customer-facing) ladder is 9x/12x. The 6x column survives only as
+// the internal cadence-discount anchor (read with includeHiddenTiers).
+const SOLD_VISITS = [9, 12];
+// The mocked-engine sweep fixtures below keep emitting the full bracket
+// ladder — they exercise the sweep's failure lanes, not the sold set.
+const MOCK_LADDER_VISITS = [6, 9, 12];
 const SIZES = [2000, 3000, 4250, 5500, 6000, 8000, 12000, 18000, 22000];
 const KNOWN_SOURCES = ['MARKET_TABLE', 'EXTRAPOLATED_TABLE', 'COST_FLOOR', 'PROGRAM_MINIMUM'];
 
@@ -38,7 +44,7 @@ describe('lawn ladder invariants — full track × size grid (code defaults)', (
   const grid = [];
   for (const track of TRACKS) for (const sqft of SIZES) grid.push([track, sqft]);
 
-  it.each(grid)('%s @ %s sqft: three sold cadences, market-table priced (floors disarmed 2026-07-17), monthly monotone in visits', (track, sqft) => {
+  it.each(grid)('%s @ %s sqft: both sold cadences (9x/12x), market-table priced (floors disarmed 2026-07-17), monthly monotone in visits', (track, sqft) => {
     const tiers = soldTiers(track, sqft);
     expect(tiers.map((t) => t.visits)).toEqual(SOLD_VISITS);
     // Owner 2026-07-17 ("forget all pricing floors"): the $50 program minimum
@@ -90,7 +96,8 @@ describe('lawn ladder invariants — full track × size grid (code defaults)', (
     // negative values are malformed), so a default-config scan is clean.
     const { violations, cellsChecked, shapeChecks } = scanLadderGrid();
     expect(shapeChecks).toBe(false); // per-app shape check stays opt-in until Phase 2 repricing
-    expect(cellsChecked).toBeGreaterThan(400);
+    // 41 sizes x 4 tracks x 2 sold cadences (6x hidden 2026-09-24) = 328.
+    expect(cellsChecked).toBeGreaterThan(300);
     expect(violations).toEqual([]);
   });
 });
@@ -139,7 +146,8 @@ describe('pricing provenance — engine → mapper → stored estimate shape', (
 
   test('every stored lawn tier row carries mechanism + dollar provenance', () => {
     const { R } = lawnOnlyMapped();
-    expect(R.lawn.length).toBeGreaterThanOrEqual(3);
+    // 9x/12x only — the retired 6x never reaches a stored estimate row.
+    expect(R.lawn.map((row) => row.v)).toEqual([9, 12]);
     for (const row of R.lawn) {
       expect(KNOWN_SOURCES).toContain(row.pricingSource);
       expect(row.prov).toEqual(expect.objectContaining({
@@ -174,10 +182,11 @@ describe('pricing provenance — engine → mapper → stored estimate shape', (
   });
 });
 
-describe('healthy lawn estimate shows all three sold cadences end-to-end', () => {
+describe('healthy lawn estimate shows both sold cadences end-to-end', () => {
   // The audit found no test walked a REAL engine result (not a hand-built
   // fixture) through to the customer-facing cadence ladder. Both display
-  // paths — live engine result and stored legacy rows — must offer 6/9/12.
+  // paths — live engine result and stored legacy rows — must offer 9/12
+  // (6x retired for new sales, owner directive 2026-09-24).
   function realEngineRun(sqft) {
     return generateEstimate({
       lawnSqFt: sqft,
@@ -188,9 +197,9 @@ describe('healthy lawn estimate shows all three sold cadences end-to-end', () =>
     });
   }
 
-  it.each([[3000], [5500], [12000]])('engine-result path @ %s sqft offers 6/9/12 with positive prices', (sqft) => {
+  it.each([[3000], [5500], [12000]])('engine-result path @ %s sqft offers 9/12 with positive prices', (sqft) => {
     const freqs = lawnFrequenciesFromEngineResult(realEngineRun(sqft));
-    expect(freqs.map((f) => f.visitsPerYear)).toEqual([6, 9, 12]);
+    expect(freqs.map((f) => f.visitsPerYear)).toEqual([9, 12]);
     for (const f of freqs) {
       expect(f.monthly).toBeGreaterThan(0);
       expect(f.annual).toBeGreaterThan(0);
@@ -199,10 +208,10 @@ describe('healthy lawn estimate shows all three sold cadences end-to-end', () =>
     expect(freqs.filter((f) => f.selected)).toHaveLength(1);
   });
 
-  it.each([[3000], [5500], [12000]])('stored-rows path @ %s sqft offers 6/9/12 with positive prices', (sqft) => {
+  it.each([[3000], [5500], [12000]])('stored-rows path @ %s sqft offers 9/12 with positive prices', (sqft) => {
     const { results } = mapV1ToLegacyShape(realEngineRun(sqft));
     const freqs = lawnFrequenciesFromResultStats({ results: { lawn: results.lawn } });
-    expect(freqs.map((f) => f.visitsPerYear)).toEqual([6, 9, 12]);
+    expect(freqs.map((f) => f.visitsPerYear)).toEqual([9, 12]);
     for (const f of freqs) {
       expect(f.monthly).toBeGreaterThan(0);
       expect(f.annual).toBeGreaterThan(0);
@@ -294,7 +303,7 @@ describe('sweep red paths — failures become alert violations, never silent gre
   }
 
   const cleanTiers = ({ lawnSqFt }) => ({
-    tiers: SOLD_VISITS.map((visits) => {
+    tiers: MOCK_LADDER_VISITS.map((visits) => {
       const monthly = 100 + visits + lawnSqFt / 1000;
       return { visits, monthly, annual: monthly * 12, perApp: 50, costFloorAnnual: 600 };
     }),
@@ -305,7 +314,7 @@ describe('sweep red paths — failures become alert violations, never silent gre
       // Each 500sf step drops $0.25 — inside the $0.30 adjacent tolerance,
       // but $4+ cumulative peak-to-valley across the grid.
       priceLawnCare: ({ lawnSqFt }) => ({
-        tiers: SOLD_VISITS.map((visits) => {
+        tiers: MOCK_LADDER_VISITS.map((visits) => {
           const monthly = 200 + visits - ((lawnSqFt - 2000) / 500) * 0.25;
           return { visits, monthly, annual: monthly * 12, perApp: 50, costFloorAnnual: 600 };
         }),
@@ -360,7 +369,7 @@ describe('sweep red paths — failures become alert violations, never silent gre
       // NaN compares false against every invariant threshold — without an
       // explicit finite check this grid reads as perfectly clean.
       priceLawnCare: () => ({
-        tiers: SOLD_VISITS.map((visits) => ({ visits, monthly: NaN, annual: NaN, perApp: NaN, costFloorAnnual: 600 })),
+        tiers: MOCK_LADDER_VISITS.map((visits) => ({ visits, monthly: NaN, annual: NaN, perApp: NaN, costFloorAnnual: 600 })),
       }),
     });
     const { violations } = sweep.scanLadderGrid();
@@ -374,7 +383,7 @@ describe('sweep red paths — failures become alert violations, never silent gre
       // usable monthly while costFloorAnnual is NaN — floor enforcement is
       // silently OFF and only an explicit check catches it.
       priceLawnCare: ({ lawnSqFt }) => ({
-        tiers: SOLD_VISITS.map((visits) => {
+        tiers: MOCK_LADDER_VISITS.map((visits) => {
           const monthly = 100 + visits + lawnSqFt / 1000;
           return { visits, monthly, annual: monthly * 12, perApp: 50, costFloorAnnual: NaN };
         }),

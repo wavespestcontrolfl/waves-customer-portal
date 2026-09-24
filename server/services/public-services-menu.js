@@ -12,6 +12,7 @@
  * its own reviewed product copy keyed by service_key (pre-push codex P1).
  */
 const db = require('../models/db');
+const { LAWN_TIERS } = require('./pricing-engine/constants');
 
 const FAMILY_LABELS = {
   pest_control: 'Pest Control',
@@ -215,6 +216,11 @@ function instantForRow(row, { packageCountVerified = false } = {}) {
   if (!PUBLIC_INSTANT_QUOTE_KEYS.has(row.service_key) || !requestMatchesCatalogRow(row.service_key, row)) return false;
   if (PUBLIC_QUOTE_REQUESTS[row.service_key]?.pestInitialRoach && packageCountVerified !== true) return false;
   if (row.service_key === 'termite_bait' && !termiteRentalGateOn()) return false;
+  // A lawn tier hidden from sale (standard/6x, owner directive 2026-09-24)
+  // would price at the enhanced fallback under the row's 6x name — never
+  // instant, even if an admin re-selects the catalog row.
+  const lawnTier = PUBLIC_QUOTE_REQUESTS[row.service_key]?.lawn?.tier;
+  if (lawnTier && LAWN_TIERS[lawnTier]?.hidden) return false;
   return true;
 }
 

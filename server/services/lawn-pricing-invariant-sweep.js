@@ -25,7 +25,13 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 const TRACKS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
-const SOLD_VISITS = [6, 9, 12];
+// Sold cadences come from the live tier table: a tier hidden from sale
+// (standard/6x since 2026-09-24, DB-tunable via lawn_pricing_v2.tiers) is
+// absent from priceLawnCare's default ladder and must not read as missing.
+function soldVisits() {
+  const { LAWN_TIERS } = require('./pricing-engine/constants');
+  return Object.values(LAWN_TIERS).filter((t) => !t.hidden).map((t) => t.freq).sort((a, b) => a - b);
+}
 const GRID_MIN_SQFT = 2000;
 const GRID_MAX_SQFT = 22000;
 const GRID_STEP_SQFT = 500;
@@ -99,6 +105,7 @@ function scanLadderGrid() {
     });
   }
 
+  const sold = soldVisits();
   for (const track of TRACKS) {
     const prevMonthlyBySizeTier = {};
     for (let sqft = GRID_MIN_SQFT; sqft <= GRID_MAX_SQFT; sqft += GRID_STEP_SQFT) {
@@ -106,14 +113,14 @@ function scanLadderGrid() {
       // so passing it there silently sweeps st_augustine four times.
       const result = priceLawnCare({ lawnSqFt: sqft }, { track });
       const tiers = (result.tiers || [])
-        .filter((t) => SOLD_VISITS.includes(t.visits))
+        .filter((t) => sold.includes(t.visits))
         .sort((a, b) => a.visits - b.visits);
 
-      if (tiers.length !== SOLD_VISITS.length) {
+      if (tiers.length !== sold.length) {
         violations.push({
           check: 'missing_tier',
           cell: cellLabel(track, sqft, 0),
-          detail: `expected ${SOLD_VISITS.length} sold cadences, engine returned ${tiers.length}`,
+          detail: `expected ${sold.length} sold cadences, engine returned ${tiers.length}`,
         });
         continue;
       }
@@ -279,7 +286,7 @@ async function checkBudgetDrift() {
   const annualLowerBound = Math.round(Number(cogs.totalPerVisit) * 100) / 100;
 
   const violations = [];
-  for (const visits of SOLD_VISITS) {
+  for (const visits of soldVisits()) {
     for (const track of TRACKS) {
       const budget = lawnMaterialBudget(track, visits);
       if (annualLowerBound > budget * BUDGET_DRIFT_RATIO) {

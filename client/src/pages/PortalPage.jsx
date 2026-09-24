@@ -9896,7 +9896,13 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'lawn_care', name: 'Lawn Care', icon: 'sprout',
-    frequencies: ['4 Apps', '6 Apps', '9 Apps', '12 Apps'],
+    // frequencies[0] renders as the generic cadence line below (no link to
+    // which program the customer is actually enrolled in — see the mosquito
+    // comment above). 4 Apps (basic/quarterly, retired 2026-08-04) and 6 Apps
+    // (standard/bi-monthly, retired 2026-09-24 — owner directive to stop
+    // offering bi-monthly lawn care) are gone; 9 Apps (the sold default) is
+    // first.
+    frequencies: ['9 Apps', '12 Apps'],
     basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, soil testing, thatch monitoring',
     products: ['Prodiamine 65 WDG', 'Celsius WG', '16-4-8 + Micros', 'Headway G'],
   },

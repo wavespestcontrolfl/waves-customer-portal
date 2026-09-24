@@ -5387,11 +5387,17 @@ export default function EstimateToolViewV2({
                     </Field>
                     <Field label="Applications / year" className="mb-0" id="estimate-lawnFreq">
                       {/* 4 — Quarterly retired for new sales (owner directive
-                          2026-07-09); the engine hides the basic tier. */}
+                          2026-07-09); the engine hides the basic tier. 6 —
+                          Bi-monthly likewise retired for new sales (owner
+                          directive 2026-09-24); the engine hides the standard
+                          tier (LAWN_TIERS.standard.hidden) the same way. A
+                          reopened estimate that still carries lawnFreq=4 or 6
+                          shows no matching option here, same as basic did —
+                          the retired-cadence requote gate handles it on send/
+                          accept, not this dropdown. */}
                       <SelectV2
                         k="lawnFreq"
                         options={[
-                          { value: "6", label: "6 — Bi-monthly" },
                           { value: "9", label: "9 — Every 6 weeks" },
                           { value: "12", label: "12 — Monthly" },
                         ]}

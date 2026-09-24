@@ -1,9 +1,11 @@
 /**
  * variantsForService — the quote options the customer-pricing AI offers.
- * Locks the lawn ladder now that 'basic' (4 applications) is RETIRED for new
- * sales (owner directive 2026-07-09): it is never offered, and "basic"/"4x"
- * prompts fall through to the full sold ladder instead of silently pricing a
- * different tier under the old label.
+ * Locks the lawn ladder now that 'basic' (4 applications, retired 2026-07-09)
+ * and 'standard' (6 applications/bi-monthly, retired 2026-09-24 — owner
+ * directive: "i dont want to offer bi-monthly lawn care service anymore")
+ * are BOTH retired for new sales: neither is ever offered, and prompts
+ * naming either fall through to the full sold ladder instead of silently
+ * pricing a different tier under the old label.
  *
  * Heavy module deps are mocked so this stays a pure-function test.
  */
@@ -14,17 +16,18 @@ jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-05-29' }));
 
 const { variantsForService } = require('../services/customer-pricing-ai');
 
-const SOLD_LADDER = ['lawn-standard', 'lawn-enhanced', 'lawn-premium'];
+const SOLD_LADDER = ['lawn-enhanced', 'lawn-premium'];
 
 describe('variantsForService — lawn_care', () => {
-  test('offers the three sold tiers, Standard first so it stays the default, Basic never', () => {
-    // The portal panel auto-selects options[0]; Standard must lead so a generic
-    // "add lawn care" quote defaults to the 6-application plan.
+  test('offers the two sold tiers, Enhanced first so it stays the default, Basic and Standard never', () => {
+    // The portal panel auto-selects options[0]; Enhanced must lead so a generic
+    // "add lawn care" quote defaults to the 9-application plan.
     const all = variantsForService('lawn_care', 'lawn care please');
     const ids = all.map((o) => o.id);
-    expect(ids[0]).toBe('lawn-standard');
+    expect(ids[0]).toBe('lawn-enhanced');
     expect(ids).toEqual(SOLD_LADDER);
     expect(all.some((o) => o.tier === 'basic' || o.lawnFreq === 4)).toBe(false);
+    expect(all.some((o) => o.tier === 'standard' || o.lawnFreq === 6)).toBe(false);
   });
 
   test('generic request returns the enhanced default only', () => {
@@ -45,17 +48,24 @@ describe('variantsForService — lawn_care', () => {
     expect(variantsForService('lawn_care', 'lawn with 4x applications/yr').map((o) => o.id)).toEqual(SOLD_LADDER);
   });
 
+  test('explicit standard tier-name / 6-application intent returns the full sold ladder (bi-monthly retired 2026-09-24)', () => {
+    // Same treatment as basic/4x above: the retired bi-monthly plan is
+    // neither advertised nor silently priced as a different tier under its
+    // old label — the customer sees what IS sold (enhanced/premium).
+    expect(variantsForService('lawn_care', 'just the standard lawn plan').map((o) => o.id)).toEqual(SOLD_LADDER);
+    expect(variantsForService('lawn_care', 'lawn with 6 applications').map((o) => o.id)).toEqual(SOLD_LADDER);
+    expect(variantsForService('lawn_care', 'lawn with 6x applications/yr').map((o) => o.id)).toEqual(SOLD_LADDER);
+    expect(variantsForService('lawn_care', 'bi-monthly lawn care please').map((o) => o.id)).toEqual(SOLD_LADDER);
+  });
+
   test('Nx-suffix counts copied from the labels narrow to the right tier', () => {
     // "Nx applications/yr" is the customer-facing option label, so a copied
-    // request must resolve to the matching tier rather than the 6x default.
+    // request must resolve to the matching tier rather than the 9x default.
     expect(variantsForService('lawn_care', 'lawn with 12x applications/yr').map((o) => o.id)).toEqual(['lawn-premium']);
     // Enhanced (9) narrows for both the bare and "x"-suffixed forms.
     expect(variantsForService('lawn_care', 'lawn with 9x applications/yr').map((o) => o.id)).toEqual(['lawn-enhanced']);
     expect(variantsForService('lawn_care', 'lawn with 9 applications').map((o) => o.id)).toEqual(['lawn-enhanced']);
     expect(variantsForService('lawn_care', 'enhanced lawn plan').map((o) => o.id)).toEqual(['lawn-enhanced']);
-    // 6x is Standard, the default — it stays the full ladder with Standard first.
-    expect(variantsForService('lawn_care', 'lawn with 6x applications/yr').map((o) => o.id))
-      .toEqual(SOLD_LADDER);
   });
 
   test('a stray digit (sq ft / address) does NOT collapse the quote to a single tier', () => {

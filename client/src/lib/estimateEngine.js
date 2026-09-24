@@ -1626,8 +1626,13 @@ function resolveLawnFreq(freq) {
   const parsed = Number(freq);
   // basic/4x is retired for new sales (owner directive 2026-07-09) — a stale
   // form value of 4 resolves to the 9-app default, matching the server's
-  // hidden-tier fallback in resolveLawnTier/priceLawnCare.
-  if (parsed === 4) return 9;
+  // hidden-tier fallback in resolveLawnTier/priceLawnCare. standard/6x is
+  // likewise retired for new sales (owner directive 2026-09-24: stop
+  // offering bi-monthly lawn care) — a stale form value of 6 resolves the
+  // same way. LAWN_FREQS keeps 6 (the bracket table anchor lawnLookup still
+  // reads for the 9x/12x cadence-discount caps), so this mapping is the
+  // only thing stopping a NEW selection from landing on it.
+  if (parsed === 4 || parsed === 6) return 9;
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
 }
 
@@ -2322,9 +2327,14 @@ export function calculateEstimate(inputs) {
     const selectedFreq = resolveLawnFreq(lawnFreq);
 
     // 4x/Quarterly is retired for new sales (owner directive 2026-07-09) —
-    // mirrors the server's LAWN_TIERS.basic hidden flag.
+    // mirrors the server's LAWN_TIERS.basic hidden flag. 6x/Bi-monthly is
+    // likewise retired for new sales (owner directive 2026-09-24) — mirrors
+    // the server's new LAWN_TIERS.standard.hidden flag. Dropping the row
+    // here (rather than keeping it and marking it dimmed) is safe for the
+    // cadence-ladder lift below: the only lift leg that feeds a
+    // customer-visible price is enhanced-vs-premium, which never reads the
+    // standard/6x leg.
     const freqs = [
-      { name: '6x applications/yr', v: 6 },
       { name: '9x applications/yr', v: 9 },
       { name: '12x applications/yr', v: 12 },
     ];

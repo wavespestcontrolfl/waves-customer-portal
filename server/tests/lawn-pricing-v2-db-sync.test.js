@@ -72,8 +72,11 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
     expect(lawn.pricingSource).toBe('MARKET_TABLE');
     expect(lawn.pricingBasis).toBe('TABLE_INTERPOLATION');
     expect(lawn.marketAnnual).toBe(576);
-    // 6/9/12-visit ladder — the 4-visit 'basic' tier is no longer sold.
-    expect(lawn.tiers.map((tier) => tier.tier)).toEqual(['standard', 'enhanced', 'premium']);
+    // 9/12-visit ladder — the 4-visit 'basic' tier is no longer sold, and
+    // the 6-visit 'standard' tier is hidden for new sales (owner directive
+    // 2026-09-24; migration 20260924000003 writes tiers.standard.hidden on
+    // the row this suite loads).
+    expect(lawn.tiers.map((tier) => tier.tier)).toEqual(['enhanced', 'premium']);
   });
 
   test('DB-loaded estimate applies WaveGuard discounts to Lawn V2 while qualifying for WaveGuard', () => {
