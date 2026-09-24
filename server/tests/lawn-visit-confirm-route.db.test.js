@@ -331,6 +331,24 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(snapshot.color_health ?? null).toBeNull();
   });
 
+  test('legacy calibration never fabricates an AI Stress from blank components', async () => {
+    const { assessment } = await seed({ ...COMPLETE, fungus_control: null, thatch_level: null, stress_damage: null }, { run: false });
+    await request(assessment.id, { adjustedScores: { fungus_control: 70, thatch_level: 80 } });
+    await drain();
+    const [, aiScores] = intel.recordTechCalibration.mock.calls.at(-1);
+    expect(aiScores.stress_damage ?? null).toBeNull();
+  });
+
+  test('two concurrent legacy fills of different blanks both survive', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null, thatch_level: null }, { run: false });
+    await Promise.all([
+      request(assessment.id, { adjustedScores: { color_health: 70 } }),
+      request(assessment.id, { adjustedScores: { fungus_control: 60 } }),
+    ]);
+    const row = await read(assessment.id);
+    expect(row).toMatchObject({ color_health: 70, fungus_control: 60 });
+  });
+
   test('clearing an earlier legacy fill (posted as null) removes it', async () => {
     const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false });
     await request(assessment.id, { adjustedScores: { fungus_control: 60 } });

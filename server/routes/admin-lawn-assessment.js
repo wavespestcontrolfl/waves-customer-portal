@@ -1124,6 +1124,57 @@ function normalizeStressFlags(input) {
   return { errors, normalized };
 }
 
+// Legacy (no-run) confirmation, mirroring visitRuns.confirmRun: one
+// transaction, same lock order (baseline advisory -> turf profile fence ->
+// assessment row FOR UPDATE), so two sessions filling different AI-blank
+// scores merge instead of overwriting each other. A blank score keeps it
+// pending: scores, notes, flags and checks are saved; nothing is confirmed,
+// no baseline is installed, and adjusted_scores (the AI read) is untouched.
+async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyHistoryEnabled, stressFlags, persistChecks }, knex) {
+  return knex.transaction(async (trx) => {
+    const original = await trx('lawn_assessments').where({ id: assessmentId }).first('customer_id');
+    if (!original) throw Object.assign(new Error('Assessment not found'), { status: 404 });
+    await lawnAssessment.lockCustomerBaseline(original.customer_id, trx);
+    const write = async (conn) => {
+      const assessment = await conn('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+      const finalScores = legacyConfirmFinalScores(assessment, adjustedScores);
+      const missingScores = visitScores.missingScores(finalScores);
+      const pending = missingScores.length > 0;
+      const textUpdate = adjustedScores?.observations != null ? { observations: adjustedScores.observations } : {};
+      const updateData = {
+        ...finalScores,
+        updated_at: new Date(),
+        ...textUpdate,
+        // Persist stress_flags only if any allowed key was sent; {} means
+        // "tech confirmed no flags set", distinct from null (no signal).
+        ...(stressFlags !== null ? { stress_flags: JSON.stringify(stressFlags) } : {}),
+        ...(pending
+          // A derived Stress is not stored while pending: it would read as
+          // AI-known on the next save and freeze.
+          ? { stress_damage: legacyStressIsFixed(assessment, adjustedScores) ? finalScores.stress_damage : null, overall_score: null }
+          : {
+            confirmed_by_tech: true,
+            confirmed_at: new Date(),
+            overall_score: calculateOverallScore(finalScores),
+            ...(adjustedScores ? {
+              adjusted_scores: JSON.stringify({ ...parseJsonObject(assessment.adjusted_scores), ...finalScores, ...textUpdate }),
+            } : {}),
+          }),
+      };
+      const updated = !pending && propertyHistoryEnabled
+        ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: conn })
+        : (await conn('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
+      if (persistChecks) await persistChecks(updated, conn);
+      return { assessment: updated, confirmed: !pending, missingScores };
+    };
+    if (propertyHistoryEnabled || persistChecks) {
+      const { withTurfProfileFence } = require('../services/customer-pricing-ai');
+      return withTurfProfileFence(trx, original.customer_id, write);
+    }
+    return write(trx);
+  });
+}
+
 router.post('/confirm', async (req, res, next) => {
   try {
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
@@ -1173,63 +1224,21 @@ router.post('/confirm', async (req, res, next) => {
         });
       }
     } else {
-      const finalScores = legacyConfirmFinalScores(assessment, adjustedScores);
-
-      // Same rule as the run-backed path: a blank score keeps the assessment
-      // pending (scores saved, nothing confirmed or delivered) until the
-      // technician fills it, rather than confirming with a gap readers would
-      // count as 0.
-      const missing = visitScores.missingScores(finalScores);
-      const pending = missing.length > 0;
-
-      const textUpdate = adjustedScores?.observations != null ? { observations: adjustedScores.observations } : {};
-      const updateData = pending
-        ? {
-          // Scores, notes, flags and checks are saved; nothing is confirmed.
-          // A derived Stress is not stored while pending (it would read as
-          // AI-known on the next save and freeze), and adjusted_scores — the
-          // AI's read — is left untouched.
-          ...finalScores,
-          stress_damage: legacyStressIsFixed(assessment, adjustedScores) ? finalScores.stress_damage : null,
-          overall_score: null,
-          updated_at: new Date(),
-          ...textUpdate,
-        }
-        : {
-          confirmed_by_tech: true,
-          confirmed_at: new Date(),
-          updated_at: new Date(),
-          ...finalScores,
-          overall_score: calculateOverallScore(finalScores),
-          ...textUpdate,
-          ...(adjustedScores ? {
-            adjusted_scores: JSON.stringify({ ...parseJsonObject(assessment.adjusted_scores), ...finalScores, ...textUpdate }),
-          } : {}),
-        };
-
-      // Persist stress_flags only if any allowed key was sent. An empty
-      // object {} is treated as "tech confirmed no flags set" and
-      // stored — distinguishable from null (no signal).
-      if (normalizedStressFlags !== null) {
-        updateData.stress_flags = JSON.stringify(normalizedStressFlags);
-      }
-
-      if (!pending && propertyHistoryEnabled) {
-        updated = await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: db });
-      } else {
-        [updated] = await db('lawn_assessments')
-          .where({ id: assessmentId })
-          .update(updateData)
-          .returning('*');
-      }
-      if (protocolFieldChecksProvided) {
-        await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
-        Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
-      }
+      confirmation = await confirmLegacyAssessment({
+        assessmentId, adjustedScores, propertyHistoryEnabled,
+        stressFlags: normalizedStressFlags,
+        persistChecks: protocolFieldChecksProvided
+          ? async (current, trx) => {
+            await persistProtocolFieldChecks({ assessment: current, checks: protocolFieldChecks, trx });
+            Object.assign(current, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
+          }
+          : undefined,
+      }, db);
+      updated = confirmation.assessment;
       // Same rule as the run-backed path: a blank score keeps the assessment
       // pending — no baseline, wiki link, or delivery until it is filled.
-      if (pending) {
-        return res.json({ success: true, confirmed: false, missingScores: missing, assessment: updated });
+      if (!confirmation.confirmed) {
+        return res.json({ success: true, confirmed: false, missingScores: confirmation.missingScores, assessment: updated });
       }
     }
 
@@ -1283,11 +1292,13 @@ router.post('/confirm', async (req, res, next) => {
           // calibration would write ai_stress_damage=null and skip the delta. Seed it
           // the same way the UI/confirm fallback does — min(fungus, thatch, 95) — so a
           // tech's Stress correction on a legacy row records a real delta, not zero.
+          // Only genuinely numeric components count: Number(null) is 0, which
+          // would fabricate an AI Stress of 0 for a score the AI never read.
           if (aiScores && aiScores.stress_damage == null) {
-            const f = Number(aiScores.fungus_control);
-            const t = Number(aiScores.thatch_level);
-            const parts = [f, t, 95].filter(Number.isFinite);
-            if (parts.length > 1) aiScores.stress_damage = Math.min(...parts);
+            const parts = [aiScores.fungus_control, aiScores.thatch_level]
+              .filter((v) => v != null && v !== '' && Number.isFinite(Number(v)))
+              .map(Number);
+            if (parts.length) aiScores.stress_damage = Math.min(...parts, 95);
           }
           await LawnIntel.recordTechCalibration(assessmentId, aiScores, confirmedScores);
         }
@@ -1321,7 +1332,7 @@ router.post('/confirm', async (req, res, next) => {
     res.json({
       success: true,
       assessment: updated,
-      ...(confirmation ? {
+      ...(visitRun ? {
         confirmed: true, missingScores: [], visitAssessment: visitRuns.responseForRun(confirmation.run),
       } : {}),
     });
