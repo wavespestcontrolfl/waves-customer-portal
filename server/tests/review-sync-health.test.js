@@ -133,6 +133,11 @@ describe('_assessReviewSyncHealth (escalation)', () => {
           return this;
         }),
         orWhere: jest.fn(function (callback) { callback(this); return this; }),
+        // Digest content-rewrite predicate (A -> B -> A refresh): chainable no-ops.
+        whereNot: jest.fn(function () { return this; }),
+        orWhereNot: jest.fn(function () { return this; }),
+        whereNull: jest.fn(function () { return this; }),
+        orWhereNull: jest.fn(function () { return this; }),
         whereRaw: jest.fn(function (sql, bindings) {
           if (sql.includes("metadata->>'resolved'")) this._unresolvedOnly = true;
           if (sql.includes('> ?::timestamptz')) this._newerThan = bindings[0];
@@ -259,8 +264,16 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     const updates = installDb({ recentNotification: marker });
     expect(await gbp._assessReviewSyncHealth({ venice: 'gbp' }, {}, {}, t3)).toEqual({ deduped: true });
     expect(marker.metadata.observedAt).toBe(t3);
-    expect(updates).toHaveLength(2);
+    // marker observedAt, digest observedAt, then the digest content rewrite:
+    // findings A -> B -> A must not leave the standing digest describing B,
+    // so the digest's title/body follow the CURRENT findings and it
+    // re-surfaces unread even while the companion marker dedupes.
+    expect(updates).toHaveLength(3);
     expect(JSON.parse(updates[1].metadata.bindings[0]).observedAt).toBe(t3);
+    expect(updates[2]).toMatchObject({ read_at: null });
+    expect(updates[2].title).toMatch(/Google review sync/);
+    expect(typeof updates[2].body).toBe('string');
+    expect(JSON.parse(updates[2].metadata.bindings[0]).observedAt).toBe(t3);
     expect(await gbp._assessReviewSyncHealth({ venice: 'gbp' }, {}, {}, t2)).toEqual({ stale: true });
     expect(marker.metadata.observedAt).toBe(t3);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();

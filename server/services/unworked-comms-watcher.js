@@ -816,7 +816,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
       logger.error(`[unworked-comms] recovery proof query failed: ${proofFailures.map((lane) => lane.key).join(', ')}`);
       return { skipped: 'query_failed' };
     }
-    if (proof.every((result) => result.value.length === 0)) await retireIfClean('unworked-comms', { lockKey: 'ops-digest:unworked-comms' });
+    if (proof.every((result) => result.value.length === 0)) await retireIfClean('unworked-comms');
     return { skipped: 'nothing_found' };
   }
 
@@ -848,9 +848,10 @@ async function runUnworkedCommsWatcher(opts = {}) {
       html: composed.html,
       text: composed.text,
       link: '/admin/communications',
-      dedupeKey: 'ops-digest:unworked-comms',
-      dedupeWindowMs: 7 * 24 * 60 * 60 * 1000,
-      refreshOnDedupe: true,
+      // No dedupe/refresh here on purpose (pre-push audit P1): the loaders
+      // drop callbacks, follow-ups and texts older than 30 days, so a
+      // refreshed standing row could erase an unresolved item's evidence
+      // when it ages out while other work remains. One row per send.
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),

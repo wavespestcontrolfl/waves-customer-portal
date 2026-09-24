@@ -1845,6 +1845,22 @@ class GoogleBusinessService {
             .whereRaw("metadata->>'source' IS NULL")
             .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
             .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ observedAt })]) });
+          // Findings A -> B -> A without a clean run in between: A's marker
+          // is still unresolved (so no re-bell), but the standing digest
+          // describes B. Rewrite the digest to the CURRENT findings when its
+          // text differs, surfacing it unread again (pre-push audit P1).
+          const digestTitle = subject.slice(0, 200);
+          await trx('notifications').where({ recipient_type: 'admin', category: 'ops_digest' })
+            .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
+            .whereRaw("metadata->>'source' IS NULL")
+            .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+            .where((q) => q.whereNot('title', digestTitle).orWhereNot('body', body).orWhereNull('body'))
+            .update({
+              title: digestTitle,
+              body,
+              read_at: null,
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ subject, observedAt })]),
+            });
           return { deduped: true };
         }
 
