@@ -802,6 +802,9 @@ async function handleLeadInquiry(email, classification) {
         .forUpdate()
         .first();
       if (!liveLead) throw new Error('Matched lead is no longer available');
+      const identityChanged = ['customer_id', 'phone', 'email']
+        .some((field) => (liveLead[field] ?? null) !== (existingLead[field] ?? null));
+      if (identityChanged) throw new Error('Matched lead identity changed before commit');
 
       // The conditional link is replay-safe and refuses to overwrite a
       // linkage changed by another worker or an admin after the match read.

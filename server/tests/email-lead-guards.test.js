@@ -516,6 +516,18 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     expect(insertsFor(state, 'lead_activities')).toHaveLength(0);
   });
 
+  test('a lead identity edit after matching aborts before linkage or activity', async () => {
+    const matched = { id: 'lead-77', customer_id: 'cust-1', phone: '9415551234', email: 'jane@example.com' };
+    const locked = { ...matched, phone: '9415559999' };
+    const state = setupDb({ leads: [matched, locked] });
+
+    await expect(handleLeadInquiry(makeEmail(), makeClassification()))
+      .rejects.toThrow('Matched lead identity changed before commit');
+
+    expect(emailUpdates(state)).toHaveLength(0);
+    expect(insertsFor(state, 'lead_activities')).toHaveLength(0);
+  });
+
   test('a concurrently changed email linkage aborts before activity insertion', async () => {
     const lead = { id: 'lead-77' };
     const state = setupDb({ leads: [lead, lead] }, { emails: [0] });

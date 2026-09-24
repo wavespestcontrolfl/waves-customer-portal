@@ -50,9 +50,13 @@ const mockDb = jest.fn(table => {
       mockState.updates.push({ table, value, clauses: [...clauses] });
       if (table === 'leads') {
         const guardedStatus = clauses.find(([method, key]) => method === 'whereIn' && key === 'status')?.[2];
-        const guardsSla = clauses.some(([method, key]) => method === 'whereNull' && key === 'response_time_minutes');
-        if ((!guardedStatus || guardedStatus.includes(mockState.lead.status) || mockState.lead.status == null)
-          && (!guardsSla || mockState.lead.response_time_minutes == null)) Object.assign(mockState.lead, value);
+        if (!guardedStatus || guardedStatus.includes(mockState.lead.status) || mockState.lead.status == null) {
+          const patch = { ...value };
+          if (patch.response_time_minutes?.sql === 'COALESCE(response_time_minutes, ?)') {
+            patch.response_time_minutes = mockState.lead.response_time_minutes ?? patch.response_time_minutes.bindings[0];
+          }
+          Object.assign(mockState.lead, patch);
+        }
       }
       if (table === 'lead_activities' && mockState.activity) {
         const metadata = JSON.parse(mockState.activity.metadata);
@@ -110,7 +114,6 @@ test('uses resolved customer without shared-phone lookup', async () => {
 });
 test.each([
   ['advanced status', { status: 'estimated', response_time_minutes: null }],
-  ['existing SLA', { status: 'new', response_time_minutes: 7 }],
 ])('a sent auto-response preserves %s while recording delivery', async (_label, leadState) => {
   Object.assign(mockState.lead, { first_contact_at: new Date(Date.now() - 60000), ...leadState });
   mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
@@ -121,13 +124,26 @@ test.each([
   expect(mockState.lead.status).toBe(leadState.status);
   expect(mockState.lead.response_time_minutes).toBe(leadState.response_time_minutes);
   const guardedUpdate = mockState.updates.find(({ table, clauses }) => table === 'leads'
-    && clauses.some(([method, key]) => method === 'whereNull' && key === 'response_time_minutes'));
+    && clauses.some(([method, key]) => method === 'whereIn' && key === 'status'));
   expect(guardedUpdate.clauses).toEqual(expect.arrayContaining([
-    ['whereNull', 'response_time_minutes'],
     ['whereIn', 'status', ['new', 'pending', 'started']],
     ['orWhereNull', 'status'],
   ]));
+  expect(guardedUpdate.clauses).not.toContainEqual(['whereNull', 'response_time_minutes']);
+  expect(guardedUpdate.value.response_time_minutes).toEqual({
+    sql: 'COALESCE(response_time_minutes, ?)', bindings: [1],
+  });
   expect(mockBridge).toHaveBeenCalledWith(context.leadId, 'contacted', mockDb);
+});
+test('a sent auto-response advances a pre-contact lead without replacing its existing SLA', async () => {
+  Object.assign(mockState.lead, { status: 'new', response_time_minutes: 7, first_contact_at: new Date(Date.now() - 60000) });
+  mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
+
+  expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context))
+    .toMatchObject({ sent: true });
+
+  expect(mockState.lead.status).toBe('contacted');
+  expect(mockState.lead.response_time_minutes).toBe(7);
 });
 test('a sent auto-response still stamps the first SLA on a pre-contact lead', async () => {
   Object.assign(mockState.lead, { status: 'new', response_time_minutes: null, first_contact_at: new Date(Date.now() - 60000) });
@@ -138,6 +154,14 @@ test('a sent auto-response still stamps the first SLA on a pre-contact lead', as
 
   expect(mockState.lead.status).toBe('contacted');
   expect(mockState.lead.response_time_minutes).toBe(1);
+});
+test('deferred settlement advances a pre-contact lead without replacing its existing SLA', async () => {
+  Object.assign(mockState.lead, { status: 'pending', response_time_minutes: 7, first_contact_at: new Date(Date.now() - 60000) });
+
+  await require('../services/lead-response-tools').recordLeadAutoReplyDelivered({ leadId: context.leadId });
+
+  expect(mockState.lead.status).toBe('contacted');
+  expect(mockState.lead.response_time_minutes).toBe(7);
 });
 test.each(['new_lead', 'service_completed', 'subscription_cancelled', '__proto__'])('rejects unsupported lead stage %s', async stage => {
   expect(await executeLeadTool('update_lead_pipeline', { stage }, context)).toHaveProperty('error');

@@ -359,10 +359,9 @@ async function executeLeadTool(toolName, input, context) {
               // Match deferred-delivery settlement: a later auto-reply may
               // record its send, but it cannot regress an advanced/closed
               // lead or replace the SLA captured by the first response.
-              .whereNull('response_time_minutes')
               .where((q) => q.whereIn('status', PRE_CONTACT_LEAD_STATUSES).orWhereNull('status'))
               .update({
-                response_time_minutes: responseMinutes,
+                response_time_minutes: trx.raw('COALESCE(response_time_minutes, ?)', [responseMinutes]),
                 status: 'contacted',
                 updated_at: new Date(),
               });
@@ -649,7 +648,7 @@ async function recordLeadAutoReplyDelivered({ leadId = null, customerId = null }
         // overwritten by a replay landing seconds later).
         .where((q) => q.whereIn('status', PRE_CONTACT_LEAD_STATUSES).orWhereNull('status'))
         .update({
-          response_time_minutes: responseMinutes,
+          response_time_minutes: db.raw('COALESCE(response_time_minutes, ?)', [responseMinutes]),
           status: 'contacted',
           updated_at: new Date(),
         });
