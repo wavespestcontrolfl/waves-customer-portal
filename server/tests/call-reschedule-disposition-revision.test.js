@@ -1,5 +1,5 @@
-// Owner follow-up from #4708 r2 P2 (extended by Codex #4721 r1 P2): an
-// applied reschedule move must revise a callback_task_created (or
+// Owner follow-up from #4708 r2 P2 (extended by Codex #4721 r1 P2 / r2 P1):
+// an applied reschedule move must revise a callback_task_created (or
 // cancellation_processed) disposition minted before the move landed —
 // otherwise unworked-comms-watcher.js keeps selecting the call as an
 // outstanding callback and pages someone to call a customer who is already
@@ -35,11 +35,13 @@ const { reviseDispositionAfterAppliedMove, applyRescheduleFollowUps } = CallReco
 
 const CALL_ID = 'a0000000-0000-4000-8000-000000000001';
 
-// scheduling.callback_window_* present is the model's own signal that a
-// callback_task_created disposition WAS keyed to the reschedule ask itself
-// ("call me back to confirm a time") — exactly what the applied move just
-// resolved.
-const schedulingCallbackExtraction = { scheduling: { callback_window_start: '14:00', callback_window_end: null } };
+// Reaching reviseDispositionAfterAppliedMove at all already means the move
+// applied — which requires agent_committed_booking === true and a
+// confirmed_start_at on the SAME extraction, so the reschedule's timing was
+// settled on the call itself. This is the "clean" extraction for that case:
+// no scheduling.callback_window_* left standing (nothing left to call back
+// and confirm about).
+const resolvedRescheduleExtraction = { scheduling: { agent_committed_booking: true, confirmed_start_at: '2026-09-24T14:00:00-04:00' } };
 
 // A minimal call_log + call_commitments store, and a compare-and-swap-aware
 // knex mock: `first()`/`update()` only match (and `update()` only lands)
@@ -56,19 +58,19 @@ function mockStore({ callLog, commitments = [] }) {
     if (table === 'call_commitments') {
       const where = {};
       const inFilters = {};
+      const matching = () => commitments.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)
+        && Object.entries(inFilters).every(([k, vals]) => vals.includes(r[k])));
+      const project = (rows, cols) => rows.map((r) => {
+        const wanted = cols.length ? cols : Object.keys(r);
+        const out = {};
+        wanted.forEach((c) => { out[c] = r[c]; });
+        return out;
+      });
       const builder = {
         where(cond) { Object.assign(where, cond); return builder; },
         whereIn(col, vals) { inFilters[col] = vals; return builder; },
-        select(...cols) {
-          const rows = commitments.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)
-            && Object.entries(inFilters).every(([k, vals]) => vals.includes(r[k])));
-          return Promise.resolve(rows.map((r) => {
-            const wanted = cols.length ? cols : Object.keys(r);
-            const out = {};
-            wanted.forEach((c) => { out[c] = r[c]; });
-            return out;
-          }));
-        },
+        select(...cols) { return Promise.resolve(project(matching(), cols)); },
+        first(...cols) { return Promise.resolve(project(matching(), cols)[0] || null); },
       };
       return builder;
     }
@@ -99,9 +101,9 @@ function mockStore({ callLog, commitments = [] }) {
 describe('reviseDispositionAfterAppliedMove', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('an applied move revises callback_task_created -> existing_customer_routed when the callback was the reschedule ask', async () => {
+  test('an applied move revises callback_task_created -> existing_customer_routed when nothing else grounds it', async () => {
     const { store } = mockStore({
-      callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction },
+      callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
     });
     await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_cb' });
     expect(store.disposition).toBe('existing_customer_routed');
@@ -114,7 +116,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
   });
 
   test('a skipped move leaves the disposition untouched', async () => {
-    const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction } });
+    const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
     await applyRescheduleFollowUps({
       call: { id: CALL_ID },
       callSid: 'CA_skip',
@@ -132,7 +134,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
   });
 
   test('a human retag landing between the read and the write wins (compare-and-swap)', async () => {
-    const { store, setRace } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction } });
+    const { store, setRace } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
     // Simulate PUT /calls/:id/disposition committing between this function's
     // read of the live value and its own conditional update.
     setRace(() => { store.disposition = 'existing_complaint'; });
@@ -141,7 +143,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
   });
 
   test('applyRescheduleFollowUps revises disposition only on an applied outcome', async () => {
-    const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction } });
+    const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
     await applyRescheduleFollowUps({
       call: { id: CALL_ID },
       callSid: 'CA_applied',
@@ -150,35 +152,49 @@ describe('reviseDispositionAfterAppliedMove', () => {
     expect(store.disposition).toBe('existing_customer_routed');
   });
 
-  describe('independent callback obligations (Codex #4721 r1 P2)', () => {
-    test('an open commitment grounded outside /scheduling/ preserves callback_task_created', async () => {
+  describe('independent callback obligations (Codex #4721 r1 P2 / r2 P1)', () => {
+    test('scheduling.callback_window_start still set alongside the committed booking preserves the disposition', async () => {
       const { store } = mockStore({
-        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction },
-        commitments: [{
-          id: 'commit-billing-1',
-          call_log_id: CALL_ID,
-          kind: 'callback',
-          status: 'open',
-          // A free-form model-pass row about the billing question, not the
-          // scheduling ask the move just resolved.
-          evidence: [{ quote: 'someone will call you about your last invoice', speaker: 'agent' }],
-        }],
+        callLog: {
+          disposition: 'callback_task_created',
+          v2_extraction_status: 'valid',
+          // agent_committed_booking + confirmed_start_at settled the move,
+          // but a callback window is STILL set — a scheduling field path or
+          // callback window alone does not prove it was superseded by this
+          // move (Codex r2 P1); a standing window names something else.
+          ai_extraction_enriched: { scheduling: { ...resolvedRescheduleExtraction.scheduling, callback_window_start: '14:00' } },
+        },
       });
-      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_multi_intent' });
+      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_window' });
       expect(store.disposition).toBe('callback_task_created');
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Leaving callback_task_created standing'));
     });
 
-    test('a call_back commitment grounded outside /scheduling/ also preserves the disposition', async () => {
+    test('scheduling.callback_window_end alone also preserves the disposition', async () => {
       const { store } = mockStore({
-        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction },
-        commitments: [{
-          id: 'commit-customer-1',
-          call_log_id: CALL_ID,
-          kind: 'call_back',
-          status: 'open',
-          evidence: [{ quote: 'I will call you back with my insurance info', speaker: 'caller' }],
-        }],
+        callLog: {
+          disposition: 'callback_task_created',
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: { scheduling: { ...resolvedRescheduleExtraction.scheduling, callback_window_end: '16:00' } },
+        },
+      });
+      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_window_end' });
+      expect(store.disposition).toBe('callback_task_created');
+    });
+
+    test('an open waves:callback commitment preserves the disposition even with no callback window', async () => {
+      const { store } = mockStore({
+        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
+        commitments: [{ id: 'commit-billing-1', call_log_id: CALL_ID, party: 'waves', kind: 'callback', status: 'open' }],
+      });
+      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_multi_intent' });
+      expect(store.disposition).toBe('callback_task_created');
+    });
+
+    test('an open customer call_back commitment also preserves the disposition', async () => {
+      const { store } = mockStore({
+        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
+        commitments: [{ id: 'commit-customer-1', call_log_id: CALL_ID, party: 'customer', kind: 'call_back', status: 'open' }],
       });
       await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_call_back' });
       expect(store.disposition).toBe('callback_task_created');
@@ -186,40 +202,20 @@ describe('reviseDispositionAfterAppliedMove', () => {
 
     test('a dismissed/fulfilled commitment (not open) does not block the revision', async () => {
       const { store } = mockStore({
-        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction },
-        commitments: [{
-          id: 'commit-old-1',
-          call_log_id: CALL_ID,
-          kind: 'callback',
-          status: 'fulfilled',
-          evidence: [{ quote: 'call about the billing question', speaker: 'agent' }],
-        }],
+        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
+        commitments: [{ id: 'commit-old-1', call_log_id: CALL_ID, party: 'waves', kind: 'callback', status: 'fulfilled' }],
       });
       await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_fulfilled' });
       expect(store.disposition).toBe('existing_customer_routed');
     });
 
-    test('an open commitment grounded in /scheduling/ evidence does not block the revision', async () => {
+    test('a commitment for a DIFFERENT call is never consulted', async () => {
       const { store } = mockStore({
-        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction },
-        commitments: [{
-          id: 'commit-sched-1',
-          call_log_id: CALL_ID,
-          kind: 'callback',
-          status: 'open',
-          evidence: [{ quote: 'call me back at two', speaker: 'caller', field_path: '/scheduling/callback_window_start' }],
-        }],
+        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
+        commitments: [{ id: 'commit-other-call', call_log_id: 'a0000000-0000-4000-8000-000000000099', party: 'waves', kind: 'callback', status: 'open' }],
       });
-      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_sched_grounded' });
+      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_other_call' });
       expect(store.disposition).toBe('existing_customer_routed');
-    });
-
-    test('no commitment row and no scheduling.callback_window_* on the live extraction preserves the disposition', async () => {
-      const { store } = mockStore({
-        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: { scheduling: {} } },
-      });
-      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_no_window' });
-      expect(store.disposition).toBe('callback_task_created');
     });
   });
 
@@ -230,7 +226,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
           disposition: 'complaint_escalated', // whatever the NEWER pass decided for itself
           processing_generation: 5,
           v2_extraction_status: 'valid',
-          ai_extraction_enriched: schedulingCallbackExtraction,
+          ai_extraction_enriched: resolvedRescheduleExtraction,
         },
       });
       await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_stale', procGeneration: 3 });
@@ -243,7 +239,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
           disposition: 'callback_task_created',
           processing_generation: 5,
           v2_extraction_status: 'valid',
-          ai_extraction_enriched: schedulingCallbackExtraction,
+          ai_extraction_enriched: resolvedRescheduleExtraction,
         },
       });
       await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_current', procGeneration: 5 });
@@ -253,7 +249,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
 
   describe('already_applied retry durability (Codex #4721 r1 P2)', () => {
     test('a retry that only sees already_applied still revises the disposition', async () => {
-      const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction } });
+      const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
       await applyRescheduleFollowUps({
         call: { id: CALL_ID },
         callSid: 'CA_retry',
@@ -263,7 +259,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
     });
 
     test('an already_applied retry does not re-run the fulfillment refresh', async () => {
-      const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction } });
+      const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
       await applyRescheduleFollowUps({
         call: { id: CALL_ID },
         callSid: 'CA_retry_no_refresh',
@@ -274,7 +270,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
     });
 
     test('a skip for any other reason still does not revise', async () => {
-      const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: schedulingCallbackExtraction } });
+      const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
       await applyRescheduleFollowUps({
         call: { id: CALL_ID },
         callSid: 'CA_other_skip',

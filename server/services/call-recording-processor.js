@@ -6741,40 +6741,34 @@ const STALE_AFTER_APPLIED_MOVE = new Set(['callback_task_created', 'cancellation
 // can still deserve after the move landed: the model's recommendation is a
 // single field for the WHOLE call, so "move the visit AND have the owner
 // call about billing" recommends callback_task_created for a reason that
-// has nothing to do with the reschedule (Codex #4721 r1 P2). Two signals
-// say the callback obligation IS the reschedule ask itself, not a separate
-// one: the call_commitments 'waves:callback' row (at most one — kind
-// 'callback' is not in REPEATABLE_KINDS) is seeded ONLY from
-// scheduling.callback_window_* evidence or the bare recommended_disposition
-// flag (deriveCommitmentsFromExtraction), so a row grounded in ANY OTHER
-// field path came from the free-form model pass finding something the
-// deterministic seed didn't — an independent ask; and a live extraction
-// with no scheduling.callback_window_* at all means callback_task_created,
-// if still set, was never keyed to the scheduling ask in the first place.
-// A customer-side 'call_back' row is checked too, per the same evidence
-// rule — belt-and-suspenders for a promise this disposition doesn't
-// normally represent. Fails safe: any ambiguity leaves the disposition
-// standing rather than risk burying a real, separate obligation.
+// has nothing to do with the reschedule (Codex #4721 r1 P2). Revising it
+// away needs POSITIVE evidence the callback obligation IS the resolved
+// reschedule — a scheduling field path or a bare callback window is NOT
+// that evidence on its own (Codex #4721 r2 P1): reaching this function at
+// all already means the move applied, which requires the SAME extraction
+// to have carried agent_committed_booking === true and a confirmed_start_at
+// — the reschedule's timing was settled ON THE CALL. There is nothing left
+// to call back and confirm about it. So a STILL-standing need to call the
+// customer — scheduling.callback_window_start/end still set on that same
+// extraction, or an open call_commitments row of kind callback/call_back
+// (at most one 'waves:callback' row can exist — that key is not in
+// REPEATABLE_KINDS, so it is never split across two rows) — names
+// something ELSE, not this move. Only when NEITHER signal is present —
+// the disposition rests on the model's bare recommended_disposition alone,
+// nothing grounding it — is callback_task_created safe to read as a stale
+// intermediate judgment the later explicit commitment superseded. Fails
+// safe: any sign of a standing need leaves the disposition alone.
 async function hasIndependentCallbackObligation(callId, v2) {
-  const rows = await db('call_commitments')
+  const schedulingCallbackWindow = v2?.scheduling?.callback_window_start || v2?.scheduling?.callback_window_end || null;
+  if (schedulingCallbackWindow) {
+    return { independent: true, reason: 'scheduling.callback_window_* still set alongside the committed booking' };
+  }
+  const openCallbackRow = await db('call_commitments')
     .where({ call_log_id: callId, status: 'open' })
     .whereIn('kind', ['callback', 'call_back'])
-    .select('id', 'evidence');
-  const evidenceOf = (row) => {
-    if (Array.isArray(row.evidence)) return row.evidence;
-    try { return JSON.parse(row.evidence || '[]'); } catch { return []; }
-  };
-  for (const row of rows) {
-    const evidence = evidenceOf(row);
-    const groundedInScheduling = evidence.length > 0
-      && evidence.every((e) => String(e?.field_path || '').startsWith('/scheduling/'));
-    if (!groundedInScheduling) {
-      return { independent: true, reason: `open commitment ${row.id} not grounded in the scheduling ask` };
-    }
-  }
-  const schedulingCallbackWindow = v2?.scheduling?.callback_window_start || v2?.scheduling?.callback_window_end || null;
-  if (!schedulingCallbackWindow) {
-    return { independent: true, reason: 'no scheduling.callback_window_* on the live extraction' };
+    .first('id');
+  if (openCallbackRow) {
+    return { independent: true, reason: `open commitment ${openCallbackRow.id} still outstanding` };
   }
   return { independent: false, reason: null };
 }
