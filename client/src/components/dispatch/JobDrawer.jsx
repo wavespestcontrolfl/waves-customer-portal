@@ -49,6 +49,7 @@ import {
   cn,
 } from '../ui';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
+import { TECH_ABSENCE_EVENT } from '../../hooks/useDispatchBoard';
 import VisualNotesReviewSection from './VisualNotesReviewSection';
 // Pure display helpers shared with the tech Visit Brief (style-free by
 // design) — the drawer renders the same estimate-source lines and brief
@@ -216,6 +217,9 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
   // until the list lands.
   const [availableTechs, setAvailableTechs] = useState([]);
   const fetchedTechsForDateRef = useRef(null);
+  // Bumped when an absence changes for the open job's date so the
+  // date-keyed roster refetches (a tech marked out / back on that date).
+  const [rosterEpoch, setRosterEpoch] = useState(0);
   // Pending-but-unsaved assignment selection. null means "Unassigned",
   // a UUID string means a specific tech. We track this separately so
   // the user can change the dropdown and click Save (rather than
@@ -369,6 +373,21 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
       }
     })();
     return () => { cancelled = true; };
+  }, [job?.scheduled_date, rosterEpoch]);
+
+  // useDispatchBoard relays every dispatch:tech_absence broadcast (this tab's
+  // own mark-out included) as TECH_ABSENCE_EVENT. An absence on the open
+  // job's date invalidates the cached roster; the effect above refetches.
+  useEffect(() => {
+    const jobDate = job?.scheduled_date ? String(job.scheduled_date).slice(0, 10) : null;
+    function onAbsenceChange(event) {
+      const changedDate = event?.detail?.date ? String(event.detail.date).slice(0, 10) : null;
+      if (!jobDate || (changedDate && changedDate !== jobDate)) return;
+      fetchedTechsForDateRef.current = null;
+      setRosterEpoch((n) => n + 1);
+    }
+    window.addEventListener(TECH_ABSENCE_EVENT, onAbsenceChange);
+    return () => window.removeEventListener(TECH_ABSENCE_EVENT, onAbsenceChange);
   }, [job?.scheduled_date]);
 
   const handleAssign = useCallback(async () => {

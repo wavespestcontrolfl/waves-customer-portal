@@ -25,6 +25,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge, Button, Card, Select, Textarea } from '../ui';
 import { etDateString } from '../../lib/timezone';
 import { TECH_ABSENCE_EVENT } from '../../hooks/useDispatchBoard';
+import { TECH_OUT_ALERTS_EVENT } from '../../hooks/useDispatchAlerts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -161,6 +162,38 @@ export default function TechOutSection({ techId, techName, onChanged }) {
     window.addEventListener(TECH_ABSENCE_EVENT, onRemoteAbsenceChange);
     return () => window.removeEventListener(TECH_ABSENCE_EVENT, onRemoteAbsenceChange);
   }, [fetchStatus]);
+
+  // An overflow card for THIS technician appeared, changed or resolved
+  // (another dispatcher moved or dismissed it): refresh ONLY the live parked
+  // count. Deliberately not fetchStatus — that advances fetchSeqRef, which
+  // the mark-out / clear / auto-assign handlers read as "superseded", and
+  // those very actions broadcast cards mid-request. Merged only into the
+  // same absence, under its own sequence, so a late read never regresses.
+  const countSeqRef = useRef(0);
+  useEffect(() => {
+    async function onTechOutAlertsChange(event) {
+      const changedTechId = event?.detail?.tech_id;
+      if (!changedTechId || changedTechId !== techIdRef.current) return;
+      const seq = ++countSeqRef.current;
+      try {
+        const res = await fetch(`${API_BASE}/admin/tech-out/${changedTechId}?date=${etDateString()}`, {
+          headers: adminAuthHeaders(),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (countSeqRef.current !== seq || techIdRef.current !== changedTechId) return;
+        const fresh = data?.absence;
+        if (!fresh || fresh.parked_open_count == null) return;
+        setAbsence((prev) => (prev && prev.id === fresh.id
+          ? { ...prev, parked_open_count: fresh.parked_open_count }
+          : prev));
+      } catch {
+        /* best-effort; the next status read catches up */
+      }
+    }
+    window.addEventListener(TECH_OUT_ALERTS_EVENT, onTechOutAlertsChange);
+    return () => window.removeEventListener(TECH_OUT_ALERTS_EVENT, onTechOutAlertsChange);
+  }, []);
 
   async function handleConfirmMarkOut() {
     if (submitting) return;

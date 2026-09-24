@@ -371,6 +371,34 @@ describe('selection matches the commit policy', () => {
   });
 });
 
+describe('in-transaction fit recheck (moveGuard)', () => {
+  async function capturedMoveGuard() {
+    SmartRebooker.reschedule.mockResolvedValue({ success: true });
+    const queue = [query(baseAlert()), query(baseStop()), query([]), query([CANDIDATE]), query([]), query([])];
+    db.mockImplementation(() => queue.shift());
+    await autoAssignParkedAlert({ alertId: ALERT_ID });
+    return SmartRebooker.reschedule.mock.calls[0][5].moveGuard;
+  }
+
+  test('an assignment that landed on the candidate after ranking refuses the move on the move transaction', async () => {
+    const guard = await capturedMoveGuard();
+    const trxRows = [query([{ window_start: '10:00', window_end: '11:30' }]), query([])];
+    const trx = jest.fn(() => trxRows.shift());
+
+    await expect(guard({ trx, technicianId: CANDIDATE.id, service: baseStop() }))
+      .rejects.toMatchObject({ code: 'TECH_OUT_AUTO_MOVE_NO_FIT' });
+    expect(trx).toHaveBeenCalledWith('scheduled_services');
+  });
+
+  test('candidate still fits on the move transaction: the move proceeds', async () => {
+    const guard = await capturedMoveGuard();
+    const trxRows = [query([]), query([])];
+    const trx = jest.fn(() => trxRows.shift());
+
+    await expect(guard({ trx, technicianId: CANDIDATE.id, service: baseStop() })).resolves.toBeUndefined();
+  });
+});
+
 describe('in-transaction still-parked recheck (beforeMove)', () => {
   async function capturedGuard() {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });

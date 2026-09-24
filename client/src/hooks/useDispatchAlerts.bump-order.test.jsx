@@ -38,4 +38,10 @@ describe('mergeAlertBroadcast', () => {
     expect(next[0].customer_name).toBe('Pat');
     expect(next[0].payload.auto_attempt.reason).toBe('window_occupied');
   });
+
+  it('never resurrects a card this board saw resolve, nor adds a resolved row', () => {
+    const prev = [{ id: 'b' }];
+    expect(mergeAlertBroadcast(prev, { id: 'a', payload: {} }, new Set(['a']))).toBe(prev);
+    expect(mergeAlertBroadcast(prev, { id: 'c', resolved_at: '2026-09-24T12:00:00Z' })).toBe(prev);
+  });
 });

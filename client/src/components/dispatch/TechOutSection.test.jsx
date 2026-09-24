@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TechOutSection from './TechOutSection';
 import { TECH_ABSENCE_EVENT } from '../../hooks/useDispatchBoard';
+import { TECH_OUT_ALERTS_EVENT } from '../../hooks/useDispatchAlerts';
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn());
@@ -434,6 +435,46 @@ describe('auto-assign parked stops (GATE_TECH_OUT_AUTO_MOVE)', () => {
     expect(postCall[0]).toBe('/api/admin/tech-out/tech-1/auto-assign');
     expect(postCall[1].method).toBe('POST');
     expect(JSON.parse(postCall[1].body)).toEqual({ date: expect.any(String) });
+  });
+
+  it('another dispatcher resolving an overflow card refreshes the parked count; other techs are ignored', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    expect(await screen.findByText('2 stops parked in the Action Queue — decide who to move')).toBeInTheDocument();
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(TECH_OUT_ALERTS_EVENT, { detail: { tech_id: 'tech-9' } }));
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence({ parked_open_count: 1 }), auto_move_enabled: true }) });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(TECH_OUT_ALERTS_EVENT, { detail: { tech_id: 'tech-1' } }));
+    });
+    expect(await screen.findByText('1 stop parked in the Action Queue — decide who to move')).toBeInTheDocument();
+  });
+
+  it('a count refresh landing mid-auto-assign does not discard the run\'s own result', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Out today · Emergency');
+
+    let releasePost;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { releasePost = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-assign parked stops' }));
+    await screen.findByRole('button', { name: 'Assigning…' });
+
+    // The run's own annotation / resolution broadcasts arrive mid-request.
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence({ parked_open_count: 1 }), auto_move_enabled: true }) });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(TECH_OUT_ALERTS_EVENT, { detail: { tech_id: 'tech-1' } }));
+    });
+
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence({ parked_open_count: 1 }), auto_move_enabled: true }) });
+    await act(async () => {
+      releasePost({ ok: true, json: async () => ({ moved: [{ alert_id: 'a1' }], left_parked: [{ alert_id: 'a2', reason: 'window_occupied' }] }) });
+    });
+    expect(await screen.findByText('Moved 1, left 1 parked for a decision.')).toBeInTheDocument();
   });
 
   it('shows an inline error on failure and re-enables the button', async () => {

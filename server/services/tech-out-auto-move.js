@@ -73,8 +73,8 @@ function minutesToTime(minutes) {
 }
 
 /** A non-available tech_schedule_blocks row (this tech's, or crew-wide) overlapping the window. */
-async function blockedBySchedule(techId, date, startMin, endMin) {
-  const blocks = await db('tech_schedule_blocks')
+async function blockedBySchedule(techId, date, startMin, endMin, conn = db) {
+  const blocks = await conn('tech_schedule_blocks')
     .where({ date })
     .whereNot('block_type', 'available')
     .where((q) => q.where('technician_id', techId).orWhereNull('technician_id'))
@@ -98,7 +98,7 @@ async function blockedBySchedule(techId, date, startMin, endMin) {
  * the commit, never looser, so a certified candidate is not refused for a
  * reason selection skipped.
  */
-async function fitsWindow(stop, tech, date) {
+async function fitsWindow(stop, tech, date, conn = db) {
   if (!stop.window_start) return { fits: false, conflict_reason: 'no_window' };
   const windowStart = stop.window_start;
   const durationMinutes = Number(stop.estimated_duration_minutes) || 60;
@@ -108,7 +108,7 @@ async function fitsWindow(stop, tech, date) {
 
   if (arrivalWindowRoutingEnabled()) {
     const fit = await checkArrivalPlacement({
-      conn: db,
+      conn,
       serviceId: stop.id,
       date,
       technicianId: tech.id,
@@ -122,7 +122,7 @@ async function fitsWindow(stop, tech, date) {
     });
     if (!fit.feasible) return { fits: false, conflict_reason: fit.reason };
   } else {
-    const others = await db('scheduled_services')
+    const others = await conn('scheduled_services')
       .where({ scheduled_date: date, technician_id: tech.id })
       .whereNot('id', stop.id)
       .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
@@ -139,7 +139,7 @@ async function fitsWindow(stop, tech, date) {
     if (conflict) return { fits: false, conflict_reason: 'overlap' };
   }
 
-  return (await blockedBySchedule(tech.id, date, startMin, endMin))
+  return (await blockedBySchedule(tech.id, date, startMin, endMin, conn))
     ? { fits: false, conflict_reason: 'schedule_block' }
     : { fits: true };
 }
@@ -248,13 +248,28 @@ async function annotateAttempt(alertId, reason) {
   }
 }
 
-/** The receiving technician's capability guard, re-checked atomically inside the mover's own transaction. */
-function makeCapabilityGuard() {
+const NO_FIT = 'TECH_OUT_AUTO_MOVE_NO_FIT';
+
+/**
+ * The receiving technician, re-checked inside the mover's own transaction
+ * (moveGuard runs after its destination tech-day fence): capabilities, then
+ * the same per-tech fit ranking used — arrival placement or plain overlap,
+ * plus schedule blocks. An assignment that landed on that technician after
+ * ranking (the fence made us wait for it) is seen here, so the rebooker's
+ * tech-blind probe is never the only commit-time check of this route.
+ */
+function makeMoveGuard(stop, date) {
   return async ({ trx, technicianId, service }) => {
     await assertCapabilitiesActive(trx, technicianId, [service], (rowId, why) => Object.assign(
       new Error(`Cannot auto-move stop ${rowId}: ${why}`),
       { statusCode: 409, status: 409, code: 'TECH_OUT_AUTO_MOVE_CAPABILITY_GUARD', isOperational: true },
     ));
+    const fit = await fitsWindow(stop, { id: technicianId }, date, trx);
+    if (!fit.fits) {
+      throw Object.assign(new Error(`Technician no longer fits this window (${fit.conflict_reason})`), {
+        statusCode: 409, status: 409, code: NO_FIT, isOperational: true,
+      });
+    }
   };
 }
 
@@ -447,6 +462,7 @@ function refusalReason(lastErr) {
   // manual-decision rule as the up-front visit_id check.
   if (lastErr.code === 'VISIT_MEMBERSHIP_CHANGED') return 'grouped_visit_manual';
   if (lastErr.code === EXCLUSION_STALE) return 'schedule_changed';
+  if (lastErr.code === NO_FIT) return 'no_eligible_candidate';
   return `move_failed: ${lastErr.message}`;
 }
 
@@ -492,7 +508,7 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
             // on_property after that read misses this CAS (409), never moves.
             track_state: stop.track_state ?? null,
           },
-          moveGuard: makeCapabilityGuard(),
+          moveGuard: makeMoveGuard(stop, date),
           beforeMove: makeStillParkedGuard({
             alertId, absentTechId, date, stopId: stop.id, excludeServiceIds, toTechId: candidate.tech.id, actorId,
           }),

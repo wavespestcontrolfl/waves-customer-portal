@@ -28,7 +28,7 @@
  * socket connection routes through the same socketAuth middleware
  * (PR #279/#284) and joins dispatch:admins automatically.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -56,10 +56,24 @@ function socketOrigin() {
 
 // Same-timestamp tie-break (one tech-out batch): lower bump_order first;
 // rows without one keep their relative order.
+// Window event the tech-out drawer listens to: an overflow card for
+// detail.tech_id appeared, changed, or resolved (any dispatcher).
+export const TECH_OUT_ALERTS_EVENT = 'waves:tech-out-alerts-changed';
+const TECH_OUT_ALERT_TYPE = 'tech_out_overflow';
+
+function relayTechOutAlertChange(alert) {
+  if (!alert || alert.type !== TECH_OUT_ALERT_TYPE) return;
+  try { window.dispatchEvent(new CustomEvent(TECH_OUT_ALERTS_EVENT, { detail: { tech_id: alert.tech_id } })); } catch { /* non-DOM env */ }
+}
+
 // dispatch:alert for an unknown id prepends a new card; for a card already on
 // screen it is an update, merged over the existing card so hydrated join
 // fields (customer / tech names) survive.
-export function mergeAlertBroadcast(prev, payload) {
+// A broadcast for an id this board already saw resolve (or a row that is
+// itself resolved) is stale — e.g. an auto-move annotation delivered after a
+// concurrent dispatcher resolve — and must never resurrect a phantom card.
+export function mergeAlertBroadcast(prev, payload, resolvedIds = null) {
+  if (payload.resolved_at || (resolvedIds && resolvedIds.has(payload.id))) return prev;
   if (!prev.some((a) => a.id === payload.id)) return [payload, ...prev];
   return prev.map((a) => (a.id === payload.id ? { ...a, ...payload } : a));
 }
@@ -75,6 +89,11 @@ export function bumpOrderTieBreak(a, b) {
 
 export function useDispatchAlerts() {
   const [alerts, setAlerts] = useState([]);
+  // Mirror for socket handlers (type / tech_id of a card being resolved —
+  // the resolved broadcast carries only the id) and the ids seen resolving.
+  const alertsRef = useRef(alerts);
+  alertsRef.current = alerts;
+  const resolvedIdsRef = useRef(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -141,7 +160,9 @@ export function useDispatchAlerts() {
       // payload.auto_attempt): merge it over the existing card so hydrated
       // join fields (customer/tech names) survive — which also dedupes a
       // hydration response racing the create broadcast for the same row.
-      setAlerts((prev) => mergeAlertBroadcast(prev, payload));
+      if (payload.resolved_at || resolvedIdsRef.current.has(payload.id)) return;
+      setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
+      relayTechOutAlertChange(payload);
     }
 
     function handleResolved(payload) {
@@ -149,7 +170,10 @@ export function useDispatchAlerts() {
       // Drop the resolved alert by id. The PATCH caller already did
       // the same removal optimistically, so this is a no-op for that
       // session and the actual drop for every other dispatcher.
+      const known = alertsRef.current.find((a) => a.id === payload.id);
+      resolvedIdsRef.current.add(payload.id);
       setAlerts((prev) => prev.filter((a) => a.id !== payload.id));
+      relayTechOutAlertChange(known);
     }
 
     socket.on('dispatch:alert', handleAlert);
