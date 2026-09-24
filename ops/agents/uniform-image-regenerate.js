@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * uniform-image-regenerate.js — regenerate ONLY the blog images that
+ * uniform-image-regenerate.js — MUTATES (the astro worktree it is pointed at; nothing in
+ * this repo and nothing in prod). Regenerates ONLY the blog images that
  * uniform-image-audit.js flagged (a technician out of uniform), through the
  * publisher's own generatePlannedImage path (same plan/style/setting per
  * slug+slot, now with WAVES_UNIFORM_LINE in the prompt), compress to webp, and
@@ -22,7 +23,12 @@ const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] :
 const REPORT = opt('--report'); const ASTRO = opt('--astro'); const ONLY = opt('--only', null);
 const LIVE = args.includes('--live');
 if (!REPORT || !ASTRO) { console.error('usage: --report <audit.json> --astro <astro worktree> [--only <file>] [--live]'); process.exit(1); }
-if (!fs.existsSync(path.join(ASTRO, '.git'))) { console.error(`${ASTRO} is not a git worktree/checkout`); process.exit(1); }
+// A linked worktree's `.git` is a FILE (`gitdir: .../worktrees/<name>`); the main
+// checkout's is a directory. Refuse the main checkout — another session may have
+// it on its own branch with staged work, and a --live run would write into it.
+const dotGit = path.join(ASTRO, '.git');
+const isLinkedWorktree = fs.existsSync(dotGit) && fs.statSync(dotGit).isFile() && /^gitdir:.*[\/]worktrees[\/]/m.test(fs.readFileSync(dotGit, 'utf8'));
+if (!isLinkedWorktree) { console.error(`${ASTRO} is not a linked git worktree (a .git FILE pointing into .../worktrees/) — refusing to write into a main checkout`); process.exit(1); }
 
 const HERO_WIDTH = 1600; const BODY_WIDTH = 1200; const EST_COST = 0.17;
 
@@ -44,7 +50,17 @@ function frontmatter(text) {
   const m = text.match(/^---\n([\s\S]*?)\n---/); const fm = {};
   if (!m) return fm;
   for (const line of m[1].split('\n')) { const k = line.match(/^([a-z_]+):\s*(.*)$/i); if (k) fm[k[1]] = k[2].replace(/^['"]|['"]$/g, ''); }
+  // hero alt is nested: hero_image:\n  src: ...\n  alt: ...
+  const alt = m[1].match(/^hero_image:\n(?:[ \t]+\w+:.*\n)*?[ \t]+alt:[ \t]*(.*)$/m);
+  if (alt) fm.hero_image_alt = alt[1].trim().replace(/^['"]|['"]$/g, '');
   return fm;
+}
+// Astro rule: bump the lastmod field on any content edit (sitemap lastmod).
+function bumpModified(text) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (/^updated:.*$/m.test(text)) return text.replace(/^updated:.*$/m, `updated: "${today}"`);
+  if (/^modified:.*$/m.test(text)) return text.replace(/^modified:.*$/m, `modified: "${today}"`);
+  return text;
 }
 // The H2 heading + first prose paragraph of the section that holds the image.
 function sectionFor(text, imagePath) {
@@ -109,12 +125,13 @@ function cityFrom(fm) {
       if (alt) {
         let text = fs.readFileSync(p.postFile.startsWith('/') ? p.postFile : path.join(ASTRO, p.postFile), 'utf8');
         if (p.kind === 'hero') {
-          if (/^hero_image_alt:.*$/m.test(text)) text = text.replace(/^hero_image_alt:.*$/m, `hero_image_alt: ${JSON.stringify(alt)}`);
+          // nested hero_image.alt — replace only the alt line inside that block
+          text = text.replace(/^(hero_image:\n(?:[ \t]+\w+:.*\n)*?[ \t]+alt:[ \t]*).*$/m, (_, head) => `${head}${JSON.stringify(alt)}`);
         } else {
           const re = new RegExp(`!\\[[^\\]]*\\]\\(${p.imagePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`);
           text = text.replace(re, `![${alt.replace(/\]/g, '')}](${p.imagePath})`);
         }
-        fs.writeFileSync(path.join(ASTRO, p.postFile), text);
+        fs.writeFileSync(path.join(ASTRO, p.postFile), bumpModified(text));
       }
       done++; results.push({ t: p.t, ok: true, model: gen.model, style: gen.plan.style, screen: gen.screen && gen.screen.ok, alt });
       console.log(`  ✓ ${p.t} via ${gen.model} (${gen.plan.style}) — alt: ${alt ? alt.slice(0, 80) : '(kept)'}`);
