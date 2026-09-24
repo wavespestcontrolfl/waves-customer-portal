@@ -8,7 +8,8 @@ function exactPassage(document, title, passage) {
 }
 
 function uniqueCoverage(items, key, expected) {
-  if (!Array.isArray(items) || items.length !== expected.length) return false;
+  if (!Array.isArray(items) || items.length !== expected.length
+    || items.some((item) => !['pass', 'fail'].includes(item?.status))) return false;
   const got = items.map((item) => item && item[key]);
   return new Set(got).size === got.length && expected.every((id) => got.includes(id));
 }
@@ -135,4 +136,3 @@ function validatePlanJson(json, sections) {
 }
 
 module.exports = { validatePlanJson, validateReviewJson };
-
