@@ -178,9 +178,8 @@ function calculatePestPressureScore(input, config) {
   // tap IS the report score — not one of five blended components. Callers
   // (orchestrate.js) pass this as a separate pure-engine input so the
   // blended path below stays untouched for customer-submitted ratings.
-  // Component breakdown/weights are still computed from the ordinary
-  // inputs so admins retain the audit view; only score/label/trend are
-  // overridden to the direct value.
+  // Its audit is the tap itself (one technicianActivityRating component at
+  // 100%, calculation_version 'direct-1.0') — see `audit` below.
   if (
     input.technicianDirectRating !== null
     && input.technicianDirectRating !== undefined
@@ -249,10 +248,8 @@ function calculatePestPressureScore(input, config) {
 
   // Owner ruling 2026-09-24: the technician's direct tap IS the score,
   // exactly (5 → 5.0), never blended with clientRating/technicianRating/
-  // reServiceImpact/riskFactor. The component breakdown above still
-  // reflects the ordinary inputs for the admin audit view; `scoreSource`
-  // flags that score/label/trend below came from the direct tap rather
-  // than the blend.
+  // reServiceImpact/riskFactor. `scoreSource` flags that score/label/trend
+  // below came from the direct tap rather than the blend.
   const score = hasTechnicianDirectRating
     ? roundToOneDecimal(clamp(input.technicianDirectRating, 0, 5))
     : blendedScore;
