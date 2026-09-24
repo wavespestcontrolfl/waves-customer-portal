@@ -117,13 +117,14 @@ function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniform
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
   const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
   const shape = allowUniformLogo
-    ? '{"readable_text": string[], "logos_or_brand_marks": string[], "waves_logo_placements": string[], "uniform_logo_lettering": string[], "technician_visible": boolean, "forbidden_scenes": number[], "notes": string}'
+    ? '{"readable_text": string[], "logos_or_brand_marks": string[], "waves_logo_placements": string[], "uniform_logo_lettering": string[], "cap_front_visible": boolean, "chest_visible": boolean, "forbidden_scenes": number[], "notes": string}'
     : '{"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": number[], "notes": string}';
   const uniformLogoRule = allowUniformLogo
     ? `
 - waves_logo_placements: every place ${UNIFORM_LOGO_DESCRIPTION} appears, each as one of exactly "cap", "right chest" (the wearer's right side, i.e. the side of their right arm), "left chest", or "elsewhere: <where>" (a vehicle, wall, sign, equipment, packaging, floating on its own). Empty array if it appears nowhere.
 - uniform_logo_lettering: the lettering you can read INSIDE that Waves logo on the technician's cap or chest ("WAVES", "LAWN & PEST"), listed here and NOT under readable_text. Empty array if none is legible.
-- technician_visible: true if a uniformed technician's cap front or shirt chest is in frame and can be judged.
+- cap_front_visible: true only if a uniformed technician's cap FRONT is in frame and legible enough to judge for a logo (false when the head is cropped, from behind, or too small).
+- chest_visible: true only if that technician's shirt chest is in frame and legible enough to judge for a logo (false when turned away, cropped, or covered).
 EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — do not list it under logos_or_brand_marks. Any OTHER lettering (including "WAVES" on a sign, vehicle or wall), and the Waves logo anywhere other than the cap or chest, must still be listed.`
     : '';
   return `Inspect this generated blog image and answer as strict JSON only, shape ${shape}.
@@ -150,13 +151,17 @@ function parseScreen(text, { requireForbidden = false, requirePlacements = false
     if (requireForbidden && !Array.isArray(obj.forbidden_scenes)) return null;
     // With the logo reference the placement list is the verdict: missing or
     // malformed → unusable answer (fail-open as unchecked), never clean.
-    if (requirePlacements && (!Array.isArray(obj.waves_logo_placements) || typeof obj.technician_visible !== 'boolean')) return null;
+    if (requirePlacements && (!Array.isArray(obj.waves_logo_placements) || typeof obj.cap_front_visible !== 'boolean' || typeof obj.chest_visible !== 'boolean')) return null;
     return {
       placements: Array.isArray(obj.waves_logo_placements) ? obj.waves_logo_placements.map((t) => String(t || '').trim()).filter(Boolean) : [],
       // Lettering the model attributes to the uniform logo itself — only the
       // logo's own words count (a model cannot launder arbitrary text here).
       uniformLettering: Array.isArray(obj.uniform_logo_lettering) ? obj.uniform_logo_lettering.map((t) => String(t || '').trim()).filter(Boolean) : [],
-      technicianVisible: obj.technician_visible === true,
+      // Per-garment: each placement is demanded only when ITS garment can
+      // be judged (a profile shot with the chest turned away is not a
+      // missing chest logo — pre-push fallback P1 on f3efa39462).
+      capVisible: obj.cap_front_visible === true,
+      chestVisible: obj.chest_visible === true,
       readableText: obj.readable_text.map((t) => String(t || '').trim()).filter(Boolean),
       logos: obj.logos_or_brand_marks.map((t) => String(t || '').trim()).filter(Boolean),
       // Numbers (the ids the prompt asks for) or strings (a model that quotes
@@ -220,17 +225,15 @@ function classifyPlacement(t) {
   return 'elsewhere';
 }
 // The reasons a uniform-logo image fails on placement alone: the logo must
-// be on the cap AND the right chest whenever a technician's garments can be
-// judged; anywhere else is a brand-mark violation.
-function uniformLogoReasons({ placements, technicianVisible }) {
+// be on the cap when the cap front can be judged, and on the RIGHT chest
+// when the chest can be judged; anywhere else is a brand-mark violation.
+function uniformLogoReasons({ placements, capVisible, chestVisible }) {
   const where = new Set(placements.map(classifyPlacement));
   const reasons = [];
   const elsewhere = placements.filter((t) => classifyPlacement(t) === 'elsewhere');
   if (elsewhere.length) reasons.push(`logo or brand mark: Waves logo ${elsewhere.slice(0, 3).join(', ')}`);
-  if (technicianVisible) {
-    if (!where.has('cap')) reasons.push('uniform logo missing on the cap');
-    if (!where.has('right chest')) reasons.push(where.has('left chest') ? 'uniform logo on the left chest, not the right' : 'uniform logo missing on the chest');
-  }
+  if (capVisible && !where.has('cap')) reasons.push('uniform logo missing on the cap');
+  if (chestVisible && !where.has('right chest')) reasons.push(where.has('left chest') ? 'uniform logo on the left chest, not the right' : 'uniform logo missing on the chest');
   return reasons;
 }
 

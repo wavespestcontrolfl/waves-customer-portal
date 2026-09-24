@@ -95,14 +95,14 @@ describe('sanitizeAlt', () => {
 describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — required on cap + right chest, forbidden elsewhere)', () => {
   const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
   const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
-  const branded = (extra = {}) => answer({ readable_text: [], logos_or_brand_marks: [], waves_logo_placements: ['cap', 'right chest'], technician_visible: true, forbidden_scenes: [], notes: '', ...extra });
+  const branded = (extra = {}) => answer({ readable_text: [], logos_or_brand_marks: [], waves_logo_placements: ['cap', 'right chest'], cap_front_visible: true, chest_visible: true, forbidden_scenes: [], notes: '', ...extra });
   beforeEach(() => mockDispatch.mockReset());
 
   test('the screen prompt asks for placements and names the exception only when the caller allows it', () => {
     const plain = buildScreenPrompt({});
     expect(plain).not.toMatch(/EXCEPTION|waves_logo_placements/);
     const p = buildScreenPrompt({ allowUniformLogo: true });
-    expect(p).toMatch(/"waves_logo_placements": string\[\], "uniform_logo_lettering": string\[\], "technician_visible": boolean/);
+    expect(p).toMatch(/"waves_logo_placements": string\[\], "uniform_logo_lettering": string\[\], "cap_front_visible": boolean, "chest_visible": boolean/);
     expect(p).toMatch(/"right chest" \(the wearer's right side/);
     expect(p).toMatch(/EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected/);
   });
@@ -127,8 +127,17 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
   });
 
   test('no technician garment to judge → no placement demand (a close-up of a bait station is fine)', async () => {
-    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: [], technician_visible: false }));
+    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: [], cap_front_visible: false, chest_visible: false }));
     expect((await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).ok).toBe(true);
+  });
+
+  test('each placement is demanded only for a garment that can be judged: a profile shot with only the cap in frame passes on the cap alone (pre-push P1 on f3efa39462)', async () => {
+    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: ['cap'], cap_front_visible: true, chest_visible: false }));
+    expect((await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).ok).toBe(true);
+    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: ['right chest'], cap_front_visible: false, chest_visible: true }));
+    expect((await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).ok).toBe(true);
+    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: [], cap_front_visible: true, chest_visible: false }));
+    expect((await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).reasons).toEqual(['uniform logo missing on the cap']);
   });
 
   test('the Waves logo anywhere else is still a brand-mark violation, even beside a correct uniform', async () => {
@@ -164,8 +173,10 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect((await screenGeneratedImage({ buffer: PNG_BUFFER })).reasons).toEqual(['readable text: WAVES']);
   });
 
-  test('an answer without the placement list or technician_visible is unusable → unchecked (fail-open), never clean', async () => {
+  test('an answer without the placement list or the per-garment visibility is unusable → unchecked (fail-open), never clean', async () => {
     mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }));
+    expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).toMatchObject({ ok: true, checked: false });
+    mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: [], waves_logo_placements: [], cap_front_visible: true, forbidden_scenes: [], notes: '' }));
     const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
     expect(r).toMatchObject({ ok: true, checked: false });
     // the same answer is a perfectly good verdict without the allowance
