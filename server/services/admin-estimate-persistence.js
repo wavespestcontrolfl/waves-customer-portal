@@ -2214,10 +2214,16 @@ async function createOrReuseAdminEstimate({
           {
             const reuseData = parseStoredEstimateData(writeFields.estimate_data) || {};
             const lockedReuseData = parseStoredEstimateData(existingEstimate.estimate_data) || {};
-            reuseClearedHold = carryAddressBlockAcrossRevise(reuseData, lockedReuseData, {
+            carryAddressBlockAcrossRevise(reuseData, lockedReuseData, {
               addressChanged: premiseChanged(existingEstimate.address, writeFields.address),
               explicitConfirm: body?.confirmAddress === true,
             });
+            // The helper's return also reports a COPIED hold; the lead
+            // reconciliation below is owed only for the prior-true →
+            // next-false transition (pre-push audit P1 after r45).
+            reuseClearedHold = lockedReuseData.addressUnverified === true
+              && reuseData.addressUnverified !== true
+              && !!reuseData.addressUnverifiedClearedBy;
             writeFields.estimate_data = JSON.stringify(reuseData);
           }
           const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };

@@ -252,6 +252,7 @@ describe('pre-push audit after r45: linked-draft reuse keeps the county hold', (
     const whole = src.slice(start, src.indexOf('await recordPreSendRevision({ priorEstimate: existingEstimate, trx });', start));
     expect(whole.indexOf("['address-verdict', contactPairLockKey(writeFields.customer_email, writeFields.customer_phone)]")).toBeLessThan(whole.indexOf('lockScheduledGroupGuardGroups(trx'));
     expect(whole).toContain('if (reuseClearedHold) {');
+    expect(whole).toContain('reuseClearedHold = lockedReuseData.addressUnverified === true\n              && reuseData.addressUnverified !== true\n              && !!reuseData.addressUnverifiedClearedBy;');
     expect(whole).toContain('await stampContactMatchedLeadsClean(trx, { row: updated, clearedBy, now });');
   });
   test('the carry helper keeps a hold on a same-premise reuse and lifts it only on correction or confirmation', () => {
