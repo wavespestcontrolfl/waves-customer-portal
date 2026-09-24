@@ -139,7 +139,7 @@ describe("ProtocolPanel independent request failures", () => {
     expect(screen.getByText("2.9 oz")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /^Equipment/ }));
     expect(screen.getByText("Current sprayer")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /^ID Guide/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Guide/ }));
     expect(screen.getByText("ID guide unavailable")).toBeVisible();
     expect(screen.queryByText("No photo references for this service")).not.toBeInTheDocument();
 
@@ -229,7 +229,7 @@ describe("ProtocolPanel independent request failures", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Equipment/ }));
     expect(screen.getByText("Equipment checklist unavailable")).toBeVisible();
     expect(screen.queryByText("Current sprayer")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /^ID Guide/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Guide/ }));
     expect(screen.queryByText("Current photo guide")).not.toBeInTheDocument();
   });
 

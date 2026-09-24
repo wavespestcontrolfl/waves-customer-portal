@@ -160,23 +160,15 @@ function seriesRootId(row) {
   return row?.id;
 }
 
-// Forever-dedupe on the notifications metadata dedupeKey — same contract as
-// call-ingest-watchdog / call-booking-miss-watchdog.
-async function alreadyAlerted(dedupeKey) {
-  const existing = await db('notifications')
-    .where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-    .first();
-  return !!existing;
-}
-
 async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('scheduleIntegrityWatchdog')) {
     return { skipped: true, reason: 'gated_off' };
   }
-  // alreadyAlerted() is a read-then-notify with no unique constraint —
-  // serialize ticks so deploy overlap can't double-ring.
+  // notifyAdmin's dedupe takes its own per-key advisory lock, but a run's
+  // classification pass (which rows are stale/unpriced/etc.) is not itself
+  // locked — serialize ticks so deploy overlap can't build two different
+  // alert sets from an overlapping read.
   const { runExclusive } = require('../utils/cron-lock');
   return runExclusive('schedule-integrity-watchdog', () => runInner({ now }));
 }
@@ -318,15 +310,21 @@ async function runInner({ now = new Date() } = {}) {
     logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
     return true;
   };
-  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch' } = {}) => {
-    if (await alreadyAlerted(dedupeKey)) return false;
+  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', refreshOnDedupe, dedupeVersion } = {}) => {
     // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
     // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
     // site-level tag these money-loss pages would return a suppressed
     // sentinel instead of ringing.
+    // Forever-dedupe (or refreshed-on-change with dedupeVersion) now runs
+    // through notifyAdmin's own advisory-locked dedupe — passing dedupeKey
+    // here instead of a local read-then-insert (the old alreadyAlerted())
+    // that raced across overlapping ticks and could double-ring.
     const created = await NotificationService.notifyAdmin('alert', title, body, {
       link,
       bell: true,
+      dedupeKey,
+      ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
+      ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
       metadata: { dedupeKey, ...metadata },
     });
     // NotificationService.create swallows insert errors into a null result;
@@ -336,6 +334,9 @@ async function runInner({ now = new Date() } = {}) {
     if (!created || (created.id == null && !created.suppressed)) {
       throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
     }
+    // A deduped result (the standing row already exists and either matched
+    // or was just refreshed) is not a NEW alert for this run's count.
+    if (created.deduped) return false;
     alerted += 1;
     return true;
   };
@@ -385,7 +386,7 @@ async function runInner({ now = new Date() } = {}) {
       // everything standing between this customer and Monday.
       const extras = g.fixable.filter((f) => f !== 'no_recurring_marked_lawn_visit');
       // Dedupe keyed to the OFFENDING BOOKING, not just customer+fixables
-      // (codex #3341 r3 P2): alreadyAlerted has no expiry, so a customer
+      // (codex #3341 r3 P2): the forever-dedupe has no expiry, so a customer
       // fixed once and regressed later — new one-time booking after the
       // stamped series was cancelled — must mint a NEW key and page again.
       return [
@@ -447,14 +448,19 @@ async function runInner({ now = new Date() } = {}) {
     logger.error(`[schedule-integrity] accepted-plan check failed: ${err.message}`);
   }
   alerts.push(...acceptedGaps.map((gap) => [
-      `accepted-schedule:${gap.estimateId}:${gap.serviceFamily}:${gap.evidenceKey}`,
+      // Stable per estimate+family — NOT the evidenceKey (that hashes every
+      // family row's row_revision/scheduled_date and churns on every
+      // routine edit, which minted a fresh row daily for the same standing
+      // gap). evidenceKey now rides as dedupeVersion below: a real evidence
+      // change re-surfaces this ONE row unread instead of adding a second.
+      `accepted-schedule:${gap.estimateId}:${gap.serviceFamily}`,
       'Accepted recurring plan needs schedule review',
       `The accepted ${gap.serviceFamily.replace(/_/g, ' ')} plan calls for ${gap.pattern.replace(/_/g, ' ')} service (${gap.expectedVisits} applications). ` +
         `The linked schedule has ${gap.recordedVisits} working/completed applications. Review: ${gap.issues.map((issue) => issue.replace(/_/g, ' ')).join('; ')}. ` +
         'Check any later amendment or cancellation before changing appointments or prices.',
       { estimate_id: gap.estimateId, customer_id: gap.customerId, issues: gap.issues,
         expected_pattern: gap.pattern, expected_visits: gap.expectedVisits, appointment_ids: gap.appointmentIds },
-      { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}` },
+      { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}`, refreshOnDedupe: true, dedupeVersion: gap.evidenceKey },
   ]));
 
   alerts.push(...stale.map((v) => {

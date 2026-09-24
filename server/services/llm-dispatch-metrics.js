@@ -736,8 +736,12 @@ function emailExceptions(day, exceptions, { directEmail = false } = {}) {
     subject: bellSubject,
     html: bellBody,
     link: '/admin/agents?tab=activity',
+    // No rolling window (#4677 follow-up): notifyAdmin measures the window
+    // from created_at, which refreshOnDedupe never advances, so a standing
+    // exception list older than the window minted a second row beside the
+    // first. retireIfClean drops the key on the clean run, so a new episode
+    // still rings.
     dedupeKey: 'ops-digest:llm-dispatch-exceptions',
-    dedupeWindowMs: 7 * 24 * 60 * 60 * 1000,
     refreshOnDedupe: true,
     sendEmail,
   });

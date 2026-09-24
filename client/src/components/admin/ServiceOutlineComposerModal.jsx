@@ -68,6 +68,7 @@ function formatEventLabel(type) {
     approved: "Approved",
     sent_sms: "SMS sent",
     sent_email: "Email sent",
+    email_blocked: "Email blocked",
     failed: "Send failed",
     viewed: "Customer viewed",
     cta_clicked: "Estimate clicked",

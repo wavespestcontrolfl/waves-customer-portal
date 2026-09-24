@@ -2534,6 +2534,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         .map((l) => ({ ...l, serviceType: (l.serviceType || "").trim() }))
         .filter((l) => l.serviceType);
       const sendAddons = cleanLines.length > 0 || hadAddonsInitially;
+      // The Price field always holds the PRIMARY line's own GROSS (see this
+      // form's own `price` seed, above: deriveLegacyPrimarySubmission
+      // returns primaryLinePrice verbatim whenever add-ons are known, which
+      // they always are on this modal) — never the stored NET total, with
+      // or without add-on lines. Sending it explicitly, unconditionally
+      // (not only when add-ons are present), tells the server's no-add-on
+      // save path which convention this payload's `estimatedPrice` uses, so
+      // an unrelated (echoed) save can be told apart from a genuine price
+      // change without guessing from the number alone (ADMIN-BUG-R01 fix:
+      // a purely value-based guess on the server collides whenever a
+      // genuine edit's new number happens to equal the other convention's
+      // reading of the same stored row).
+      const primaryLinePriceValue =
+        form.price !== "" && !isNaN(parseFloat(form.price))
+          ? parseFloat(form.price)
+          : undefined;
       const addonsPayload = sendAddons
         ? cleanLines.map((l) => {
             const common = {
@@ -2601,13 +2617,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
           ...seriesAckPayload(seriesPreview.preview),
+          // Sent unconditionally (see primaryLinePriceValue's own comment) —
+          // NOT only when sendAddons — so the server can tell this payload's
+          // gross-Price convention apart from MobileServiceEditModal's net
+          // convention even for a no-add-on save.
+          primaryLinePrice: primaryLinePriceValue,
           ...(sendAddons
             ? {
                 addons: addonsPayload,
-                primaryLinePrice:
-                  form.price !== "" && !isNaN(parseFloat(form.price))
-                    ? parseFloat(form.price)
-                    : undefined,
                 // Parent estimated_duration_minutes drives schedule-grid sizing
                 // and capacity, so send the summed group duration (primary line
                 // + add-on lines), matching the create flow.
@@ -5893,13 +5910,13 @@ export function ProtocolPanel({ service, onClose }) {
   }, [service, isLawn, serviceCategory, loadAttempt]);
 
   const SECTIONS = [
-    ...(jobCardEnabled ? [{ id: "job_card", label: " Job card", count: null }] : []),
+    ...(jobCardEnabled ? [{ id: "job_card", label: "Job", count: null }] : []),
     ...(protocolEnabled ? [{ id: "visit_protocol", label: " Protocol", count: null }] : []),
     ...(!protocolEnabled && isLawn
       ? [
           {
             id: "lawn_protocol",
-            label: " Lawn Protocol",
+            label: "Lawn",
             count: lawnProtocol?.visits?.length || null,
           },
         ]
@@ -5915,11 +5932,11 @@ export function ProtocolPanel({ service, onClose }) {
           },
         ]
       : []),
-    { id: "overview", label: " Overview", count: null },
-    { id: "seasonal", label: " Pest Pressure", count: seasonal.length },
-    { id: "photos", label: " ID Guide", count: photos.length },
-    { id: "scripts", label: " Scripts", count: scripts.length },
-    { id: "equipment", label: " Equipment", count: equipment.length },
+    { id: "overview", label: "Overview", count: null },
+    { id: "seasonal", label: "Pressure", count: seasonal.length },
+    { id: "photos", label: "Guide", count: photos.length },
+    { id: "scripts", label: "Scripts", count: scripts.length },
+    { id: "equipment", label: "Equipment", count: equipment.length },
     ...(canScore ? [{ id: "score", label: "Score", count: null }] : []),
   ];
 

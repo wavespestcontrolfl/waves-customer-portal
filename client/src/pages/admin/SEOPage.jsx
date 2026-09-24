@@ -143,7 +143,7 @@ const WORKSPACES = [
       },
       {
         key: "advisor",
-        label: "SEO Advisor",
+        label: "Advisor",
       },
     ],
   },
@@ -158,11 +158,11 @@ const WORKSPACES = [
       },
       {
         key: "content-qa",
-        label: "Content QA",
+        label: "Quality",
       },
       {
         key: "refresh-audit",
-        label: "Refresh Audit",
+        label: "Refresh",
       },
     ],
   },
@@ -196,11 +196,11 @@ const WORKSPACES = [
     sections: [
       {
         key: "backlinks",
-        label: "Backlinks & Citations",
+        label: "Links",
       },
       {
         key: "ai-overview",
-        label: "AI Overview",
+        label: "AI",
       },
     ],
   },
@@ -211,7 +211,7 @@ const WORKSPACES = [
     sections: [
       {
         key: "url-intel",
-        label: "URL Intel",
+        label: "URLs",
       },
       {
         key: "indexation",
@@ -219,7 +219,7 @@ const WORKSPACES = [
       },
       {
         key: "site-audit",
-        label: "Site Health",
+        label: "Health",
       },
     ],
   },
@@ -234,7 +234,7 @@ const WORKSPACES = [
       },
       {
         key: "by-site",
-        label: "By Site",
+        label: "Sites",
       },
     ],
   },
@@ -1610,15 +1610,15 @@ function BacklinksTab() {
             },
             {
               key: "gaps",
-              label: "Competitor Gaps",
+              label: "Gaps",
             },
             {
               key: "llm",
-              label: "LLM Mentions",
+              label: "Mentions",
             },
             {
               key: "prospects",
-              label: "Link Building",
+              label: "Outreach",
             },
             {
               key: "agent",
@@ -2386,23 +2386,23 @@ const PROSPECT_VIEWS = [
   },
   {
     key: "approvals",
-    label: "Needs approval",
+    label: "Approval",
     statuses: null,
   },
   // outreach drafts → send (M3b)
   {
     key: "outreach",
-    label: "Needs outreach",
+    label: "Contacting",
     statuses: ["prospect", "contacted", "negotiating"],
   },
   {
     key: "placed",
-    label: "In progress",
+    label: "Progress",
     statuses: ["placed"],
   },
   {
     key: "notindexed",
-    label: "Live · not indexed",
+    label: "Unindexed",
     statuses: ["live"],
   },
   {
@@ -7273,11 +7273,11 @@ function UrlIntelTab({ domain }) {
     },
     {
       key: "diagnosis",
-      label: "By Diagnosis",
+      label: "Diagnosis",
     },
     {
       key: "priority",
-      label: "Priority Queue",
+      label: "Priority",
     },
     {
       key: "duplicates",
@@ -7285,7 +7285,7 @@ function UrlIntelTab({ domain }) {
     },
     {
       key: "intent",
-      label: "Intent Routing",
+      label: "Intent",
     },
   ];
   const diagnosisLabels = {
@@ -7772,11 +7772,11 @@ function ActionsTab({ domain }) {
     },
     {
       key: "drafts",
-      label: "AI Drafts",
+      label: "Drafts",
     },
     {
       key: "progress",
-      label: "In Progress",
+      label: "Progress",
     },
     {
       key: "experiments",
@@ -8222,23 +8222,23 @@ function IndexationTab({ domain }) {
   const subTabs = [
     {
       key: "gap",
-      label: "Indexation Gap",
+      label: "Gap",
     },
     {
       key: "conflicts",
-      label: "Canonical Conflicts",
+      label: "Conflicts",
     },
     {
       key: "crawled",
-      label: "Not Indexed",
+      label: "Unindexed",
     },
     {
       key: "sitemap",
-      label: "Sitemap Issues",
+      label: "Sitemap",
     },
     {
       key: "inspector",
-      label: "URL Inspector",
+      label: "Inspector",
     },
   ];
   return (

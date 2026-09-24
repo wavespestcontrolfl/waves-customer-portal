@@ -72,7 +72,7 @@ describe("MobileServiceLibrary", () => {
     const onOpenProtocols = vi.fn();
     render(<MobileServiceLibrary onOpenProtocols={onOpenProtocols} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /Treatment Plans/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Treatments/i }));
 
     expect(onOpenProtocols).toHaveBeenCalledTimes(1);
   });

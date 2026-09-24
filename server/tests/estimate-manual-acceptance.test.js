@@ -102,6 +102,9 @@ function makeDb(estimate, claimedOverrides = null) {
         this.statusList = { column, values };
         return this;
       },
+      whereNotIn() {
+        return this;
+      },
       whereNull(column) {
         this.nullColumns = [...(this.nullColumns || []), column];
         return this;
@@ -328,6 +331,7 @@ describe('estimate manual acceptance', () => {
       bookedAppointmentIds: ['booked-1'],
       skipSetupInvoice: true,
       skipMembershipEmail: true,
+      skipWelcomeSms: true,
       deferCommercialScheduleNotification: true,
     });
     expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledWith(membershipEmail);
@@ -405,6 +409,7 @@ describe('estimate manual acceptance', () => {
       bookedAppointmentIds: [],
       skipSetupInvoice: false,
       skipMembershipEmail: true,
+      skipWelcomeSms: true,
       deferCommercialScheduleNotification: true,
       autoSendInvoice: false,
       billingTerm: 'prepay_annual',

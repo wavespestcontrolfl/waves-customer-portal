@@ -962,7 +962,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         // refuses at the confirm preflight and again at the executor's own
         // read, instead of another customer's email getting the
         // replied-via-SMS stamp.
-        const srcEmail = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+        const srcEmail = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'reply_to', 'subject', 'gmail_thread_id', 'customer_id');
         if (!srcEmail) return { failed: true, modelResult: { error: 'That email could not be found — nothing was proposed.' } };
         params._pinned_email = emailPinFingerprint(srcEmail);
       }
@@ -982,7 +982,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       };
     }
     if (toolUse.name === 'send_email_reply' && params.email_id) {
-      const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+      const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'reply_to', 'subject', 'gmail_thread_id', 'customer_id');
       if (!email) return { failed: true, modelResult: { error: 'Email not found — nothing was proposed.' } };
       if (!email.from_address) return { failed: true, modelResult: { error: 'Email has no sender address to reply to.' } };
       // The FULL pin (address+subject+thread+customer) rides into the
@@ -994,7 +994,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         // linked_customer drives the card's contact flag (GH r17 P2): a
         // reply to a vendor/partner/unattributed email is NOT customer
         // contact and must not claim to be.
-        pinned_recipient: { email_masked: maskEmail(email.from_address), subject: email.subject || null, linked_customer: !!email.customer_id },
+        // ADMIN-BUG-R22 (same class): show the address the send actually
+        // targets — reply_to when the row has one (relayed mail: contact
+        // forms, lead marketplaces, ticketing) — not the relay's From, so
+        // the approval card never shows a different recipient than the send.
+        pinned_recipient: { email_masked: maskEmail(email.reply_to || email.from_address), subject: email.subject || null, linked_customer: !!email.customer_id },
       };
     }
     if (toolUse.name === 'block_sender') {
@@ -2986,7 +2990,7 @@ router.post('/confirm-action', async (req, res, next) => {
         }
       }
       if (!drifted && pinnedEmail) {
-        const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+        const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'reply_to', 'subject', 'gmail_thread_id', 'customer_id');
         drifted = !email || emailPinFingerprint(email) !== String(pinnedEmail);
       }
       // Kept in execParams: approvePrice re-verifies on ITS loaded row.

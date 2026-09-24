@@ -97,8 +97,11 @@ describe('llm-dispatch-metrics', () => {
       expect(first.subject).not.toContain('2026-09-11');
       expect(first.html).not.toContain('2026-09-11');
       expect(first.sendEmail).toBeInstanceOf(Function);
-      expect(first).toMatchObject({ fallOff: true, dedupeKey: 'ops-digest:llm-dispatch-exceptions',
-        dedupeWindowMs: 604800000, refreshOnDedupe: true });
+      expect(first).toMatchObject({ fallOff: true, dedupeKey: 'ops-digest:llm-dispatch-exceptions', refreshOnDedupe: true });
+      // No rolling window: it is measured from created_at, which the refresh
+      // never advances, so a standing list older than the window would mint
+      // a second row. retireIfClean drops the key on the clean run instead.
+      expect(first).not.toHaveProperty('dedupeWindowMs');
     } finally {
       jest.dontMock('../services/ops-digest');
     }

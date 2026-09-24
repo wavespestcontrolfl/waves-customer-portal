@@ -36,7 +36,7 @@ it("keeps pending and failed recovery totals unknown while preserving successful
 it("does not treat a missing payer summary as an empty balance", async () => {
   vi.stubGlobal("fetch", vi.fn(async url => url.endsWith("/statements") ? response({ statements: [] }) : response({})));
   render(<PayerDetailSheet payer={{ id: 42, display_name: "Example payer" }} onClose={vi.fn()} />);
-  fireEvent.click(screen.getByRole("tab", { name: "AR / aging" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Aging" }));
   await screen.findByText("Could not load this payer's balance.");
   expect(screen.queryByText("No outstanding balance.")).not.toBeInTheDocument();
   expect(screen.queryByText("$0.00")).not.toBeInTheDocument();

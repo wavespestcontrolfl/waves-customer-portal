@@ -114,7 +114,7 @@ describe("AdminDispatchPage", () => {
     for (const label of ["Board", "Schedule", "Protocols"]) {
       expect(screen.getByRole("button", { name: label })).not.toHaveClass("hidden");
     }
-    for (const label of ["Tech Match", "CSR Booking", "Job Scores", "Insights"]) {
+    for (const label of ["Matching", "Booking", "Scores", "Insights"]) {
       const button = screen.getByRole("button", { name: label });
       expect(button).not.toHaveClass("hidden");
       fireEvent.click(button);

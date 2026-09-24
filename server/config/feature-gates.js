@@ -2740,6 +2740,16 @@ const gates = {
   controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
   // Field Team Program rev 2b: evidence and simulation only; never payroll.
   fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
+  // Consultation-link lane ("Book with Adam", scope doc
+  // lead-inspection-link-scope.md): the /inspection/:token public page, the
+  // buildLeadConsultationLink composer/admin builder, and the recurring-lead
+  // new_lead email's booking block all read the same flag. Ships DARK: off
+  // unless exactly 'true' — every one of those three surfaces stays inert
+  // (route 404s, builder returns { url: null }, email placeholder renders
+  // empty) until Adam flips it. This map entry is for logGateStatus only —
+  // the canonical CALL-TIME reader is leadInspectionLinkLive() below, same
+  // discountStackingLive() convention, so a flip needs no redeploy.
+  leadInspectionLink: process.env.GATE_LEAD_INSPECTION_LINK === 'true',
   // "Tech out today": mark a technician absent for a date, redistribute
   // their stops onto another eligible tech at the same promised arrival
   // window, park the rest as ranked dispatch alerts. Sends no customer
@@ -2770,6 +2780,16 @@ function gateEnvValue(envName) {
 // flip until the process restarts).
 function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
+}
+
+// GATE_LEAD_INSPECTION_LINK read at CALL time — strict `=== 'true'`, same
+// convention as discountStackingLive(). The `leadInspectionLink` gates-map
+// entry above is for logGateStatus only; this is the one canonical reader
+// every caller (the public page route, buildLeadConsultationLink, and the
+// new_lead email runner) must use, so none of them can drift from what an
+// admin flip actually does.
+function leadInspectionLinkLive() {
+  return process.env.GATE_LEAD_INSPECTION_LINK === 'true';
 }
 
 // Self-booking day cap (owner ruling 2026-09-23) — the canonical reader
@@ -2831,5 +2851,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive };
 // gates 1775330914

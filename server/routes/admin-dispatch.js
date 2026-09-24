@@ -3640,7 +3640,16 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // A partial/unverifiable unit move deliberately retains the cohort
       // hold — this unconditional post-move sync must not release it
       // (codex #3609 r37).
-      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
+      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify,
+      // willNotify=false means this move sends no replacement notice of its
+      // own (Day-grid resize/bulk move always set notifyCustomer:false; a
+      // rain-out whose moved-SMS didn't send lands here too) — a still-
+      // pending creation confirmation must stay pending so the deferred
+      // sendConfirmation / stranded sweep still delivers it with the new
+      // time, exactly like the sibling re-arms in admin-schedule.js's bulk
+      // reschedule and auto-dispatch/apply.js (ADMIN-BUG-R24).
+      ...(willNotify ? {} : { keepPendingConfirmation: true }),
+      ...(expectSchedule ? { expectSchedule } : {}) },
     );
     if (synced && synced.skippedStale === true) return 'stale';
     if (synced !== null) return true;
@@ -4276,13 +4285,26 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         if (!cardOnly && overlapDates.length) parts.push(result.arrivalWindowDates?.length
           ? `${overlapDates.length} occurrence(s) need route review to keep every promised arrival window (${overlapDates.join(', ')}) — check those days' routes`
           : `${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
+        // Deep link: AdminDispatchPage mounts the Schedule tab only with
+        // ?tab=schedule (Board is the default); DispatchPageV2 then reads
+        // ?date= (opens that day) and ?appointment= (opens that visit's
+        // detail sheet). Nothing reads a service id. Land on the earliest
+        // affected day, focused on the first untimed conflict when there is one.
+        // An untimed conflict outranks earlier preserved/overlap days: it is
+        // the visit that still needs a time, so it gets the focus (codex r2).
+        const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d));
+        const focusConflict = [...dueConflicts].filter((c) => isDate(c.date)).sort((a, b) => a.date.localeCompare(b.date))[0] || null;
+        const otherDates = cardOnly ? [] : [...overlapDates, ...preserved.map((c) => c.date)].filter(isDate).sort();
+        const link = focusConflict
+          ? `/admin/dispatch?tab=schedule&date=${focusConflict.date}&appointment=${encodeURIComponent(focusConflict.id)}`
+          : otherDates.length ? `/admin/dispatch?tab=schedule&date=${otherDates[0]}` : '/admin/dispatch?tab=schedule';
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
           preserved.length ? 'Recurring move needs a future visit review'
             : dueConflicts.length ? 'Series move left visits without a time window'
               : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { bell: true, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
+          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
         );
         if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');

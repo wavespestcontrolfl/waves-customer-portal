@@ -115,10 +115,17 @@ function isAffirmativeSmsReaction(body) {
 // The quoted target is authoritative (a later non-question outbound must not
 // mask it). Unquoted targets ("an image", "a photo") ask nothing.
 const ASKS_RE = /\?|\breply\b|\brespond\b|\btext\s+(?:us\s+)?back\b|\blet\s+(?:us|me)\s+know\b|\bconfirm\b/i;
+const OPT_OUT_FOOTER_RE = /\s*(?:reply\s+)?stop\s+to\s+(?:opt\s*out|unsubscribe)(?:\s+from\s+(?:messages?|texts?))?[.!]*(?:\s*msg\s*&\s*data\s+rates?\s+may\s+apply[.!]*)?\s*$/i;
+
+function outboundAsksForReply(body) {
+  const withoutComplianceFooter = String(body || '').replace(OPT_OUT_FOOTER_RE, '').trim();
+  return ASKS_RE.test(withoutComplianceFooter);
+}
+
 function reactionTargetAsksQuestion(body) {
   const m = /[\u201c"]([\s\S]+)[\u201d"]\s*$/.exec(String(body || '').trim());
   if (!m) return false;
-  return ASKS_RE.test(m[1]);
+  return outboundAsksForReply(m[1]);
 }
 
 /**
@@ -355,4 +362,13 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-module.exports = { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isAffirmativeSmsReaction, reactionTargetAsksQuestion, isCourtesyOnly, hasRescheduleOrAwayIntent };
+module.exports = {
+  hasSchedulingIntent,
+  isSmsReaction,
+  isQuietSmsReaction,
+  isAffirmativeSmsReaction,
+  reactionTargetAsksQuestion,
+  outboundAsksForReply,
+  isCourtesyOnly,
+  hasRescheduleOrAwayIntent,
+};

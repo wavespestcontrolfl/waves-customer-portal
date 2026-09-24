@@ -425,12 +425,12 @@ async function main() {
 
       const navigation = [
         [
-          "Vendors & Pricing",
-          ["Price Sync", "Approvals", "Vendors", "Scrape Health"],
+          "Sourcing",
+          ["Prices", "Approvals", "Vendors", "Scraping"],
         ],
-        ["Planning", ["Forecast", "Unit Review", "Restock"]],
-        ["Content", ["Registry", "Lawn Facts", "Lawn Content"]],
-        ["Protocols", ["Protocols", "Service Margins"]],
+        ["Planning", ["Forecast", "Units", "Restock"]],
+        ["Content", ["Registry", "Facts", "Lawn"]],
+        ["Protocols", ["Protocols", "Margins"]],
       ];
       // A stable, leaf-specific element to wait for before measuring — the
       // fixture's actual rendered data (or its known empty state) rather
@@ -440,18 +440,18 @@ async function main() {
       const leafReady = {
         Approvals: () => page.getByText("Synthetic review", { exact: true }).waitFor(),
         Vendors: () => page.getByText(vendor.name, { exact: true }).first().waitFor(),
-        "Scrape Health": () => page.getByText(vendor.name, { exact: true }).first().waitFor(),
+        Scraping: () => page.getByText(vendor.name, { exact: true }).first().waitFor(),
         Forecast: () => page.getByText("No forecasted WaveGuard product demand in this window.", { exact: true }).waitFor(),
         Restock: () => page.getByText("No restock requests in this view.", { exact: true }).waitFor(),
-        "Lawn Facts": () => page.getByText("No products match this status.", { exact: true }).waitFor(),
-        "Lawn Content": () => page.getByText("Lawn Outline Content Library", { exact: true }).waitFor(),
+        Facts: () => page.getByText("No products match this status.", { exact: true }).waitFor(),
+        Lawn: () => page.getByText("Lawn Outline Content Library", { exact: true }).waitFor(),
         // "Templates" also labels a per-line button, so it isn't a unique
         // match; "COGS" only labels the metric.
         Protocols: () => page.getByText("COGS", { exact: true }).waitFor(),
         // MarginsTab never renders product notes — wait on its always-
         // present heading instead (rendered post-load whether or not any
         // service line has products, same strategy as Lawn Content below).
-        "Service Margins": () => page.getByText("COGS by Service Line", { exact: true }).waitFor(),
+        Margins: () => page.getByText("COGS by Service Line", { exact: true }).waitFor(),
       };
       for (const [group, leaves] of navigation) {
         await page
@@ -469,9 +469,9 @@ async function main() {
             .click();
           await page.waitForTimeout(75);
           if (leafReady[leaf]) await leafReady[leaf]();
-          if (leaf === "Price Sync" || leaf === "Registry") {
-            const initial = leaf === "Price Sync" ? "Vendor Sync Status" : "All Products";
-            const next = leaf === "Price Sync" ? "Needs Mapping" : "Public";
+          if (leaf === "Prices" || leaf === "Registry") {
+            const initial = leaf === "Prices" ? "Status" : "All Products";
+            const next = leaf === "Prices" ? "Mapping" : "Public";
             const initialButton = page.getByRole("button", { name: initial, exact: true });
             const nextButton = page.getByRole("button", { name: next, exact: true });
             await initialButton.waitFor();
@@ -480,7 +480,7 @@ async function main() {
             assert.equal(await nextButton.getAttribute("aria-pressed"), "true");
             assert.equal(await initialButton.getAttribute("aria-pressed"), "false");
           }
-          if (leaf === "Unit Review") {
+          if (leaf === "Units") {
             await page.getByRole("button", { name: "fl_oz", exact: true }).waitFor();
             const fixPath = "/api/admin/inventory/unit-review/product-1/fix";
             await Promise.all([page.waitForResponse(response => response.url().includes(fixPath)), page.getByRole("button", { name: "Apply", exact: true }).click()]);

@@ -235,7 +235,7 @@ async function payerWorkflow(page, server, state, report, name) {
   await screenshot(page, report, `${name}-statement`);
   const payment = 'POST /api/admin/payers/42/statements/71/reconcile';
   await pendingAction(page, state, sheet.getByRole('button', { name: 'Record', exact: true }), payment, holdFailure(state, payment));
-  await sheet.getByRole('tab', { name: 'AR / aging' }).click();
+  await sheet.getByRole('tab', { name: 'Aging' }).click();
   assert.equal(await sheet.getByRole('textbox', { name: 'Amount' }).count(), 0);
   await sheet.getByRole('tab', { name: 'Statements' }).click();
   assert.equal(await sheet.getByLabel('Amount').inputValue(), '1,000.00');

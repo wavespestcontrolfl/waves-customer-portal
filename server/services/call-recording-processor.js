@@ -100,6 +100,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
+const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
@@ -1179,6 +1180,9 @@ function summarizeKnownCaller(customer) {
     .filter(Boolean)
     .join(' ');
   const accountType = classifyCallerAccount(customer.pipeline_stage);
+  const stage = String(customer.pipeline_stage || '').trim().toLowerCase();
+  const isExistingCustomer = FAIL_OPEN_CUSTOMER_STAGES.has(stage);
+  const hasAddress = !!String(customer.address_line1 || '').trim();
   return {
     name: name || null,
     // The matched row's identity — carried alongside the on-file address so a
@@ -1194,8 +1198,16 @@ function summarizeKnownCaller(customer) {
     // classifies as 'established_customer' for prompt purposes, but its stale
     // on-file data must never clear address/confidence blockers; dormant/
     // churned accounts likewise fall back to normal review.
-    isExistingCustomer: FAIL_OPEN_CUSTOMER_STAGES.has(String(customer.pipeline_stage || '').trim().toLowerCase()),
-    hasAddress: !!String(customer.address_line1 || '').trim(),
+    isExistingCustomer,
+    hasAddress,
+    pipelineStage: stage || null,
+    // Whether the on-file address may satisfy the address flags without
+    // being restated. Established customers: yes. A new_lead earns it only
+    // through trustValidatedNewLeadAddress (a server-side validation of the
+    // on-file address at call time — owner ruling 2026-09-24), which also
+    // marks the trust addressOnly so it never lifts the confidence checks.
+    addressTrusted: isExistingCustomer,
+    addressOnly: false,
     // The on-file address components, for the fail-open V1 conflict check: a
     // legacy V1 address that conflicts with them (different street, unit,
     // city, or ZIP) is a NEW address that must hold for review, never
@@ -1210,12 +1222,108 @@ function summarizeKnownCaller(customer) {
   };
 }
 
-// The fail-open routing input for a known caller: null unless they are a
-// customer we actively serve, else the on-file address components so the
-// gate can tell a RESTATED on-file address from a new one (statesNewAddress).
-function failOpenKnownCustomer(knownCaller) {
-  if (!knownCaller || !knownCaller.isExistingCustomer) return null;
+// Owner ruling 2026-09-24: a NEW LEAD who already has an address on file (a
+// web quote form, an earlier call) is trusted for the on-file address rule
+// the same way an active customer is — six of the nine address blocks filed
+// on linked customers in the week to 2026-09-23 were a form lead calling
+// back and not reciting the address they had typed. Stored columns prove
+// nothing by themselves (/public-quote persists client-supplied lat/lng
+// unbound to the address — codex #4685 r1 P1), so the on-file address is
+// validated server-side at call time and trusted only on a validated_accept
+// verdict inside the service area. The trust is addressOnly: it satisfies
+// the address flags and nothing else — the low-confidence exemptions stay
+// reserved for established customers (codex #4685 r1 P1). Other open-lead
+// stages and terminal stages never qualify. Fail closed on any validator
+// error or non-accept status.
+//
+// The verdict is applied by applyOnFileAddressVerdict — pure, so the live
+// pass and the offline routing audits (buildFailOpenRoutingContext, which
+// replays the verdict production persisted on ai_validation) reach the same
+// knownCustomer from the same evidence (codex #4685 r2 P1).
+// The address components a verdict was judged on, so a replayed verdict
+// can be bound to the record it vouched for (codex #4685 r4 P2): a lead
+// whose saved address changed after the call must not inherit an old
+// validated_accept.
+function onFileAddressJudged(knownCaller, storedState) {
+  const norm = (v) => String(v || '').trim().toLowerCase();
   return {
+    line1: norm(knownCaller.addressLine1), line2: norm(knownCaller.addressLine2),
+    city: norm(knownCaller.addressCity), state: norm(storedState), zip: norm(knownCaller.addressZip),
+  };
+}
+function judgedAddressMatches(judged, knownCaller) {
+  if (!judged) return false;
+  const now = onFileAddressJudged(knownCaller, normalizeState(String(knownCaller.addressState || '').trim()) || SERVICE_STATE);
+  return ['line1', 'line2', 'city', 'state', 'zip'].every((k) => String(judged[k] || '') === now[k]);
+}
+function applyOnFileAddressVerdict(knownCaller, verdict) {
+  if (!knownCaller) return knownCaller;
+  const status = verdict?.status || null;
+  knownCaller.onFileAddressVerdict = status
+    ? { status, inServiceArea: verdict?.inServiceArea ?? null, ...(verdict?.address ? { address: verdict.address } : {}) }
+    : null;
+  if (knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
+  if (!(status === 'validated_accept' && verdict?.inServiceArea === true)) return knownCaller;
+  // A verdict carries the address it judged; the record must still match it.
+  if (!judgedAddressMatches(verdict.address, knownCaller)) return knownCaller;
+  knownCaller.addressTrusted = true;
+  knownCaller.addressOnly = true;
+  // The proof snapshot carries the state that was validated, never the
+  // spelled-out or blank stored value (codex #4685 r4 P2).
+  knownCaller.addressState = String(verdict.address.state || SERVICE_STATE).toUpperCase();
+  return knownCaller;
+}
+
+// Runs the validation for a new lead, once per pass and only when routing
+// can use the on-file lane (codex #4685 r2 P2): the call is not stating an
+// address of its own (that address takes the normal validation path), and
+// the record's street + ZIP are on file. The STORED state is validated as
+// stored — a non-Florida state fails closed rather than being rewritten to
+// FL, or Google would accept a synthesized Florida address the proof
+// snapshot never carried (codex #4685 r2 P1).
+async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress, extraction = null, failOpen = true } = {}) {
+  if (!knownCaller || knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
+  if (knownCaller.onFileAddressVerdict !== undefined) return knownCaller;   // already judged this pass
+  const line1 = String(knownCaller.addressLine1 || '').trim();
+  const zip = String(knownCaller.addressZip || '').trim();
+  if (!line1 || !zip) return knownCaller;
+  if (extraction && statesNewAddress(extraction, knownCaller)) return knownCaller;
+  // A CONFIRMED booking keeps its address flags for review unless fail-open
+  // booking is on (see canAutoRouteDecision); with that gate off the
+  // verdict could not change anything, so the lookup is skipped (r3 P2).
+  if (extraction?.scheduling?.status === 'confirmed' && !failOpen) return knownCaller;
+  // The stored state as the shared normalizer reads it ("Florida" -> FL); an
+  // unrecognisable or non-Florida value fails closed (r2 P1, r3 P2).
+  const rawState = String(knownCaller.addressState || '').trim();
+  const storedState = rawState ? normalizeState(rawState) : '';
+  if (rawState && storedState !== SERVICE_STATE) {
+    return applyOnFileAddressVerdict(knownCaller, { status: 'stored_state_outside_service_area', inServiceArea: false });
+  }
+  const judgedState = storedState || SERVICE_STATE;
+  const address = onFileAddressJudged(knownCaller, judgedState);
+  const lines = [line1];
+  if (knownCaller.addressLine2) lines.push(String(knownCaller.addressLine2).trim());
+  lines.push([knownCaller.addressCity, `${judgedState} ${zip}`].filter(Boolean).join(', '));
+  let verdict = null;
+  try {
+    verdict = await validate({ addressLines: lines, administrativeArea: SERVICE_STATE });
+  } catch (err) {
+    logger.warn(`[call-proc] on-file address validation skipped for new lead ${knownCaller.id}: ${err.message}`);
+    return applyOnFileAddressVerdict(knownCaller, { status: 'validator_error', inServiceArea: null, address });
+  }
+  return applyOnFileAddressVerdict(knownCaller, { status: verdict?.status || null, inServiceArea: verdict?.inServiceArea ?? null, address });
+}
+
+// The fail-open routing input for a known caller: null unless their on-file
+// address is trusted (a customer we actively serve, or a new lead whose
+// on-file address just validated — see trustValidatedNewLeadAddress), else
+// the on-file address components so the gate can tell a RESTATED on-file
+// address from a new one (statesNewAddress). addressOnly rides along so the
+// gate lifts address flags and nothing else for a new lead.
+function failOpenKnownCustomer(knownCaller) {
+  if (!knownCaller || !knownCaller.addressTrusted) return null;
+  return {
+    addressOnly: knownCaller.addressOnly === true,
     hasAddress: knownCaller.hasAddress,
     addressLine1: knownCaller.addressLine1 || null,
     addressLine2: knownCaller.addressLine2 || null,
@@ -1265,9 +1373,16 @@ function callerIdNameForPrompt(call) {
  * exactly as the live path does — the two are one contract.
  */
 function buildFailOpenRoutingContext({
-  call = {}, customer = null, contactPhone = null, failOpenEnabled = false,
+  call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
+  // A new lead's trust comes from the verdict production persisted for this
+  // call (ai_validation.on_file_address_validation), never from a fresh
+  // network call and never from stored columns (codex #4685 r2 P1).
+  if (knownCaller) {
+    const verdict = onFileAddressVerdict !== undefined ? onFileAddressVerdict : persistedOnFileAddressVerdict(call);
+    applyOnFileAddressVerdict(knownCaller, verdict);
+  }
   return {
     knownCaller,
     options: {
@@ -1278,6 +1393,12 @@ function buildFailOpenRoutingContext({
       knownCustomer: failOpenKnownCustomer(knownCaller),
     },
   };
+}
+
+function persistedOnFileAddressVerdict(call) {
+  let av = call?.ai_validation;
+  if (typeof av === 'string') { try { av = JSON.parse(av); } catch { av = null; } }
+  return av?.on_file_address_validation || null;
 }
 
 function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller) {
@@ -5749,25 +5870,11 @@ const RECURRING_OVERRIDE_SOURCES = new Set([
   'cockroach treatment',
   'initial pest cleanout',
 ]);
-// Strips the "Service" token at the end OR before a parenthetical, so both
-// "Quarterly Pest Control Service" and "General Pest Control Service
-// (Bi-Monthly)" normalize to comparable keys.
-const normalizeServiceKey = (v) => String(v || '').trim().toLowerCase().replace(/\s+service(?=\s*\(|$)/, '');
-// The recurring pest programs (suffix-normalized), including the seeded-DB
-// alias forms. The prod rows carry the "* Pest Control Service" names,
-// active + booking_enabled (verified in prod 2026-07-11). Also used to
-// RETARGET a model-picked cadence when the caller unambiguously chose a
-// different one.
-const RECURRING_PEST_PROGRAMS = new Set([
-  'monthly pest control',
-  'bi-monthly pest control',
-  'quarterly pest control',
-  'semiannual pest control',
-  'general pest control (monthly)',
-  'general pest control (bi-monthly)',
-  'general pest control (quarterly)',
-  'general pest control (semiannual)',
-]);
+// normalizeServiceKey + RECURRING_PEST_PROGRAMS relocated to
+// config/recurring-pest-programs.js (2026-09-23, the consultation-link lane)
+// so lead-recurring-intent.js can share them without requiring this 16k-line
+// module. Pure relocation — same Set, same normalizer, byte-identical.
+const { RECURRING_PEST_PROGRAMS, normalizeServiceKey } = require('../config/recurring-pest-programs');
 // Program words that are unambiguous on their own. Bare cadence words —
 // including "quarterly"/"semiannual" — are NOT here: they only count with
 // the pest-pressure/history guard below ("we get ants every month" and
@@ -8615,6 +8722,9 @@ const CallRecordingProcessor = {
           // caller_phone_missing, an existing customer's on-file address clears
           // address flags, a garbled email (name_email_mismatch) is advisory.
           const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
+          // A new lead's on-file address is validated HERE, once, and only
+          // when this call does not state its own (codex #4685 r2 P2).
+          knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2Extraction, failOpen: failOpenBooking });
           const knownCustomerForFailOpen = failOpenKnownCustomer(knownCaller);
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
@@ -16352,6 +16462,7 @@ const CallRecordingProcessor = {
           canonicalRecord: extracted,
         });
         finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
+        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit, failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call) });
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
@@ -16408,6 +16519,10 @@ const CallRecordingProcessor = {
             : {}),
         } : null,
         address_validation_status: v2AddressValidation?.status || null,
+        // The on-file address verdict this pass judged a new lead by (null
+        // when none was needed) — replayed by buildFailOpenRoutingContext so
+        // the offline audits mirror the live lane (codex #4685 r2 P1).
+        on_file_address_validation: knownCaller?.onFileAddressVerdict || null,
         errors: v2Result.errors || null,
         generated_at: new Date().toISOString(),
       };
@@ -17541,6 +17656,9 @@ CallRecordingProcessor._test = {
   attachCandidateSlotAgrees,
   classifyCallerAccount,
   summarizeKnownCaller,
+  failOpenKnownCustomer,
+  trustValidatedNewLeadAddress,
+  applyOnFileAddressVerdict,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,

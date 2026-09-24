@@ -469,6 +469,14 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(storedEstimate().status).toBe('accepted');
     expect(storedEstimate().price_locked_at != null).toBe(true);
 
+    // The admin bell for the accepted-estimate notice deep-links to this
+    // estimate (the same ?estimateId= shape estimate_hot_view already uses),
+    // not the bare Estimates list.
+    const NotificationService = require('../services/notification-service');
+    const estimateNotice = NotificationService.notifyAdmin.mock.calls
+      .find((call) => call[0] === 'estimate');
+    expect(estimateNotice[3]).toMatchObject({ link: '/admin/estimates?estimateId=est-atomic-1' });
+
     // The conversion ran INSIDE the transaction with comms deferred.
     const opts = EstimateConverter.convertEstimate.mock.calls.at(-1)[1];
     expect(opts.database).toBeDefined();

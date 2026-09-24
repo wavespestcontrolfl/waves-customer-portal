@@ -70,7 +70,7 @@ function pct(n) {
 const TABS = [
   {
     key: "ppc-dashboard",
-    label: "PPC Dashboard",
+    label: "Dashboard",
     Icon: Megaphone,
   },
   {
@@ -80,17 +80,17 @@ const TABS = [
   },
   {
     key: "call-bridge",
-    label: "Call Bridge",
+    label: "Bridge",
     Icon: PhoneCall,
   },
   {
     key: "service-lines",
-    label: "Service Lines",
+    label: "Services",
     Icon: Layers,
   },
   {
     key: "advisor",
-    label: "AI Advisor",
+    label: "Advisor",
     Icon: Sparkles,
   },
   {

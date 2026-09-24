@@ -129,7 +129,7 @@ const BANKING_SECTIONS = [
   },
   {
     key: "cashflow",
-    label: "Cash Flow",
+    label: "Cashflow",
     Icon: TrendingUp,
   },
   {

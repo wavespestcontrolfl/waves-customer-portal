@@ -78,9 +78,9 @@ describe("KnowledgeBasePage embedded navigation", () => {
       "/admin/knowledge?area=base&source=digest&kbTab=audit",
     );
 
-    expect(screen.getByRole("button", { name: "AI audit" }))
+    expect(screen.getByRole("button", { name: "Audit" }))
       .toHaveAttribute("aria-current", "page");
-    fireEvent.click(screen.getByRole("button", { name: "Token health" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tokens" }));
 
     expect(screen.getByTestId("location-search")).toHaveTextContent(
       "?area=base&source=digest&kbTab=tokens",
@@ -90,9 +90,9 @@ describe("KnowledgeBasePage embedded navigation", () => {
   it("keeps owner-only sections hidden and resolves their deep links to Browse", () => {
     renderKnowledgeBase("/admin/knowledge?area=base&kbTab=tokens", "technician");
 
-    expect(screen.queryByRole("button", { name: "Token health" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "AI audit" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Browse & search" }))
+    expect(screen.queryByRole("button", { name: "Tokens" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Audit" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Browse" }))
       .toHaveAttribute("aria-current", "page");
     expect(screen.getByTestId("location-search"))
       .toHaveTextContent("?area=base&kbTab=tokens");

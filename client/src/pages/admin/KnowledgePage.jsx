@@ -22,7 +22,7 @@ const TABS = [
   { key: "articles", label: "Articles", Icon: BookOpen },
   { key: "sources", label: "Sources", Icon: Database },
   { key: "health", label: "Health", Icon: Activity },
-  { key: "queries", label: "Recent queries", Icon: Search },
+  { key: "queries", label: "Queries", Icon: Search },
 ];
 
 // The health endpoint is admin-only server-side (requireAdmin); showing the
