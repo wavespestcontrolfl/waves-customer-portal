@@ -10358,7 +10358,11 @@ const CallRecordingProcessor = {
                     cleared_on_file_street: onFileAddress?.address_line1 || null,
                     ...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),
                   });
-                  if (!onFileAddress?.address_line1) return trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [merged]);
+                  // A conflict cleared because the STATED premise is a saved
+                  // secondary property (knownIndependentProperty) keeps the
+                  // card's original ask — only a record that validated the
+                  // on-file number re-points it there (codex r34 P1).
+                  if (!onFileAddress?.address_line1 || knownIndependentProperty) return trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [merged]);
                   const resolvedAddress = JSON.stringify({
                     street_line_1: onFileAddress.address_line1,
                     street_line_2: onFileAddress.address_line2 || null,
