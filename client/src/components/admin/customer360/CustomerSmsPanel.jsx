@@ -203,20 +203,18 @@ function consultationLineOf(addition) {
   const lines = text.split("\n");
   return lines.find((line) => urlHost(firstUrlIn(line)) === host) || lines[0];
 }
-// combineAppendedDraft is PURE — it must never write the remembered
-// consultation line itself: it runs twice on mount (the identity-reset
-// effect clobbers the useState initializer's result back to the raw
-// stored draft, and the appendDraft effect below re-applies this function
-// to repair that in the same flush — existing behavior, not new here). A
-// write inside this function would corrupt the memory the second, REAL
-// application reads. The caller writes it once, via consultationLineOf,
-// at the same point it calls writeDraft.
-function combineAppendedDraft(existing, addition, identity) {
+// combineAppendedDraft is PURE — no storage reads or writes. `remembered`
+// (the previously inserted consultation line) is read by the CALLER before
+// any state update (Codex #4709 P1): React StrictMode runs a setState
+// updater twice with the same previous draft, so an updater that read the
+// remembered line and then overwrote it would see the NEW line on its
+// second run and fail to strip the old link. The caller persists the draft
+// and the new remembered line outside the updater.
+function combineAppendedDraft(existing, addition, remembered) {
   if (!addition) return existing;
   const base = String(existing || "");
   const newHost = urlHost(firstUrlIn(addition));
   if (newHost) {
-    const remembered = identity ? readConsultationLine(identity) : "";
     const isPriorClauseLine = (line) => (remembered
       ? line === remembered
       : urlHost(firstUrlIn(line)) === newHost && CONSULTATION_WORDING_RE.test(line));
@@ -245,7 +243,11 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [draft, setDraft] = useState(() => (identity ? combineAppendedDraft(readDraft(identity) || initialDraft, appendDraft, identity) : ""));
+  const [draft, setDraft] = useState(() => (identity ? combineAppendedDraft(readDraft(identity) || initialDraft, appendDraft, readConsultationLine(identity)) : ""));
+  // The latest draft, for the appendDraft effect to build on without a
+  // setState updater (see that effect).
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const [sentNote, setSentNote] = useState("");
@@ -275,7 +277,9 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
     setPendingNew(0);
     setLiveNote("");
     knownIdsRef.current = new Set();
-    setDraft(identity ? readDraft(identity) || initialDraft : "");
+    const base = identity ? readDraft(identity) || initialDraft : "";
+    draftRef.current = base;
+    setDraft(base);
   }, [identity, initialDraft]);
 
   // appendDraft joins onto the draft the panel already holds — including
@@ -289,14 +293,18 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
   const appliedAppendDraftRef = useRef(undefined);
   useEffect(() => {
     if (appendDraft && appendDraft !== appliedAppendDraftRef.current) {
-      setDraft((prev) => {
-        const next = combineAppendedDraft(prev, appendDraft, identity);
-        if (identity) {
-          writeDraft(identity, next);
-          writeConsultationLine(identity, consultationLineOf(appendDraft));
-        }
-        return next;
-      });
+      // No setState updater here (Codex #4709 P1): the next draft is
+      // computed once from draftRef, then set and persisted synchronously,
+      // so StrictMode's double-invoked updaters and re-run mount effects
+      // can neither strip the wrong line nor lose an unpersisted append.
+      const remembered = identity ? readConsultationLine(identity) : "";
+      const next = combineAppendedDraft(draftRef.current, appendDraft, remembered);
+      draftRef.current = next;
+      setDraft(next);
+      if (identity) {
+        writeDraft(identity, next);
+        writeConsultationLine(identity, consultationLineOf(appendDraft));
+      }
     }
     appliedAppendDraftRef.current = appendDraft;
   }, [appendDraft, identity]);

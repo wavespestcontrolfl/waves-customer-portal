@@ -199,6 +199,28 @@ describe("CustomerSmsPanel", () => {
     expect((box.value.match(/waves\.link/g) || []).length).toBe(1);
   });
 
+  // Codex #4709 P1: StrictMode runs a setState updater twice with the same
+  // previous draft. The remembered line is read before the update, so both
+  // runs strip the OLD consultation line and the replacement is persisted.
+  it("under StrictMode, re-inserting a consultation link replaces the previous one (draft updater stays pure)", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    const first = "Hi Avery, it's Waves. Pick a time: https://waves.link/l/old111\n\nReply STOP to opt out.";
+    const second = "Hi Avery, it's Waves. Pick a time: https://waves.link/l/new222\n\nReply STOP to opt out.";
+    const { rerender } = render(
+      <React.StrictMode><CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={first} /></React.StrictMode>,
+    );
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("old111"));
+    rerender(<React.StrictMode><CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={second} /></React.StrictMode>);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old111");
+    await waitFor(() => expect(sessionStorage.getItem("c360:sms-draft:staff-a:cust-a")).toContain("new222"));
+    expect(sessionStorage.getItem("c360:sms-draft:staff-a:cust-a")).not.toContain("old111");
+  });
+
   it("sends once per click through the canonical route, pinned to the customer, and keeps the draft on failure", async () => {
     const send = deferred();
     adminFetch.mockImplementation(async (path, options = {}) => {
