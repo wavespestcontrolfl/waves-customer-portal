@@ -40,6 +40,10 @@ describe('resolveLibraryMatch', () => {
     ['a (German cockroach) nymph', 'german-roach'],
     ['immature big-headed ant worker', 'bigheaded-ant'],
     ['eastern drywood termite worker', 'drywood-termite'],
+    ['eastern drywood termites', 'drywood-termite'],
+    ['southern black widows', 'black-widow'],
+    ['large American cockroaches', 'american-roach'],
+    ['white beetle larvae', 'white-grub'],
     ['ticks', 'tick'],
   ])('preserves whole-word alias matches: %s', (name, slug) => {
     expect(resolveLibraryMatch(name)?.slug).toBe(slug);

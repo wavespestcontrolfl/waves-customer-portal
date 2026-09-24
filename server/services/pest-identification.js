@@ -340,8 +340,10 @@ function resolveLibraryMatch(name) {
   for (const [alias, slug] of ALIAS_INDEX.entries()) {
     if (alias.length < 4) continue;
     // normalizeName limits aliases to letters, spaces, and hyphens, so they
-    // contain no regex metacharacters. Boundaries also allow hyphenated qualifiers.
-    if (alias.length > bestLen && new RegExp(`\\b${alias}\\b`).test(normalized)) {
+    // contain no regex metacharacters. Preserve plural suffixes before requiring
+    // a boundary, including the library's larva → larvae aliases.
+    const pluralSuffix = alias.endsWith('larva') ? 'e?' : '(?:s|es)?';
+    if (alias.length > bestLen && new RegExp(`\\b${alias}${pluralSuffix}\\b`).test(normalized)) {
       best = slug;
       bestLen = alias.length;
     }
