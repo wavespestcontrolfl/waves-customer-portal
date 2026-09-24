@@ -91,7 +91,7 @@ jest.mock('../models/db', () => {
     const passthrough = [
       'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
       'whereRaw', 'andWhere', 'orWhere', 'orderBy', 'orderByRaw', 'limit', 'offset',
-      'select', 'join', 'leftJoin', 'groupBy', 'modify', 'onConflict',
+      'select', 'join', 'leftJoin', 'groupBy', 'modify', 'onConflict', 'forUpdate', 'forNoKeyUpdate',
     ];
     for (const m of passthrough) q[m] = () => q;
     q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
@@ -961,6 +961,43 @@ describe('POST /:token commit', () => {
       expect(customerUpdates).toHaveLength(2);
       expect(customerUpdates[0].payload.latitude).toBe(LOC.lat);
       expect(customerUpdates[1].payload).toMatchObject({ address_line1: null, city: null, state: 'FL', latitude: null, longitude: null });
+    });
+
+    // Local audit P1: a concurrent commit may have booked against the
+    // address this request wrote — its visit keeps the address.
+    test('the undo is skipped when a live visit was booked for the customer since the write', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null };
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.55, lng: -82.55 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      mockCreateSelfBooking.mockImplementationOnce(async () => {
+        firstResults.scheduled_services = { id: 'ss-concurrent' }; // another commit's visit landed
+        return { ok: false, status: 409, error: 'That time was just taken' };
+      });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Any St, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(409);
+      expect(updateCalls.filter((c) => c.table === 'customers')).toHaveLength(1); // the write only, no undo
+    });
+
+    test('a stored address that geocodes but had no coordinates gets them persisted before booking', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null };
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.51, lng: -82.52 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+      expect(res.statusCode).toBe(200);
+      const write = updateCalls.find((c) => c.table === 'customers');
+      expect(write.payload).toMatchObject({ latitude: 27.51, longitude: -82.52 });
+      expect(write.payload.address_line1).toBeUndefined();
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(27.51);
     });
 
     test('stored address present but unresolvable, unchanged under the lock: the validated supplied replacement wins and is written back, fixing up the bad stored address', async () => {

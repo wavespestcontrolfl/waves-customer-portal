@@ -826,7 +826,7 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
       return {
         customer: { ...matched, ...after },
         location: resolved.location,
-        addressWrite: { customerId: matched.id, before: { latitude: null, longitude: null }, after },
+        addressWrite: { customerId: matched.id, before: { latitude: null, longitude: null }, after, writtenAt: new Date() },
       };
     }
   }
@@ -842,13 +842,26 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
 async function undoAddressWrite(addressWrite, leadId) {
   if (!addressWrite) return;
   try {
-    const guard = { id: addressWrite.customerId };
-    const q = db('customers').where(guard);
-    for (const [field, value] of Object.entries(addressWrite.after)) {
-      if (value == null) q.whereNull(field);
-      else q.where(field, value);
-    }
-    await q.update({ ...addressWrite.before, updated_at: new Date() });
+    await db.transaction(async (undoTrx) => {
+      // Serialize against other writers of this customer row, then keep the
+      // write if ANY live visit was booked for the customer since it landed
+      // (local audit P1): a concurrent commit may have booked against the
+      // address this request wrote, and reverting would strand that visit.
+      await undoTrx('customers').where({ id: addressWrite.customerId }).forUpdate().first('id');
+      const adopted = await undoTrx('scheduled_services')
+        .where({ customer_id: addressWrite.customerId })
+        // 5s slack for app-vs-DB clock skew — over-inclusive keeps the write.
+        .where('created_at', '>=', new Date(addressWrite.writtenAt.getTime() - 5000))
+        .whereNotIn('status', ['cancelled', 'skipped', 'no_show'])
+        .first('id');
+      if (adopted) return;
+      const q = undoTrx('customers').where({ id: addressWrite.customerId });
+      for (const [field, value] of Object.entries(addressWrite.after)) {
+        if (value == null) q.whereNull(field);
+        else q.where(field, value);
+      }
+      await q.update({ ...addressWrite.before, updated_at: new Date() });
+    });
   } catch (err) {
     logger.warn(`[inspection-public] address write-back undo failed for lead ${leadId}: ${err.message}`);
   }
@@ -1203,6 +1216,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             customerId: freshCustRow.id,
             before: Object.fromEntries(Object.keys(after).map((f) => [f, freshCustRow[f] ?? null])),
             after,
+            writtenAt: new Date(),
           };
           provisioned = {
             ...freshCustRow,
@@ -1212,8 +1226,21 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           };
         }
         // else resolved.source === 'customer': the pre-lock resolution WAS
-        // this row's own already-good stored address/coords — nothing to
-        // write back; `location` stays resolved.location, set above.
+        // this row's own stored address. Its text needs no write-back, but
+        // coordinates it lacked are persisted (local audit P1) —
+        // createSelfBooking reloads the row for its commit-time travel check,
+        // which must never run locationless.
+        else if (freshCustRow.latitude == null || freshCustRow.longitude == null) {
+          const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
+          await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
+          addressWrite = {
+            customerId: freshCustRow.id,
+            before: { latitude: freshCustRow.latitude ?? null, longitude: freshCustRow.longitude ?? null },
+            after,
+            writtenAt: new Date(),
+          };
+          provisioned = { ...freshCustRow, ...after };
+        }
       }
 
       return { custRow: provisioned, location, addressWrite };
@@ -1338,8 +1365,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
     if (!result.ok) {
       // No visit from THIS request — phase 1's address write-back must not
-      // outlive it (Codex #4737 r3 P1).
-      await undoAddressWrite(phase1.addressWrite, lead.id);
+      // outlive it (Codex #4737 r3 P1). Except ALREADY_BOOKED: another
+      // commit's visit exists and may be using that address.
+      if (result.code !== 'ALREADY_BOOKED') await undoAddressWrite(phase1.addressWrite, lead.id);
       if (result.code === 'ALREADY_BOOKED') {
         // The atomic lane dedupe inside createSelfBooking's own insert
         // transaction caught a duplicate — resolve and return the SAME
