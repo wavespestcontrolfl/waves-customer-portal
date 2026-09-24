@@ -3803,9 +3803,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   key={match.id}
                   onClick={() => {
                     setShowModal(null);
-                    const next = new URLSearchParams(searchParams);
+                    const next = new URLSearchParams();
+                    if (activityReviewEnabled)
+                      next.set("leadReview", "1");
                     next.set("lead", match.id);
-                    next.delete("leadId");
                     navigate(`/admin/pipeline?${next}`);
                   }}
                 >

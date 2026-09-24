@@ -231,7 +231,7 @@ describe('Pipeline queue navigation', () => {
     fetch.mockImplementation(async (url, opts) => String(url).includes('/contact-matches?')
       ? { ok: true, json: async () => ({ matches: [lead], total: 1 }) }
       : base(url, opts));
-    mount('/admin/pipeline?leadReview=1', { newLeadRequest: 1 });
+    mount('/admin/pipeline?leadReview=1&leadStatus=lost&leadPage=2&leadSearch=old', { newLeadRequest: 1 });
     fireEvent.change(screen.getByLabelText('Phone'), { target: { value: '9415550100' } });
     expect(await screen.findByText(/Possible existing leads with this contact/)).toBeInTheDocument();
     expect(calls.some(({ options }) => options?.method === 'POST')).toBe(false);
@@ -241,6 +241,9 @@ describe('Pipeline queue navigation', () => {
     await waitFor(() => expect(queueCalls().at(-1).path).toContain('id=lead-qa'));
     expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=lead-qa');
     expect(screen.getByLabelText('Current route')).toHaveTextContent('leadReview=1');
+    expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadStatus=');
+    expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadPage=');
+    expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadSearch=');
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
   });
 
