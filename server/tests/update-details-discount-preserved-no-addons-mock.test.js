@@ -1,13 +1,20 @@
 /**
- * Audit repro r2-sched-update-details-financials-1
+ * Audit repro r2-sched-update-details-financials-1 (ADMIN-BUG-R01)
  *
  * A discounted NO-add-on visit (estimated_price 90 net, primary_line_price 100
  * gross, discount_type 'percentage' 10) receives an unrelated Edit-appointment
  * save. The V1 EditServiceModal seeds its Price field from primaryLinePrice
  * (gross 100) and posts { estimatedPrice: 100, notes } with no discount
- * fields. The no-add-on branch of PUT /:id/update-details compares 100 against
- * the stored NET 90, treats it as a price change, and rewrites the row at
- * gross with the discount stamp nulled.
+ * fields. The no-add-on branch of PUT /:id/update-details compared 100
+ * against the stored NET 90, treated it as a price change, and rewrote the
+ * row at gross with the discount stamp nulled.
+ *
+ * Fix: the desktop modal now also sends its own `primaryLinePrice` on every
+ * no-add-on save (not only when add-ons are present), declaring outright
+ * that its `estimatedPrice` is the row's GROSS. The server reads that
+ * field's presence as the caller's convention instead of guessing from the
+ * posted number — MobileServiceEditModal never sends it, so its
+ * `estimatedPrice` is read as the stored NET exactly as before this fix.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -110,6 +117,24 @@ function chain(table) {
   return thenable;
 }
 
+// A variant of STORED with an existing $50 add-on line and no discount:
+// primary_line_price=100, one add-on base_price=50, estimated_price=150.
+function mockDbWithAddonRow(storedRowOverrides) {
+  const storedRow = { ...STORED, discount_type: null, discount_amount: null, discount_dollars: null, ...storedRowOverrides };
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_service_addons') {
+      const c = chain(table);
+      const rows = [{ base_price: 50, estimated_price: 50 }];
+      c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+      c.catch = (fn) => Promise.resolve(rows).catch(fn);
+      return c;
+    }
+    const c = chain(table);
+    if (table === 'scheduled_services') c.first = jest.fn(async () => ({ ...storedRow }));
+    return c;
+  });
+}
+
 let server;
 let baseUrl;
 beforeAll((done) => {
@@ -143,13 +168,13 @@ async function put(body) {
   return { status: res.status, body: await res.json() };
 }
 
-test('an unrelated save echoing the gross primaryLinePrice as estimatedPrice must NOT strip the appointment discount', async () => {
-  // What the V1 EditServiceModal posts for a no-add-on row: form.price was
-  // seeded from primaryLinePrice (100, gross) because the list DTO always ships
-  // serviceAddons as an array; discountType state is "" so it is omitted.
-  const { status, body } = await put({ estimatedPrice: 100, notes: 'gate code 1234' });
+test('desktop: an unrelated save echoing the gross primaryLinePrice must NOT strip the appointment discount', async () => {
+  // What the FIXED EditServiceModal posts for a no-add-on row: form.price
+  // was seeded from primaryLinePrice (100, gross); primaryLinePrice is now
+  // sent unconditionally, declaring the gross convention; discountType
+  // state is "" so it is omitted.
+  const { status, body } = await put({ estimatedPrice: 100, primaryLinePrice: 100, notes: 'gate code 1234' });
   const write = captured.find((c) => c.table === 'scheduled_services');
-   
   console.log('status', status, JSON.stringify(body), 'captured scheduled_services update:', JSON.stringify(write?.payload));
   expect(write).toBeDefined();
   // Expected: economics untouched. Either no estimated_price write at all, or
@@ -161,44 +186,21 @@ test('an unrelated save echoing the gross primaryLinePrice as estimatedPrice mus
   expect(write.payload.discount_amount).not.toBeNull();
 });
 
-test('Codex round-1 P0: a genuine mobile price change on a row WITH existing add-ons must NOT be silently ignored just because it matches the primary line\'s own gross', async () => {
-  // Stored row: a $100 primary line + a $50 add-on = $150 total, no
-  // discount. `deriveLegacyPrimarySubmission` returns only the PRIMARY
-  // line's own gross (100) here — NOT the row's true $150 total — so a
-  // "does the posted price match the derived gross" check must never apply
-  // when the row has existing add-on rows, or a genuine new total that
-  // happens to equal 100 gets discarded as an unchanged echo.
-  const storedWithAddons = { ...STORED, estimated_price: 150, discount_type: null, discount_amount: null, discount_dollars: null };
-  db.mockImplementation((table) => {
-    if (table === 'scheduled_service_addons') {
-      const c = chain(table);
-      c.then = (resolve, reject) => Promise.resolve([{ base_price: 50, estimated_price: 50 }]).then(resolve, reject);
-      c.catch = (fn) => Promise.resolve([{ base_price: 50, estimated_price: 50 }]).catch(fn);
-      return c;
-    }
-    const c = chain(table);
-    if (table === 'scheduled_services') {
-      c.first = jest.fn(async () => ({ ...storedWithAddons }));
-    }
-    return c;
-  });
-  // MobileServiceEditModal seeds from the stored NET total (150) and posts
-  // a genuinely NEW total of 100 — which happens to equal the stored
-  // primary line's own gross, purely by coincidence.
-  const { status, body } = await put({ estimatedPrice: 100, notes: 'gate code 1234' });
+test('desktop: a genuine price change (primaryLinePrice posted, different from stored) is honored, discount recomputed', async () => {
+  // Operator actually types a new Price of 120 on the same $100/$90 row.
+  const { status, body } = await put({ estimatedPrice: 120, primaryLinePrice: 120, notes: 'price bump' });
   const write = captured.find((c) => c.table === 'scheduled_services');
   console.log('status', status, JSON.stringify(body), 'captured scheduled_services update:', JSON.stringify(write?.payload));
   expect(write).toBeDefined();
-  // The genuine price change must actually land — never silently discarded.
-  expect(Number(write.payload.estimated_price)).toBeCloseTo(100, 2);
+  expect(Number(write.payload.estimated_price)).toBeCloseTo(120, 2);
 });
 
-test('an unrelated MobileServiceEditModal save echoing the stored NET as estimatedPrice must also NOT strip the discount', async () => {
+test('mobile: an unrelated save echoing the stored NET as estimatedPrice must also NOT strip the discount', async () => {
   // MobileServiceEditModal seeds its price state from the stored NET
-  // `estimatedPrice` (90) and posts it back verbatim — the opposite
-  // convention from the desktop modal's gross echo above. Both callers post
-  // the same `estimatedPrice` key to this same branch, so the no-op check
-  // must recognize BOTH as unchanged.
+  // `estimatedPrice` (90) and posts it back verbatim, WITHOUT
+  // primaryLinePrice — the opposite convention from the desktop modal's
+  // gross echo above. Both callers post the same `estimatedPrice` key to
+  // this same branch, so the no-op check must recognize BOTH as unchanged.
   const { status, body } = await put({ estimatedPrice: 90, notes: 'gate code 1234' });
   const write = captured.find((c) => c.table === 'scheduled_services');
   console.log('status', status, JSON.stringify(body), 'captured scheduled_services update:', JSON.stringify(write?.payload));
@@ -208,4 +210,33 @@ test('an unrelated MobileServiceEditModal save echoing the stored NET as estimat
   }
   expect(write.payload.discount_type).not.toBeNull();
   expect(write.payload.discount_amount).not.toBeNull();
+});
+
+test('Codex round-2 P0: a genuine mobile price change that happens to equal the stored GROSS must still be honored', async () => {
+  // Same $100/$90/10%-discount row. Mobile operator genuinely wants to set
+  // the price to 100 (drop the discount) — no primaryLinePrice is posted,
+  // so this must be read as a real NET change (90 -> 100), never guessed as
+  // an echo of the stored gross.
+  const { status, body } = await put({ estimatedPrice: 100, notes: 'drop the discount' });
+  const write = captured.find((c) => c.table === 'scheduled_services');
+  console.log('status', status, JSON.stringify(body), 'captured scheduled_services update:', JSON.stringify(write?.payload));
+  expect(write).toBeDefined();
+  expect(Number(write.payload.estimated_price)).toBeCloseTo(100, 2);
+});
+
+test('Codex round-1 P0: a genuine mobile price change on a row WITH existing add-ons must NOT be silently ignored just because it matches the primary line\'s own gross', async () => {
+  // Stored row: a $100 primary line + a $50 add-on = $150 total, no
+  // discount. `deriveLegacyPrimarySubmission` returns only the PRIMARY
+  // line's own gross (100) here — NOT the row's true $150 total — so
+  // reading it as a stand-in for "the whole-visit price" would let a
+  // genuine new total that happens to equal 100 be discarded as unchanged.
+  // No primaryLinePrice is posted (mobile), so the fix must never even
+  // consider the gross reading here.
+  mockDbWithAddonRow({ estimated_price: 150 });
+  const { status, body } = await put({ estimatedPrice: 100, notes: 'gate code 1234' });
+  const write = captured.find((c) => c.table === 'scheduled_services');
+  console.log('status', status, JSON.stringify(body), 'captured scheduled_services update:', JSON.stringify(write?.payload));
+  expect(write).toBeDefined();
+  // The genuine price change must actually land — never silently discarded.
+  expect(Number(write.payload.estimated_price)).toBeCloseTo(100, 2);
 });

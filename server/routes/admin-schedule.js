@@ -10327,45 +10327,51 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // ADMIN-BUG-R01 (P0) fix: this branch is shared by TWO callers with
         // DIFFERENT price-field conventions for the SAME `estimatedPrice`
         // key. The desktop Edit-appointment modal (SchedulePage.jsx) seeds
-        // its Price field from the row's GROSS `primaryLinePrice` whenever
-        // add-ons are "known" (:1708-1719) — never the stored NET
-        // `estimated_price` — while MobileServiceEditModal seeds and posts
-        // the stored NET `estimatedPrice` verbatim. Diffing the posted value
-        // against only the net (the old behavior) treated every discounted,
-        // add-on-less DESKTOP save as a price change and silently stripped
-        // the discount.
+        // its Price field from the row's GROSS `primaryLinePrice` (:1708-
+        // 1719) — never the stored NET `estimated_price` — while
+        // MobileServiceEditModal seeds and posts the stored NET
+        // `estimatedPrice` verbatim. Diffing the posted value against only
+        // the net (the old behavior) treated every discounted, add-on-less
+        // DESKTOP save as a price change and silently stripped the
+        // discount.
         //
-        // Codex round 1 (P0): the fix cannot simply accept EITHER
-        // representation as unchanged everywhere — when the row has
-        // EXISTING add-on rows, `deriveLegacyPrimarySubmission` returns only
-        // the PRIMARY line's own gross (it ignores add-ons whenever
-        // `primaryLinePrice` is set), not the row's total; treating that as
-        // an acceptable stand-in for "the whole-visit price" would let a
-        // genuine mobile price change that happens to equal the stored
-        // primary's gross be silently discarded as a no-op. Desktop can
-        // never actually reach this add-on-less branch for a row that HAS
-        // stored add-ons — its own save always includes an `addons` key
-        // once the row had any (SchedulePage.jsx `hadAddonsInitially`/
-        // `sendAddons`), routing it through the OTHER branch above instead.
-        // So whenever this branch sees existing add-on rows, the caller can
-        // only be one using the NET convention (today: mobile), and the
-        // gross fallback must not apply — compare against the stored NET
-        // only, exactly as before this fix. The gross fallback is scoped to
-        // the genuinely ambiguous case this bug report is about: a row with
-        // NO stored add-ons, where gross and net differ only by the
-        // appointment discount and either caller's echo must be a no-op.
-        const existingNetPrice = Number(existingPrice?.estimated_price);
-        const matchesNet = Number.isFinite(existingNetPrice) && Math.abs(existingNetPrice - basePrice) < 0.005;
-        let matchesGross = false;
-        if (addonRows.length === 0) {
+        // Codex rounds 1-2 (P0): a purely value-based guess at which
+        // convention a given save used — "does it match the derived gross,
+        // or the stored net" — cannot be made safe. When the row has
+        // add-ons, the "gross" this branch can derive is only the PRIMARY
+        // line's own (deriveLegacyPrimarySubmission ignores add-ons
+        // whenever `primaryLinePrice` is set), not the row's total, so a
+        // genuine mobile total that happens to equal it would be discarded;
+        // and even for a genuinely add-on-less row, a genuine mobile price
+        // change that happens to equal the stored GROSS (or a genuine
+        // desktop change that happens to equal the stored NET) collides the
+        // same way. Guessing from the number can never rule this out.
+        //
+        // Fixed by removing the guess: the desktop modal now sends its own
+        // `primaryLinePrice` on EVERY save (previously only when add-ons
+        // were present), declaring outright that its `estimatedPrice` is
+        // that row's GROSS. Its presence is the caller's explicit
+        // convention, not a value to pattern-match — MobileServiceEditModal
+        // never sends this field, so its `estimatedPrice` is read as the
+        // NET exactly as this branch always treated it before this fix.
+        const desktopGrossConvention = primaryLinePrice !== undefined && primaryLinePrice !== ''
+          && !isNaN(Number(primaryLinePrice));
+        let priceChanged;
+        if (desktopGrossConvention) {
           const existingGrossPrice = deriveLegacyPrimarySubmission({
             primaryLinePrice: existingPrice?.primary_line_price,
             estimatedPrice: existingPrice?.estimated_price,
-            addons: [],
+            addons: addonRows.map((addon) => ({
+              basePrice: addon.base_price != null ? addon.base_price : addon.estimated_price,
+            })),
           });
-          matchesGross = Number.isFinite(existingGrossPrice) && Math.abs(existingGrossPrice - basePrice) < 0.005;
+          priceChanged = !Number.isFinite(existingGrossPrice)
+            || Math.abs(existingGrossPrice - basePrice) >= 0.005;
+        } else {
+          const existingNetPrice = Number(existingPrice?.estimated_price);
+          priceChanged = !Number.isFinite(existingNetPrice)
+            || Math.abs(existingNetPrice - basePrice) >= 0.005;
         }
-        const priceChanged = !matchesNet && !matchesGross;
         const discountTypeChanged = discountType !== undefined
           && (discountType || null) !== (existingPrice?.discount_type || null);
         const nextDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;

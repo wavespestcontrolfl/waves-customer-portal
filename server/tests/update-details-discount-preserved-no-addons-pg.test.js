@@ -153,11 +153,12 @@ describeDb('r2-sched-update-details-financials-1: unrelated edit on a discounted
 
     // The modal's payload for an unrelated (notes-only) save: no `addons` key
     // (no lines, none initially), estimatedPrice = form.price (the seed),
+    // primaryLinePrice sent unconditionally (declares the gross convention),
     // discountType/discountAmount/discountId undefined (never seeded).
     const res = await fetch(`${baseUrl}/api/admin/schedule/${SERVICE}/update-details`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ estimatedPrice: seededPrice, notes: 'gate code 1234' }),
+      body: JSON.stringify({ estimatedPrice: seededPrice, primaryLinePrice: seededPrice, notes: 'gate code 1234' }),
     });
     const body = await res.json().catch(() => ({}));
     expect(res.status).toBe(200);
@@ -190,5 +191,20 @@ describeDb('r2-sched-update-details-financials-1: unrelated edit on a discounted
     expect(after.discount_type).toBe('percentage');
     expect(Number(after.discount_amount)).toBe(10);
     expect(Number(after.primary_line_price)).toBe(GROSS);
+  });
+
+  test('Codex round-2 P0: a genuine mobile price change equal to the stored GROSS is honored, not read as an echo', async () => {
+    // Mobile operator genuinely wants to change the price to 100 (drop the
+    // discount) on this $100/$90/10%-discount row. No primaryLinePrice is
+    // posted, so this must be treated as a real NET change, never guessed
+    // as an echo of the stored gross just because the numbers coincide.
+    const res = await fetch(`${baseUrl}/api/admin/schedule/${SERVICE}/update-details`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ estimatedPrice: GROSS, notes: 'drop the discount' }),
+    });
+    expect(res.status).toBe(200);
+    const after = await readEconomics();
+    expect(Number(after.estimated_price)).toBe(GROSS);
   });
 });
