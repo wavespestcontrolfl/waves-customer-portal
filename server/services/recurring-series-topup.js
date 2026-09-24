@@ -60,27 +60,37 @@ async function eligibleSeriesParentIds(conn) {
 //   dryRun: false → topUpRecurringSeries (the writing wrapper): commits and
 //                    registers a reminder for each spawned visit, exactly as
 //                    the completion-path wrapper does for its own extend.
-// `conn`: the transaction to run this series' work under, when the caller
-// already has one open (runRecurringSeriesTopUpSweep's own outer,
-// rollback-only dry-run transaction — see below). Omitted, this function
-// manages its own connection/transaction exactly as it always has, for a
-// standalone caller with no outer transaction of its own.
+// A prior version of this fix (Codex GitHub r3 P2) tried nesting every
+// series' dry run inside ONE outer transaction (trx.transaction()
+// savepoints) so a later series could see an earlier one's simulated
+// inserts. Reverted: topUpRecurringSeriesWithLocks takes its maintenance
+// and customer-comms fences via pg_advisory_xact_lock, which Postgres
+// scopes to the ENCLOSING REAL transaction, not a savepoint — releasing a
+// savepoint does not release the locks taken inside it. Sharing one outer
+// transaction across every series in the sweep therefore held EVERY
+// series' advisory locks for the WHOLE sweep, not just its own series, so
+// a same-customer series processed earlier in the sweep could still hold
+// that customer's comms lock while this function waited on a DIFFERENT
+// series' maintenance lock for the same customer — exactly the
+// lock-order cycle a concurrent live completion (which takes maintenance
+// lock then comms lock, in that order) could deadlock against, live
+// maintenance included, even with the top-up gate off (caught by this
+// repo's local pre-push Codex audit). Each series keeps its own
+// independent, independently-rolled-back transaction instead — the
+// cross-series "sees earlier simulated inserts" accuracy improvement is
+// not implemented; a dry-run preview across two series for the same
+// customer can therefore differ slightly from what an --apply run (which
+// commits each series before the next starts) would actually do. `conn`
+// is accepted for a caller that already has its OWN transaction for a
+// single series (e.g. a future targeted re-run), never for fanning many
+// series out under one shared transaction.
 async function topUpOneSeries(parentId, { horizonDays, dryRun, conn = null }) {
   const { topUpRecurringSeries, topUpRecurringSeriesWithLocks } = require('../routes/admin-schedule');
   if (!dryRun) {
     return topUpRecurringSeries(conn || db, parentId, { horizonDays });
   }
   if (conn) {
-    // Nested under the sweep's own outer transaction: knex's
-    // trx.transaction(cb) on an existing transaction opens a SAVEPOINT, not
-    // a fresh connection — a resolving callback releases it (visible to the
-    // outer transaction, i.e. to every OTHER series' queries in this same
-    // dry run, per Codex GitHub r3 P2), a throwing callback rolls back only
-    // that savepoint. Per-series failure isolation without a per-series
-    // transaction: the outer transaction and every sibling savepoint are
-    // untouched either way, and the sweep's loop still catches/tallies the
-    // error same as before.
-    return conn.transaction((savepointTrx) => topUpRecurringSeriesWithLocks(savepointTrx, parentId, { horizonDays }));
+    return topUpRecurringSeriesWithLocks(conn, parentId, { horizonDays });
   }
   const trx = await db.transaction();
   // Knex's default doNotRejectOnRollback RESOLVES trx.executionPromise on a
@@ -115,57 +125,28 @@ async function runRecurringSeriesTopUpSweep({ horizonDays = horizonDaysFromEnv()
     dryRun, horizonDays, scanned: ids.length, toppedUp: 0, visitsInserted: 0,
     skipped: {}, errors: [], series: [],
   };
-  const sweepOnce = async (conn) => {
-    for (const parentId of ids) {
-      try {
-        // Sequential, not parallel: each series must see the prior one's
-        // simulated inserts (dry run) or fully complete before the next
-        // starts (apply) — this can't be parallelized.
-        const result = await topUpOneSeries(parentId, { horizonDays, dryRun, conn });
-        const inserted = result?.spawnedVisits?.length || 0;
-        if (result?.skipped) {
-          summary.skipped[result.skipped] = (summary.skipped[result.skipped] || 0) + 1;
-        } else if (inserted > 0) {
-          summary.toppedUp += 1;
-          summary.visitsInserted += inserted;
-        }
-        summary.series.push({
-          parentId,
-          skipped: result?.skipped || null,
-          insertedDates: (result?.spawnedVisits || []).map((v) => v.scheduledDate),
-        });
-      } catch (e) {
-        summary.errors.push({ parentId, error: e.message });
-        logger.error(`[recurring-series-topup] series ${parentId} failed: ${e.message}`);
-      }
-    }
-  };
-  if (dryRun) {
-    // ONE rollback-only transaction for the WHOLE sweep (Codex GitHub r3
-    // P2), not one per series as before: a separate transaction per series
-    // couldn't see an earlier series' simulated inserts in the same dry
-    // run (each was independently opened and rolled back), so a plan whose
-    // eligibility or horizon math depends on a sibling series' just-added
-    // visit would under-report here even though the real --apply pass
-    // (which commits each series before the next starts) would see it.
-    // topUpOneSeries nests each series in its own SAVEPOINT under this
-    // transaction, so one series' failure still can't disturb another's
-    // work or force the whole sweep to unwind.
-    const trx = await db.transaction();
-    // Same explicit-error rollback as the single-series path used to do on
-    // its own transaction — keeps fileCoverageExceptionAfterCommit's
-    // after-commit notification gate shut for a dry run that never
-    // actually committed anything.
-    if (trx.executionPromise && typeof trx.executionPromise.catch === 'function') {
-      trx.executionPromise.catch(() => {});
-    }
+  for (const parentId of ids) {
     try {
-      await sweepOnce(trx);
-    } finally {
-      await trx.rollback(new Error('recurring-series-topup: intentional dry-run rollback')).catch(() => {});
+      // Sequential, not parallel: each series opens and settles its OWN
+      // transaction (topUpOneSeries) before the next starts, so two
+      // series can't race each other's locks or writes.
+      const result = await topUpOneSeries(parentId, { horizonDays, dryRun });
+      const inserted = result?.spawnedVisits?.length || 0;
+      if (result?.skipped) {
+        summary.skipped[result.skipped] = (summary.skipped[result.skipped] || 0) + 1;
+      } else if (inserted > 0) {
+        summary.toppedUp += 1;
+        summary.visitsInserted += inserted;
+      }
+      summary.series.push({
+        parentId,
+        skipped: result?.skipped || null,
+        insertedDates: (result?.spawnedVisits || []).map((v) => v.scheduledDate),
+      });
+    } catch (e) {
+      summary.errors.push({ parentId, error: e.message });
+      logger.error(`[recurring-series-topup] series ${parentId} failed: ${e.message}`);
     }
-  } else {
-    await sweepOnce(db);
   }
   logger.info(
     `[recurring-series-topup] ${dryRun ? 'shadow' : 'apply'} run: scanned=${summary.scanned} `

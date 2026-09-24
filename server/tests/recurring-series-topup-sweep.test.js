@@ -11,20 +11,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-// A per-series savepoint under the outer trx — a distinct object from
-// mockTrx so a test can tell "ran under the outer transaction directly" vs
-// "ran under its own nested savepoint" apart if it needs to.
-const mockSavepointTrx = { isTransaction: true };
-const mockTrx = {
-  rollback: jest.fn().mockResolvedValue(undefined),
-  isTransaction: true,
-  // knex's trx.transaction(cb) on an existing transaction opens a SAVEPOINT
-  // and hands the callback that nested transaction object; the mock just
-  // invokes the callback synchronously with mockSavepointTrx and returns
-  // its result (a promise), same shape a real nested transaction's own
-  // resolve/reject would have.
-  transaction: jest.fn((cb) => cb(mockSavepointTrx)),
-};
+const mockTrx = { rollback: jest.fn().mockResolvedValue(undefined), isTransaction: true };
 const mockTransaction = jest.fn().mockResolvedValue(mockTrx);
 const mockPluck = jest.fn().mockResolvedValue([]);
 const mockColumnInfo = jest.fn().mockResolvedValue({ recurring_ongoing: {} });
@@ -87,13 +74,17 @@ describe('topUpOneSeries — dry run never reaches the committing wrapper', () =
     expect(mockTopUpRecurringSeriesWithLocks).not.toHaveBeenCalled();
   });
 
-  test('given an outer `conn`, nests as a savepoint on it instead of opening its own transaction (Codex GitHub r3 P2)', async () => {
+  test('given an outer `conn` (a caller with its own single-series transaction), runs directly on it instead of opening a new one', async () => {
+    // Deliberately NOT used by runRecurringSeriesTopUpSweep — see
+    // topUpOneSeries' own comment on why the sweep never shares one
+    // transaction across series (pg_advisory_xact_lock's transaction,
+    // not savepoint, scope). This param exists for a single-series caller
+    // that already owns a transaction.
     mockTopUpRecurringSeriesWithLocks.mockResolvedValue({ spawnedVisits: [{ scheduledDate: '2027-01-01' }], skipped: null });
     const result = await topUpOneSeries('parent-1', { horizonDays: 90, dryRun: true, conn: mockTrx });
     expect(db.transaction).not.toHaveBeenCalled();
-    expect(mockTrx.transaction).toHaveBeenCalledTimes(1);
-    expect(mockTopUpRecurringSeriesWithLocks).toHaveBeenCalledWith(mockSavepointTrx, 'parent-1', { horizonDays: 90 });
-    expect(mockTrx.rollback).not.toHaveBeenCalled(); // the OUTER trx's rollback is the caller's responsibility, not this series'
+    expect(mockTopUpRecurringSeriesWithLocks).toHaveBeenCalledWith(mockTrx, 'parent-1', { horizonDays: 90 });
+    expect(mockTrx.rollback).not.toHaveBeenCalled(); // that transaction's lifecycle is the CALLER's responsibility, not this series'
     expect(result.spawnedVisits).toHaveLength(1);
   });
 
@@ -101,7 +92,6 @@ describe('topUpOneSeries — dry run never reaches the committing wrapper', () =
     mockTopUpRecurringSeries.mockResolvedValue({ spawnedVisits: [], skipped: null });
     await topUpOneSeries('parent-1', { horizonDays: 90, dryRun: false, conn: mockTrx });
     expect(mockTopUpRecurringSeries).toHaveBeenCalledWith(mockTrx, 'parent-1', { horizonDays: 90 });
-    expect(mockTrx.transaction).not.toHaveBeenCalled();
   });
 });
 
@@ -128,34 +118,11 @@ describe('runRecurringSeriesTopUpSweep', () => {
     expect(mockTopUpRecurringSeriesWithLocks).toHaveBeenCalledTimes(3);
     // Never touched the committing wrapper in shadow mode.
     expect(mockTopUpRecurringSeries).not.toHaveBeenCalled();
-    // ONE outer transaction for the whole sweep, not one per series — p2's
-    // savepoint failure must not have unwound the outer transaction or
-    // stopped p3 from running under it.
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(mockTrx.transaction).toHaveBeenCalledTimes(3);
-  });
-
-  test('nests each series as its own savepoint on ONE outer, rollback-only transaction (Codex GitHub r3 P2)', async () => {
-    mockTopUpRecurringSeriesWithLocks.mockResolvedValue({ spawnedVisits: [], skipped: 'not_ongoing' });
-    await runRecurringSeriesTopUpSweep({ dryRun: true, parentIds: ['p1', 'p2', 'p3'], horizonDays: 30 });
-    // A per-series transaction (the old shape) would call db.transaction()
-    // once per parentId; the fix calls it exactly once for the whole sweep
-    // and nests each series under that same trx instead.
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(mockTrx.transaction).toHaveBeenCalledTimes(3);
-    expect(mockTopUpRecurringSeriesWithLocks).toHaveBeenCalledWith(mockSavepointTrx, 'p1', { horizonDays: 30 });
-    // The outer transaction is rolled back with an explicit error exactly
-    // once at the end — same after-commit-gate-closing contract as before,
-    // now scoped to the whole sweep rather than each series.
-    expect(mockTrx.rollback).toHaveBeenCalledTimes(1);
-    expect(mockTrx.rollback.mock.calls[0][0]).toBeInstanceOf(Error);
-  });
-
-  test('apply mode (dryRun: false) never opens a transaction of its own — topUpRecurringSeries manages its own per series', async () => {
-    mockTopUpRecurringSeries.mockResolvedValue({ spawnedVisits: [], skipped: null });
-    await runRecurringSeriesTopUpSweep({ dryRun: false, parentIds: ['p1', 'p2'] });
-    expect(db.transaction).not.toHaveBeenCalled();
-    expect(mockTrx.transaction).not.toHaveBeenCalled();
+    // Each series gets its OWN transaction (never one shared across the
+    // sweep — see topUpOneSeries' comment on why): p2's failed transaction
+    // must not have prevented p3 from opening and running its own.
+    expect(db.transaction).toHaveBeenCalledTimes(3);
+    expect(mockTrx.rollback).toHaveBeenCalledTimes(3);
   });
 
   test('with no parentIds given, scans eligibleSeriesParentIds', async () => {
