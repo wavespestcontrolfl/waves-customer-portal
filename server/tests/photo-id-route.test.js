@@ -961,6 +961,30 @@ describe('real averageScores merges never leave the composite empty (why raw evi
       expect(body.next_step.kind).toBe('unclear');
     });
   });
+
+  test('lawn-assessment.js averageScores with an ASYMMETRIC missing field dilutes a real value with a synthetic zero (codex GH r8 P1)', () => {
+    // Claude reports turf_density 80; Gemini omits it entirely. Real
+    // averageScores still averages 80 against a synthetic 0 and publishes
+    // 40 — not a measurement, half of one.
+    const { composite } = realLawnAssessment.averageScores({ turf_density: 80 }, {});
+    expect(composite.turf_density).toBe(40);
+  });
+
+  test('end-to-end: an asymmetric missing field uses the SOLE reported value, never the diluted average (codex GH r8 P1)', async () => {
+    const claude = { turf_density: 80, weed_coverage: 10, color_health: 8, fungal_activity: 'none' };
+    const gemini = { fungal_activity: 'none' }; // omits every numeric field entirely
+    const realResult = { claude, gemini, composite: realLawnAssessment.averageScores(claude, gemini).composite };
+    // Prove the bug is real before asserting the route corrects it.
+    expect(realResult.composite.turf_density).toBe(40);
+    mockLawnAnalyzePhoto.mockResolvedValue(realResult);
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      const body = await res.json();
+      expect(body.result.scores.turf_density).toBe(80); // Claude's actual reading, not diluted to 40
+      expect(body.result.scores.weed_coverage).toBe(10);
+      expect(body.result.scores.color_health).toBe(8);
+    });
+  });
 });
 
 // A tiny local mirror of the route's own check, for the assertion above —

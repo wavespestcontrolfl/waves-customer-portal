@@ -414,27 +414,48 @@ function lawnRawResultHasEvidence(raw) {
   return LAWN_EVIDENCE_FIELDS.some((key) => raw[key] != null && raw[key] !== '');
 }
 
-// codex GH r7 P1: the "any evidence" check above is right for the
+// codex GH r7+r8 P1: the "any evidence" check above is right for the
 // TOTAL-FAILURE 503 decision, but the 3 numeric SCORE fields customers see
-// (turf_density/weed_coverage/color_health) have their OWN synthetic
-// defaults independent of the categorical ones — averageScores gives
-// turf_density/weed_coverage a real 0 and color_health a real 5 whenever
-// EITHER model omits them, even if the other categorical fields (e.g.
-// fungal_activity) genuinely WERE reported. A photo whose raw output only
-// ever covered fungal_activity would otherwise merge as a confident
-// turf_density: 0 / color_health: 5 read. This nulls out exactly those 3
-// fields on a photo's composite when NEITHER model actually reported them,
-// so mergeLawnComposites' existing numericValues() (which already correctly
-// drops nulls before averaging) sees a true "not measured" instead of a
-// synthesized number, and noUsableScores can correctly catch it.
+// (turf_density/weed_coverage/color_health) have their OWN independent
+// defaults inside averageScores — a MISSING field from EITHER model
+// defaults to a real 0 (turf/weed) or 5 (color) before the two sides are
+// averaged. That corrupts more than the "neither model reported it" case
+// (r7): if only ONE model reports a real value (say Claude: turf_density 80)
+// and the other omits the field, averageScores still averages 80 against a
+// synthetic 0 and publishes 40 — a genuinely measured 80 diluted by nothing,
+// not caught by nulling only the "neither has it" case. The fix recomputes
+// each of the 3 fields directly from RAW claude/gemini instead of trusting
+// the composite's own value at all: both models reported it → average
+// (matching averageScores' own rounding); only one did → use that value
+// as-is (no synthetic partner); neither did → null (mergeLawnComposites'
+// numericValues() already correctly drops nulls before its own average).
+const LAWN_SCORE_FIELD_ROUNDING = {
+  turf_density: (v) => Math.round(v),
+  weed_coverage: (v) => Math.round(v),
+  color_health: (v) => Math.round(v * 10) / 10, // 1-10 scale, 1 decimal — matches averageScores' own color_health rounding
+};
+
+function lawnRawNumericValue(raw, key) {
+  if (!raw || raw[key] == null || raw[key] === '') return null;
+  const n = Number(raw[key]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function lawnRecomputeScoreField(claude, gemini, key) {
+  const c = lawnRawNumericValue(claude, key);
+  const g = lawnRawNumericValue(gemini, key);
+  if (c != null && g != null) return LAWN_SCORE_FIELD_ROUNDING[key]((c + g) / 2);
+  if (c != null) return c;
+  if (g != null) return g;
+  return null;
+}
+
 function lawnSanitizeScoreFields(analysis) {
   const { claude, gemini, composite } = analysis;
   if (!composite) return null;
   const sanitized = { ...composite };
   for (const key of ['turf_density', 'weed_coverage', 'color_health']) {
-    const claudeHas = claude && claude[key] != null && claude[key] !== '';
-    const geminiHas = gemini && gemini[key] != null && gemini[key] !== '';
-    if (!claudeHas && !geminiHas) sanitized[key] = null;
+    sanitized[key] = lawnRecomputeScoreField(claude, gemini, key);
   }
   return sanitized;
 }
