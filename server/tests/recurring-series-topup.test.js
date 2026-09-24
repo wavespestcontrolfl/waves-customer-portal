@@ -22,9 +22,14 @@ jest.mock('../services/appointment-reminders', () => ({
 jest.mock('../services/annual-prepay-renewals', () => ({
   // serviceMatchesCoverage is pure (no DB) — keep the REAL implementation so
   // the term-cap's customer-wide service scoping is exercised for real;
-  // only coveredTermsAsOf (the DB query) is mocked per-test.
+  // coveredTermsAsOf (the DB query) is mocked per-test. annualPrepayCoversVisit
+  // defaults to resolving true below (beforeEach) — the term-cap describe
+  // block is about DATE math, not coverage-stamping mechanics, which get
+  // their own dedicated describe block further down with this mock
+  // overridden per-test.
   ...jest.requireActual('../services/annual-prepay-renewals'),
   coveredTermsAsOf: jest.fn(),
+  annualPrepayCoversVisit: jest.fn(),
 }));
 
 const adminScheduleRouter = require('../routes/admin-schedule');
@@ -32,7 +37,9 @@ const {
   topUpRecurringSeriesLocked, topUpRecurringSeries, topUpRecurringSeriesWithLocks, TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
 } = adminScheduleRouter._test;
 const AppointmentReminders = require('../services/appointment-reminders');
-const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
+const { coveredTermsAsOf, annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
+beforeEach(() => { annualPrepayCoversVisit.mockReset().mockResolvedValue(true); });
+const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
 const { etDateString } = require('../utils/datetime-et');
 
 function daysOut(n) {
@@ -141,6 +148,7 @@ function topupScenario({
   const cols = { ...BASE_COLS, ...colsOverrides };
   const seriesDates = new Set(initialDates);
   const inserted = [];
+  const insertedById = new Map();
   let nextId = 900;
   const handler = ({ table, calls, op, data, field }) => {
     if (table === 'scheduled_services') {
@@ -157,10 +165,33 @@ function topupScenario({
           return { scheduled_date: latest };
         }
         const whereCall = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'id' in c[1]);
-        if (whereCall && whereCall[1].id !== parent.id) return undefined;
+        if (whereCall) {
+          if (whereCall[1].id === parent.id) return parent;
+          // A freshly-inserted row's own id (e.g. the strict prepay-coverage
+          // re-read, or a spawned-reminder terminal recheck) — tracked
+          // separately from `parent` so a plain bare `.first()` by id
+          // returns the actual row, not a stale copy of the parent.
+          return insertedById.get(whereCall[1].id);
+        }
         return parent;
       }
       if (op === 'await') {
+        if (calls.some((c) => c[0] === 'del')) {
+          // A row-scoped compensating delete (post-insert cancellation
+          // re-check, or the strict prepay-coverage rollback) — remove it
+          // from both the id map and the audit array so an assertion
+          // checking `inserted` correctly reflects the rollback instead of
+          // still showing a row this same call deleted.
+          const whereCall = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'id' in c[1]);
+          const targetId = whereCall?.[1]?.id;
+          if (targetId != null && insertedById.has(targetId)) {
+            insertedById.delete(targetId);
+            const idx = inserted.findIndex((r) => r.id === targetId);
+            if (idx >= 0) inserted.splice(idx, 1);
+            return 1;
+          }
+          return 0;
+        }
         if (calls.some((c) => c[0] === 'whereRaw')) return []; // global occupancy probe — never clashes here
         if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
           return [...seriesDates].map((scheduled_date) => ({ scheduled_date }));
@@ -169,9 +200,11 @@ function topupScenario({
       }
       if (op === 'insertReturning') {
         const id = ++nextId;
-        inserted.push({ id, ...data });
+        const row = { id, ...data };
+        inserted.push(row);
+        insertedById.set(id, row);
         seriesDates.add(data.scheduled_date);
-        return [{ id, ...data }];
+        return [row];
       }
       if (op === 'insert') { inserted.push(data); seriesDates.add(data.scheduled_date); return [1]; }
     }
@@ -230,11 +263,34 @@ describe('topUpRecurringSeriesLocked — eligibility', () => {
     }
   });
 
-  test('skips a paused customer', async () => {
-    const { conn, inserted } = topupScenario({ customerOverrides: { service_paused_at: new Date() } });
+  test('skips a customer under a genuine service hold (a hand-set pause, any reason other than the billing-only one)', async () => {
+    const { conn, inserted } = topupScenario({
+      customerOverrides: { service_paused_at: new Date(), service_pause_reason: 'owner_pause' },
+    });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
-    expect(result.skipped).toBe('customer_service_paused');
+    expect(result.skipped).toBe('customer_service_held');
     expect(inserted).toHaveLength(0);
+  });
+
+  test('skips a paused customer with no legible reason too (fail closed on an unknown pause)', async () => {
+    const { conn, inserted } = topupScenario({
+      customerOverrides: { service_paused_at: new Date(), service_pause_reason: null },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('customer_service_held');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('does NOT skip a billing-only autopay pause — dues stop, visits (and top-up) continue', async () => {
+    // Migration 20260801200000 (billing-copy-no-false-interruption):
+    // service_paused_at with reason AUTO_CLEARABLE_REASON stops only the
+    // dues cron; it has no scheduling consumer anywhere in the app.
+    const { conn, inserted } = topupScenario({
+      customerOverrides: { service_paused_at: new Date(), service_pause_reason: AUTO_CLEARABLE_REASON },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
   });
 
   test('skips a deleted customer', async () => {
@@ -287,6 +343,52 @@ describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
     expect(result.skipped).toBeNull();
     expect(inserted.length).toBeGreaterThan(0);
+  });
+});
+
+describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Codex GitHub r2 P1)', () => {
+  // A legacy 09:15/09:30 template would otherwise get copied onto every one
+  // of up to 24 unattended inserts, minting rows assertAdminAppointmentWindow
+  // (server/services/scheduling/window-rules.js) would reject outright on
+  // any admin-facing write (AGENTS.md: windows start on the hour).
+  test('floors an off-hour parent window_start to the hour and recomputes the end from duration', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '09:15', window_end: '10:15',
+        estimated_duration_minutes: 60,
+      },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+    for (const row of inserted) {
+      expect(row.window_start).toBe('09:00');
+      expect(row.window_end).toBe('10:00');
+    }
+  });
+
+  test('an on-the-hour parent window_start is left exactly as-is', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00' },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(inserted.length).toBeGreaterThan(0);
+    for (const row of inserted) {
+      expect(row.window_start).toBe('09:00');
+      expect(row.window_end).toBe('10:00');
+    }
+  });
+
+  test('a windowless template never gets an hour invented for it', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly', window_start: null, window_end: null },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(inserted.length).toBeGreaterThan(0);
+    for (const row of inserted) {
+      expect(row.window_start).toBeFalsy();
+      expect(row.window_end).toBeFalsy();
+    }
   });
 });
 
@@ -544,6 +646,63 @@ describe('topUpRecurringSeriesLocked — annual-prepay term_end cap', () => {
     const coverageProbe = whereInCalls.find((c) => c.coverageDate);
     expect(coverageProbe).toBeDefined();
     expect(coverageProbe.ids).toContain('term-unlinked');
+  });
+});
+
+describe('topUpRecurringSeriesLocked — strict prepay coverage verification (Codex GitHub r2 P1)', () => {
+  // applyExtensionPrepayCoverage fails SOFT by design (a completion must
+  // never be blocked by a coverage-application hiccup), and
+  // applyPrepaidCoverageForTerm leaves a row unstamped once
+  // coverage_visit_count is used up — either way, an unattended top-up run
+  // must never leave an inserted row silently uncovered under an
+  // applicable term. Both cases roll back the row and stop the series for
+  // the run, verified at the one place a fake connection can observe a
+  // rollback: the tracked insert/delete pair in `inserted`.
+  function termCappedScenario(overrides = {}) {
+    const termEnd = daysOut(90);
+    coveredTermsAsOf.mockReturnValue({
+      whereIn: () => ({ select: async () => [{ term_end: termEnd, status: 'active', renewal_decision: null }] }),
+    });
+    return topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+      colsOverrides: { annual_prepay_term_id: {} },
+      linkedTermIds: ['term-A'],
+      ...overrides,
+    });
+  }
+
+  test('coverage_visit_count exhausted mid-run: the first uncovered date rolls back and stops the series (earlier covered dates stand)', async () => {
+    annualPrepayCoversVisit
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+    const { conn, inserted } = termCappedScenario();
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBeNull();
+    expect(result.spawnedVisits).toHaveLength(2);
+    expect(inserted).toHaveLength(2);
+    expect(annualPrepayCoversVisit).toHaveBeenCalledTimes(3);
+  });
+
+  test('coverage verification throws (a transient read error): treated as unverified, fails closed the same as a confirmed exhaustion', async () => {
+    annualPrepayCoversVisit.mockRejectedValue(new Error('coverage lookup exploded'));
+    const { conn, inserted } = termCappedScenario();
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBeNull();
+    expect(result.spawnedVisits).toHaveLength(0);
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('a series with no applicable term never consults strict coverage at all', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(annualPrepayCoversVisit).not.toHaveBeenCalled();
+    expect(result).toBeTruthy();
   });
 });
 

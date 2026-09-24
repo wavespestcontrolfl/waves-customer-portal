@@ -21,6 +21,7 @@ const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTec
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../services/route-reorder');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  parseHHMM, minutesToHHMM,
 } = require('../services/scheduling/window-rules');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { openInvoiceFacts } = require('../services/visit-context/balance');
@@ -28,6 +29,7 @@ const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
+const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
 const {
@@ -14756,6 +14758,19 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // billable-amount gate, checked against this ACTUAL candidate date; omitted
 // (the completion path), the gate is never consulted, byte-identical to
 // before this extraction (owner ruling: warn at completion, don't block it).
+// `opts.normalizeOffHourStart` (bool), when true, floors an off-hour
+// parent.window_start to the hour and recomputes the end from duration for
+// this insert only — topUp's guard against minting a stack of off-hour
+// rows from a legacy template (AGENTS.md: windows start on the hour); a
+// windowless template is untouched either way. Omitted (the completion
+// path), the window is copied verbatim, byte-identical to before this
+// extraction. `opts.checkStrictPrepayCoverage` (bool), when true, re-reads
+// the inserted row after coverage runs and deletes it (stopping this call)
+// if the canonical annualPrepayCoversVisit authority doesn't see it as
+// covered — topUp's guard against a term running out of coverage_visit_count
+// silently minting an uncovered row (applyExtensionPrepayCoverage itself
+// fails soft by design). Omitted (the completion path), an uncovered
+// extension is left standing, byte-identical to before this extraction.
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
@@ -14842,12 +14857,35 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     } else if (!stillOngoing) {
       logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
     } else {
+      // opts.normalizeOffHourStart (topUp only — never set by the
+      // completion path, so its own behavior, including any legacy
+      // off-hour template, is unchanged): a legacy 09:15/09:30 template
+      // otherwise gets copied onto every one of up to
+      // TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN unattended inserts, minting a
+      // stack of rows assertAdminAppointmentWindow would reject outright on
+      // any admin-facing write (AGENTS.md: appointment windows start on the
+      // hour). Floors an ACTUAL off-hour start to the hour and recomputes
+      // the end from the row's own duration — never invents an hour for a
+      // windowless template (parent.window_start falsy passes through
+      // unchanged, same placeholder behavior as today).
+      let nextWindowStart = parent.window_start;
+      let nextWindowEnd = parent.window_end;
+      if (opts.normalizeOffHourStart && nextWindowStart) {
+        const startMin = parseHHMM(nextWindowStart);
+        if (startMin != null && startMin % 60 !== 0) {
+          const flooredMin = startMin - (startMin % 60);
+          const durationMin = Number.parseInt(parent.estimated_duration_minutes, 10);
+          nextWindowStart = minutesToHHMM(flooredMin);
+          nextWindowEnd = minutesToHHMM(flooredMin + (Number.isInteger(durationMin) && durationMin > 0 ? durationMin : 60));
+          logger.warn(`[recurring-topup] parent=${parentId} window_start ${parent.window_start} is off-hour — flooring to ${nextWindowStart} for this top-up insert`);
+        }
+      }
       const childIdentity = await resolveSeriesChildIdentity(conn, parent);
       const nextData = {
         customer_id: parent.customer_id,
         technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
         scheduled_date: nextStr,
-        window_start: parent.window_start, window_end: parent.window_end,
+        window_start: nextWindowStart, window_end: nextWindowEnd,
         service_type: childIdentity.service_type, status: 'pending',
         time_window: parent.time_window, zone: parent.zone,
         estimated_duration_minutes: parent.estimated_duration_minutes,
@@ -14946,6 +14984,46 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // generated visit and reconciliation settles that case); the
       // cancelled-paid-slot bell still rings — nothing re-seeds it.
       await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr, opts.extraTermIds || []);
+      // opts.checkStrictPrepayCoverage (topUp only, when a term genuinely
+      // applies to this series — never set by the completion path, which
+      // keeps its existing fail-soft posture): applyExtensionPrepayCoverage
+      // above fails SOFT by design (a completion must never be blocked by a
+      // coverage-application hiccup) and applyPrepaidCoverageForTerm itself
+      // leaves a row unstamped once coverage_visit_count is exhausted —
+      // either way, an unattended top-up run must never leave an inserted
+      // row silently uncovered and get billed again at completion (Codex
+      // GitHub r2 P1). Re-read the row and consult the SAME canonical
+      // coverage authority every completion-billing check uses
+      // (annualPrepayCoversVisit — requires the explicit stamp AND the
+      // term's paid coverage still live); if it isn't covered, delete the
+      // row (it has no add-on mirror or reminder yet at this point — both
+      // happen further below) and stop this series for the run rather than
+      // leaving an unbillable-looking gap in the ledger.
+      if (opts.checkStrictPrepayCoverage && autoExtRow?.id) {
+        const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
+        let covered = false;
+        let verificationError = null;
+        try {
+          const freshExtRow = await conn('scheduled_services').where({ id: autoExtRow.id }).first();
+          covered = !!freshExtRow && await annualPrepayCoversVisit(freshExtRow, conn);
+        } catch (e) {
+          // Fail CLOSED, same convention as resolveTopUpTermCap's own lookup
+          // failure: an unverifiable stamp (a transient read error, not a
+          // confirmed "not covered") is never optimistically treated as
+          // fine — a bad row is recoverable next run, a silent double-bill
+          // is not.
+          verificationError = e;
+        }
+        if (!covered) {
+          await conn('scheduled_services').where({ id: autoExtRow.id, status: 'pending' }).del();
+          if (verificationError) {
+            logger.warn(`[recurring-topup] parent=${parentId} — coverage verification for ${nextStr} failed (${verificationError.message}); rolled back and stopping this series for the run`);
+          } else {
+            logger.warn(`[recurring-topup] parent=${parentId} — ${nextStr} would be uncovered under an applicable annual-prepay term (coverage_visit_count likely exhausted); rolled back and stopping this series for the run`);
+          }
+          return spawnedVisit;
+        }
+      }
       // Post-insert re-check closes the remaining race: a
       // cancellation can stop the series between the pre-insert
       // read above and this insert. The row hasn't been mirrored,
@@ -15166,9 +15244,12 @@ async function resolveTopUpTermCap(conn, parent, parentId, cols) {
 // never throws for an ordinary ineligible series): must be_recurring with a
 // recurring_pattern and recurring_ongoing=true (a non-ongoing fixed plan has
 // its own plan_ending alert path — never topped up here); the customer must
-// have no deleted_at, no service_paused_at, active !== false, and a
-// pipeline_stage outside FORMER_CUSTOMER_STAGES (customer-stages.js — the
-// one churned/former vocabulary every KPI/eligibility surface shares).
+// have no deleted_at, no GENUINE service hold (service_paused_at set with
+// any reason other than the billing-only, auto-clearable
+// 'autopay_final_failure' — see TOPUP_CUSTOMER_INELIGIBILITY_RULES),
+// active !== false, and a pipeline_stage outside FORMER_CUSTOMER_STAGES
+// (customer-stages.js — the one churned/former vocabulary every KPI/
+// eligibility surface shares).
 //
 // Hard-capped at TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN inserts per call — a
 // runaway pattern or a horizon misconfiguration can never seed an unbounded
@@ -15179,9 +15260,23 @@ const TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN = 24;
 // per row, evaluated in order) — dedupes the branch-per-reason shape into a
 // single loop so a new disqualifying condition is one more row, not one more
 // `if`. Reused nowhere else today; kept next to its one caller.
+// service_paused_at is set two ways, and only one of them is a genuine
+// scheduling hold (Codex GitHub round 2 P1). billing-cron sets it with
+// reason 'autopay_final_failure' when the 3-retry ladder exhausts — that
+// stops the DUES CRON only; migration 20260801200000 (billing-copy-no-
+// false-interruption) is explicit that this reason has "no scheduling
+// consumer" anywhere in the app, and visits continue on schedule. An
+// operator can also set the SAME column by hand for a genuine whole-
+// account hold (any OTHER reason value, e.g. the 2026-09-11 owner-directed
+// pause) — billing-pause.js's own contract already draws this exact line
+// ("ONLY 'autopay_final_failure' pauses auto-clear... a pause an operator
+// set by hand is a human decision"). Reuse that constant rather than
+// hand-rolling a second copy of the distinction. An unset/unknown reason
+// on a paused row is treated as a hold (fail closed — never top up a
+// customer someone paused without a legible, auto-clearable reason).
 const TOPUP_CUSTOMER_INELIGIBILITY_RULES = [
   ['customer_deleted', (c) => !!c.deleted_at],
-  ['customer_service_paused', (c) => !!c.service_paused_at],
+  ['customer_service_held', (c) => !!c.service_paused_at && c.service_pause_reason !== AUTO_CLEARABLE_REASON],
   ['customer_inactive', (c) => c.active === false],
   ['customer_churned', (c) => FORMER_CUSTOMER_STAGES.includes(c.pipeline_stage)],
 ];
@@ -15211,7 +15306,7 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   if (!isOngoing) return { spawnedVisits: [], skipped: 'not_ongoing' };
 
   const customer = await conn('customers').where({ id: parent.customer_id })
-    .first('id', 'active', 'deleted_at', 'service_paused_at', 'pipeline_stage');
+    .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
   const customerSkip = topupCustomerSkipReason(customer);
   if (customerSkip) return { spawnedVisits: [], skipped: customerSkip };
 
@@ -15265,8 +15360,14 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // extendSeriesOnceLocked (price varies by date), not a coarse upfront
     // guess — a series can fill partway then stop exactly where billability
     // breaks down, same as running out of horizon or hitting the cap.
+    // checkStrictPrepayCoverage only when a term genuinely applies to this
+    // series (termCap non-null — resolveTopUpTermCap found at least one
+    // live, service-matched candidate): an unattended run must never leave
+    // an inserted row silently uncovered under an active prepay term (Codex
+    // GitHub r2 P1) — see extendSeriesOnceLocked's own comment.
     const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, {
-      maxDate: effectiveHorizon, extraTermIds, checkUnbillable: true,
+      maxDate: effectiveHorizon, extraTermIds, checkUnbillable: true, normalizeOffHourStart: true,
+      checkStrictPrepayCoverage: termCap !== null,
     });
     if (!spawned) break;
     spawnedVisits.push(spawned);

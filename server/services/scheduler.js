@@ -6703,7 +6703,17 @@ function initScheduledJobs() {
       await runExclusive('recurring-series-topup', async () => {
         const { recurringSeriesTopUpLive } = require('../config/feature-gates');
         const { runRecurringSeriesTopUpSweep } = require('./recurring-series-topup');
-        await runRecurringSeriesTopUpSweep({ dryRun: !recurringSeriesTopUpLive() });
+        const summary = await runRecurringSeriesTopUpSweep({ dryRun: !recurringSeriesTopUpLive() });
+        // Per-series isolation stays intact (each failure was already
+        // caught and tallied inside the sweep, so one bad series never
+        // stopped another) — but a summary with errors must not read as a
+        // clean run to job_health: throw an aggregate here so runExclusive
+        // records this tick as failed (Codex GitHub r2 P2) and the existing
+        // job-health/regression surfaces pick it up like any other failed
+        // cron.
+        if (summary.errors.length) {
+          throw new Error(`recurring-series-topup: ${summary.errors.length}/${summary.scanned} series failed — first: ${summary.errors[0].parentId}: ${summary.errors[0].error}`);
+        }
       });
     } catch (err) {
       logger.error(`Recurring-series top-up sweep failed: ${err.message}`);
