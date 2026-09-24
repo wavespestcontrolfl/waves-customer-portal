@@ -43,7 +43,8 @@ async function countPendingSmsConversations({
       FROM base_sms base
     ), inbound_events AS MATERIALIZED (
       SELECT s.*,
-             COALESCE(legacy.message_type, s.canonical_message_type, '') AS message_type,
+             CASE WHEN optout_receipt.message_sid IS NOT NULL THEN 'opt_out'
+               ELSE COALESCE(legacy.message_type, s.canonical_message_type, '') END AS message_type,
              COALESCE(s.canonical_metadata, '{}'::jsonb)
                || COALESCE(legacy.metadata, '{}'::jsonb) AS metadata
       FROM sms_events s
@@ -53,6 +54,8 @@ async function countPendingSmsConversations({
         WHERE sl.twilio_sid = s.twilio_sid AND sl.direction = s.direction
         ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
       ) legacy ON true
+      LEFT JOIN inbound_sms_optout_receipts optout_receipt
+        ON optout_receipt.message_sid = s.twilio_sid
       WHERE s.direction = 'inbound'
     ), latest_inbound AS MATERIALIZED (
       SELECT DISTINCT ON (s.peer, s.endpoint)
@@ -115,7 +118,10 @@ async function countPendingSmsConversations({
           OR os.draft_reply_to_message_id = os.inbound_id)
         AND os.draft_intent IS DISTINCT FROM 'click_followup'
     ), all_stop_events AS MATERIALIZED (
-      SELECT ${stopPeer} AS peer, stop_message.created_at
+      SELECT ${stopPeer} AS peer,
+             CASE WHEN stop_receipt.message_sid IS NOT NULL
+               THEN LEAST(stop_message.created_at, stop_receipt.applied_at)
+               ELSE stop_message.created_at END AS created_at
       FROM messages stop_message
       JOIN conversations stop_conversation ON stop_conversation.id = stop_message.conversation_id
       LEFT JOIN customers stop_customer ON stop_customer.id = stop_conversation.customer_id
@@ -125,14 +131,17 @@ async function countPendingSmsConversations({
         WHERE sl.twilio_sid = stop_message.twilio_sid AND sl.direction = stop_message.direction
         ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
       ) stop_legacy ON true
+      LEFT JOIN inbound_sms_optout_receipts stop_receipt
+        ON stop_receipt.message_sid = stop_message.twilio_sid
       WHERE stop_message.channel = 'sms' AND stop_message.direction = 'inbound'
-        AND (stop_message.message_type = 'opt_out' OR EXISTS (
+        AND (stop_receipt.message_sid IS NOT NULL OR stop_message.message_type = 'opt_out' OR EXISTS (
           SELECT 1 FROM sms_log stop_candidate
           WHERE stop_candidate.twilio_sid = stop_message.twilio_sid
             AND stop_candidate.direction = stop_message.direction
             AND stop_candidate.message_type = 'opt_out'
         ))
-        AND COALESCE(stop_legacy.message_type, stop_message.message_type, '') = 'opt_out'
+        AND (stop_receipt.message_sid IS NOT NULL
+          OR COALESCE(stop_legacy.message_type, stop_message.message_type, '') = 'opt_out')
         AND NOT (COALESCE(stop_conversation.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(stop_conversation.contact_phone, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(stop_customer.phone, '') = ANY(CAST(:excludePhones AS text[])))
