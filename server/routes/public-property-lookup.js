@@ -550,32 +550,16 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             : 0;
           const newerFlag = resolveStaffCleanAt.lastNewestFlag;
           const newerFlagAt = resolveStaffCleanAt.lastNewestFlagAt || 0;
-          if (addressUnverified && result?.enriched && lockedCleanAt
-            && cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt: auditEvidenceAt(result), cleanEvidenceAt: lockedCleanAt })) {
-            addressUnverified = null;
-            staffCleanAt = lockedCleanAt;
-            cachedAuditStale = true;
-          } else if (!addressUnverified && newerFlag && newerFlagAt > evidenceAt && !(lockedCleanAt && (Date.parse(lockedCleanAt) || 0) > newerFlagAt)) {
-            addressUnverified = newerFlag;
-            staffCleanAt = null;
-            cachedAuditStale = false;
-          } else if (!addressUnverified && cachedAuditStale && lockedCleanAt
-            && (Date.parse(lockedCleanAt) || 0) > (Date.parse(staffCleanAt || '') || 0)) {
-            // Already superseded before the lock: a NEWER clean verdict a
-            // concurrent staff confirmation committed since is the one to
-            // persist, or this write would replace it with the older
-            // pre-lock timestamp and let an intervening sibling flag win
-            // (pre-push audit P1 after r42).
-            staffCleanAt = lockedCleanAt;
-          } else if (addressUnverified && newerFlag && newerFlag !== addressUnverified
-            && newerFlagAt > (Date.parse(addressUnverified.flagged_at || '') || 0)) {
-            // An already-flagged lookup carrying an OLDER cached flag adopts
-            // the newer flag another request stored, so the lead and the
-            // quarantine carry the newest negative evidence — never an older
-            // timestamp a clean verdict in between could out-date (codex r34
-            // P1).
-            addressUnverified = newerFlag;
-          }
+          // ONE shared precedence decision (codex r45 P2): cached audit
+          // superseded by a newer staff verdict; a clean run adopting a
+          // newer covering flag; an already-superseded run persisting the
+          // newer under-lock clean timestamp; an already-flagged run
+          // adopting a newer stored flag.
+          const { applyLookupVerdictPrecedence } = require('../services/lead-address-unverified');
+          ({ addressUnverified, staffCleanAt, cachedAuditStale } = applyLookupVerdictPrecedence({
+            addressUnverified, staffCleanAt, cachedAuditStale,
+            lockedCleanAt, newerFlag, newerFlagAt, evidenceAt, profileFound: !!result?.enriched, cachedAt: auditEvidenceAt(result),
+          }));
         }
         // A FLAGGED verdict quarantines the visitor's earlier publications
         // for this premise right here — a visitor who abandons before
@@ -587,40 +571,15 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             leadId: lead.id, contactEmail: email, contactPhone: normPhone, fullAddress: normalizedAddress.fullAddress || lookupAddress, flag: addressUnverified,
           });
         } else if (cachedAuditStale || countyRollAnswered(result?.enriched)) {
-          // The CLEAN counterpart (codex r27 P1): legacy quote-wizard rows an
-          // earlier flagged lookup blocked without archiving keep refusing
-          // every staff send with ADDRESS_UNVERIFIED if the visitor abandons
-          // before /calculate lifts them — so a clean county answer (or a
-          // staff verdict that superseded the cached audit) lifts the block
-          // here, under the same lock, for this contact pair's rows at the
-          // same complete premise. Mirrors the /calculate supersession.
-          const fullAddress = normalizedAddress.fullAddress || lookupAddress;
-          const blocked = await trx('estimates')
-            .where({ source: 'quote_wizard' })
-            .whereNull('archived_at')
-            .whereRaw('LOWER(customer_email) = ?', [String(email).toLowerCase().trim()])
-            .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(normPhone).replace(/\D/g, '').slice(-10)])
-            .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
-            .select('id', 'address');
-          const unblocked = blocked
-            .filter((row) => samePremiseDisplay(row.address, fullAddress, { requireLocality: true }));
-          // Each lift re-asserts the row's matched address AND this contact
-          // pair (codex r38 P1): a Customer 360 edit that moved the row to
-          // another pair and premise — and a lookup under that pair that
-          // stamped a fresh rejection — must win, never be cleared by this
-          // pair's clean answer.
-          for (const row of unblocked) {
-            await trx('estimates')
-              .where({ id: row.id, address: row.address })
-              .whereRaw('LOWER(customer_email) = ?', [String(email).toLowerCase().trim()])
-              .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(normPhone).replace(/\D/g, '').slice(-10)])
-              .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
-              .update({
-                estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
-                updated_at: new Date(),
-              });
-          }
-          if (unblocked.length) logger.info(`[public-property-lookup] clean verdict lifted the address block on ${unblocked.length} legacy estimate(s)`);
+          // The CLEAN counterpart (codex r27 P1): a clean county answer (or
+          // a staff verdict that superseded the cached audit) lifts the
+          // block on this pair's legacy rows at the same premise, under the
+          // same lock — the withdrawal service's own inverse.
+          const { liftLegacyBlocksForCleanVerdict } = require('../services/website-quote-withdrawal');
+          const lifted = await liftLegacyBlocksForCleanVerdict(trx, {
+            contactEmail: email, contactPhone: normPhone, fullAddress: normalizedAddress.fullAddress || lookupAddress,
+          });
+          if (lifted) logger.info(`[public-property-lookup] clean verdict lifted the address block on ${lifted} legacy estimate(s)`);
         }
         await trx('leads').where({ id: lead.id }).update({
           extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({

@@ -109,11 +109,14 @@ describe('pre-push audit after r42: parser and lookup clean-timestamp', () => {
     expect(parseDisplayAddress('1260 Example St, Parrish, FL 34219')).toMatchObject({ city: 'Parrish', zip: '34219', state: 'FL' });
   });
   test('an already-superseded lookup persists the newer clean timestamp found under the lock', () => {
+    const { applyLookupVerdictPrecedence } = require('../services/lead-address-unverified');
+    const out = applyLookupVerdictPrecedence({
+      addressUnverified: null, staffCleanAt: '2026-09-01T00:00:00Z', cachedAuditStale: true,
+      lockedCleanAt: '2026-09-03T00:00:00Z', newerFlag: null, newerFlagAt: 0, evidenceAt: 0,
+    });
+    expect(out).toEqual({ addressUnverified: null, staffCleanAt: '2026-09-03T00:00:00Z', cachedAuditStale: true });
     const src = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
-    const start = src.indexOf('const lockedCleanAt = await resolveStaffCleanAt(trx);');
-    const block = src.slice(start, src.indexOf('address_unverified: addressUnverified,', start));
-    expect(block).toContain('} else if (!addressUnverified && cachedAuditStale && lockedCleanAt');
-    expect(block).toContain('staffCleanAt = lockedCleanAt;\n          } else if (addressUnverified && newerFlag');
+    expect(src).toContain('({ addressUnverified, staffCleanAt, cachedAuditStale } = applyLookupVerdictPrecedence({');
   });
 });
 
@@ -162,5 +165,32 @@ describe('codex r44', () => {
     const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
     expect(pq).toContain('const verdicts = await loadContactVerdicts(trx, { email: contactEmail, phone: contactPhone, premise: normalizedAddress');
     expect(ppl).toContain('const verdicts = await loadContactVerdicts(conn, { email, phone: normPhone, premise: normalizedAddress, ownLeadId: lead.id });');
+  });
+});
+
+describe('codex r45', () => {
+  test('the accept recheck answers the re-price 409 before the generic off-surface 404', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+    const start = src.indexOf("const freshLinkRow = await trx('estimates')");
+    const block = src.slice(start, start + 4000);
+    expect(block.indexOf('repricePendingActive(eng)')).toBeLessThan(block.indexOf("estimateOffCustomerSurface({ estimate_data: freshLinkData })"));
+  });
+  test('/calculate holds a delivery claim on the linked estimate across the email and SMS sends', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    const claim = src.indexOf('let quoteDeliveryClaimToken = null;');
+    expect(claim).toBeGreaterThan(0);
+    expect(claim).toBeLessThan(src.indexOf('await sendQuoteRequestEmail({'));
+    const block = src.slice(claim, src.indexOf('await sendQuoteRequestEmail({'));
+    expect(block).toContain('.whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)');
+    expect(block).toContain('.whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)');
+    expect(block).toContain("jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text)");
+    const release = src.indexOf("require('./admin-estimates').clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken)");
+    expect(release).toBeGreaterThan(src.indexOf('Customer SMS failed'));
+  });
+  test('the lookup lifts legacy blocks through the withdrawal service', () => {
+    const w = require('../services/website-quote-withdrawal');
+    expect(typeof w.liftLegacyBlocksForCleanVerdict).toBe('function');
+    const src = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
+    expect(src).toContain('const lifted = await liftLegacyBlocksForCleanVerdict(trx, {');
   });
 });

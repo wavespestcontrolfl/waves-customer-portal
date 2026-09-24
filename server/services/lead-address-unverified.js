@@ -317,9 +317,49 @@ function reconcileVerdictPrecedence({ verdicts, blocked = null, extraFlags = [],
   return {};
 }
 
+// The lookup stage's UNDER-LOCK precedence over its pre-lock answer (codex
+// #4667 r45 P2 — one reusable decision, not a branch tree in the route):
+// given the pre-lock triple (addressUnverified / staffCleanAt /
+// cachedAuditStale), the clean verdict and newest covering flag found
+// under the lock, and this run's own county evidence time, returns the
+// triple to persist.
+function applyLookupVerdictPrecedence({
+  addressUnverified, staffCleanAt, cachedAuditStale,
+  lockedCleanAt, newerFlag, newerFlagAt = 0, evidenceAt = 0, profileFound = false, cachedAt = null,
+}) {
+  const lockedAt = Date.parse(lockedCleanAt || '') || 0;
+  // A cached audit this run carried is superseded by a NEWER staff clean
+  // verdict committed since.
+  if (addressUnverified && profileFound && lockedCleanAt
+    && cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt, cleanEvidenceAt: lockedCleanAt })) {
+    return { addressUnverified: null, staffCleanAt: lockedCleanAt, cachedAuditStale: true };
+  }
+  // A clean run adopts a covering flag committed since that outranks both
+  // this run's evidence and any stored clean verdict.
+  if (!addressUnverified && newerFlag && newerFlagAt > evidenceAt && !(lockedAt && lockedAt > newerFlagAt)) {
+    return { addressUnverified: newerFlag, staffCleanAt: null, cachedAuditStale: false };
+  }
+  // Already superseded before the lock: a NEWER clean verdict a concurrent
+  // staff confirmation committed since is the one to persist, or the write
+  // would replace it with the older pre-lock timestamp and let an
+  // intervening sibling flag win.
+  if (!addressUnverified && cachedAuditStale && lockedAt && lockedAt > (Date.parse(staffCleanAt || '') || 0)) {
+    return { addressUnverified, staffCleanAt: lockedCleanAt, cachedAuditStale };
+  }
+  // An already-flagged lookup carrying an OLDER cached flag adopts the
+  // newer flag another request stored, so the lead and the quarantine
+  // carry the newest negative evidence.
+  if (addressUnverified && newerFlag && newerFlag !== addressUnverified
+    && newerFlagAt > (Date.parse(addressUnverified.flagged_at || '') || 0)) {
+    return { addressUnverified: newerFlag, staffCleanAt, cachedAuditStale };
+  }
+  return { addressUnverified, staffCleanAt, cachedAuditStale };
+}
+
 module.exports = {
   cachedAuditSuperseded,
   auditEvidenceAt, deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey };
 module.exports.streetKeyNoUnit = streetKeyNoUnit;
 module.exports.loadContactVerdicts = loadContactVerdicts;
 module.exports.reconcileVerdictPrecedence = reconcileVerdictPrecedence;
+module.exports.applyLookupVerdictPrecedence = applyLookupVerdictPrecedence;

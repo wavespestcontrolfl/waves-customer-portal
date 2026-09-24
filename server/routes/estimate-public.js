@@ -10569,6 +10569,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // after the handler's pre-read must refuse the accept here, not
         // rely on the millisecond-truncated updated_at CAS (codex #4667
         // r18 P1).
+        const eng = freshLinkData?.estimatorEngine;
+        // A bedroom re-price in flight (estimate-clarify-asks): the
+        // fallback dollars on this draft are being replaced — refuse the
+        // accept until the replacement lands (or the marker lapses). Judged
+        // FIRST (codex #4667 r45 P0): the re-price hold is part of the
+        // shared off-surface predicate below, and its contract is the 409
+        // retry message, never the generic 404.
+        if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) {
+          const err = new Error('This estimate is being re-priced — please try again in a few minutes');
+          err.status = 409;
+          throw err;
+        }
         if (freshLinkData && require('../utils/estimate-claim-sql').estimateOffCustomerSurface({ estimate_data: freshLinkData })) {
           // The token route's GENERIC 404 (codex #4667 r35 P0): the same
           // token answers 404 from the view / data surfaces once blocked,
@@ -10579,17 +10591,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           err.code = 'OFF_CUSTOMER_SURFACE';
           throw err;
         }
-        const eng = freshLinkData?.estimatorEngine;
         if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
           const err = new Error('Estimate is no longer active');
-          err.status = 409;
-          throw err;
-        }
-        // A bedroom re-price in flight (estimate-clarify-asks): the
-        // fallback dollars on this draft are being replaced — refuse the
-        // accept until the replacement lands (or the marker lapses).
-        if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) {
-          const err = new Error('This estimate is being re-priced — please try again in a few minutes');
           err.status = 409;
           throw err;
         }

@@ -148,4 +148,40 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
   return rows;
 }
 
+// The CLEAN counterpart of the withdrawal (codex #4667 r27 P1, moved here
+// r45 P2): legacy quote-wizard rows an earlier flagged lookup blocked
+// without archiving keep refusing every staff send with ADDRESS_UNVERIFIED
+// unless a clean verdict lifts them — for this contact pair's rows at the
+// same complete premise, each lift re-asserting the row's matched address
+// AND the pair (a Customer 360 edit that moved the row elsewhere, and a
+// lookup under that pair that stamped a fresh rejection, must win).
+// Caller holds the contact-pair advisory lock. Returns the lifted count.
+async function liftLegacyBlocksForCleanVerdict(trx, { contactEmail, contactPhone, fullAddress }) {
+  const { samePremiseDisplay } = require('./lead-address-unverified');
+  const emailLc = String(contactEmail || '').toLowerCase().trim();
+  const phone10 = String(contactPhone || '').replace(/\D/g, '').slice(-10);
+  if (!emailLc || !phone10) return 0;
+  const blocked = await trx('estimates')
+    .where({ source: 'quote_wizard' })
+    .whereNull('archived_at')
+    .whereRaw('LOWER(customer_email) = ?', [emailLc])
+    .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone10])
+    .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+    .select('id', 'address');
+  const unblocked = blocked.filter((row) => samePremiseDisplay(row.address, fullAddress, { requireLocality: true }));
+  for (const row of unblocked) {
+    await trx('estimates')
+      .where({ id: row.id, address: row.address })
+      .whereRaw('LOWER(customer_email) = ?', [emailLc])
+      .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone10])
+      .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+      .update({
+        estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
+        updated_at: new Date(),
+      });
+  }
+  return unblocked.length;
+}
+
 module.exports = { withdrawFlaggedPublications, WITHDRAWABLE_PUBLICATION_STATES };
+module.exports.liftLegacyBlocksForCleanVerdict = liftLegacyBlocksForCleanVerdict;

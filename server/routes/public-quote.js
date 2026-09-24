@@ -3682,6 +3682,51 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       logger.error(`[public-quote] pre-delivery address recheck failed — refusing the run: ${deliveryRecheckErr.code || deliveryRecheckErr.name || 'error'}`);
       return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
     }
+    // A DELIVERY CLAIM on the linked estimate across BOTH provider sends
+    // (codex #4667 r45 P1): the rechecks above release the contact-pair
+    // lock before each provider call, so a lookup flagging this premise in
+    // that gap could withdraw the publication while the email / text still
+    // carries its link. The withdrawal refuses to commit while a claim is
+    // fresh (the same protocol the admin send and the extension use);
+    // token-fenced release after the SMS leg, TTL otherwise. No claim
+    // (off-surface since the recheck, or another sender's live claim) →
+    // the links are withheld, fail closed.
+    let quoteDeliveryClaimToken = null;
+    if (draftEstimateId && (bookingUrl || websiteEstimateUrl)) {
+      const token = require('crypto').randomUUID();
+      try {
+        const { ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
+        const taken = await db.transaction(async (trx) => {
+          const row = await trx('estimates')
+            .where({ id: draftEstimateId })
+            .whereNull('archived_at')
+            .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
+            .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+            .forUpdate()
+            .first('id');
+          if (!row) return false;
+          await trx('estimates').where({ id: draftEstimateId }).update({
+            estimate_data: trx.raw(
+              "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)",
+              [new Date().toISOString(), token],
+            ),
+            updated_at: trx.fn.now(),
+          });
+          return true;
+        });
+        if (taken) {
+          quoteDeliveryClaimToken = token;
+        } else {
+          bookingUrl = null;
+          websiteEstimateUrl = null;
+          logger.info('[public-quote] quote link withheld — the estimate left the customer surface (or is under another delivery) before the sends');
+        }
+      } catch (claimErr) {
+        bookingUrl = null;
+        websiteEstimateUrl = null;
+        logger.warn(`[public-quote] quote delivery claim not taken — links withheld: ${claimErr.code || claimErr.name || 'db_error'}`);
+      }
+    }
 
     // Per-application phrasing when the quote resolves to one (owner
     // 2026-07-11: recurring emails lead per-application, never /mo where a
@@ -3794,6 +3839,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           }
         }
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
+    }
+    // Both provider legs are behind us: release this run's delivery claim
+    // (token-fenced; the shared release also completes a deferred
+    // invalidation). Non-fatal — an uncleared claim ages out by TTL.
+    if (quoteDeliveryClaimToken) {
+      try {
+        await require('./admin-estimates').clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken);
+      } catch (releaseErr) {
+        logger.warn(`[public-quote] quote delivery claim release failed (ages out by TTL): ${releaseErr.code || releaseErr.name || 'db_error'}`);
+      }
     }
 
     // Newsletter enrollment — gated on explicit opt-in from a public quote
