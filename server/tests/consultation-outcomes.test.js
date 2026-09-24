@@ -2171,7 +2171,9 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
   });
 
   test('local audit P1: live wins never starve a dead one — the last_reconciled_at cursor reaches it within ceil(rows/limit) ticks', async () => {
-    const live = Array.from({ length: 5 }, (_, i) => ({ id: `sale-live-${i}`, status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: `cust-${i}` }));
+    // Each live win has real in-window evidence (its booking's created_at) —
+    // wins are re-judged against evidence (Codex #4710 r10 pre-push P1).
+    const live = Array.from({ length: 5 }, (_, i) => ({ id: `sale-live-${i}`, status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: `cust-${i}`, created_at: new Date('2026-09-12T15:00:00Z') }));
     const fakeDb = install({
       scheduled_services: [
         { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-x' },
@@ -2251,15 +2253,34 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
     expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('warm');
   });
 
+  // Codex #4710 r10 pre-push P1: a won consultation moved AFTER its sale is
+  // re-judged against its current schedule and cleared.
+  test('a won consultation moved later than its sale loses the win', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', status: 'confirmed', service_type: 'Waves Assessment', scheduled_date: '2026-09-18', customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1', created_at: new Date('2026-09-12T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.reopened).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'warm', won_evidence_booking_id: null });
+  });
+
   test('a live evidence booking, or a win with no recorded evidence, is left won', async () => {
     const fakeDb = install({
       scheduled_services: [
         { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-1' },
-        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1', created_at: new Date('2026-09-12T15:00:00Z') },
+        { id: 'visit-2', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-2' },
       ],
+      estimates: [{ id: 'est-2', customer_id: 'cust-2', status: 'accepted', accepted_at: new Date('2026-09-14T15:00:00Z') }],
       consultation_outcomes: [
         { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' },
-        { id: 'co-2', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'estimate_accept', won_evidence_booking_id: null },
+        { id: 'co-2', scheduled_service_id: 'visit-2', customer_id: 'cust-2', outcome: 'won', won_via: 'estimate_accept', won_evidence_booking_id: null },
       ],
     });
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });

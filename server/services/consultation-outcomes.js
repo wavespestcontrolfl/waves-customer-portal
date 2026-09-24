@@ -1308,25 +1308,7 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
             : clearWin(restoredOutcome(row.pre_win_outcome));
           return locked('consultation_outcomes').where({ id: row.id, outcome: 'won' }).update(cleared);
         }
-        // An estimate win (no booking behind it) on a live consultation stands.
-        if (!row.won_evidence_booking_id) return stampOnly();
-        // A booking win stands while its booking is still THIS customer's
-        // real sale (local audit P1s: full sale rule, ownership).
-        if (await winBookingStillQualifies(locked, row)) return stampOnly();
-        // Surviving in-window evidence re-points the win (local audit P1),
-        // regardless of the consultation's age; none → cleared.
-        const evidence = row.customer_id
-          ? await findSaleEvidenceForConsultation(locked, {
-            customerId: row.customer_id,
-            scheduledDateStr: toDateOnlyString(consultation.scheduled_date),
-            windowStart: consultation.window_start,
-            now,
-          })
-          : null;
-        const guard = { id: row.id, outcome: 'won', won_evidence_booking_id: row.won_evidence_booking_id };
-        return locked('consultation_outcomes').where(guard).update(evidence
-          ? { won_at: evidence.won_at, won_via: evidence.won_via, won_evidence_booking_id: evidence.booking_id || null, last_reconciled_at: now, updated_at: now }
-          : clearWin(restoredOutcome(row.pre_win_outcome)));
+        return rejudgeLiveWin(locked, row, consultation, { now, stampOnly, clearWin });
       });
       if (changed) result.reopened += 1;
     } catch (err) {
@@ -1334,6 +1316,30 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
       logger.warn(`[consultation-outcomes] reopen failed for outcome ${row.id}: ${err.message}`);
     }
   }
+}
+
+// A win on a still-live consultation, re-judged against the consultation's
+// CURRENT schedule (Codex #4710 r10 pre-push P1): dispatch can move it after
+// the win, and a sale that now precedes it is not its sale. The earliest
+// qualifying evidence in the current window is the win's evidence — same
+// one → stamp only; different → re-point; none → cleared. A win with no
+// customer snapshot keeps the booking-only check (no customer to search).
+async function rejudgeLiveWin(locked, row, consultation, { now, stampOnly, clearWin }) {
+  if (!row.customer_id) {
+    if (!row.won_evidence_booking_id || await winBookingStillQualifies(locked, row)) return stampOnly();
+    return locked('consultation_outcomes').where({ id: row.id, outcome: 'won' }).update(clearWin(restoredOutcome(row.pre_win_outcome)));
+  }
+  const evidence = await findSaleEvidenceForConsultation(locked, {
+    customerId: row.customer_id,
+    scheduledDateStr: toDateOnlyString(consultation.scheduled_date),
+    windowStart: consultation.window_start,
+    now,
+  });
+  if (evidence && (evidence.booking_id || null) === (row.won_evidence_booking_id || null)) return stampOnly();
+  const guard = { id: row.id, outcome: 'won', won_evidence_booking_id: row.won_evidence_booking_id || null };
+  return locked('consultation_outcomes').where(guard).update(evidence
+    ? { won_at: evidence.won_at, won_via: evidence.won_via, won_evidence_booking_id: evidence.booking_id || null, last_reconciled_at: now, updated_at: now }
+    : clearWin(restoredOutcome(row.pre_win_outcome)));
 }
 
 // Round 12, P2 job-status.js:514 (codex): the no-show transition writes the
