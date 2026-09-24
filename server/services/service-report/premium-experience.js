@@ -213,7 +213,7 @@ async function loadPremiumRows(record, knex = db) {
     // gauge even when the labels were edited in Settings.
     knex('pest_pressure_scores')
       .where({ service_record_id: record.id })
-      .first('displayed_score', 'label_name')
+      .first('displayed_score', 'label_name', 'is_overridden')
       .catch(() => null),
   ]);
 
@@ -388,7 +388,10 @@ function unfilteredBody(primaryMove, finding) {
 // falls back to the six-band default scale.
 function pressureLabelName(pressure, pressureScoreRow) {
   const stored = pressureScoreRow?.displayed_score;
-  if (pressureScoreRow?.label_name && stored != null && Number(stored) === Number(pressure)) {
+  // An admin override changes displayed_score but not label_name, so an
+  // overridden row's stored label describes a different number.
+  if (pressureScoreRow?.label_name && !pressureScoreRow.is_overridden
+    && stored != null && Number(stored) === Number(pressure)) {
     return pressureScoreRow.label_name;
   }
   return resolveLabel(pressure, DEFAULT_CONFIG.labels)?.name || 'Tracking';

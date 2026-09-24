@@ -834,6 +834,9 @@ describe('service report v1', () => {
     expect(findPressureRow(build({ displayed_score: '5.0', label_name: 'Severe' }))?.detail).toBe('Severe · 5.0 / 5');
     // A stale row for a different number never labels this one.
     expect(findPressureRow(build({ displayed_score: '2.0', label_name: 'Low' }))?.detail).toBe('High · 5.0 / 5');
+    // An override keeps the calculated label_name; never show it for the
+    // overridden number (codex r6 P2).
+    expect(findPressureRow(build({ displayed_score: '5.0', label_name: 'Low', is_overridden: true }))?.detail).toBe('High · 5.0 / 5');
   });
 
   test('premium experience builds customer-facing modules from service facts', () => {
