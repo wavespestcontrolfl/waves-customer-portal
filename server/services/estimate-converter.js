@@ -5012,6 +5012,12 @@ const EstimateConverter = {
     const customerUpdateResult = await database('customers')
       .where({ id: customerId })
       .update(customerUpdates, ['monthly_rate']);
+    // Consultation-outcomes reconciliation: this accept is a real close for
+    // the customer — settle any open warm/cold consultation outcome within
+    // its 90-day window. Best-effort, savepoint-isolated inside
+    // markWonForCustomer (waves-db §5b); never blocks the accept.
+    await require('./consultation-outcomes')
+      .markWonForCustomer(customerId, { via: 'estimate_accept', trx: database });
     // Ledger-authority writes are plain values (row-lock serialized), so
     // RETURNING reconciliation is only needed on the legacy atomic-increment
     // path.

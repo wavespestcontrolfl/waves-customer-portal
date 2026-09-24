@@ -1779,6 +1779,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           performed_by: 'system',
           metadata: JSON.stringify({ customerId }),
         });
+        // Consultation-outcomes reconciliation: this is a real (non-assessment)
+        // booking closing for the customer — settle any open warm/cold
+        // consultation outcome within its 90-day window. Best-effort,
+        // savepoint-isolated inside markWonForCustomer (waves-db §5b).
+        await require('../services/consultation-outcomes')
+          .markWonForCustomer(customerId, { via: 'office_booking', trx });
       }
       await trx('lead_activities').insert({
         lead_id: req.params.id,
