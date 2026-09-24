@@ -896,6 +896,95 @@
             "null"
           ],
           "description": "The AGENT committed to send a quote/estimate after the call. Means work is still owed to the caller — set even when an appointment was also booked."
+        },
+        "price": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ANY price stated on the call by either party (the agent's quote, or a number the caller speaks — see stated_by), whether or not the caller accepted it, a range, or a unit/tier/prepay term — distinct from quoted_price_usd, which stays the narrower accepted-total-only field. Optional: omit or leave every field null when no price was discussed.",
+          "properties": {
+            "amount_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "The stated price, or the LOW end when a range was given. null when no number was stated. Never estimate or invent a price."
+            },
+            "amount_max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "The HIGH end of a stated range (e.g. '$90 to 100 per quarter' -> amount_usd 90, amount_max_usd 100). null when a single number was given, not a range."
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "one_time",
+                "per_application",
+                "per_month",
+                "per_quarter",
+                "per_year",
+                "unknown",
+                null
+              ],
+              "description": "The billing unit AS SPOKEN (e.g. 'per application', 'a quarter', 'a year'). 'unknown' when a price was stated but no unit was said; null when no price was stated."
+            },
+            "accepted": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "true only when the CALLER accepted this price. false when the agent stated it and the caller did not accept (declined, hesitated, or the call ended before a response). null when acceptance was never discussed."
+            },
+            "stated_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "agent",
+                "caller",
+                null
+              ],
+              "description": "Who said the number first — almost always 'agent'; 'caller' when the caller quoted a price back (e.g. a competitor's price, or repeating what they read online)."
+            },
+            "prepay_term": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "annual",
+                "none",
+                null
+              ],
+              "description": "'annual' when paying for the year up front was discussed ('pay the year', 'annual prepay'); 'none' when prepay was explicitly ruled out; null when never discussed."
+            },
+            "tier_mentioned": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "bronze",
+                "silver",
+                "gold",
+                "platinum",
+                null
+              ],
+              "description": "A WaveGuard package tier name mentioned in connection with THIS price, by either party. Independent of waveguard_tier_mentioned (which is caller-sourced only)."
+            },
+            "evidence_quote": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verbatim transcript quote the price fields above were read from. null when price is otherwise empty."
+            }
+          }
         }
       }
     },

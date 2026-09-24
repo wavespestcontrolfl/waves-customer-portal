@@ -92,8 +92,13 @@ function checkTcpaConsent(extraction, opts = {}) {
 // not_confirmed verdict with no scheduling ask files no fallback card — a
 // force-reprocess of an older recording can now change its blocked reasons,
 // so the route_decisions key must not collide with the pre-change row.
-const V2_DECISION_VERSION = 'v2-1.7.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0'];
+// v2-1.8.0: a grounded agent commitment now also demotes
+// commercial_requires_quote (owner ruling 2026-09-24 — Waves personnel
+// dictating the booking on the recording), so a commercial call that used to
+// land in review can auto-route; a force-reprocess must write a fresh
+// decision row rather than onConflict-ignore into the stale needs_review one.
+const V2_DECISION_VERSION = 'v2-1.8.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0'];
 
 function buildRouteDecision({
   callLogId,
