@@ -506,6 +506,133 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(inserted[0].scheduled_date).toBe('2098-10-15');
   });
 
+  test('P1: a "this visit only" exception anchors extension on its cadence slot, not the moved date (ADMIN-BUG-R30)', async () => {
+    const parent = {
+      id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_ongoing: true, scheduled_date: '2098-01-15',
+      window_start: '08:00', window_end: '10:00',
+      service_type: 'Quarterly Pest Control', time_window: 'morning', zone: 'A',
+      estimated_duration_minutes: 60, skip_weekends: false, technician_id: 'tech-1',
+      create_invoice_on_complete: false,
+    };
+    const rows = [
+      { scheduled_date: '2098-01-15', status: 'completed' },
+      { scheduled_date: '2098-04-15', status: 'completed' },
+      { scheduled_date: '2098-07-15', status: 'completed' },
+      // Sole upcoming visit, moved "this visit only" (rebooker.dateExceptionStamp):
+      // scheduled_date is the moved date, date_exception_cadence_date is the
+      // cadence slot it deviated from. Before the fix, the anchor projected
+      // from 2098-11-05 (the moved date) landing the next visit in Feb 2099
+      // instead of Jan 2099.
+      { scheduled_date: '2098-11-05', status: 'confirmed', date_exception: true, date_exception_cadence_date: '2098-10-15' },
+    ];
+    const inserted = [];
+    const handler = ({ table, calls, op, data }) => {
+      if (table === 'scheduled_services') {
+        if (op === 'columnInfo') return COLS;
+        if (op === 'first') {
+          const firstCall = calls.find((c) => c[0] === 'first');
+          if (calls.some((c) => c[0] === 'count')) return { c: '1' };
+          if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: true };
+          if (firstCall[1] === 'create_invoice_on_complete') return undefined;
+          if (calls.some((c) => c[0] === 'orderBy')) {
+            const notIn = calls.find((c) => c[0] === 'whereNotIn' && c[1] === 'status');
+            const visible = notIn ? rows.filter((r) => !notIn[2].includes(r.status)) : rows;
+            const cadencePos = (r) => r.date_exception && r.date_exception_cadence_date ? r.date_exception_cadence_date : r.scheduled_date;
+            const sorted = [...visible].sort((a, b) => (cadencePos(a) < cadencePos(b) ? -1 : 1));
+            return sorted[sorted.length - 1];
+          }
+          return parent;
+        }
+        if (op === 'await') {
+          if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
+            return rows
+              .filter((r) => !['cancelled', 'rescheduled'].includes(r.status))
+              .map((r) => ({ scheduled_date: r.scheduled_date }));
+          }
+          return [];
+        }
+        if (op === 'insertReturning') { inserted.push(data); return [{ id: 902, ...data }]; }
+        if (op === 'insert') { inserted.push(data); return [1]; }
+      }
+      if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+      if (table === 'technicians') { if (op === 'first') return { id: data?.id || 't1', employment_status: 'active', field_dispatchable: true }; return []; }
+      if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }
+      return null;
+    };
+    await runRecurringSeriesMaintenance(makeConn(handler), { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-11-05' });
+    expect(inserted).toHaveLength(1);
+    // Expected: cadence slot (Oct 15) + 1 quarter = January 2099 — NOT
+    // Nov 5 + 1 quarter (February 2099), which is what the moved date would
+    // have produced. Exact day depends on the parent's nth-weekday-of-month
+    // anchor (addETMonthsByWeekday), so only the MONTH is asserted here —
+    // same method as the other quarterly-cadence repro tests.
+    expect(inserted[0].scheduled_date.slice(0, 7)).toBe('2099-01');
+  });
+
+  test('P1: a legacy exception row with no cadence date recorded anchors on scheduled_date, never on today (ADMIN-BUG-R30 null-cadence fallback)', async () => {
+    const parent = {
+      id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_ongoing: true, scheduled_date: '2098-01-15',
+      window_start: '08:00', window_end: '10:00',
+      service_type: 'Quarterly Pest Control', time_window: 'morning', zone: 'A',
+      estimated_duration_minutes: 60, skip_weekends: false, technician_id: 'tech-1',
+      create_invoice_on_complete: false,
+    };
+    const rows = [
+      { scheduled_date: '2098-01-15', status: 'completed' },
+      { scheduled_date: '2098-04-15', status: 'completed' },
+      { scheduled_date: '2098-07-15', status: 'completed' },
+      // Sole upcoming visit: a LEGACY "this visit only" exception that
+      // predates the date_exception_cadence_date column — date_exception is
+      // true but no cadence date was ever recorded. Must fall back to
+      // scheduled_date (rebooker's own COALESCE-equivalent fallback), never
+      // to today's wall-clock date (which would be far in the PAST relative
+      // to this 2098 fixture and would corrupt the series).
+      { scheduled_date: '2098-10-15', status: 'confirmed', date_exception: true, date_exception_cadence_date: null },
+    ];
+    const inserted = [];
+    const handler = ({ table, calls, op, data }) => {
+      if (table === 'scheduled_services') {
+        if (op === 'columnInfo') return COLS;
+        if (op === 'first') {
+          const firstCall = calls.find((c) => c[0] === 'first');
+          if (calls.some((c) => c[0] === 'count')) return { c: '1' };
+          if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: true };
+          if (firstCall[1] === 'create_invoice_on_complete') return undefined;
+          if (calls.some((c) => c[0] === 'orderBy')) {
+            const notIn = calls.find((c) => c[0] === 'whereNotIn' && c[1] === 'status');
+            const visible = notIn ? rows.filter((r) => !notIn[2].includes(r.status)) : rows;
+            const cadencePos = (r) => r.date_exception && r.date_exception_cadence_date ? r.date_exception_cadence_date : r.scheduled_date;
+            const sorted = [...visible].sort((a, b) => (cadencePos(a) < cadencePos(b) ? -1 : 1));
+            return sorted[sorted.length - 1];
+          }
+          return parent;
+        }
+        if (op === 'await') {
+          if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
+            return rows
+              .filter((r) => !['cancelled', 'rescheduled'].includes(r.status))
+              .map((r) => ({ scheduled_date: r.scheduled_date }));
+          }
+          return [];
+        }
+        if (op === 'insertReturning') { inserted.push(data); return [{ id: 902, ...data }]; }
+        if (op === 'insert') { inserted.push(data); return [1]; }
+      }
+      if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+      if (table === 'technicians') { if (op === 'first') return { id: data?.id || 't1', employment_status: 'active', field_dispatchable: true }; return []; }
+      if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }
+      return null;
+    };
+    await runRecurringSeriesMaintenance(makeConn(handler), { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-10-15' });
+    expect(inserted).toHaveLength(1);
+    // Anchored on scheduled_date (2098-10-15) + 1 quarter = January 2099 —
+    // not on today's date (which is in 2026, long before this fixture's
+    // window). Only the MONTH is asserted (see the nth-weekday note above).
+    expect(inserted[0].scheduled_date.slice(0, 7)).toBe('2099-01');
+  });
+
   test('the latest-anchor query pins the cancelled/rescheduled exclusion — one shared helper, every consumer (source guard)', () => {
     // The anchor lives in latestLiveSeriesVisit, consumed by EVERY writer that
     // extends a series — the maintenance auto-extend, the alert-action route,
@@ -519,7 +646,10 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(helperEnd).toBeGreaterThan(helper);
     const helperBody = src.slice(helper, helperEnd);
     expect(helperBody).toContain(".whereNotIn('status', ['cancelled', 'rescheduled'])");
-    expect(helperBody).toContain(".orderBy('scheduled_date', 'desc')");
+    // Orders by cadence POSITION (COALESCE date_exception_cadence_date,
+    // scheduled_date), not the raw date — a "this visit only" exception row
+    // must not out-rank its own cadence slot (ADMIN-BUG-R30).
+    expect(helperBody).toContain("COALESCE(date_exception_cadence_date, scheduled_date)");
     expect(helperBody).toContain(".where('is_recurring', true)");
     // 4th consumer: planUpdateDetailsRecurrenceDates (update-details' pre-trx
     // rung-1 date peek) anchors its extend plan on the same helper.
