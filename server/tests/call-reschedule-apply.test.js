@@ -487,6 +487,11 @@ describe('applyCallReschedule', () => {
     expect(await priorApplicationStillMatchesLiveCall(makeConn({ prior, visits: [landed], settledCall: { processing_generation: 4 } }), call())).toBe(true);
     expect(await priorApplicationStillMatchesLiveCall(makeConn({ prior, visits: [landed], settledCall: { transcription: 'Corrected source' } }), call())).toBe(false);
     expect(await priorApplicationStillMatchesLiveCall(makeConn({ prior, visits: [visit()] }), call())).toBe(false);
+    // A destination parked for rebook keeps its date/window but is off the
+    // books — neither caller may treat it as proof (Codex #4721 r4 P2).
+    const parked = { ...landed, status: 'rescheduled' };
+    expect(await priorApplicationStillMatchesLiveCall(makeConn({ prior, visits: [parked] }), call())).toBe(false);
+    expect(await applyCallReschedule({ conn: makeConn({ prior, visits: [parked] }), call: call(), now: NOW })).toMatchObject({ reason: 'prior_application_requires_review' });
     // No durable row at all for this call.
     expect(await priorApplicationStillMatchesLiveCall(makeConn(), call())).toBe(false);
   });

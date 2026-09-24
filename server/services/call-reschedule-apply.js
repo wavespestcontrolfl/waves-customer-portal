@@ -566,7 +566,7 @@ async function priorApplicationMatchesLiveCall(conn, call, { requireSameGenerati
     && liveCall.v2_extraction_status === 'valid'
     && (!requireSameGeneration || Number(liveCall.processing_generation) === Number(resolvedProof?.processing_generation))
     && createHash('sha256').update(JSON.stringify([liveCall.transcription, liveCall.ai_extraction_enriched])).digest('hex') === resolvedProof?.source_hash;
-  const sameVisit = Boolean(liveVisit) && liveVisit.customer_id === referenceCustomerId && LIVE_STATUSES.includes(liveVisit.status)
+  const sameVisit = Boolean(liveVisit) && liveVisit.customer_id === referenceCustomerId && MOVABLE_STATUSES.includes(liveVisit.status)
     && dateOnly(liveVisit.scheduled_date) === resolvedProof?.to?.date && hhmm(liveVisit.window_start) === resolvedProof?.to?.start
     && hhmm(liveVisit.window_end) === resolvedProof?.to?.end;
   return sameDecision && sameVisit;
