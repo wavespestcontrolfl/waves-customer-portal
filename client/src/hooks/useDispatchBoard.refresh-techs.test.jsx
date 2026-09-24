@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useDispatchBoard } from './useDispatchBoard';
+import { useDispatchBoard, TECH_ABSENCE_EVENT } from './useDispatchBoard';
 
 // Handlers the hook registers, by event name, so a test can fire a
 // broadcast at the hook exactly as socket.io would.
@@ -454,5 +454,22 @@ describe('a tech_status for a tech the roster does not carry re-reads the board 
     const added = result.current.techs.find((t) => t.id === 'tech-2');
     expect(added.name).toBe('Tech Two');
     expect(added.out_today).toBe(true);
+  });
+});
+
+describe('absence broadcast relay (Codex r8 P2 on PR #4678)', () => {
+  it('re-emits every dispatch:tech_absence as a window event carrying the payload', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const seen = [];
+    const listener = (e) => seen.push(e.detail);
+    window.addEventListener(TECH_ABSENCE_EVENT, listener);
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
+    await act(async () => {
+      socketHandlers['dispatch:tech_absence']({ tech_id: 'tech-1', date: '2026-09-30', out: true, absence_id: 'a-1' });
+    });
+    window.removeEventListener(TECH_ABSENCE_EVENT, listener);
+    expect(seen).toEqual([{ tech_id: 'tech-1', date: '2026-09-30', out: true, absence_id: 'a-1' }]);
   });
 });

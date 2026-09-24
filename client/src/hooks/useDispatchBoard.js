@@ -113,6 +113,12 @@ function boardJobFromPayload(payload) {
   };
 }
 
+// Window event the board hook re-emits for every dispatch:tech_absence
+// broadcast, so components with their own state for one technician (the
+// TechDrawer's TechOutSection) can refetch without prop threading. detail =
+// the broadcast payload ({ tech_id, date, out, absence_id }).
+export const TECH_ABSENCE_EVENT = 'waves:tech-absence-changed';
+
 export function useDispatchBoard() {
   const [techsMap, setTechsMap] = useState(() => new Map());
   const [jobs, setJobs] = useState([]);
@@ -353,6 +359,8 @@ export function useDispatchBoard() {
     function handleTechAbsence(payload) {
       if (!payload || !payload.tech_id) return;
       refreshTechs();
+      // Relay to the open drawer (TechOutSection) — see TECH_ABSENCE_EVENT.
+      try { window.dispatchEvent(new CustomEvent(TECH_ABSENCE_EVENT, { detail: payload })); } catch { /* non-DOM env */ }
     }
 
     socket.on('dispatch:tech_absence', handleTechAbsence);

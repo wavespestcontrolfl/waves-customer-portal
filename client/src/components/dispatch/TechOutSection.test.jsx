@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TechOutSection from './TechOutSection';
+import { TECH_ABSENCE_EVENT } from '../../hooks/useDispatchBoard';
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn());
@@ -294,5 +295,44 @@ describe('gate closed mid-drawer (Codex r7 P2 on PR #4678)', () => {
     await waitFor(() => expect(screen.queryByText('Out today · Sick')).toBeNull());
     expect(screen.queryByText('Availability')).toBeNull();
     expect(screen.queryByText(/Failed to clear|HTTP 404/)).toBeNull();
+  });
+});
+
+describe('remote changes and a second clear (Codex r8 P2s on PR #4678)', () => {
+  it('"Tech is back" answered 404 not_out (someone else cleared it) returns to the Availability form, not off', async () => {
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ enabled: true, absence: { id: 'abs-1', technician_id: 'tech-1', absence_date: '2026-09-23', reason: 'sick', note: null, redistribution: { total: 0, parked: [] } } }),
+    });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Out today · Sick');
+
+    fetch.mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({ error: 'not_out' }) });
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Tech is back' }));
+
+    expect(await screen.findByText('Availability')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark out today' })).toBeInTheDocument();
+  });
+
+  it('a remote mark-out for the shown tech refetches status; one for another tech is ignored', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Availability');
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(TECH_ABSENCE_EVENT, { detail: { tech_id: 'tech-9', date: '2026-09-23', out: true } }));
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ enabled: true, absence: { id: 'abs-2', technician_id: 'tech-1', absence_date: '2026-09-23', reason: 'emergency', note: null, redistribution: { total: 0, parked: [] } } }),
+    });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(TECH_ABSENCE_EVENT, { detail: { tech_id: 'tech-1', date: '2026-09-23', out: true } }));
+    });
+    expect(await screen.findByText('Out today · Emergency')).toBeInTheDocument();
   });
 });

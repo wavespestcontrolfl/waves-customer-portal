@@ -24,6 +24,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge, Button, Card, Select, Textarea } from '../ui';
 import { etDateString } from '../../lib/timezone';
+import { TECH_ABSENCE_EVENT } from '../../hooks/useDispatchBoard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -134,6 +135,21 @@ export default function TechOutSection({ techId, techName, onChanged }) {
     if (techId) fetchStatus(techId);
   }, [techId, fetchStatus]);
 
+  // Another tab marked or cleared THIS technician: useDispatchBoard relays
+  // the dispatch:tech_absence broadcast as a window event (it refreshes the
+  // roster itself); the open drawer re-reads status so it never keeps
+  // offering "Mark out today" after a remote mark, or the old absence after
+  // a remote clear (Codex r8 P2 on #4678).
+  useEffect(() => {
+    function onRemoteAbsenceChange(event) {
+      const changedTechId = event?.detail?.tech_id;
+      if (!changedTechId || changedTechId !== techIdRef.current) return;
+      fetchStatus(changedTechId);
+    }
+    window.addEventListener(TECH_ABSENCE_EVENT, onRemoteAbsenceChange);
+    return () => window.removeEventListener(TECH_ABSENCE_EVENT, onRemoteAbsenceChange);
+  }, [fetchStatus]);
+
   async function handleConfirmMarkOut() {
     if (submitting) return;
     // Capture the guard pair before the request goes out — see the
@@ -216,6 +232,15 @@ export default function TechOutSection({ techId, techName, onChanged }) {
         return;
       }
       if (res.status === 404) {
+        const data = await res.json().catch(() => ({}));
+        if (data.error === 'not_out') {
+          // Another dispatcher already cleared this absence (route answers
+          // 404 not_out, gate still on): re-read status so the section
+          // returns to the plain Availability form — never `off` (Codex r8
+          // P2 on #4678).
+          await fetchStatus(requestTechId);
+          return;
+        }
         // Gate closed mid-drawer — see handleConfirmMarkOut.
         setPhase('off');
         setAbsence(null);
