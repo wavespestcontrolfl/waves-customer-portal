@@ -816,6 +816,26 @@ describe('service report v1', () => {
     }
   });
 
+  test('property-defense Pressure row prefers the report\'s persisted label for its own score', () => {
+    const findPressureRow = (node) => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.key === 'pressure' && node.label === 'Pressure') return node;
+      for (const value of Object.values(node)) {
+        const hit = findPressureRow(value);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const build = (pressureScoreRow) => buildPremiumExperienceContextFromRows({
+      record: { id: 'service-current', pressure_index: 5 },
+      pressureScoreRow,
+      dynamicContext: { pressureTrend: { current: { pressureIndex: 5 } } },
+    });
+    expect(findPressureRow(build({ displayed_score: '5.0', label_name: 'Severe' }))?.detail).toBe('Severe · 5.0 / 5');
+    // A stale row for a different number never labels this one.
+    expect(findPressureRow(build({ displayed_score: '2.0', label_name: 'Low' }))?.detail).toBe('High · 5.0 / 5');
+  });
+
   test('premium experience builds customer-facing modules from service facts', () => {
     const context = buildPremiumExperienceContextFromRows({
       record: {
