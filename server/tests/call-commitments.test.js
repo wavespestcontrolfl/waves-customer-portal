@@ -912,6 +912,50 @@ describe('the model pass sends no sampling controls (current models reject them)
   });
 });
 
+describe('model vocabulary slips are normalized before schema validation (audit 2026-09-23)', () => {
+  const { extractCommitmentsWithModel, normalizeChannel, normalizeKind, normalizeModelOutput, buildCommitmentsPrompt } = require('../services/call-commitments');
+  const transcript = 'Agent: I will call you back tomorrow morning with the price, thank you for calling Waves today.';
+  const reply = (commitments) => ({ content: [{ type: 'text', text: JSON.stringify({ commitments }) }] });
+  const item = (extra) => ({ party: 'waves', kind: 'callback', description: 'Call back with the price', channel: 'call', due_text: 'tomorrow morning', due_at: null, confidence: 0.9, evidence: [{ quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }], ...extra });
+
+  test('channel "phone" (the production failure) is coerced to "call" and the promise survives', async () => {
+    const create = jest.fn(async () => reply([item({ channel: 'phone' })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.items.map((i) => [i.kind, i.channel])).toEqual([['callback', 'call']]);
+  });
+  test('an unlisted channel word fails soft to "unknown"; an unlisted kind fails soft to "other"', async () => {
+    const create = jest.fn(async () => reply([item({ channel: 'carrier pigeon', kind: 'ring_back' })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.items.map((i) => [i.kind, i.channel])).toEqual([['other', 'unknown']]);
+  });
+  test('a structural problem (no evidence) is still a schema failure, reported with the offending path', async () => {
+    const create = jest.fn(async () => reply([item({ evidence: [] })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBe('schema_failed');
+    expect(out.items).toEqual([]);
+    expect(out.errors.some((e) => e.instancePath === '/commitments/0/evidence')).toBe(true);
+  });
+  test('normalizers: case, spacing and aliases; null stays null', () => {
+    expect(normalizeChannel('Phone')).toBe('call');
+    expect(normalizeChannel('text message')).toBe('sms');
+    expect(normalizeChannel('In-Person')).toBe('in_person');
+    expect(normalizeChannel('EMAIL')).toBe('email');
+    expect(normalizeChannel(null)).toBeNull();
+    expect(normalizeChannel('')).toBeNull();
+    expect(normalizeChannel('fax')).toBe('unknown');
+    expect(normalizeKind('Send Estimate')).toBe('send_estimate');
+    expect(normalizeKind('nope')).toBe('other');
+    expect(normalizeModelOutput({ commitments: 'not-an-array' })).toEqual({ commitments: 'not-an-array' });
+    expect(normalizeModelOutput(null)).toBeNull();
+  });
+  test('the prompt names the channel vocabulary', () => {
+    const prompt = buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' });
+    expect(prompt).toMatch(/"channel" is exactly one of "sms", "email", "call", "in_person", "unknown"/);
+  });
+});
+
 describe('lead lookups on a call with no lead key', () => {
   const { buildCallOutcomes } = require('../services/call-commitments');
   test('buildCallOutcomes queries nothing for an imported call (no lead_id, no SID, no customer)', async () => {
