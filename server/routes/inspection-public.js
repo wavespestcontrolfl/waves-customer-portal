@@ -197,6 +197,7 @@ const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { isInServiceAreaBox } = require('../services/service-area');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
+const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
 // the offer (buildAvailabilityForLead) and the commit (callbackVisit).
 const ASSESSMENT_EXPECTED_IDENTITY = Object.freeze({ catalogServiceKey: ASSESSMENT_SERVICE_KEY, serviceType: 'Waves Assessment' });
@@ -825,6 +826,10 @@ async function resolveEligibility(dbConn, lead, custRow, { includeRescheduleUrl 
       };
     }
   }
+  // A lead staff closed (disqualified, spam, duplicate, lost) no longer
+  // books, even without converted_at (Codex #4737 r12 pre-push P1) — the
+  // same open-lead predicate the link mint uses.
+  if (!isOpenLeadRow(lead)) return { state: 'gone', visit: null, rescheduleUrl: null };
   return { state: 'ok', visit: null, rescheduleUrl: null };
 }
 
@@ -1115,7 +1120,19 @@ async function attachLinkedProfileToOwnAccount(trx, linked) {
 // matching profile is reused, else a new "Additional property" profile is
 // created under it (a legacy profile with no account is attached to its OWN
 // new account first — see attachLinkedProfileToOwnAccount).
-async function resolveOtherAccountProperty(trx, freshLead, linked, resolved) {
+// Whether this token may use an existing profile: verified-phone proof, or
+// the profile is an outright (flow-created) prospect in this lead's own
+// provenance.
+async function tokenMayUseProfile(dbConn, lead, profile, token) {
+  if (await verifiedForCustomer(lead, profile, token, dbConn)) return true;
+  const rows = await dbConn('lead_activities').where({ lead_id: lead.id, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata');
+  return (rows || []).some((row) => {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+    return meta && String(meta.customer_id) === String(profile.id) && !meta.requires_verification;
+  });
+}
+
+async function resolveOtherAccountProperty(trx, freshLead, linked, resolved, token) {
   let account = linked.account_id ? { accountId: linked.account_id, existingCustomer: linked } : null;
   if (!account) {
     account = await attachLinkedProfileToOwnAccount(trx, linked);
@@ -1125,6 +1142,13 @@ async function resolveOtherAccountProperty(trx, freshLead, linked, resolved) {
     if (!account) return { locationFailure: 'address_unresolved' };
   }
   const existing = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
+  // An EXISTING sibling property is reused only when this token may see it
+  // (Codex #4737 r12 pre-push P0): the verified-phone proof, or it is itself
+  // a flow-created prospect of this lead. Otherwise nothing about it is read
+  // or booked — fail closed, recoverable.
+  if (existing && !(await tokenMayUseProfile(trx, freshLead, existing, token))) {
+    return { locationFailure: 'address_unresolved' };
+  }
   const chosen = existing
     ? await reuseMatchedProfile(trx, freshLead, existing, resolved)
     : { customer: await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account) };
@@ -1429,7 +1453,7 @@ async function correctableInPlace(trx, freshLead, profile) {
 // The linked-customer half of phase 1 (split out of provisionCommitCustomer).
 // Runs under its locks; returns { custRow, location } or a terminal
 // { locationFailure } / { eligibility }.
-async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, resolved }) {
+async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, resolved, verified }) {
   let provisioned = freshCustRow;
   const location = resolved.location;
   // Compare the fresh row's stored-address fields against the
@@ -1466,7 +1490,7 @@ async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, 
     && !profileMatchesAddress(freshCustRow, resolved.address, resolved.location)
     && !(await correctableInPlace(trx, freshLead, freshCustRow));
   if (anotherProperty) {
-    const other = await resolveOtherAccountProperty(trx, freshLead, freshCustRow, resolved);
+    const other = await resolveOtherAccountProperty(trx, freshLead, freshCustRow, resolved, verified);
     if (other.eligibility) return { eligibility: other.eligibility };
     if (other.locationFailure) return { locationFailure: other.locationFailure };
     return { custRow: other.customer, location: other.location || resolved.location };
@@ -1578,7 +1602,7 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
         await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
       }
     } else {
-      const linked = await provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, resolved });
+      const linked = await provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, resolved, verified });
       if (!linked.custRow) return linked;
       provisioned = linked.custRow;
       location = linked.location;

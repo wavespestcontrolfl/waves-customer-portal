@@ -648,6 +648,37 @@ describe('Codex #4737 r11 P2s: availability eligibility; race refresh never at a
   });
 });
 
+describe('Codex #4737 r12 pre-push: closed leads stop; untrusted sibling properties are never reused', () => {
+  test('P1: a lead staff closed (no converted_at) answers gone and offers no booking', async () => {
+    firstResults.leads = { ...LEAD_ROW, status: 'spam' };
+    listResults.scheduled_services = [];
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.state).toBe('gone');
+    expect(mockBuildAvailability).not.toHaveBeenCalled();
+  });
+
+  test('P0: an unverified token\'s own prospect cannot reuse a staff-added sibling property by typing its address', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: null };
+    // The flow's own prospect (outright trust), in account acct-p, with visit history.
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
+    listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-prospect' }) }];
+    firstResults.customers = { id: 'cust-prospect', account_id: 'acct-p', phone: '9415550101', address_line1: '1 Typo St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-old' }] : []);
+    // A staff-added sibling at the typed address, on another phone.
+    const sibling = { id: 'cust-sibling', account_id: 'acct-p', phone: '9415558888', address_line1: '5 Sibling St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.45, longitude: -82.55 };
+    listResults.customers = [firstResults.customers, sibling];
+    mockGeocode.mockResolvedValueOnce({ location: { lat: 27.45, lng: -82.55 } });
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    firstResults.call_log = null;
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '5 Sibling St, Bradenton, FL 34209' });
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ error: 'address_unresolved' });
+    expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+  });
+});
+
 describe('Codex #4737 r12 pre-push P0: an ALREADY_BOOKED answer never reveals a customer the token lost', () => {
   test('ALREADY_BOOKED after a phone change → already_booked with no visit and no reschedule link', async () => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
