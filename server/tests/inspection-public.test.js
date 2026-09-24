@@ -141,7 +141,7 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 
-const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+const { mintLeadConsultationToken, mintWaitlistTicket } = require('../utils/lead-consultation-token');
 const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType } = require('../services/assessment-booking');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const db = require('../models/db');
@@ -1075,7 +1075,8 @@ describe('POST /:token/availability — address resolution (P1 :219)', () => {
     const token = mintLeadConsultationToken(LEAD_ID);
     const res = await callAvailability(token, { address: '1 Somewhere Rd, Wauchula, FL 33873' });
     expect(res.statusCode).toBe(422);
-    expect(res.body).toEqual({ error: 'out_of_area', county: 'Hardee' });
+    expect(res.body).toMatchObject({ error: 'out_of_area', county: 'Hardee' });
+        expect(typeof res.body.waitlist_ticket).toBe('string');
   });
 
   // Codex #4737 r6 P2: outside the box (no county lookup) the supplied
@@ -1085,7 +1086,8 @@ describe('POST /:token/availability — address resolution (P1 :219)', () => {
     mockGeocode.mockResolvedValueOnce({ location: { lat: 32.7555, lng: -97.3308 } });
     const res = await callAvailability(mintLeadConsultationToken(LEAD_ID), { address: '1 Rooftop Rd, Fort Worth, TX 76102' });
     expect(res.statusCode).toBe(422);
-    expect(res.body).toEqual({ error: 'out_of_area', county: 'Fort Worth 76102' });
+    expect(res.body).toMatchObject({ error: 'out_of_area', county: 'Fort Worth 76102' });
+        expect(typeof res.body.waitlist_ticket).toBe('string');
     expect(mockCounty).not.toHaveBeenCalled();
   });
 
@@ -1212,7 +1214,8 @@ describe('POST /:token commit', () => {
     const token = mintLeadConsultationToken(LEAD_ID);
     const res = await callPost(token, okBody());
     expect(res.statusCode).toBe(422);
-    expect(res.body).toEqual({ error: 'out_of_area', county: 'Hardee' });
+    expect(res.body).toMatchObject({ error: 'out_of_area', county: 'Hardee' });
+        expect(typeof res.body.waitlist_ticket).toBe('string');
     expect(mockCreateSelfBooking).not.toHaveBeenCalled();
   });
 
@@ -2163,7 +2166,8 @@ describe('POST /:token commit', () => {
         const res = await callPost(token, okBody());
         expect(res.statusCode).toBe(422);
         // No county outside the box — the stored city/ZIP is the region signal.
-        expect(res.body).toEqual({ error: 'out_of_area', county: 'Fort Worth 76102' });
+        expect(res.body).toMatchObject({ error: 'out_of_area', county: 'Fort Worth 76102' });
+        expect(typeof res.body.waitlist_ticket).toBe('string');
         expect(mockCreateSelfBooking).not.toHaveBeenCalled();
       } finally {
         process.env.GOOGLE_API_KEY = 'test-google-key';
@@ -2800,10 +2804,10 @@ describe('POST /:token/waitlist', () => {
   test('idempotent insert on email — no error on a repeat submit', async () => {
     firstResults.leads = LEAD_ROW;
     const token = mintLeadConsultationToken(LEAD_ID);
-    const res1 = await callWaitlist(token, { email: 'someone@example.com', county: 'Hardee' });
+    const res1 = await callWaitlist(token, { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
     expect(res1.statusCode).toBe(200);
     expect(res1.body).toEqual({ ok: true });
-    const res2 = await callWaitlist(token, { email: 'someone@example.com', county: 'Hardee' });
+    const res2 = await callWaitlist(token, { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
     expect(res2.statusCode).toBe(200);
     expect(res2.body).toEqual({ ok: true });
   });
@@ -2823,7 +2827,7 @@ describe('POST /:token/waitlist', () => {
   test('inserts at status "waitlist", never "active" or "pending" — never enrols in the newsletter', async () => {
     firstResults.leads = LEAD_ROW;
     const token = mintLeadConsultationToken(LEAD_ID);
-    const res = await callWaitlist(token, { email: 'someone@example.com', county: 'Hardee' });
+    const res = await callWaitlist(token, { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
     expect(res.statusCode).toBe(200);
     const insert = insertCalls.find((c) => c.table === 'newsletter_subscribers');
     expect(insert).toBeTruthy();
@@ -2839,13 +2843,46 @@ describe('POST /:token/waitlist', () => {
   test('every request writes an expansion_waitlist lead activity, even when the email is already a subscriber', async () => {
     firstResults.leads = LEAD_ROW;
     const token = mintLeadConsultationToken(LEAD_ID);
-    await callWaitlist(token, { email: 'someone@example.com', county: 'Hardee' });
-    await callWaitlist(token, { email: 'someone@example.com', county: 'Hardee' });
+    await callWaitlist(token, { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
+    await callWaitlist(token, { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
     const activities = insertCalls.filter((c) => c.table === 'lead_activities');
     expect(activities).toHaveLength(2);
     expect(activities[0].payload).toMatchObject({ lead_id: LEAD_ID, activity_type: 'expansion_waitlist' });
     expect(JSON.parse(activities[0].payload.metadata)).toEqual({ email: 'someone@example.com', county: 'Hardee' });
     expect(updateCalls.some((c) => c.table === 'newsletter_subscribers')).toBe(false);
+  });
+
+  // Codex #4737 r15 P0: only a server-verified out-of-area answer (its
+  // signed ticket) opens the waitlist, and the region comes from the ticket.
+  test('no ticket, a forged ticket, or another lead\'s ticket → generic 404, nothing written', async () => {
+    firstResults.leads = LEAD_ROW;
+    const token = mintLeadConsultationToken(LEAD_ID);
+    for (const body of [
+      { email: 'someone@example.com', county: 'Hardee' },
+      { email: 'someone@example.com', waitlist_ticket: 'x.y.z' },
+      { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket('another-lead', 'Hardee') },
+    ]) {
+      const res = await callWaitlist(token, body);
+      expect(res.statusCode).toBe(404);
+    }
+    expect(insertCalls.some((c) => c.table === 'newsletter_subscribers' || c.table === 'lead_activities')).toBe(false);
+  });
+
+  test('a lead no longer eligible (already booked) cannot join even with a valid ticket', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [
+      { id: 'ss-a', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'a-tok' },
+    ];
+    const res = await callWaitlist(mintLeadConsultationToken(LEAD_ID), { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('the region is the ticket\'s, never a caller-supplied county', async () => {
+    firstResults.leads = LEAD_ROW;
+    const res = await callWaitlist(mintLeadConsultationToken(LEAD_ID), { email: 'someone@example.com', county: 'Fake County', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
+    expect(res.statusCode).toBe(200);
+    expect(insertCalls.find((c) => c.table === 'newsletter_subscribers').payload.source).toBe('expansion_waitlist:Hardee');
   });
 });
 

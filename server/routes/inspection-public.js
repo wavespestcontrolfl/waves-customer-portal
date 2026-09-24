@@ -190,7 +190,7 @@ const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
-const { verifyLeadConsultationToken, smsChannelFor } = require('../utils/lead-consultation-token');
+const { verifyLeadConsultationToken, smsChannelFor, mintWaitlistTicket, verifyWaitlistTicket } = require('../utils/lead-consultation-token');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
@@ -1316,7 +1316,7 @@ router.get('/:token', async (req, res, next) => {
     // calendar (Codex pre-push P1, 2026-09-24).
     const resolved = await finalizeBookingLocation(lead, custRow, null);
     if (resolved.failure === 'out_of_area') {
-      return res.json({ state: 'out_of_area', county: resolved.county || null, lead: leadPayload });
+      return res.json({ state: 'out_of_area', county: resolved.county || null, lead: leadPayload, waitlist_ticket: mintWaitlistTicket(lead.id, resolved.county) });
     }
     if (resolved.failure === 'service_area_unavailable') {
       return res.json({
@@ -1388,7 +1388,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     const resolved = await finalizeBookingLocation(lead, custRow, addressInput);
     if (resolved.failure) {
       if (resolved.failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
-      if (resolved.failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: resolved.county || null });
+      if (resolved.failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: resolved.county || null, waitlist_ticket: mintWaitlistTicket(lead.id, resolved.county) });
       return res.status(422).json({ error: 'address_unresolved' });
     }
 
@@ -1453,7 +1453,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const resolved = await finalizeBookingLocation(lead, custRow, addressInput);
     if (resolved.failure) {
       if (resolved.failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
-      if (resolved.failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: resolved.county || null });
+      if (resolved.failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: resolved.county || null, waitlist_ticket: mintWaitlistTicket(lead.id, resolved.county) });
       return res.status(400).json({ error: findSlotsAddressFailureMessage(resolved.failure) });
     }
 
@@ -1672,10 +1672,10 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
 // Commit-handler helpers (split out, Codex #4737 r1 P2) — each maps one
 // repeated decision to its response so the handler reads as phases.
 
-function sendLocationFailure(res, failure, county) {
+function sendLocationFailure(res, failure, county, leadId) {
   if (failure === 'address_required') return res.status(400).json({ error: 'address required' });
   if (failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
-  if (failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: county || null });
+  if (failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: county || null, waitlist_ticket: mintWaitlistTicket(leadId, county) });
   return res.status(422).json({ error: 'address_unresolved' });
 }
 
@@ -1960,7 +1960,7 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
 // Phase 1 ended in a terminal answer: eligibility changed under the lock
 // (with the reschedule URL filled in now that the lock is released), or the
 // customer's stored address changed under it.
-async function sendPhase1Terminal(res, phase1, leadPayload) {
+async function sendPhase1Terminal(res, phase1, leadPayload, leadId) {
   if (phase1.eligibility) {
     // The lock-protected eligibility check above skipped the reschedule
     // URL (no second connection while the lock was held) — the lock is
@@ -1970,7 +1970,7 @@ async function sendPhase1Terminal(res, phase1, leadPayload) {
     }
     return res.json(eligibilityResponse(phase1.eligibility, leadPayload));
   }
-  if (phase1.locationFailure) return sendLocationFailure(res, phase1.locationFailure, phase1.county);
+  if (phase1.locationFailure) return sendLocationFailure(res, phase1.locationFailure, phase1.county, leadId);
 }
 
 // The picked date outside the online window, or no assessment catalog row.
@@ -2010,7 +2010,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
 
     const resolved = await finalizeBookingLocation(lead, custRow, addressInput);
-    if (resolved.failure) return sendLocationFailure(res, resolved.failure, resolved.county);
+    if (resolved.failure) return sendLocationFailure(res, resolved.failure, resolved.county, lead.id);
 
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
@@ -2054,7 +2054,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // never inside it — see below.
     const phase1 = await provisionCommitCustomer({ lead, custRow, resolved, verified });
 
-    if (phase1.eligibility || phase1.locationFailure) return sendPhase1Terminal(res, phase1, leadPayload);
+    if (phase1.eligibility || phase1.locationFailure) return sendPhase1Terminal(res, phase1, leadPayload, lead.id);
     custRow = phase1.custRow;
     const bookingLocation = phase1.location;
 
@@ -2065,7 +2065,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const locationMoved = !sameLocation(bookingLocation, resolved.location);
     if (locationMoved) {
       const areaFailure = await serviceAreaFailure(bookingLocation, custRow);
-      if (areaFailure) return sendLocationFailure(res, areaFailure.failure, areaFailure.county);
+      if (areaFailure) return sendLocationFailure(res, areaFailure.failure, areaFailure.county, lead.id);
     }
 
     // Re-validate the chosen slot when the final location differs from
@@ -2135,7 +2135,15 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
   try {
     const lead = await loadLead(db, verified.leadId);
     if (!lead) return res.status(404).json({ error: 'not_found' });
-    const county = typeof req.body?.county === 'string' ? req.body.county.trim() : '';
+    // Only a lead the server itself just found out of area, and that is
+    // still bookable-eligible, may join (Codex #4737 r15 P0): the signed
+    // ticket minted with that out_of_area answer carries the region — never
+    // a caller-supplied county — and anything else is the generic 404.
+    const ticket = verifyWaitlistTicket(req.body?.waitlist_ticket, lead.id);
+    if (!ticket) return res.status(404).json({ error: 'not_found' });
+    const eligibility = await resolveEligibility(db, lead, await loadTrustedCustomer(db, lead, verified), { includeRescheduleUrl: false });
+    if (eligibility.state !== 'ok') return res.status(404).json({ error: 'not_found' });
+    const county = ticket.county || '';
 
     // status: 'waitlist' — deliberately NOT 'active' (Codex pre-push P1,
     // 2026-09-24: an 'active' row enrols in ordinary newsletter sends —

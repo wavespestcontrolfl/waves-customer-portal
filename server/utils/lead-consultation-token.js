@@ -97,4 +97,36 @@ function smsChannelFor(phone) {
   return `sms-${crypto.createHmac('sha256', key).update(`lead-consultation-sms:${last10}`).digest('hex').slice(0, 16)}`;
 }
 
-module.exports = { mintLeadConsultationToken, verifyLeadConsultationToken, smsChannelFor, TTL_SECONDS };
+// A short-lived, signed waitlist ticket (Codex #4737 r15 P0): minted ONLY
+// with a server-verified out_of_area answer, it binds the lead and the
+// region that answer found, so POST /:token/waitlist never trusts a
+// caller-supplied county or writes for a lead that was never out of area.
+const WAITLIST_TICKET_TTL_SECONDS = 60 * 60;
+function waitlistTicketSig(leadId, payload) {
+  return crypto.createHmac('sha256', secret()).update(`lead-consultation-waitlist:${leadId}:${payload}`).digest('base64url');
+}
+function mintWaitlistTicket(leadId, county, nowSec = Math.floor(Date.now() / 1000)) {
+  if (!leadId || !secret()) return null;
+  const payload = `${nowSec + WAITLIST_TICKET_TTL_SECONDS}.${Buffer.from(String(county || '')).toString('base64url')}`;
+  return `${payload}.${waitlistTicketSig(leadId, payload)}`;
+}
+function verifyWaitlistTicket(ticket, leadId, nowSec = Math.floor(Date.now() / 1000)) {
+  if (!ticket || !leadId || !secret()) return null;
+  const parts = String(ticket).split('.');
+  if (parts.length !== 3) return null;
+  const [expStr, countyB64, sig] = parts;
+  const exp = Number(expStr);
+  if (!Number.isFinite(exp) || exp < nowSec) return null;
+  const expected = waitlistTicketSig(leadId, `${expStr}.${countyB64}`);
+  if (sig.length !== expected.length) return null;
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  } catch {
+    return null;
+  }
+  return { county: Buffer.from(countyB64, 'base64url').toString() || null };
+}
+
+module.exports = {
+  mintWaitlistTicket,
+  verifyWaitlistTicket, mintLeadConsultationToken, verifyLeadConsultationToken, smsChannelFor, TTL_SECONDS };

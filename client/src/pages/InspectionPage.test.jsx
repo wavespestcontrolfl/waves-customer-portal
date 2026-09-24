@@ -260,9 +260,10 @@ describe('InspectionPage address-first gate', () => {
         availability: null,
         lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
       })),
-      availability: jsonResponse({ error: 'out_of_area', county: 'Hardee' }, 422),
+      availability: jsonResponse({ error: 'out_of_area', county: 'Hardee', waitlist_ticket: 'signed-ticket' }, 422),
       waitlist: jsonResponse({ ok: true }),
     });
+    const fetchMock = globalThis.fetch;
     renderPage();
 
     fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '1 Somewhere Rd, Wauchula, FL 33873' } });
@@ -272,6 +273,10 @@ describe('InspectionPage address-first gate', () => {
     fireEvent.change(screen.getByLabelText('Email address'), { target: { value: 'pat@example.com' } });
     fireEvent.click(screen.getByRole('button', { name: /Notify me/i }));
     expect(await screen.findByText(/you.re on the list/i)).toBeInTheDocument();
+    // Codex #4737 r15 P0: the server's signed ticket rides the join — never
+    // a client-supplied county.
+    const join = fetchMock.mock.calls.find(([url]) => String(url).includes('/waitlist'));
+    expect(JSON.parse(join[1].body)).toEqual({ email: 'pat@example.com', waitlist_ticket: 'signed-ticket' });
   });
 
   it('needs_address + address_unresolved: stays on the form with an inline message, never the waitlist stop', async () => {
@@ -616,6 +621,41 @@ describe('InspectionPage: a terminal state from the slot search replaces the pic
     fireEvent.change(await screen.findByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     expect((await screen.findAllByText(/already a Waves customer/i)).length).toBeGreaterThan(0);
+  });
+});
+
+// Codex #4737 r15 P2: an in-flight search for the OLD address is aborted
+// when "Different address?" reopens the gate — its late answer never
+// replaces the new address's times.
+describe('InspectionPage: a stale search never lands after an address change', () => {
+  it('the old search\'s late response is dropped', async () => {
+    let releaseSearch;
+    const staleAvailability = { ...okPayload().availability, days: [{ date: '2026-07-13', fullDate: 'Monday, July 13', nearby: false, slots: [{ start_time: '08:00', end_time: '08:30', start_label: '8:00 AM', end_label: '8:30 AM', technician_id: 'tech-9' }] }] };
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) {
+        return new Promise((resolve, reject) => {
+          releaseSearch = () => resolve(jsonResponse({ availability: staleAvailability, summary: 'stale' }));
+          opts.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+        });
+      }
+      if (u.includes('/availability') && opts.method === 'POST') return Promise.resolve(jsonResponse({ availability: okPayload().availability, needs_address: false }));
+      return Promise.resolve(jsonResponse(okPayload()));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Search for a service date or time'), { target: { value: 'monday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(typeof releaseSearch).toBe('function'));
+    fireEvent.click(await screen.findByRole('button', { name: /Different address\?/i }));
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '2 New Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+    releaseSearch();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole('button', { name: /Choose 8:00 AM on Monday, July 13/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toBeInTheDocument();
   });
 });
 

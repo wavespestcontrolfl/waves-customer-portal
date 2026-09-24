@@ -943,7 +943,7 @@ function InspectionCoveredCard({ data }) {
 
 // Out-of-area stop (owner ruling 2026-09-23): STOP the page entirely and
 // offer the one-field expansion-waitlist prompt.
-function OutOfAreaCard({ token, county }) {
+function OutOfAreaCard({ token, county, ticket }) {
   const [email, setEmail] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [joined, setJoined] = useState(false);
@@ -958,7 +958,9 @@ function OutOfAreaCard({ token, county }) {
       const res = await fetch(`${API_BASE}/public/inspection/${token}/waitlist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: value, county: county || undefined }),
+        // The server-signed ticket from the out_of_area answer carries the
+        // region (Codex #4737 r15 P0) — never a client-supplied county.
+        body: JSON.stringify({ email: value, waitlist_ticket: ticket || undefined }),
       });
       if (!res.ok) throw new Error('failed');
       setJoined(true);
@@ -1027,7 +1029,7 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
     try {
       const { res, body } = await postInspectionAvailability(token, value);
       if (res.status === 422 && body.error === 'out_of_area') {
-        setOutOfArea({ county: body.county || null });
+        setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
         return;
       }
       // Recoverable: the address text didn't geocode (typo, unparseable
@@ -1073,7 +1075,7 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
     }
   };
 
-  if (outOfArea) return <OutOfAreaCard token={token} county={outOfArea.county} />;
+  if (outOfArea) return <OutOfAreaCard token={token} county={outOfArea.county} ticket={outOfArea.ticket} />;
 
   return (
     <Card>
@@ -1268,7 +1270,7 @@ const FLOWS = {
       // sits outside the service area) — same stop card the commit-time
       // out_of_area response raises, just sourced from initial load instead
       // of a POST (Codex pre-push P1, 2026-09-24).
-      if (data.state === 'out_of_area') return <OutOfAreaCard token={ctx?.token} county={data.county} />;
+      if (data.state === 'out_of_area') return <OutOfAreaCard token={ctx?.token} county={data.county} ticket={data.waitlist_ticket} />;
       if (data.needs_address) {
         return (
           <InspectionAddressGate
@@ -1559,7 +1561,7 @@ export default function ScheduleFlowPage({ flow }) {
       // Inspection only: the geocoded address falls outside the service
       // area — STOP with the dedicated card instead of a generic error.
       if (flow === 'inspection' && body.error === 'out_of_area') {
-        setOutOfArea({ county: body.county || null });
+        setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
         return;
       }
       // Inspection only: the address didn't geocode at commit time (rare —
@@ -1650,7 +1652,7 @@ export default function ScheduleFlowPage({ flow }) {
   if (result) return <Page><cfg.Success result={result} data={data} /></Page>;
   // Inspection only: raised from the commit's out_of_area response — a STOP
   // like `blocked` below, just sourced from a POST instead of the GET state.
-  if (outOfArea) return <Page><OutOfAreaCard token={token} county={outOfArea.county} /></Page>;
+  if (outOfArea) return <Page><OutOfAreaCard token={token} county={outOfArea.county} ticket={outOfArea.ticket} /></Page>;
   const blocked = cfg.blocked(data, { token, mergeData, setResolvedAddress });
   if (blocked) return <Page>{blocked}</Page>;
 
@@ -1684,7 +1686,16 @@ export default function ScheduleFlowPage({ flow }) {
         // Inspection only: re-open the address form to correct the address
         // (Codex #4737 r5 P1 — an explicitly typed address wins on the
         // server, so a corrected retry books there).
-        onChangeAddress={() => mergeData({ needs_address: true })}
+        onChangeAddress={() => {
+          // An in-flight search for the OLD address must never land after
+          // the new one resolves (Codex #4737 r15 P2): abort it and start a
+          // fresh controller for the requests that follow.
+          loadAbortRef.current?.abort();
+          loadAbortRef.current = new AbortController();
+          setAiFiltered(false);
+          setSelectedSlot(null);
+          mergeData({ needs_address: true });
+        }}
       />
       {blockedLanes.map((lane) => (
         <AlreadyBookedCard key={lane.key} lane={lane} />
