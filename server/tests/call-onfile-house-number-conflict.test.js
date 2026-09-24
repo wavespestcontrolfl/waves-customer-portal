@@ -323,7 +323,7 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(guard).toContain("code: 'CONFLICT_CUSTOMER_RELINKED'");
     expect(guard).toContain('no recovery task filed');
     // The retained visit is looked up by the column scheduled_services actually carries (codex local audit).
-    expect(src).toContain("where({ id: retainedId, source_call_log_id: item.call_log_id })");
+    expect(src).toContain("where({ id: retainedId, source_call_log_id: item.call_log_id }).whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'])");
     // Recovery tasks: version-bound on /verdict, never swept by a sibling verdict, obsolete retained fields nulled (codex r31 P1).
     expect(src).toContain("if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {");
     expect(src).toContain("...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),");

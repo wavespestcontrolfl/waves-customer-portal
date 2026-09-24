@@ -823,7 +823,11 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
     // already cancelled or moved falls back to the booking task.
     const retainedId = heldConflictPayload?.retained_service_id || null;
     const retained = retainedId
-      ? await trx('scheduled_services').where({ id: retainedId, source_call_log_id: item.call_log_id }).whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show']).first('id', 'scheduled_date')
+      // A 'rescheduled' row is the customer-reschedule placeholder (off the
+      // calendar until staff rebook it) — not a live retained visit, so the
+      // task must ask for a booking, not address-correction-only (codex r34
+      // P1).
+      ? await trx('scheduled_services').where({ id: retainedId, source_call_log_id: item.call_log_id }).whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled']).first('id', 'scheduled_date')
       : null;
     const taskSummary = retained
       ? `Address confirmed on file after a house-number dispute — the retained appointment (visit ${retained.id}) still carries the disputed number; correct its address, do not book a second one`
