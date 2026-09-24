@@ -277,6 +277,18 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
     expect(G.normalizeServiceName('Taurus SC Treatment')).toBeNull();
     expect(G.normalizeServiceName('')).toBeNull();
   });
+  test('brand names the canonical normalizer itself emits are still dropped (2026-09-25 P1 fix)', () => {
+    // service-normalizer's own SERVICE_TYPE_MAP maps these raw labels to
+    // types that carry a brand name — Bora-Care, Arborjet — so the
+    // product-word backstop has to catch the NORMALIZER's output, not just
+    // an unmapped raw label.
+    expect(G.normalizeServiceName('Bora-Care Wood Treatment Service')).toBeNull();
+    expect(G.normalizeServiceName('Arborjet Treatment')).toBeNull();
+    expect(G.servicesPerformedFrom([
+      { service_type: 'Bora-Care Wood Treatment Service', scheduled_date: '2026-01-01' },
+      { service_type: 'Arborjet Treatment', scheduled_date: '2026-01-02' },
+    ])).toEqual([]);
+  });
 });
 
 describe('accountFingerprint — servicesPerformed', () => {

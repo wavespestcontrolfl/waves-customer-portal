@@ -286,9 +286,13 @@ what when where whether which while who why wish with would yes you your you're 
 const ORDINARY_OPENERS = new Set(`
 ants roaches spiders termites mosquitoes mosquitos bugs pests rodents rats mice fleas ticks
 wasps bees hornets silverfish earwigs millipedes centipedes scorpions bedbugs gnats flies
-armadillos grubs fungus lawns yards turf shrubs mulch finding keeping skipping having getting
-being knowing hearing seeing looking making taking staying protecting treating helping showing
-coming letting giving working watching checking
+weeds results armadillos grubs fungus lawns yards turf shrubs mulch finding keeping skipping
+having getting being knowing hearing seeing looking making taking staying protecting treating
+helping showing coming letting giving working watching checking going dealing inheriting doing
+hoping appreciating thanking glad happy sorry sounds catching tracking handling following
+answering explaining walking learning welcoming wishing sending passing putting setting turning
+moving starting switching arriving spending sticking considering choosing trusting reaching
+calling booking scheduling planning noticing nothing everything anything something
 `.split(/\s+/).filter(Boolean));
 // …and a listed opener is exempt only with POSITIVE ordinary-word syntax
 // directly after it: a plural-only verb ("Ants are / love / need"), a
@@ -320,7 +324,15 @@ const DATE_CLAIM_RE = /\b(?:noon|midnight|\d{1,2}(?::\d{2})?\s?(?:am|pm|a\.m\.|p
 // Service / treatment / relationship claims. Each is a factual assertion
 // about what we did or who the customer is; it must come from the review
 // text or from an allowed account fact, never from the model.
-const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|waveguard)\b/gi;
+const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|membership|members?|programs?|waveguard)\b/gi;
+// Membership/plan-status terms within SERVICE_CLAIM_RE (2026-09-25 P1 fix,
+// pre-push round 2) — an identity/relationship claim, not an outcome, so
+// deliberately absent from OUTCOME_TERM_RE. Bare "plan" is NOT a claim
+// ("explained the plan" stays ordinary prose) — only these account-status
+// shapes are. In the service-claim loop these are sourced by the review's
+// own root (the existing logic every term gets) OR by
+// grounding.account?.relationship === 'recurring'.
+const MEMBERSHIP_TERM_RE = /^(?:membership|members?|programs?|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?)$/i;
 // Outcome / result phrases within SERVICE_CLAIM_RE — the ones a negation
 // in the review flips ("did not get rid of", "never eliminated", "not under
 // control"). Topic nouns (ants, treatment, lawn) are deliberately absent.
@@ -619,11 +631,17 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   // "Cockroach Treatment") could compose into "ant treatment" — a claim
   // neither the review nor the account actually supports.
   const servicePhraseSpans = [];
+  // Words may be joined in the body by more than plain whitespace — real
+  // service names carry "&", "/", "-", or a spelled-out "and" ("Flea & Tick
+  // Treatment", "Tree & Shrub Care", "One-Time Pest Control"); the
+  // normalizer strips those to bare words, so the span regex has to accept
+  // any of them back between words, not just \s+ (2026-09-25 P2 fix).
+  const PHRASE_WORD_JOIN_RE = '(?:\\s*(?:&|and|\\/|,|-)\\s*|\\s+)';
   for (const phrase of grounding.allow?.servicePhrases || []) {
     const words = String(phrase).trim().split(/\s+/).filter(Boolean);
     if (!words.length) continue;
     const parts = words.map((w, i) => escapeRe(w) + (i === words.length - 1 ? 's?' : ''));
-    const phraseRe = new RegExp(`\\b${parts.join('\\s+')}\\b`, 'gi');
+    const phraseRe = new RegExp(`\\b${parts.join(PHRASE_WORD_JOIN_RE)}\\b`, 'gi');
     let pm;
     while ((pm = phraseRe.exec(body)) !== null) servicePhraseSpans.push([pm.index, pm.index + pm[0].length]);
   }
@@ -702,18 +720,17 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
+    // 2026-09-25 fix (pre-push round 2, third time raised): the standalone
+    // morphology exemption ("ends in ing/ed/ly") is DELETED — "Sterling
+    // around your property…" and "Harding around your property…" both end
+    // in "ing" and are surnames, not gerunds, so that shape admitted them
+    // too. The only sentence-initial pass now goes through the existing,
+    // explicitly enumerated ORDINARY_OPENERS allowlist above (extended with
+    // the common reply openers this fix needed: inheriting, dealing, going,
+    // answering, explaining, walking, …) plus the review-word-inflection
+    // check above it. A capitalized word not on either list has no
+    // provenance from mere morphology.
     if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
-    // 2026-09-24/25 fix: a sentence-initial GERUND/PARTICIPLE/ADVERB (ends in
-    // "ing"/"ed"/"ly", 5+ letters — a morphology no surname or invented
-    // product name takes) that is not a common first name and not a known
-    // (forbidden tech / recent-greeting) name, followed by ordinary syntax,
-    // is not a hallucinated staff name — "Working around your schedule…",
-    // "Inheriting a cockroach problem…". Narrower than a bare "any word"
-    // pass (pre-push P1: "Sentricon around your property…" / "Jenkins
-    // around your property…" — neither ends in ing/ed/ly — must still
-    // reject): this is a wider pass than the inflection check above only in
-    // that it needs no stem match to a review word.
-    if (sentenceInitial && w.length >= 5 && /(?:ing|ed|ly)$/.test(w) && !COMMON_FIRST_NAMES.has(w) && !knownNames.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
     return reject('unlisted_name', pn[2]);
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
@@ -775,6 +792,39 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     }
     return reviewResolved;
   };
+  // Subject-scoped guard on the outcome fallback below (2026-09-25 P1 fix,
+  // third time raised — made structural): reviewStatesOutcome() alone proves
+  // only that the review states SOME un-negated outcome ANYWHERE — not that
+  // it is about the thing the reply names. "Glad the Cockroach Treatment
+  // worked" must not borrow "The ants are gone"'s outcome for an unrelated
+  // subject. An outcome term additionally needs, in its OWN body sentence, a
+  // pest/service noun the reviewer actually wrote (root-matched, same as
+  // `rooted` above) with an un-negated occurrence in the review.
+  const sentenceSpans = (() => {
+    const spans = [];
+    let start = 0;
+    const breakRe = /[.!?]/g;
+    let bm;
+    while ((bm = breakRe.exec(body)) !== null) { spans.push([start, bm.index + 1]); start = bm.index + 1; }
+    if (start < body.length) spans.push([start, body.length]);
+    return spans;
+  })();
+  const sentenceTextAt = (idx) => {
+    const span = sentenceSpans.find(([a, b]) => idx >= a && idx < b);
+    return span ? body.slice(span[0], span[1]) : body;
+  };
+  const sentenceHasSourcedSubject = (sentenceText) => {
+    for (const subjTerm of sentenceText.match(SERVICE_CLAIM_RE) || []) {
+      const subj = subjTerm.toLowerCase().replace(/\s+/g, ' ');
+      if (OUTCOME_TERM_RE.test(subj)) continue; // a pest/service NOUN, not another outcome verb
+      const subjStem = stemOf(subj);
+      const subjRooted = reviewWords.has(subj) || reviewWords.has(subjStem)
+        || (subjStem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(subjStem) || (subjStem.startsWith(ws) && ws.length >= 4); }));
+      if (!subjRooted) continue;
+      if (rootSupported(reviewLower, reviewWords, subjStem, subj, reviewNeg) === true) return true;
+    }
+    return false;
+  };
   for (const claimMatch of body.matchAll(SERVICE_CLAIM_RE)) {
     const term = claimMatch[0];
     const termIdx = claimMatch.index;
@@ -797,6 +847,11 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     if (support === 'negated') continue;
     const stem = stemOf(t);
     if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
+    // A membership/plan-status claim is also sourced by the account's own
+    // relationship fact, independent of the review's words (2026-09-25 P1
+    // fix): a genuinely recurring customer may be called a member/plan
+    // holder even if the review itself never says so.
+    if (MEMBERSHIP_TERM_RE.test(t) && grounding.account?.relationship === 'recurring') continue;
     // Same root in the reviewer's words ("eliminate" ↔ "eliminated",
     // "infestation" ↔ "infested") — an un-negated occurrence of that root.
     const rooted = reviewWords.has(t) || reviewWords.has(stem)
@@ -813,8 +868,11 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     // SOME un-negated outcome in different words ("got much better", "under
     // control" → "handled") — 2026-09-24 P1 fix: this fallback never fires
     // for a term the review directly negates (that path returns above), so
-    // "did not work" still blocks "Glad the treatment worked."
-    if (outcome && reviewStatesOutcome()) continue;
+    // "did not work" still blocks "Glad the treatment worked." — AND
+    // (2026-09-25 P1 fix) the reply's own sentence must name a pest/service
+    // subject the review actually wrote, un-negated: "Glad the Cockroach
+    // Treatment worked" (review: only ants) still rejects.
+    if (outcome && reviewStatesOutcome() && sentenceHasSourcedSubject(sentenceTextAt(termIdx))) continue;
     return reject('unlisted_service_claim', t);
   }
   // Provenance for relationship / tenure claims: the reviewer's words or the

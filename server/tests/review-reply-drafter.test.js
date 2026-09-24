@@ -678,7 +678,7 @@ describe('2026-09-24 fix: sentence-initial gerunds pass, servicesPerformed words
   test('"Working around your schedule…" and sentence-initial "Inheriting…" pass', () => {
     const g = tylerGrounding();
     expect(Drafter.verifyReplyText(good("Hi Tyler,\n\nGood to hear Adam found the source and explained the plan. Working around your schedule is part of the job, and we'll pass your note along."), g)).toBeNull();
-    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad the cockroach treatment handled it and the visit went well.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad we handled the nest and the cockroach treatment did its job.'), g)).toBeNull();
   });
   test('a common first name (Kevin) sentence-initial still rejects', () => {
     const g = tylerGrounding();
@@ -728,7 +728,7 @@ describe('2026-09-24 P1 fix: worked/handled negation restored, compliment adject
     g.allow.names = ['Tyler', 'Adam'];
     g.allow.servicePhrases = ['cockroach treatment'];
     expect(Drafter.verifyReplyText(good("Hi Tyler,\n\nGood to hear Adam found the source and explained the plan. Working around your schedule is part of the job, and we'll pass your note along."), g)).toBeNull();
-    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad the cockroach treatment handled it and the visit went well.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad we handled the nest and the cockroach treatment did its job.'), g)).toBeNull();
   });
 });
 
@@ -768,6 +768,48 @@ describe('2026-09-25 pre-push round: legacy labels / greedy exemption / composab
   test('a root the review never mentions at all is left alone (ordinary prose)', () => {
     const g = grounding({ text: 'Great service', mentionedTechNames: [], topics: [] });
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went well.'), g)).toBeNull();
+  });
+});
+
+describe('2026-09-25 pre-push round 2: subject-scoped outcome fallback / opener allowlist / phrase punctuation / membership claims', () => {
+  test('the outcome fallback is subject-scoped: an unrelated account phrase cannot borrow the review\'s outcome elsewhere', () => {
+    const g = grounding({ text: 'The ants are gone.', mentionedTechNames: [], topics: [] });
+    g.allow.servicePhrases = ['cockroach treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the Cockroach Treatment worked so well.'), g)).toBe('unlisted_service_claim');
+  });
+  test('"Glad the ants are handled" passes: the review states an outcome about the SAME subject (ants)', () => {
+    const g = grounding({ text: 'Our ant situation got much much better.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the ants are handled.'), g)).toBeNull();
+  });
+  test('"Glad the spiders are handled" passes: the review states an outcome about the SAME subject (spiders)', () => {
+    const g = grounding({ text: 'Our spider issues are under control.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the spiders are handled.'), g)).toBeNull();
+  });
+  test('the sentence-initial pass is now purely the ORDINARY_OPENERS allowlist: Working/Inheriting pass, surnames that happen to end in -ing do not (2026-09-25 P1 fix)', () => {
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nWorking around your schedule is part of the job.'), grounding())).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nInheriting a mess is no fun, but we are glad to help.'), grounding())).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nSterling around your property can help with ants.'), grounding())).toBe('unlisted_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nHarding around your property can help with ants.'), grounding())).toBe('unlisted_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nSentricon around your property can help with ants.'), grounding())).toBe('unlisted_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nJenkins around your property can help with ants.'), grounding())).toBe('unlisted_name');
+  });
+  test('service-phrase spans match names joined by "&" or a hyphen, not just plain whitespace (2026-09-25 P2 fix)', () => {
+    const g1 = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [] });
+    g1.allow.servicePhrases = ['flea tick treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the Flea & Tick Treatment did the trick.'), g1)).toBeNull();
+    const g2 = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [] });
+    g2.allow.servicePhrases = ['one time pest control'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you chose the One-Time Pest Control for your home.'), g2)).toBeNull();
+  });
+  test('membership/plan claims need the account\'s recurring relationship or the review\'s own words (2026-09-25 P1 fix)', () => {
+    const gNoAccount = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [], account: null });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for choosing our membership plan.'), gNoAccount)).toBe('unlisted_service_claim');
+    const gRecurring = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'established', serviceCategories: ['pest control'], city: null } });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for choosing our membership plan.'), gRecurring)).toBeNull();
+  });
+  test('"explained the plan" is ordinary prose — bare "plan" is not a claim', () => {
+    const g = grounding({ text: 'Adam explained everything.', mentionedTechNames: ['Adam'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad Adam explained the plan.'), g)).toBeNull();
   });
 });
 

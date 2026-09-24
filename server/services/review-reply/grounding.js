@@ -146,7 +146,12 @@ function serviceCategoriesFrom(serviceTypes) {
 // a date (those stay out of the pack entirely; see servicesPerformedFrom).
 // Product/brand words a service_type must never surface under (an internal
 // label like "Pre-Slab Termidor" names a product, not a public service).
-const SERVICE_PRODUCT_WORD_RE = /termidor|talstar|talak|taurus|bifen|fipronil|advion|alpine|demand|essentria|waves assessment|appointment/i;
+// 2026-09-25 P1 fix: the canonical normalizer's own SERVICE_TYPE_MAP
+// (server/utils/service-normalizer.js) emits brand names for some mapped
+// types too — "Bora-Care Wood Treatment Service", "Arborjet Treatment" —
+// so every product/brand token found there (and in the termite-bait family)
+// is covered here, not just the ones a raw label could carry unmapped.
+const SERVICE_PRODUCT_WORD_RE = /termidor|talstar|talak|taurus|bifen|fipronil|advion|alpine|demand|essentria|bora-?care|arborjet|sentricon|altriset|trelona|premise|waves assessment|appointment/i;
 
 // Shared word-normalization (mirrors drafter.js's normalizeWords — kept as a
 // small local copy rather than a cross-module import so grounding.js keeps
