@@ -161,7 +161,7 @@ async function main() {
         const reason = outcome.slice('skip:'.length);
         summary.skipped[reason] = (summary.skipped[reason] || 0) + 1;
         console.log(`[skip: ${reason}] parent=${parentId}`);
-        if (reason === 'duplicate_series' && Array.isArray(result.duplicateSeriesIds)) {
+        if (reason === 'duplicate_series') {
           duplicatesForReview.push(duplicateReviewRow(parentId, result));
         }
         continue;

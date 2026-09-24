@@ -17447,10 +17447,15 @@ async function resolveDuplicateActiveSeries(conn, parent, parentId) {
   // parent's address internally (the same function, same call).
   const addr = recurringServiceAddress(parent);
   const address = [
-    [addr.service_address_line1, addr.service_address_line2].filter(Boolean).join(' '),
+    // Comma-join street + unit so the canonical parser (makeEstimateScopeKeys)
+    // sees the unit as address_line2 and stays unit-aware — a space-joined
+    // "100 Main St Apt 5" reads as unitless and can collide with the
+    // customer's other unit at the same street (Codex r6 P1).
+    addr.service_address_line1,
+    addr.service_address_line2,
     addr.service_address_city,
     `${addr.service_address_state || ''} ${addr.service_address_zip || ''}`.trim(),
-  ].join(', ');
+  ].filter(Boolean).join(', ');
   let serviceAddressScope = null;
   try {
     serviceAddressScope = await buildSeriesAddressScope(

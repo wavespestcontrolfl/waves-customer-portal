@@ -856,6 +856,18 @@ describe('topUpRecurringSeriesLocked — duplicate active series (Codex GitHub #
     });
   });
 
+  test('keeps an explicit unit as its own comma-separated segment so the canonical parser stays unit-aware (Codex GitHub r6 P1)', async () => {
+    const { conn } = topupScenario({
+      parentOverrides: {
+        service_address_line1: '100 Main St', service_address_line2: 'Apt 5',
+        service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34205',
+      },
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    const call = buildSeriesAddressScope.mock.calls[0];
+    expect(call[1].address).toBe('100 Main St, Apt 5, Bradenton, FL 34205');
+  });
+
   // Approved separate programs (duplicateSeriesOverride / allowDuplicateSeries,
   // admin-schedule.js's own booking-creation routes): checked ONLY at
   // booking time via separateProgramMatches, against the reviewedIds the
