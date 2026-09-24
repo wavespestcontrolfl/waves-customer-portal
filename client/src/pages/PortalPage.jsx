@@ -9896,7 +9896,13 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'lawn_care', name: 'Lawn Care', icon: 'sprout',
-    frequencies: ['4 Apps', '6 Apps', '9 Apps', '12 Apps'],
+    // My Plan renders frequencies[0] as the cadence line and SERVICE_CATALOG
+    // has no link to the customer's enrolled program — same as mosquito
+    // below. Customers enrolled before a cadence retired (4x 2026-08-04, 6x
+    // bi-monthly 2026-09-24) keep their plan, so naming any one cadence
+    // misstates someone's; variant-neutral until the panel reads the
+    // matched service's real cadence.
+    frequencies: ['Recurring lawn program'],
     basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, soil testing, thatch monitoring',
     products: ['Prodiamine 65 WDG', 'Celsius WG', '16-4-8 + Micros', 'Headway G'],
   },

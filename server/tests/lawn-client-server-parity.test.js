@@ -60,7 +60,9 @@ function roundedFloorFromRaw(rawAnnual, visits) {
 function serverTier(sf, track, visits, { property = {} } = {}) {
   const result = priceLawnCare(
     { turfSf: sf, ...property },
-    { track, lawnFreq: visits },
+    // includeHiddenTiers: parity covers the 6x column too — hidden for new
+    // sales (owner directive 2026-09-24), still priced as the bracket anchor.
+    { track, lawnFreq: visits, includeHiddenTiers: true },
   );
   const tier = result.tiers.find((t) => t.freq === visits);
   if (!tier) throw new Error(`no server tier for visits=${visits}`);
@@ -73,7 +75,7 @@ function serverTier(sf, track, visits, { property = {} } = {}) {
 function serverFloor(sf, track, visits, { property = {} } = {}) {
   const result = priceLawnCare(
     { turfSf: sf, ...property },
-    { track, lawnFreq: visits, useLawnCostFloor: true },
+    { track, lawnFreq: visits, useLawnCostFloor: true, includeHiddenTiers: true },
   );
   const tier = result.tiers.find((t) => t.freq === visits);
   if (!tier) throw new Error(`no server tier for visits=${visits}`);
