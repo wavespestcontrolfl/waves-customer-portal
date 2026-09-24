@@ -172,7 +172,53 @@ describe("OwedTabV2", () => {
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(await screen.findByText(/Nothing owed/)).toBeInTheDocument();
     expect(customerReads).toBe(2);
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent("Synthetic action failure");
+  });
+
+  it("keeps an action error through poll failure and recovery until the next action", async () => {
+    let failPatch = true;
+    let failRead = false;
+    globalThis.fetch.mockImplementation(async (_url, options = {}) => {
+      if (options.method === "PATCH") {
+        if (!failPatch) return { ok: true, status: 200, json: async () => ({ commitment: {} }) };
+        return {
+          ok: false,
+          status: 500,
+          statusText: "Server Error",
+          clone: () => ({ json: async () => ({ error: "Synthetic action failure" }) }),
+        };
+      }
+      if (failRead) {
+        return {
+          ok: false,
+          status: 503,
+          statusText: "Unavailable",
+          clone: () => ({ json: async () => ({ error: "Synthetic read failure" }) }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ commitments: rows() }) };
+    });
+
+    render(<OwedTabV2 />);
+    await screen.findByText("Send the caller an estimate");
+    fireEvent.click(screen.getAllByRole("button", { name: "Mark done" })[0]);
+    expect(await screen.findByText("Synthetic action failure")).toBeInTheDocument();
+
+    failRead = true;
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(await screen.findByText("Synthetic read failure")).toBeInTheDocument();
+    expect(screen.getByText("Synthetic action failure")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+
+    failRead = false;
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(screen.queryByText("Synthetic read failure")).toBeNull());
+    expect(screen.getByText("Synthetic action failure")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+
+    failPatch = false;
+    fireEvent.click(screen.getAllByRole("button", { name: "Mark done" })[0]);
+    await waitFor(() => expect(screen.queryByText("Synthetic action failure")).toBeNull());
   });
 
   it("Open call deep-links the Calls tab to that call", async () => {

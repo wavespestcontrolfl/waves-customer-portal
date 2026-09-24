@@ -406,6 +406,54 @@ describe('3916 follow-ups', () => {
 });
 
 describe('internal-link refresh ownership', () => {
+  it('keeps failed link actions visible while read errors independently recover', async () => {
+    const original = fetch.getMockImplementation();
+    let listFailure = '';
+    let actionCalls = 0;
+    let finishNextAction;
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links/link-1/decision')) {
+        actionCalls += 1;
+        if (actionCalls === 1) return Promise.reject(new Error('Link action failed'));
+        return new Promise((resolve) => { finishNextAction = resolve; });
+      }
+      if (url.includes('/internal-links?')) {
+        if (listFailure) return Promise.reject(new Error(listFailure));
+        return Promise.resolve({ ok: true, json: async () => ({ items: [linkItem('link-1')] }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Requeue' }));
+    await screen.findByText('Link action failed');
+
+    await resumeRefresh();
+    expect(screen.getByText('Link action failed')).toBeTruthy();
+
+    listFailure = 'Link read failed';
+    await resumeRefresh();
+    expect(screen.getByText('Link action failed · Link read failed')).toBeTruthy();
+
+    listFailure = '';
+    await resumeRefresh();
+    expect(screen.getByText('Link action failed')).toBeTruthy();
+    expect(screen.queryByText('Link read failed')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+    await waitFor(() => expect(finishNextAction).toBeTypeOf('function'));
+    expect(screen.queryByText('Link action failed')).toBeNull();
+    await act(async () => finishNextAction({
+      ok: true,
+      json: async () => ({ item: linkItem('link-1', 2) }),
+    }));
+  });
+
   it('keeps a blurred dirty link note and selection when a background poll no longer contains it', async () => {
     const original = fetch.getMockImplementation();
     let links = [linkItem('link-1')];

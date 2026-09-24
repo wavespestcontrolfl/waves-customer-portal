@@ -48,9 +48,10 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [contentError, setContentError] = useState("");
   const [decisionError, setDecisionError] = useState("");
   const [linkError, setLinkError] = useState("");
+  const [linkDecisionError, setLinkDecisionError] = useState("");
   const [impactError, setImpactError] = useState("");
   const error = {
-    links: linkError,
+    links: [linkDecisionError, linkError].filter(Boolean).join(" · "),
     impact: impactError,
     content: contentError,
     review: [decisionError, contentError].filter(Boolean).join(" · "),
@@ -279,7 +280,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     setLinkLoading(false);
     setLinkDetailLoading(false);
     setLinkActionPending(decision);
-    setLinkError("");
+    setLinkDecisionError("");
     try {
       const next = await adminFetch(`/admin/content/internal-links/${actionLinkId}/decision`, {
         method: "POST",
@@ -291,7 +292,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       }
       await loadLinks();
     } catch (err) {
-      setLinkError(err.message);
+      setLinkDecisionError(err.message);
     } finally {
       setLinkActionPending("");
     }

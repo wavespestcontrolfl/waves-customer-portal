@@ -141,6 +141,7 @@ export default function OwedTabV2() {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 60 * 1000); return () => clearInterval(t); }, []);
   const [busyId, setBusyId] = useState(null);
+  const [actionError, setActionError] = useState(null);
   // Only the latest request may paint: a filter change while an earlier
   // load (or a post-action reload) is in flight would otherwise let the
   // older response overwrite the newer selection.
@@ -229,12 +230,13 @@ export default function OwedTabV2() {
     // The action just invalidated any foreground filter/Retry read that owned
     // `loading`. Release only that state now; a newer read can set it again.
     setState((s) => s.status === "loading" ? { ...s, status: "ready" } : s);
+    setActionError(null);
     setBusyId(row.id);
     try {
       await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
       await loadRef.current();
     } catch (err) {
-      setState((s) => ({ ...s, error: err.message || "That change did not save." }));
+      setActionError(err.message || "That change did not save.");
     } finally {
       setBusyId(null);
     }
@@ -288,6 +290,11 @@ export default function OwedTabV2() {
         <div className="text-13 md:text-12 text-alert-fg" role="alert">
           {state.error}{" "}
           <button type="button" className="underline u-focus-ring" onClick={() => load({ pageCount: state.loadedPages })}>Retry</button>
+        </div>
+      )}
+      {actionError && (
+        <div className="text-13 md:text-12 text-alert-fg" role="alert">
+          {actionError}
         </div>
       )}
       {state.status === "ready" && state.enabled === false && (
