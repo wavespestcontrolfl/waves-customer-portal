@@ -1870,6 +1870,30 @@ router.put('/intent-modes/:intent', async (req, res, next) => {
   }
 });
 
+// Manual qualification measures the fixed gratitude reply without creating
+// customer drafts, suggestions, outbound rows, or changing delivery modes.
+router.get('/gratitude-qualification', async (req, res, next) => {
+  try {
+    const { evaluateGratitudeQualification } = require('../services/sms-gratitude-qualification');
+    res.json(await evaluateGratitudeQualification());
+  } catch (err) { next(err); }
+});
+
+router.post('/gratitude-qualification', requireAdmin, async (req, res, next) => {
+  try {
+    const qualification = require('../services/sms-gratitude-qualification');
+    const run = await qualification.createGratitudeQualification({ triggeredBy: actorName(req) });
+    setImmediate(() => {
+      void qualification.runGratitudeQualification({ runId: run.id })
+        .catch(err => logger.error(`[sms-gratitude] qualification failed: ${err.message}`));
+    });
+    res.status(202).json({ runId: run.id, customerCommunication: false });
+  } catch (err) {
+    if (err.code === 'RUN_IN_PROGRESS') return res.status(409).json({ error: err.message });
+    next(err);
+  }
+});
+
 // GET /sealed-eval — sealed-exam state for the Agents hub: item-pool counts,
 // recent runs (aggregates + significance vs baseline), latest complete run
 // per provider leg for the current prompt version. Read-only.
