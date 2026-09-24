@@ -4,6 +4,7 @@
 // fans a series-level payment across siblings and reconstructs the "visit X of
 // Y · N more covered" context for the appointment detail UI.
 const { recordAuditEvent } = require('./audit-log');
+const logger = require('./logger');
 
 // Statuses that should NOT receive a prepayment stamp. A completed visit
 // already has its books closed; cancelled / no-show / skipped are dead rows
@@ -22,6 +23,21 @@ const ANNUAL_PREPAY_METHOD = 'annual_prepay_invoice';
 
 function hasAnnualCoverage(row) {
   return !!(row?.annual_prepay_term_id || row?.prepaid_method === ANNUAL_PREPAY_METHOD);
+}
+
+// Narrower than hasAnnualCoverage: true only when the row's CURRENT stamp
+// actually IS the annual method with a positive amount — not merely LINKED
+// to a term. attachScheduledServices links a row to a term by date/service
+// match before the term ever stamps it, and applyPrepaidCoverageForTerm
+// deliberately preserves an existing non-annual prepaid_method rather than
+// overwrite it ("its stamp is a real out-of-band payment") — so a row can
+// carry a live annual_prepay_term_id while its money is a genuine manual
+// cash/Zelle payment. Used wherever a CLEAR must decide "is this specific
+// stamp the annual one" rather than "is this row ever touched by a term at
+// all" (Codex round-2 P1, symmetric with the DELETE /:id/prepaid route's
+// own distinction).
+function hasGenuineAnnualStamp(row) {
+  return row?.prepaid_method === ANNUAL_PREPAY_METHOD && Number(row?.prepaid_amount) > 0;
 }
 
 // Embed the annual-coverage refusal IN a manual single-visit stamp UPDATE
@@ -397,8 +413,14 @@ async function clearSeriesPrepaid(db, anchor) {
     // out of the update entirely — and clear the rest; only refuse outright
     // when EVERY row in the family is annual-covered, i.e. there is no
     // manual stamp here at all to legitimately clear.
+    //
+    // Gate on the GENUINE annual stamp (hasGenuineAnnualStamp), not the bare
+    // link (hasAnnualCoverage): the same distinction the single-visit DELETE
+    // route makes (Codex round-2 P1) — a row can carry a live
+    // annual_prepay_term_id while its actual stamp is an ordinary manual
+    // payment attachScheduledServices linked but never claimed.
     const annualCoveredIds = new Set(
-      family.filter((row) => familyIds.includes(row.id) && hasAnnualCoverage(row)).map((row) => row.id),
+      family.filter((row) => familyIds.includes(row.id) && hasGenuineAnnualStamp(row)).map((row) => row.id),
     );
     if (annualCoveredIds.size > 0 && annualCoveredIds.size === familyIds.length) {
       const err = new Error('Series has annual prepay coverage; reconcile that term (void/refund) before clearing a manual prepayment');
@@ -445,10 +467,24 @@ async function clearSeriesPrepaid(db, anchor) {
     const cleared = await trx('scheduled_services').whereIn('id', ids)
       .whereNotNull('prepaid_amount')
       .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null })
-      .returning(['id']);
+      .returning(['id', 'annual_prepay_term_id']);
     await retireActiveAllocationAudits(trx, {
       customerId: anchor.customer_id, parentId, ids,
     });
+    // A cleared row may still be LINKED to a live annual term (its manual
+    // stamp was occupying a slot the term itself would otherwise have
+    // claimed, same shape the single-visit DELETE route reconciles) —
+    // reapply each affected term's coverage so a now-unstamped, in-window
+    // visit is picked up if the term still needs it. Best-effort: never
+    // blocks the clear response itself.
+    const linkedTermIds = [...new Set(cleared.map((row) => row.annual_prepay_term_id).filter(Boolean))];
+    for (const termId of linkedTermIds) {
+      try {
+        await require('./annual-prepay-renewals').refreshTermSnapshot(termId, trx);
+      } catch (err) {
+        logger.warn(`[prepaid-series] series clear: term coverage re-apply failed for term ${termId}: ${err.message}`);
+      }
+    }
     return { success: true, clearedCount: cleared.length, seriesParentId: parentId };
   });
 }

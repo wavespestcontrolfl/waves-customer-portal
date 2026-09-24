@@ -33,6 +33,7 @@ jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info
 
 const { stampSeriesPrepaid, clearSeriesPrepaid } = require('../services/prepaid-series');
 const { assertPrepayTotalMatchesPricing } = require('../routes/admin-schedule')._test;
+const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 
 const PER_VISIT = 100;
 
@@ -304,5 +305,37 @@ postgres('r1-sched-visits-1: in-person series prepay vs booster rows', () => {
     for (const r of live) expect(r.prepaid_amount).toBeNull();
     expect(Number(historicalAfter.prepaid_amount)).toBe(100);
     expect(historicalAfter.prepaid_method).toBe('annual_prepay_invoice');
+  });
+
+  test('clearSeriesPrepaid clears a MANUAL (cash) stamp on a row merely LINKED to a live term — the link alone must not protect it — and reapplies that term\'s coverage', async () => {
+    const { parentId } = await insertFamily({ childDates: ['2027-02-02', '2027-05-03', '2027-08-02'] });
+    const [term] = await trx('annual_prepay_terms').insert({
+      customer_id: customerId, term_start: '2026-01-01', term_end: '2027-01-01',
+      status: 'active', prepay_amount: 400, coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4,
+    }).returning('id');
+    const termId = term.id || term;
+    // Same shape as attachScheduledServices + applyPrepaidCoverageForTerm
+    // leave behind for a visit manually prepaid (cash) BEFORE the term ever
+    // claimed it: LINKED (annual_prepay_term_id set) but the stamp itself
+    // is the manual method, never overwritten.
+    await trx('scheduled_services').where({ id: parentId })
+      .update({ annual_prepay_term_id: termId, prepaid_method: 'cash', prepaid_amount: 90, prepaid_at: new Date() });
+    const anchor = await trx('scheduled_services').where({ id: parentId }).first();
+    const spy = jest.spyOn(AnnualPrepayRenewals, 'refreshTermSnapshot');
+    const result = await clearSeriesPrepaid(trx, anchor);
+    const after = await family(parentId);
+    const clearedParent = after.find((r) => r.id === parentId);
+    // EXPECTED: this is a genuine manual payment, not annual coverage —
+    // clearable like any other manual stamp, not silently protected just
+    // because the link is present. The $90 cash stamp itself is gone
+    // either way; refreshTermSnapshot may then legitimately reclaim the
+    // now-unstamped, in-window row into the term's own coverage (its real
+    // logic ran, exercised below via the spy) — the load-bearing assertion
+    // is that the manual stamp was never protected from the clear.
+    expect(clearedParent.prepaid_method).not.toBe('cash');
+    expect(Number(clearedParent.prepaid_amount)).not.toBe(90);
+    expect(result.clearedCount).toBeGreaterThanOrEqual(1);
+    expect(spy).toHaveBeenCalledWith(termId, expect.anything());
+    spy.mockRestore();
   });
 });
