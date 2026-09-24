@@ -1987,6 +1987,28 @@ describe('financialStateDrifted — a concurrent same-price primary service swit
     expect(src.match(/discount_max_dollars: existingPrice\.discount_max_dollars/g)).toHaveLength(1);
     expect(src.match(/\.\.\.\(cols\.discount_service_key_filter \? \['discount_service_key_filter'\] : \[\]\),/g)).toHaveLength(1);
   });
+
+  // Pre-push fallback audit P1 (round 26c): every key the addons-array
+  // branch places in financialCasSnapshot.parent must be a column the
+  // `existing` read actually selected — an unselected key would store
+  // undefined, the locked re-read (which selects the snapshot's keys) would
+  // read the real value, and EVERY save on such a row would 409.
+  test('every addons-branch snapshot key is selected by existingFields (source pin)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+    const fieldsStart = src.indexOf('const existingFields = [');
+    const fieldsEnd = src.indexOf("const existing = await db('scheduled_services')", fieldsStart);
+    expect(fieldsStart).toBeGreaterThan(-1);
+    expect(fieldsEnd).toBeGreaterThan(fieldsStart);
+    const selected = new Set([...src.slice(fieldsStart, fieldsEnd).matchAll(/'([a-z_]+)'/g)].map((m) => m[1]));
+    const snapStart = src.lastIndexOf('financialCasSnapshot = {\n            parent: {');
+    const snapEnd = src.indexOf('addons: existingAddonDiscountRows.map', snapStart);
+    expect(snapStart).toBeGreaterThan(-1);
+    expect(snapEnd).toBeGreaterThan(snapStart);
+    const snapshotKeys = [...src.slice(snapStart, snapEnd).matchAll(/\{ ([a-z_]+): existing\.\1 \}|^\s+([a-z_]+): existing\.\2,/gm)]
+      .map((m) => m[1] || m[2]);
+    expect(snapshotKeys.length).toBeGreaterThanOrEqual(16);
+    for (const key of snapshotKeys) expect(selected.has(key)).toBe(true);
+  });
 });
 
 // GitHub Codex round 26 P1 (#4657, :11902): the null witness on the blank-

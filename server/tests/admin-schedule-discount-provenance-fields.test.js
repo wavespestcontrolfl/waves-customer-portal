@@ -1076,6 +1076,57 @@ postgres('round 4 on #4657 — preview must equal what the PUT persists, verbati
     expect(Number(previewAddon.price)).toBe(Number(savedAddon.estimated_price));
   });
 
+  // Pre-push fallback audit P1 (round 26c) control: a row with a REAL
+  // service identity and a capped, scoped stored appointment discount —
+  // every field the financial CAS snapshot now captures is non-null — must
+  // still save a notes-only edit (the snapshot compares against the locked
+  // row's own values; an unselected key would 409 every such save).
+  test('round 26 CAS control — a notes-only save on a row with service_id, service snapshots and a capped, scoped stored discount is accepted (no FINANCIAL_STATE_DRIFT) and keeps its total', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    let [svc] = await trx('services').where({ service_key: 'pest_general_quarterly' });
+    if (!svc) {
+      [svc] = await trx('services').insert({
+        id: randomUUID(), service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control',
+        category: 'pest', frequency: 'quarterly', billing_type: 'recurring', visits_per_year: 4,
+      }).returning('*');
+    }
+    const discountId = randomUUID();
+    await trx('discounts').insert({
+      id: discountId, discount_key: 'scoped_capped_' + discountId.slice(0, 8), name: 'Scoped Capped',
+      discount_type: 'fixed_amount', amount: 10, max_discount_dollars: 25, is_active: true,
+      is_auto_apply: false, show_in_invoices: true, service_key_filter: 'pest_general_quarterly',
+    });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_id: svc.id, service_key_snapshot: 'pest_general_quarterly', service_category_snapshot: 'pest',
+      status: 'confirmed', scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 140, primary_line_price: 100,
+      discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10, discount_id: discountId,
+      discount_name: 'Scoped Capped', discount_max_dollars: 25,
+      discount_service_key_filter: 'pest_general_quarterly', discount_service_category_filter: null,
+    }).returning('*');
+    visitId = row.id;
+    const [addon] = await trx('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: visitId, service_name: 'Mosquito Add-on',
+      base_price: 50, estimated_price: 50,
+    }).returning('*');
+    const body = {
+      notes: 'gate code 4321',
+      primaryLinePrice: 100,
+      addons: [{ id: addon.id, serviceName: 'Mosquito Add-on', basePrice: 50 }],
+    };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const saved = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(saved.estimated_price)).toBe(140);
+    expect(saved.notes).toBe('gate code 4321');
+    expect(String(saved.service_id)).toBe(String(svc.id));
+  });
+
   test(':9542 — removing and reselecting the SAME preset after a reprice is treated as a FRESH pick (cap + eligibility enforced), not an unchanged round-trip', async () => {
     const discountId = randomUUID();
     await trx('discounts').insert({
