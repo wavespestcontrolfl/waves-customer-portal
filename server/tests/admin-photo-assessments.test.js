@@ -1400,6 +1400,19 @@ describe('tree & shrub — third assessment type', () => {
     });
   });
 
+  test('a blank severity from one provider (which would dilute the other\'s signal) counts as unscored → 503', async () => {
+    mockAnalyzeTreeShrub.mockResolvedValue({
+      claude: { ...HEDGE_CLOSEUP, pest_signals: 'severe' },
+      gemini: { ...HEDGE_CLOSEUP, pest_signals: '' },
+      composite: { ...HEDGE_CLOSEUP, pest_signals: 'moderate' },
+      divergenceFlags: [],
+    });
+    await withServer(async (base) => {
+      expect((await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] })).status).toBe(503);
+      expect(inserts.tree_shrub_identifications).toBeUndefined();
+    });
+  });
+
   test('one provider omitting a field the other read is still complete (the engine uses the available read)', async () => {
     const { pest_signals: _omitted, ...geminiRead } = HEDGE_CLOSEUP;
     mockAnalyzeTreeShrub.mockResolvedValue({ claude: HEDGE_CLOSEUP, gemini: geminiRead, composite: HEDGE_CLOSEUP, divergenceFlags: [] });

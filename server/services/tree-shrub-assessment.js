@@ -268,7 +268,10 @@ function isCompleteVisionResult(result) {
   if (!result || !result.composite) return false;
   const readings = [result.claude, result.gemini].filter(Boolean);
   return [...NUMERIC_SCORE_FIELDS, ...SEVERITY_SCORE_FIELDS].every((field) => {
-    const present = readings.map((raw) => raw[field]).filter((value) => value != null && value !== '');
+    // "Present" matches averageScores exactly (!= null): a blank string IS a
+    // reading there — it normalizes to "none" and averages a real signal
+    // down — so it must be judged (and fail) here, not skipped.
+    const present = readings.map((raw) => raw[field]).filter((value) => value != null);
     return present.length > 0 && present.every((value) => isValidScoreReading(field, value));
   });
 }

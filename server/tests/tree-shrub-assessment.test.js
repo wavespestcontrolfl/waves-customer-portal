@@ -368,6 +368,13 @@ describe('isCompleteVisionResult — every schema field read, never a silent def
     expect(isCompleteVisionResult(result({ ...full, foliage_fullness: 'lush' }, full))).toBe(false);
   });
 
+  it('rejects a blank reading from one provider — averageScores would count it as "none" and average the other down', () => {
+    const r = result({ ...full, pest_signals: 'severe' }, { ...full, pest_signals: '' });
+    expect(r.composite.pest_signals).toBe('moderate'); // the dilution being guarded
+    expect(isCompleteVisionResult(r)).toBe(false);
+    expect(isCompleteVisionResult(result({ ...full, foliage_fullness: '' }, full))).toBe(false);
+  });
+
   it('accepts one provider omitting a field the other read validly', () => {
     const { water_heat_stress: _w, ...partial } = full;
     expect(isCompleteVisionResult(result(full, partial))).toBe(true);
