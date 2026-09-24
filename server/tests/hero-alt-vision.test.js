@@ -308,6 +308,31 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(await screen({ van_wrap_elsewhere: 'none' })).toMatchObject({ ok: true, checked: false });
   });
 
+  test('the `van` key must be PRESENT — an OMITTED key (van_wrap_elsewhere answered, van left out entirely) is unusable, never treated as an explicit "no van" (Codex r1 P2 on #4785)', async () => {
+    // van_wrap_elsewhere is well-formed but `van` is missing from the JSON
+    // entirely — JSON mode does not guarantee every requested key comes
+    // back, so this must fail open, not read as "no van" (clean).
+    mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: [], van_wrap_elsewhere: [], forbidden_scenes: [], notes: '' }));
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true });
+    expect(r).toMatchObject({ ok: true, checked: false });
+    // An EXPLICIT null for the same otherwise-complete answer is still a
+    // valid, clean "no van" verdict — only the missing key is rejected.
+    const explicit = await screen({ van: null });
+    expect(explicit).toMatchObject({ ok: true, checked: true, reasons: [] });
+  });
+
+  test('a PARTIALLY applied wrap — wrapped: true but no mascot — is a violation, whether or not any wrap text rendered (Codex r1 P2 on #4785)', async () => {
+    const noMascotNoText = await screen({ van: van({ wrap_mascot: false, wrap_text: [] }) });
+    expect(noMascotNoText.ok).toBe(false);
+    expect(noMascotNoText.reasons).toEqual(['van wrap missing the mascot']);
+    expect(noMascotNoText.logos).toEqual(['van wrap missing the mascot']);
+    // missing mascot AND garbled text both count, as two separate reasons
+    const noMascotBadText = await screen({ van: van({ wrap_mascot: false, wrap_text: ['941-XX9-ZZ59'] }) });
+    expect(noMascotBadText.ok).toBe(false);
+    expect(noMascotBadText.reasons).toEqual(['van wrap missing the mascot', 'garbled van wrap text: 941-XX9-ZZ59']);
+    expect(noMascotBadText.violations).toBe(2);
+  });
+
   test('without the allowance, van wrap fields are ignored — a logo-free/wrap-free generation is screened as before', async () => {
     mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }));
     const r = await screenGeneratedImage({ buffer: PNG_BUFFER });
@@ -322,5 +347,35 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(p).toMatch(/"van":/);
     expect(_internals.screenMaxTokens({ allowUniformLogo: true, allowVanWrap: true })).toBe(_internals.SCREEN_MAX_TOKENS_WITH_LOGO_AND_VAN_WRAP);
     expect(_internals.SCREEN_MAX_TOKENS_WITH_LOGO_AND_VAN_WRAP).toBeGreaterThan(_internals.SCREEN_MAX_TOKENS_WITH_LOGO);
+  });
+
+  test('combined logo+van prompt exempts the one wrapped van from waves_logo_elsewhere — a compliant answer reporting the van only under `van` is clean (Codex r1 P2 on #4785)', () => {
+    // Logo-only prompt (allowVanWrap off) stays byte-identical to before —
+    // no inserted clause changes it.
+    const logoOnly = buildScreenPrompt({ allowUniformLogo: true });
+    expect(logoOnly).toMatch(/EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — do not list it under logos_or_brand_marks\. Any OTHER lettering \(including "WAVES" on a sign, vehicle or wall\), and the Waves logo anywhere other than a cap or chest, must still be listed\./);
+    expect(logoOnly).not.toMatch(/wrapped van/);
+
+    const combined = buildScreenPrompt({ allowUniformLogo: true, allowVanWrap: true });
+    expect(combined).toMatch(/waves_logo_elsewhere: every place that Waves logo appears that is NOT a technician's cap or chest and NOT the one wrapped van described below \(report the van's own marks under `van` instead\)/);
+    expect(combined).toMatch(/EXCEPTION: that Waves logo on a technician's cap or shirt chest, and on the one wrapped van described below, is expected — do not list it under logos_or_brand_marks or waves_logo_elsewhere\./);
+    expect(combined).toMatch(/the Waves logo anywhere other than a cap, chest or that one van, must still be listed\./);
+
+    // A compliant answer: the technician correctly carries the logo, the van
+    // correctly carries the wrap, and NEITHER shows up in waves_logo_elsewhere
+    // — this must be clean, not rejected as a stray brand mark.
+    const tech = { cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'right chest'] };
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      text: JSON.stringify({
+        readable_text: [], logos_or_brand_marks: [],
+        technicians: [tech], waves_logo_elsewhere: [], uniform_logo_lettering: [],
+        van: { present: true, wrapped: true, wrap_text: ['WAVES', 'Lawn & Pest'], wrap_mascot: true },
+        van_wrap_elsewhere: [], forbidden_scenes: [], notes: '',
+      }),
+    });
+    return screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true, allowVanWrap: true }).then((r) => {
+      expect(r).toMatchObject({ ok: true, checked: true, reasons: [] });
+    });
   });
 });

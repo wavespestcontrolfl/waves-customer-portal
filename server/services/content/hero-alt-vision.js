@@ -158,12 +158,24 @@ function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniform
   }
   parts.push('"forbidden_scenes": number[]', '"notes": string');
   const shape = `{${parts.join(', ')}}`;
+  // When the van wrap allowance is ALSO on, the one wrapped van is a second
+  // expected place for the Waves mark — waves_logo_elsewhere must exempt it
+  // (its marks belong under `van`/`van_wrap_elsewhere` instead) or a fully
+  // compliant answer that correctly reports the van's own branding only
+  // under `van` would ALSO have to list that same branding here, and
+  // uniformLogoReasons would then fail an image the van rule explicitly
+  // allows (Codex r1 P2 on #4785). Logo-only prompts (allowVanWrap off)
+  // are unaffected — every inserted clause is empty then.
+  const vanExemptionClause = allowVanWrap ? ' and NOT the one wrapped van described below (report the van\'s own marks under `van` instead)' : '';
+  const vanExceptionClause = allowVanWrap ? ', and on the one wrapped van described below,' : '';
+  const vanExceptionListClause = allowVanWrap ? ' or waves_logo_elsewhere' : '';
+  const vanOtherPlaceClause = allowVanWrap ? ', chest or that one van' : ' or chest';
   const uniformLogoRule = allowUniformLogo
     ? `
 - technicians: one entry PER uniformed technician in frame (empty array if none). For that person: cap_front_visible is true only if their cap FRONT is in frame and legible enough to judge for a logo (false when the head is cropped, from behind, or too small); chest_visible is true only if their shirt chest is in frame and legible enough to judge (false when turned away, cropped, or covered); logo_on lists where ${UNIFORM_LOGO_DESCRIPTION} appears on THAT person, each as exactly "cap", "right chest" (the wearer's right side, i.e. the side of their right arm) or "left chest".
-- waves_logo_elsewhere: every place that Waves logo appears that is NOT a technician's cap or chest (a vehicle, wall, sign, equipment, packaging, floating on its own), each named. Empty array if none.
+- waves_logo_elsewhere: every place that Waves logo appears that is NOT a technician's cap or chest${vanExemptionClause} (a vehicle, wall, sign, equipment, packaging, floating on its own), each named. Empty array if none.
 - uniform_logo_lettering: the lettering you can read INSIDE that Waves logo on a technician's cap or chest ("WAVES", "LAWN & PEST"), listed here and NOT under readable_text. Empty array if none is legible.
-EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — do not list it under logos_or_brand_marks. Any OTHER lettering (including "WAVES" on a sign, vehicle or wall), and the Waves logo anywhere other than a cap or chest, must still be listed.`
+EXCEPTION: that Waves logo on a technician's cap or shirt chest${vanExceptionClause} is expected — do not list it under logos_or_brand_marks${vanExceptionListClause}. Any OTHER lettering (including "WAVES" on a sign, vehicle or wall), and the Waves logo anywhere other than a cap${vanOtherPlaceClause}, must still be listed.`
     : '';
   const vanWrapRule = allowVanWrap
     ? `
@@ -240,7 +252,15 @@ function placementsWellFormed(obj) {
 // (fail-open as unchecked), same bar as the uniform logo's placement list.
 function vanWrapWellFormed(obj) {
   if (!Array.isArray(obj.van_wrap_elsewhere)) return false;
-  if (obj.van === null || obj.van === undefined) return true;
+  // The `van` key itself must be PRESENT — an explicit `null` (the model
+  // judged no van at all) or a well-formed object. JSON mode does not
+  // guarantee every requested key comes back, so a response that simply
+  // OMITS `van` is an incomplete answer, not "no van" — treating a missing
+  // key the same as an explicit null let a truncated response conceal an
+  // unwrapped/malformed van as a clean, checked verdict (Codex r1 P2 on
+  // #4785).
+  if (!Object.prototype.hasOwnProperty.call(obj, 'van')) return false;
+  if (obj.van === null) return true;
   return typeof obj.van === 'object' && typeof obj.van.present === 'boolean' && typeof obj.van.wrapped === 'boolean' && Array.isArray(obj.van.wrap_text) && typeof obj.van.wrap_mascot === 'boolean';
 }
 // A detection names an exclusion when it is its 1-based id, the same text,
@@ -379,12 +399,24 @@ function vanWrapReasons({ van, vanWrapElsewhere }) {
   if (van && !van.wrapped) {
     reasons.push('van present without the wrap');
     flagged.push('van present without the wrap');
-  } else if (van && Array.isArray(van.wrapText) && van.wrapText.length) {
-    const { strayText, incomplete } = matchCaptions(van.wrapText, VAN_WRAP_ALLOWED_TEXT);
-    const garbled = [...strayText, ...incomplete];
-    if (garbled.length) {
-      reasons.push(`garbled van wrap text: ${garbled.slice(0, 3).join(', ')}`);
-      flagged.push(...garbled.map((t) => `garbled van wrap text: ${t}`));
+  } else if (van) {
+    // A PARTIALLY applied wrap (e.g. { wrapped: true, wrap_mascot: false,
+    // wrap_text: [] } — the color/gradient landed but the mascot did not)
+    // is still not the real wrap: the mascot is checked on its own,
+    // independent of whether any wrap text rendered, so an empty
+    // wrap_text array can no longer hide a missing mascot as clean (Codex
+    // r1 P2 on #4785).
+    if (!van.wrapMascot) {
+      reasons.push('van wrap missing the mascot');
+      flagged.push('van wrap missing the mascot');
+    }
+    if (Array.isArray(van.wrapText) && van.wrapText.length) {
+      const { strayText, incomplete } = matchCaptions(van.wrapText, VAN_WRAP_ALLOWED_TEXT);
+      const garbled = [...strayText, ...incomplete];
+      if (garbled.length) {
+        reasons.push(`garbled van wrap text: ${garbled.slice(0, 3).join(', ')}`);
+        flagged.push(...garbled.map((t) => `garbled van wrap text: ${t}`));
+      }
     }
   }
   return { reasons, flagged };
