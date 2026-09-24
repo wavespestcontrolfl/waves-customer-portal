@@ -9982,9 +9982,12 @@ const CallRecordingProcessor = {
               // caller's words: the pre-validation street the caller gave is
               // kept as the caller evidence and the validated line shown as
               // the correction (codex r21 P2).
-              ...(effectiveAddressValidation?.status === 'corrected' && corroboratingStreet
-                && !sameHouseNumberStreet(corroboratingStreet, houseConflict.stated_street)
-                ? { spoken_street: String(corroboratingStreet).trim() }
+              // …read from the caller's ORIGINAL line (rawStreetBeforeAdopt),
+              // never the already-normalized authority streets, which the
+              // AV adoption above rewrote to the correction (codex r22 P2).
+              ...(effectiveAddressValidation?.status === 'corrected' && rawStreetBeforeAdopt
+                && !sameHouseNumberStreet(rawStreetBeforeAdopt, houseConflict.stated_street)
+                ? { spoken_street: String(rawStreetBeforeAdopt).trim() }
                 : {}),
             },
           })
@@ -15369,6 +15372,12 @@ const CallRecordingProcessor = {
                       scheduled_date: svc.scheduled_date || null,
                       service: svc.service_type || null,
                       ...(disputeSkippedFollowUpPlan ? { skipped_reason: 'house_number_disputed' } : {}),
+                      // WHEN visit 2 was promised, so the card shows the
+                      // date and window, not just that it is owed (codex
+                      // r22 P1).
+                      ...((typeof callFollowUpPlan !== 'undefined' && callFollowUpPlan)
+                        ? { follow_up_plan: { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null } }
+                        : {}),
                     },
                   }))
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))

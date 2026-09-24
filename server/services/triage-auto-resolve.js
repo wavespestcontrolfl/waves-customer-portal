@@ -1965,10 +1965,15 @@ async function loadVisitEvidence(conn, items, flag) {
 
 // Per-item proof map for the evidence rules — the four arms above over the
 // open evidence-coded cards. Empty when the evidence gate is off.
-async function loadEvidence(conn, items) {
+// `ignoreGate`: the verdict-time coverage check (admin-triage
+// settleHeldConflictCard) must see a matching booking whether or not the
+// NIGHTLY evidence resolution is switched on — with the gate off an
+// empty map filed a duplicate booking task for an appointment that
+// already existed (codex #4666 r22 P1).
+async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
   const evidence = new Map();
   const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('triageAutoResolveEvidence')) return evidence;
+  if (!ignoreGate && !isEnabled('triageAutoResolveEvidence')) return evidence;
   const candidates = items.filter((i) => EVIDENCE_CODES.has(i.reason_code) && i.status === 'open');
   if (!candidates.length) return evidence;
   const flag = (id, key) => {

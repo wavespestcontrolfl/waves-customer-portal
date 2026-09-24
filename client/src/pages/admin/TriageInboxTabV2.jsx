@@ -393,7 +393,10 @@ export default function TriageInboxTabV2() {
       : `/admin/triage/auto-routed/${item.call_log_id}/verdict`;
     adminFetch(url, {
       method: "POST",
-      body: JSON.stringify({ verdict, wrong_fields: wrongFields || [], note: note || null }),
+      // expected_updated_at: version binding (enforced server-side for
+      // house-number conflict cards) — a card refreshed since it was
+      // rendered answers 409 instead of settling unseen evidence.
+      body: JSON.stringify({ verdict, wrong_fields: wrongFields || [], note: note || null, expected_updated_at: item.updated_at || null }),
     })
       .then(() => {
         setActioning(null);

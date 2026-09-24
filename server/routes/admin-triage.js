@@ -720,7 +720,7 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
     // rule (codex r9 P2); service, window, hour and address still bind.
     created_at: new Date(0).toISOString(), payload: pre.approvedPayload, call_customer_id: callRow?.customer_id || null,
   };
-  const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
+  const evidence = await loadEvidence(trx, [heldItem], { ignoreGate: true }).catch(() => new Map());
   // EXACTLY the visit(s) the dispute pulled (the processor notes their
   // ids on the card), still live and unassigned — never any
   // unassigned row of the call, which a reprocess may have made
@@ -853,6 +853,7 @@ router.post('/:id/verdict', async (req, res) => {
     // Did this verdict settle an open house-number conflict card? (Read
     // inside the transaction; drives the calibration verdict below.)
     let conflictCardSettled = false;
+    let staleConflictVersion = false;
     await db.transaction(async (trx) => {
       // GLOBAL LOCK ORDER (owner ruling 2026-08-02): advisory call lock →
       // first_touch_holds rows → triage_items. The advisory lock is the
@@ -862,6 +863,20 @@ router.post('/:id/verdict', async (req, res) => {
       // r33 discipline against the email-correction fanout, which settles
       // holds and cards in one transaction using the same order.
       await lockTriageCall(trx, item.call_log_id);
+      // A house-number conflict card is version-bound like the property-
+      // role and promise cards: a force-reprocess merges refreshed evidence
+      // into the same open row, so a verdict judged on what the inbox
+      // rendered must not settle evidence it never displayed (codex r22
+      // P1). Checked under the call lock.
+      if (item.reason_code === 'on_file_house_number_conflict') {
+        const liveCard = await trx('triage_items').where({ id }).first('updated_at');
+        const expectedUpdatedAt = req.body?.expected_updated_at || null;
+        if (!liveCard || !expectedUpdatedAt
+          || new Date(expectedUpdatedAt).getTime() !== new Date(liveCard.updated_at).getTime()) {
+          staleConflictVersion = true;
+          return;
+        }
+      }
       if (holdsTable) {
         await trx('first_touch_holds')
           .where({ call_log_id: item.call_log_id })
@@ -1028,6 +1043,9 @@ router.post('/:id/verdict', async (req, res) => {
       }
     }
 
+    if (staleConflictVersion) {
+      return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest' });
+    }
     // Calibration: an Accept on a house-number conflict card means the
     // CALLER'S extracted number was rejected in favour of the record — for
     // route_feedback that is an address denial, not "the AI got this call
