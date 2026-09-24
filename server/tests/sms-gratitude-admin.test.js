@@ -1,6 +1,7 @@
 const express = require('express');
 
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('route must not write operational rows'); }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
 jest.mock('../services/lead-attribution', () => ({}));
 jest.mock('../services/agent-activity', () => ({}));
@@ -22,8 +23,26 @@ jest.mock('../services/sms-gratitude-qualification', () => ({
   createGratitudeQualification: jest.fn(), runGratitudeQualification: jest.fn(),
   evaluateGratitudeQualification: jest.fn(),
 }));
+jest.mock('../services/sms-gratitude', () => ({ GRATITUDE_INTENT: 'gratitude_reply' }));
+jest.mock('../services/sms-suggest-mode', () => ({
+  SUGGEST_WORKFLOW: 'sms_suggest',
+  AUTO_SEND_MODE: 'auto_send',
+  isEscalationIntent: jest.fn(() => false),
+  listIntentModes: jest.fn(),
+}));
+jest.mock('../services/sms-graduation', () => ({
+  THRESHOLDS: {},
+  resolveCohortVersions: jest.fn(() => ['house_voice_v11']),
+  resolveVoiceProfilePin: jest.fn(async () => null),
+  rollupSuggestOutcomes: jest.fn(() => new Map()),
+  computeReadiness: jest.fn(),
+}));
 
+const db = require('../models/db');
+const featureGates = require('../config/feature-gates');
 const qualification = require('../services/sms-gratitude-qualification');
+const suggestMode = require('../services/sms-suggest-mode');
+const graduation = require('../services/sms-graduation');
 const app = express();
 app.use(express.json());
 app.use('/agents', require('../routes/admin-agents'));
@@ -79,4 +98,49 @@ test('readiness read neither starts a run nor changes a delivery mode', async ()
   expect(res.status).toBe(200);
   expect(await res.json()).toEqual({ eligible: false, blockers: ['Not run'] });
   expect(qualification.createGratitudeQualification).not.toHaveBeenCalled();
+});
+
+test('intent modes expose the effective gratitude gate per row and retain the global gate field', async () => {
+  db.raw = jest.fn(sql => sql);
+  db.mockImplementation((table) => {
+    if (table === 'message_drafts') {
+      return {
+        whereNotNull() { return this; },
+        distinct() { return this; },
+        pluck: async () => [],
+      };
+    }
+    if (table?.a === 'agent_decisions') {
+      return {
+        leftJoin() { return this; },
+        where() { return this; },
+        select() { return this; },
+        count() { return this; },
+        groupBy: async () => [],
+      };
+    }
+    throw new Error(`unexpected table: ${String(table)}`);
+  });
+  featureGates.isEnabled.mockImplementation(gate => gate === 'smsGratitudeReplies');
+  suggestMode.listIntentModes.mockResolvedValue([
+    { intent: 'general_question', mode: 'suggest' },
+    { intent: 'gratitude_reply', mode: 'shadow' },
+  ]);
+  graduation.computeReadiness.mockResolvedValue(new Map([
+    ['general_question', { eligibleFor: 'auto_send' }],
+    ['gratitude_reply', { eligibleFor: 'auto_send', qualification: { basis: 'fixed_copy_exam' } }],
+  ]));
+
+  const res = await fetch(base.replace('/gratitude-qualification', '/intent-modes'), {
+    headers: { 'x-test-role': 'admin' },
+  });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.autoSendGateEnabled).toBe(false);
+  expect(body.intents).toEqual(expect.arrayContaining([
+    expect.objectContaining({ intent: 'general_question', autoSendGateEnabled: false }),
+    expect.objectContaining({ intent: 'gratitude_reply', autoSendGateEnabled: true }),
+  ]));
+  expect(featureGates.isEnabled).toHaveBeenCalledWith('smsAutoSend');
+  expect(featureGates.isEnabled).toHaveBeenCalledWith('smsGratitudeReplies');
 });

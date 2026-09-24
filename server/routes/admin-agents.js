@@ -1721,6 +1721,13 @@ router.get('/intent-modes', async (req, res, next) => {
   try {
     const suggestMode = require('../services/sms-suggest-mode');
     const graduation = require('../services/sms-graduation');
+    const { GRATITUDE_INTENT } = require('../services/sms-gratitude');
+    const featureGates = require('../config/feature-gates');
+    const autoSendGateEnabled = featureGates.isEnabled('smsAutoSend');
+    const gratitudeAutoSendGateEnabled = featureGates.isEnabled('smsGratitudeReplies');
+    const autoSendGateOverrides = new Map([
+      [GRATITUDE_INTENT, { autoSendGateEnabled: gratitudeAutoSendGateEnabled }],
+    ]);
     const judgeCohort = graduation.resolveCohortVersions();
     // Voice-profile pin for the readiness slice (Codex r2): resolution
     // failure pins to a never-matching sentinel so readiness evidence
@@ -1760,6 +1767,7 @@ router.get('/intent-modes', async (req, res, next) => {
           updatedBy: null,
           updatedAt: null,
           reason: null,
+          autoSendGateEnabled,
           suggest: { suggested: 0, pending: 0, accepted: 0, corrected: 0, ignored: 0, superseded: 0, expired: 0 },
         });
       }
@@ -1789,16 +1797,17 @@ router.get('/intent-modes', async (req, res, next) => {
     const readiness = await graduation.computeReadiness({
       intents: [...byIntent.values()].map((b) => ({ intent: b.intent, mode: b.mode, locked: b.locked, suggest: outcomeRollup.get(b.intent)?.cohort || { accepted: 0, corrected: 0, ignored: 0 } })),
     });
-    for (const b of byIntent.values()) b.graduation = readiness.get(b.intent) || null;
+    for (const b of byIntent.values()) {
+      b.graduation = readiness.get(b.intent) || null;
+      Object.assign(b, autoSendGateOverrides.get(b.intent));
+    }
 
     res.json({
       generatedAt: new Date().toISOString(),
       gateEnabled: require('../config/feature-gates').isEnabled('smsSuggestMode'),
-      // Whether the Phase E auto-send executor gate is on. Promoting an intent
-      // to auto_send while this is off is harmless (drafts degrade to a
-      // suggestion card), but the UI surfaces it so the operator isn't
-      // surprised that nothing auto-sends yet.
-      autoSendGateEnabled: require('../config/feature-gates').isEnabled('smsAutoSend'),
+      // Retain the general executor gate for older clients. Each intent row
+      // above carries its effective gate, including gratitude's narrow lane.
+      autoSendGateEnabled,
       thresholds: graduation.THRESHOLDS,
       // Which drafter prompt version(s) the readiness signals count — null
       // means all live versions (GRAD_COHORT_VERSIONS=all_live).
