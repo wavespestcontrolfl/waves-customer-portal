@@ -33,6 +33,10 @@ jest.mock('../services/scheduling/day-stops', () => ({
   guardedCoordSelects: jest.fn(() => []),
 }));
 jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn().mockResolvedValue(['k']) }));
+jest.mock('../services/visit-groups', () => ({
+  LIVE_COMPLETION_CLAIM_STATUSES: jest.requireActual('../services/visit-groups').LIVE_COMPLETION_CLAIM_STATUSES,
+  lockStopForRow: jest.fn().mockResolvedValue(null),
+}));
 jest.mock('../sockets', () => ({ getIo: jest.fn() }));
 jest.mock('../services/estimate-slot-availability', () => ({ invalidateAllEstimates: jest.fn() }));
 
@@ -43,6 +47,7 @@ const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('../service
 const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('../services/technician-eligibility');
 const { inactiveCapabilitiesForServices } = require('../services/technician-capabilities');
 const { ALERT_TYPE } = require('../services/tech-out');
+const { lockStopForRow } = require('../services/visit-groups');
 const {
   autoMoveEnabled, autoAssignParkedAlert, autoAssignTechDay,
 } = require('../services/tech-out-auto-move');
@@ -546,9 +551,18 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
 
   test('a completion already claimed the visit: refuses inside the move transaction, alert untouched', async () => {
     const guard = await capturedGuard();
-    await expect(guard(trxReturning({ id: 'abs-1' }, { id: ALERT_ID }, { id: 'claim-1' })))
-      .rejects.toMatchObject({ code: 'TECH_OUT_COMPLETION_IN_FLIGHT' });
+    const trx = trxReturning({ id: 'abs-1' }, { id: ALERT_ID }, { id: 'claim-1' });
+    await expect(guard(trx)).rejects.toMatchObject({ code: 'TECH_OUT_COMPLETION_IN_FLIGHT' });
     expect(resolveAlert).not.toHaveBeenCalled();
+    // The claim check runs under the completion writer's own stop lock.
+    expect(lockStopForRow).toHaveBeenCalledWith(trx, JOB_ID);
+    expect(lockStopForRow.mock.invocationCallOrder[0]).toBeLessThan(trx.mock.invocationCallOrder[0]);
+  });
+
+  test('a stop that moved under the stop-lock peek refuses as a plain 409 (the CAS path)', async () => {
+    const guard = await capturedGuard();
+    lockStopForRow.mockRejectedValueOnce(Object.assign(new Error('moved'), { code: 'VISIT_STOP_MOVED' }));
+    await expect(guard(trxReturning({ id: 'abs-1' }, { id: ALERT_ID }))).rejects.toMatchObject({ statusCode: 409 });
   });
 
   test('absence cleared ("Tech is back") after the read: refuses inside the move transaction', async () => {

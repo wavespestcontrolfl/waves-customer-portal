@@ -51,7 +51,7 @@ const { resolveGeo, driveMin, HQ } = require('./auto-dispatch/geo');
 const { resolveAlert, emitAlert } = require('./dispatch-alerts');
 const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('./dispatch-assignment');
 const { ALERT_TYPE, ABSENT_STOP_EXCLUDE_STATUSES, rankBumpOrder } = require('./tech-out');
-const { LIVE_COMPLETION_CLAIM_STATUSES } = require('./visit-groups');
+const { LIVE_COMPLETION_CLAIM_STATUSES, lockStopForRow } = require('./visit-groups');
 
 // Statuses that occupy no route capacity — exactly what the rebooker's
 // probeMoveConflicts excludes (NOT_A_ROUTE_STOP_STATUSES + completed).
@@ -322,6 +322,21 @@ function makeStillParkedGuard({ alertId, absentTechId, date, stopId, toTechId, a
     // A completion already claimed this visit (the claim touches none of the
     // expect-pinned fields, and the single-row mover has no claim guard):
     // reassigning it now would let the completion finish under the old tech.
+    // Checked under the stop lock the completion writer takes before it
+    // inserts its claim (complete-scheduled-service.js), held through this
+    // move — so a claim either landed first (refused here) or waits for the
+    // move to commit. Same relative position the rebooker's own solo-visit
+    // recheck takes this lock in (after the date/tech fences, before any
+    // row lock), so it adds no ordering inversion. A stop that moved under
+    // the peek (VISIT_STOP_MOVED) surfaces as a plain CAS-style 409.
+    try {
+      await lockStopForRow(trx, stopId);
+    } catch (lockErr) {
+      if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') {
+        throw Object.assign(new Error('The stop changed concurrently'), { statusCode: 409 });
+      }
+      throw lockErr;
+    }
     const liveClaim = await trx('service_completion_attempts')
       .where({ service_id: stopId })
       .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES)
