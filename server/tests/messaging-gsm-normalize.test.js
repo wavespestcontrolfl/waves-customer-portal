@@ -36,6 +36,7 @@ jest.mock('../services/messaging/audit', () => ({
   persistAudit: jest.fn(async () => ({ id: 'audit-1' })),
 }));
 jest.mock('../services/messaging/providers/twilio-sms', () => ({
+  mapPurposeToMessageType: jest.fn(() => 'manual'),
   sendViaTwilio: jest.fn(async () => ({ sent: true, providerMessageId: 'SM-test' })),
   // Mirror of the real predicate — the wrapper's MMS exemption calls it.
   mediaUrlsAllowed: (input) => {
