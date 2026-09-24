@@ -3627,6 +3627,41 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     }
 
+    // The LAST recheck, after publication and immediately before the
+    // customer delivery below (codex r31 P1): the pre-handoff recheck
+    // released the contact-pair lock before URL shortening, publication and
+    // the sends, so a /property-lookup that commits a county flag in that
+    // window has blocked or archived the draft while this request still
+    // holds a live bookingUrl. Under the same lock: a newer matching flag
+    // withholds the link, withdraws this run's own publication and lands on
+    // the lead. A failed recheck refuses the run (fail closed).
+    if ((bookingUrl || websiteEstimateUrl) && !addressUnverified && !draftAddressBlockCarried && contactEmail && contactPhone) {
+      try {
+        const late = await db.transaction(async (trx) => {
+          await draftVerdictLock(trx);
+          const rec = await reconcileUnderLock(trx);
+          if (rec.newerFlag) {
+            const { withdrawFlaggedPublications } = require('../services/website-quote-withdrawal');
+            await withdrawFlaggedPublications(trx, {
+              leadId: lead.id, contactEmail, contactPhone, fullAddress: quoteFullAddress, flag: rec.newerFlag,
+            });
+          }
+          return rec;
+        });
+        if (late.newerFlag) {
+          draftAddressBlockCarried = true;
+          carriedAddressFlag = late.newerFlag;
+          bookingUrl = null;
+          websiteEstimateUrl = null;
+          logger.info('[public-quote] address flag committed before delivery — link withheld and this run\'s publication withdrawn');
+          await carryFlagToLead();
+        }
+      } catch (deliveryRecheckErr) {
+        logger.error(`[public-quote] pre-delivery address recheck failed — refusing the run: ${deliveryRecheckErr.code || deliveryRecheckErr.name || 'error'}`);
+        return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
+      }
+    }
+
     // Per-application phrasing when the quote resolves to one (owner
     // 2026-07-11: recurring emails lead per-application, never /mo where a
     // per-application figure exists; every amount shows cents). Multi-service
