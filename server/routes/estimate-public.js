@@ -14031,6 +14031,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
     if (err && err.status >= 400 && err.status < 500) {
+      // A 404 is the token route's GENERIC answer and carries no code: a
+      // raced hold (OFF_CUSTOMER_SURFACE) must read exactly like an unknown
+      // token (codex #4667 r38 P0).
+      if (err.status === 404) return res.status(404).json({ error: 'Estimate not found' });
       return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     }
     next(err);
