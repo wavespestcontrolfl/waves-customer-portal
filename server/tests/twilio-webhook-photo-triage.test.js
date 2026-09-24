@@ -175,7 +175,7 @@ test('a triage run failure is logged, releases its slot, and never changes the r
   expect(res.body).toBe('<Response></Response>');
   expect(res.statusCode).toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith(
-    '[photo-triage] triage failed for message synthetic-message; vision slot released: vision exploded',
+    '[photo-triage] assessment failed for message synthetic-message; vision slot released: vision exploded',
   );
   expect(mockState.drafts).toHaveLength(0);
 });

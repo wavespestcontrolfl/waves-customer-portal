@@ -19,8 +19,10 @@
  *     A candidate has already RESERVED its vision slot, so suppressing the
  *     legacy draft always leaves the text with a triage run.
  *   runPhotoTriage — takes that candidacy (the classifier is never re-run),
- *     runs the assessment, parks the draft. Any failure after the
- *     reservation clears the stamp again (released, logged at error).
+ *     runs the assessment, parks the draft. An assessment that fails with no
+ *     row clears the stamp again (released, logged at error); once the paid
+ *     analysis produced a row the stamp stays, and a draft failure is logged
+ *     at error naming the kept assessment.
  * Every guard runs before any paid call:
  *   - gate off → fully inert (no DB read, no model call);
  *   - no image media, tech lines, and the AI assistant line are skipped;
@@ -299,16 +301,8 @@ function legacyAiDraftsAllowed(candidacy) {
   return true;
 }
 
-// Assessment + draft for a candidate whose vision slot is already reserved.
-// Throws on any failure so runPhotoTriage can hand the slot back.
-async function assessAndPark({ intent, messageId, smsLogId, images, body, from, customer }) {
-  const created = await createAdminAssessment({
-    type: intent.assessmentType,
-    source: ASSESSMENT_SOURCE,
-    message_photos: images.map((item) => ({ message_id: messageId, key: item.key })),
-  });
-  if (created.error) throw new Error(`assessment refused (${created.status || 'error'})`);
-
+// Draft for a finished assessment (the paid vision already ran).
+async function parkForAssessment({ intent, messageId, smsLogId, body, from, customer }, created) {
   const text = buildDraftText({
     firstName: customer?.first_name,
     findingLabel: teaserFindingLabel(created.type, created.analysis),
@@ -330,14 +324,33 @@ async function assessAndPark({ intent, messageId, smsLogId, images, body, from, 
  */
 async function runPhotoTriage(candidacy) {
   if (!candidacy?.candidate) return { status: 'skipped', reason: candidacy?.reason || 'not_candidate' };
+  const { intent, messageId, images } = candidacy;
+
+  // No assessment row → the run left nothing behind: clear the reservation
+  // so the message is not marked triaged and the failure is off today's
+  // budget.
+  let created;
   try {
-    return await assessAndPark(candidacy);
+    created = await createAdminAssessment({
+      type: intent.assessmentType,
+      source: ASSESSMENT_SOURCE,
+      message_photos: images.map((item) => ({ message_id: messageId, key: item.key })),
+    });
+    if (created.error) throw new Error(`assessment refused (${created.status || 'error'})`);
   } catch (err) {
-    // A failed run must not stay "triaged": clear the reservation so the
-    // message is eligible again and the failure is off today's budget.
-    logger.error(`[photo-triage] triage failed for message ${candidacy.messageId}; vision slot released: ${err.message}`);
-    await releaseVisionSlot(candidacy.messageId);
-    return { status: 'skipped', reason: 'triage_failed' };
+    logger.error(`[photo-triage] assessment failed for message ${messageId}; vision slot released: ${err.message}`);
+    await releaseVisionSlot(messageId);
+    return { status: 'skipped', reason: 'assessment_failed' };
+  }
+
+  // The assessment exists and its paid analysis ran: the slot stays spent
+  // (clearing it would let repeated draft failures exceed the daily cap and
+  // re-analyze the same photos). The assessment is on the assessments page.
+  try {
+    return await parkForAssessment(candidacy, created);
+  } catch (err) {
+    logger.error(`[photo-triage] draft failed for message ${messageId}; ${created.type} assessment ${created.id} kept: ${err.message}`);
+    return { status: 'skipped', reason: 'draft_failed' };
   }
 }
 
