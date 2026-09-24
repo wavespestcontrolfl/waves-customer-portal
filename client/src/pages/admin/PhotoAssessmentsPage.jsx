@@ -1,3 +1,4 @@
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 /**
  * Photo Assessments — admin surface for the lawn-assessment + pest-identifier
  * lead magnets (/admin/lawn-assessments).
@@ -13,7 +14,7 @@
  * flips gates, the page just shows LIVE/DARK.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Plus } from "lucide-react";
 import {
   Button,
@@ -233,9 +234,12 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
   const [showNew, setShowNew] = useState(false);
   const [loadError, setLoadError] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setLoadError("");
+  const loadSeq = useRef(0);
+  const overlayOpen = useRef(false);
+  overlayOpen.current = Boolean(selected || showNew);
+  const load = useCallback(async ({ background = false } = {}) => {
+    const seq = ++loadSeq.current;
+    if (!background) setLoading(true);
     try {
       const params = new URLSearchParams({ type: typeTab, status });
       const [listRes, funnelRes] = await Promise.all([
@@ -244,17 +248,23 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
       ]);
       if (!listRes.ok) throw new Error(`List failed (${listRes.status})`);
       const list = await listRes.json();
+      const nextFunnel = funnelRes.ok ? await funnelRes.json() : null;
+      if (seq !== loadSeq.current || (background && overlayOpen.current)) return;
+      setLoadError("");
       setAssessments(list.assessments || []);
       setGates(list.gates || null);
-      if (funnelRes.ok) setFunnel(await funnelRes.json());
+      if (nextFunnel) setFunnel(nextFunnel);
     } catch (err) {
-      setLoadError(err.message);
+      if (seq === loadSeq.current) setLoadError(err.message);
     } finally {
-      setLoading(false);
+      if (!background && seq === loadSeq.current) setLoading(false);
     }
   }, [typeTab, status]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); return () => { loadSeq.current += 1; }; }, [load]);
+  useVisiblePageRefresh(() => load({ background: true }), {
+    intervalMs: 60000, enabled: !loading && !selected && !showNew,
+  });
 
   const hubOwnsHeader = embedded && Boolean(onSecondaryNav);
   useEffect(() => {
@@ -309,7 +319,7 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
         </div>
       </div>
 
-      {loadError ? <div className="text-[14px] text-alert-fg mb-3">{loadError}</div> : null}
+      {loadError ? <div className="text-[14px] text-alert-fg mb-3">{loadError} <Button variant="ghost" onClick={load}>Retry</Button></div> : null}
 
       <Card>
         <Table>

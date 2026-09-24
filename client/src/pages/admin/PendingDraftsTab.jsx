@@ -17,6 +17,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { adminFetch } from "../../utils/admin-fetch";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 const D = {
   bg: "#F4F4F5",
@@ -244,25 +245,41 @@ export default function PendingDraftsTab({ embedded = false }) {
   const [busyId, setBusyId] = useState(null);
   const [laneFilter, setLaneFilter] = useState("all");
   // Monotonic load sequence: a mutation bumps it, and a GET that started
-  // before the bump throws its response away — otherwise a Refresh in
+  // before the bump throws its response away — otherwise a background read in
   // flight across an approve could resolve late and restore the actioned
   // card (already sent/rejected) to the list.
   const loadSeq = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ background = false, visibleCount = 0 } = {}) => {
     const seq = ++loadSeq.current;
-    setLoading(true);
+    if (!background) setLoading(true);
     setError(null);
     try {
-      const data = await adminFetch("/admin/drafts?status=pending");
+      let data = await adminFetch("/admin/drafts?status=pending");
+      const refreshed = [...(Array.isArray(data?.drafts) ? data.drafts : [])];
+      const seen = new Set(refreshed.map((draft) => draft.id));
+      while (background && refreshed.length < visibleCount && data?.nextCursor) {
+        if (seq !== loadSeq.current) return;
+        const cursor = data.nextCursor;
+        const next = await adminFetch(`/admin/drafts?status=pending&before=${encodeURIComponent(cursor)}`);
+        const older = Array.isArray(next?.drafts) ? next.drafts : [];
+        for (const draft of older) {
+          if (!seen.has(draft.id)) {
+            seen.add(draft.id);
+            refreshed.push(draft);
+          }
+        }
+        data = next;
+        if (next?.nextCursor === cursor || older.length === 0) break;
+      }
       if (seq !== loadSeq.current) return; // superseded by a mutation
-      setDrafts(Array.isArray(data?.drafts) ? data.drafts : []);
+      setDrafts(refreshed);
       setPendingCount(Number(data?.pendingCount) || 0);
       setNextCursor(data?.nextCursor || null);
     } catch (err) {
       if (seq === loadSeq.current) setError(err.message || "Failed to load drafts");
     } finally {
-      setLoading(false);
+      if (!background && seq === loadSeq.current) setLoading(false);
     }
   }, []);
 
@@ -294,6 +311,10 @@ export default function PendingDraftsTab({ embedded = false }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  useVisiblePageRefresh(() => load({ background: true, visibleCount: drafts.length }), {
+    intervalMs: 30_000, enabled: !loading && !loadingMore && busyId === null,
+  });
 
   const lanes = useMemo(() => {
     const seen = new Map();
@@ -373,7 +394,7 @@ export default function PendingDraftsTab({ embedded = false }) {
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
-          {loading ? "Loading pending drafts" : `${pendingCount} pending draft${pendingCount === 1 ? "" : "s"}`}
+          {loading && drafts.length === 0 ? "Loading pending drafts" : `${pendingCount} pending draft${pendingCount === 1 ? "" : "s"}`}
           {!loading && drafts.length < pendingCount && (
             <span style={{ fontWeight: 500, color: D.muted }}> (showing {drafts.length})</span>
           )}
@@ -390,20 +411,19 @@ export default function PendingDraftsTab({ embedded = false }) {
             ))}
           </div>
         )}
-        <button
-          type="button"
-          onClick={load}
-          disabled={loading || busyId !== null}
-          style={{ marginLeft: "auto", background: "#FFFFFF", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8, padding: "5px 12px", fontSize: 13, fontWeight: 500, cursor: loading ? "default" : "pointer" }}
-        >
-          Refresh
-        </button>
       </div>
 
       {notice && (
         <div style={{ fontSize: 14, color: notice.tone === "ok" ? D.green : D.red }}>{notice.text}</div>
       )}
-      {error && <div style={{ fontSize: 14, color: D.red }}>{error}</div>}
+      {error && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, fontSize: 14, color: D.red }} role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={load} disabled={loading || busyId !== null} style={{ background: "#FFFFFF", color: D.red, border: `1px solid ${D.red}`, borderRadius: 8, padding: "5px 12px", fontSize: 13, fontWeight: 500, cursor: loading ? "default" : "pointer" }}>
+            {loading ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      )}
 
       {!loading && !error && visible.length === 0 && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 24, fontSize: 14, color: D.muted }}>
@@ -422,7 +442,7 @@ export default function PendingDraftsTab({ embedded = false }) {
           // EVERY card locks while any mutation is in flight: busyId can
           // name only one draft, so a second action started meanwhile
           // would overwrite it and whichever request finished first would
-          // re-enable Refresh with the other still pending — reopening
+          // re-enable the other cards with one request still pending — reopening
           // the stale-reload window the seq guard closes.
           busy={busyId !== null || loading || loadingMore}
           onApprove={approve}

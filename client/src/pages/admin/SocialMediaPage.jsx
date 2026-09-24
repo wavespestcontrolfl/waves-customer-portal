@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Activity,
@@ -14,6 +14,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { formatETDate } from "../../lib/timezone";
 import {
   Badge,
@@ -279,7 +280,7 @@ const TAB_BODIES = {
   calendar: () => <CalendarTab />,
   analytics: () => <AnalyticsTab />,
   templates: ({ showToast }) => <TemplatesTab showToast={showToast} />,
-  history: ({ history, loadData }) => <HistoryTab history={history} onRefresh={loadData} />,
+  history: ({ history }) => <HistoryTab history={history} />,
 };
 
 function TabBody(props) {
@@ -383,26 +384,42 @@ export default function SocialMediaPage() {
   const [health, setHealth] = useState(null);
   const [pauseLoading, setPauseLoading] = useState(false);
   const [alert, setAlert] = useState(null);
+  const [readError, setReadError] = useState("");
+  const loadGen = useRef(0);
   const loadData = useCallback(async () => {
-    const [s, st, h, hl, al] = await Promise.all([
-      adminFetch("/admin/social-media/status").catch(() => null),
-      adminFetch("/admin/social-media/stats").catch(() => null),
-      adminFetch("/admin/social-media/history?limit=20").catch(() => ({
-        posts: [],
-      })),
-      adminFetch("/admin/social-media/health").catch(() => null),
-      adminFetch("/admin/social-media/alerts").catch(() => null),
+    const gen = ++loadGen.current;
+    const [s, st, h, hl, al] = await Promise.allSettled([
+      adminFetch("/admin/social-media/status"),
+      adminFetch("/admin/social-media/stats"),
+      adminFetch("/admin/social-media/history?limit=20"),
+      adminFetch("/admin/social-media/health"),
+      adminFetch("/admin/social-media/alerts"),
     ]);
-    setStatus(s);
-    setStats(st);
-    setHistory(h.posts || []);
-    setHealth(hl);
-    if (al?.active) setAlert(al.alert);
-    else setAlert(null);
+    if (gen !== loadGen.current) return;
+    if (s.status === "fulfilled") setStatus(s.value);
+    if (st.status === "fulfilled") setStats(st.value);
+    if (h.status === "fulfilled") setHistory(h.value.posts || []);
+    if (hl.status === "fulfilled") setHealth(hl.value);
+    if (al.status === "fulfilled") {
+      if (al.value?.active) setAlert(al.value.alert);
+      else setAlert(null);
+    }
+    setReadError(
+      [s, st, h, hl, al].some((result) => result.status === "rejected")
+        ? "Some social media data could not be refreshed."
+        : "",
+    );
   }, []);
   useEffect(() => {
     loadData();
   }, [loadData]);
+  useVisiblePageRefresh(
+    () => {
+      if (pauseLoading) return undefined;
+      return loadData();
+    },
+    { intervalMs: 120_000 },
+  );
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(""), 3500);
@@ -427,6 +444,12 @@ export default function SocialMediaPage() {
         navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
         variant="workspace"
       />
+      {readError && (
+        <Card className="mb-3 flex items-center justify-between gap-3 border-alert-fg bg-alert-bg border-l-4 text-alert-fg">
+          <span>{readError}</span>
+          <Button onClick={loadData} variant="secondary">Retry</Button>
+        </Card>
+      )}
       {activeGroup.tabs.length > 1 && (
         <div className="flex flex-wrap gap-2 mb-4">
           {activeGroup.tabs.map((key) => {
@@ -1115,25 +1138,38 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
     runs: [],
   });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [running, setRunning] = useState("");
   const [variantChoice, setVariantChoice] = useState({}); // runId → selected variant index
   const [acting, setActing] = useState(""); // "approve-<id>" | "reject-<id>" while in flight
+  const loadGen = useRef(0);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    adminFetch("/admin/social-media/autonomous/runs?limit=30")
-      .then(setData)
-      .catch(() =>
-        setData({
-          runs: [],
-        }),
-      )
-      .finally(() => setLoading(false));
+  const load = useCallback((background = false) => {
+    const gen = ++loadGen.current;
+    if (!background) setLoading(true);
+    setLoadError("");
+    return adminFetch("/admin/social-media/autonomous/runs?limit=30")
+      .then((next) => {
+        if (gen === loadGen.current) setData(next);
+      })
+      .catch((error) => {
+        if (gen !== loadGen.current) return;
+        if (!background) setData({ runs: [] });
+        setLoadError(error.message || "Autonomous runs could not be loaded.");
+      })
+      .finally(() => {
+        if (gen === loadGen.current) setLoading(false);
+      });
   }, []);
   useEffect(() => {
     load();
   }, [load]);
+  useVisiblePageRefresh(
+    () => (loading || running || acting ? undefined : load(true)),
+    { intervalMs: 120_000 },
+  );
   const runNow = async (mode) => {
+    loadGen.current += 1;
     setRunning(mode);
     try {
       const result = await adminFetch("/admin/social-media/autonomous/run", {
@@ -1157,6 +1193,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
     }
   };
   const approveRun = async (run) => {
+    loadGen.current += 1;
     setActing(`approve-${run.id}`);
     try {
       const result = await adminFetch(`/admin/social-media/autonomous/runs/${run.id}/approve`, {
@@ -1176,6 +1213,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
     }
   };
   const rejectRun = async (run) => {
+    loadGen.current += 1;
     setActing(`reject-${run.id}`);
     try {
       await adminFetch(`/admin/social-media/autonomous/runs/${run.id}/reject`, {
@@ -1213,9 +1251,6 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
           </div>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <Button onClick={load} disabled={loading} variant="secondary">
-            Refresh
-          </Button>
           <Button
             onClick={() => runNow("draft")}
             disabled={!!running}
@@ -1234,6 +1269,15 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
           </Button>
         </div>
       </Card>
+
+      {loadError && (
+        <Card className="text-alert-fg flex items-center justify-between gap-3">
+          <span>{loadError}</span>
+          <Button onClick={() => load()} disabled={loading} variant="secondary">
+            Retry
+          </Button>
+        </Card>
+      )}
 
       <div className="flex gap-2.5 mb-4 flex-wrap">
         {[
@@ -2354,7 +2398,7 @@ function RSSTab({ showToast, onPublished }) {
 }
 
 // ── History Tab ──
-function HistoryTab({ history, onRefresh }) {
+function HistoryTab({ history }) {
   const isMobile = useIsMobile();
   return (
     <div>
@@ -2364,7 +2408,6 @@ function HistoryTab({ history, onRefresh }) {
         <div className="text-ui-body font-medium text-zinc-900">
           Post History
         </div>{" "}
-        <Button onClick={onRefresh}>Refresh</Button>{" "}
       </div>
       {history.length === 0 ? (
         <Card className="text-center p-10 text-ink-secondary">

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, CheckCircle2, ClipboardList, Edit3, MessageSquare, PhoneCall, RefreshCw, Save, ShieldAlert, UserRound, XCircle } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Bot, CheckCircle2, ClipboardList, Edit3, MessageSquare, PhoneCall, Save, ShieldAlert, UserRound, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   ActionFeedback,
@@ -15,6 +15,7 @@ import {
   UiSurface,
 } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 const STATUSES = ["pending_review", "accepted", "corrected", "dismissed", "all"];
 
@@ -104,20 +105,36 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const [actualReply, setActualReply] = useState("");
   const [replyReviewNote, setReplyReviewNote] = useState("");
   const [replyScenarioLabel, setReplyScenarioLabel] = useState("");
+  const requestRef = useRef(0);
+  const editEpochRef = useRef(0);
+  const detailAppliedEpochRef = useRef(0);
+  const draftBaselineRef = useRef({
+    correctionNote: "",
+    correctedActions: "",
+    idealReply: "",
+    actualReply: "",
+    replyReviewNote: "",
+    replyScenarioLabel: "",
+  });
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const load = useCallback(async ({ background = false } = {}) => {
+    const request = ++requestRef.current;
+    const editEpoch = editEpochRef.current;
+    if (!background) {
+      setLoading(true);
+      setError("");
+    }
     try {
       const next = await adminFetch(`/admin/agent-decisions?status=${encodeURIComponent(status)}&limit=100`);
+      if (request !== requestRef.current || editEpoch !== editEpochRef.current) return;
       setData(next);
       setSelectedId((current) => (
         next.decisions?.some((d) => d.id === current) ? current : next.decisions?.[0]?.id || null
       ));
     } catch (err) {
-      setError(err.message);
+      if (request === requestRef.current && editEpoch === editEpochRef.current) setError(err.message);
     } finally {
-      setLoading(false);
+      if (!background && request === requestRef.current) setLoading(false);
     }
   }, [status]);
 
@@ -131,8 +148,14 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   );
 
   useEffect(() => {
+    const nextActions = selected?.recommendedActions?.join("\n") || "";
     setCorrectionNote("");
-    setCorrectedActions(selected?.recommendedActions?.join("\n") || "");
+    setCorrectedActions(nextActions);
+    draftBaselineRef.current = {
+      ...draftBaselineRef.current,
+      correctionNote: "",
+      correctedActions: nextActions,
+    };
   }, [selected?.id]);
 
   useEffect(() => {
@@ -141,10 +164,14 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       return;
     }
     let cancelled = false;
+    const editEpoch = editEpochRef.current;
     setDetailLoading(true);
     adminFetch(`/admin/agent-decisions/${selected.id}/context`)
       .then((next) => {
-        if (!cancelled) setDetail(next);
+        if (!cancelled) {
+          detailAppliedEpochRef.current = editEpoch;
+          setDetail(next);
+        }
       })
       .catch((err) => {
         if (!cancelled) setDetail({ error: err.message });
@@ -156,13 +183,41 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   }, [selected?.id]);
 
   useEffect(() => {
+    if (detailAppliedEpochRef.current !== editEpochRef.current) return;
     const training = detail?.replyTraining;
     const humanReply = detail?.context?.actualHumanReply?.body || "";
-    setActualReply(training?.actualHumanReply || humanReply || "");
-    setIdealReply(training?.outboundBody || selected?.suggestedMessage || humanReply || "");
-    setReplyReviewNote(training?.reviewNote || "");
-    setReplyScenarioLabel(training?.scenarioLabel || selected?.inputSnapshot?.reply_training_hint?.scenarioLabel || "");
+    const nextActualReply = training?.actualHumanReply || humanReply || "";
+    const nextIdealReply = training?.outboundBody || selected?.suggestedMessage || humanReply || "";
+    const nextReviewNote = training?.reviewNote || "";
+    const nextScenarioLabel = training?.scenarioLabel || selected?.inputSnapshot?.reply_training_hint?.scenarioLabel || "";
+    setActualReply(nextActualReply);
+    setIdealReply(nextIdealReply);
+    setReplyReviewNote(nextReviewNote);
+    setReplyScenarioLabel(nextScenarioLabel);
+    draftBaselineRef.current = {
+      ...draftBaselineRef.current,
+      actualReply: nextActualReply,
+      idealReply: nextIdealReply,
+      replyReviewNote: nextReviewNote,
+      replyScenarioLabel: nextScenarioLabel,
+    };
   }, [detail?.replyTraining?.id, detail?.context?.actualHumanReply?.id, selected?.id, selected?.suggestedMessage]);
+
+  const hasDraftChanges = correctionNote !== draftBaselineRef.current.correctionNote
+    || correctedActions !== draftBaselineRef.current.correctedActions
+    || idealReply !== draftBaselineRef.current.idealReply
+    || actualReply !== draftBaselineRef.current.actualReply
+    || replyReviewNote !== draftBaselineRef.current.replyReviewNote
+    || replyScenarioLabel !== draftBaselineRef.current.replyScenarioLabel;
+  const updateDraft = (setter, value) => {
+    editEpochRef.current += 1;
+    setter(value);
+  };
+
+  useVisiblePageRefresh(() => load({ background: true }), {
+    intervalMs: 30_000,
+    enabled: !loading && !busyId && !hasDraftChanges,
+  });
 
   const review = useCallback(async (decision, verdict) => {
     if (!decision) return;
@@ -184,6 +239,11 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
         method: "POST",
         body: JSON.stringify(body),
       });
+      draftBaselineRef.current = {
+        ...draftBaselineRef.current,
+        correctionNote,
+        correctedActions,
+      };
       setNotice(`Decision ${statusLabel(verdict).toLowerCase()}.`);
       await load();
     } catch (err) {
@@ -215,6 +275,13 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
         }),
       });
       setDetail((current) => ({ ...(current || {}), replyTraining: next.replyTraining }));
+      draftBaselineRef.current = {
+        ...draftBaselineRef.current,
+        actualReply,
+        idealReply,
+        replyReviewNote,
+        replyScenarioLabel,
+      };
       setNotice(`Reply training ${statusLabel(replyVerdict).toLowerCase()} saved.`);
     } catch (err) {
       setError(err.message);
@@ -246,7 +313,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           </ActionFeedback>
         )}
 
-        {error && <ActionFeedback error>{error}</ActionFeedback>}
+        {error && <ActionFeedback error onRetry={load}>{error}</ActionFeedback>}
         {notice && <ActionFeedback>{notice}</ActionFeedback>}
 
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
@@ -343,21 +410,11 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
               {statusLabel(item)}
             </Button>
           ))}
-          <Button
-            type="button"
-            onClick={load}
-            loading={loading}
-            variant="secondary"
-            className="sm:ml-auto"
-          >
-            <RefreshCw size={16} aria-hidden />
-            Refresh
-          </Button>
         </div>
 
         <div className="grid gap-4 md:grid-cols-[minmax(280px,380px)_minmax(0,1fr)] items-start">
           <Card className="overflow-hidden">
-            {loading ? (
+            {loading && !data.decisions?.length ? (
               <ActionFeedback className="m-4">Loading decisions...</ActionFeedback>
             ) : data.decisions?.length ? (
               data.decisions.map((decision) => (
@@ -516,7 +573,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       <FormField label="Actual human reply">
                         <Textarea
                           value={actualReply}
-                          onChange={(event) => setActualReply(event.target.value)}
+                          onChange={(event) => updateDraft(setActualReply, event.target.value)}
                           rows={5}
                           placeholder="If you replied, paste or adjust the actual reply here."
                         />
@@ -524,7 +581,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       <FormField label="Final / rewrite reply">
                         <Textarea
                           value={idealReply}
-                          onChange={(event) => setIdealReply(event.target.value)}
+                          onChange={(event) => updateDraft(setIdealReply, event.target.value)}
                           rows={5}
                           placeholder="Accepted draft, edited version, or your replacement reply."
                         />
@@ -534,14 +591,14 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       <FormField label="Scenario label">
                       <Input
                         value={replyScenarioLabel}
-                        onChange={(event) => setReplyScenarioLabel(event.target.value)}
+                        onChange={(event) => updateDraft(setReplyScenarioLabel, event.target.value)}
                         placeholder="scenario, e.g. scheduling"
                       />
                       </FormField>
                       <FormField label="Review note">
                       <Input
                         value={replyReviewNote}
-                        onChange={(event) => setReplyReviewNote(event.target.value)}
+                        onChange={(event) => updateDraft(setReplyReviewNote, event.target.value)}
                         placeholder="What should the agent learn from this reply?"
                       />
                       </FormField>
@@ -616,14 +673,14 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                   <FormField label="Corrected actions">
                   <Textarea
                     value={correctedActions}
-                    onChange={(event) => setCorrectedActions(event.target.value)}
+                    onChange={(event) => updateDraft(setCorrectedActions, event.target.value)}
                     rows={4}
                   />
                   </FormField>
                   <FormField label="Review reason">
                   <Textarea
                     value={correctionNote}
-                    onChange={(event) => setCorrectionNote(event.target.value)}
+                    onChange={(event) => updateDraft(setCorrectionNote, event.target.value)}
                     rows={3}
                     placeholder="Why was this accepted, corrected, or dismissed?"
                   />

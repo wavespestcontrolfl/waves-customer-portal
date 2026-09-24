@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { cn } from "../../components/ui";
-import { Bot, RefreshCw, AlertTriangle } from "lucide-react";
+import { Bot, AlertTriangle } from "lucide-react";
 import { PillTab, PhoneFrame } from "./autonomous-content/shared";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import ContentTab from "./autonomous-content/ActivityTab";
 import LinksTab from "./autonomous-content/LinksTab";
 import ImpactTab from "./autonomous-content/ImpactTab";
@@ -68,6 +69,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [status, setStatus] = useState("all");
   const [detailVersion, setDetailVersion] = useState(0);
   const listRequest = useRef(0);
+  const linksRequest = useRef(0);
+  const impactRequest = useRef(0);
   const listInFlight = useRef(null);
   const currentLoad = useRef(null);
   const detailInFlight = useRef(null);
@@ -113,34 +116,40 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   );
   currentLoad.current = load;
 
-  const loadLinks = async () => {
-    setLinkLoading(true);
+  const loadLinks = useCallback(async (background = false) => {
+    const request = ++linksRequest.current;
+    if (!background) setLinkLoading(true);
     setLinkError("");
     try {
       const next = await adminFetch("/admin/content/internal-links?status=all&limit=100");
+      if (request !== linksRequest.current) return;
       setLinkData(next);
       setSelectedLinkId((current) =>
         next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null,
       );
     } catch (err) {
+      if (request !== linksRequest.current) return;
       setLinkError(err.message);
     } finally {
-      setLinkLoading(false);
+      if (request === linksRequest.current) setLinkLoading(false);
     }
-  };
+  }, []);
 
-  const loadImpact = async () => {
-    setImpactLoading(true);
+  const loadImpact = useCallback(async (background = false) => {
+    const request = ++impactRequest.current;
+    if (!background) setImpactLoading(true);
     setImpactError("");
     try {
       const next = await adminFetch("/admin/content/autonomous/impact?limit=100");
+      if (request !== impactRequest.current) return;
       setImpactData(next);
     } catch (err) {
+      if (request !== impactRequest.current) return;
       setImpactError(err.message);
     } finally {
-      setImpactLoading(false);
+      if (request === impactRequest.current) setImpactLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadLinks();
@@ -149,11 +158,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
   useEffect(() => {
     void load();
-    const timer = setInterval(() => {
-      if (listInFlight.current === null) void load(true);
-    }, 30000);
     return () => {
-      clearInterval(timer);
       listRequest.current += 1;
     };
   }, [load]);
@@ -223,6 +228,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const submitDecision = async (decision) => {
     if (view !== "review" || selected?.action_type === "new_supporting_blog" || !selectedId || actionPending || loading)
       return;
+    listRequest.current += 1;
     setActionPending(decision);
     setDecisionError("");
     try {
@@ -245,6 +251,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
   const submitLinkDecision = async (decision) => {
     if (!selectedLinkId || linkActionPending) return;
+    linksRequest.current += 1;
     setLinkActionPending(decision);
     setLinkError("");
     try {
@@ -269,11 +276,13 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
   const busy = loading || linkLoading || impactLoading;
 
-  const refreshAll = () => {
-    load();
-    loadLinks();
-    loadImpact();
-  };
+  useVisiblePageRefresh(
+    () => {
+      if (busy || actionPending || linkActionPending) return undefined;
+      return Promise.all([load(true), loadLinks(true), loadImpact(true)]);
+    },
+    { intervalMs: 120_000 },
+  );
   const changeView = (next) => {
     if (next === view) return;
     setView(next);
@@ -291,6 +300,11 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     setSelectedLinkId(id);
     setMobileDetailOpen(true);
   };
+  const retryCurrent = () => {
+    if (view === "links") return loadLinks();
+    if (view === "impact") return loadImpact();
+    return load();
+  };
 
   return (
     <div className={cn("min-h-full", embedded ? "" : "bg-[#FAF7EF] p-4 sm:p-6")}>
@@ -303,15 +317,6 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
               <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-11 font-medium uppercase tracking-label text-white/80">
                 <Bot size={13} strokeWidth={2} className="text-[#7BD66A]" /> Autonomous content
               </span>
-              <button
-                type="button"
-                onClick={refreshAll}
-                disabled={busy}
-                className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-white/10 px-3.5 text-12 font-medium text-white transition-colors hover:bg-white/20 disabled:opacity-50 u-focus-ring"
-              >
-                <RefreshCw size={14} strokeWidth={2} className={busy ? "animate-spin" : ""} />
-                <span className="hidden sm:inline">Refresh</span>
-              </button>
             </div>
             <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">
               Autonomous blog activity
@@ -348,6 +353,14 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
         <div className="mt-4 flex items-center gap-2 rounded-md bg-[#FEECEB] px-3 py-2.5 text-13 text-[#B42318]">
           <AlertTriangle size={16} strokeWidth={2} className="shrink-0" />
           <span>{error}</span>
+          <button
+            type="button"
+            onClick={retryCurrent}
+            disabled={busy}
+            className="ml-auto min-h-9 rounded-md border border-[#B42318] bg-white px-3 text-14 font-medium u-focus-ring disabled:opacity-50"
+          >
+            Retry
+          </button>
         </div>
       )}
 

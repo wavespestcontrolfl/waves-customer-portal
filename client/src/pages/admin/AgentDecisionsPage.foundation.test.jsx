@@ -34,3 +34,25 @@ it('preserves the decision correction payload from the shared review fields', as
   resolveReview({});
   await waitFor(() => expect(correctButton).not.toHaveAttribute('aria-busy', 'true'));
 });
+
+it('keeps in-progress review text when a pending background read resolves', async () => {
+  let resolveBackground;
+  let listReads = 0;
+  adminFetch.mockImplementation((url) => {
+    if (url.endsWith('/context')) return Promise.resolve({ context: {} });
+    listReads += 1;
+    if (listReads === 1) {
+      return Promise.resolve({ decisions: [{ id: 'fixture-decision', status: 'pending', customerName: 'Fixture customer', recommendedActions: ['call_customer'] }] });
+    }
+    return new Promise((resolve) => { resolveBackground = resolve; });
+  });
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  const reason = await screen.findByLabelText('Review reason');
+  fireEvent(window, new Event('focus'));
+  await waitFor(() => expect(listReads).toBe(2));
+  fireEvent.change(reason, { target: { value: 'Keep this correction' } });
+  resolveBackground({ decisions: [{ id: 'replacement', status: 'pending', customerName: 'Replacement', recommendedActions: [] }] });
+  await waitFor(() => expect(reason).toHaveValue('Keep this correction'));
+    expect(screen.getAllByText('Fixture customer').length).toBeGreaterThan(0);
+  expect(screen.queryByText('Replacement')).not.toBeInTheDocument();
+});

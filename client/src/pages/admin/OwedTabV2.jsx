@@ -1,3 +1,4 @@
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 // client/src/pages/admin/OwedTabV2.jsx
 // Communications → Owed: every open promise across calls, overdue first.
 // Endpoints:
@@ -101,15 +102,26 @@ export default function OwedTabV2() {
   // older response overwrite the newer selection.
   const requestSeq = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ background = false, visibleCount = 200 } = {}) => {
     const seq = ++requestSeq.current;
-    setState((s) => ({ ...s, status: "loading", error: null }));
+    if (!background) setState((s) => ({ ...s, status: "loading", error: null }));
     try {
       const params = new URLSearchParams();
       if (party !== "all") params.set("party", party);
       if (!showHints) params.set("hints", "0");
       params.set("limit", "200");
-      const body = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
+      let body = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
+      const commitments = [...(body.commitments || [])];
+      while (background && commitments.length < visibleCount && body.has_more && body.next_offset != null) {
+        if (seq !== requestSeq.current) return;
+        params.set("offset", String(body.next_offset));
+        const next = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
+        commitments.push(...(next.commitments || []));
+        const progressed = next.next_offset !== body.next_offset && (next.commitments || []).length > 0;
+        body = { ...body, ...next };
+        if (!progressed) break;
+      }
+      body.commitments = commitments;
       if (seq !== requestSeq.current) return;
       setState({ status: "ready", rows: body.commitments || [], error: null, implicitDays: body.overdue_implicit_days ?? null, implicitEstimateHours: body.overdue_implicit_estimate_hours ?? 24, callbacksEnabled: body.callbacks_enabled === true, enabled: body.enabled !== false, hasMore: body.has_more === true, nextOffset: body.next_offset ?? null });
     } catch (err) {
@@ -122,14 +134,17 @@ export default function OwedTabV2() {
     }
   }, [party, showHints]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); return () => { requestSeq.current += 1; }; }, [load]);
+  useVisiblePageRefresh(() => load({ background: true, visibleCount: state.rows.length }), {
+    intervalMs: 60000, enabled: state.status !== "loading" && !busyId && !loadingMore,
+  });
 
   // The server pages at 200: walk the queue with the offset it returned and
   // append, under the same latest-request guard (a filter change while a
   // page is in flight drops the stale page). An action reloads page one.
   const loadMore = async () => {
     if (loadingMore || state.nextOffset == null) return;
-    const seq = requestSeq.current;
+    const seq = ++requestSeq.current;
     setLoadingMore(true);
     try {
       const params = new URLSearchParams();
@@ -155,6 +170,7 @@ export default function OwedTabV2() {
   useEffect(() => { loadRef.current = load; }, [load]);
   const act = async (row, action) => {
     if (busyId) return;
+    requestSeq.current += 1;
     setBusyId(row.id);
     try {
       await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
@@ -205,7 +221,6 @@ export default function OwedTabV2() {
           {state.status === "ready" ? `${openCount}${moreMark} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
           {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours} hours, a callback ${CALLBACK_POLICY[state.callbacksEnabled]}, other promises after ${state.implicitDays} days` : ""}
         </span>
-        <Button size="sm" variant="ghost" onClick={load} disabled={state.status === "loading"}>Refresh</Button>
       </div>
 
       {state.status === "loading" && rows.length === 0 && (

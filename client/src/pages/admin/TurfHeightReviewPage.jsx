@@ -1,6 +1,7 @@
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { formatETDate } from "../../lib/timezone";
-import { Ruler, RefreshCw } from "lucide-react";
+import { Ruler } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
 import { UiSurface, Button, Card, CardBody, ActionFeedback } from "../../components/ui";
@@ -42,19 +43,32 @@ export default function TurfHeightReviewPage() {
   // one success wipe the other's failure (UI audit F0558, Codex r2).
   const [rowErrors, setRowErrors] = useState({});
 
-  const load = useCallback(() => {
-    setLoading(true);
-    adminFetch("/admin/turf-height/review")
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then((d) => { setItems(d.items || []); setError(null); })
-      .catch(() => setError("Failed to load the review queue — the query may be broken, not empty."))
-      .finally(() => setLoading(false));
+  const loadSeq = useRef(0);
+  const foregroundRead = useRef(0);
+  const load = useCallback(async ({ background = false } = {}) => {
+    const seq = ++loadSeq.current;
+    if (!background) foregroundRead.current = seq;
+    if (!background) setLoading(true);
+    try {
+      const r = await adminFetch("/admin/turf-height/review");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      if (seq !== loadSeq.current) return;
+      setItems(d.items || []);
+      setError(null);
+    } catch {
+      if (seq === loadSeq.current) setError("Failed to load the review queue — the query may be broken, not empty.");
+    } finally {
+      if (!background && seq === foregroundRead.current) setLoading(false);
+    }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); return () => { loadSeq.current += 1; }; }, [load]);
+  useVisiblePageRefresh(() => load({ background: true }), { intervalMs: 60000, enabled: !loading && resolving.size === 0 });
 
   async function resolve(id) {
     if (pendingConfirmations.current.has(id)) return;
+    loadSeq.current += 1;
     pendingConfirmations.current.add(id);
     setResolving(new Set(pendingConfirmations.current));
     try {
@@ -85,14 +99,13 @@ export default function TurfHeightReviewPage() {
         variant="workspace"
         title="Turf height review"
         icon={Ruler}
-        actions={[{ key: "refresh", label: "Refresh", variant: "ghost", icon: RefreshCw, onClick: load }]}
       />
       <p className="mb-5 text-ui-body text-ink-secondary">
         Readings where the gauge-photo OCR diverged from the tech's entry, or couldn't be read. The manual reading is the record — confirming just clears the flag.
       </p>
 
       {loading && <ActionFeedback className="min-h-16 mb-3">Loading…</ActionFeedback>}
-      {error && <ActionFeedback error className="mb-3">{error}</ActionFeedback>}
+      {error && <ActionFeedback error onRetry={resolving.size ? undefined : load} className="mb-3">{error}</ActionFeedback>}
       {!loading && !error && items.length === 0 && (
         <Card><CardBody className="py-8 text-center text-ui-body text-ink-secondary">
           Nothing to review — every captured reading agrees with its gauge photo.

@@ -1,5 +1,5 @@
 "use strict";
-/* global window, navigator, localStorage, innerWidth */
+/* global window, Event, window, navigator, localStorage, innerWidth */
 // Actual admin route; every API request is synthetic. No vendor email or scan runs.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -266,14 +266,14 @@ async function main() {
         body: { mode: "select" },
       });
       failList = true;
-      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
       await page
         .getByRole("alert")
         .filter({ hasText: "Synthetic list failure" })
         .waitFor();
       failList = false;
       empty = true;
-      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+      await page.getByRole("button", { name: "Try again", exact: true }).click();
       await page.getByText("No drafts in this view.").waitFor();
       const small = await page
         .locator("main .ui-surface")

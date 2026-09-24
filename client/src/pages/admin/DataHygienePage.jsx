@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { CheckCircle2, DatabaseZap, Eye, EyeOff, Play, RefreshCw, RotateCcw, ShieldAlert, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -75,29 +76,38 @@ export default function DataHygienePage({ embedded = false } = {}) {
   const [revertTarget, setRevertTarget] = useState(null);
   const [revertError, setRevertError] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const loadSeq = useRef(0);
+  const foregroundRead = useRef(0);
+  const load = useCallback(async ({ background = false } = {}) => {
+    const seq = ++loadSeq.current;
+    if (!background) foregroundRead.current = seq;
+    if (!background) { setLoading(true); setError(""); }
     try {
       const [next, nextMetrics] = await Promise.all([
         adminFetch(`/admin/data-hygiene/proposals?status=${encodeURIComponent(status)}&limit=100`),
         adminFetch("/admin/data-hygiene/metrics?days=30"),
       ]);
+      if (seq !== loadSeq.current) return;
       setData(next);
       setMetrics(nextMetrics);
       setSelectedId((current) => (
         next.proposals?.some((p) => p.id === current) ? current : next.proposals?.[0]?.id || null
       ));
     } catch (err) {
-      setError(err.message);
+      if (seq === loadSeq.current) setError(err.message);
     } finally {
-      setLoading(false);
+      if (!background && seq === foregroundRead.current) setLoading(false);
     }
   }, [status]);
 
   useEffect(() => {
     load();
+    return () => { loadSeq.current += 1; };
   }, [load]);
+  useVisiblePageRefresh(() => load({ background: true }), {
+    intervalMs: 60000, enabled: !loading && !busyId && !scanning && !revealingId && !revertTarget && !revealed,
+  });
+  useEffect(() => { if (busyId || scanning) loadSeq.current += 1; }, [busyId, scanning]);
 
   const selected = useMemo(
     () => data.proposals?.find((p) => p.id === selectedId) || data.proposals?.[0] || null,
@@ -245,7 +255,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
           </div>
         </div>
 
-        {error && <ActionFeedback error>{error}</ActionFeedback>}
+        {error && <ActionFeedback error onRetry={busyId || scanning ? undefined : load}>{error}</ActionFeedback>}
         {notice && <ActionFeedback>{notice}</ActionFeedback>}
 
         <MetricsPanel metrics={metrics} />
@@ -257,9 +267,6 @@ export default function DataHygienePage({ embedded = false } = {}) {
                 <CardTitle>Proposals</CardTitle>
                 <p className="text-ui-caption text-ink-secondary mt-1">{pendingCount} pending in current view</p>
               </div>
-              <Button type="button" onClick={load} loading={loading} variant="secondary" aria-label="Refresh proposals">
-                <RefreshCw size={16} aria-hidden />
-              </Button>
             </CardHeader>
             <div className="max-h-[calc(100dvh-260px)] overflow-auto">
               {loading ? (

@@ -70,23 +70,22 @@ describe("PendingDraftsTab", () => {
     expect(adminFetch).toHaveBeenCalledWith("/admin/drafts?status=pending");
   });
 
-  it("locks every card and Refresh while one mutation is in flight", async () => {
+  it("locks every card while one mutation is in flight", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<PendingDraftsTab embedded />);
     await screen.findByText("Pat Customer");
     let finish;
     adminFetch.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     fireEvent.click(screen.getAllByText("Approve & send")[0]);
-    // busyId names only d1, but d2's actions and Refresh must lock too:
+    // busyId names only d1, but d2's actions must lock too:
     // a second action would overwrite busyId and the first to finish
     // would re-enable everything with the other still pending.
     await waitFor(() => expect(screen.getAllByText("Approve & send")[1]).toBeDisabled());
     expect(screen.getAllByText("Reject")[1]).toBeDisabled();
-    expect(screen.getByText("Refresh")).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
     finish({ success: true });
     await waitFor(() => expect(screen.queryByText("Pat Customer")).not.toBeInTheDocument());
     expect(screen.getAllByText("Approve & send")[0]).not.toBeDisabled();
-    expect(screen.getByText("Refresh")).not.toBeDisabled();
   });
 
   it("approve confirms, PUTs, and removes the card", async () => {
@@ -184,5 +183,25 @@ describe("PendingDraftsTab", () => {
     await waitFor(() => expect(screen.getByText("Old Draft")).toBeInTheDocument());
     expect(screen.getAllByText("Sam Owner")).toHaveLength(1); // dedup by id
     expect(screen.queryByText("Load older drafts")).not.toBeInTheDocument(); // cursor exhausted
+  });
+
+  it("keeps loaded older drafts when a background refresh runs", async () => {
+    adminFetch.mockResolvedValueOnce({ drafts: DRAFTS.drafts, pendingCount: 3, nextCursor: "d2" });
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+    const oldDraft = { ...DRAFTS.drafts[0], id: "d3", customerName: "Old Draft" };
+    adminFetch.mockResolvedValueOnce({ drafts: [oldDraft], pendingCount: 3, nextCursor: null });
+    fireEvent.click(screen.getByText("Load older drafts"));
+    expect(await screen.findByText("Old Draft")).toBeInTheDocument();
+
+    adminFetch
+      .mockResolvedValueOnce({ drafts: DRAFTS.drafts, pendingCount: 3, nextCursor: "d2" })
+      .mockResolvedValueOnce({ drafts: [oldDraft], pendingCount: 3, nextCursor: null });
+    fireEvent(window, new Event("focus"));
+
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([url]) =>
+      url === "/admin/drafts?status=pending&before=d2"
+    )).toHaveLength(2));
+    expect(screen.getByText("Old Draft")).toBeInTheDocument();
   });
 });

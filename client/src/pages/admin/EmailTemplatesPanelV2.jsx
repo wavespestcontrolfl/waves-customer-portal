@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -17,6 +18,7 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  ActionFeedback,
   Badge,
   Button,
   Card,
@@ -278,7 +280,7 @@ function defaultNewTemplate() {
   };
 }
 
-function SendHistoryPanel({ messages, loading, onRefresh }) {
+function SendHistoryPanel({ messages, loading }) {
   return (
     <Card>
       <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
@@ -286,9 +288,6 @@ function SendHistoryPanel({ messages, loading, onRefresh }) {
           <History size={15} />
           <CardTitle>Send history</CardTitle>
         </div>
-        <Button variant="secondary" size="sm" className="gap-2" onClick={onRefresh} disabled={loading}>
-          <RefreshCw size={14} /> Refresh
-        </Button>
       </CardHeader>
       <CardBody>
         {loading ? (
@@ -340,7 +339,7 @@ function SendHistoryPanel({ messages, loading, onRefresh }) {
   );
 }
 
-function TemplateIssuesPanel({ issues, loading, onRefresh, onOpenTemplate }) {
+function TemplateIssuesPanel({ issues, loading, onOpenTemplate }) {
   return (
     <Card>
       <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
@@ -348,9 +347,6 @@ function TemplateIssuesPanel({ issues, loading, onRefresh, onOpenTemplate }) {
           <AlertTriangle size={15} />
           <CardTitle>Template issues</CardTitle>
         </div>
-        <Button variant="secondary" size="sm" className="gap-2" onClick={onRefresh} disabled={loading}>
-          <RefreshCw size={14} /> Refresh
-        </Button>
       </CardHeader>
       <CardBody>
         {loading ? (
@@ -599,7 +595,7 @@ function SuppressionsPanel({
   );
 }
 
-function DeliverabilityPanel({ data, loading, onRefresh }) {
+function DeliverabilityPanel({ data, loading }) {
   const provider = data?.provider || {};
   const rates = data?.rates || {};
   const health = data?.health || {};
@@ -619,9 +615,6 @@ function DeliverabilityPanel({ data, loading, onRefresh }) {
             <Activity size={15} />
             <CardTitle>Deliverability</CardTitle>
           </div>
-          <Button variant="secondary" size="sm" className="gap-2" onClick={onRefresh} disabled={loading}>
-            <RefreshCw size={14} /> Refresh
-          </Button>
         </CardHeader>
         <CardBody>
           {loading ? (
@@ -1024,7 +1017,6 @@ function AutomationRunsPanel({
   runs,
   loading,
   busy,
-  onRefresh,
   onProcessDue,
 }) {
   if (!automationKey) return null;
@@ -1039,9 +1031,6 @@ function AutomationRunsPanel({
         <div className="flex gap-2 flex-wrap">
           <Button variant="secondary" size="sm" className="gap-2" onClick={onProcessDue} disabled={busy}>
             <RefreshCw size={14} /> Process due
-          </Button>
-          <Button variant="secondary" size="sm" className="gap-2" onClick={onRefresh} disabled={loading}>
-            <RefreshCw size={14} /> Refresh
           </Button>
         </div>
       </CardHeader>
@@ -1122,7 +1111,6 @@ function AutomationsPanel({
   onSave,
   onDryRun,
   onSelectRuns,
-  onRefreshRuns,
   onProcessDue,
   onDelete,
 }) {
@@ -1404,7 +1392,6 @@ function AutomationsPanel({
         runs={runs}
         loading={runsLoading}
         busy={busy}
-        onRefresh={onRefreshRuns}
         onProcessDue={onProcessDue}
       />
     </div>
@@ -1676,6 +1663,8 @@ export default function EmailTemplatesPanelV2() {
   const [audienceAppointmentId, setAudienceAppointmentId] = useState("");
   const [testEmail, setTestEmail] = useState("contact@wavespestcontrol.com");
   const [toast, setToast] = useState("");
+  const [readErrors, setReadErrors] = useState({});
+  const runsSequence = useRef(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -1737,20 +1726,22 @@ export default function EmailTemplatesPanelV2() {
       .catch((e) => setToast(`Template load failed: ${e.message}`));
   }, [applyFixture]);
 
-  const loadHistory = useCallback(() => {
-    setHistoryLoading(true);
+  const loadHistory = useCallback(({ background = false } = {}) => {
+    if (!background) setHistoryLoading(true);
     return adminFetch("/admin/email-templates/send-history?limit=100")
       .then((d) => setHistory(d.messages || []))
-      .catch((e) => setToast(`History load failed: ${e.message}`))
-      .finally(() => setHistoryLoading(false));
+      .then(() => setReadErrors((prev) => ({ ...prev, history: null })))
+      .catch((e) => setReadErrors((prev) => ({ ...prev, history: e.message })))
+      .finally(() => { if (!background) setHistoryLoading(false); });
   }, []);
 
-  const loadTemplateIssues = useCallback(() => {
-    setTemplateIssuesLoading(true);
+  const loadTemplateIssues = useCallback(({ background = false } = {}) => {
+    if (!background) setTemplateIssuesLoading(true);
     return adminFetch("/admin/email-templates/issues?limit=100")
       .then((d) => setTemplateIssues(d.issues || []))
-      .catch((e) => setToast(`Template issues load failed: ${e.message}`))
-      .finally(() => setTemplateIssuesLoading(false));
+      .then(() => setReadErrors((prev) => ({ ...prev, issues: null })))
+      .catch((e) => setReadErrors((prev) => ({ ...prev, issues: e.message })))
+      .finally(() => { if (!background) setTemplateIssuesLoading(false); });
   }, []);
 
   const loadSuppressions = useCallback(() => {
@@ -1769,12 +1760,13 @@ export default function EmailTemplatesPanelV2() {
       .finally(() => setSuppressionLoading(false));
   }, [suppressionFilter]);
 
-  const loadDeliverability = useCallback(() => {
-    setDeliverabilityLoading(true);
+  const loadDeliverability = useCallback(({ background = false } = {}) => {
+    if (!background) setDeliverabilityLoading(true);
     return adminFetch("/admin/email-templates/deliverability")
       .then((d) => setDeliverability(d))
-      .catch((e) => setToast(`Deliverability load failed: ${e.message}`))
-      .finally(() => setDeliverabilityLoading(false));
+      .then(() => setReadErrors((prev) => ({ ...prev, deliverability: null })))
+      .catch((e) => setReadErrors((prev) => ({ ...prev, deliverability: e.message })))
+      .finally(() => { if (!background) setDeliverabilityLoading(false); });
   }, []);
 
   const loadAutomations = useCallback(() => {
@@ -1789,17 +1781,28 @@ export default function EmailTemplatesPanelV2() {
       .finally(() => setAutomationLoading(false));
   }, []);
 
-  const loadAutomationRuns = useCallback((key = selectedRunsKey) => {
+  const loadAutomationRuns = useCallback((key = selectedRunsKey, { background = false } = {}) => {
     if (!key) return Promise.resolve();
-    setAutomationRunsLoading(true);
+    const seq = ++runsSequence.current;
+    if (!background) setAutomationRunsLoading(true);
     return adminFetch(`/admin/email-templates/automations/${key}/runs?limit=100`)
       .then((d) => {
+        if (seq !== runsSequence.current) return;
         setSelectedRunsKey(key);
         setAutomationRuns(d.runs || []);
+        setReadErrors((prev) => ({ ...prev, automations: null }));
       })
-      .catch((e) => setToast(`Automation runs load failed: ${e.message}`))
-      .finally(() => setAutomationRunsLoading(false));
+      .catch((e) => { if (seq === runsSequence.current) setReadErrors((prev) => ({ ...prev, automations: e.message })); })
+      .finally(() => { if (!background && seq === runsSequence.current) setAutomationRunsLoading(false); });
   }, [selectedRunsKey]);
+
+  const refreshReadView = () => {
+    if (activeView === "history" && !historyLoading) return loadHistory({ background: true });
+    if (activeView === "issues" && !templateIssuesLoading) return loadTemplateIssues({ background: true });
+    if (activeView === "deliverability" && !deliverabilityLoading) return loadDeliverability({ background: true });
+    if (activeView === "automations" && !automationRunsLoading) return loadAutomationRuns(selectedRunsKey, { background: true });
+  };
+  useVisiblePageRefresh(refreshReadView, { intervalMs: 60000, enabled: !loading && !busy });
 
   useEffect(() => {
     loadTemplates();
@@ -2284,6 +2287,8 @@ export default function EmailTemplatesPanelV2() {
         return next;
       });
       if (selectedRunsKey === key) {
+        runsSequence.current += 1;
+        setAutomationRunsLoading(false);
         setSelectedRunsKey(null);
         setAutomationRuns([]);
       }
@@ -2427,6 +2432,7 @@ export default function EmailTemplatesPanelV2() {
       </div>
 
       {toast && <div className="text-12 text-ink-secondary">{toast}</div>}
+      {readErrors[activeView] && <ActionFeedback error onRetry={busy ? undefined : refreshReadView}>{readErrors[activeView]}</ActionFeedback>}
 
       {activeView === "automations" ? (
         <AutomationsPanel
@@ -2445,17 +2451,15 @@ export default function EmailTemplatesPanelV2() {
           onSave={saveAutomation}
           onDryRun={dryRunAutomation}
           onSelectRuns={selectAutomationRuns}
-          onRefreshRuns={() => loadAutomationRuns(selectedRunsKey)}
           onProcessDue={processDueAutomationRuns}
           onDelete={deleteAutomation}
         />
       ) : activeView === "history" ? (
-        <SendHistoryPanel messages={history} loading={historyLoading} onRefresh={loadHistory} />
+        <SendHistoryPanel messages={history} loading={historyLoading} />
       ) : activeView === "issues" ? (
         <TemplateIssuesPanel
           issues={templateIssues}
           loading={templateIssuesLoading}
-          onRefresh={loadTemplateIssues}
           onOpenTemplate={(key) => {
             if (!key) return;
             setSelectedKey(key);
@@ -2481,7 +2485,6 @@ export default function EmailTemplatesPanelV2() {
         <DeliverabilityPanel
           data={deliverability}
           loading={deliverabilityLoading}
-          onRefresh={loadDeliverability}
         />
       ) : (
         <>

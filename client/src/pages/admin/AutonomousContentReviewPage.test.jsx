@@ -29,6 +29,12 @@ beforeEach(() => {
   }));
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+async function resumeRefresh() {
+  await act(async () => {
+    window.dispatchEvent(new Event('online'));
+    await Promise.resolve();
+  });
+}
 
 describe('autonomous blog monitor', () => {
   it('shows failed topic checks and offers no human publishing decisions', async () => {
@@ -55,8 +61,8 @@ describe('autonomous blog monitor', () => {
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
     revision = 2;
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByText('Full draft revision 2');
+    await resumeRefresh();
+    expect(screen.getByText('Full draft revision 2')).toBeTruthy();
     expect(screen.queryByText('Full draft revision 1')).toBeNull();
   });
   it('reaches older activity and resets pagination when filtering', async () => {
@@ -81,9 +87,10 @@ describe('review regressions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     const note = await screen.findByPlaceholderText('Reviewer note (optional)');
     fireEvent.change(note, { target: { value: 'First record note' } });
+    note.blur();
     revision = 2;
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByText('Full draft revision 2');
+    await resumeRefresh();
+    expect(screen.getByText('Full draft revision 2')).toBeTruthy();
     expect(screen.getByPlaceholderText('Reviewer note (optional)').value).toBe('First record note');
     fireEvent.click(screen.getByText('Seasonal ants other-2'));
     await waitFor(() => expect(screen.queryByDisplayValue('First record note')).toBeNull());
@@ -120,25 +127,24 @@ describe('review regressions', () => {
   });
 
   it('lets a slow list response finish before polling again', async () => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     let finish;
     fetch.mockImplementation((url, opts) => url.includes('/review?')
       ? new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ items: [item()], total: 1 }) }); })
       : original(url, opts));
     render(<AutonomousContentReviewPage embedded />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(61000); });
+    await resumeRefresh();
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.includes('/review?'))).toHaveLength(1);
     await act(async () => { finish(); });
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.includes('/review?'))).toHaveLength(2);
   });
 });
 
 describe('activity observability', () => {
   it.each([['Links', '/internal-links'], ['Impact', '/autonomous/impact']])('preserves %s errors during background blog polling', async (tab, endpoint) => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => url.includes(endpoint)
       ? Promise.reject(new Error(`${tab} unavailable`)) : original(url, opts));
@@ -146,7 +152,7 @@ describe('activity observability', () => {
     await act(async () => {});
     fireEvent.click(screen.getByRole('button', { name: tab, exact: true }));
     expect(screen.getByText(`${tab} unavailable`)).toBeTruthy();
-    await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.includes('/review?')).length).toBeGreaterThan(1);
     expect(screen.getByText(`${tab} unavailable`)).toBeTruthy();
   });
@@ -186,7 +192,6 @@ describe('failed activity queries', () => {
 
 describe('background refresh boundaries', () => {
   it('keeps a failed decision visible after successful list polling', async () => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => opts?.method === 'POST'
       ? Promise.reject(new Error('Decision failed')) : original(url, opts));
@@ -196,7 +201,7 @@ describe('background refresh boundaries', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Requeue' })); });
     expect(screen.getByText('Decision failed')).toBeTruthy();
     revision = 2;
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(screen.getByText('Full draft revision 2')).toBeTruthy();
     expect(screen.getByText('Decision failed')).toBeTruthy();
   });
@@ -209,7 +214,6 @@ describe('background refresh boundaries', () => {
   });
 
   it('closes vanished selection on polling without opening another run', async () => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     let vanished = false;
     fetch.mockImplementation((url, opts) => vanished && url.includes('/review?')
@@ -218,42 +222,42 @@ describe('background refresh boundaries', () => {
     await act(async () => {});
     fireEvent.click(screen.getByRole('button', { name: /Seasonal ants blog-1 / }));
     vanished = true;
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(screen.queryByText('Full draft revision 1')).toBeNull();
     expect(screen.getByText('Select a run to see its status.')).toBeTruthy();
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(screen.getByText('Select a run to see its status.')).toBeTruthy();
   });
 });
 
 describe('slow and failed detail refresh', () => {
   it('lets a slow selected detail finish while list polling continues', async () => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     let finish;
     fetch.mockImplementation((url, opts) => url.endsWith('/review/blog-1')
       ? new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ item: item() }) }); }) : original(url, opts));
     render(<AutonomousContentReviewPage embedded />);
     await act(async () => {});
-    await act(async () => { await vi.advanceTimersByTimeAsync(61000); });
+    await resumeRefresh();
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.endsWith('/review/blog-1'))).toHaveLength(1);
     expect(fetch.mock.calls.filter(([url]) => url.includes('/review?')).length).toBeGreaterThan(1);
     await act(async () => { finish(); });
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.endsWith('/review/blog-1'))).toHaveLength(2);
   });
 
   it('preserves selected content and unsaved notes after a background list failure', async () => {
-    vi.useFakeTimers();
     render(<AutonomousContentReviewPage embedded />);
     await act(async () => {});
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Review' })); });
     fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Keep this note' } });
+    screen.getByPlaceholderText('Reviewer note (optional)').blur();
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => url.includes('/review?')
       ? Promise.reject(new Error('Poll failed')) : original(url, opts));
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(screen.getByText('Poll failed')).toBeTruthy();
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
     expect(screen.getByPlaceholderText('Reviewer note (optional)').value).toBe('Keep this note');
@@ -298,12 +302,11 @@ describe('navigation and background loading', () => {
   });
 
   it('keeps loaded cards visible and selectable while a background poll is pending', async () => {
-    vi.useFakeTimers();
     render(<AutonomousContentReviewPage embedded />);
     await act(async () => {});
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => url.includes('/review?') ? new Promise(() => {}) : original(url, opts));
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     const row = screen.getByRole('button', { name: /Seasonal ants blog-2 / });
     expect(row.disabled).toBe(false);
     expect(screen.getByRole('button', { name: 'Next' }).disabled).toBe(false);
@@ -357,12 +360,12 @@ describe('3916 follow-ups', () => {
     });
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
-    vi.useFakeTimers();
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Review' })));
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
     fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Keep this note' } });
+    screen.getByPlaceholderText('Reviewer note (optional)').blur();
     hold = true;
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(release).toBeTypeOf('function');
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
     expect(screen.queryByText('Abbreviated list preview')).toBeNull();

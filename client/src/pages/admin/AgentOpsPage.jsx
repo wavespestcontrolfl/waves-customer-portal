@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   AlertTriangle,
@@ -10,7 +10,6 @@ import {
   ExternalLink,
   Megaphone,
   MessageSquare,
-  RefreshCw,
   Route as RouteIcon,
   Search,
   Star,
@@ -18,6 +17,7 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 const D = {
   bg: "#F4F4F5",
@@ -313,7 +313,7 @@ function LeadConversionPanel({ details }) {
   );
 }
 
-export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {}) {
+export default function AgentOpsPage({ embedded = false } = {}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -321,31 +321,35 @@ export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {
   const [noticeAction, setNoticeAction] = useState(null);
   const [pendingAction, setPendingAction] = useState("");
   const [activeAgent, setActiveAgent] = useState("all");
+  const loadSeqRef = useRef(0);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const load = useCallback(async ({ background = false } = {}) => {
+    const seq = (loadSeqRef.current += 1);
+    if (!background) {
+      setLoading(true);
+      setError("");
+    }
     try {
       const next = await adminFetch("/admin/agents/overview");
+      if (seq !== loadSeqRef.current) return;
       setData(next);
+      setError("");
     } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       setError(err.message || "Failed to load agent ops.");
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current && !background) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     load();
+    return () => {
+      loadSeqRef.current += 1;
+    };
   }, [load]);
 
-  // When embedded under AgentsHubPage, the hub header owns the Refresh
-  // pill — register our load() (and busy state) with it.
-  useEffect(() => {
-    if (!setRefreshHandler) return undefined;
-    setRefreshHandler(load, loading);
-    return () => setRefreshHandler(null);
-  }, [setRefreshHandler, load, loading]);
+  useVisiblePageRefresh(() => load({ background: true }), { intervalMs: 30_000, enabled: !loading && !pendingAction });
 
   const tasks = useMemo(() => {
     const all = data?.tasks || [];
@@ -365,6 +369,7 @@ export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {
       if (note.trim()) body.note = note.trim();
     }
     const key = `${item.id}:${action.key}`;
+    loadSeqRef.current += 1;
     setPendingAction(key);
     setError("");
     setNotice("");
@@ -407,16 +412,16 @@ export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {
         <AdminCommandHeader
           title="Agent ops"
           icon={Bot}
-          actions={[
-            { key: "refresh", label: loading ? "Refreshing" : "Refresh", icon: RefreshCw, onClick: load, disabled: loading, variant: "secondary" },
-          ]}
         />
       )}
 
       <div className="agent-ops-wrap">
         {error && (
-          <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700 }}>
-            {error}
+          <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }} role="alert">
+            <span>{error}</span>
+            <button type="button" onClick={load} disabled={loading || !!pendingAction} style={{ border: `1px solid ${D.red}`, borderRadius: 6, background: D.card, color: D.red, padding: "6px 10px", font: "inherit", cursor: loading ? "default" : "pointer" }}>
+              {loading ? "Retrying…" : "Retry"}
+            </button>
           </div>
         )}
         {notice && (

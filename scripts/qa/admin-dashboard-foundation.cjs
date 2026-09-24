@@ -170,8 +170,10 @@ async function main() {
     await desktop.getByRole('button', { name: 'Discard', exact: true }).click();
     await Promise.all([
       desktop.waitForResponse((response) => response.url().endsWith('/api/admin/dashboard')),
-      desktop.getByRole('button', { name: 'Refresh', exact: true }).click(),
+      desktop.evaluate(() => { document.activeElement?.blur(); window.dispatchEvent(new Event('focus')); }),
     ]);
+    assert.equal(await desktop.getByRole('button', { name: 'Refresh', exact: true }).count(), 0);
+    assert.equal(await desktop.getByText(/^Updated /).count(), 0);
     await desktop.getByRole('button', { name: 'Growth', exact: true }).click();
     assert.equal(await desktop.getByRole('button', { name: 'Growth', exact: true }).getAttribute('aria-current'), 'page');
 

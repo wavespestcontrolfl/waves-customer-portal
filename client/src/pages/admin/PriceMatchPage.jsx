@@ -1,7 +1,7 @@
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Tag,
-  RefreshCw,
   Send,
   XCircle,
   RotateCcw,
@@ -89,10 +89,11 @@ export default function PriceMatchPage() {
   // not overwrite the list with the wrong filter's results when it lands last.
   const loadSeqRef = useRef(0);
 
-  const loadDrafts = useCallback(async () => {
+  const foregroundRead = useRef(0);
+  const loadDrafts = useCallback(async ({ background = false } = {}) => {
     const seq = ++loadSeqRef.current;
-    setLoading(true);
-    setError(null);
+    if (!background) foregroundRead.current = seq;
+    if (!background) { setLoading(true); setError(null); }
     try {
       const data = await adminFetch(`/admin/price-match/drafts?status=${filter}`);
       if (seq !== loadSeqRef.current) return; // superseded by a newer load
@@ -102,13 +103,17 @@ export default function PriceMatchPage() {
       if (seq === loadSeqRef.current)
         setError(err.message || "Failed to load drafts");
     } finally {
-      if (seq === loadSeqRef.current) setLoading(false);
+      if (!background && seq === foregroundRead.current) setLoading(false);
     }
   }, [filter]);
 
   useEffect(() => {
     loadDrafts();
   }, [loadDrafts]);
+  useVisiblePageRefresh(() => loadDrafts({ background: true }), {
+    intervalMs: 60000, enabled: !loading && !busy && !scanning && !confirmSend,
+  });
+  useEffect(() => { if (busy || scanning) loadSeqRef.current += 1; }, [busy, scanning]);
 
   // Load the selected draft's full body whenever the selection changes.
   useEffect(() => {
@@ -226,7 +231,7 @@ export default function PriceMatchPage() {
         );
       } else {
         setNotice(
-          "Scan started — it runs in the background; refresh in a few minutes to see any new draft.",
+          "Scan started — new drafts will appear here automatically.",
         );
       }
     } catch (err) {
@@ -244,7 +249,7 @@ export default function PriceMatchPage() {
   // The backend protects a fresh claim: reset/dismiss only act once claimed_at is
   // older than the stale window (server STALE_CLAIM_MS). Gate the recovery controls
   // on the same window so a fresh 'sending' row shows a wait state instead of a
-  // button that just 409s. (Recomputed each render; Refresh re-evaluates.)
+  // button that just 409s. (Recomputed as the draft list updates.)
   const STALE_CLAIM_MS = 10 * 60 * 1000;
   const claimedAtMs =
     detail && detail.claimed_at ? new Date(detail.claimed_at).getTime() : null;
@@ -267,13 +272,6 @@ export default function PriceMatchPage() {
         title="Price match"
         icon={Tag}
         actions={[
-          {
-            key: "refresh",
-            label: "Refresh",
-            variant: "ghost",
-            icon: RefreshCw,
-            onClick: loadDrafts,
-          },
           {
             key: "preview",
             label: "Preview scan",
@@ -322,7 +320,7 @@ export default function PriceMatchPage() {
         ))}
       </div>
       {error && (
-        <ActionFeedback error className="mb-4">
+        <ActionFeedback error onRetry={busy || scanning ? undefined : loadDrafts} className="mb-4">
           {error}
         </ActionFeedback>
       )}

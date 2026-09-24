@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRightLeft, Copy } from "lucide-react";
 import { Button, Card, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { useHubParams } from "./agents/hubParams";
 import LaneModelCard from "./agents/LaneModelCard";
 import MigrationSetDialog from "./agents/MigrationSetDialog";
@@ -32,7 +33,7 @@ const FILTERS = [
   { key: "locked", label: "Locked" },
 ];
 
-export default function AgentModelsTab({ setRefreshHandler }) {
+export default function AgentModelsTab() {
   const { area } = useHubParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -53,29 +54,33 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   // (no key on this server). Per env: cleared only when THAT draft is
   // replaced or discarded, so an earlier unverified line keeps its warning.
   const [unverified, setUnverified] = useState({});
+  const loadSeq = useRef(0);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async ({ background = false } = {}) => {
+    const seq = ++loadSeq.current;
+    if (!background) {
+      setLoading(true);
+      setError(null);
+    }
     try {
-      setData(await adminFetch("/admin/agents/models"));
+      const next = await adminFetch("/admin/agents/models");
+      if (seq === loadSeq.current) setData(next);
     } catch (e) {
-      setError(e?.message || "Failed to load the model registry");
+      if (seq === loadSeq.current) setError(e?.message || "Failed to load the model registry");
     } finally {
-      setLoading(false);
+      if (!background && seq === loadSeq.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     load();
+    return () => { loadSeq.current += 1; };
   }, [load]);
 
-  // The hub header's Refresh pill drives this tab (same handle AgentOpsPage
-  // exposes); re-register on each loading transition so it can show busy.
-  useEffect(() => {
-    setRefreshHandler?.(load, loading);
-    return () => setRefreshHandler?.(null);
-  }, [setRefreshHandler, load, loading]);
+  useVisiblePageRefresh(() => load({ background: true }), {
+    intervalMs: 60_000,
+    enabled: !loading && Object.keys(draft).length === 0 && !find && !review && !migrating,
+  });
 
   const catalog = useMemo(() => ({ ...(data?.models || {}), ...discovered }), [data, discovered]);
   const selectorByKey = useMemo(() => Object.fromEntries((data?.selectors || []).map((s) => [s.key, s])), [data]);
@@ -111,6 +116,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   }, [data, laneChanged, effectiveLeg, catalog]);
 
   const setDraftValue = (env, value, unverifiedLabel = null) => {
+    loadSeq.current += 1;
     setDraft((prev) => {
       const next = { ...prev };
       if (value) next[env] = value;
@@ -145,6 +151,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   const openPicker = (lane, leg, which) => {
     const env = envForLeg(leg);
     if (!env) return;
+    loadSeq.current += 1;
     const siblings = siblingsOf(lane, leg);
     // Unpin = delete the env var. For a lane pin that returns the leg to its
     // selector / code default; for a leg on an OVERRIDDEN selector it returns
@@ -240,7 +247,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
           <span className="u-nums">{unchecked}</span> unchecked after a switch. Changes apply after Railway restarts; nothing here
           sends anything to a customer.
         </p>
-        <Button size="sm" variant="secondary" onClick={() => setMigrating(true)} className="gap-2">
+        <Button size="sm" variant="secondary" onClick={() => { loadSeq.current += 1; setMigrating(true); }} className="gap-2">
           <ArrowRightLeft size={13} strokeWidth={2} aria-hidden />
           Move a model…
         </Button>

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Copy, RefreshCw } from "lucide-react";
+import { Copy } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Card, CardBody, UiSurface, ActionFeedback, cn } from "../../components/ui";
 import { adminFetch as rawAdminFetch } from "../../lib/adminFetch";
@@ -85,29 +86,37 @@ export default function DuplicateCustomersPage() {
   const [toast, setToast] = useState("");
   const [actionKey, setActionKey] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const loadSeq = useRef(0);
+  const foregroundRead = useRef(0);
+  const load = useCallback(async ({ background = false } = {}) => {
+    const seq = ++loadSeq.current;
+    if (!background) foregroundRead.current = seq;
+    if (!background) { setLoading(true); setError(""); }
     try {
       const data = await api("/admin/customer-duplicates");
-      setGroups(data.groups || []);
+
       // The undo surface is secondary — a merges-list failure must not blank
       // the review queue, so it degrades to an empty section silently.
       const journal = await api("/admin/customer-duplicates/merges").catch(() => ({ merges: [] }));
+      if (seq !== loadSeq.current) return;
+      setGroups(data.groups || []);
       setMerges(journal.merges || []);
     } catch (err) {
-      setError(err.message || "Could not load duplicate customers");
+      if (seq === loadSeq.current) setError(err.message || "Could not load duplicate customers");
     } finally {
-      setLoading(false);
+      if (!background && seq === foregroundRead.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     load();
+    return () => { loadSeq.current += 1; };
   }, [load]);
+  useVisiblePageRefresh(() => load({ background: true }), { intervalMs: 60000, enabled: !loading && !actionKey });
 
   const runAction = async ({ key, endpoint, body, confirmText, successText, onResult }) => {
     if (confirmText && !window.confirm(confirmText)) return;
+    loadSeq.current += 1;
     setActionKey(key);
     setError("");
     setToast("");
@@ -133,7 +142,6 @@ export default function DuplicateCustomersPage() {
         variant="workspace"
         title="Duplicate customers"
         icon={Copy}
-        actions={[{ label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: load, disabled: loading }]}
       />
 
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
@@ -145,7 +153,7 @@ export default function DuplicateCustomersPage() {
         as an additional property on the kept customer.
       </div>
 
-      {error && <ActionFeedback error className="mb-3">{error}</ActionFeedback>}
+      {error && <ActionFeedback error onRetry={actionKey ? undefined : load} className="mb-3">{error}</ActionFeedback>}
       {toast && <ActionFeedback className="mb-3">{toast}</ActionFeedback>}
 
       {loading && !groups.length && (

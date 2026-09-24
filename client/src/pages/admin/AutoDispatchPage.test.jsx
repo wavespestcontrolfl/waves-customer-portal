@@ -41,13 +41,14 @@ it("opens a requested run and links the named appointment to its CURRENT date", 
   expect(screen.getAllByText(/evaluates visits from 7 days out/)[0]).toBeVisible();
 });
 
-it("refreshes selected decisions as well as the list when a running run completes", async () => {
+it("refreshes selected decisions as well as the list when the page regains focus", async () => {
   mount();
   await screen.findByText("Original decision");
   detail = { run: { ...run, status: "completed" }, logs: [{ ...decision, reason_description: "Final decision" }] };
-  fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
+  fireEvent(window, new Event("focus"));
   expect(await screen.findByText("Final decision")).toBeInTheDocument();
   expect(screen.queryByText("Original decision")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
 });
 
 it("shows a retryable detail error instead of claiming there are no decisions", async () => {
@@ -111,6 +112,30 @@ it("updates visit protection through the existing endpoint and reloads authorita
   await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/auto-dispatch/services/visit-1/lock", { method: "PATCH", body: '{"locked":true}' }));
   await screen.findByText("Original decision");
   fireEvent.click(screen.getByText("Decision details and visit controls"));
+  expect(screen.getByRole("checkbox", { name: "Lock this visit from automation" })).toBeChecked();
+});
+
+it("does not let a stale poll overwrite a visit protection update", async () => {
+  const stale = deferred();
+  let detailReads = 0;
+  adminFetch.mockImplementation(async (path, options) => {
+    if (path.includes("runs?")) return { runs: [detail.run], automation };
+    if (options?.method === "PATCH") {
+      detail.logs[0].auto_dispatch_locked = true;
+      return { ok: true };
+    }
+    detailReads += 1;
+    if (detailReads === 2) return stale.promise;
+    return structuredClone(detail);
+  });
+  mount();
+  await screen.findByText("Original decision");
+  fireEvent(window, new Event("focus"));
+  await waitFor(() => expect(detailReads).toBe(2));
+  fireEvent.click(screen.getByText("Decision details and visit controls"));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Lock this visit from automation" }));
+  await waitFor(() => expect(screen.getByRole("checkbox", { name: "Lock this visit from automation" })).toBeChecked());
+  await act(async () => stale.resolve({ run, logs: [{ ...decision, auto_dispatch_locked: false }] }));
   expect(screen.getByRole("checkbox", { name: "Lock this visit from automation" })).toBeChecked();
 });
 

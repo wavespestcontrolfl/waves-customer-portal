@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import OwedTabV2, { dueLabel, whoLabel } from "./OwedTabV2";
 
@@ -180,4 +180,24 @@ describe("OwedTabV2", () => {
     expect(whoLabel({ customer_first_name: "A", customer_last_name: "B" })).toBe("A B");
     expect(whoLabel({ direction: "outbound", to_phone: "+15555550101", from_phone: "+15555550100" })).toBe("+15555550101");
   });
+});
+
+
+it("keeps expanded owed pages when refreshing automatically", async () => {
+  const first = rows()[0];
+  const second = { ...rows()[1], description: "Second page promise" };
+  globalThis.fetch.mockImplementation(async (url) => {
+    const later = String(url).includes("offset=200");
+    return { ok: true, status: 200, json: async () => ({
+      commitments: later ? [second] : [first], has_more: !later, next_offset: later ? null : 200,
+    }) };
+  });
+  render(<OwedTabV2 />);
+  await screen.findByText(first.description);
+  fireEvent.click(screen.getByRole("button", { name: /Load more/ }));
+  await screen.findByText(second.description);
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(screen.getByText(first.description)).toBeInTheDocument();
+  expect(screen.getByText(second.description)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
 });

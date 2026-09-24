@@ -23,6 +23,7 @@ const PRESENTATIONS = {
 
 export default function AdminCommandHeader({
   title,
+  subtitle,
   icon: Icon,
   action,
   actions,
@@ -126,6 +127,7 @@ export default function AdminCommandHeader({
             <div className="h-8 w-8 md:h-9 md:w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
               {Icon && <Icon size={17} strokeWidth={1.9} aria-hidden />}
             </div>
+            <div className="min-w-0">
             <Heading
               className={cn(
                 "m-0 min-w-0 font-medium tracking-normal text-zinc-900",
@@ -138,6 +140,8 @@ export default function AdminCommandHeader({
             >
               {title}
             </Heading>
+            {subtitle && <p className="m-0 mt-1 text-14 font-normal text-ink-secondary">{subtitle}</p>}
+            </div>
           </div>
           {resolvedActions.length > 0 && (
             <div className="ui-command-actions">

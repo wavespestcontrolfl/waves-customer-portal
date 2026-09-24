@@ -33,9 +33,9 @@
  * Tier 1 V2 styling for the shell; the embedded pages keep their own
  * Tier 2 styles.
  */
-import React, { useState, useRef, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw, Layers } from "lucide-react";
+import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, Layers } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
@@ -108,8 +108,8 @@ function readsArea(tab, controlCenter) {
 
 // Overview is the Control center once the ledger phase exists, else the
 // fleet-health page it has always been.
-function OverviewTab({ controlCenter, areas, setRefreshHandler }) {
-  return controlCenter ? <AgentControlCenterTab areas={areas} setRefreshHandler={setRefreshHandler} /> : <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />;
+function OverviewTab({ controlCenter, areas }) {
+  return controlCenter ? <AgentControlCenterTab areas={areas} /> : <AgentOpsPage embedded />;
 }
 
 export default function AgentsHubPage() {
@@ -156,22 +156,6 @@ export default function AgentsHubPage() {
   // (Codex #2961 r15).
   useRenderedTabBeacon("/admin/agents", tab, [searchParams]);
 
-  // AgentOpsPage owns its data fetch; expose a handle here so the lifted
-  // Refresh pill in this header can trigger it without lifting the state
-  // (same pattern as AdminDispatchPage's setOpenCreateHandler). The page
-  // re-registers on each loading transition so the pill can show busy
-  // state, and clears the handler on unmount.
-  const refreshRef = useRef(null);
-  const [refreshState, setRefreshState] = useState({
-    ready: false,
-    busy: false,
-  });
-  const setRefreshHandler = useCallback((handler, busy = false) => {
-    refreshRef.current = handler || null;
-    setRefreshState({ ready: typeof handler === "function", busy });
-  }, []);
-  const handleRefresh = () => refreshRef.current?.();
-
   const showAreas = readsArea(tab, controlCenter) && hub.areas.length > 0;
   const areaSections = showAreas ? [{ key: ALL_AREAS, label: "All" }, ...hub.areas.map((a) => ({ key: a.key, label: areaLabel(a) }))] : [];
   const activeArea = hub.areas.some((a) => a.key === area) ? area : ALL_AREAS;
@@ -191,20 +175,10 @@ export default function AgentsHubPage() {
         onSecondaryChange={(key) => setHubParams({ area: key === ALL_AREAS ? null : key })}
         secondaryAriaLabel="Product area"
         secondaryNavGridClassName="grid-cols-2 md:grid-cols-4 lg:grid-cols-7"
-        action={
-          tab === TABS.OVERVIEW || tab === TABS.MODELS
-            ? {
-                label: refreshState.busy ? "Refreshing" : "Refresh",
-                icon: RefreshCw,
-                onClick: handleRefresh,
-                disabled: !refreshState.ready || refreshState.busy,
-              }
-            : null
-        }
       />
       <div aria-label="Agents content" className="flex-1 min-h-0 flex flex-col">
         {tab === TABS.OVERVIEW ? (
-          <OverviewTab controlCenter={controlCenter} areas={hub.areas} setRefreshHandler={setRefreshHandler} />
+          <OverviewTab controlCenter={controlCenter} areas={hub.areas} />
         ) : tab === TABS.ACTIVITY ? (
           <AgentActivityTab />
         ) : tab === TABS.DISPATCH ? (
@@ -216,7 +190,7 @@ export default function AgentsHubPage() {
         ) : tab === TABS.SHADOW ? (
           <AgentShadowDraftsPage embedded />
         ) : tab === TABS.MODELS ? (
-          <AgentModelsTab setRefreshHandler={setRefreshHandler} />
+          <AgentModelsTab />
         ) : tab === TABS.QUEUE ? (
           <AgentQueueTab embedded />
         ) : (

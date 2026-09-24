@@ -44,6 +44,23 @@ describe("AgentModelsTab", () => {
     expect(within(draftCard).getByText("No backup")).toBeInTheDocument();
   });
 
+  it("does not refresh while a picker or unsaved model draft is open", async () => {
+    renderTab();
+    const card = (await screen.findByText("SMS intent")).closest(".p-4");
+    const modelReads = () => adminFetch.mock.calls.filter(([path]) => path === "/admin/agents/models").length;
+    expect(modelReads()).toBe(1);
+
+    fireEvent.click(within(card).getByRole("button", { name: /Change/ }));
+    await screen.findByRole("dialog");
+    fireEvent(window, new Event("focus"));
+    expect(modelReads()).toBe(1);
+
+    fireEvent.click(within(screen.getByRole("dialog")).getAllByRole("button", { name: "Use" })[0]);
+    await screen.findByText(/lanes move after restart/);
+    fireEvent(window, new Event("focus"));
+    expect(modelReads()).toBe(1);
+  });
+
   it("?area= narrows to that area and the No backup chip filters", async () => {
     renderTab("/admin/agents?tab=models&area=ib");
     expect(await screen.findByRole("heading", { name: "Intelligence Bar" })).toBeInTheDocument();
