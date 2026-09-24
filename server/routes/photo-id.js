@@ -188,10 +188,17 @@ function pestPublicResult(contract) {
   };
 }
 
+// Order matters (codex r1 P1): a contested or low-confidence "not a pest"
+// read (e.g. a lovebug/beneficial call that disagreed across photos, or
+// never rose past low confidence) must NOT reach the reassuring "nothing to
+// worry about" copy — the hedged/generic check runs BEFORE the not_a_pest
+// check, so only a confident, uncontested benign call reads as 'none'.
+// Inspection stays first regardless of confidence (termite/rodent/WDO-style
+// entries are inspection-first at ANY confidence, by design).
 function pestNextStepKind(result, idLabel, type, access) {
   if (result.recommendation && result.recommendation.inspection_required) return 'inspection';
-  if (result.not_a_pest) return 'none';
   if (idLabel.hedged && idLabel.specificity === 'generic') return 'unclear';
+  if (result.not_a_pest) return 'none';
   return laneOutcomeKind(type, access);
 }
 
@@ -274,10 +281,20 @@ function worstOf(values, rankMap, orderList) {
   return orderList[Math.max(...ranks)];
 }
 
+// Missing (null/undefined/'') is NOT a zero reading (codex r1 P1: Number(null)
+// === 0 and Number('') === 0 both pass Number.isFinite, so a genuinely absent
+// score would silently become a measured zero, skew the average, and hide a
+// vision gap from the noUsableScores check below) — filter the raw value
+// BEFORE converting to a number, exactly like lawn-assessment.js's own
+// drought_stress merge treats missing provider evidence as unknown, not none.
+function numericValues(list, key) {
+  return list.map((c) => c[key]).filter((v) => v != null && v !== '').map(Number).filter(Number.isFinite);
+}
+
 function mergeLawnComposites(list) {
-  const turf = list.map((c) => Number(c.turf_density)).filter(Number.isFinite);
-  const weed = list.map((c) => Number(c.weed_coverage)).filter(Number.isFinite);
-  const color = list.map((c) => Number(c.color_health)).filter(Number.isFinite);
+  const turf = numericValues(list, 'turf_density');
+  const weed = numericValues(list, 'weed_coverage');
+  const color = numericValues(list, 'color_health');
   return {
     turf_density: turf.length ? Math.round(turf.reduce((a, b) => a + b, 0) / turf.length) : null,
     weed_coverage: weed.length ? Math.round(weed.reduce((a, b) => a + b, 0) / weed.length) : null,

@@ -333,6 +333,42 @@ describe('next_step branches', () => {
     });
   });
 
+  test('pest: contested/low-confidence not_a_pest read -> unclear, never "nothing to worry about"', async () => {
+    // A lovebug/beneficial call that disagreed across photos must not read as
+    // confidently benign (codex r1 P1).
+    mockIdentifyPest.mockResolvedValue(pestResultFor('lovebug', 'low', true));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      const body = await res.json();
+      expect(body.result.not_a_pest).toBe(true);
+      expect(body.next_step.kind).toBe('unclear');
+      expect(body.next_step.title).not.toMatch(/nothing to worry about/i);
+    });
+  });
+
+  test('pest: confident, uncontested not_a_pest read -> still none', async () => {
+    mockIdentifyPest.mockResolvedValue(pestResultFor('lovebug', 'high', false));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('none');
+    });
+  });
+
+  test('lawn: explicit null scores are treated as missing, not a measured zero -> unclear', async () => {
+    mockLawnAnalyzePhoto.mockResolvedValue({
+      composite: {
+        turf_density: null, weed_coverage: null, color_health: null, grass_type: null, observations: '',
+      },
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      const body = await res.json();
+      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.next_step.kind).toBe('unclear');
+    });
+  });
+
   test('lawn: no usable scores -> unclear', async () => {
     mockLawnAnalyzePhoto.mockResolvedValue({ composite: {} });
     await withServer(async (base) => {
