@@ -84,7 +84,8 @@ describe('v2 extraction prompt', () => {
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
     const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
-    expect(prompt).toContain('Capture ANY price the AGENT states on the call, whether or not the caller accepted it');
+    expect(prompt).toContain('Capture ANY price stated on the call by EITHER party');
+    expect(prompt).toContain('record who said it in stated_by');
     expect(prompt).toContain('amount_max_usd');
     expect(prompt).toContain('per_application');
     expect(prompt).toContain('prepay_term');
