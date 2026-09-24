@@ -71,21 +71,25 @@ function unpricedChild(over = {}) {
 }
 
 // Thenable knex-chain stub: every builder method returns the chain; awaiting
-// it resolves the row list; .first() resolves per-dedupe-key presence.
+// it resolves the row list. Dedupe no longer reads the DB (ring() now hands
+// dedupeKey to notifyAdmin's own advisory-locked dedupe) — `alertedKeys`
+// instead configures the notifyAdmin mock below to answer `deduped: true`
+// for those keys, the same contract the real service relies on.
 function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], alertedKeys = new Set() } = {}) {
   db.mockImplementation((table) => {
     const rows = table === 'scheduled_services' ? staleRows
       : table === 'scheduled_services as ss' ? coverageRows
         : table === 'annual_prepay_terms' ? coveredTerms : null;
     const c = {};
-    for (const m of ['whereIn', 'where', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw']) {
+    for (const m of ['whereIn', 'where', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
       c[m] = jest.fn(() => c);
     }
-    c.whereRaw = jest.fn((sql, params) => { c._dedupeKey = params && params[0]; return c; });
-    c.first = jest.fn(async () => (alertedKeys.has(c._dedupeKey) ? { id: 99 } : undefined));
     c.then = (res, rej) => Promise.resolve(rows || []).then(res, rej);
     return c;
   });
+  NotificationService.notifyAdmin.mockImplementation(async (_category, _title, _body, opts) => (
+    opts?.dedupeKey && alertedKeys.has(opts.dedupeKey) ? { id: 99, deduped: true } : { id: 1 }
+  ));
 }
 
 beforeEach(() => {
@@ -196,7 +200,11 @@ describe('runInner alerting', () => {
     makeDbMock({ staleRows: [staleVisit()], alertedKeys: new Set(['stale-visit:sv-1']) });
     const result = await runInner({ now: NOW });
     expect(result).toMatchObject({ stale: 1, alerted: 0 });
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // notifyAdmin's own dedupe now decides — it IS called (with the
+    // dedupeKey), it just answers deduped:true and does not count as a new
+    // alert.
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('stale-visit:sv-1');
   });
 
   test('an unpriced series rings ONE bell for many child visits', async () => {
@@ -430,17 +438,43 @@ describe('accepted-plan schedule detection', () => {
     expect(keys.filter((key) => key.startsWith('accepted-schedule:'))).toHaveLength(MAX_ALERTS_PER_RUN - 1);
   });
 
-  test('acceptance findings use the existing admin bell and evidence dedupe', async () => {
+  test('acceptance findings use the existing admin bell, a STABLE per-estimate+family dedupe key, and evidenceKey as dedupeVersion', async () => {
+    // The key used to embed evidenceKey directly and churned daily (it
+    // hashes every family row's row_revision/scheduled_date) — one customer
+    // rang 9 times in 9 days for the same standing gap. Now the key is
+    // stable per estimate+family; evidenceKey rides as dedupeVersion so
+    // notifyAdmin re-surfaces the ONE standing row unread on a real
+    // evidence change instead of minting a second row.
     const gap = { estimateId: 'e-1', customerId: 'c-1', serviceFamily: 'pest_control', pattern: 'monthly',
       expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'evidence-1', appointmentIds: ['s-1'] };
     findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap]);
     makeDbMock();
     expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleGaps: 1, acceptedScheduleCheckFailed: false, alerted: 1 });
-    expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true,
-      link: '/admin/customers?customerId=c-1', metadata: { dedupeKey: 'accepted-schedule:e-1:pest_control:evidence-1' } });
+    expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({
+      bell: true,
+      link: '/admin/customers?customerId=c-1',
+      dedupeKey: 'accepted-schedule:e-1:pest_control',
+      refreshOnDedupe: true,
+      dedupeVersion: 'evidence-1',
+      metadata: { dedupeKey: 'accepted-schedule:e-1:pest_control' },
+    });
+
+    // Same estimate+family, same evidence → dedupes onto the standing row.
     findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap]);
-    makeDbMock({ alertedKeys: new Set(['accepted-schedule:e-1:pest_control:evidence-1']) });
+    makeDbMock({ alertedKeys: new Set(['accepted-schedule:e-1:pest_control']) });
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0 });
+
+    // Evidence churns (routine field change) — the KEY is unaffected; only
+    // dedupeVersion changes, which notifyAdmin (tested in its own suite)
+    // uses to decide whether to refresh the standing row. This suite only
+    // has to prove the correct key/version reach notifyAdmin, never a
+    // SECOND key.
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([{ ...gap, evidenceKey: 'evidence-2' }]);
+    makeDbMock({ alertedKeys: new Set(['accepted-schedule:e-1:pest_control']) });
+    await runInner({ now: NOW });
+    const lastCall = NotificationService.notifyAdmin.mock.calls.at(-1);
+    expect(lastCall[3].dedupeKey).toBe('accepted-schedule:e-1:pest_control');
+    expect(lastCall[3].dedupeVersion).toBe('evidence-2');
   });
 
   test('an unavailable acceptance check is reported while existing checks keep running', async () => {

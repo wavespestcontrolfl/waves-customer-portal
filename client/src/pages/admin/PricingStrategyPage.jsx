@@ -34,11 +34,11 @@ const formatMoney = (value) => value != null
   : "—";
 
 const STRATEGY_TABS = [
-  { key: "money-model", label: "Money model" },
-  { key: "value-calc", label: "Value equation" },
-  { key: "offers", label: "Offer builder" },
-  { key: "upsells", label: "Upsell engine" },
-  { key: "ltv", label: "LTV analysis" },
+  { key: "money-model", label: "Model" },
+  { key: "value-calc", label: "Value" },
+  { key: "offers", label: "Offers" },
+  { key: "upsells", label: "Upsells" },
+  { key: "ltv", label: "LTV" },
 ];
 
 export default function PricingStrategyPage({ embedded = false, onSecondaryNav } = {}) {

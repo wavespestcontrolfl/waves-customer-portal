@@ -94,9 +94,9 @@ describe("AssessmentsHubPage usage reporting", () => {
     );
     trackAdminPageView.mockClear();
 
-    fireEvent.click(screen.getByRole("button", { name: "Field Assessment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Field" }));
     expect(await screen.findByText("Field workspace")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Field Assessment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Field" }));
 
     expect(trackAdminPageView).toHaveBeenCalledTimes(1);
     expect(trackAdminPageView).toHaveBeenCalledWith({

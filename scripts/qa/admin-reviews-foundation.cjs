@@ -268,7 +268,11 @@ async function main() {
       await pipelineBadge.waitFor();
       assert.notEqual(await pipelineBadge.evaluate((node) => getComputedStyle(node).color), "rgb(255, 255, 255)");
 
-      await page.getByRole("button", { name: "Outreach", exact: true }).click();
+      await page
+        .getByRole("navigation", { name: "Reviews section", exact: true })
+        .getByRole("button", { name: "Outreach", exact: true })
+        .click();
+      await page.getByRole("button", { name: "Requests", exact: true }).click();
       await page.getByText("Review Routing", { exact: true }).waitFor();
       await capture("outreach-dashboard");
       await page
@@ -333,7 +337,7 @@ async function main() {
       await page.getByLabel("Business Name", { exact: true }).fill("Waves Pest Control");
       await capture("gbp-profile");
       await page.getByRole("button", { name: /^Updates/ }).first().click();
-      await page.getByRole("button", { name: "Bulk Edit", exact: true }).click();
+      await page.getByRole("button", { name: "Bulk", exact: true }).click();
       await page.getByLabel("Field to Edit", { exact: true }).selectOption("phone");
       await page.getByLabel("New Value", { exact: true }).fill("9415550117");
       await capture("gbp-bulk");

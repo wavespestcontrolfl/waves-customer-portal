@@ -41,7 +41,7 @@ describe('finding 5/6 — repeat callers and spoken-name variants', () => {
 });
 
 describe('finding 4 — missed-call bell for unknown callers (GATE_MISSED_CALL_UNKNOWN_CALLERS)', () => {
-  const base = { direction: 'inbound', customer_id: null, from_phone: '+19415550123', answered_by: 'voicemail', recording_sid: null, call_outcome: null, metadata: { location: 'GBP — Sarasota' } };
+  const base = { direction: 'inbound', customer_id: null, from_phone: '+19415550123', answered_by: 'voicemail', recording_sid: null, call_outcome: null, duration_seconds: 40, metadata: { location: 'GBP — Sarasota' } };
 
   test('gate off → customers only, as before', () => {
     expect(missedCallEligible(base)).toBe(false);
@@ -58,12 +58,26 @@ describe('finding 4 — missed-call bell for unknown callers (GATE_MISSED_CALL_U
     const clean = { ...base, metadata: { addons: { results: { nomorobo_spamscore: { status: 'successful', result: { score: 0 } } } } } };
     expect(missedCallEligible(clean, Date.now(), on)).toBe(true);
   });
+
+  test('gate on → an unknown caller rings only after waiting 25s or more (owner ruling 2026-09-24); customers ring at any duration', () => {
+    const on = { unknownCallers: true };
+    const { UNKNOWN_CALLER_MIN_SECONDS } = require('../services/missed-call-bell');
+    expect(UNKNOWN_CALLER_MIN_SECONDS).toBe(25);
+    expect(missedCallEligible({ ...base, duration_seconds: 24 }, Date.now(), on)).toBe(false);
+    expect(missedCallEligible({ ...base, duration_seconds: 25 }, Date.now(), on)).toBe(true);
+    expect(missedCallEligible({ ...base, duration_seconds: '47' }, Date.now(), on)).toBe(true);
+    expect(missedCallEligible({ ...base, duration_seconds: null }, Date.now(), on)).toBe(false);
+    expect(missedCallEligible({ ...base, duration_seconds: undefined }, Date.now(), on)).toBe(false);
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'no-answer', duration_seconds: 6 }, Date.now(), on)).toBe(false);
+    expect(missedCallEligible({ ...base, customer_id: 'c1', duration_seconds: 6 }, Date.now(), on)).toBe(true);
+    expect(missedCallEligible({ ...base, customer_id: 'c1', duration_seconds: null })).toBe(true);
+  });
 });
 
 describe('regressions', () => {
   test.each(['restricted', '+7378742833', '7378742833', '+17378742833', '+86282452253'])('withheld caller %s cannot ring either bell', (from_phone) => {
     expect(callerKey(from_phone)).toBeNull();
-    expect(missedCallEligible({ direction: 'inbound', customer_id: null, from_phone, answered_by: 'missed' }, Date.now(), { unknownCallers: true })).toBe(false);
+    expect(missedCallEligible({ direction: 'inbound', customer_id: null, from_phone, answered_by: 'missed', duration_seconds: 40 }, Date.now(), { unknownCallers: true })).toBe(false);
   });
 
   test('repeat-caller pushes carry a per-call tag (P2)', () => {

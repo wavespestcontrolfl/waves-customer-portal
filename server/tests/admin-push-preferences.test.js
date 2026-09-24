@@ -56,6 +56,19 @@ describe('GET /preferences', () => {
     expect(res.json).not.toHaveBeenCalled();
   });
 
+  test('a quietByDefault trigger reads OFF on every channel when no row is saved', async () => {
+    const { listTriggers } = require('../services/notification-triggers');
+    listTriggers.mockReturnValueOnce([
+      { key: 'new_lead', label: 'New lead' },
+      { key: 'job_complete', label: 'Tech marked job complete', quietByDefault: true },
+    ]);
+    const { res, next } = await invokePreferences({ rows: [] });
+    expect(next).not.toHaveBeenCalled();
+    const prefs = res.json.mock.calls[0][0].preferences;
+    expect(prefs.find((p) => p.key === 'new_lead')).toMatchObject({ push_enabled: true, bell_enabled: true, sound_enabled: true });
+    expect(prefs.find((p) => p.key === 'job_complete')).toMatchObject({ push_enabled: false, bell_enabled: false, sound_enabled: false });
+  });
+
   test('returns defaults when the query succeeds with genuinely no saved rows', async () => {
     const { where, res, next } = await invokePreferences({ rows: [] });
 

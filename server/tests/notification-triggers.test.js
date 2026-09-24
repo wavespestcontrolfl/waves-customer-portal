@@ -372,9 +372,28 @@ describe('triggerNotification bell outcome', () => {
       .toMatchObject({ bellWritten: false, retryable: true });
   });
 
+  // job_complete is quietByDefault: these push-handoff tests need an explicit
+  // opted-in preference row, or the event never reaches the push path.
+  const jobCompleteOptIn = (table) => tableMock(
+    table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }]
+      : table === 'notification_preferences' ? [{ admin_user_id: 'admin-1', trigger_key: 'job_complete', bell_enabled: true, push_enabled: true, sound_enabled: true }]
+        : []);
+
+  test('a quietByDefault trigger with no preference row writes no bell and sends no push', async () => {
+    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    const result = await triggerNotification('job_complete', { techName: 'Adam' });
+    expect(result.bellWritten).toBe(false);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+    // An explicit opt-in row turns the same event back on.
+    db.mockImplementation(jobCompleteOptIn);
+    const optedIn = await triggerNotification('job_complete', { techName: 'Adam' });
+    expect(optedIn.bellWritten).toBe(true);
+  });
+
   test('the durable push check runs after badge work and immediately before sending', async () => {
     const order = [];
-    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    db.mockImplementation(jobCompleteOptIn);
     require('../services/admin-unread').getUnreadCountForAdmin.mockImplementationOnce(async () => {
       order.push('badge');
       return { count: 0, at: Date.now() };
@@ -393,7 +412,7 @@ describe('triggerNotification bell outcome', () => {
   });
 
   test('a push claim refused after the subscription lookup reads as superseded', async () => {
-    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    db.mockImplementation(jobCompleteOptIn);
     require('../services/push-notifications').sendToAdminUsers.mockImplementationOnce(async (_ids, _build, { beforeDispatch }) => (
       (await beforeDispatch()) === false ? { subscriptions: 1, sent: 0, superseded: true } : { sent: 1 }));
     const result = await triggerNotification('job_complete', {}, {
@@ -404,7 +423,7 @@ describe('triggerNotification bell outcome', () => {
   });
 
   test('a push lookup failure keeps a resumed event retryable without taking the claim', async () => {
-    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    db.mockImplementation(jobCompleteOptIn);
     require('../services/push-notifications').sendToAdminUsers.mockRejectedValueOnce(new Error('Synthetic subscription lookup outage'));
     const claim = jest.fn(async () => true);
     const result = await triggerNotification('job_complete', {}, {

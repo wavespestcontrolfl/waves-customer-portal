@@ -94,11 +94,11 @@ const EQUIPMENT_SECTIONS = [{
   Icon: BarChart3
 }, {
   key: "tank-mixes",
-  label: "Tank Mixes",
+  label: "Mixes",
   Icon: Beaker
 }, {
   key: "job-costs",
-  label: "Job Costing",
+  label: "Jobs",
   Icon: Calculator
 }, {
   key: "calibrations",
@@ -129,7 +129,7 @@ const EQUIPMENT_TAB_GROUPS = [{
   tabs: ["maintenance", "calibrations"]
 }, {
   key: "tank-mixes",
-  label: "Tank Mixes",
+  label: "Mixes",
   Icon: Beaker,
   tabs: ["tank-mixes"]
 }, {

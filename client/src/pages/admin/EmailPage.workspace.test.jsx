@@ -250,7 +250,7 @@ describe("Email workspace feedback and request ownership", () => {
   it("preserves blocked senders and the entered address after failed writes", async () => {
     overrides.set("/api/admin/email/block", () => response({}, 503));
     overrides.set("/api/admin/email/blocked/blocked-a", () => response({}, 503));
-    mount(); fireEvent.click(await screen.findByRole("button", { name: "Blocked senders", exact: true }));
+    mount(); fireEvent.click(await screen.findByRole("button", { name: "Blocked", exact: true }));
     await screen.findByText("unwanted.example.invalid");
     fireEvent.change(screen.getByLabelText("Domain or email to block"), { target: { value: "Other@Example.invalid" } });
     fireEvent.click(screen.getByRole("button", { name: "Block", exact: true }));
@@ -327,7 +327,7 @@ describe("Email workspace feedback and request ownership", () => {
   it("reports the Gmail filter warning after the blocklist write succeeds", async () => {
     const warning = "Blocklist saved; Gmail filter unavailable. Messages may stay visible in Gmail.";
     overrides.set("/api/admin/email/block", () => response({ id: "new-block", warning }));
-    mount(); fireEvent.click(await screen.findByRole("button", { name: "Blocked senders", exact: true }));
+    mount(); fireEvent.click(await screen.findByRole("button", { name: "Blocked", exact: true }));
     await screen.findByText("unwanted.example.invalid");
     fireEvent.change(screen.getByLabelText("Domain or email to block"), { target: { value: "example.invalid" } });
     fireEvent.click(screen.getByRole("button", { name: "Block", exact: true }));

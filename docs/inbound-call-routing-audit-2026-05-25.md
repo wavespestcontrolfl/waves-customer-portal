@@ -83,7 +83,9 @@ Production env for this path:
   list.
 - `TWILIO_EXPECTED_FORWARD_NUMBERS` explicitly set to the same list.
 - `WAVES_GREETING_URL` explicitly set to the current Studio disclosure greeting.
-- `WAVES_VOICEMAIL_URL` set to the Waves voicemail MP3.
+- `WAVES_VOICEMAIL_URL` set to the Waves voicemail MP3 (played only when
+  `WAVES_VOICEMAIL_GREETING=recorded`; the default `short` mode speaks an
+  ~8s `<Say>` greeting instead — 2026-09-24).
 
 ## Repeatable Audit Commands
 

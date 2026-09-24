@@ -55,6 +55,29 @@ describe('canAutoRoute fail-open booking', () => {
     expect(open.allowed).toBe(true);
   });
 
+  test('a new lead with a validated on-file address (addressOnly) clears the address flags but keeps every confidence check (codex #4685 r1 P1)', () => {
+    const addressOnly = { hasAddress: true, addressOnly: true };
+    // Address flags alone: the on-file address satisfies them, booking proceeds.
+    const addr = canAutoRoute(extraction(['address_unverifiable', 'missing_service_address', 'caller_phone_missing']), {
+      failOpen: true, callerAni: '+19414651056', knownCustomer: addressOnly,
+    });
+    expect(addr.allowed).toBe(true);
+    // The Barbara call with addressOnly trust: low_extraction_confidence still holds it.
+    const ex = extraction(['address_unverifiable', 'missing_service_address', 'low_confidence_address', 'caller_phone_missing', 'low_extraction_confidence'], 0);
+    const held = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: addressOnly });
+    expect(held.allowed).toBe(false);
+    expect(held.appointmentBlockingFlags).toContain('low_extraction_confidence');
+    expect(held.appointmentBlockingFlags).not.toContain('missing_service_address');
+    // And a low overall score is not exempted either.
+    const low = extraction(['address_unverifiable'], 0);
+    low.confidence = { ...(low.confidence || {}), overall: 0.1 };
+    const lowOut = canAutoRoute(low, { failOpen: true, callerAni: '+19414651056', knownCustomer: addressOnly });
+    expect(lowOut.allowed).toBe(false);
+    expect(lowOut.reason).toBe('low_confidence');
+    const establishedOut = canAutoRoute(low, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    expect(establishedOut.allowed).toBe(true);
+  });
+
   test('address flags are NOT cleared for a new caller (no on-file address)', () => {
     const r = canAutoRoute(extraction(['address_unverifiable', 'missing_service_address']), {
       failOpen: true, callerAni: '+19419603120', knownCustomer: null,

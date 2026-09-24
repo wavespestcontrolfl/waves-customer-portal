@@ -91,7 +91,7 @@ describe("Pricing admin new UI foundation", () => {
     // used to have when it reused totalRetained.
     expect(screen.getByText("Stage IV: Continuity").parentElement).toHaveTextContent("5");
     expect(screen.getByText("Retained 6mo+").parentElement).toHaveTextContent("4");
-    fireEvent.click(screen.getByRole("button", { name: "Value equation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Value" }));
     // The production-length positioning and recommendation strings, not the old
     // short synthetic ones — the Badge has to hold the real copy.
     expect(await screen.findByText("Premium — high perceived value, charge accordingly")).toBeInTheDocument();
@@ -102,7 +102,7 @@ describe("Pricing admin new UI foundation", () => {
       const calls = fetch.mock.calls.filter(([url, options]) => url === "/api/admin/pricing/calculate-value" && options?.method === "POST");
       expect(JSON.parse(calls.at(-1)[1].body).dreamOutcome).toBe(9);
     });
-    fireEvent.click(screen.getByRole("button", { name: "Upsell engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Upsells" }));
     expect(await screen.findByText("Synthetic customer")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
     // The generic success copy is what an operator actually sees, since the

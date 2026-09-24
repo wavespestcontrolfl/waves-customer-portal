@@ -126,14 +126,14 @@ async function main() {
 
       await page.getByRole("button", { name: "Automation", exact: true }).click();
       await page.getByText("Blog RSS Feed", { exact: true }).waitFor();
-      await page.getByRole("button", { name: "Run Audit", exact: true }).click();
+      await page.getByRole("button", { name: "Audit", exact: true }).click();
       await page.getByText("Approve this draft", { exact: true }).waitFor();
       await capture("audit");
       await page.getByRole("button", { name: "Approve & Publish", exact: true }).click();
       const approveWrite = report.requests.filter((item) => item.width === width && item.path.endsWith("/run-1/approve")).at(-1);
       assert.deepEqual({ method: approveWrite.method, body: approveWrite.body }, { method: "POST", body: { variantIndex: 0 } });
 
-      await page.getByRole("button", { name: "Review Graphics", exact: true }).first().click();
+      await page.getByRole("button", { name: "Graphics", exact: true }).first().click();
       await page.getByText("Taylor Example", { exact: true }).first().waitFor();
       await page.getByRole("button", { name: "Competitors", exact: true }).click();
       await page.getByText("Synthetic Competitor", { exact: true }).first().waitFor();

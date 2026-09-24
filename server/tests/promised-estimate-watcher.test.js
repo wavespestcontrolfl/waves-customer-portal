@@ -176,7 +176,7 @@ describe('runPromisedEstimateWatcher', () => {
   test('recovery retires the alert during the send cooldown', async () => {
     const result = await runPromisedEstimateWatcher({ loadRows: async () => [], sentRecently: async () => true });
     expect(result).toEqual({ skipped: 'nothing_found' });
-    expect(retireIfClean).toHaveBeenCalledWith('promised-estimate');
+    expect(retireIfClean).toHaveBeenCalledWith('promised-estimate', { lockKey: 'ops-digest:promised-estimate' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 

@@ -136,7 +136,7 @@ describe("Admin billing failure and draft boundaries", () => {
     await screen.findByText("Reconciliation unavailable");
     expect(screen.getByLabelText("Amount")).toHaveValue("239.50");
     expect(changed).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("tab", { name: "AR / aging" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Aging" }));
     expect(screen.queryByRole("textbox", { name: "Amount" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "Statements" }));
     expect(screen.getByLabelText("Amount")).toHaveValue("239.50");

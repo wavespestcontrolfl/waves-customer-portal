@@ -169,8 +169,8 @@ async function main() {
     });
     await scenario('all six live PPC tabs and live SEO chunk mount', async () => {
       await page.goto(`${server.baseUrl}/admin/ppc`);
-      await page.getByRole('button', { name: 'PPC Dashboard', exact: true }).waitFor();
-      for (const label of ['Overview', 'Call Bridge', 'Service Lines', 'AI Advisor', 'Capacity', 'PPC Dashboard']) {
+      await page.getByRole('button', { name: 'Dashboard', exact: true }).waitFor();
+      for (const label of ['Overview', 'Bridge', 'Services', 'Advisor', 'Capacity', 'Dashboard']) {
         await page.getByRole('button', { name: label, exact: true }).first().click();
       }
       await page.goto(`${server.baseUrl}/admin/seo`);
@@ -187,10 +187,10 @@ async function main() {
       await page.reload();
       await page.getByText('No pending outreach or upsell opportunities. Use Directory filters to find customers by health or past retention outcomes.', { exact: true }).waitFor();
       await page.goto(`${server.baseUrl}/admin/communications`);
-      await page.getByRole('button', { name: 'Message Automations', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Automations', exact: true }).waitFor();
       await page.getByRole('button', { name: 'Promises', exact: true }).waitFor();
       await shot(page, 'communications-desktop-1440');
-      await page.getByRole('button', { name: 'Message Automations', exact: true }).click();
+      await page.getByRole('button', { name: 'Automations', exact: true }).click();
       await page.getByText('Catalog entries: 0', { exact: true }).waitFor();
       await page.goto(`${server.baseUrl}/admin/communications#tab=events`);
       await page.getByText('Catalog entries: 0', { exact: true }).waitFor();
@@ -224,7 +224,7 @@ async function main() {
       await mobile.getByRole('button', { name: 'Promises', exact: true }).waitFor();
       await mobile.getByText('Nothing owed.', { exact: false }).waitFor();
       await shot(mobile, 'communications-mobile-390');
-      await mobile.getByRole('button', { name: 'Message Automations', exact: true }).click();
+      await mobile.getByRole('button', { name: 'Automations', exact: true }).click();
       await mobile.getByText('Catalog entries: 0', { exact: true }).waitFor();
       await shot(mobile, 'communications-automations-mobile-390');
     });
