@@ -161,4 +161,30 @@ describe('first-visit pest activity rating', () => {
     await answer({ allowed: true, firstVisit: false, scaleLabels: ['Very Low', 'Very Low', 'Low', 'Moderate', 'Elevated', 'Severe'] });
     expect(screen.getAllByText(/0 = very low · 1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = severe\./).length).toBeGreaterThan(0);
   });
+
+  it('a restored untouched prefill still submits as a prefill (pre-push P1)', async () => {
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Prefill only', clientPestRating: 5, clientPestRatingTouched: false }));
+    const onSubmit = await mount();
+    await answer({ allowed: true, firstVisit: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
+    });
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.clientPestRating).toBe(5);
+    expect(body.clientPestRatingPrefilled).toBe(true);
+  });
+
+  it('a restored chosen rating is never marked as a prefill', async () => {
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Chose 5', clientPestRating: 5, clientPestRatingTouched: true }));
+    const onSubmit = await mount();
+    await answer({ allowed: true, firstVisit: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
+    });
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.clientPestRating).toBe(5);
+    expect(body).not.toHaveProperty('clientPestRatingPrefilled');
+  });
 });

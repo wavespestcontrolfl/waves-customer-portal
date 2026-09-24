@@ -13407,13 +13407,18 @@ export function CompletionPanel({
     // An untouched picker (legacy drafts stored null for it) keeps whatever
     // is showing now — including the first-visit 5; a tap or a deliberate
     // clear is restored and locks out the late prefill.
-    if (savedDraft.clientPestRatingTouched === true || Number.isInteger(savedDraft.clientPestRating)) {
+    // Drafts since 2026-09-24 record whether the tech touched the picker;
+    // an untouched prefill restores as a prefill (the server re-checks it).
+    // Older drafts have no marker: a number there was the tech's choice.
+    const draftRating = Number.isInteger(savedDraft.clientPestRating) ? savedDraft.clientPestRating : null;
+    const draftTouched = typeof savedDraft.clientPestRatingTouched === "boolean"
+      ? savedDraft.clientPestRatingTouched
+      : draftRating != null;
+    if (draftTouched) {
       clientPestRatingSetByTechRef.current = true;
-      setClientPestRating(
-        Number.isInteger(savedDraft.clientPestRating)
-          ? savedDraft.clientPestRating
-          : null,
-      );
+      setClientPestRating(draftRating);
+    } else if (draftRating != null) {
+      setClientPestRating(draftRating);
     }
     setReviewTiming(normalizeReviewTiming(savedDraft.reviewTiming));
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
