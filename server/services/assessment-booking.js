@@ -33,6 +33,14 @@ function isAssessmentServiceRow(serviceRow) {
     || isAssessmentServiceType(serviceRow.name);
 }
 
+function scopeToAssessmentBookings(query, bookingAlias = 'scheduled_services', serviceAlias = 'services') {
+  return query.where(function assessmentIdentity() {
+    this.whereRaw('LOWER(TRIM(??)) = ?', [`${bookingAlias}.service_type`, ASSESSMENT_DISPLAY_NAME.toLowerCase()])
+      .orWhere(`${serviceAlias}.service_key`, ASSESSMENT_SERVICE_KEY)
+      .orWhereRaw('LOWER(TRIM(??)) = ?', [`${serviceAlias}.name`, ASSESSMENT_DISPLAY_NAME.toLowerCase()]);
+  });
+}
+
 // A scheduled_services-shaped row: the denormalized name first, then the
 // catalog FK when the name alone doesn't say.
 async function isAssessmentBooking(booking, database = db) {
@@ -49,5 +57,6 @@ module.exports = {
   ASSESSMENT_SERVICE_KEY,
   isAssessmentServiceType,
   isAssessmentServiceRow,
+  scopeToAssessmentBookings,
   isAssessmentBooking,
 };

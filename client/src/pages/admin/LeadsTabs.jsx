@@ -414,6 +414,11 @@ function LeadBadge({ label, tone = "neutral", className }) {
     </Badge>
   );
 }
+const CONTACT_EVIDENCE_LABELS = {
+  live_conversation: "Live conversation",
+  assessment_booked: "Assessment booked",
+  assessment_completed: "Assessment completed",
+};
 function LeadStatusReviewPanel({ reconciliation }) {
   if (!reconciliation) return null;
   const isReview = reconciliation.status === "review";
@@ -447,7 +452,8 @@ function LeadStatusReviewPanel({ reconciliation }) {
           {finding.message}
           {finding.evidence && (
             <div className="mt-[3px] text-ink-secondary">
-              {finding.evidence.type}
+              {CONTACT_EVIDENCE_LABELS[finding.evidence.type] ||
+                finding.evidence.type}
               {finding.evidence.id ? ` · ${finding.evidence.id}` : ""}
               {finding.evidence.occurred_at
                 ? ` · ${new Date(finding.evidence.occurred_at).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`
@@ -459,6 +465,12 @@ function LeadStatusReviewPanel({ reconciliation }) {
       <p className="m-[10px_0_0] text-ui-body text-ink-secondary">
         Read-only preview for this lead and recent assessment evidence. No
         status changes or customer messages were made.
+        {reconciliation.scope?.assessment_limit
+          ? ` Shows up to ${reconciliation.scope.assessment_limit} recent assessments.`
+          : ""}
+        {reconciliation.scope?.assessment_truncated
+          ? " Older assessments were not checked."
+          : ""}
       </p>
     </Card>
   );

@@ -13,33 +13,31 @@ jest.mock('../services/lead-attribution', () => ({
 jest.mock('../services/lead-status-reconciliation', () => ({
   getLeadStatusReconciliation: jest.fn(),
 }));
-
 const knex = require('knex')({ client: 'pg' });
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { getLeadStatusReconciliation } = require('../services/lead-status-reconciliation');
 const router = require('../routes/admin-leads');
 const handler = router.stack.find((layer) => layer.route?.path === '/:id' && layer.route.methods.get).route.stack.at(-1).handle;
-
 const lead = { id: 'lead-1', status: 'new', first_contact_at: '2026-09-01T12:00:00.000Z' };
 const activities = [{ id: 'activity-1', activity_type: 'note' }];
-
+let failCalls;
 knex.client.runner = (builder) => ({ run: async () => {
   const compiled = builder.toSQL();
   if (compiled.sql.includes('from "leads"')) return lead;
   if (compiled.sql.includes('from "lead_activities"')) return activities;
+  if (compiled.sql.includes('from "call_log"') && failCalls) throw new Error('synthetic call lookup failure');
   return [];
 } });
-
 async function request(query = {}) {
   const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
   const next = jest.fn();
   await handler({ params: { id: lead.id }, query }, res, next);
   return { body: res.json.mock.calls[0]?.[0], error: next.mock.calls[0]?.[0] };
 }
-
 beforeEach(() => {
   jest.clearAllMocks();
+  failCalls = false;
   db.mockImplementation((table) => knex(table));
   db.raw = knex.raw.bind(knex);
   getLeadStatusReconciliation.mockResolvedValue({
@@ -47,23 +45,29 @@ beforeEach(() => {
   });
 });
 afterAll(() => knex.destroy());
-
 test('leaves the existing detail response unchanged unless leadReview is explicitly enabled', async () => {
   const { body, error } = await request();
   expect(error).toBeUndefined();
   expect(body).toEqual({ lead, activities, calls: [] });
   expect(getLeadStatusReconciliation).not.toHaveBeenCalled();
 });
-
 test('adds a read-only reconciliation preview when leadReview=1', async () => {
   const { body, error } = await request({ leadReview: '1' });
   expect(error).toBeUndefined();
   expect(body.reconciliation).toMatchObject({ mode: 'read_only', status: 'review' });
   expect(getLeadStatusReconciliation).toHaveBeenCalledWith({
-    database: db, lead, activities, associatedCallCount: 0,
+    database: db, lead, activities, associatedCallCount: 0, associatedCallsAvailable: true,
   });
 });
-
+test('marks call evidence unavailable when the best-effort call lookup fails', async () => {
+  jest.spyOn(console, 'error').mockImplementation(() => {});
+  failCalls = true;
+  const { error } = await request({ leadReview: '1' });
+  expect(error).toBeUndefined();
+  expect(getLeadStatusReconciliation).toHaveBeenCalledWith(expect.objectContaining({
+    associatedCallCount: 0, associatedCallsAvailable: false,
+  }));
+});
 test('keeps detail usable with an unavailable preview if reconciliation fails', async () => {
   getLeadStatusReconciliation.mockRejectedValueOnce(new Error('synthetic failure'));
   const { body, error } = await request({ leadReview: '1' });

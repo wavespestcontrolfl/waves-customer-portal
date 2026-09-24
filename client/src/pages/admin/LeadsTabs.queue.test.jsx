@@ -173,6 +173,7 @@ describe('Pipeline queue navigation', () => {
               message: 'Verified evidence previously moved this lead from New to Contacted.',
               evidence: { type: 'live_conversation', id: 'call-1', occurred_at: '2026-09-01T13:00:00.000Z' },
             }],
+            scope: { assessment_limit: 6, assessment_truncated: true },
           },
         }),
       }
@@ -183,6 +184,8 @@ describe('Pipeline queue navigation', () => {
     expect(panel).toHaveTextContent('Review needed');
     expect(panel).toHaveTextContent('Verified evidence previously moved this lead');
     expect(panel).toHaveTextContent('No status changes or customer messages were made');
+    expect(panel).toHaveTextContent('Shows up to 6 recent assessments');
+    expect(panel).toHaveTextContent('Older assessments were not checked');
     expect(fetch).toHaveBeenCalledWith(
       '/api/admin/leads/lead-qa?leadReview=1',
       expect.anything(),

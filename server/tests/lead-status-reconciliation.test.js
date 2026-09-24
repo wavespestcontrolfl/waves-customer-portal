@@ -3,18 +3,12 @@ jest.mock('../services/lead-estimate-link', () => ({
     'live_conversation', 'assessment_booked', 'assessment_completed',
   ]).has(value),
 }));
-jest.mock('../services/assessment-booking', () => ({
-  ASSESSMENT_DISPLAY_NAME: 'Waves Assessment',
-  ASSESSMENT_SERVICE_KEY: 'lawn_inspection',
-}));
-
 const knex = require('knex')({ client: 'pg' });
 const {
   buildLeadStatusReconciliation,
   getLeadStatusReconciliation,
   resolveAssessmentEvidence,
 } = require('../services/lead-status-reconciliation');
-
 const lead = {
   id: 'lead-1',
   status: 'new',
@@ -22,7 +16,6 @@ const lead = {
   estimate_id: null,
   first_contact_at: '2026-09-01T12:00:00.000Z',
 };
-
 function contactActivity(overrides = {}) {
   return {
     activity_type: 'status_change',
@@ -32,7 +25,6 @@ function contactActivity(overrides = {}) {
     ...overrides,
   };
 }
-
 function databaseResults({ openLeads = [], assessments = [] } = {}) {
   const queries = [];
   knex.client.runner = (builder) => ({ run: async () => {
@@ -42,9 +34,7 @@ function databaseResults({ openLeads = [], assessments = [] } = {}) {
   } });
   return { database: (table) => knex(table), queries };
 }
-
 afterAll(() => knex.destroy());
-
 test('flags an exact historical transition only within the current lead lifecycle', () => {
   const result = buildLeadStatusReconciliation({
     lead,
@@ -62,7 +52,6 @@ test('flags an exact historical transition only within the current lead lifecycl
   })]);
   expect(result.scope).toMatchObject({ kind: 'single_record', writes: false, global_sweep: false });
 });
-
 test('treats closed and advanced statuses as review-only history, not an automatic mismatch', async () => {
   const database = jest.fn(() => { throw new Error('database should not be queried'); });
   for (const status of ['contacted', 'won', 'lost']) {
@@ -78,7 +67,6 @@ test('treats closed and advanced statuses as review-only history, not an automat
   }
   expect(database).not.toHaveBeenCalled();
 });
-
 test('matches a non-cancelled assessment by exact source estimate after first contact', async () => {
   const rows = Array.from({ length: 7 }, (_, index) => ({
     id: `assessment-${index}`,
@@ -93,10 +81,11 @@ test('matches a non-cancelled assessment by exact source estimate after first co
   expect(queries[0].sql).toContain('"ss"."source_estimate_id" = ?');
   expect(queries[0].sql).toContain('"ss"."created_at" >= ?');
   expect(queries[0].sql).toContain('"ss"."status" is null');
+  expect(queries[0].sql.toLowerCase()).toContain('lower(trim("ss"."service_type"))');
+  expect(queries[0].sql.toLowerCase()).toContain('lower(trim("svc"."name"))');
   expect(queries[0].bindings).toContain('estimate-1');
   expect(queries[0].bindings).not.toContain('customer-1');
 });
-
 test('uses exact customer evidence only when this is the unique open lead', async () => {
   const assessment = { id: 'assessment-1', status: 'completed', created_at: '2026-09-02T12:00:00.000Z' };
   const unique = databaseResults({ openLeads: [{ id: lead.id }], assessments: [assessment] });
@@ -106,7 +95,6 @@ test('uses exact customer evidence only when this is the unique open lead', asyn
     confidence: 'bounded',
     evidence: { type: 'assessment_completed', id: 'assessment-1', association: 'unique_customer' },
   });
-
   const ambiguous = databaseResults({ openLeads: [{ id: lead.id }, { id: 'lead-2' }], assessments: [assessment] });
   const ambiguousResult = await getLeadStatusReconciliation({ database: ambiguous.database, lead });
   expect(ambiguousResult.findings).toEqual([expect.objectContaining({
@@ -114,7 +102,6 @@ test('uses exact customer evidence only when this is the unique open lead', asyn
     confidence: 'ambiguous',
   })]);
 });
-
 test('surfaces estimate and customer association conflicts without treating them as exact evidence', async () => {
   const estimateConflict = databaseResults({ assessments: [{
     id: 'assessment-other-customer', customer_id: 'customer-2', source_estimate_id: 'estimate-1',
@@ -126,7 +113,6 @@ test('surfaces estimate and customer association conflicts without treating them
   expect(estimateResult.findings).toEqual([expect.objectContaining({
     code: 'assessment_identity_conflict', confidence: 'ambiguous',
   })]);
-
   const customerConflict = databaseResults({
     openLeads: [{ id: lead.id }],
     assessments: [{ id: 'assessment-other-estimate', customer_id: lead.customer_id, source_estimate_id: 'estimate-2' }],
@@ -136,7 +122,6 @@ test('surfaces estimate and customer association conflicts without treating them
     code: 'assessment_identity_conflict', confidence: 'ambiguous',
   })]);
 });
-
 test('reports associated raw calls as advisory without claiming live contact', () => {
   const result = buildLeadStatusReconciliation({ lead, associatedCallCount: 2 });
   expect(result.findings).toEqual([expect.objectContaining({
@@ -144,4 +129,12 @@ test('reports associated raw calls as advisory without claiming live contact', (
     confidence: 'advisory',
     evidence_count: 2,
   })]);
+});
+test('requires review when the associated call source is unavailable', () => {
+  const result = buildLeadStatusReconciliation({ lead, associatedCallsAvailable: false });
+  expect(result.status).toBe('review');
+  expect(result.findings).toEqual([expect.objectContaining({
+    code: 'associated_calls_unavailable', confidence: 'advisory',
+  })]);
+  expect(result.scope.calls_available).toBe(false);
 });

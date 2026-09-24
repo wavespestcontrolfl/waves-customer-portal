@@ -930,6 +930,7 @@ router.get('/:id', async (req, res, next) => {
     // leads, so a call attached to a form lead is still found). Best-effort:
     // a call_log failure must never break the lead fetch.
     let calls = [];
+    let associatedCallsAvailable = true;
     try {
       const digits = String(lead.phone || '').replace(/\D/g, '');
       let ten = digits.length >= 10 ? digits.slice(-10) : null;
@@ -1037,6 +1038,7 @@ router.get('/:id', async (req, res, next) => {
         }));
       }
     } catch (e) {
+      associatedCallsAvailable = false;
       console.error('[leads] call_log lookup failed (non-blocking):', e.message);
     }
 
@@ -1048,6 +1050,7 @@ router.get('/:id', async (req, res, next) => {
           lead,
           activities,
           associatedCallCount: calls.length,
+          associatedCallsAvailable,
         });
       } catch {
         logger.warn('[leads] status reconciliation preview unavailable', { leadId: lead.id });

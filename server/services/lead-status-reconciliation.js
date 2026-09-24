@@ -1,13 +1,10 @@
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { isContactEvidenceType } = require('./lead-estimate-link');
 const {
-  ASSESSMENT_DISPLAY_NAME,
-  ASSESSMENT_SERVICE_KEY,
+  scopeToAssessmentBookings,
 } = require('./assessment-booking');
-
 const ASSESSMENT_RESULT_LIMIT = 6;
 const IGNORED_APPOINTMENT_STATUSES = ['cancelled', 'skipped'];
-
 function metadataOf(activity) {
   if (!activity?.metadata) return {};
   if (typeof activity.metadata === 'object') return activity.metadata || {};
@@ -16,14 +13,12 @@ function metadataOf(activity) {
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch { return {}; }
 }
-
 function atOrAfter(value, floor) {
   if (!floor) return true;
   const valueMs = new Date(value).getTime();
   const floorMs = new Date(floor).getTime();
   return Number.isFinite(valueMs) && Number.isFinite(floorMs) && valueMs >= floorMs;
 }
-
 function exactContactActivities(lead, activities) {
   return activities.filter((activity) => {
     const metadata = metadataOf(activity);
@@ -33,7 +28,6 @@ function exactContactActivities(lead, activities) {
       && atOrAfter(activity.created_at, lead.first_contact_at);
   });
 }
-
 function assessmentQuery(database, lead, association) {
   const query = database('scheduled_services as ss')
     .leftJoin('services as svc', 'ss.service_id', 'svc.id')
@@ -41,9 +35,7 @@ function assessmentQuery(database, lead, association) {
       .whereNotIn('ss.status', IGNORED_APPOINTMENT_STATUSES)
       .orWhereNull('ss.status'))
     .where('ss.created_at', '>=', lead.first_contact_at)
-    .where((builder) => builder
-      .whereILike('ss.service_type', ASSESSMENT_DISPLAY_NAME)
-      .orWhere('svc.service_key', ASSESSMENT_SERVICE_KEY))
+    .modify((builder) => scopeToAssessmentBookings(builder, 'ss', 'svc'))
     .orderBy('ss.created_at', 'desc')
     .limit(ASSESSMENT_RESULT_LIMIT + 1)
     .select(
@@ -57,7 +49,6 @@ function assessmentQuery(database, lead, association) {
   }
   return query;
 }
-
 async function resolveAssessmentEvidence(database, lead) {
   if (!lead?.first_contact_at) return { association: 'unavailable', candidates: [], reason: 'missing_first_contact' };
   if (lead.estimate_id) {
@@ -71,7 +62,6 @@ async function resolveAssessmentEvidence(database, lead) {
     };
   }
   if (!lead.customer_id) return { association: 'unavailable', candidates: [], reason: 'missing_customer_identity' };
-
   const [openLeads, rows] = await Promise.all([
     database('leads')
       .where({ customer_id: lead.customer_id })
@@ -91,12 +81,12 @@ async function resolveAssessmentEvidence(database, lead) {
     open_lead_count: openLeads.length,
   };
 }
-
 function buildLeadStatusReconciliation({
   lead,
   activities = [],
   assessmentResolution = { association: 'unavailable', candidates: [] },
   associatedCallCount = 0,
+  associatedCallsAvailable = true,
 }) {
   const findings = [];
   const exactActivities = exactContactActivities(lead, activities);
@@ -114,7 +104,6 @@ function buildLeadStatusReconciliation({
         },
       });
     });
-
     const exactEvidenceIds = new Set(exactActivities
       .map((activity) => metadataOf(activity).evidenceId)
       .filter((evidenceId) => evidenceId != null)
@@ -151,8 +140,13 @@ function buildLeadStatusReconciliation({
           },
         }));
     }
-
-    if (associatedCallCount > 0) {
+    if (!associatedCallsAvailable) {
+      findings.push({
+        code: 'associated_calls_unavailable',
+        confidence: 'advisory',
+        message: 'Associated call records could not be loaded, so this preview cannot evaluate their outcome. Review the call history manually.',
+      });
+    } else if (associatedCallCount > 0) {
       findings.push({
         code: 'associated_calls_unverified',
         confidence: 'advisory',
@@ -161,7 +155,6 @@ function buildLeadStatusReconciliation({
       });
     }
   }
-
   const review = findings.length > 0;
   const evaluated = lead.status === 'new';
   return {
@@ -181,20 +174,23 @@ function buildLeadStatusReconciliation({
       assessment_limit: ASSESSMENT_RESULT_LIMIT,
       assessment_truncated: !!assessmentResolution.truncated,
       calls: 'Associated calls are advisory only because no canonical persisted live-conversation resolver is available.',
+      calls_available: associatedCallsAvailable,
       evaluated_statuses: ['new'],
       global_sweep: false,
     },
   };
 }
-
-async function getLeadStatusReconciliation({ database, lead, activities = [], associatedCallCount = 0 }) {
+async function getLeadStatusReconciliation({
+  database, lead, activities = [], associatedCallCount = 0, associatedCallsAvailable = true,
+}) {
   if (lead.status !== 'new') {
-    return buildLeadStatusReconciliation({ lead, activities, associatedCallCount });
+    return buildLeadStatusReconciliation({ lead, activities, associatedCallCount, associatedCallsAvailable });
   }
   const assessmentResolution = await resolveAssessmentEvidence(database, lead);
-  return buildLeadStatusReconciliation({ lead, activities, assessmentResolution, associatedCallCount });
+  return buildLeadStatusReconciliation({
+    lead, activities, assessmentResolution, associatedCallCount, associatedCallsAvailable,
+  });
 }
-
 module.exports = {
   buildLeadStatusReconciliation,
   getLeadStatusReconciliation,
