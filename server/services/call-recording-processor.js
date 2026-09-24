@@ -14389,11 +14389,19 @@ const CallRecordingProcessor = {
                     // pass may have created it; it was pulled above, not
                     // lost) — otherwise the task would invite a duplicate
                     // manual booking (pre-push audit P1).
-                    const existingChild = await trx('scheduled_services')
-                      .where({ parent_service_id: primaryRow.id, source_action: 'ai_call_pipeline_followup' })
-                      .whereNotIn('status', ['cancelled', 'skipped', 'no_show', 'rescheduled'])
-                      .first('id');
-                    if (!existingChild) disputeSkippedFollowUpPlan = true;
+                    // …judged by ensureCallFollowUpVisit's OWN ownership rule
+                    // (codex r27 P1): any follow-up off this primary — an AI
+                    // child in any status (a cancelled one was cancelled on
+                    // purpose) or a completion-CTA follow-up linked through
+                    // followup_source_service_id — means dispatch already owns
+                    // the outcome, and a terminal primary gets no visit 2.
+                    const followUpOwned = ['cancelled', 'completed', 'skipped'].includes(primaryRow.status)
+                      || !!(await trx('scheduled_services')
+                        .where((qb) => qb
+                          .where({ parent_service_id: primaryRow.id, source_action: 'ai_call_pipeline_followup' })
+                          .orWhere({ followup_source_service_id: primaryRow.id }))
+                        .first('id'));
+                    if (!followUpOwned) disputeSkippedFollowUpPlan = true;
                   }
                   return primaryRow;
                 }
@@ -15574,7 +15582,13 @@ const CallRecordingProcessor = {
                 // a human's booking so no AI child was created (a manually
                 // planned visit 2 would be a standalone row the child-dedup
                 // guard can't see). Surface it — visit 2 is booked by hand.
-                await db('triage_items')
+                // Serialized with the triage routes' per-call lock (the same
+                // lock transitionCore takes) so a refresh cannot interleave
+                // with a version-bound Resolve of the standing card (pre-push
+                // audit P1 after r27).
+                await db.transaction(async (ttrx) => {
+                  await require('../utils/triage-locks').lockTriageCall(ttrx, call.id);
+                  await ttrx('triage_items')
                   .insert(buildTriageItem({
                     callLogId: call.id,
                     flag: 'attached_booking_followup_unbooked',
@@ -15598,13 +15612,13 @@ const CallRecordingProcessor = {
                   // force-reprocess that moved visit 2's date or window
                   // must reach the staff who book it by hand (codex r27
                   // P1). Payload merged, so nothing it recorded is lost.
-                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                   .merge({
-                    payload: db.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
-                    summary: db.raw('EXCLUDED.summary'),
+                    payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                    summary: ttrx.raw('EXCLUDED.summary'),
                     updated_at: new Date(),
-                  })
-                  .catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+                  });
+                }).catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
               }
               }
               if (followUpCreated) {

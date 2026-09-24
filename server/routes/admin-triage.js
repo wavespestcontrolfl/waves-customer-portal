@@ -230,8 +230,12 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // …and house-number conflict cards, whose Resolve / Dismiss settle the
     // held appointment from the payload (codex r22 P1): the single-card
     // actions carry expected_updated_at like the verdict route.
+    // …and the attached-booking follow-up card, whose promised date/window a
+    // force-reprocess refreshes in place: "Follow-up booked" on the old
+    // screen must not settle the newer obligation (pre-push audit P1 after
+    // r27).
     if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
-      || item.reason_code === 'on_file_house_number_conflict'
+      || item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'attached_booking_followup_unbooked'
       || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
@@ -1051,6 +1055,13 @@ router.post('/:id/verdict', async (req, res) => {
         .where({ id: item.call_log_id })
         .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: new Date() });
     });
+    // The stale-version answer FIRST: a stale card exits the transaction
+    // with nothing resolved, and the generic 409 below would otherwise
+    // hide the STALE_CARD_VERSION code the client reloads on (pre-push
+    // audit P1 after r27).
+    if (staleConflictVersion) {
+      return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
+    }
     if (resolved === 0) {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });
     }
@@ -1089,12 +1100,6 @@ router.post('/:id/verdict', async (req, res) => {
       }
     }
 
-    if (staleConflictVersion) {
-      // A distinct code so the client can tell the stale-version 409 (reload
-      // and re-read) from a relink or proposal conflict, whose messages
-      // carry their own instruction (pre-push audit P1 after r27).
-      return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
-    }
     // Calibration: an Accept on a house-number conflict card means the
     // CALLER'S extracted number was rejected in favour of the record — for
     // route_feedback that is an address denial, not "the AI got this call
