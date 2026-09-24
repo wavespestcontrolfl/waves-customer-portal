@@ -1227,34 +1227,58 @@ function summarizeKnownCaller(customer) {
 // on linked customers in the week to 2026-09-23 were a form lead calling
 // back and not reciting the address they had typed. Stored columns prove
 // nothing by themselves (/public-quote persists client-supplied lat/lng
-// unbound to the address — codex #4685 r1 P1), so the on-file street + ZIP
-// is validated server-side HERE, at call time, and trusted only on a
-// validated_accept verdict inside the service area. The trust is
-// addressOnly: it satisfies the address flags and nothing else — the
-// low-confidence exemptions stay reserved for established customers
-// (codex #4685 r1 P1). Other open-lead stages and terminal stages never
-// qualify. Fail closed on any validator error or non-accept status.
-async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress } = {}) {
+// unbound to the address — codex #4685 r1 P1), so the on-file address is
+// validated server-side at call time and trusted only on a validated_accept
+// verdict inside the service area. The trust is addressOnly: it satisfies
+// the address flags and nothing else — the low-confidence exemptions stay
+// reserved for established customers (codex #4685 r1 P1). Other open-lead
+// stages and terminal stages never qualify. Fail closed on any validator
+// error or non-accept status.
+//
+// The verdict is applied by applyOnFileAddressVerdict — pure, so the live
+// pass and the offline routing audits (buildFailOpenRoutingContext, which
+// replays the verdict production persisted on ai_validation) reach the same
+// knownCustomer from the same evidence (codex #4685 r2 P1).
+function applyOnFileAddressVerdict(knownCaller, verdict) {
+  if (!knownCaller) return knownCaller;
+  const status = verdict?.status || null;
+  knownCaller.onFileAddressVerdict = status ? { status, inServiceArea: verdict?.inServiceArea ?? null } : null;
+  if (knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
+  if (!(status === 'validated_accept' && verdict?.inServiceArea === true)) return knownCaller;
+  knownCaller.addressTrusted = true;
+  knownCaller.addressOnly = true;
+  return knownCaller;
+}
+
+// Runs the validation for a new lead, once per pass and only when routing
+// can use the on-file lane (codex #4685 r2 P2): the call is not stating an
+// address of its own (that address takes the normal validation path), and
+// the record's street + ZIP are on file. The STORED state is validated as
+// stored — a non-Florida state fails closed rather than being rewritten to
+// FL, or Google would accept a synthesized Florida address the proof
+// snapshot never carried (codex #4685 r2 P1).
+async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress, extraction = null } = {}) {
   if (!knownCaller || knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
+  if (knownCaller.onFileAddressVerdict !== undefined) return knownCaller;   // already judged this pass
   const line1 = String(knownCaller.addressLine1 || '').trim();
   const zip = String(knownCaller.addressZip || '').trim();
   if (!line1 || !zip) return knownCaller;
+  if (extraction && statesNewAddress(extraction, knownCaller)) return knownCaller;
+  const storedState = String(knownCaller.addressState || '').trim().toUpperCase();
+  if (storedState && storedState !== SERVICE_STATE) {
+    return applyOnFileAddressVerdict(knownCaller, { status: 'stored_state_outside_service_area', inServiceArea: false });
+  }
   const lines = [line1];
   if (knownCaller.addressLine2) lines.push(String(knownCaller.addressLine2).trim());
-  lines.push([knownCaller.addressCity, `${SERVICE_STATE} ${zip}`].filter(Boolean).join(', '));
+  lines.push([knownCaller.addressCity, `${storedState || SERVICE_STATE} ${zip}`].filter(Boolean).join(', '));
   let verdict = null;
   try {
     verdict = await validate({ addressLines: lines, administrativeArea: SERVICE_STATE });
   } catch (err) {
     logger.warn(`[call-proc] on-file address validation skipped for new lead ${knownCaller.id}: ${err.message}`);
-    return knownCaller;
+    return applyOnFileAddressVerdict(knownCaller, { status: 'validator_error', inServiceArea: null });
   }
-  const accepted = verdict?.status === 'validated_accept' && verdict?.inServiceArea === true;
-  knownCaller.onFileAddressValidation = verdict?.status || null;
-  if (!accepted) return knownCaller;
-  knownCaller.addressTrusted = true;
-  knownCaller.addressOnly = true;
-  return knownCaller;
+  return applyOnFileAddressVerdict(knownCaller, verdict);
 }
 
 // The fail-open routing input for a known caller: null unless their on-file
@@ -1316,9 +1340,16 @@ function callerIdNameForPrompt(call) {
  * exactly as the live path does — the two are one contract.
  */
 function buildFailOpenRoutingContext({
-  call = {}, customer = null, contactPhone = null, failOpenEnabled = false,
+  call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
+  // A new lead's trust comes from the verdict production persisted for this
+  // call (ai_validation.on_file_address_validation), never from a fresh
+  // network call and never from stored columns (codex #4685 r2 P1).
+  if (knownCaller) {
+    const verdict = onFileAddressVerdict !== undefined ? onFileAddressVerdict : persistedOnFileAddressVerdict(call);
+    applyOnFileAddressVerdict(knownCaller, verdict);
+  }
   return {
     knownCaller,
     options: {
@@ -1329,6 +1360,12 @@ function buildFailOpenRoutingContext({
       knownCustomer: failOpenKnownCustomer(knownCaller),
     },
   };
+}
+
+function persistedOnFileAddressVerdict(call) {
+  let av = call?.ai_validation;
+  if (typeof av === 'string') { try { av = JSON.parse(av); } catch { av = null; } }
+  return av?.on_file_address_validation || null;
 }
 
 function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller) {
@@ -7766,7 +7803,7 @@ const CallRecordingProcessor = {
           ? await db('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()
           : null)
         : await findCustomerForCallContact(contactPhone, {});
-      knownCaller = await trustValidatedNewLeadAddress(summarizeKnownCaller(knownCustomer));
+      knownCaller = summarizeKnownCaller(knownCustomer);
     } catch (e) {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
@@ -8666,6 +8703,9 @@ const CallRecordingProcessor = {
           // caller_phone_missing, an existing customer's on-file address clears
           // address flags, a garbled email (name_email_mismatch) is advisory.
           const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
+          // A new lead's on-file address is validated HERE, once, and only
+          // when this call does not state its own (codex #4685 r2 P2).
+          knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2Extraction });
           const knownCustomerForFailOpen = failOpenKnownCustomer(knownCaller);
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
@@ -16403,6 +16443,7 @@ const CallRecordingProcessor = {
           canonicalRecord: extracted,
         });
         finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
+        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit });
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
@@ -16459,6 +16500,10 @@ const CallRecordingProcessor = {
             : {}),
         } : null,
         address_validation_status: v2AddressValidation?.status || null,
+        // The on-file address verdict this pass judged a new lead by (null
+        // when none was needed) — replayed by buildFailOpenRoutingContext so
+        // the offline audits mirror the live lane (codex #4685 r2 P1).
+        on_file_address_validation: knownCaller?.onFileAddressVerdict || null,
         errors: v2Result.errors || null,
         generated_at: new Date().toISOString(),
       };
@@ -17594,6 +17639,7 @@ CallRecordingProcessor._test = {
   summarizeKnownCaller,
   failOpenKnownCustomer,
   trustValidatedNewLeadAddress,
+  applyOnFileAddressVerdict,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,
