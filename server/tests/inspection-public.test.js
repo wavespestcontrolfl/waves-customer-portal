@@ -691,6 +691,24 @@ describe('main merge: ADDRESS_UNVERIFIED from the shared booking', () => {
   });
 });
 
+describe('Codex #4737 r20 P2: an elapsed same-day visit is not a future visit', () => {
+  const visitToday = (end) => [{ id: 'ss-today', scheduled_date: etDateString(), window_start: '00:00', window_end: end, service_type: 'Quarterly Pest Control', reschedule_token: 'today-tok' }];
+  test('a visit from earlier today whose window ended does not make the lead converted', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = visitToday('00:01');
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.state).not.toBe('converted');
+  });
+  test('a visit later today still counts as future (converted)', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = visitToday('23:59');
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.state).toBe('converted');
+  });
+});
+
 describe('Codex #4737 r17: south Hillsborough is served; the in-booking and waitlist checks are lead-wide', () => {
   test('P1: a Ruskin (south Hillsborough) address is in area; a Tampa one is not', async () => {
     firstResults.leads = LEAD_ROW;
@@ -2994,6 +3012,18 @@ describe('POST /:token/waitlist', () => {
     expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['inspection-lead', LEAD_ID]);
     expect(openAtInsert.length).toBeGreaterThanOrEqual(2);
     expect(openAtInsert.every((n) => n > 0)).toBe(true);
+  });
+
+  // Codex #4737 r20 P0 / P2: the waitlist row-locks the lead; the waitlist
+  // promotion only moves a row that is still a waitlist row.
+  test('the waitlist locks the lead row; the subscriber promotion is conditional on status waitlist', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const page = fs.readFileSync(path.join(__dirname, '../routes/inspection-public.js'), 'utf8');
+    const wl = page.slice(page.indexOf("router.post('/:token/waitlist'"));
+    expect(wl.slice(0, 3000)).toContain('loadLead(trx, lead.id, { forUpdate: true })');
+    const ns = fs.readFileSync(path.join(__dirname, '../services/newsletter-subscribers.js'), 'utf8');
+    expect(ns).toContain(".where({ id: existing.id, status: 'waitlist' }).update(updates)");
   });
 
   test('the region is the ticket\'s, never a caller-supplied county', async () => {

@@ -68,7 +68,12 @@ async function transitionWaitlistRow(existing, {
     updates.status = 'active';
     updates.confirmed_at = new Date();
   }
-  await db('newsletter_subscribers').where({ id: existing.id }).update(updates);
+  // Conditional on the row STILL being a waitlist row (Codex #4737 r20 P2):
+  // an overlapping signup or admin promotion that moved it first wins, and
+  // this call returns null so the caller re-runs the normal state machine
+  // (never a second token overwriting the first's emailed link).
+  const moved = await db('newsletter_subscribers').where({ id: existing.id, status: 'waitlist' }).update(updates);
+  if (!moved) return null;
   if (linkCustomer) await linkToCustomer(lc);
   const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
   return { subscriber: fresh, action: requireConfirmation ? 'confirmation_sent' : 'resubscribed' };
@@ -113,7 +118,11 @@ async function transitionWaitlistRow(existing, {
  * false, paths land directly at status='active' (admin add only; public
  * website and quote-wizard signups must pass requireConfirmation=true).
  */
-async function subscribeOrResubscribe({
+async function subscribeOrResubscribe(params = {}) {
+  return subscribeOrResubscribeOnce(params, { retried: false });
+}
+
+async function subscribeOrResubscribeOnce({
   email,
   firstName = null,
   lastName = null,
@@ -125,7 +134,7 @@ async function subscribeOrResubscribe({
   // /subscribers) may promote a waitlist row straight to active; bulk and
   // automatic trusted flows never do (Codex #4737 r3 P2).
   promoteWaitlist,
-} = {}) {
+} = {}, { retried } = {}) {
   if (!email) {
     const err = new Error('email required');
     err.code = 'EMAIL_REQUIRED';
@@ -179,9 +188,14 @@ async function subscribeOrResubscribe({
     if (existing.status === 'waitlist') {
       // Its own status-specific transition (Codex #4737 r9 P2) — see
       // transitionWaitlistRow below.
-      return transitionWaitlistRow(existing, {
+      const transitioned = await transitionWaitlistRow(existing, {
         source, firstName, lastName, requireConfirmation, promoteWaitlist, linkCustomer, lc,
       });
+      if (transitioned || retried) return transitioned || { subscriber: existing, action: 'already_pending' };
+      // Another request moved the row first: re-run once against its state.
+      return subscribeOrResubscribeOnce({
+        email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist,
+      }, { retried: true });
     }
 
     if (existing.status === 'unsubscribed' || existing.status === 'inactive') {

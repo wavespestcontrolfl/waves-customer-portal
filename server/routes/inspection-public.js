@@ -766,6 +766,20 @@ async function rescheduleUrlFor(visitId) {
 // already happened, but a not-yet-terminal same-day row still should).
 // Takes an explicit `dbConn` (plain `db` or a `trx`) so the commit path can
 // re-run this exact query under its advisory lock.
+// A visit dated TODAY whose window has already ended in ET (Codex #4737 r20
+// P2): its terminal status may simply not be recorded yet, so it is not a
+// "future" visit. No window on file → not provably elapsed.
+function elapsedToday(row) {
+  const { toDateStr } = require('../services/auto-dispatch/dates');
+  if (toDateStr(row.scheduled_date) !== etDateString()) return false;
+  const end = String(row.window_end || row.window_start || '').slice(0, 5);
+  if (!/^\d{2}:\d{2}$/.test(end)) return false;
+  const { etParts } = require('../utils/datetime-et');
+  const now = etParts();
+  const nowHHMM = `${String(now.hour).padStart(2, '0')}:${String(now.minute).padStart(2, '0')}`;
+  return end <= nowHHMM;
+}
+
 async function findOpenVisit(dbConn, customerId, { assessmentOnly = false, excludeAssessment = false, futureOnly = false } = {}) {
   // The assessment identity is applied IN SQL, before anything could bound
   // the scan (Codex #4737 r12 pre-push P1) — and no LIMIT: a customer with
@@ -784,6 +798,7 @@ async function findOpenVisit(dbConn, customerId, { assessmentOnly = false, exclu
   if (futureOnly) q = q.where('scheduled_services.scheduled_date', '>=', etDateString());
   const rows = await q;
   for (const row of rows) {
+    if (futureOnly && elapsedToday(row)) continue;
     // The catalog identity too (Codex #4737 r9 P2): a row linked to the
     // assessment service with a customized service_type is still one.
     const assessment = await isAssessmentBooking(row, dbConn);
@@ -2186,7 +2201,10 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
     // concurrent commit either finished first (and is seen here) or waits.
     const written = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['inspection-lead', String(lead.id)]);
-      const freshLead = await loadLead(trx, lead.id);
+      // Row-locked too (Codex #4737 r20 P0): staff conversions/closures do
+      // not take the advisory lock, so the lead row itself is held until
+      // both writes commit.
+      const freshLead = await loadLead(trx, lead.id, { forUpdate: true });
       if (!freshLead) return false;
       // Lead-wide, every trusted profile (Codex #4737 r17 P0).
       const eligibility = await readEligibility(freshLead, await loadTrustedCustomer(trx, freshLead, verified), verified, { conn: trx, includeRescheduleUrl: false });
