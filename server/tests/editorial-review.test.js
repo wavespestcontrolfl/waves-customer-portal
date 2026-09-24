@@ -138,6 +138,13 @@ describe('editorial review', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
+  test('rejects unclosed frontmatter before dispatch', async () => {
+    const result = await editorial.review({ document: '---\ntitle: Broken\n\n# Broken', title: 'Broken' });
+    expect(result.checks.every((check) => check.status === 'error')).toBe(true);
+    expect(result.checks[0].findings[0].detail).toContain('frontmatter is invalid');
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
   test('fails closed when dispatch is unavailable', async () => {
     mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
     const result = await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding' });

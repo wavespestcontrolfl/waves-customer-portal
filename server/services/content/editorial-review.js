@@ -104,6 +104,7 @@ function addOperationalFindings(checks, analysis, sourceErrors, document, title)
 function prepareReview(document, title) {
   if (!document.trim() || !title) return { error: ['A non-empty exact document and title are required.', 'Supply the final Markdown/MDX document and its exact title.'] };
   if (document.length > LIMITS.documentChars) return { error: [`Document exceeds the ${LIMITS.documentChars}-character review ceiling.`, 'Split or reduce the document before review; partial review cannot pass.'] };
+  if (/^---\r?\n/.test(document) && !splitFrontmatter(document).frontmatter) return { error: ['The document frontmatter is invalid.', 'Correct the frontmatter before review.'] };
   try {
     const publishedTitle = frontmatter.parse(document).data.title;
     if (publishedTitle != null && publishedTitle !== title) return { error: ['The supplied title differs from the published frontmatter title.', 'Review the exact published title.'] };
