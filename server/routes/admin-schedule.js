@@ -12664,8 +12664,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       if (financialCasSnapshot?.versions) {
         const lockedVersionRow = await trx('scheduled_services')
           .where({ id: req.params.id }).forUpdate().first('id', ...rowVersionSelect(trx));
+        // The add-on rows are locked too (pre-push fallback audit P1 on
+        // 39412c3242): an unlocked read here would let a concurrent writer
+        // change an add-on row after the compare and before this
+        // transaction's own add-on replace, which then silently discards
+        // that write. Parent row first, then its add-on rows, in id order
+        // — the same order every other writer on this visit takes.
         const lockedAddonVersionRows = await trx('scheduled_service_addons')
-          .where({ scheduled_service_id: req.params.id }).select('id', ...rowVersionSelect(trx));
+          .where({ scheduled_service_id: req.params.id }).orderBy('id').forUpdate().select('id', ...rowVersionSelect(trx));
         if (rowVersionsDrifted(financialCasSnapshot, { parent: lockedVersionRow, addons: lockedAddonVersionRows })) {
           throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
             statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
