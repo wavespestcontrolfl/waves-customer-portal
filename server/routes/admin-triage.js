@@ -759,6 +759,21 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
         summary: trx.raw('EXCLUDED.summary'),
         updated_at: new Date(),
       });
+  } else if (heldConflictPayload?.follow_up_plan) {
+    // No task filed (the primary is covered, or the verdict denied it) but
+    // the card recorded a PROMISED follow-up the hold kept from booking:
+    // that owed visit 2 gets its own card, as the reuse path files it,
+    // unless one already stands (local audit P1 after r20).
+    const { buildTriageItem } = require('../services/call-routing-gates');
+    await trx('triage_items')
+      .insert(buildTriageItem({
+        callLogId: item.call_log_id,
+        flag: 'attached_booking_followup_unbooked',
+        extraction: { meta: { call_summary: 'House-number dispute settled — the follow-up visit promised on the call is still unbooked' }, scheduling: pre.approvedWindow || { status: 'confirmed' } },
+        extraPayload: { follow_up_plan: heldConflictPayload.follow_up_plan, skipped_reason: 'house_number_dispute_settled_follow_up_unbooked' },
+      }))
+      .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+      .ignore();
   }
 }
 
