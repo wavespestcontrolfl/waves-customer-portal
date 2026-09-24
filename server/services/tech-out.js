@@ -27,6 +27,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { dayStopsQuery } = require('./scheduling/day-stops');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { createAlert, resolveAlert } = require('./dispatch-alerts');
+const { getIo } = require('../sockets');
 
 const REASONS = ['sick', 'emergency', 'no_show', 'other'];
 const MAX_NOTE_LENGTH = 300;
@@ -290,6 +291,28 @@ async function sweepAbsentTechDays({ now } = {}) {
   return { absences: absences.length, parked };
 }
 
+const ABSENCE_EVENT = 'dispatch:tech_absence';
+const ADMIN_ROOM = 'dispatch:admins';
+
+/**
+ * After a mark-out / clear COMMITS, tell every open dispatch board (the
+ * dispatch:admins room, same as dispatch-alerts.js) so boards other than
+ * the mutating tab re-read the roster — out_today, the Out pill and the
+ * disabled drop target are derived from technician_absences, and the
+ * dispatch:tech_status stream never carries them (pre-push auditor P1 on
+ * #4678). Payload is a pointer, not the row: the client re-fetches
+ * /admin/dispatch/board, so out_today is always the server's own reading.
+ * Fire-and-forget; io unset (unit tests, boot order) just logs.
+ */
+function emitAbsenceChange({ technicianId, date, out, absenceId }) {
+  const io = getIo();
+  if (!io) {
+    logger.warn('[tech-out] io not initialized; skipping absence broadcast');
+    return;
+  }
+  io.to(ADMIN_ROOM).emit(ABSENCE_EVENT, { tech_id: technicianId, date, out: !!out, absence_id: absenceId || null });
+}
+
 /** Mark a technician out for a date and park their day, atomically. */
 async function markTechOut({ technicianId, date, reason, note, actorId }) {
   if (!technicianId) throw serviceError(400, 'VALIDATION', 'technicianId is required');
@@ -300,7 +323,7 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
     throw serviceError(400, 'VALIDATION', `note must be ${MAX_NOTE_LENGTH} characters or fewer`);
   }
 
-  return db.transaction(async (trx) => {
+  const result = await db.transaction(async (trx) => {
     // Serialize with assignment writers: they take the tech-day fence FIRST
     // and then read this row FOR SHARE inside the transaction
     // (dispatch-assignment.js applyAssignment, rebooker.js, the IB movers).
@@ -332,11 +355,15 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
     logger.info(`[tech-out] ${tech.name} out ${date} (${reason}): ${summary.total} stop(s) in ${summary.units} unit(s) parked`);
     return { absence: updated || { ...absence, redistribution: summary }, summary };
   });
+  // Committed by here — a failed mark (ALREADY_OUT, alert insert error)
+  // rejected above and broadcasts nothing.
+  emitAbsenceChange({ technicianId, date, out: true, absenceId: result.absence?.id });
+  return result;
 }
 
 /** Clear a technician's absence for a date and resolve its parked alerts, atomically. Moves nothing. */
 async function clearTechOut({ technicianId, date, actorId }) {
-  return db.transaction(async (trx) => {
+  const result = await db.transaction(async (trx) => {
     // Fence first (same order as markTechOut and the sweep): a sweep that
     // holds this tech-day finishes before we clear, and a sweep that starts
     // after us re-reads the row under the fence and sees cleared_at.
@@ -368,11 +395,15 @@ async function clearTechOut({ technicianId, date, actorId }) {
     logger.info(`[tech-out] cleared absence ${absence.id} for ${technicianId} on ${date}; resolved ${resolvedAlerts.length} overflow alert(s)`);
     return { absence: rows[0], resolvedAlerts };
   });
+  // Committed by here (NOT_OUT / a resolveAlert failure rejected above).
+  emitAbsenceChange({ technicianId, date, out: false, absenceId: result.absence?.id });
+  return result;
 }
 
 module.exports = {
   REASONS,
   ALERT_TYPE,
+  ABSENCE_EVENT,
   techOutEnabled,
   getTechOut,
   markTechOut,

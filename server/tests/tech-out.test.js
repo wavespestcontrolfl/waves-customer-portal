@@ -142,14 +142,17 @@ jest.mock('../services/dispatch-alerts', () => ({
   createAlert: jest.fn(),
   resolveAlert: jest.fn(),
 }));
+jest.mock('../sockets', () => ({ getIo: jest.fn() }));
 
 const db = require('../models/db');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const { lockTechDays } = require('../services/scheduling/tech-day-lock');
 const { createAlert, resolveAlert } = require('../services/dispatch-alerts');
+const { getIo } = require('../sockets');
+const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
-  REASONS, ALERT_TYPE, markTechOut, clearTechOut, getTechOut, parkTechDay, sweepAbsentTechDays, rankBumpOrder, _test,
+  REASONS, ALERT_TYPE, ABSENCE_EVENT, markTechOut, clearTechOut, getTechOut, parkTechDay, sweepAbsentTechDays, rankBumpOrder, _test,
 } = require('../services/tech-out');
 
 const TECH = { id: '11111111-2222-4333-8444-555555555555', name: 'Adam' };
@@ -178,7 +181,15 @@ beforeEach(() => {
   dayStopsQuery.mockImplementation(() => fakeQuery([]));
   createAlert.mockImplementation(async ({ jobId }) => ({ id: `alert-${jobId}` }));
   resolveAlert.mockImplementation(async ({ id }) => ({ id, resolved_at: 'NOW()' }));
+  getIo.mockReturnValue(null);
 });
+
+/** A fake socket.io server: `emit` calls are recorded per room. */
+function fakeIo() {
+  const emit = jest.fn();
+  const io = { to: jest.fn(() => ({ emit })), emit };
+  return io;
+}
 
 describe('REASONS / rankBumpOrder', () => {
   test('fixed vocabulary', () => {
@@ -378,6 +389,50 @@ describe('getTechOut / clearTechOut', () => {
     db.__state.alerts.push({ id: 'alert-1', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: null });
     resolveAlert.mockRejectedValueOnce(new Error('resolve boom'));
     await expect(clearTechOut({ technicianId: TECH.id, date: DATE, actorId: ACTOR })).rejects.toThrow('resolve boom');
+  });
+});
+
+describe('absence broadcast (pre-push auditor P1 on #4678: other open boards)', () => {
+  test('markTechOut emits dispatch:tech_absence {out: true} to dispatch:admins AFTER the transaction commits', async () => {
+    const io = fakeIo();
+    getIo.mockReturnValue(io);
+    db.transaction.mockClear();
+
+    const { absence } = await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+
+    expect(io.to).toHaveBeenCalledWith('dispatch:admins');
+    expect(io.emit).toHaveBeenCalledTimes(1);
+    expect(io.emit).toHaveBeenCalledWith(ABSENCE_EVENT, { tech_id: TECH.id, date: DATE, out: true, absence_id: absence.id });
+    // After commit: io is looked up only once the transaction has resolved.
+    expect(getIo.mock.invocationCallOrder[0]).toBeGreaterThan(db.transaction.mock.invocationCallOrder[0]);
+  });
+
+  test('clearTechOut emits dispatch:tech_absence {out: false} for the cleared absence', async () => {
+    const { absence } = await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    const io = fakeIo();
+    getIo.mockReturnValue(io);
+
+    await clearTechOut({ technicianId: TECH.id, date: DATE, actorId: ACTOR });
+
+    expect(io.to).toHaveBeenCalledWith('dispatch:admins');
+    expect(io.emit).toHaveBeenCalledTimes(1);
+    expect(io.emit).toHaveBeenCalledWith(ABSENCE_EVENT, { tech_id: TECH.id, date: DATE, out: false, absence_id: absence.id });
+  });
+
+  test('a mark that fails (ALREADY_OUT) and a clear that fails (NOT_OUT) broadcast nothing', async () => {
+    const io = fakeIo();
+    getIo.mockReturnValue(io);
+    await expect(clearTechOut({ technicianId: TECH.id, date: DATE, actorId: ACTOR })).rejects.toMatchObject({ code: 'NOT_OUT' });
+    await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    io.emit.mockClear();
+    await expect(markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR })).rejects.toMatchObject({ code: 'ALREADY_OUT' });
+    expect(io.emit).not.toHaveBeenCalled();
+  });
+
+  test('io not initialized: the mutation still succeeds and the skip is logged, not thrown', async () => {
+    getIo.mockReturnValue(null);
+    await expect(markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR })).resolves.toBeTruthy();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('skipping absence broadcast'));
   });
 });
 

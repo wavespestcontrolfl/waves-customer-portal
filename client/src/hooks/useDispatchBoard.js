@@ -293,13 +293,27 @@ export function useDispatchBoard() {
 
     socket.on('dispatch:job_update', handleJobUpdate);
 
-    // Cleanup: remove BOTH handlers AND disconnect. Any one missing leaks.
+    // A mark-out / "tech is back" committed in ANY tab (server/services/
+    // tech-out.js emits after commit). out_today is derived from
+    // technician_absences and rides neither tech_status nor job_update,
+    // so re-read the roster from the server rather than patching a flag
+    // this tab can't compute — refreshTechs is the same path the
+    // mutating tab already takes.
+    function handleTechAbsence(payload) {
+      if (!payload || !payload.tech_id) return;
+      refreshTechs();
+    }
+
+    socket.on('dispatch:tech_absence', handleTechAbsence);
+
+    // Cleanup: remove ALL handlers AND disconnect. Any one missing leaks.
     return () => {
       socket.off('dispatch:tech_status', handleTechStatus);
       socket.off('dispatch:job_update', handleJobUpdate);
+      socket.off('dispatch:tech_absence', handleTechAbsence);
       socket.disconnect();
     };
-  }, []);
+  }, [refreshTechs]);
 
   // Derived: stable array snapshot for consumers. Sorted by name to
   // match the API endpoint's ORDER BY so the roster doesn't reshuffle
