@@ -975,6 +975,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
   const {
     classifyCallerAccount,
     summarizeKnownCaller,
+    failOpenKnownCustomer,
     isNonLeadCallContent,
     leadContactCompleteness,
     hasWorkableLeadSignal,
@@ -992,19 +993,38 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
 
   test('summarizes a known caller for the extraction prompt', () => {
     expect(summarizeKnownCaller({ first_name: 'Uma', last_name: 'Satyendra', pipeline_stage: 'won' }))
-      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: false, addressLine1: null, addressLine2: null, addressCity: null, addressState: null, addressZip: null });
+      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: false, hasValidatedAddress: false, addressTrusted: true, addressLine1: null, addressLine2: null, addressCity: null, addressState: null, addressZip: null });
     expect(summarizeKnownCaller({ first_name: 'Uma', last_name: 'Satyendra', pipeline_stage: 'won', address_line1: '123 Main St', address_line2: 'Apt 4', city: 'Venice', state: 'FL', zip: '34285' }))
-      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: true, addressLine1: '123 Main St', addressLine2: 'Apt 4', addressCity: 'Venice', addressState: 'FL', addressZip: '34285' });
+      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: true, hasValidatedAddress: false, addressTrusted: true, addressLine1: '123 Main St', addressLine2: 'Apt 4', addressCity: 'Venice', addressState: 'FL', addressZip: '34285' });
     expect(summarizeKnownCaller({ first_name: 'Jake', pipeline_stage: 'new_lead' }))
-      .toEqual({ name: 'Jake', accountType: 'open_lead', isExistingCustomer: false, hasAddress: false, addressLine1: null, addressLine2: null, addressCity: null, addressState: null, addressZip: null });
+      .toEqual({ name: 'Jake', accountType: 'open_lead', isExistingCustomer: false, hasAddress: false, hasValidatedAddress: false, addressTrusted: false, addressLine1: null, addressLine2: null, addressCity: null, addressState: null, addressZip: null });
     // Terminal/lapsed stages classify as established for the PROMPT but never
     // earn fail-open trust (codex r10 P2): stale on-file data must not clear
     // address/confidence blockers.
     expect(summarizeKnownCaller({ first_name: 'Old', pipeline_stage: 'churned', address_line1: '9 Stale St' }))
-      .toEqual({ name: 'Old', accountType: 'established_customer', isExistingCustomer: false, hasAddress: true, addressLine1: '9 Stale St', addressLine2: null, addressCity: null, addressState: null, addressZip: null });
+      .toEqual({ name: 'Old', accountType: 'established_customer', isExistingCustomer: false, hasAddress: true, hasValidatedAddress: false, addressTrusted: false, addressLine1: '9 Stale St', addressLine2: null, addressCity: null, addressState: null, addressZip: null });
     expect(summarizeKnownCaller({ first_name: 'Ann', pipeline_stage: 'active_customer' }).isExistingCustomer).toBe(true);
     expect(summarizeKnownCaller({ first_name: 'Amy', pipeline_stage: 'at_risk' }).isExistingCustomer).toBe(true);
     expect(summarizeKnownCaller(null)).toBeNull();
+  });
+
+  test('a new lead with a VALIDATED on-file address (street + ZIP + geocode) earns on-file address trust; other leads and terminal stages do not (owner ruling 2026-09-24)', () => {
+    const validated = { first_name: 'Form', pipeline_stage: 'new_lead', address_line1: '1234 Sample Palm Dr', city: 'Venice', state: 'FL', zip: '34292', latitude: '27.1', longitude: '-82.4' };
+    const lead = summarizeKnownCaller(validated);
+    expect(lead).toMatchObject({ accountType: 'open_lead', isExistingCustomer: false, hasValidatedAddress: true, addressTrusted: true });
+    expect(failOpenKnownCustomer(lead)).toEqual({ hasAddress: true, addressLine1: '1234 Sample Palm Dr', addressLine2: null, addressCity: 'Venice', addressZip: '34292' });
+    // No geocode, no ZIP, or no street: the address was never validated.
+    expect(summarizeKnownCaller({ ...validated, latitude: null, longitude: null }).addressTrusted).toBe(false);
+    expect(summarizeKnownCaller({ ...validated, zip: '' }).addressTrusted).toBe(false);
+    expect(summarizeKnownCaller({ ...validated, address_line1: null }).addressTrusted).toBe(false);
+    expect(summarizeKnownCaller({ ...validated, latitude: 'abc' }).addressTrusted).toBe(false);
+    // Only the new_lead stage; a later open-lead stage or a terminal stage keeps normal review.
+    expect(summarizeKnownCaller({ ...validated, pipeline_stage: 'estimate_sent' }).addressTrusted).toBe(false);
+    expect(summarizeKnownCaller({ ...validated, pipeline_stage: 'lost' }).addressTrusted).toBe(false);
+    expect(failOpenKnownCustomer(summarizeKnownCaller({ ...validated, pipeline_stage: 'lost' }))).toBeNull();
+    // Active customers are trusted with or without a geocode, as before.
+    expect(summarizeKnownCaller({ ...validated, pipeline_stage: 'won', latitude: null, longitude: null }).addressTrusted).toBe(true);
+    expect(failOpenKnownCustomer(null)).toBeNull();
   });
 
   // The four owner-reported false leads, plus the genuine-but-early prospect.

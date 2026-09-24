@@ -1179,6 +1179,13 @@ function summarizeKnownCaller(customer) {
     .filter(Boolean)
     .join(' ');
   const accountType = classifyCallerAccount(customer.pipeline_stage);
+  const stage = String(customer.pipeline_stage || '').trim().toLowerCase();
+  const isExistingCustomer = FAIL_OPEN_CUSTOMER_STAGES.has(stage);
+  const hasAddress = !!String(customer.address_line1 || '').trim();
+  const hasValidatedAddress = hasAddress
+    && !!String(customer.zip || '').trim()
+    && Number.isFinite(Number(customer.latitude)) && Number.isFinite(Number(customer.longitude))
+    && customer.latitude !== null && customer.longitude !== null;
   return {
     name: name || null,
     // The matched row's identity — carried alongside the on-file address so a
@@ -1194,8 +1201,18 @@ function summarizeKnownCaller(customer) {
     // classifies as 'established_customer' for prompt purposes, but its stale
     // on-file data must never clear address/confidence blockers; dormant/
     // churned accounts likewise fall back to normal review.
-    isExistingCustomer: FAIL_OPEN_CUSTOMER_STAGES.has(String(customer.pipeline_stage || '').trim().toLowerCase()),
-    hasAddress: !!String(customer.address_line1 || '').trim(),
+    isExistingCustomer,
+    hasAddress,
+    // Owner ruling 2026-09-24: a NEW LEAD whose on-file address was already
+    // validated — geocoded (lat/lng present) with a street and ZIP, i.e. a
+    // web quote form or an earlier call that passed address validation — is
+    // trusted for the on-file address rule the same way an active customer
+    // is. Six of the nine address blocks filed on linked customers in the
+    // week to 2026-09-23 were exactly this: a form lead calling back and not
+    // reciting the address already on file. Other open-lead stages and every
+    // terminal stage stay untrusted.
+    hasValidatedAddress,
+    addressTrusted: isExistingCustomer || (stage === 'new_lead' && hasValidatedAddress),
     // The on-file address components, for the fail-open V1 conflict check: a
     // legacy V1 address that conflicts with them (different street, unit,
     // city, or ZIP) is a NEW address that must hold for review, never
@@ -1210,11 +1227,13 @@ function summarizeKnownCaller(customer) {
   };
 }
 
-// The fail-open routing input for a known caller: null unless they are a
-// customer we actively serve, else the on-file address components so the
-// gate can tell a RESTATED on-file address from a new one (statesNewAddress).
+// The fail-open routing input for a known caller: null unless their on-file
+// address is trusted (a customer we actively serve, or a new lead whose
+// address was already validated — see summarizeKnownCaller.addressTrusted),
+// else the on-file address components so the gate can tell a RESTATED
+// on-file address from a new one (statesNewAddress).
 function failOpenKnownCustomer(knownCaller) {
-  if (!knownCaller || !knownCaller.isExistingCustomer) return null;
+  if (!knownCaller || !knownCaller.addressTrusted) return null;
   return {
     hasAddress: knownCaller.hasAddress,
     addressLine1: knownCaller.addressLine1 || null,
@@ -17541,6 +17560,7 @@ CallRecordingProcessor._test = {
   attachCandidateSlotAgrees,
   classifyCallerAccount,
   summarizeKnownCaller,
+  failOpenKnownCustomer,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,
