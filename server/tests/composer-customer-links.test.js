@@ -121,6 +121,7 @@ jest.mock('../services/payer-statement-settle', () => ({
 // the mocked render mirrors that, and the comparison helper is the real
 // contract the builder must use.
 jest.mock('../routes/admin-sms-templates', () => ({
+  hasStopLine: (body) => /Reply STOP to opt out\./.test(String(body || '')),
 }));
 jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
@@ -488,22 +489,25 @@ describe('buildConsultationLink', () => {
   const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 
   test('a caller-supplied leadId override wins over the customer lookup when it is the resolved customer\'s own OPEN lead', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-override', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111', status: 'new', converted_at: null } }) };
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: 'aaaaaaaa-0000-4000-8000-000000000001', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111', status: 'new', converted_at: null } }),
+      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
+    };
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/abc', line: 'line\n\n', standalone: true });
-    const r = await buildConsultationLink('c1', 'lead-override');
+    const r = await buildConsultationLink('c1', 'aaaaaaaa-0000-4000-8000-000000000001');
     expect(r.url).toBe('https://waves.link/l/abc');
-    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-override', 'Pat');
+    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000001', 'Pat');
   });
 
   test('a caller-supplied leadId override wins when it is not the customer\'s own lead by customer_id but shares the resolved phone (and is open)', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: 'lead-other', first_name: 'Jamie', customer_id: 'c9', phone: '+19415550111', status: 'contacted', converted_at: null } }),
+      leads: chainBuilder({ firstRow: { id: 'aaaaaaaa-0000-4000-8000-000000000002', first_name: 'Jamie', customer_id: 'c9', phone: '+19415550111', status: 'contacted', converted_at: null } }),
       customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
     };
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/phone-match', line: 'line\n\n', standalone: true });
-    const r = await buildConsultationLink('c1', 'lead-other');
+    const r = await buildConsultationLink('c1', 'aaaaaaaa-0000-4000-8000-000000000002');
     expect(r.url).toBe('https://waves.link/l/phone-match');
-    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-other', 'Jamie');
+    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000002', 'Jamie');
   });
 
   // Pre-push Codex P1: the explicit override had the same eligibility gap
@@ -512,8 +516,8 @@ describe('buildConsultationLink', () => {
   // explicitly by id. Rejected outright (specific reason), never silently
   // falls through to the customer's newest OPEN lead instead.
   test('a caller-supplied leadId override that IS the customer\'s own lead but already converted is rejected — no fallback substitution', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-won', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111', status: 'won', converted_at: new Date('2026-01-01') } }) };
-    const r = await buildConsultationLink('c1', 'lead-won');
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'aaaaaaaa-0000-4000-8000-000000000003', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111', status: 'won', converted_at: new Date('2026-01-01') } }) };
+    const r = await buildConsultationLink('c1', 'aaaaaaaa-0000-4000-8000-000000000003');
     expect(r.url).toBeNull();
     expect(r.reason).toBe('That lead has already converted or closed — pick a different lead');
     expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
@@ -526,18 +530,18 @@ describe('buildConsultationLink', () => {
   // resolved recipient exactly like the lead-only fallback does.
   test('a leadId override for a DIFFERENT customer\'s lead (mismatched customer_id and phone) is rejected — no link inserted', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: 'lead-b', first_name: 'Robin', customer_id: 'customer-b', phone: '+19415559999' } }),
+      leads: chainBuilder({ firstRow: { id: 'aaaaaaaa-0000-4000-8000-000000000004', first_name: 'Robin', customer_id: 'customer-b', phone: '+19415559999' } }),
       customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
     };
-    const r = await buildConsultationLink('customer-a', 'lead-b');
+    const r = await buildConsultationLink('customer-a', 'aaaaaaaa-0000-4000-8000-000000000004');
     expect(r.url).toBeNull();
     expect(r.reason).toBe('That lead does not match the destination number');
     expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
   });
 
   test('no leadId override: resolves the customer\'s newest non-deleted OPEN lead', async () => {
-    const leads = chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris' } });
-    mockBuilders = { leads };
+    const leads = chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris', phone: '+19415550111' } });
+    mockBuilders = { leads, customers: chainBuilder({ firstRow: { phone: '+19415550111' } }) };
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/xyz', line: 'line\n\n', standalone: true });
     const r = await buildConsultationLink('c1');
     expect(r.url).toBe('https://waves.link/l/xyz');
@@ -576,13 +580,38 @@ describe('buildConsultationLink', () => {
         whereNull: jest.fn(function () { return this; }),
         whereIn: jest.fn(function () { return this; }),
         orderBy: jest.fn(function () { return this; }),
-        first: jest.fn(async () => (call++ === 0 ? null : { id: 'lead-fallback', first_name: 'Sam' })),
+        first: jest.fn(async () => (call++ === 0 ? null : { id: 'lead-fallback', first_name: 'Sam', phone: '+19415550111' })),
       },
+      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
     };
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/fb', line: 'line\n\n', standalone: true });
-    const r = await buildConsultationLink('c1', 'lead-gone');
+    const r = await buildConsultationLink('c1', 'aaaaaaaa-0000-4000-8000-000000000005');
     expect(r.url).toBe('https://waves.link/l/fb');
     expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-fallback', 'Sam');
+  });
+
+  // Codex #4709 r4 P2: a lead whose own phone is not this customer's number
+  // would mint a link the send check always refuses — refused up front.
+  test('the resolved lead\'s phone differs from the customer\'s number: a reason, no mint', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris', phone: '+19415559999' } }),
+      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
+    };
+    const r = await buildConsultationLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/phone differs/);
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+  });
+
+  // Codex #4709 r4 P2: a malformed override answers with a reason, never a
+  // Postgres uuid-syntax 500.
+  test('a malformed leadId override: a reason, no DB lookup', async () => {
+    const leads = chainBuilder({ firstRow: null });
+    mockBuilders = { leads };
+    const r = await buildConsultationLink('c1', 'not-a-uuid');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/not valid/);
+    expect(leads.first).not.toHaveBeenCalled();
   });
 
   test('no lead on file for the customer: a reason, no link, builder never called', async () => {
@@ -2647,7 +2676,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 describe('checkConsultationLinkSend (send-time re-check of a consultation short code)', () => {
   const { checkConsultationLinkSend, bearerLinkSendCheck } = require('../services/composer-customer-links');
   const { leadInspectionLinkLive } = require('../config/feature-gates');
-  const BODY = 'Pick a time: wavespest.co/l/cons1';
+  const BODY = 'Pick a time: wavespest.co/l/cons1 Reply STOP to opt out.';
   const LEAD_ROW = { id: 'lead-1', phone: '+19415550100', status: 'new', converted_at: null };
   const CODE_ROW = { code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' };
 
@@ -2675,6 +2704,14 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
   test('a live, open, matching-phone consultation link → null (passes)', async () => {
     wireConsultation();
     expect(await checkConsultationLinkSend(BODY, '9415550100')).toBeNull();
+  });
+
+  // Codex #4709 r4 P1: the operator deleted the STOP line after inserting.
+  test('the required STOP line was removed from the body → refused', async () => {
+    wireConsultation();
+    const refusal = await checkConsultationLinkSend('Pick a time: wavespest.co/l/cons1', '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/Reply STOP to opt out/);
   });
 
   test('the gate went off since the insert → refused', async () => {

@@ -374,6 +374,11 @@ async function buildConsultationLink(customerId, leadIdOverride) {
   const { buildLeadConsultationSmsLine } = require('./lead-consultation-link');
   const { isOpenLeadRow, applyOpenLeadPredicate } = require('./lead-statuses');
   let lead = null;
+  // Codex #4709 r4 P2: leads.id is a UUID column — a malformed override
+  // must answer with a reason, never a Postgres 500.
+  if (leadIdOverride && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(leadIdOverride))) {
+    return { url: null, line: '', reason: 'That lead id is not valid' };
+  }
   if (leadIdOverride) {
     const candidate = await db('leads').where({ id: leadIdOverride }).whereNull('deleted_at').first('id', 'first_name', 'customer_id', 'phone', 'status', 'converted_at');
     if (candidate) {
@@ -398,9 +403,16 @@ async function buildConsultationLink(customerId, leadIdOverride) {
       db('leads').where({ customer_id: customerId }).whereNull('deleted_at')
     )
       .orderBy('created_at', 'desc')
-      .first('id', 'first_name');
+      .first('id', 'first_name', 'phone');
   }
   if (!lead) return { url: null, line: '', reason: 'No lead on file for this customer' };
+  // Codex #4709 r4 P2: the send check requires the lead's own phone to be
+  // the destination (this customer's number). Refuse before minting rather
+  // than hand back an unsendable draft and a live, unused short code.
+  const destination = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('phone');
+  if (!digitsLast10(destination?.phone) || digitsLast10(lead.phone) !== digitsLast10(destination.phone)) {
+    return { url: null, line: '', reason: "This lead's phone differs from the customer's number — send the link from the Leads page" };
+  }
   return buildLeadConsultationSmsLine(lead.id, lead.first_name);
 }
 
@@ -1404,6 +1416,12 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLea
   const { leadInspectionLinkLive } = require('../config/feature-gates');
   if (!leadInspectionLinkLive()) {
     return refuseSend('Consultation links are switched off (GATE_LEAD_INSPECTION_LINK) — remove the link before sending.');
+  }
+  // Send-time keep-list check (Codex #4709 r4 P1): both composers are
+  // editable, so the operator can delete the STOP line after inserting the
+  // link. Same hasStopLine the template save and render checks use.
+  if (!require('../routes/admin-sms-templates').hasStopLine(body)) {
+    return refuseSend('Consultation texts must keep "Reply STOP to opt out." — add it back before sending.');
   }
   const { isOpenLeadRow } = require('./lead-statuses');
   for (const row of rows) {

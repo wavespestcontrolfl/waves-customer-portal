@@ -205,14 +205,14 @@ describe('a consultation short code in the message is re-checked at THIS send bo
   });
 
   test('a live, open, matching-phone consultation link sends normally', async () => {
-    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1', to: '+19415550103' });
+    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1 Reply STOP to opt out.', to: '+19415550103' });
     expect(response.status).toBe(200);
     expect(sendCustomerMessage).toHaveBeenCalled();
   });
 
   test('the gate went off since the insert → 409, never sent', async () => {
     process.env.GATE_LEAD_INSPECTION_LINK = 'false';
-    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1', to: '+19415550103' });
+    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1 Reply STOP to opt out.', to: '+19415550103' });
     expect(response.status).toBe(409);
     expect(response.body.error).toMatch(/switched off|GATE_LEAD_INSPECTION_LINK/);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -220,7 +220,7 @@ describe('a consultation short code in the message is re-checked at THIS send bo
 
   test('the short code itself expired since the insert → 409, never sent', async () => {
     shortCodeRows = [{ code: 'cons1', expires_at: new Date(Date.now() - 1000), lead_id: 'lead-qa' }];
-    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1', to: '+19415550103' });
+    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1 Reply STOP to opt out.', to: '+19415550103' });
     expect(response.status).toBe(409);
     expect(response.body.error).toMatch(/expired/);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -229,7 +229,7 @@ describe('a consultation short code in the message is re-checked at THIS send bo
   test('the lead converted or closed since the insert → 409, never sent', async () => {
     lead.status = 'won';
     lead.converted_at = new Date('2026-01-01');
-    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1', to: '+19415550103' });
+    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1 Reply STOP to opt out.', to: '+19415550103' });
     expect(response.status).toBe(409);
     expect(response.body.error).toMatch(/converted or closed/);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
