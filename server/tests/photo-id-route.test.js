@@ -198,6 +198,8 @@ beforeEach(() => {
     observations: 'Plants look healthy.',
     aiSummary: 'No urgent visible plant issues found.',
     findings: [],
+    scoredCount: 1,
+    photoCount: 1,
   });
 });
 
@@ -276,6 +278,25 @@ describe('POST /api/photo-id/:type happy paths', () => {
       const fungalSignal = body.result.signals.find((s) => s.key === 'fungal_activity');
       expect(fungalSignal.level).toBe('severe');
       expect(body.result.observations).toContain('Severe fungal patches');
+    });
+  });
+
+  test('lawn: one photo failing to analyze forces unclear rather than a confident read off the rest', async () => {
+    // codex r3 P1 — a trouble-spot photo failing while an overview photo
+    // succeeds must never silently present the successful subset as complete.
+    mockLawnAnalyzePhoto
+      .mockResolvedValueOnce({
+        composite: {
+          turf_density: 90, weed_coverage: 5, color_health: 9, fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Looks healthy.',
+        },
+      })
+      .mockResolvedValueOnce(null);
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-x', lanes: ['lawn'] }); // would otherwise win as 'reservice'
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('unclear');
     });
   });
 
@@ -429,11 +450,34 @@ describe('next_step branches', () => {
       observations: '',
       aiSummary: null,
       findings: [],
+      scoredCount: 1,
+      photoCount: 1,
     });
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
       const body = await res.json();
       expect(body.result.scores.overall).toBeNull();
+      expect(body.next_step.kind).toBe('unclear');
+    });
+  });
+
+  test('tree_shrub: one photo failing to score forces unclear even with a usable overall score', async () => {
+    // codex r3 P1 — scoredCount < photoCount must not read as a complete result.
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-y', lanes: ['lawn'] }); // would otherwise win as 'reservice'
+    mockPreviewTreeShrub.mockResolvedValue({
+      scores: {
+        foliageFullness: 80, leafColorVigor: 75, pestActivity: 90, diseaseLeafSpot: 95, waterHeatStress: 85, overallScore: 85,
+      },
+      observations: 'Plants look healthy.',
+      aiSummary: 'No urgent visible plant issues found.',
+      findings: [],
+      scoredCount: 1,
+      photoCount: 2,
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/tree_shrub', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
+      const body = await res.json();
+      expect(body.result.scores.overall).toBe(85);
       expect(body.next_step.kind).toBe('unclear');
     });
   });

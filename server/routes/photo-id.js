@@ -342,6 +342,11 @@ async function handleLawn(req, res, { note, location }) {
   if (!composites.length) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
   }
+  // codex r3 P1: a trouble-spot photo failing while an overview photo
+  // succeeds must not silently present the successful subset as a complete,
+  // possibly reassuring read — a partial batch is unclear, whatever the
+  // partial scores say.
+  const partial = composites.length < photoInputs.length;
 
   const merged = mergeLawnComposites(composites);
   const lawnResult = lawnPublicResult(merged);
@@ -351,8 +356,8 @@ async function handleLawn(req, res, { note, location }) {
     status: 'analyzed',
     source: 'portal',
     customer_id: req.customer.id,
-    ai_analysis: JSON.stringify({ customer_note: note, composite: merged }),
-    report_contract: JSON.stringify({ contract_version: 'lawn_photo_id_v1', result: lawnResult }),
+    ai_analysis: JSON.stringify({ customer_note: note, composite: merged, partial }),
+    report_contract: JSON.stringify({ contract_version: 'lawn_photo_id_v1', result: lawnResult, partial }),
     ai_summary: lawnResult.observations ? String(lawnResult.observations).slice(0, 2000) : null,
     note,
     location,
@@ -368,7 +373,7 @@ async function handleLawn(req, res, { note, location }) {
 
   const noUsableScores = merged.turf_density == null && merged.weed_coverage == null && merged.color_health == null;
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = noUsableScores ? 'unclear' : laneOutcomeKind('lawn', access);
+  const kind = (noUsableScores || partial) ? 'unclear' : laneOutcomeKind('lawn', access);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('lawn', { location, note }),
@@ -393,13 +398,19 @@ async function handleTreeShrub(req, res, { note, location }) {
   }
 
   const treeResult = buildCustomerTreeShrubReport(preview);
+  // codex r3 P1: a photo that failed to score (scoredCount < photoCount)
+  // must not let the successfully-scored subset present as a complete read.
+  const partial = preview.scoredCount != null && preview.photoCount != null
+    && preview.scoredCount < preview.photoCount;
 
   const [row] = await db('tree_shrub_assessments').insert({
     customer_id: req.customer.id,
     service_date: etDateString(),
     source: 'portal',
     mode: 'customer',
-    composite_scores: JSON.stringify(preview.scores || {}),
+    composite_scores: JSON.stringify({
+      ...(preview.scores || {}), scored_count: preview.scoredCount ?? null, photo_count: preview.photoCount ?? null,
+    }),
     foliage_fullness: preview.scores?.foliageFullness ?? null,
     leaf_color_vigor: preview.scores?.leafColorVigor ?? null,
     pest_activity: preview.scores?.pestActivity ?? null,
@@ -422,7 +433,7 @@ async function handleTreeShrub(req, res, { note, location }) {
 
   const noUsableScores = treeResult.scores.overall == null;
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = noUsableScores ? 'unclear' : laneOutcomeKind('tree_shrub', access);
+  const kind = (noUsableScores || partial) ? 'unclear' : laneOutcomeKind('tree_shrub', access);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('tree_shrub', { location, note }),
@@ -500,11 +511,17 @@ function lawnNextStepKindFromRow(row, access) {
   const contract = parseJsonSafe(row.report_contract);
   const scores = contract?.result?.scores || {};
   const noScores = scores.turf_density == null && scores.weed_coverage == null && scores.color_health == null;
-  return noScores ? 'unclear' : laneOutcomeKind('lawn', access);
+  return (noScores || contract.partial) ? 'unclear' : laneOutcomeKind('lawn', access);
+}
+
+function treeShrubIsPartial(row) {
+  const meta = parseJsonSafe(row.composite_scores);
+  return meta.scored_count != null && meta.photo_count != null && meta.scored_count < meta.photo_count;
 }
 
 function treeNextStepKindFromRow(row, access) {
-  return row.overall_score == null ? 'unclear' : laneOutcomeKind('tree_shrub', access);
+  if (row.overall_score == null || treeShrubIsPartial(row)) return 'unclear';
+  return laneOutcomeKind('tree_shrub', access);
 }
 
 // GET /api/photo-id
@@ -517,7 +534,7 @@ router.get('/', async (req, res, next) => {
       db('lawn_diagnostics').where({ customer_id: customerId, mode: 'customer' })
         .orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract'),
       db('tree_shrub_assessments').where({ customer_id: customerId, mode: 'customer' })
-        .orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'overall_score'),
+        .orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'overall_score', 'composite_scores'),
     ]);
 
     const access = await reserviceStreamlineAccess(customerId);
