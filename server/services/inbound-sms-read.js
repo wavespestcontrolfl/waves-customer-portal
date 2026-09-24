@@ -389,6 +389,7 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null, in
       ) audit ON true
     ), outbound_events AS MATERIALIZED (
       SELECT s.*, li.id AS inbound_id, li.created_at AS inbound_created_at,
+             COALESCE(legacy.created_at, s.created_at) AS response_created_at,
              COALESCE(legacy.message_type, s.canonical_message_type, '') AS message_type,
              COALESCE(legacy.status, s.canonical_delivery_status, '') AS delivery_status,
              response_draft.sms_log_id IS NOT NULL AS has_inbound_draft_anchor,
@@ -398,7 +399,7 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null, in
         AND s.direction = 'outbound'
         AND s.created_at > li.created_at - INTERVAL '24 hours'
       LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status, sl.metadata
+        SELECT sl.message_type, sl.status, sl.metadata, sl.created_at
         FROM sms_log sl
         WHERE sl.twilio_sid = s.twilio_sid AND sl.direction = s.direction
         ORDER BY sl.created_at DESC, sl.id DESC
@@ -419,14 +420,15 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null, in
       WHERE prev.endpoint <> ''
         AND prev.delivery_status IN ('queued', 'sent', 'delivered')
         AND prev.message_type <> 'internal_alert'
-        AND prev.created_at < prev.inbound_created_at
-      ORDER BY prev.inbound_id, prev.created_at DESC, prev.id DESC
+        AND prev.response_created_at < prev.inbound_created_at
+        AND prev.response_created_at > prev.inbound_created_at - INTERVAL '24 hours'
+      ORDER BY prev.inbound_id, prev.response_created_at DESC, prev.id DESC
     ), answered_inbound AS MATERIALIZED (
       SELECT DISTINCT os.inbound_id
       FROM outbound_events os
       WHERE os.message_type = ANY(CAST(:humanReplyTypes AS text[]))
         AND os.delivery_status IN ('queued', 'sent', 'delivered')
-        AND os.created_at > os.inbound_created_at
+        AND os.response_created_at > os.inbound_created_at
         -- Approval sends can be proactive nudges. Require an exact draft
         -- inbound anchor for ambiguous types; proactive drafts never clear an ask.
         AND (os.message_type <> ALL(CAST(:draftReplyTypes AS text[])) OR os.has_inbound_draft_anchor)

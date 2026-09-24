@@ -1673,7 +1673,7 @@ router.get('/log', async (req, res, next) => {
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .leftJoin('customers', 'conversations.customer_id', 'customers.id')
       .joinRaw(`LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status, sl.metadata
+        SELECT sl.message_type, sl.status, sl.metadata, sl.created_at
         FROM sms_log sl
         WHERE sl.twilio_sid = messages.twilio_sid AND sl.direction = messages.direction
         ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
@@ -1704,6 +1704,7 @@ router.get('/log', async (req, res, next) => {
         'sms_response.message_type as response_message_type',
         'sms_response.status as response_status',
         'sms_response.metadata as response_metadata',
+        'sms_response.created_at as response_created_at',
         'sms_audit.metadata as response_audit_metadata',
         'sms_answer.is_click_followup as response_is_click_followup',
         'sms_answer.has_inbound_draft_anchor as response_has_inbound_draft_anchor',
@@ -1733,6 +1734,7 @@ router.get('/log', async (req, res, next) => {
     if (customerId) query = query.where('conversations.customer_id', customerId);
     if (direction) query = query.where('messages.direction', direction);
     if (messageType) query = query.where('messages.message_type', messageType);
+    let pendingIds = [];
     if (needsResponse === 'true') {
       const { countUnreadInboundSms } = require('../services/inbound-sms-read');
       const pending = await countUnreadInboundSms({
@@ -1741,7 +1743,7 @@ router.get('/log', async (req, res, next) => {
         role: req.techRole,
         includePending: true,
       });
-      const pendingIds = pending.pendingMessageIds || [];
+      pendingIds = pending.pendingMessageIds || [];
       if (!pendingIds.length) {
         query = query.whereRaw('FALSE');
       } else {
@@ -1765,15 +1767,62 @@ router.get('/log', async (req, res, next) => {
     const searchTerm = typeof search === 'string' ? search.trim() : '';
     if (searchTerm) {
       const like = `%${searchTerm}%`;
-      query = query.where(b => b
-        .where('customers.first_name', 'ilike', like)
-        .orWhere('customers.last_name', 'ilike', like)
-        .orWhereRaw("(customers.first_name || ' ' || customers.last_name) ILIKE ?", [like])
-        .orWhere('conversations.contact_phone', 'ilike', like)
-        .orWhere('conversations.our_endpoint_id', 'ilike', like)
-        .orWhere('customers.phone', 'ilike', like)
-        .orWhere('messages.body', 'ilike', like)
-      );
+      if (needsResponse === 'true' && pendingIds.length) {
+        const visiblePeer = phoneIdentitySql("COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '')");
+        const searchPeer = phoneIdentitySql("COALESCE(NULLIF(search_conversation.contact_phone, ''), search_customer.phone, '')");
+        const searchClauses = [
+          "search_message.channel = 'sms'",
+          `${searchPeer} = ${visiblePeer}`,
+          `(search_customer.first_name ILIKE ?
+            OR search_customer.last_name ILIKE ?
+            OR (search_customer.first_name || ' ' || search_customer.last_name) ILIKE ?
+            OR search_conversation.contact_phone ILIKE ?
+            OR search_conversation.our_endpoint_id ILIKE ?
+            OR search_customer.phone ILIKE ?
+            OR search_message.body ILIKE ?)`,
+          "COALESCE(search_conversation.our_endpoint_id, '') <> ALL(?::text[])",
+          "COALESCE(search_conversation.contact_phone, '') <> ALL(?::text[])",
+          "COALESCE(search_customer.phone, '') <> ALL(?::text[])",
+        ];
+        const searchBindings = [like, like, like, like, like, like, like, ADMIN_PHONES, ADMIN_PHONES, ADMIN_PHONES];
+        if (req.techRole !== 'admin') searchClauses.push("(search_message.message_type IS NULL OR search_message.message_type NOT LIKE 'job\\_%')");
+        if (customerId) {
+          searchClauses.push('search_conversation.customer_id = ?');
+          searchBindings.push(customerId);
+        }
+        if (direction) {
+          searchClauses.push('search_message.direction = ?');
+          searchBindings.push(direction);
+        }
+        if (messageType) {
+          searchClauses.push('search_message.message_type = ?');
+          searchBindings.push(messageType);
+        }
+        if (req.query.phone !== undefined) {
+          searchClauses.push("regexp_replace(COALESCE(search_conversation.contact_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])");
+          searchBindings.push(phoneMatchDigits(req.query.phone));
+        }
+        // Search selects matching pending conversations, then returns their
+        // scoped history (including the exact pending row) instead of
+        // truncating each conversation down to only body/name matches.
+        query = query.whereRaw(`EXISTS (
+          SELECT 1
+          FROM messages search_message
+          JOIN conversations search_conversation ON search_conversation.id = search_message.conversation_id
+          LEFT JOIN customers search_customer ON search_customer.id = search_conversation.customer_id
+          WHERE ${searchClauses.join('\n            AND ')}
+        )`, searchBindings);
+      } else {
+        query = query.where(b => b
+          .where('customers.first_name', 'ilike', like)
+          .orWhere('customers.last_name', 'ilike', like)
+          .orWhereRaw("(customers.first_name || ' ' || customers.last_name) ILIKE ?", [like])
+          .orWhere('conversations.contact_phone', 'ilike', like)
+          .orWhere('conversations.our_endpoint_id', 'ilike', like)
+          .orWhere('customers.phone', 'ilike', like)
+          .orWhere('messages.body', 'ilike', like)
+        );
+      }
     }
 
     query = query.orderBy('messages.created_at', 'desc').orderBy('messages.id', 'desc');
@@ -1826,6 +1875,7 @@ router.get('/log', async (req, res, next) => {
         responseMessageType,
         responseStatus,
         responseIsAnswer,
+        responseCreatedAt: m.response_created_at || m.created_at,
         customerId: m.customer_id || fallbackCustomer?.id || null, customerName,
         createdAt: m.created_at,
         isRead: !!m.is_read,

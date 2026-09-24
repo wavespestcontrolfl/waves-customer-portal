@@ -78,3 +78,15 @@ test('customer comms requires an inbound-anchored draft before AI approval clear
     ...base, response_has_inbound_draft_anchor: true,
   }, { phone: '+19415550100' }, null).responseIsAnswer).toBe(true);
 });
+
+test('customer comms exposes provider handoff time separately from display time', () => {
+  const mapped = mapCommsMessage({
+    id: 'message-late-write', conversation_id: 'conversation-1', channel: 'sms', direction: 'outbound',
+    body: 'Reply', media: [], metadata: {}, message_type: 'manual', delivery_status: 'sent',
+    created_at: new Date('2026-09-23T12:03:00Z'),
+    response_created_at: new Date('2026-09-23T12:01:00Z'),
+  }, { phone: '+19415550100' }, null);
+
+  expect(mapped.createdAt).toEqual(new Date('2026-09-23T12:03:00Z'));
+  expect(mapped.responseCreatedAt).toEqual(new Date('2026-09-23T12:01:00Z'));
+});

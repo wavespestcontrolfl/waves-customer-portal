@@ -79,6 +79,15 @@ describe("needsSmsReply", () => {
     ])).toBe(false);
   });
 
+  it("uses provider handoff time when unified persistence finishes after a newer inbound", () => {
+    expect(needsSmsReply([
+      message("inbound", "2026-09-21T13:02:00Z"),
+      message("outbound", "2026-09-21T13:03:00Z", {
+        responseCreatedAt: "2026-09-21T13:01:00Z",
+      }),
+    ])).toBe(true);
+  });
+
   it("keeps business lines isolated when deciding whether an inbound was answered", () => {
     const inboundOnLineA = message("inbound", "2026-09-21T13:00:00Z", {
       to: "+19413187612",

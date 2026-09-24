@@ -11,6 +11,7 @@ jest.mock('../services/notification-service', () => ({}));
 
 const { randomUUID } = require('node:crypto');
 const { countUnreadInboundSms } = require('../services/inbound-sms-read');
+const { loadPriorOutboundBodies } = require('../services/sms-response-policy');
 const connection = process.env.UNREAD_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let database;
@@ -24,7 +25,7 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     mockPg = await database.transaction();
     await mockPg.raw(`
       CREATE TABLE customers (id uuid PRIMARY KEY, phone varchar(32));
-      CREATE TABLE conversations (id uuid PRIMARY KEY, customer_id uuid, contact_phone varchar(32), our_endpoint_id varchar(100));
+      CREATE TABLE conversations (id uuid PRIMARY KEY, customer_id uuid, channel varchar(20), contact_phone varchar(32), our_endpoint_id varchar(100));
       CREATE TABLE messages (
         id uuid PRIMARY KEY, conversation_id uuid NOT NULL, channel varchar(20), direction varchar(12),
         body text, media jsonb DEFAULT '[]', metadata jsonb DEFAULT '{}', message_type varchar(30),
@@ -65,7 +66,7 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     }
     let conversation = await mockPg('conversations').where({ customer_id: resolvedCustomerId, contact_phone: phone, our_endpoint_id: ours }).first();
     if (!conversation) {
-      conversation = { id: randomUUID(), customer_id: resolvedCustomerId, contact_phone: phone, our_endpoint_id: ours };
+      conversation = { id: randomUUID(), customer_id: resolvedCustomerId, channel: 'sms', contact_phone: phone, our_endpoint_id: ours };
       await mockPg('conversations').insert(conversation);
     }
     const sid = `SM${randomUUID().replace(/-/g, '')}`;
@@ -142,6 +143,46 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
     await seedEvent({ direction: 'outbound', messageType: 'manual', status: 'sent', body: 'Calling now' });
     expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
+  });
+
+  test('uses the provider handoff time when the unified outbound write lands after a newer inbound', async () => {
+    await seedEvent({ body: 'Can you confirm the arrival window?' });
+    const reply = await seedEvent({ direction: 'outbound', body: 'We will arrive at noon.' });
+    await seedEvent({ body: 'Could you make it one instead?' });
+    await mockPg('messages').where({ twilio_sid: reply.sid }).update({
+      created_at: new Date(tick.getTime() + 60_000),
+    });
+
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+  });
+
+  test('finds courtesy context by provider handoff when unified persistence lands after the inbound', async () => {
+    const update = await seedEvent({ direction: 'outbound', body: 'Your service is complete.' });
+    const thanks = await seedEvent({ body: 'Thanks!' });
+    await mockPg('messages').where({ twilio_sid: update.sid }).update({
+      created_at: new Date(tick.getTime() + 60_000),
+    });
+    const inbound = await mockPg('messages as m')
+      .join('conversations as c', 'c.id', 'm.conversation_id')
+      .where('m.twilio_sid', thanks.sid)
+      .first(
+        'm.id', 'm.direction', 'm.channel', 'm.created_at',
+        'c.contact_phone', 'c.our_endpoint_id', 'c.customer_id',
+      );
+
+    const contexts = await loadPriorOutboundBodies(mockPg, [inbound]);
+    expect(contexts.get(String(inbound.id))).toBe('Your service is complete.');
+  });
+
+  test('uses provider handoff time at the 24-hour courtesy boundary', async () => {
+    const update = await seedEvent({ direction: 'outbound', body: 'Your service is complete.' });
+    await mockPg('messages').where({ twilio_sid: update.sid }).update({
+      created_at: new Date('2026-09-23T12:00:02.000Z'),
+    });
+    tick = new Date('2026-09-24T12:00:01.000Z');
+    await seedEvent({ body: 'Okay' });
+
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
   });
 
   test('an approved click-followup nudge does not answer, while a nearby manual reply does', async () => {

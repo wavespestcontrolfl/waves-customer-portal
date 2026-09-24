@@ -80,18 +80,19 @@ async function loadPriorOutboundBodies(db, messages, {
              max(inbound_at) AS latest
       FROM thread_candidates GROUP BY conversation_id
     ), accepted_outbound AS MATERIALIZED (
-      SELECT prior.id, prior.conversation_id, prior.body, prior.created_at
+      SELECT prior.id, prior.conversation_id, prior.body,
+             COALESCE(prior_legacy.created_at, prior.created_at) AS response_created_at
       FROM relevant_threads
       JOIN messages prior ON prior.conversation_id = relevant_threads.conversation_id
         AND prior.created_at > relevant_threads.earliest
-        AND prior.created_at < relevant_threads.latest
       LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status
+        SELECT sl.message_type, sl.status, sl.created_at
         FROM sms_log sl
         WHERE sl.twilio_sid = prior.twilio_sid AND sl.direction = prior.direction
         ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
       ) prior_legacy ON true
       WHERE prior.channel = 'sms' AND prior.direction = 'outbound'
+        AND COALESCE(prior_legacy.created_at, prior.created_at) < relevant_threads.latest
         AND COALESCE(prior_legacy.status, prior.delivery_status, '') IN ('queued', 'sent', 'delivered')
         AND COALESCE(prior_legacy.message_type, prior.message_type, '') <> 'internal_alert'
     )
@@ -99,9 +100,9 @@ async function loadPriorOutboundBodies(db, messages, {
            thread_candidates.message_id, accepted_outbound.body
     FROM thread_candidates
     JOIN accepted_outbound ON accepted_outbound.conversation_id = thread_candidates.conversation_id
-      AND accepted_outbound.created_at < thread_candidates.inbound_at
-      AND accepted_outbound.created_at > thread_candidates.inbound_at - interval '24 hours'
-    ORDER BY thread_candidates.message_id, accepted_outbound.created_at DESC, accepted_outbound.id DESC
+      AND accepted_outbound.response_created_at < thread_candidates.inbound_at
+      AND accepted_outbound.response_created_at > thread_candidates.inbound_at - interval '24 hours'
+    ORDER BY thread_candidates.message_id, accepted_outbound.response_created_at DESC, accepted_outbound.id DESC
   `, [JSON.stringify(contexts)]);
   return new Map((result.rows || result).map((row) => [String(row.message_id), row.body]));
 }

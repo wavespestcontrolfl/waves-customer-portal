@@ -371,6 +371,7 @@ function mapCommsMessage(message, customer, twilioNumbers) {
     direction: message.direction, body: message.body, aiSummary: message.ai_summary,
     messageType: message.message_type, durationSeconds: message.duration_seconds, media,
     responseMessageType, responseStatus, responseIsAnswer,
+    responseCreatedAt: message.response_created_at || message.created_at,
     answeredBy: message.answered_by, isRead: !!message.is_read,
     courtesyOnly, spamEnforced,
     deliveryStatus: message.delivery_status, recordingSid: message.recording_sid,
@@ -387,7 +388,7 @@ async function listCustomerComms(db, customer, query = {}) {
   const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', m.metadata->>'draft_id')");
   const selectCommsColumns = queryBuilder => queryBuilder
     .joinRaw(`LEFT JOIN LATERAL (
-      SELECT sl.message_type, sl.status, sl.metadata
+      SELECT sl.message_type, sl.status, sl.metadata, sl.created_at
       FROM sms_log sl
       WHERE sl.twilio_sid = m.twilio_sid AND sl.direction = m.direction
       ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
@@ -415,6 +416,7 @@ async function listCustomerComms(db, customer, query = {}) {
       'sms_response.message_type as response_message_type',
       'sms_response.status as response_status',
       'sms_response.metadata as response_metadata',
+      'sms_response.created_at as response_created_at',
       'sms_audit.metadata as response_audit_metadata',
       'sms_answer.is_click_followup as response_is_click_followup',
       'sms_answer.has_inbound_draft_anchor as response_has_inbound_draft_anchor',

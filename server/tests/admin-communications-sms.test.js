@@ -2004,7 +2004,11 @@ describe('admin communications SMS route', () => {
   });
 
   test('filters the SMS log to exact pending candidate ids', async () => {
-    const builder = makeQueryBuilder([smsMessageRow({ id: 'pending-message' })]);
+    const builder = makeQueryBuilder([smsMessageRow({
+      id: 'pending-message',
+      created_at: new Date('2026-05-20T12:03:00Z'),
+      response_created_at: new Date('2026-05-20T12:01:00Z'),
+    })]);
     db.mockReturnValue(builder);
     db.raw
       .mockResolvedValueOnce({ rows: [{
@@ -2020,7 +2024,40 @@ describe('admin communications SMS route', () => {
       expect(res.status).toBe(200);
       expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('FROM messages pending_message'), [['pending-message']]);
       expect(builder.orderByRaw).toHaveBeenCalledWith(expect.stringContaining('messages.id = ANY'), [['pending-message']]);
-      expect((await res.json()).messages.map((message) => message.id)).toEqual(['pending-message']);
+      const body = await res.json();
+      expect(body.messages.map((message) => message.id)).toEqual(['pending-message']);
+      expect(body.messages[0]).toMatchObject({
+        createdAt: '2026-05-20T12:03:00.000Z',
+        responseCreatedAt: '2026-05-20T12:01:00.000Z',
+      });
+    });
+  });
+
+  test('searches pending conversations while retaining the pending row and scoped history', async () => {
+    const builder = makeQueryBuilder([
+      smsMessageRow({ id: 'pending-message', body: 'Can you confirm the visit?' }),
+      smsMessageRow({ id: 'older-match', direction: 'outbound', body: 'Earlier estimate details' }),
+    ]);
+    db.mockReturnValue(builder);
+    db.raw
+      .mockResolvedValueOnce({ rows: [{
+        id: 'pending-message', peer: '9415550100', endpoint: '9415550190',
+        message_body: 'Can you confirm the visit?', metadata: {}, media: [],
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?needsResponse=true&search=estimate`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      const conversationSearch = builder.whereRaw.mock.calls.find(([sql]) => String(sql).includes('FROM messages search_message'));
+
+      expect(res.status).toBe(200);
+      expect(conversationSearch?.[0]).toContain('search_message.body ILIKE');
+      expect(conversationSearch?.[0]).toContain('search_message.channel');
+      expect(conversationSearch?.[1]).toContain('%estimate%');
+      expect(body.messages.map((message) => message.id)).toEqual(['pending-message', 'older-match']);
     });
   });
 

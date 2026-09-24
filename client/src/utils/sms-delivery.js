@@ -44,6 +44,10 @@ function messageTime(message) {
   return new Date(message?.createdAt).getTime();
 }
 
+function responseTime(message) {
+  return new Date(message?.responseCreatedAt || message?.createdAt).getTime();
+}
+
 function isActionableInbound(message) {
   if (message?.direction !== "inbound") return false;
   const messageType = message.responseMessageType || message.messageType || "";
@@ -89,7 +93,7 @@ export function unansweredSmsReply(messages) {
       if (message.responseIsAnswer === false) return false;
       if (!HUMAN_REPLY_TYPES.has(message.responseMessageType || message.messageType)) return false;
       if (!ANSWERED_STATUSES.has(message.responseStatus || message.status)) return false;
-      const createdAt = messageTime(message);
+      const createdAt = responseTime(message);
       return !Number.isNaN(createdAt) && createdAt > latestInboundAt;
     });
     if (!answered && latestInboundAt > (latestUnanswered?.createdAt ?? -Infinity)) {
