@@ -216,7 +216,7 @@ describe('autoAssignParkedAlert', () => {
     expect(newDate).toBe(DATE);
     expect(newWindow).toEqual({ start: '09:00', end: '11:00' });
     expect(reason).toBe('tech_out_auto_move');
-    expect(initiatedBy).toBe('system');
+    expect(initiatedBy).toBe('admin');
     expect(options).toMatchObject({
       technicianId: CANDIDATE.id,
       keepStatus: true,
@@ -321,6 +321,22 @@ describe('selection matches the commit policy', () => {
     predicate(q);
     expect(q.whereNull).toHaveBeenCalledWith('reservation_expires_at');
     expect(q.orWhereRaw).toHaveBeenCalledWith('reservation_expires_at > NOW()');
+  });
+
+  test('lapsed estimate holds neither count as stops nor anchor the detour', async () => {
+    const { dayStopsQuery } = require('../services/scheduling/day-stops');
+    const past = new Date(Date.now() - 3600e3).toISOString();
+    const future = new Date(Date.now() + 3600e3).toISOString();
+    dayStopsQuery.mockResolvedValueOnce([
+      { id: 'lapsed', window_start: '08:00', reservation_expires_at: past },
+      { id: 'live-hold', window_start: '12:00', reservation_expires_at: future },
+      { id: 'visit', window_start: '14:00', reservation_expires_at: null },
+    ]);
+    const { _test: { detourForTech } } = require('../services/tech-out-auto-move');
+
+    const res = await detourForTech(baseStop(), CANDIDATE.id, DATE);
+
+    expect(res.stops_that_day).toBe(3); // live-hold + visit + the stop itself
   });
 
   test('schedule blocks refuse a candidate on the arrival-routing path too', async () => {

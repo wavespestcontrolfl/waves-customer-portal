@@ -152,10 +152,15 @@ async function detourForTech(stop, techId, date) {
     excludeStatuses: DEFAULT_EXCLUDE_STATUSES,
     select: [
       'scheduled_services.id', 'scheduled_services.window_start', 'scheduled_services.window_end',
-      'scheduled_services.estimated_duration_minutes', ...guardedCoordSelects(db),
+      'scheduled_services.estimated_duration_minutes', 'scheduled_services.reservation_expires_at',
+      ...guardedCoordSelects(db),
     ],
   });
-  const neighbors = rows.filter((r) => r.id !== stop.id);
+  // A lapsed estimate hold is not a route stop (same predicate as fitsWindow
+  // and the rebooker's commit check) — never a count or an anchor.
+  const now = Date.now();
+  const neighbors = rows.filter((r) => r.id !== stop.id
+    && (r.reservation_expires_at == null || new Date(r.reservation_expires_at).getTime() > now));
   if (!geo) return { detour_minutes: null, stops_that_day: neighbors.length + 1 };
 
   const myStart = timeToMinutes(stop.window_start) ?? 0;
@@ -442,7 +447,11 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
   for (const candidate of candidates) {
     try {
       await SmartRebooker.reschedule(
-        stop.id, date, window, 'tech_out_auto_move', 'system',
+        // 'admin': a dispatcher pressed the button, and the date never
+        // changes — the owner-blackout and seasonal guards that bind
+        // customer/system date moves do not apply to a same-day reassignment
+        // (same initiator as the board's own manual moves).
+        stop.id, date, window, 'tech_out_auto_move', 'admin',
         {
           technicianId: candidate.tech.id,
           excludeServiceIds,
