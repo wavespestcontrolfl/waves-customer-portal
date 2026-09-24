@@ -63,6 +63,12 @@ describe('conversation context vetoes', () => {
       id: 'earlier', createdAt: '2030-01-10T14:58:00Z', body: 'Please send the revised inspection report.',
     }, report] }).reason).toBe('operational_context');
   });
+  test('a reaction prefix cannot conceal a trailing operational request', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [{ ...inbound,
+      id: 'earlier', createdAt: '2030-01-10T14:58:00Z',
+      body: 'Liked “Your report” Please reschedule tomorrow.',
+    }, report] }).reason).toBe('operational_context');
+  });
   test('an outstanding promise stays outstanding after a template', () => {
     expect(evaluateGratitudeContext({ ...context, history: [{ ...report,
       id: 'promise', createdAt: '2030-01-10T14:58:00Z', body: 'I will send the estimate tonight.',

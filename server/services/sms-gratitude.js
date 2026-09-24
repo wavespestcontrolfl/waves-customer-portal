@@ -46,13 +46,6 @@ function gratitudeTimingReason({ inboundCreatedAt, now, activatedAt } = {}) {
   return null;
 }
 
-// Older Android and translated reactions can quote arbitrary operational
-// text. They are never gratitude candidates. In context only affirmative
-// reactions are harmless; negative/questioning reactions remain blockers.
-function affirmativeReaction(body) {
-  return /^(?:liked|loved|le gusta|le encanta)\s+[“"\s]|^[\s\u200b\u200a]*👍(?:\p{Emoji_Modifier})?[\s\u200b\u200a]*to\s+[“"]/iu.test(body);
-}
-
 function withoutOptionalFooter(body) {
   // Exact standalone template lines only: never strip a real question just
   // because it happens to contain "reply" or "let me know".
@@ -99,7 +92,7 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
   // report/reminder satisfied a separate request or a promised follow-up.
   if (recent.some(row => row.direction === 'inbound'
       && (row.mediaCount !== 0 || !(isCourtesyOnly(row.body, { awaitingAnswer: false })
-        || isGratitudeOnly(row.body) || affirmativeReaction(row.body))))) return deny('operational_context');
+        || isGratitudeOnly(row.body))))) return deny('operational_context');
   if (outgoing.slice(0, -1).some(row => {
     const text = withoutOptionalFooter(String(row.body || ''));
     return !BANK_ACK_RE.test(text) && (outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text));
