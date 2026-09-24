@@ -1,5 +1,5 @@
 const { phoneIdentityKey } = require('../utils/phone');
-const { draftIdSql, phoneIdentitySql } = require('./sms-response-policy');
+const { draftIdSql, loadPriorOutboundBodies } = require('./sms-response-policy');
 
 const TIMELINE_TYPES = new Set([
   'all', 'interaction', 'sms', 'call', 'service', 'invoice', 'estimate',
@@ -384,13 +384,8 @@ async function listCustomerComms(db, customer, query = {}) {
   const customerId = customer.id;
   const parsed = parseCommsRequest(query, customerId);
   const readBefore = parsed.cursor?.readBefore || new Date().toISOString();
-  const currentPeer = phoneIdentitySql("COALESCE(NULLIF(c.contact_phone, ''), customer_scope.phone, '')");
-  const currentEndpoint = phoneIdentitySql("COALESCE(c.our_endpoint_id, '')");
-  const priorPeer = phoneIdentitySql("COALESCE(NULLIF(prior_conversation.contact_phone, ''), prior_customer.phone, '')");
-  const priorEndpoint = phoneIdentitySql("COALESCE(prior_conversation.our_endpoint_id, '')");
   const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', m.metadata->>'draft_id')");
   const selectCommsColumns = queryBuilder => queryBuilder
-    .leftJoin('customers as customer_scope', 'c.customer_id', 'customer_scope.id')
     .joinRaw(`LEFT JOIN LATERAL (
       SELECT sl.message_type, sl.status, sl.metadata
       FROM sms_log sl
@@ -410,33 +405,11 @@ async function listCustomerComms(db, customer, query = {}) {
       WHERE mdx.id = ${responseDraftId}
       LIMIT 1
     ) sms_answer ON true`)
-    .joinRaw(`LEFT JOIN LATERAL (
-      SELECT prior.body
-      FROM messages prior
-      JOIN conversations prior_conversation ON prior_conversation.id = prior.conversation_id
-      LEFT JOIN customers prior_customer ON prior_customer.id = prior_conversation.customer_id
-      LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status
-        FROM sms_log sl
-        WHERE sl.twilio_sid = prior.twilio_sid AND sl.direction = prior.direction
-        ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
-      ) prior_legacy ON true
-      WHERE m.direction = 'inbound' AND prior.channel = 'sms'
-        AND prior.direction = 'outbound'
-        AND COALESCE(prior_legacy.status, prior.delivery_status, '') IN ('queued', 'sent', 'delivered')
-        AND COALESCE(prior_legacy.message_type, prior.message_type, '') <> 'internal_alert'
-        AND prior_conversation.customer_id = c.customer_id
-        AND ${currentPeer} <> '' AND ${currentEndpoint} <> ''
-        AND ${priorPeer} = ${currentPeer} AND ${priorEndpoint} = ${currentEndpoint}
-        AND prior.created_at < m.created_at
-        AND prior.created_at > m.created_at - interval '24 hours'
-      ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1
-    ) sms_prior_outbound ON true`)
     .select(
       'm.id', 'm.conversation_id', 'm.channel', 'm.direction', 'm.body',
       'm.ai_summary', 'm.message_type', 'm.duration_seconds', 'm.media', 'm.answered_by',
       'm.is_read', 'm.delivery_status', 'm.recording_sid', 'm.metadata', 'm.created_at',
-      'c.our_endpoint_id', 'c.contact_phone',
+      'c.customer_id', 'c.our_endpoint_id', 'c.contact_phone',
     )
     .select(
       'sms_response.message_type as response_message_type',
@@ -445,7 +418,6 @@ async function listCustomerComms(db, customer, query = {}) {
       'sms_audit.metadata as response_audit_metadata',
       'sms_answer.is_click_followup as response_is_click_followup',
       'sms_answer.has_draft_provenance as response_has_draft_provenance',
-      'sms_prior_outbound.body as response_prior_outbound_body',
     );
   const rowsQuery = selectCommsColumns(db('messages as m')
     .leftJoin('conversations as c', 'm.conversation_id', 'c.id')
@@ -460,6 +432,14 @@ async function listCustomerComms(db, customer, query = {}) {
   const rows = await rowsQuery.orderBy('m.created_at', 'desc').orderBy('m.id', 'desc').limit(parsed.limit + 1);
   const hasMore = rows.length > parsed.limit;
   const pageRows = rows.slice(0, parsed.limit);
+  const priorOutboundBodies = await loadPriorOutboundBodies(db, pageRows, {
+    customerScoped: true, fallbackCustomerPhone: customer.phone,
+  });
+  for (const row of pageRows) {
+    if (priorOutboundBodies.has(String(row.id))) {
+      row.response_prior_outbound_body = priorOutboundBodies.get(String(row.id));
+    }
+  }
   const last = pageRows[pageRows.length - 1];
   const nextCursor = hasMore && last ? encodeCursor({
     v: 1, kind: 'comms', customerId, filter: parsed.channel, readBefore,
@@ -498,6 +478,14 @@ async function listCustomerComms(db, customer, query = {}) {
       .orderBy('m.created_at', 'desc')
       .orderBy('m.id', 'desc')
       .limit(1);
+    const composerPriorOutboundBodies = await loadPriorOutboundBodies(db, composerRows, {
+      customerScoped: true, fallbackCustomerPhone: customer.phone,
+    });
+    for (const row of composerRows) {
+      if (composerPriorOutboundBodies.has(String(row.id))) {
+        row.response_prior_outbound_body = composerPriorOutboundBodies.get(String(row.id));
+      }
+    }
     composerComms = composerRows.map(message => mapCommsMessage(message, customer, twilioNumbers));
   }
   return {
