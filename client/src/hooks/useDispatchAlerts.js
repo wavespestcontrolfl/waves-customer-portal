@@ -69,6 +69,24 @@ function relayTechOutAlertChange(alert) {
 // dispatch:alert for an unknown id prepends a new card; for a card already on
 // screen it is an update, merged over the existing card so hydrated join
 // fields (customer / tech names) survive.
+// Initial GET merged with live rows. The fetched row supplies enriched
+// fields (tech_name, customer, address); a live row that arrived while the
+// GET was in flight is newer and its own fields win; a card that resolved
+// meanwhile is not resurrected. Newest first; a tech-out batch shares one
+// created_at (one transaction), so its cards fall back to bump_order.
+export function mergeHydration(prev, fetched, resolvedIds = null) {
+  const byId = new Map();
+  for (const a of prev) byId.set(a.id, a);
+  for (const a of fetched) {
+    if (resolvedIds && resolvedIds.has(a.id)) continue;
+    const live = byId.get(a.id);
+    byId.set(a.id, live ? { ...a, ...live } : a);
+  }
+  return Array.from(byId.values()).sort(
+    (a, b) => (new Date(b.created_at) - new Date(a.created_at)) || bumpOrderTieBreak(a, b)
+  );
+}
+
 // A broadcast for an id this board already saw resolve (or a row that is
 // itself resolved) is stale — e.g. an auto-move annotation delivered after a
 // concurrent dispatcher resolve — and must never resurrect a phantom card.
@@ -117,20 +135,9 @@ export function useDispatchAlerts() {
         // row gets dropped — the GET response was generated from an
         // earlier DB snapshot. Codex P1 on PR #306.
         //
-        // Dedupe by id. Hydration row wins on conflict because it
-        // carries enriched fields (tech_name, customer, address) that
-        // the bare broadcast row doesn't have. Live rows whose ids
-        // aren't in the hydration response are preserved as-is.
-        setAlerts((prev) => {
-          const byId = new Map();
-          for (const a of prev) byId.set(a.id, a);
-          for (const a of fetched) byId.set(a.id, a);
-          return Array.from(byId.values()).sort(
-            // Newest first; a tech-out batch shares one created_at (one
-            // transaction), so its cards fall back to bump_order (#1 first).
-            (a, b) => (new Date(b.created_at) - new Date(a.created_at)) || bumpOrderTieBreak(a, b)
-          );
-        });
+        // Dedupe by id — see mergeHydration (live fields win over the
+        // enriched snapshot; resolved cards stay gone).
+        setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current));
         setLoading(false);
       } catch (err) {
         if (cancelled) return;

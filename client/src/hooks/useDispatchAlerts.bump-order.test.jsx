@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { bumpOrderTieBreak, mergeAlertBroadcast } from './useDispatchAlerts';
+import { bumpOrderTieBreak, mergeAlertBroadcast, mergeHydration } from './useDispatchAlerts';
 
 describe('bumpOrderTieBreak (tech-out batch ordering)', () => {
   const at = (bump) => ({ created_at: '2026-09-24T12:00:00Z', payload: bump == null ? {} : { bump_order: bump } });
@@ -43,5 +43,19 @@ describe('mergeAlertBroadcast', () => {
     const prev = [{ id: 'b' }];
     expect(mergeAlertBroadcast(prev, { id: 'a', payload: {} }, new Set(['a']))).toBe(prev);
     expect(mergeAlertBroadcast(prev, { id: 'c', resolved_at: '2026-09-24T12:00:00Z' })).toBe(prev);
+  });
+});
+
+describe('mergeHydration', () => {
+  it('keeps a live update that raced the initial GET, layered over the enriched snapshot', () => {
+    const live = [{ id: 'a', created_at: '2026-09-24T12:00:00Z', payload: { auto_attempt: { reason: 'window_occupied' } } }];
+    const fetched = [{ id: 'a', created_at: '2026-09-24T12:00:00Z', tech_name: 'Tech One', payload: {} }];
+    const [row] = mergeHydration(live, fetched);
+    expect(row.tech_name).toBe('Tech One');
+    expect(row.payload.auto_attempt.reason).toBe('window_occupied');
+  });
+
+  it('does not resurrect a card that resolved while the GET was in flight', () => {
+    expect(mergeHydration([], [{ id: 'a', created_at: '2026-09-24T12:00:00Z' }], new Set(['a']))).toEqual([]);
   });
 });

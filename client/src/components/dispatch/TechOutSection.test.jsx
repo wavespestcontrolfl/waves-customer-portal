@@ -454,6 +454,31 @@ describe('auto-assign parked stops (GATE_TECH_OUT_AUTO_MOVE)', () => {
     expect(await screen.findByText('1 stop parked in the Action Queue — decide who to move')).toBeInTheDocument();
   });
 
+  it('a slow count read for a previous selection never overwrites the count a newer status read brought', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
+    const { rerender } = render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('2 stops parked in the Action Queue — decide who to move');
+
+    // A count-only read for tech-1 starts and stalls…
+    let releaseCount;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { releaseCount = resolve; }));
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(TECH_OUT_ALERTS_EVENT, { detail: { tech_id: 'tech-1' } }));
+    });
+    // …the drawer switches away and back; the fresh status read lands first.
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+    rerender(<TechOutSection techId="tech-2" techName="Tech Two" />);
+    await screen.findByText('Availability');
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence({ parked_open_count: 0 }), auto_move_enabled: true }) });
+    rerender(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Out today · Emergency');
+
+    await act(async () => {
+      releaseCount({ ok: true, json: async () => ({ enabled: true, absence: outAbsence({ parked_open_count: 5 }), auto_move_enabled: true }) });
+    });
+    expect(screen.queryByText(/5 stops parked/)).toBeNull();
+  });
+
   it('a count refresh landing mid-auto-assign does not discard the run\'s own result', async () => {
     fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
     render(<TechOutSection techId="tech-1" techName="Tech One" />);

@@ -201,6 +201,34 @@ describe('autoAssignParkedAlert', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
+  test.each(['completed', 'cancelled', 'skipped', 'no_show', 'on_site'])('a %s stop no longer needs reassigning: stale, card closed, never annotated', async (status) => {
+    const queue = [query(baseAlert()), query(baseStop({ status }))];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, skipped: 'already_resolved' });
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, auto: true }));
+    expect(db.raw).not.toHaveBeenCalled();
+  });
+
+  test('a CAS miss because a dispatcher reassigned the stop mid-run closes the stale card instead of trying more techs', async () => {
+    SmartRebooker.reschedule.mockRejectedValue(Object.assign(new Error('concurrently'), { statusCode: 409 }));
+    const second = { id: 'tech-3', name: 'Tech Three' };
+    const queue = [
+      query(baseAlert()), query(baseStop()), query([CANDIDATE, second]),
+      query([]), query([]), query([]), query([]),
+      query(baseStop({ technician_id: 'someone-else' })), // re-read after the 409
+    ];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, skipped: 'already_resolved' });
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, auto: true }));
+  });
+
   test('a superseded (rescheduled) row is stale: no move, and its card is closed as a systemic resolution', async () => {
     const queue = [query(baseAlert()), query(baseStop({ status: 'rescheduled' }))];
     db.mockImplementation(() => queue.shift());
@@ -311,6 +339,7 @@ describe('autoAssignParkedAlert', () => {
       query([CANDIDATE]),
       query([]),
       query([]),
+      query(baseStop()), // re-read after the 409: still parked on the absent tech
       query({}),
     ];
     db.mockImplementation(() => queue.shift());
@@ -358,6 +387,7 @@ describe('selection matches the commit policy', () => {
     const options = SmartRebooker.reschedule.mock.calls[0][5];
     expect(options).not.toHaveProperty('excludeServiceIds');
     expect(options.expect.estimated_duration_minutes).toBe(60);
+    expect(options.expect.service_type).toBe('general_pest');
   });
 
   test('a lapsed estimate hold on the candidate\'s day does not count as a conflict', async () => {

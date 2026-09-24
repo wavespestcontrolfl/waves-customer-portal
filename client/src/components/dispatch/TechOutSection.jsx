@@ -74,6 +74,8 @@ export default function TechOutSection({ techId, techName, onChanged }) {
   const [clearing, setClearing] = useState(false);
 
   const fetchSeqRef = useRef(0);
+  // Count-only refreshes (onTechOutAlertsChange) — see fetchStatus.
+  const countSeqRef = useRef(0);
   // Mirrors the techId prop on every render so an already-in-flight async
   // handler (whose own `techId` closure is frozen at the value from the
   // render it started in) can still tell the selection moved on. Needed
@@ -98,6 +100,10 @@ export default function TechOutSection({ techId, techName, onChanged }) {
 
   const fetchStatus = useCallback(async (id) => {
     const seq = ++fetchSeqRef.current;
+    // Any full status read (tech switch, reopen, mutation) supersedes an
+    // in-flight count-only read, so a slow count for an earlier selection
+    // can never overwrite the fresher count this read brings.
+    countSeqRef.current += 1;
     try {
       const date = etDateString();
       const res = await fetch(`${API_BASE}/admin/tech-out/${id}?date=${date}`, {
@@ -169,7 +175,6 @@ export default function TechOutSection({ techId, techName, onChanged }) {
   // the mark-out / clear / auto-assign handlers read as "superseded", and
   // those very actions broadcast cards mid-request. Merged only into the
   // same absence, under its own sequence, so a late read never regresses.
-  const countSeqRef = useRef(0);
   useEffect(() => {
     async function onTechOutAlertsChange(event) {
       const changedTechId = event?.detail?.tech_id;

@@ -50,7 +50,7 @@ const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./schedu
 const { resolveGeo, driveMin, HQ } = require('./auto-dispatch/geo');
 const { resolveAlert, emitAlert } = require('./dispatch-alerts');
 const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('./dispatch-assignment');
-const { ALERT_TYPE } = require('./tech-out');
+const { ALERT_TYPE, ABSENT_STOP_EXCLUDE_STATUSES } = require('./tech-out');
 
 // Up to this many fitting candidates get a real move attempt (best detour
 // first) before an alert gives up and stays parked for a human.
@@ -340,12 +340,14 @@ function stopMoveRefusal(stop, absentTechId, date) {
     ? stop.scheduled_date.toISOString().slice(0, 10)
     : String(stop.scheduled_date || '').slice(0, 10);
   // Stale card: the stop already left the absent tech's day by some other
-  // path (a dispatcher's reassignment, a prior run, a date move), or it was
-  // superseded ('rescheduled' is a non-route placeholder the parking query
-  // itself never selects). Nothing to move; the caller closes the card.
+  // path (a dispatcher's reassignment, a prior run, a date move), or is
+  // finished / superseded. Nothing to move; the caller closes the card.
+  // A status the parking query itself no longer selects (completed,
+  // cancelled, skipped, no_show, rescheduled, on_site) means the stop no
+  // longer needs reassigning either — same list, so both sides agree.
   if (String(stop.technician_id || '') !== String(absentTechId || '')
     || scheduledDateStr !== String(date)
-    || stop.status === 'rescheduled') {
+    || ABSENT_STOP_EXCLUDE_STATUSES.includes(String(stop.status))) {
     return { reason: 'already_resolved', skipped: true, stale: true };
   }
   // A grouped visit the alert didn't know about (grouped after park) is a
@@ -364,6 +366,22 @@ function stopMoveRefusal(stop, absentTechId, date) {
   // status syncs, so a 'confirmed' row may already be an active visit.
   if (LIVE_TRACK_STATES.includes(String(stop.track_state))) return { reason: 'live_status', skipped: false };
   return null;
+}
+
+// guardedCoordSelects reads customers.* as the coordinate fallback, so the
+// customer join is required (not optional) for this select to parse.
+function readStop(jobId) {
+  return db('scheduled_services')
+    .leftJoin('customers', 'customers.id', 'scheduled_services.customer_id')
+    .where('scheduled_services.id', jobId)
+    .first(
+      'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
+      'scheduled_services.window_start', 'scheduled_services.window_end',
+      'scheduled_services.estimated_duration_minutes', 'scheduled_services.visit_id',
+      'scheduled_services.technician_id', 'scheduled_services.scheduled_date',
+      'scheduled_services.customer_id', 'scheduled_services.track_state',
+      'scheduled_services.source_action', 'scheduled_services.customer_confirmed', ...guardedCoordSelects(db),
+    );
 }
 
 async function loadMovableStop(alertId) {
@@ -389,19 +407,7 @@ async function loadMovableStop(alertId) {
     return { done: { moved: false, alert_id: alertId, reason: 'no_job_reference' } };
   }
 
-  // guardedCoordSelects reads customers.* as the coordinate fallback, so the
-  // customer join is required (not optional) for this select to parse.
-  const stop = await db('scheduled_services')
-    .leftJoin('customers', 'customers.id', 'scheduled_services.customer_id')
-    .where('scheduled_services.id', jobId)
-    .first(
-      'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
-      'scheduled_services.window_start', 'scheduled_services.window_end',
-      'scheduled_services.estimated_duration_minutes', 'scheduled_services.visit_id',
-      'scheduled_services.technician_id', 'scheduled_services.scheduled_date',
-      'scheduled_services.customer_id', 'scheduled_services.track_state',
-      'scheduled_services.source_action', 'scheduled_services.customer_confirmed', ...guardedCoordSelects(db),
-    );
+  const stop = await readStop(jobId);
   const refusal = stopMoveRefusal(stop, absentTechId, date);
   if (refusal) {
     if (!refusal.skipped) await annotateAttempt(alertId, refusal.reason);
@@ -508,6 +514,8 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
             // The span the in-transaction fit (moveGuard) derives an
             // open-ended window from — an edit after ranking misses the CAS.
             estimated_duration_minutes: stop.estimated_duration_minutes ?? null,
+            // The category moveGuard checked capabilities against.
+            service_type: stop.service_type ?? null,
           },
           moveGuard: makeMoveGuard(stop, date),
           beforeMove: makeStillParkedGuard({
@@ -517,6 +525,17 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
       );
     } catch (err) {
       if (err && STALE_CODES.has(err.code)) return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
+      // A plain 409 is the expect CAS missing: re-read the stop. If it has
+      // left the absent tech's day (a racing manual reassignment, a status
+      // change) the card is stale — close it instead of trying more techs.
+      if (err && (err.statusCode === 409 || err.status === 409) && !err.code) {
+        const now = await readStop(stop.id);
+        const refusal = stopMoveRefusal(now, absentTechId, date);
+        if (refusal && refusal.stale) {
+          await resolveStaleAlert(alertId);
+          return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
+        }
+      }
       lastErr = err;
       // Same answer for every candidate: stop and let the next run re-read.
       if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED') break;

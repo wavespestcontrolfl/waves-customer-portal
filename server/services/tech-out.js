@@ -531,6 +531,7 @@ async function clearTechOut({ technicianId, date, actorId }) {
 module.exports = {
   REASONS,
   ALERT_TYPE,
+  ABSENT_STOP_EXCLUDE_STATUSES,
   ABSENCE_EVENT,
   techOutEnabled,
   getTechOut,
