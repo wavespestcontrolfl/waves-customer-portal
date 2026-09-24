@@ -195,17 +195,19 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     // operator saying "charge this on top, on purpose".
     //
     // ADMIN-BUG-R11: the check-then-charge below runs under a per-customer
-    // in-process lock (shared with billing-cron's per-customer loop) so two
-    // overlapping amount-less requests — two tabs/operators, or a click
-    // landing while the 8 AM dues cron or 10 AM retry sweep is mid-charge
-    // for this SAME customer — can't both pass the guard and both call
-    // StripeService.charge. The second caller's callback runs only after
-    // the first's fully settles, sees the ledger row it just wrote, and
-    // 409s already_collected. A deterministic idempotency key
-    // (manual_monthly_<cid>_<YYYY-MM>) is passed to charge() too, so a
+    // in-process lock (shared with billing-cron's per-customer monthly loop
+    // AND its retry sweep) so two overlapping amount-less requests — two
+    // tabs/operators, or a click landing while the 8 AM dues cron or 10 AM
+    // retry sweep is mid-charge for this SAME customer — can't both pass
+    // the guard and both call StripeService.charge. The second caller's
+    // callback runs only after the first's fully settles, sees the ledger
+    // row it just wrote, and 409s already_collected. The idempotency key
+    // passed to charge() is the SAME `autopay_monthly_<cid>_<ET date>` key
+    // chargeMonthly() defaults to (not a separate manual_ family) — a
     // duplicate that slips past this same-process lock (a genuine second
-    // Railway instance) still replays the same PaymentIntent and collapses
-    // to one ledger row under charge()'s own per-PI advisory lock.
+    // Railway instance overlapping during a deploy) still replays the SAME
+    // Stripe PaymentIntent as that day's cron run, and collapses to one
+    // ledger row under charge()'s own per-PI advisory lock.
     let payment;
     if (isMonthlyCollection) {
       const lockOutcome = await withCustomerBillingLock(customerId, async () => {
@@ -253,7 +255,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
             tier: customer.waveguard_tier || '',
             billed_month: monthKey,
             initiated_by: 'machine',
-          }, `manual_monthly_${customerId}_${monthKey}`);
+          }, `autopay_monthly_${customerId}_${etDateString()}`);
           return { payment: chargedPayment };
         } catch (err) {
           return { response: await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId }) };

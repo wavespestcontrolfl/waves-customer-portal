@@ -164,13 +164,15 @@ describe('POST /customers/:id/charge-now fails closed off the monthly lane', () 
     await withServer(async (baseUrl) => {
       const res = await postChargeNow(baseUrl, customer.id, {});
       expect(res.status).toBe(200);
-      // 5th arg: deterministic per-customer/month idempotency key (ADMIN-BUG-R11
-      // fix) — a duplicate that slips past the in-process charge-now lock still
-      // replays the same Stripe PaymentIntent instead of minting a new one.
+      // 5th arg: the SAME autopay_monthly_<cid>_<ET date> idempotency key
+      // chargeMonthly() defaults to (ADMIN-BUG-R11 fix) — a duplicate that
+      // slips past the in-process charge-now lock (a genuine second Railway
+      // instance) still replays the SAME PaymentIntent as that day's cron
+      // run instead of minting a new one.
       expect(chargeMock).toHaveBeenCalledWith(customer.id, 89, expect.any(String), expect.objectContaining({
         type: 'manual_charge',
         billed_month: expect.stringMatching(/^\d{4}-\d{2}$/),
-      }), expect.stringMatching(new RegExp(`^manual_monthly_${customer.id}_\\d{4}-\\d{2}$`)));
+      }), expect.stringMatching(new RegExp(`^autopay_monthly_${customer.id}_\\d{4}-\\d{2}-\\d{2}$`)));
       expect(chargeOneTimeMock).not.toHaveBeenCalled();
     });
   });

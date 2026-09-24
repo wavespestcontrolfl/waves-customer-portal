@@ -153,13 +153,15 @@ describe('charge-now already-collected guard', () => {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
       });
       expect(res.status).toBe(200);
-      // 5th arg: deterministic per-customer/month idempotency key (ADMIN-BUG-R11
-      // fix) — a duplicate that slips past the in-process charge-now lock still
-      // replays the same Stripe PaymentIntent instead of minting a new one.
+      // 5th arg: the SAME autopay_monthly_<cid>_<ET date> idempotency key
+      // chargeMonthly() defaults to (ADMIN-BUG-R11 fix) — a duplicate that
+      // slips past the in-process charge-now lock (a genuine second Railway
+      // instance) still replays the SAME PaymentIntent as that day's cron
+      // run instead of minting a new one.
       expect(chargeMock).toHaveBeenCalledWith('cust-1', 89, expect.any(String), expect.objectContaining({
         billed_month: expect.stringMatching(/^\d{4}-\d{2}$/),
         initiated_by: 'machine',
-      }), expect.stringMatching(/^manual_monthly_cust-1_\d{4}-\d{2}$/));
+      }), expect.stringMatching(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}$/));
     });
   });
 

@@ -826,6 +826,12 @@ const BillingCron = {
       let newPayment = null;
       let originalMeta = {};
       let baseAmount = parseFloat(payment.amount);
+      // ADMIN-BUG-R11: set inside the monthly charge's collection lock below
+      // when a concurrent collector (Charge now, or this same sweep for a
+      // different rung) already took this obligation between the
+      // classification above and here — resolved exactly like the
+      // ALREADY_COLLECTED branch, never re-entering the failure ladder.
+      let raceAlreadyCollectedId = null;
 
       try {
         const service = await require('./stripe');
@@ -869,16 +875,37 @@ const BillingCron = {
           const monthlyCustomer = await db('customers').where({ id: payment.customer_id }).first();
           const monthlyDescription = description
             || `${monthlyCustomer?.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${monthlyCustomer?.first_name} ${monthlyCustomer?.last_name}`;
-          // Month-of-obligation stamp: this retry collects the ORIGINAL
-          // failed attempt's month (obligationMonth, resolved above), not
-          // the month the rung happens to land in — a July decline
-          // recovered Aug 1 must not satisfy August's month-window dedupe
-          // and skip a whole billing cycle.
-          newPayment = await service.charge(payment.customer_id, baseAmount, monthlyDescription, {
-            type: 'monthly_autopay',
-            tier: monthlyCustomer?.waveguard_tier || '',
-            billed_month: obligationMonth || undefined,
-          }, retryIdempotencyKey);
+          // ADMIN-BUG-R11: this retry and a concurrent admin "Charge now"
+          // click (or the daily monthly cron) collect the SAME obligation.
+          // Serialize on the SAME per-customer in-process lock those paths
+          // hold, and re-run the pure classifier one more time inside it —
+          // a collection that landed between this sweep's classification
+          // above and here (the whole point of the lock) is caught instead
+          // of charged again.
+          const lockOutcome = await withCustomerBillingLock(payment.customer_id, async () => {
+            if (obligationMonth) {
+              const recheck = await classifyFailedPaymentRetry({ payment, customer, ctx });
+              if (recheck.reason === RETRY_REASONS.ALREADY_COLLECTED) {
+                return { alreadyCollected: recheck.collectedByPaymentId };
+              }
+            }
+            // Month-of-obligation stamp: this retry collects the ORIGINAL
+            // failed attempt's month (obligationMonth, resolved above), not
+            // the month the rung happens to land in — a July decline
+            // recovered Aug 1 must not satisfy August's month-window dedupe
+            // and skip a whole billing cycle.
+            const charged = await service.charge(payment.customer_id, baseAmount, monthlyDescription, {
+              type: 'monthly_autopay',
+              tier: monthlyCustomer?.waveguard_tier || '',
+              billed_month: obligationMonth || undefined,
+            }, retryIdempotencyKey);
+            return { charged };
+          });
+          if (lockOutcome.alreadyCollected) {
+            raceAlreadyCollectedId = lockOutcome.alreadyCollected;
+          } else {
+            newPayment = lockOutcome.charged;
+          }
         } else {
           newPayment = await service.chargeOneTime(
             payment.customer_id,
@@ -1328,6 +1355,30 @@ const BillingCron = {
             });
           }
         }
+        continue;
+      }
+
+      // ADMIN-BUG-R11: the collection lock's re-check found this obligation
+      // already collected through another door — resolve exactly like the
+      // pre-charge ALREADY_COLLECTED branch above (no charge was made; no
+      // new payment row exists to supersede this one with is wrong here, so
+      // point at the collector that actually won the race).
+      if (raceAlreadyCollectedId) {
+        await db('payments')
+          .where({ id: payment.id })
+          .update({
+            next_retry_at: null,
+            superseded_by_payment_id: raceAlreadyCollectedId,
+            failure_reason: db.raw(
+              'COALESCE(failure_reason, \'\') || ? ',
+              [` — resolved: ${obligationMonth} already collected by payment ${raceAlreadyCollectedId} (caught under the collection lock)`],
+            ),
+          }).catch((updErr) => logger.error(`[billing-cron] retry disarm (already collected, late race) failed for payment ${payment.id}: ${updErr.message}`));
+        await logAutopay(payment.customer_id, 'skipped_already_paid', {
+          paymentId: payment.id,
+          details: { source: 'autopay_retry', collected_by_payment_id: raceAlreadyCollectedId, billed_month: obligationMonth, ladder_stopped: true },
+        }).catch(() => {});
+        logger.info(`[billing-cron] Retry for payment ${payment.id} skipped — ${obligationMonth} already collected by payment ${raceAlreadyCollectedId} (caught under the collection lock)`);
         continue;
       }
 
