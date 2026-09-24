@@ -2395,7 +2395,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, normalizedAddress, { requireLocality: !own }))
               .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
               .reduce((max, at) => Math.max(max, at), 0);
-            const cleanAt = Math.max(lockedClean, Date.parse(cleanEvidenceAt || cachedCleanAt || '') || 0);
+            // BOTH clean timestamps independently, never first-wins (pre-push
+            // audit P1 after r47): an older lead clean verdict must not hide
+            // a newer cached county confirmation from this comparison.
+            const cleanAt = Math.max(lockedClean, Date.parse(cleanEvidenceAt || '') || 0, Date.parse(cachedCleanAt || '') || 0);
             acceptedCleanAt = cleanAt;
             const lockedFlags = lockedRows
               .map((row) => recoverAddressUnverified(parseLocked(row)))

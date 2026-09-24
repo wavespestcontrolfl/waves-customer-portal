@@ -289,3 +289,11 @@ describe('codex r46: a corrected commercial proposal is judged on its customer-f
     expect(pq.split('samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true })').length - 1).toBe(2);
   });
 });
+
+describe('pre-push audit after r47: both clean timestamps count', () => {
+  test('the locked reconciliation takes the max of the lead clean verdict and the cached clean audit', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    expect(src).toContain("const cleanAt = Math.max(lockedClean, Date.parse(cleanEvidenceAt || '') || 0, Date.parse(cachedCleanAt || '') || 0);");
+    expect(src).not.toContain('cleanEvidenceAt || cachedCleanAt');
+  });
+});
