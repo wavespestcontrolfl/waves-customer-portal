@@ -71,11 +71,24 @@ function technicianLiveVisitFilter(req, q) {
 // token no longer authorizes this row, 404 not_found for a row that
 // genuinely doesn't exist) — callers let it propagate to the route's
 // catch/next(err), or catch it themselves for a custom response shape.
-async function lockOwnedLiveVisit(trx, req, visitId, columns = ['*']) {
-  const row = await technicianLiveVisitFilter(
-    req,
-    trx('scheduled_services').where('scheduled_services.id', visitId).forUpdate(),
-  ).first(...columns);
+// allowTerminal: a same-status retry of an already-terminal transition
+// (cancelled/skipped/no_show, re-run to recover an interrupted invoice/
+// reminder/tracker effect) is explicitly permitted by the status route's
+// OWN terminal-transition logic even though the row now fails
+// technicianLiveVisitFilter (dead statuses never authorize a NEW
+// transition) — codex-review P1 (PR #4673 round 3): rejecting that retry
+// outright regressed a legitimate, already-supported recovery path. Pass
+// true only when the caller has ALREADY confirmed this is a same-status
+// resend; it drops to a bare (but still row-locked) technician_id match,
+// never staleness/dead-status, and stays admin-unscoped either way.
+async function lockOwnedLiveVisit(trx, req, visitId, columns = ['*'], { allowTerminal = false } = {}) {
+  const q = trx('scheduled_services').where('scheduled_services.id', visitId).forUpdate();
+  if (allowTerminal) {
+    if (isTechnicianRequest(req)) q.where('scheduled_services.technician_id', req.technicianId);
+  } else {
+    technicianLiveVisitFilter(req, q);
+  }
+  const row = await q.first(...columns);
   if (row) return row;
   if (!isTechnicianRequest(req)) {
     throw Object.assign(new Error('Service not found'), { status: 404, code: 'not_found' });

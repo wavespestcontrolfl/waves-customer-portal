@@ -2057,9 +2057,21 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     const jobDateStr = job.scheduled_date
       ? String(job.scheduled_date instanceof Date ? job.scheduled_date.toISOString() : job.scheduled_date).slice(0, 10)
       : null;
+    // codex-review P0 (PR #4673 round 3): the ROUTE's own admin-only gate
+    // decides from ITS pre-call read of the visit's scheduled_date, which
+    // races this function's own re-read (loadServiceWithCustomer above) —
+    // a concurrent date change landing in between could leave the route's
+    // check believing no series-widening is possible while THIS read
+    // disagrees, reaching the series branch with no ownership enforcement
+    // at all (requireAssignedTechnicianId only fenced the single-job
+    // fallback). A restricted (technician) caller can never take the
+    // series-shift branch here, full stop, regardless of any race — every
+    // technician request is forced onto the single-job path below, which
+    // is unconditionally fenced by requireAssignedTechnicianId's CAS.
     const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
       && !!job.is_recurring
-      && String(target.date) !== jobDateStr;
+      && String(target.date) !== jobDateStr
+      && !requireAssignedTechnicianId;
     // The anchor's on-the-hour normalization for this path lives at the
     // TOP of commit() (before the custom move's SMS pre-render) — by here
     // target.window is already the window that books.

@@ -151,3 +151,36 @@ test('control: no reassignment in flight — the same technician transitions the
   expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
   expect(mockTransitionJobStatus.mock.calls[0][0]).toMatchObject({ jobId: 'svc-1', toStatus: 'en_route', transitionedBy: 'tech-A' });
 });
+
+// codex-review P1 (PR #4673 round 3): lockOwnedLiveVisit's technicianLiveVisitFilter
+// rejects cancelled/skipped/no_show rows outright, so a technician retrying
+// their OWN already-terminal transition (recovering an interrupted invoice/
+// reminder/tracker effect — the route's own terminal-transition logic
+// explicitly permits this) started getting 403'd instead of re-running the
+// idempotent effects. allowTerminal must let a same-status resend through.
+test('a technician resending the SAME status on their own already-cancelled visit succeeds (idempotent retry), not 403', async () => {
+  db.__state.scheduledServices[0].status = 'cancelled';
+  const { status, body } = await put('svc-1', { status: 'cancelled' });
+  expect(status).toBe(200);
+  expect(body.success).toBe(true);
+  expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
+  expect(mockTransitionJobStatus.mock.calls[0][0]).toMatchObject({ jobId: 'svc-1', fromStatus: 'cancelled', toStatus: 'cancelled', transitionedBy: 'tech-A' });
+});
+
+test('control: a DIFFERENT target from an already-cancelled visit still 409s (terminal, not a retry) — allowTerminal never widens to a new transition', async () => {
+  db.__state.scheduledServices[0].status = 'cancelled';
+  const { status, body } = await put('svc-1', { status: 'en_route' });
+  expect(status).toBe(409);
+  expect(body.code).toBe('already_terminal');
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+});
+
+test('a reassigned tech resending the SAME status on a NOW-cancelled-and-reassigned visit is still refused (allowTerminal drops the staleness check but keeps the technician_id match)', async () => {
+  db.__state.scheduledServices[0].status = 'cancelled';
+  db.__state.reassignOnTransaction = true;
+  db.__state.reassignedTo = 'tech-B';
+  const { status, body } = await put('svc-1', { status: 'cancelled' });
+  expect(status).toBe(403);
+  expect(body).toEqual({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+});

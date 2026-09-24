@@ -2256,7 +2256,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // fail it too, not just a technician_id compare) before
         // transitionJobStatus ever runs — the SAME check the field-confirm
         // path below reuses instead of re-verifying itself.
-        const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status']);
+        const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status'], {
+          // A same-status resend of an already-terminal row (cancelled/
+          // skipped/no_show) is the one case the terminal-transition check
+          // above explicitly lets through — it must not be re-rejected here
+          // for being terminal (codex-review P1).
+          allowTerminal: toStatus === fromStatus,
+        });
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = lockedRow;
           fieldConfirmVerified = !!locked
