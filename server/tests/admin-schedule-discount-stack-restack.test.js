@@ -2292,42 +2292,5 @@ describe('resolveUpdateDetailsAddonFinancials — PUT /:id/update-details routes
       expect(result.addons).toEqual({ 'real-disc': 9 });
     });
 
-    // GitHub Codex round 24 P1 (#4657, :2973): a snapshot holding obsolete
-    // caps for several formerly used presets — switching an add-on straight
-    // from A to a historical B must NOT resurrect B's stale frozen cap.
-    describe('priorAddonIds (round 24 P1, #4657 :2973)', () => {
-      const historical = { line: { id: null, cap: null }, addons: { A: 10, B: 6, C: 4 } };
-
-      test('A → B switch: B survives this save but was not live before it, so its stale frozen cap is dropped (reads live); A is dropped as removed', () => {
-        const result = pruneObsoleteFrozenAddonCaps(historical, ['B'], null, ['A']);
-        expect(result.addons).toEqual({});
-      });
-
-      test('same-current-id re-pick (owner Ruling A): an id live before AND after keeps its frozen cap exactly as before', () => {
-        const result = pruneObsoleteFrozenAddonCaps(historical, ['A'], null, ['A']);
-        expect(result.addons).toEqual({ A: 10 });
-      });
-
-      test('two add-ons, one unchanged and one switched to a historical preset: only the unchanged id keeps its frozen cap', () => {
-        const result = pruneObsoleteFrozenAddonCaps(historical, ['A', 'C'], null, ['A', 'B']);
-        expect(result.addons).toEqual({ A: 10 });
-      });
-
-      test('the primary line\'s own id is always kept, prior-side check or not', () => {
-        const frozen = { line: { id: 'shared', cap: 3 }, addons: { shared: 3, B: 6 } };
-        const result = pruneObsoleteFrozenAddonCaps(frozen, ['B'], 'shared', []);
-        expect(result.addons).toEqual({ shared: 3 });
-      });
-
-      test('omitted / null priorAddonIds keeps the round 16 rule unchanged (surviving ids kept)', () => {
-        expect(pruneObsoleteFrozenAddonCaps(historical, ['B'], null).addons).toEqual({ B: 6 });
-        expect(pruneObsoleteFrozenAddonCaps(historical, ['B'], null, null).addons).toEqual({ B: 6 });
-      });
-
-      test('null entries in priorAddonIds are ignored, and ids compare as strings', () => {
-        const frozen = { line: { id: null, cap: null }, addons: { 7: 2 } };
-        expect(pruneObsoleteFrozenAddonCaps(frozen, [7], null, [null, '7']).addons).toEqual({ 7: 2 });
-      });
-    });
   });
 });

@@ -2176,6 +2176,62 @@ it('round 24 P1 (:3794): preview permanently down on an untouched undiscounted v
 });
 
 // ---------------------------------------------------------------------
+// GitHub Codex round 24 P1 (#4657, :3315): Price cleared + None posted
+// explicit discount nulls with both price fields omitted — the server's
+// no-price fallback left discount_dollars/estimated_price as stored. The
+// server now refuses (422 DISCOUNT_PRICE_REQUIRED); the modal blocks Save
+// with the reason first.
+// ---------------------------------------------------------------------
+
+it('round 24 P1 (:3315): clearing Price and choosing None blocks Save with a reason and posts nothing; re-entering a price re-enables it', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: storedApptDiscountVisit }));
+  const onSaved = vi.fn();
+  render(<Harness service={storedApptDiscountVisit} onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  const priceInput = screen.getAllByPlaceholderText('0.00').find((i) => Number(i.value) === 100);
+  expect(priceInput).toBeTruthy();
+  fireEvent.change(priceInput, { target: { value: '' } });
+  fireEvent.change(apptDiscountSelect(), { target: { value: '' } });
+  await waitFor(() => expect(screen.getByText('Enter the visit price to change or remove its discount.')).toBeInTheDocument());
+  const save = screen.getByRole('button', { name: 'Save', exact: true });
+  expect(save).toBeDisabled();
+  fireEvent.click(save);
+  expect(writes()).toHaveLength(0);
+  expect(onSaved).not.toHaveBeenCalled();
+  fireEvent.change(priceInput, { target: { value: '100' } });
+  await waitFor(() => expect(screen.queryByText('Enter the visit price to change or remove its discount.')).not.toBeInTheDocument());
+});
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 24 P2 (#4657, :2220): a zero-value preset (the seeded
+// Bronze 0% tier) was offered in the line picker but a fresh pick resolves
+// to null server-side, so the visible selection never persisted.
+// ---------------------------------------------------------------------
+
+const BRONZE_ZERO = {
+  id: 'disc-bronze', name: 'WaveGuard Bronze', discount_type: 'percentage', amount: 0,
+  max_discount_dollars: null, stack_group: 'waveguard', is_stackable: false,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+};
+
+it('round 24 P2 (:2220): a zero-value fixed/percent preset is not offered in the line picker; a variable preset still is', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => [...DISCOUNTS, BRONZE_ZERO, CUSTOM_DOLLAR] };
+    if (url.includes('/update-details/preview')) return { ok: true, json: async () => ({ total: 155, addons: [] }) };
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  await waitFor(() => expect([...fertPicker.options].some((o) => o.value === 'disc-silver')).toBe(true));
+  const values = [...fertPicker.options].map((o) => o.value);
+  expect(values).not.toContain('disc-bronze');
+  expect(values).toContain('disc-custom');
+});
+
+// ---------------------------------------------------------------------
 // GitHub Codex round 19 P2 (#4657, :3768): displayPrimaryGross falls back
 // to the (net) form seed when neither the preview's own primaryLinePrice
 // nor the visit's stored primaryLinePrice is known. For a zero-add-on

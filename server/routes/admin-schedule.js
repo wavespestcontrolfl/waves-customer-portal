@@ -2014,6 +2014,32 @@ function negativePricePosted({ estimatedPrice, primaryLinePrice }) {
 }
 const NEGATIVE_PRICE_MESSAGE = 'A price can’t be negative. Enter $0 or more.';
 
+// GitHub Codex round 24 P1 (#4657, :3315): the desktop modal posts an
+// explicit appointment-discount change (a pick, or `None` = explicit
+// nulls) even when the operator has cleared Price, and then OMITS both
+// price fields. With no `addons` array, computeUpdateDetailsFinancialPlan
+// has no pricing branch to run: its no-price fallback cleared
+// discount_type/amount/catalog fields but left discount_dollars and
+// estimated_price as stored (and on a recurring root cleared nothing), so
+// Save "succeeded" while the promised removal left stale discount
+// economics — or a fresh pick a mismatched identity. A discount change
+// needs a finite gross to recompute against, so it is refused ONCE at the
+// route input, before any read, for the save AND the preview. The
+// `addons` shape is out of scope here: that branch derives its own gross
+// and preserves the appointment discount itself. The mobile modal always
+// posts estimatedPrice and never posts discount fields, so only the
+// cleared-Price desktop shape can trip this.
+function discountChangeWithoutPricePosted({
+  discountType, discountAmount, discountId, estimatedPrice, primaryLinePrice, addons,
+}) {
+  if (Array.isArray(addons)) return false;
+  const discountPosted = discountType !== undefined || discountAmount !== undefined || discountId !== undefined;
+  if (!discountPosted) return false;
+  const finite = (v) => v != null && v !== '' && Number.isFinite(Number(v));
+  return !finite(estimatedPrice) && !finite(primaryLinePrice);
+}
+const DISCOUNT_PRICE_REQUIRED_MESSAGE = 'Enter the visit price to change or remove its discount.';
+
 function calculateDiscountDollars(row, baseAmount, clientAmount) {
   if (!row || !(baseAmount > 0)) return { amount: 0, dollars: 0 };
   const amount = normalizeDiscountAmount(row, clientAmount);
@@ -2922,10 +2948,6 @@ async function resolveUpdateDetailsAddonFinancials({
   db, existing, updates, primaryGross, normalizedAddons,
   effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
   appointmentDiscountId, adoptCanonicalPricing = false,
-  // GitHub Codex round 24 P1 (#4657, :2973): the discount ids the row's
-  // add-on rows carried BEFORE this save (normalizeUpdateDetailsAddons'
-  // own existingAddonDiscountRows read) — see the prune call below.
-  priorAddonDiscountIds = null,
 }) {
   // Primary line discount is not exposed here — back it out of the gross
   // primary price so the subtotal matches what was originally stored
@@ -2992,22 +3014,16 @@ async function resolveUpdateDetailsAddonFinancials({
     // it stops that id's stale cap from being merged forward and later
     // resurrected over a fresh re-pick's live (possibly since-changed)
     // catalog cap.
-    // GitHub Codex round 24 P1 (#4657, :2973): surviving is not enough —
-    // a snapshot holding obsolete caps for several formerly used presets
-    // kept a historical B's stale cap when an add-on switched straight
-    // from A to B (B survives this save, so the round 16 rule retained
-    // it) and the restack's frozen-wins merge then applied it over B's
-    // live catalog cap. A frozen add-on entry now also has to have been
-    // live BEFORE this save (priorAddonDiscountIds); a same-current-id
-    // re-pick (owner Ruling A) is live on both sides and keeps its frozen
-    // cap exactly as before.
+    // GitHub Codex round 24 (#4657, :2973) asked for a stricter prune (drop
+    // an id not live BEFORE this save too). Reverted the same round: it
+    // broke the owner-ruled :13285 contract — a fresh pick of an id this
+    // row froze takes the frozen cap. See pruneObsoleteFrozenAddonCaps.
     if (canonicalParent.pricing_provenance?.caps) {
       const survivingAddonIds = canonicalAddonRows.map((a) => a.discount_id);
       const prunedCaps = pruneObsoleteFrozenAddonCaps(
         canonicalParent.pricing_provenance.caps,
         survivingAddonIds,
         canonicalParent.line_discount_id,
-        priorAddonDiscountIds,
       );
       if (prunedCaps !== canonicalParent.pricing_provenance.caps) {
         canonicalParent.pricing_provenance = { ...canonicalParent.pricing_provenance, caps: prunedCaps };
@@ -11061,7 +11077,6 @@ async function computeUpdateDetailsFinancialPlan({
           effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
           appointmentDiscountId: appointmentDiscountPreset?.id ?? existing?.discount_id ?? null,
           adoptCanonicalPricing: adoptCanonicalPricing && !legacyPrimaryGrossUnknown,
-          priorAddonDiscountIds: existingAddonDiscountRows.map((r) => r.discount_id),
         });
         canonicalRestackedAddonDollars = canonicalDollars;
 
@@ -11274,6 +11289,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // First statement, before any read: see negativePricePosted.
     if (negativePricePosted(req.body || {})) {
       throw Object.assign(httpError(422, NEGATIVE_PRICE_MESSAGE), { code: 'NEGATIVE_PRICE' });
+    }
+    // Same shape of refusal: see discountChangeWithoutPricePosted.
+    if (discountChangeWithoutPricePosted(req.body || {})) {
+      throw Object.assign(httpError(422, DISCOUNT_PRICE_REQUIRED_MESSAGE), { code: 'DISCOUNT_PRICE_REQUIRED' });
     }
     const propertyId = req.body.propertyId;
     if (propertyId !== undefined) {
@@ -14342,6 +14361,9 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     // any read, so the preview never confirms a total the PUT would refuse.
     if (negativePricePosted(req.body || {})) {
       throw Object.assign(httpError(422, NEGATIVE_PRICE_MESSAGE), { code: 'NEGATIVE_PRICE' });
+    }
+    if (discountChangeWithoutPricePosted(req.body || {})) {
+      throw Object.assign(httpError(422, DISCOUNT_PRICE_REQUIRED_MESSAGE), { code: 'DISCOUNT_PRICE_REQUIRED' });
     }
     const id = req.params.id;
     const cols = await db('scheduled_services').columnInfo();
@@ -21895,6 +21917,7 @@ function blackoutDateString(value) {
 
 router._test = {
   negativePricePosted,
+  discountChangeWithoutPricePosted,
   buildPresetEligibilityCheck,
   resolvePlannedTotal,
   addonRowIdsDrifted,

@@ -1759,7 +1759,82 @@ describe('resolvePlannedTotal — the preview reports, and the drift check compa
     expect(src.match(/previewTotalDrifted\(expectedTotal, await resolvePlannedTotal\(db, req\.params\.id, updates\)\)/g)).toHaveLength(1);
     expect(src.match(/total: await resolvePlannedTotal\(db, id, updates, cols\)/g)).toHaveLength(1);
     expect(src.match(/total: updates\.estimated_price !== undefined \? updates\.estimated_price : null/g)).toBeNull();
-    // round 24 P1 (:2973): the save hands the pruner the PRIOR add-on discount ids.
-    expect(src.match(/priorAddonDiscountIds: existingAddonDiscountRows\.map\(\(r\) => r\.discount_id\)/g)).toHaveLength(1);
+  });
+});
+
+// GitHub Codex round 24 P1 (#4657, :3315): a discount change (pick or
+// explicit None) posted with Price cleared — both price fields omitted, no
+// addons array — has no gross to recompute against; refused at the route
+// input for the save AND the preview, before any read.
+describe('discountChangeWithoutPricePosted — a discount change with no price is refused at the route input (round 24 P1, #4657 :3315)', () => {
+  const { discountChangeWithoutPricePosted } = require('../routes/admin-schedule')._test;
+
+  test('pure decision: explicit-null clear, a pick, or a lone discountId with no finite price refuses; any finite price, an addons array, or no discount field at all does not', () => {
+    expect(discountChangeWithoutPricePosted({ discountType: null, discountAmount: null, discountId: null })).toBe(true);
+    expect(discountChangeWithoutPricePosted({ discountType: 'fixed_amount', discountAmount: 10 })).toBe(true);
+    expect(discountChangeWithoutPricePosted({ discountId: 'disc-1' })).toBe(true);
+    expect(discountChangeWithoutPricePosted({ discountType: null, estimatedPrice: '' , primaryLinePrice: '' })).toBe(true);
+    expect(discountChangeWithoutPricePosted({ discountType: null, estimatedPrice: 'abc' })).toBe(true);
+    expect(discountChangeWithoutPricePosted({ discountType: null, estimatedPrice: 90 })).toBe(false);
+    expect(discountChangeWithoutPricePosted({ discountType: null, primaryLinePrice: '100' })).toBe(false);
+    expect(discountChangeWithoutPricePosted({ discountType: null, estimatedPrice: 0 })).toBe(false);
+    expect(discountChangeWithoutPricePosted({ discountType: null, addons: [] })).toBe(false);
+    expect(discountChangeWithoutPricePosted({ notes: 'x' })).toBe(false);
+    expect(discountChangeWithoutPricePosted({ estimatedPrice: undefined })).toBe(false);
+    expect(discountChangeWithoutPricePosted({})).toBe(false);
+  });
+
+  const router = require('../routes/admin-schedule');
+  const db = require('../models/db');
+  function findHandler(method, path) {
+    const layer = router.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  }
+  async function run(method, path, body) {
+    const handler = findHandler(method, path);
+    const req = { params: { id: 'visit-1' }, query: {}, body, headers: {} };
+    let statusCode = 200;
+    let payload = null;
+    const res = { status(code) { statusCode = code; return this; }, json(p) { payload = p; return this; } };
+    let nextErr = null;
+    await handler(req, res, (err) => { nextErr = err; });
+    return { statusCode, payload, nextErr };
+  }
+  const DB_TOUCHED = new Error('db must not be touched before the refusal');
+  beforeEach(() => { db.mockReset(); db.mockImplementation(() => { throw DB_TOUCHED; }); });
+
+  test('PUT: the repro — Price cleared + None (explicit nulls, both price fields omitted, no addons): 422 DISCOUNT_PRICE_REQUIRED, db never touched', async () => {
+    const { statusCode, payload } = await run('put', '/:id/update-details', { discountType: null, discountAmount: null, discountId: null, notes: 'x' });
+    expect(statusCode).toBe(422);
+    expect(payload?.code).toBe('DISCOUNT_PRICE_REQUIRED');
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('PUT: a fresh pick with Price cleared is refused the same way (recurring root included — the body shape is what is judged)', async () => {
+    const { statusCode, payload } = await run('put', '/:id/update-details', { discountType: 'percentage', discountAmount: 10, discountId: 'disc-1', isRecurring: true });
+    expect(statusCode).toBe(422);
+    expect(payload?.code).toBe('DISCOUNT_PRICE_REQUIRED');
+  });
+
+  test('POST preview: refused identically, so the preview never confirms a save the PUT would refuse', async () => {
+    const { statusCode, payload } = await run('post', '/:id/update-details/preview', { discountType: null, discountAmount: null, discountId: null });
+    expect(statusCode).toBe(422);
+    expect(payload?.code).toBe('DISCOUNT_PRICE_REQUIRED');
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('the same clear WITH a price passes the refusal and the handler proceeds (reaches the db read)', async () => {
+    const { nextErr } = await run('put', '/:id/update-details', { discountType: null, discountAmount: null, discountId: null, estimatedPrice: 100, primaryLinePrice: 100 });
+    expect(nextErr).toBe(DB_TOUCHED);
+  });
+
+  test('a notes-only save (no discount field posted, no price) is untouched by the guard', async () => {
+    const { nextErr } = await run('put', '/:id/update-details', { notes: 'x' });
+    expect(nextErr).toBe(DB_TOUCHED);
+  });
+
+  test('both routes call the guard right after negativePricePosted (source pin)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+    expect(src.match(/if \(discountChangeWithoutPricePosted\(req\.body \|\| \{\}\)\) \{/g)).toHaveLength(2);
   });
 });
