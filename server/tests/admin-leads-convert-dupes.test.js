@@ -728,7 +728,12 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       // `if (isConversion)` and this rebook would never reconcile a
       // consultation outcome recorded after the original conversion.
       expect(markWonForCustomer).toHaveBeenCalledTimes(1);
-      expect(markWonForCustomer).toHaveBeenCalledWith('cust-linked', { via: 'office_booking', trx: expect.any(Function) });
+      // round 12 (P1 :923): this call site also passes evidenceCreatedAt/
+      // evidenceTechnicianId (read off the same INSERT's RETURNING row) so
+      // markWonForCustomer can decide won_via closeout_booking vs
+      // office_booking — objectContaining rather than an exact match since
+      // those two fields aren't this test's concern.
+      expect(markWonForCustomer).toHaveBeenCalledWith('cust-linked', expect.objectContaining({ via: 'office_booking', trx: expect.any(Function) }));
     });
   });
 

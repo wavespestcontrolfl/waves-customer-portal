@@ -20,7 +20,17 @@
  * reconcileOpenConsultationOutcomes, is the COMPLETENESS GUARANTEE that
  * catches every other insert path (existing or future) within its next
  * tick, so this service never again needs a new direct hook wired in to
- * stay correct.
+ * stay correct. FAIRNESS (round 12): the sweep orders by
+ * (last_reconciled_at NULLS FIRST, recorded_at ASC), not recorded_at alone
+ * — see the FAIRNESS paragraph above reconcileOpenConsultationOutcomes.
+ *
+ * WON_VIA PROVENANCE (round 12): 'closeout_booking' — the technician booked
+ * the next visit themselves, at the door, same-day — vs. 'office_booking'/
+ * 'estimate_accept' otherwise. Decided by isCloseoutEvidence (same-day,
+ * same-technician as the consultation visit) wherever won_via is set: the
+ * sweep and recordOutcome's own reconciliation via attemptEvidenceBasedWin,
+ * and the direct hooks via markWonForCustomer's evidenceCreatedAt/
+ * evidenceTechnicianId pre-check.
  */
 
 const db = require('../models/db');
@@ -336,6 +346,26 @@ function isQualifyingSaleBooking(row) {
   return true;
 }
 
+// Round 12: 'closeout_booking' is the FIRST won_via value in the CHECK
+// enum (20260923000010) but no production write path ever produced it —
+// every real win read as office_booking/estimate_accept, so
+// consultationStats' won_at_door metric was permanently 0. scheduled_services
+// has no `source`/`created_by` column distinguishing "booked from the tech
+// closeout/tech portal" (grepped — neither exists on this table), so the
+// only available signal is: the winning booking was created on the
+// consultation VISIT's own calendar day, by the SAME technician the visit
+// was assigned to — the tech closed the sale right there at the door,
+// rather than the office booking it in later or the customer accepting a
+// mailed estimate. Scoped to evidence type (c) only (a genuine NEW
+// booking) — a lead conversion (a) or an accepted estimate (b) is never a
+// door-side close by definition, so those two keep their existing
+// office_booking/estimate_accept values unconditionally.
+function isCloseoutEvidence(evidenceCreatedAt, evidenceTechnicianId, visitScheduledDateStr, visitTechnicianId) {
+  if (!evidenceCreatedAt || !evidenceTechnicianId || !visitTechnicianId) return false;
+  return String(evidenceTechnicianId) === String(visitTechnicianId)
+    && toDateOnlyString(evidenceCreatedAt) === visitScheduledDateStr;
+}
+
 /**
  * Reconciliation from the CONSULTATION side (P1-1): a sale can commit
  * BEFORE the technician gets around to recording the visit's outcome, in
@@ -354,10 +384,16 @@ function isQualifyingSaleBooking(row) {
  *       included $0 follow-up minted from a completion (followup_included),
  *       or any other ALWAYS-free service type (isAlwaysFreeServiceType —
  *       appointment/estimate/re-service/follow-up/re-visit by name) is
- *       never itself a sale.
- * Returns { won_via, won_at } for the first match, or null.
+ *       never itself a sale. won_via is 'closeout_booking' when this
+ *       booking was created same-day, same-technician as the consultation
+ *       (isCloseoutEvidence, round 12) — otherwise 'office_booking'.
+ * Returns { won_via, won_at } for the first match, or null. `technicianId`
+ * is the CONSULTATION visit's own assigned technician (not the winning
+ * booking's) — only used for the closeout determination above.
  */
-async function findSaleEvidenceForConsultation(database, { customerId, scheduledDateStr, now = new Date() }) {
+async function findSaleEvidenceForConsultation(database, {
+  customerId, scheduledDateStr, technicianId = null, now = new Date(),
+}) {
   if (!customerId) return null;
 
   const nowDateStr = etDateString(now);
@@ -412,12 +448,15 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
       // see the comment above that function for what each one decides.
       'status', 'source_action', 'customer_confirmed',
       'is_callback', 'recurring_parent_id', 'followup_included',
-      'estimated_price', 'annual_prepay_term_id',
+      'estimated_price', 'annual_prepay_term_id', 'technician_id',
     );
   for (const booking of bookings) {
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale — separate, async, not part of the sync predicate
     if (!isQualifyingSaleBooking(booking)) continue;
-    return { won_via: 'office_booking', won_at: new Date(booking.created_at) };
+    const wonVia = isCloseoutEvidence(booking.created_at, booking.technician_id, scheduledDateStr, technicianId)
+      ? 'closeout_booking'
+      : 'office_booking';
+    return { won_via: wonVia, won_at: new Date(booking.created_at) };
   }
 
   return null;
@@ -438,11 +477,11 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
 // error — best-effort is the CALLER's responsibility (each logs its own
 // context), not this shared piece.
 async function attemptEvidenceBasedWin(database, {
-  outcomeRowId, customerId, scheduledDateStr, now,
+  outcomeRowId, customerId, scheduledDateStr, technicianId = null, now,
 }) {
   let won = null;
   await database.transaction(async (sp) => {
-    const evidence = await findSaleEvidenceForConsultation(sp, { customerId, scheduledDateStr, now });
+    const evidence = await findSaleEvidenceForConsultation(sp, { customerId, scheduledDateStr, technicianId, now });
     if (!evidence) return;
     const [wonRow] = await sp('consultation_outcomes')
       .where({ id: outcomeRowId })
@@ -460,14 +499,30 @@ async function attemptEvidenceBasedWin(database, {
 // transaction. Unlike recordOutcome (which has an insert to run under the
 // same lock), the sweep has nothing else to do under it, so lock-then-
 // attempt collapses into this one small wrapper.
+//
+// Round 12 (fairness): stamps last_reconciled_at on the row REGARDLESS of
+// whether it won — same fix as reschedule-link-promises.js's
+// SCAN_FAIRNESS_ORDER (codex #4293): a sweep that only advances rows it
+// CHANGES lets a backlog of exactly-still-open rows sort to the front of
+// the LIMIT-bounded query forever, starving every row behind them once the
+// backlog exceeds `limit`. Stamping "was examined this tick" separately
+// from "changed this tick" is what reconcileOpenConsultationOutcomes'
+// (last_reconciled_at NULLS FIRST, recorded_at ASC) ordering relies on. No
+// outcome guard on this UPDATE (unlike attemptEvidenceBasedWin's win
+// UPDATE) — it only ever touches this ONE column, so stamping a row a
+// concurrent process already won in between is harmless and never
+// re-selected by the sweep's own WHERE outcome IN (warm,cold) again either
+// way.
 async function reconcileOneOpenOutcome(database, {
-  outcomeRowId, customerId, scheduledDateStr, now,
+  outcomeRowId, customerId, scheduledDateStr, technicianId = null, now,
 }) {
   return database.transaction(async (locked) => {
     await lockCustomerRow(locked, customerId);
-    return attemptEvidenceBasedWin(locked, {
-      outcomeRowId, customerId, scheduledDateStr, now,
+    const won = await attemptEvidenceBasedWin(locked, {
+      outcomeRowId, customerId, scheduledDateStr, technicianId, now,
     });
+    await locked('consultation_outcomes').where({ id: outcomeRowId }).update({ last_reconciled_at: now });
+    return won;
   });
 }
 
@@ -603,6 +658,7 @@ async function recordOutcome(params = {}, { trx } = {}) {
           outcomeRowId: saved.id,
           customerId,
           scheduledDateStr: toDateOnlyString(svcRow.scheduled_date),
+          technicianId,
           now,
         });
         if (won) return won;
@@ -644,7 +700,9 @@ async function recordOutcome(params = {}, { trx } = {}) {
  * the booking/accept that is reconciling. Returns the count won (0 on any
  * failure or no match) — never throws.
  */
-async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {}) {
+async function markWonForCustomer(customerId, {
+  via, trx, now = new Date(), evidenceCreatedAt = null, evidenceTechnicianId = null,
+} = {}) {
   if (!customerId || !trx || !via) return 0;
   try {
     let winCount = 0;
@@ -683,6 +741,39 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
       // median_days_to_close negative. Bounds the window on BOTH sides.
       const nowDateStr = etDateString(now);
 
+      // Provenance pre-check (round 12, P1 :923): a direct hook only knows
+      // the ONE booking/accept row that just closed, not which (if any) of
+      // the customer's open consultation_outcomes rows it is reconciling —
+      // that's still decided entirely by the atomic UPDATE's own WHERE
+      // below. This SELECT only picks the VALUE written into won_via for
+      // the whole batch: closeout_booking when the evidence (the booking
+      // that just closed) was created on the SAME calendar day and by the
+      // SAME technician as one of those open rows' own visit — i.e. the
+      // technician booked it themselves, at the door, during their own
+      // visit — matching attemptEvidenceBasedWin's isCloseoutEvidence rule
+      // for the sweep. No match, or no evidence hint passed, keeps `via`
+      // as given (office_booking/estimate_accept). This is a read before
+      // the write, but it never governs row SELECTION (no TOCTOU on P1-A's
+      // guarantee) — only which of two known-safe won_via strings the one
+      // UPDATE below writes into every row it touches.
+      let wonVia = via;
+      if (evidenceCreatedAt && evidenceTechnicianId) {
+        const evidenceDateStr = toDateOnlyString(evidenceCreatedAt);
+        const closeoutMatch = await sp('consultation_outcomes as co')
+          .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
+          .whereIn('co.outcome', ['warm', 'cold'])
+          .where(function matchCustomerOrItsLeads() {
+            this.where('co.customer_id', customerId);
+            if (leadIds.length) this.orWhereIn('co.lead_id', leadIds);
+          })
+          .where('ss.scheduled_date', '>=', cutoff)
+          .where('ss.scheduled_date', '<=', nowDateStr)
+          .where('ss.technician_id', evidenceTechnicianId)
+          .where('ss.scheduled_date', evidenceDateStr)
+          .first('co.id');
+        if (closeoutMatch) wonVia = 'closeout_booking';
+      }
+
       // One atomic UPDATE: the outcome guard (only an open warm/cold row can
       // win) and the [90-day-ago, today] window (a subquery against
       // scheduled_services, not a prior SELECT) both live in the same
@@ -700,7 +791,7 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
             .where('scheduled_date', '>=', cutoff)
             .where('scheduled_date', '<=', nowDateStr);
         })
-        .update({ outcome: 'won', won_at: now, won_via: via, updated_at: now })
+        .update({ outcome: 'won', won_at: now, won_via: wonVia, updated_at: now })
         .returning('id');
       winCount = updated.length;
     });
@@ -728,9 +819,18 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
  * best-effort PER ROW: one row's failure (lock contention, a transient DB
  * error) is logged and skipped, never aborts the rest of the sweep. Bounded
  * by `limit` so one very large backlog can't turn an hourly tick into an
- * hours-long one; the next tick picks up whatever this one didn't reach
- * (oldest-recorded-first, so the same rows aren't perpetually starved by a
- * skewed ordering).
+ * hours-long one.
+ *
+ * FAIRNESS (round 12): ordering by recorded_at ASC alone re-selected the
+ * SAME oldest `limit` rows every tick whenever they stayed open (nothing
+ * about a still-warm row advances recorded_at) — a backlog of exactly
+ * `limit` unresolved rows starves every row behind them forever, the same
+ * bug class reschedule-link-promises.js's SCAN_FAIRNESS_ORDER fixed (codex
+ * #4293). reconcileOneOpenOutcome stamps last_reconciled_at on every row
+ * it examines regardless of outcome; ordering by (last_reconciled_at NULLS
+ * FIRST, recorded_at ASC) means a row this tick just checked — whether or
+ * not anything about it changed — moves to the back of the line, so the
+ * NEXT tick reaches whatever this one's `limit` cutoff left behind.
  *
  * Returns { scanned, won, errors } — never throws.
  */
@@ -750,9 +850,9 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
       .whereNotNull('co.customer_id')
       .where('ss.scheduled_date', '>=', cutoff)
       .where('ss.scheduled_date', '<=', nowDateStr)
-      .orderBy('co.recorded_at', 'asc')
+      .orderBy([{ column: 'co.last_reconciled_at', order: 'asc', nulls: 'first' }, { column: 'co.recorded_at', order: 'asc' }])
       .limit(limit)
-      .select('co.id as outcome_id', 'co.customer_id', 'ss.scheduled_date');
+      .select('co.id as outcome_id', 'co.customer_id', 'ss.scheduled_date', 'ss.technician_id');
   } catch (err) {
     logger.error(`[consultation-outcomes] reconcile sweep query failed: ${err.message}`);
     result.errors += 1;
@@ -766,6 +866,7 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
         outcomeRowId: row.outcome_id,
         customerId: row.customer_id,
         scheduledDateStr: toDateOnlyString(row.scheduled_date),
+        technicianId: row.technician_id,
         now,
       });
       if (wonRow) result.won += 1;

@@ -7377,7 +7377,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (!(await require('../services/assessment-booking').isAssessmentBooking(svc, trx))
         && require('../services/consultation-outcomes').isQualifyingSaleBooking(svc)) {
         await require('../services/consultation-outcomes')
-          .markWonForCustomer(customerId, { via: 'office_booking', trx });
+          .markWonForCustomer(customerId, {
+            via: 'office_booking',
+            trx,
+            evidenceCreatedAt: svc.created_at,
+            evidenceTechnicianId: svc.technician_id,
+          });
       }
 
       // Create recurring instances from the dates precomputed (and locked)

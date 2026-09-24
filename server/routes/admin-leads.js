@@ -1801,7 +1801,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (!assessmentVisit
         && require('../services/consultation-outcomes').isQualifyingSaleBooking(appt)) {
         await require('../services/consultation-outcomes')
-          .markWonForCustomer(customerId, { via: 'office_booking', trx });
+          .markWonForCustomer(customerId, {
+            via: 'office_booking',
+            trx,
+            evidenceCreatedAt: appt.created_at,
+            evidenceTechnicianId: appt.technician_id,
+          });
       }
       await trx('lead_activities').insert({
         lead_id: req.params.id,

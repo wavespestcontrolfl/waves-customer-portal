@@ -150,13 +150,36 @@ function makeFakeDb(seed = {}) {
         filtered = filtered.filter((r) => values.includes(resolveField(r, col)));
         return api;
       },
-      orderBy(col, dir = 'asc') {
+      // Supports both the plain `.orderBy('col', 'asc')` shape and knex's
+      // multi-key `.orderBy([{ column, order, nulls }, ...])` shape (round
+      // 12: reconcileOpenConsultationOutcomes' fairness ordering,
+      // last_reconciled_at NULLS FIRST then recorded_at ASC) — a string
+      // first arg is normalized into the same one-spec array the array
+      // form uses, so every existing single-column caller is unaffected.
+      orderBy(colOrSpecs, dir = 'asc') {
+        const specs = Array.isArray(colOrSpecs)
+          ? colOrSpecs.map((s) => ({ column: s.column, order: s.order || 'asc', nulls: s.nulls || null }))
+          : [{ column: colOrSpecs, order: dir, nulls: null }];
         filtered = [...filtered].sort((a, b) => {
-          const av = resolveField(a, col);
-          const bv = resolveField(b, col);
-          if (av === bv) return 0;
-          const gt = av > bv;
-          return dir === 'desc' ? (gt ? -1 : 1) : (gt ? 1 : -1);
+          for (let i = 0; i < specs.length; i += 1) {
+            const spec = specs[i];
+            const av = resolveField(a, spec.column);
+            const bv = resolveField(b, spec.column);
+            const aNull = av === null || av === undefined;
+            const bNull = bv === null || bv === undefined;
+            if (aNull || bNull) {
+              if (aNull && bNull) continue;
+              // Postgres default (no NULLS clause given): NULLS LAST for
+              // ASC, NULLS FIRST for DESC — matched here for parity, but
+              // every real caller in this file passes an explicit `nulls`.
+              const nullsFirst = spec.nulls ? spec.nulls === 'first' : spec.order === 'desc';
+              return (aNull ? nullsFirst : !nullsFirst) ? -1 : 1;
+            }
+            if (av === bv) continue;
+            const gt = av > bv;
+            return spec.order === 'desc' ? (gt ? -1 : 1) : (gt ? 1 : -1);
+          }
+          return 0;
         });
         return api;
       },
@@ -667,6 +690,39 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-15T00:00:00Z').toISOString());
   });
 
+  test('round 12 (P1 :923): a booking created on the SAME calendar day as the visit, by the visit\'s OWN technician, flips warm to won with won_via closeout_booking (the tech booked it themselves, at the door)', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push({
+      id: 'visit-closeout', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
+      created_at: new Date(`${SCHEDULED_DATE}T15:00:00Z`), status: 'confirmed', technician_id: 'tech-1',
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('closeout_booking');
+  });
+
+  test('round 12 (P1 :923): a same-day booking by a DIFFERENT technician is not closeout evidence — stays office_booking', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push({
+      id: 'visit-office', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
+      created_at: new Date(`${SCHEDULED_DATE}T15:00:00Z`), status: 'confirmed', technician_id: 'tech-9',
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('office_booking');
+  });
+
+  test('round 12 (P1 :923): the visit\'s OWN technician booking on a LATER calendar day (an office follow-up, not booked at the door) stays office_booking', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push({
+      id: 'visit-later', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
+      created_at: new Date('2026-09-12T15:00:00Z'), status: 'confirmed', technician_id: 'tech-1',
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('office_booking');
+  });
+
   test('P1-2: evidence dated in the FUTURE relative to `now` does not count', async () => {
     // Sanity companion to the markWonForCustomer future-consultation test
     // below — the upper bound applies to evidence dates here too.
@@ -831,6 +887,72 @@ describe('markWonForCustomer', () => {
   });
 });
 
+// ---- markWonForCustomer — P1 :923 closeout_booking provenance (round 12) --
+
+describe('markWonForCustomer — P1 :923 closeout_booking provenance pre-check (round 12)', () => {
+  function seededDb() {
+    return makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-1', scheduled_date: '2026-09-10', technician_id: 'tech-1' },
+      ],
+      leads: [],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
+      ],
+    });
+  }
+
+  test('evidence created same-day, same-technician as the customer\'s own open visit sets won_via closeout_booking for the batch UPDATE', async () => {
+    const fakeDb = seededDb();
+    const count = await markWonForCustomer('cust-1', {
+      via: 'office_booking',
+      trx: fakeDb,
+      now: new Date('2026-09-10T20:00:00Z'),
+      evidenceCreatedAt: new Date('2026-09-10T15:00:00Z'),
+      evidenceTechnicianId: 'tech-1',
+    });
+    expect(count).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking');
+  });
+
+  test('evidence from a DIFFERENT technician than the visit is not closeout evidence — won_via stays as passed (office_booking)', async () => {
+    const fakeDb = seededDb();
+    await markWonForCustomer('cust-1', {
+      via: 'office_booking',
+      trx: fakeDb,
+      now: new Date('2026-09-10T20:00:00Z'),
+      evidenceCreatedAt: new Date('2026-09-10T15:00:00Z'),
+      evidenceTechnicianId: 'tech-9',
+    });
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
+  });
+
+  test('evidence on a LATER calendar day than the visit is not closeout evidence — won_via stays as passed', async () => {
+    const fakeDb = seededDb();
+    await markWonForCustomer('cust-1', {
+      via: 'office_booking',
+      trx: fakeDb,
+      now: new Date('2026-09-12T20:00:00Z'),
+      evidenceCreatedAt: new Date('2026-09-12T15:00:00Z'),
+      evidenceTechnicianId: 'tech-1',
+    });
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
+  });
+
+  test('no evidence hint passed (backward compatible with every pre-round-12 caller) — won_via is exactly `via`, and the pre-check query never runs', async () => {
+    const fakeDb = seededDb();
+    const tableCalls = [];
+    const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
+    spyDb.transaction = async (fn) => fn(spyDb);
+    await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: new Date('2026-09-10T20:00:00Z') });
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
+    // Matches the existing atomic-guard test's expectation of exactly one
+    // touch of consultation_outcomes when no evidence hint is passed — the
+    // pre-check only adds a query when there's actually a hint to check.
+    expect(tableCalls.filter((n) => n === 'consultation_outcomes as co')).toHaveLength(0);
+  });
+});
+
 // ---- reconcileOpenConsultationOutcomes (round 10 — the hourly sweep) ------
 
 describe('reconcileOpenConsultationOutcomes — the completeness guarantee (round 10)', () => {
@@ -967,6 +1089,81 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
 
     expect(result.scanned).toBe(2); // only the 2 oldest-recorded rows this tick
   });
+
+  test('P1 :755 fairness — a row this tick already examined is not re-selected before an older-recorded row this tick has not looked at yet', async () => {
+    // row A: recorded earliest, examined tick 1 (stamped last_reconciled_at
+    // whether or not it won — it stays warm here, no qualifying evidence).
+    // row B: recorded LATER than A but never examined. Pre-fix (ORDER BY
+    // recorded_at ASC alone), A would sort first on EVERY tick forever,
+    // since staying warm never advances recorded_at — starving B.
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-a', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-a', service_type: 'Waves Assessment' },
+        { id: 'visit-b', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-b', service_type: 'Waves Assessment' },
+      ],
+      consultation_outcomes: [
+        { id: 'co-a', scheduled_service_id: 'visit-a', customer_id: 'cust-a', outcome: 'warm', recorded_at: new Date('2026-09-01T00:00:00Z') },
+        { id: 'co-b', scheduled_service_id: 'visit-b', customer_id: 'cust-b', outcome: 'warm', recorded_at: new Date('2026-09-05T00:00:00Z') },
+      ],
+    });
+
+    const tick1 = await reconcileOpenConsultationOutcomes({ now: NOW, limit: 1 });
+    expect(tick1.scanned).toBe(1);
+    // Both rows start with null last_reconciled_at — recorded_at ASC is the
+    // tiebreak, so the older-recorded row (A) goes first.
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-a').last_reconciled_at).toBeTruthy();
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-b').last_reconciled_at).toBeFalsy();
+
+    const tick2 = await reconcileOpenConsultationOutcomes({ now: NOW, limit: 1 });
+    expect(tick2.scanned).toBe(1);
+    // B (never examined — null last_reconciled_at, NULLS FIRST) is reached
+    // on tick 2 BEFORE A is re-examined, even though A's recorded_at is
+    // still the earlier of the two — the fairness fix under test.
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-b').last_reconciled_at).toBeTruthy();
+  });
+
+  test('P1 :755 fairness — a 200-row backlog of still-unresolved rows does not permanently starve a qualifying row behind them; it is reached on the SECOND tick', async () => {
+    const visits = [];
+    const outcomes = [];
+    // 200 rows that stay open on every reconciliation attempt (no matching
+    // evidence anywhere) — recorded BEFORE the qualifying row below, so a
+    // naive `ORDER BY recorded_at ASC LIMIT 200` (the pre-fix query) selects
+    // exactly this backlog on EVERY tick, forever, since none of them ever
+    // change.
+    for (let i = 0; i < 200; i += 1) {
+      visits.push({ id: `visit-stale-${i}`, scheduled_date: SCHEDULED_DATE, customer_id: `cust-stale-${i}`, service_type: 'Waves Assessment' });
+      outcomes.push({
+        id: `co-stale-${i}`, scheduled_service_id: `visit-stale-${i}`, customer_id: `cust-stale-${i}`,
+        outcome: 'warm', recorded_at: new Date(2026, 8, 1, 0, 0, i),
+      });
+    }
+    // The qualifying row: recorded AFTER all 200 stale rows, so it sorts to
+    // position 201 — one past the default `limit` — on every tick, under
+    // the pre-fix ordering.
+    visits.push({ id: 'visit-real', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-real', service_type: 'Waves Assessment' });
+    visits.push({
+      id: 'visit-real-sale', scheduled_date: '2026-09-17', customer_id: 'cust-real', service_type: 'Quarterly Pest Control',
+      status: 'confirmed', created_at: new Date('2026-09-17T00:00:00Z'),
+    });
+    outcomes.push({ id: 'co-real', scheduled_service_id: 'visit-real', customer_id: 'cust-real', outcome: 'warm', recorded_at: new Date('2026-09-02T00:00:00Z') });
+
+    const fakeDb = install({ scheduled_services: visits, consultation_outcomes: outcomes });
+
+    const tick1 = await reconcileOpenConsultationOutcomes({ now: NOW }); // default limit: 200
+    expect(tick1.scanned).toBe(200);
+    expect(tick1.won).toBe(0); // none of the 200 stale rows have qualifying evidence
+    // Every row this tick EXAMINED is stamped, win or not — what lets the
+    // next tick advance past them.
+    const stamped = fakeDb.__store.consultation_outcomes.filter((r) => r.last_reconciled_at != null);
+    expect(stamped.length).toBe(200);
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-real').last_reconciled_at).toBeFalsy();
+
+    const tick2 = await reconcileOpenConsultationOutcomes({ now: NOW });
+    // co-real (still-null last_reconciled_at) sorts before every now-stamped
+    // stale row, so it is reached on this second tick and wins.
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-real').outcome).toBe('won');
+    expect(tick2.won).toBe(1);
+  });
 });
 
 // ---- markNoShow -------------------------------------------------------------
@@ -1093,5 +1290,21 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
     // calendar day). The pre-fix bug computes this as 1 (etDateString reads
     // the UTC-midnight scheduled_date as the ET day before).
     expect(stats.median_days_to_close).toBe(0);
+  });
+
+  test('round 12 (P1 :923): a won row with won_via closeout_booking counts toward won_at_door, not won_after (previously always zero — no write path produced that value)', async () => {
+    const visits = [
+      {
+        status: 'completed', scheduled_date: '2026-09-10', technician_id: 't1', technician_name: 'Adam',
+        outcome: 'won', won_via: 'closeout_booking', won_at: new Date('2026-09-10T18:00:00.000Z'), lead_source: 'referral',
+      },
+      {
+        status: 'completed', scheduled_date: '2026-09-11', technician_id: 't2', technician_name: 'Bea',
+        outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-14T00:00:00.000Z'), lead_source: 'referral',
+      },
+    ];
+    const stats = await consultationStats({ trx: statsDb(visits) });
+    expect(stats.won_at_door).toBe(1);
+    expect(stats.won_after).toBe(1);
   });
 });
