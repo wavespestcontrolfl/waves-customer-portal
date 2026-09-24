@@ -560,7 +560,20 @@ function lawnResultForResponse(lawnResult, partial) {
 
 async function handleLawn(req, res, { note, location, propertyId, isSecondary }) {
   const photoInputs = req._photoInputs;
-  const grassContext = await loadCustomerGrassContext(req.customer.id).catch(() => null);
+  // codex GH r10 P1: loadCustomerGrassContext is account-wide by design —
+  // customer_turf_profiles is a 1:1-with-customer table with no property_id
+  // column anywhere in the schema (checked: 20260430000007_customer_turf_profiles.js
+  // and every later alter of that table), so there is no per-property grass
+  // context to load even in principle; adding one would be new schema/plan-
+  // engine machinery far outside this route's scope (rule 16). For a
+  // secondary-property submission, buildVisionPrompt's "confirm against the
+  // blades; only override if the morphology clearly differs" instruction
+  // means the model defers to whatever's on file — which is the CUSTOMER's
+  // primary-property turf profile, not this property's. Passing empty
+  // context for a secondary property (the finding's own suggested fix)
+  // makes the model call the grass type from the photo alone instead of
+  // anchoring on another property's data.
+  const grassContext = isSecondary ? null : await loadCustomerGrassContext(req.customer.id).catch(() => null);
   const context = grassContext
     ? { grassType: grassContext.grassTypeLabel || undefined, irrigation: grassContext.irrigationSystem || undefined }
     : {};

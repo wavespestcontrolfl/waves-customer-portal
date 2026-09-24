@@ -120,8 +120,9 @@ jest.mock('../middleware/auth', () => ({
 jest.mock('../routes/requests', () => ({
   VALID_LOCATIONS: ['front_yard', 'back_yard', 'side_yard', 'inside_home', 'garage_lanai', 'garden_beds', 'other'],
 }));
+const mockLoadCustomerGrassContext = jest.fn(async () => ({ grassTypeLabel: null, irrigationSystem: null }));
 jest.mock('../services/lawn-grass-context', () => ({
-  loadCustomerGrassContext: jest.fn(async () => ({ grassTypeLabel: null, irrigationSystem: null })),
+  loadCustomerGrassContext: (...args) => mockLoadCustomerGrassContext(...args),
   grassTypeLabel: (v) => (v ? String(v).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) : null),
 }));
 jest.mock('../services/reservice-link', () => ({ reserviceStreamlineAccess: (...args) => mockReserviceAccess(...args) }));
@@ -252,6 +253,7 @@ beforeEach(() => {
     enabled: false, multi: false, scoped: false, closed: false, property: null,
   });
   mockApplyPropertyPredicateCalls.length = 0;
+  mockLoadCustomerGrassContext.mockResolvedValue({ grassTypeLabel: null, irrigationSystem: null });
   mockIdentifyPest.mockResolvedValue(pestResultFor('ghost-ant'));
   mockLawnAnalyzePhoto.mockResolvedValue(lawnAnalyzeResult({
     turf_density: 80, weed_coverage: 10, color_health: 8, fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Lawn looks healthy.',
@@ -810,6 +812,40 @@ describe('property scope (GATE_APP_PROPERTY_SCOPE)', () => {
     await withServer(async (base) => {
       await post(base, '/api/photo-id/lawn', photoBody());
       expect(TABLES.lawn_diagnostics[0].property_id).toBeNull();
+    });
+  });
+
+  test('lawn: a secondary-property submission never inherits the account-wide grass context (codex GH r10 P1)', async () => {
+    // customer_turf_profiles is a 1:1-with-customer table (no property_id
+    // column exists anywhere in the schema) — loadCustomerGrassContext is
+    // account-wide by construction. buildVisionPrompt tells the model to
+    // "confirm against the blades; only override if the morphology clearly
+    // differs" for whatever grass type is on file, so passing the primary
+    // property's grass type/irrigation into a SECONDARY property's analysis
+    // would bias (and let the model persist) a reading using the wrong
+    // property's turf data.
+    mockLoadCustomerGrassContext.mockResolvedValue({ grassTypeLabel: 'Bermuda', irrigationSystem: 'in_ground' });
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-secondary', is_primary: false },
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      expect(res.status).toBe(200);
+      const [, , context] = mockLawnAnalyzePhoto.mock.calls[0];
+      expect(context).toEqual({});
+    });
+  });
+
+  test('lawn: a primary/unscoped submission still gets the account-wide grass context', async () => {
+    mockLoadCustomerGrassContext.mockResolvedValue({ grassTypeLabel: 'Bermuda', irrigationSystem: 'in_ground' });
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-primary', is_primary: true },
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      expect(res.status).toBe(200);
+      const [, , context] = mockLawnAnalyzePhoto.mock.calls[0];
+      expect(context).toEqual({ grassType: 'Bermuda', irrigation: 'in_ground' });
     });
   });
 
