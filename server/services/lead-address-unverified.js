@@ -328,6 +328,15 @@ function applyLookupVerdictPrecedence({
   lockedCleanAt, newerFlag, newerFlagAt = 0, evidenceAt = 0, profileFound = false, cachedAt = null,
 }) {
   const lockedAt = Date.parse(lockedCleanAt || '') || 0;
+  // A RECOVERED flag (no county answer this run — an outage or an
+  // unanswered profile, evidenceAt 0) is judged against the clean verdict
+  // by its OWN flagged_at, never by the profile's cache time (pre-push
+  // audit P1 after r45): a staff confirmation newer than the flag clears
+  // it whether or not an unanswered profile was cached after that.
+  if (addressUnverified && !evidenceAt && lockedAt && lockedAt > (Date.parse(addressUnverified.flagged_at || '') || 0)
+    && !(newerFlag && newerFlagAt > lockedAt)) {
+    return { addressUnverified: null, staffCleanAt: lockedCleanAt, cachedAuditStale: true };
+  }
   // A cached audit this run carried is superseded by a NEWER staff clean
   // verdict committed since.
   if (addressUnverified && profileFound && lockedCleanAt

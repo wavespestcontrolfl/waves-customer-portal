@@ -216,3 +216,24 @@ describe('pre-push audit after r45: draft refreshes never overwrite a live deliv
     expect(dupBlock).toContain('draftReconcileFailed = true;');
   });
 });
+
+describe('pre-push audit after r45: recovered flag vs staff confirmation under an unanswered profile', () => {
+  test('flag (T1) → staff confirmation (T2) → unanswered cache (T3): the confirmation wins, no county evidence needed', () => {
+    const { applyLookupVerdictPrecedence } = require('../services/lead-address-unverified');
+    const flag = { address_line1: '1260 Example St', flagged_at: '2026-09-01T00:00:00Z' };
+    const out = applyLookupVerdictPrecedence({
+      addressUnverified: flag, staffCleanAt: null, cachedAuditStale: false,
+      lockedCleanAt: '2026-09-02T00:00:00Z', newerFlag: flag, newerFlagAt: Date.parse(flag.flagged_at),
+      evidenceAt: 0, profileFound: true, cachedAt: '2026-09-03T00:00:00Z',
+    });
+    expect(out).toEqual({ addressUnverified: null, staffCleanAt: '2026-09-02T00:00:00Z', cachedAuditStale: true });
+    // …but a flag NEWER than the confirmation stands.
+    const newer = { address_line1: '1260 Example St', flagged_at: '2026-09-04T00:00:00Z' };
+    const kept = applyLookupVerdictPrecedence({
+      addressUnverified: newer, staffCleanAt: null, cachedAuditStale: false,
+      lockedCleanAt: '2026-09-02T00:00:00Z', newerFlag: newer, newerFlagAt: Date.parse(newer.flagged_at),
+      evidenceAt: 0, profileFound: false, cachedAt: null,
+    });
+    expect(kept.addressUnverified).toBe(newer);
+  });
+});
