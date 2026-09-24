@@ -734,10 +734,14 @@ function supersededScenario(roots) {
     recurring_ongoing: r.recurringOngoing !== false, scheduled_date: r.latestDate || daysOut(0),
     property_id: r.propertyId, service_id: 1, created_at: r.createdAt || '2020-01-01T00:00:00Z',
     estimated_duration_minutes: 60,
-    // Billable by default (looksBillable's own cheap proxy) — a root
-    // exercising the unbillable-sibling guard sets billable: false.
-    create_invoice_on_complete: r.billable !== false,
-    estimated_price: r.billable !== false ? '150.00' : null,
+    // Billable by default (via seriesExtensionUnbillable, the real gate) —
+    // `billable: false` sets both fields unbillable; an explicit
+    // `createInvoiceOnComplete`/`estimatedPrice` overrides either alone
+    // (e.g. an invoice-flagged but $0 root — Codex GitHub guards
+    // follow-up P1, the false-positive a cheap "has an invoice stamp"
+    // proxy let through).
+    create_invoice_on_complete: r.createInvoiceOnComplete ?? (r.billable !== false),
+    estimated_price: r.estimatedPrice !== undefined ? r.estimatedPrice : (r.billable !== false ? '150.00' : null),
     window_start: null, window_end: null,
     // Only set for an UNLINKED root exercising the service-address fallback.
     service_address_line1: r.serviceAddressLine1 || null,
@@ -883,12 +887,12 @@ describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Co
   });
 
   test('a later-dated but statically UNBILLABLE sibling never wins — never suppresses a genuinely billable series (Codex GitHub guards follow-up P1)', async () => {
-    // Without the billability pre-filter, root 99 (no invoice stamp, no
-    // price, a coincidentally LATER live visit) would be crowned winner
-    // purely on recency, suppressing root 10 — the genuinely billable
-    // series — as superseded_series. Root 99 would then refuse every
-    // insert on its OWN turn (the real seriesExtensionUnbillable gate),
-    // so NEITHER series would ever replenish again on any future run.
+    // Without the billability check, root 99 (no invoice stamp, no price,
+    // a coincidentally LATER live visit) would be crowned winner purely on
+    // recency, suppressing root 10 — the genuinely billable series — as
+    // superseded_series. Root 99 would then refuse every insert on its OWN
+    // turn (the real seriesExtensionUnbillable gate), so NEITHER series
+    // would ever replenish again on any future run.
     const roots = [
       { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z', billable: true },
       { id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z', billable: false },
@@ -902,6 +906,25 @@ describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Co
     // to face its own real billable-amount gate.
     const unbillableResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
     expect(unbillableResult.skipped).not.toBe('superseded_series');
+  });
+
+  test('an invoice flag ALONE with a zero/unset price never counts as billable — the false-positive a cheap proxy let through (Codex GitHub guards follow-up P1, round 2)', async () => {
+    // create_invoice_on_complete: true with NO price and no membership
+    // dues is still $0 — "will invoice" supplies no amount to invoice. A
+    // first fix attempt treated the flag as sufficient on its own; this
+    // pins the corrected version, which reuses seriesExtensionUnbillable
+    // itself rather than a second hand-rolled approximation of it.
+    const roots = [
+      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z', billable: true },
+      {
+        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z',
+        createInvoiceOnComplete: true, estimatedPrice: null,
+      },
+    ];
+    const billableResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(billableResult.skipped).not.toBe('superseded_series');
+    const zeroPriceResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
+    expect(zeroPriceResult.skipped).not.toBe('superseded_series');
   });
 });
 

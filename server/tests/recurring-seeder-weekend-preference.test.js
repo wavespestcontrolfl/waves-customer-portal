@@ -128,13 +128,17 @@ describe('seedFollowUpsForParent honors the saved weekday preference', () => {
 
 describe('every consumer consults the preference LIVE (source pins)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-  test('all eight admin-schedule consult sites present', () => {
+  test('all nine admin-schedule consult sites present', () => {
     // import + plan-helper fallback + create route + per-edit snapshot +
     // reconcile fallback + maintenance + annual-prepay weekend gate +
     // alert action. The update-details write paths consume the per-edit
     // snapshot (editPrefNoWeekends) instead of resolving again — one
     // snapshot per edit keeps the plan and the writes on the same value.
-    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
+    // 9th: isSupersededSeries' own billability probe (Codex GitHub guards
+    // follow-up P1) — reuses seriesExtensionUnbillable's own inputs
+    // exactly, including a LIVE preference read per candidate root, rather
+    // than assuming a static default.
+    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(9);
     expect(src).toContain('(input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))');
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
     expect(src).toContain('const editPrefNoWeekends = await customerPrefersNoWeekends(db, editPrefRow?.customer_id);');

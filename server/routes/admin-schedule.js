@@ -17457,6 +17457,59 @@ async function seriesPropertyKey(conn, row, cols) {
   const customerAddress = customer ? addressKey(customer) : '';
   return customerAddress ? `addr:${customerAddress}` : null;
 }
+// Never let an unbillable candidate win a superseded-series comparison and
+// suppress a real one (Codex GitHub guards-follow-up P1, twice: a first
+// cheap "invoice stamp OR a price OR membership dues" proxy still let a
+// create_invoice_on_complete flag alone count as billable, with no price
+// or dues behind it — the SAME false-positive shape the coordinator's
+// whole prepay scope-cut saga already spent three rounds eliminating from
+// this file). An unbillable legacy duplicate with a coincidentally LATER
+// live visit could otherwise be crowned winner, suppressing the
+// genuinely billable sibling — and since the "winner" then refuses every
+// insert on its own turn anyway, NEITHER series would ever replenish
+// again on any future run either. Reuses seriesExtensionUnbillable
+// directly — the SAME authoritative verdict extendSeriesOnceLocked
+// itself consults, never a second hand-rolled approximation — probed
+// against today's date with no due add-ons (an add-on could only ever
+// RESCUE an otherwise-$0 base price, never make a genuinely priced
+// series look unbillable, so ignoring them here is the safe direction: it
+// can undercount billability, never overcount it).
+async function isCandidateTopUpBillable(conn, row, cols) {
+  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: row.id });
+  const storedDiscountScope = await loadStoredDiscountScope(conn, row, parentAddons);
+  const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, row.id, row);
+  const blackoutDates = await loadSeriesBlackoutDates(conn, etDateString());
+  const skipParent = (cols.skip_weekends ? !!row.skip_weekends : false)
+    || await customerPrefersNoWeekends(conn, row.customer_id);
+  const unbillable = await seriesExtensionUnbillable(conn, {
+    parent: row, dates: [etDateString()], cols, parentAddons, storedDiscountScope,
+    blackoutDates, skipParent, seriesCioc,
+  });
+  return !unbillable;
+}
+// Resolves the winning root among a candidate pool: the one with the
+// latest live visit (latestLiveSeriesVisit — the SAME anchor every extend
+// step uses), ties broken by the most recently created root. A candidate
+// with no live visit at all never outranks one that has one.
+async function pickTopUpWinnerId(conn, pool) {
+  let winner = null;
+  for (const row of pool) {
+    // Sequential, not parallel: pools here are tiny (2-3 candidates at
+    // most even for the busiest customers).
+    const latest = await latestLiveSeriesVisit(conn, row.id);
+    const latestDate = latest ? dateOnly(latest.scheduled_date) : null;
+    const createdAt = row.created_at ? new Date(row.created_at).getTime() : 0;
+    const candidate = { id: row.id, latestDate, createdAt };
+    if (!winner) { winner = candidate; continue; }
+    if (candidate.latestDate !== winner.latestDate) {
+      if (candidate.latestDate == null) continue;
+      if (winner.latestDate == null || candidate.latestDate > winner.latestDate) { winner = candidate; }
+      continue;
+    }
+    if (candidate.createdAt > winner.createdAt) winner = candidate;
+  }
+  return winner.id;
+}
 async function isSupersededSeries(conn, parent, parentId, cols) {
   const family = await seriesFamilyOf(conn, parent);
   if (!family) return false;
@@ -17487,59 +17540,22 @@ async function isSupersededSeries(conn, parent, parentId, cols) {
     duplicates.push(row);
   }
   if (!duplicates.length) return false;
-  // This series is one candidate among itself + its duplicates — resolve
-  // the winner (latest live visit, ties by most-recently-created) and skip
-  // whichever candidate isn't it.
+  // This series is one candidate among itself + its duplicates.
   const candidates = [parent, ...duplicates];
-  // Never let a statically unbillable candidate win and suppress a real
-  // one (Codex GitHub guards-follow-up P1): an unpriced, no-invoice-stamp
-  // legacy duplicate with a coincidentally LATER live visit could
-  // otherwise be crowned winner, suppressing the genuinely billable
-  // sibling — and since the "winner" then refuses every insert on its own
-  // turn (extendSeriesOnceLocked's real seriesExtensionUnbillable gate),
-  // NEITHER series would ever replenish again on any future run either.
-  // seriesLooksBillable is a cheap, deliberately conservative proxy for
-  // "this series can plausibly bill something" — NOT the full
-  // seriesExtensionUnbillable verdict, which needs per-date add-on/
-  // discount/blackout context this rule has no reason to reproduce a
-  // second time (that would be exactly the kind of parallel
-  // reimplementation the v1 prepay scope cut spent three rounds
-  // eliminating). It only rules out the OBVIOUS case (no invoice stamp,
-  // no price, no membership dues); the real, authoritative gate still
-  // runs on the actual winner's own candidate dates once picked. A
-  // `parent` that itself looks unbillable while a sibling looks billable
-  // is never labeled superseded_series here — mislabeling would be
-  // exactly the dishonest-skip-reason problem this same PR's other fix
-  // corrects; it proceeds normally and faces its own real gate, reporting
-  // 'unbillable' honestly if it truly is one.
-  const customer = await conn('customers').where({ id: parent.customer_id })
-    .first('billing_mode', 'monthly_rate');
-  const looksBillable = (row) => !!(
-    (cols.create_invoice_on_complete && row.create_invoice_on_complete)
-    || Number(row.estimated_price) > 0
-    || (customer?.billing_mode === 'monthly_membership' && Number(customer?.monthly_rate) > 0)
-  );
-  const billableIds = new Set(candidates.filter(looksBillable).map((row) => row.id));
+  const billableIds = new Set();
+  for (const row of candidates) {
+    // Sequential, not parallel: same small candidate set gathered above.
+    if (await isCandidateTopUpBillable(conn, row, cols)) billableIds.add(row.id);
+  }
+  // A `parent` that is itself unbillable while a sibling is billable is
+  // never labeled superseded_series here — mislabeling would be exactly
+  // the dishonest-skip-reason problem this same PR's other fix corrects;
+  // it proceeds normally and faces its own real gate, reporting
+  // 'unbillable' honestly.
   if (billableIds.size && !billableIds.has(parentId)) return false;
   const pool = billableIds.size ? candidates.filter((row) => billableIds.has(row.id)) : candidates;
-  let winner = null;
-  for (const row of pool) {
-    // Sequential, not parallel: same small candidate set gathered above.
-    const latest = await latestLiveSeriesVisit(conn, row.id);
-    const latestDate = latest ? dateOnly(latest.scheduled_date) : null;
-    const createdAt = row.created_at ? new Date(row.created_at).getTime() : 0;
-    const candidate = { id: row.id, latestDate, createdAt };
-    if (!winner) { winner = candidate; continue; }
-    if (candidate.latestDate !== winner.latestDate) {
-      // A candidate with no live visit at all never outranks one that has
-      // one; between two that have one, the later date wins.
-      if (candidate.latestDate == null) continue;
-      if (winner.latestDate == null || candidate.latestDate > winner.latestDate) { winner = candidate; }
-      continue;
-    }
-    if (candidate.createdAt > winner.createdAt) winner = candidate;
-  }
-  return winner.id !== parentId;
+  const winnerId = await pickTopUpWinnerId(conn, pool);
+  return winnerId !== parentId;
 }
 
 // Table-driven (async — needs a DB read, unlike the synchronous customer
@@ -23564,6 +23580,8 @@ router._test = {
   isCustomerPrepayLive,
   isFamilyOnPlanHold,
   isSupersededSeries,
+  isCandidateTopUpBillable,
+  pickTopUpWinnerId,
   normalizeTopUpWindow,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
   latestLiveSeriesVisit,
