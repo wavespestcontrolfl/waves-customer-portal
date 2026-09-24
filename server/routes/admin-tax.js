@@ -182,6 +182,14 @@ router.post('/rates', async (req, res, next) => {
           })
           .update({ active: false, expiry_date: effectiveDate });
       }
+      // Correcting an already-staged rate (posting the same county +
+      // effective_date again, e.g. to fix a typo before it goes live) must
+      // replace that row, not sit beside it as a second active row for the
+      // same date (codex P0, round 2): once that date arrives, both readers
+      // order only by effective_date and could pick either one.
+      await trx('tax_rates')
+        .where({ county: countyKey, active: true, effective_date: effectiveDate })
+        .update({ active: false });
       await trx('tax_rates').insert({
         county: countyKey, state: 'FL', state_rate: parsedStateRate, county_surtax: parsedCountySurtax,
         combined_rate: parsedStateRate + parsedCountySurtax,
