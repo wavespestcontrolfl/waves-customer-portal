@@ -18,6 +18,8 @@ const mockState = {
   decisionCustomerScope: false,
   decisionThreadScope: false,
   aliasFirsts: 0,
+  candidateRows: [],
+  candidateOrderBys: [],
 };
 
 jest.mock('../models/db', () => {
@@ -26,8 +28,16 @@ jest.mock('../models/db', () => {
     let operation = null;
     for (const method of [
       'whereNull', 'whereNotNull', 'whereRaw', 'whereNotIn', 'whereIn',
-      'leftJoin', 'join', 'orderBy', 'limit', 'onConflict', 'ignore',
+      'leftJoin', 'join', 'onConflict', 'ignore',
     ]) q[method] = jest.fn(() => q);
+    const orderBys = [];
+    let queryLimit = null;
+    q.orderBy = jest.fn((column, direction) => {
+      orderBys.push([column, direction]);
+      if (table === 'message_drafts as md') mockState.candidateOrderBys.push([column, direction]);
+      return q;
+    });
+    q.limit = jest.fn((value) => { queryLimit = value; return q; });
     q.where = jest.fn((...args) => {
       if (typeof args[0] === 'function') args[0].call(q);
       if (table === 'agent_decisions as ad' && args[0] === 'ad.customer_id') mockState.decisionCustomerScope = true;
@@ -62,6 +72,23 @@ jest.mock('../models/db', () => {
     q.select = jest.fn(async () => {
       if (table === 'customers') return mockState.customers;
       if (table === 'sms_log') return mockState.history;
+      if (table === 'message_drafts as md') {
+        const valueFor = (row, column) => column === 's.created_at'
+          ? row.inbound_created_at
+          : column === 'md.created_at' ? row.created_at : row.id;
+        const rows = [...mockState.candidateRows].sort((left, right) => {
+          for (const [column, direction] of orderBys) {
+            const a = valueFor(left, column);
+            const b = valueFor(right, column);
+            const compared = a instanceof Date && b instanceof Date
+              ? a.getTime() - b.getTime()
+              : String(a).localeCompare(String(b));
+            if (compared) return direction === 'desc' ? -compared : compared;
+          }
+          return 0;
+        });
+        return queryLimit === null ? rows : rows.slice(0, queryLimit);
+      }
       return [];
     });
     q.insert = jest.fn(() => { operation = 'insert'; return q; });
@@ -151,6 +178,8 @@ function resetFixture() {
   mockState.threadAdvanced = false;
   mockState.decisionCustomerScope = false;
   mockState.decisionThreadScope = false;
+  mockState.candidateRows = [];
+  mockState.candidateOrderBys = [];
   mockState.customers = [{ id: ID.customer, first_name: 'Dana', phone: '+19415550100' }];
   mockState.inbound = {
     id: ID.inbound, customer_id: ID.customer, direction: 'inbound',
@@ -344,6 +373,59 @@ test('qualified live gratitude preserves mode/graduation checks and reaches only
     to: '+19415550100', body: buildGratitudeReply('Dana'),
     metadata: expect.objectContaining({ original_message_type: 'ai_gratitude', gratitude_policy_version: GRATITUDE_POLICY_VERSION }),
   }));
+});
+
+test('candidate sweep drains the oldest inbound before more than 25 newer rejected drafts', async () => {
+  const now = new Date();
+  const oldestInboundAt = new Date(now.getTime() - 9 * 60 * 1000);
+  const newestDraftForOldestInbound = new Date(oldestInboundAt.getTime() + 2000);
+  mockState.activation = new Date(oldestInboundAt.getTime() - 60 * 1000);
+  mockState.inbound.created_at = oldestInboundAt;
+  mockState.draft.created_at = newestDraftForOldestInbound;
+  mockState.history[0].created_at = oldestInboundAt;
+  mockState.history[1].created_at = new Date(oldestInboundAt.getTime() - 60 * 1000);
+
+  const candidate = (overrides = {}) => ({
+    id: ID.draft,
+    sms_log_id: ID.inbound,
+    customer_id: ID.customer,
+    inbound_message: mockState.inbound.message_body,
+    draft_response: mockState.draft.draft_response,
+    intent: GRATITUDE_INTENT,
+    intent_confidence: 1,
+    model: 'gpt-test',
+    prompt_version: 'house_voice_v11',
+    intended_actions: metadata(),
+    scheduling_intent: false,
+    inbound_created_at: oldestInboundAt,
+    created_at: newestDraftForOldestInbound,
+    ...overrides,
+  });
+  const olderDuplicate = candidate({
+    id: '00000000-0000-4000-8000-000000000099',
+    intended_actions: metadata({ actions: null }),
+    created_at: new Date(oldestInboundAt.getTime() + 1000),
+  });
+  const newerRejected = Array.from({ length: 30 }, (_, index) => {
+    const inboundAt = new Date(now.getTime() - (8 * 60 * 1000) + index * 1000);
+    return candidate({
+      id: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      sms_log_id: `20000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      intended_actions: metadata({ actions: null }),
+      inbound_created_at: inboundAt,
+      created_at: new Date(inboundAt.getTime() + 1000),
+    });
+  });
+  mockState.candidateRows = [olderDuplicate, candidate(), ...newerRejected];
+
+  await expect(autoSend.processGratitudeAutoSendCandidates({ limit: 25, now }))
+    .resolves.toEqual({ scanned: 32, attempted: 1, sent: 1 });
+  expect(mockState.candidateOrderBys).toEqual([
+    ['s.created_at', 'asc'],
+    ['md.created_at', 'desc'],
+    ['md.id', 'asc'],
+  ]);
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
 });
 
 // Simulate provider preparation before the distinct final SMS predicate.

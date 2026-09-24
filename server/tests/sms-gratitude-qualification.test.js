@@ -465,6 +465,7 @@ describe('sms gratitude qualification', () => {
     'server/services/messaging/send-manual-customer-sms.js',
     'server/services/messaging/review-ask-reservation.js',
     'server/routes/admin-drafts.js',
+    'server/routes/admin-communications.js',
     'server/routes/tech-line.js',
     'server/services/intelligence-bar/comms-tools.js',
   ])('changes to direct safety dependency %s invalidate a pass', async (relative) => {

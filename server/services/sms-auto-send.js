@@ -731,7 +731,14 @@ async function processGratitudeAutoSendCandidates({ limit = 25, now = new Date()
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'actions_verified_safe' = 'true'")
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'verifier_enabled' = 'true'")
     .whereRaw("md.intended_actions::jsonb->'verify'->>'converged' = 'true'")
+    // The inbound clock owns both eligibility and the ten-minute deadline.
+    // Drain the oldest eligible thread first so a steady stream of newer,
+    // ultimately-rejected drafts cannot consume every bounded sweep until an
+    // older valid reply expires. For duplicate drafts on one inbound, retain
+    // the latest generated copy; id makes an exact timestamp tie stable.
+    .orderBy('s.created_at', 'asc')
     .orderBy('md.created_at', 'desc')
+    .orderBy('md.id', 'asc')
     .limit(scanLimit)
     .select(
       'md.id', 'md.sms_log_id', 'md.customer_id', 'md.inbound_message', 'md.draft_response',
