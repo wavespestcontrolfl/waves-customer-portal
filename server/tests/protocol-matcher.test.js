@@ -218,3 +218,51 @@ describe('catalog service keys', () => {
     expect(matchServiceProtocol(protocols, 'Quarterly Pest Control', { serviceKey: 'pest_quarterly' })).toEqual(matchServiceProtocol(protocols, 'Quarterly Pest Control'));
   });
 });
+
+describe('mosquito misting SYSTEM is a consultation, not the barrier protocol', () => {
+  // Codex P1 (PR #4762 follow-up): mosquito_misting_system is the automatic
+  // misting SYSTEM (design visit → install → maintenance), not the barrier
+  // PROGRAM's foliage/backpack spray — it must never resolve mosquito_barrier
+  // (or any other program), by the catalog key OR the display name.
+  test('the misting-system catalog key gets no protocol, regardless of the display name', () => {
+    const result = matchServiceProtocol(protocols, 'Mosquito Misting System Service', { serviceKey: 'mosquito_misting_system' });
+    expect(result).toEqual({
+      programKey: null,
+      program: null,
+      matchedVisit: null,
+      matched: false,
+      reason: 'misting_system_consultation',
+    });
+  });
+
+  test('a "misting system" name with no catalog key also gets no protocol', () => {
+    expect(matchServiceProtocol(protocols, 'Automatic Misting System Design Visit').program).toBeNull();
+    expect(matchServiceProtocol(protocols, 'Mosquito Misting System Install').program).toBeNull();
+  });
+
+  test('bare "misting" (the barrier program\'s own cycle-length wording) still routes to the barrier protocol', () => {
+    // Legacy barrier copy uses "21-day misting" for cycle length — only the
+    // two-word "misting system" phrase or the explicit key suppresses.
+    expect(match('21-Day Misting Service')).toEqual({
+      programKey: 'mosquito',
+      visit: 1,
+      reason: 'mosquito_barrier',
+    });
+  });
+
+  test('the plain barrier mosquito keys and word are unchanged', () => {
+    const byKey = (serviceType, serviceKey) => {
+      const r = matchServiceProtocol(protocols, serviceType, { serviceKey });
+      return [r.programKey, r.matchedVisit?.visit, r.reason];
+    };
+    expect(match('Mosquito Control')).toEqual({
+      programKey: 'mosquito',
+      visit: 1,
+      reason: 'mosquito_barrier',
+    });
+    expect(byKey('Mosquito Monthly Service', 'mosquito_monthly')).toEqual(['mosquito', 1, 'mosquito_barrier']);
+    expect(byKey('Mosquito Seasonal Service', 'mosquito_seasonal')).toEqual(['mosquito', 1, 'mosquito_barrier']);
+    expect(byKey('Mosquito One-Time Service', 'mosquito_one_time')).toEqual(['mosquito', 1, 'mosquito_barrier']);
+    expect(byKey('Mosquito Event Service', 'mosquito_event')).toEqual(['mosquito', 3, 'mosquito_event_service']);
+  });
+});

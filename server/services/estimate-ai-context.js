@@ -44,6 +44,16 @@ const REPO_CONTEXT_FILES = [
 const REPO_CONTEXT_DIRS = ['wiki', 'docs'];
 const REPO_CONTEXT_FILE_LIMIT = 80;
 
+// The misting-system protocol competes with the mosquito BARRIER program's
+// own repo matches (waveguard-tier-logic.md, protocols.json, the pricing
+// README, ...) for the same 5-result cap in loadRepoContext below, and those
+// fixed/discovered files are scanned first — a misting question can lose the
+// one file that actually answers it before the loader ever reaches it. Guard
+// it in explicitly, but ONLY when a search term is actually about misting,
+// so an unrelated question (barrier, lawn, termite, ...) never pays for it.
+const MISTING_PROTOCOL_FILE = 'wiki/protocols/mosquito-misting-systems.md';
+const MISTING_TERM_PATTERN = /misting/i;
+
 const EXTERNAL_REFERENCES = {
   general: [
     {
@@ -869,10 +879,24 @@ function loadRepoContext(terms) {
   for (const dir of REPO_CONTEXT_DIRS) {
     discovered.push(...discoverMarkdownFiles(dir));
   }
-  return unique([...REPO_CONTEXT_FILES, ...discovered])
+  const mistingRequested = terms.some((term) => MISTING_TERM_PATTERN.test(term));
+
+  // Scored normally, the misting protocol can rank BEHIND five other
+  // matches (barrier-program repo hits sharing "mosquito") and never survive
+  // the cap below — pull it out of the normal scan and guarantee it a slot
+  // up front instead, but only on a question that is actually about
+  // misting; otherwise it competes for the cap like any other file.
+  const results = unique([...REPO_CONTEXT_FILES, ...discovered])
+    .filter((file) => !(mistingRequested && file === MISTING_PROTOCOL_FILE))
     .map((file) => snippetFromFile(file, terms))
-    .filter(Boolean)
-    .slice(0, 5);
+    .filter(Boolean);
+
+  if (mistingRequested) {
+    const mistingSnippet = snippetFromFile(MISTING_PROTOCOL_FILE, terms);
+    if (mistingSnippet) results.unshift(mistingSnippet);
+  }
+
+  return results.slice(0, 5);
 }
 
 function discoverMarkdownFiles(relativeDir) {

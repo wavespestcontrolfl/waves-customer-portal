@@ -245,6 +245,27 @@ const MATCH_RULES = [
   },
 ];
 
+// The automatic mosquito misting SYSTEM (mosquito_misting_system: design
+// visit, install, monthly/quarterly maintenance — see
+// wiki/protocols/mosquito-misting-systems.md) is a consultation/equipment
+// service with no chemical application protocol of its own, but its name
+// and catalog category both share "mosquito"/"misting" with the barrier
+// PROGRAM's mosquito_barrier rule (visit 1, terms include 'misting' for the
+// barrier program's own "21-day misting" cycle-length copy) — left alone, a
+// scheduled misting-system visit would resolve the barrier program's
+// foliage/backpack spray steps. Scoped narrowly on purpose (Codex P1, PR
+// #4762 follow-up): only the explicit catalog key or the two-word "misting
+// system" phrase suppresses — bare "misting" (the barrier program's own
+// cycle-length wording) and the plain word "mosquito" keep routing to the
+// barrier program exactly as before.
+const MOSQUITO_MISTING_SYSTEM_SERVICE_KEY = 'mosquito_misting_system';
+const MISTING_SYSTEM_NAME_PATTERN = /\bmisting\s+system\b/i;
+
+function isMistingSystemConsultation(serviceType, serviceKey) {
+  if (serviceKey === MOSQUITO_MISTING_SYSTEM_SERVICE_KEY) return true;
+  return MISTING_SYSTEM_NAME_PATTERN.test(String(serviceType || ''));
+}
+
 function normalize(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
@@ -330,6 +351,19 @@ function findVisit(program, visitNumber) {
 }
 
 function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}) {
+  // Consultation/equipment service, not a treatment — no program, no visit,
+  // by design. Every caller already treats a null program as "no protocol"
+  // (admin-protocols.js's /match and /completion-actions 404; job-card.js's
+  // resolveProtocolLines only when it does not itself force a programKey).
+  if (isMistingSystemConsultation(serviceType, serviceKey)) {
+    return {
+      programKey: null,
+      program: null,
+      matchedVisit: null,
+      matched: false,
+      reason: 'misting_system_consultation',
+    };
+  }
   const normalized = normalize(serviceType);
   // The catalog service key outranks the name: a rule that claims the key
   // is the match, and the program is that rule's.
