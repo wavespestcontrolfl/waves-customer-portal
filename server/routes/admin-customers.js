@@ -1652,31 +1652,9 @@ async function attachMatchedCustomerToAccount(trx, customer) {
   if (!customer) return null;
   if (customer.account_id) return customer.account_id;
 
-  const accountId = customer.id;
-  await trx('customer_accounts')
-    .insert({
-      id: accountId,
-      first_name: customer.first_name,
-      last_name: customer.last_name,
-      phone: customer.phone || null,
-      email: customer.email ? String(customer.email).trim().toLowerCase() : null,
-      company_name: customer.company_name || null,
-      created_at: customer.created_at || new Date(),
-      updated_at: new Date(),
-    })
-    .onConflict('id')
-    .ignore();
-
-  await trx('customers')
-    .where({ id: customer.id })
-    .update({
-      account_id: accountId,
-      is_primary_profile: customer.is_primary_profile === false ? false : true,
-      profile_label: customer.profile_label || 'Primary',
-      updated_at: new Date(),
-    });
-
-  return accountId;
+  // Shared write (Codex #4737 r9 P1) — see services/customer-account-attach.js.
+  const { attachCustomerToNewAccount } = require('../services/customer-account-attach');
+  return attachCustomerToNewAccount(trx, customer);
 }
 
 // Phone-first account match (last-10 digits). `matchEmail` (default OFF —

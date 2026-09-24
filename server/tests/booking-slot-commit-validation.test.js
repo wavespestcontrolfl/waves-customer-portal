@@ -519,6 +519,8 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     const lineEnd = src.indexOf('\n', convertIdx);
     const conditionLine = src.slice(convertIdx, lineEnd);
     expect(conditionLine).toMatch(/txErr\.code === 'LOCATION_CHANGED_RETRY'/);
+    // Codex #4737 r9 P2: the fingerprint-side twin of the same race.
+    expect(conditionLine).toMatch(/txErr\.code === 'CUSTOMER_CHANGED_RETRY'/);
     // Still inside the same branch that returns { ok:false, status:409, ...
     // code } rather than re-throwing — pin the branch body, not just the
     // condition line, so moving LOCATION_CHANGED_RETRY to its own
@@ -527,6 +529,24 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     const returnIdx = src.indexOf("return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };", convertIdx);
     expect(returnIdx).toBeGreaterThan(convertIdx);
     expect(returnIdx).toBeLessThan(throwIdx);
+  });
+
+  // Codex #4737 r9 P1: the consultation page's lead-scoped dedupe — the lead
+  // lock is taken AFTER the per-customer lane lock and BEFORE the replay /
+  // slot checks, and every other profile of the lead is checked for an open
+  // assessment, refusing ALREADY_BOOKED.
+  test('leadDedupe takes the inspection-lead lock after the lane lock and refuses a lead with an open assessment on another profile', () => {
+    const laneLock = src.indexOf("['reservice-lane', `${custId}:${callbackVisit.serviceKey}`]");
+    const leadLock = src.indexOf("['inspection-lead', String(callbackVisit.leadDedupe.leadId)]");
+    const replay = src.indexOf("const replayQuery = trx('self_booked_appointments')");
+    expect(laneLock).toBeGreaterThan(-1);
+    expect(leadLock).toBeGreaterThan(laneLock);
+    expect(leadLock).toBeLessThan(replay);
+    const loop = src.indexOf('for (const profileId of callbackVisit.leadDedupe.customerIds || [])');
+    expect(loop).toBeGreaterThan(replay);
+    const body = src.slice(loop, loop + 600);
+    expect(body).toMatch(/openCallbackExistsForLane\(trx, profileId, lane\)/);
+    expect(body).toMatch(/code: 'ALREADY_BOOKED'/);
   });
 });
 

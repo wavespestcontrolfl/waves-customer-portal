@@ -21,6 +21,59 @@ const { EMAIL_RE } = require('../utils/workable-lead-signal');
 const CONFIRM_TTL_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days — link still confirms
 const PENDING_PURGE_MS = 30 * 24 * 60 * 60 * 1000;    // 30 days — then delete the row
 
+
+// A 'waitlist' row (the out-of-area consultation prompt) meeting a later
+// signup: its own transition, out of subscribeOrResubscribe's shared state
+// machine (Codex #4737 r9 P2).
+async function transitionWaitlistRow(existing, {
+  source, firstName, lastName, requireConfirmation, promoteWaitlist, linkCustomer, lc,
+}) {
+  // Codex pre-push P1 :1087, 2026-09-24 — a 'waitlist' row (the
+  // out-of-area inspection-link prompt, inspection-public.js's POST
+  // /:token/waitlist) intentionally carries NO subscription: it skips
+  // this function entirely at insert time (status:'waitlist', never
+  // 'pending') specifically so it never enrols in ordinary sends
+  // (buildSubscriberQuery selects status='active' only) or triggers a
+  // confirmation email just for joining the waitlist. But this function
+  // didn't know the status existed, so a LATER deliberate newsletter
+  // signup by the same email fell through to the final "already
+  // active" branch below — no confirmation sent, and the row stayed
+  // excluded forever. Treated exactly like a brand-new email would be
+  // (the row is reused, not re-inserted, since email is unique):
+  // requireConfirmation lands at 'pending' + a fresh confirmation
+  // token/email, same as any new public-form signup. Never resets
+  // resubscribed_at/unsubscribed_at or the sunset hygiene markers —
+  // a waitlist row was never part of that lifecycle, so those fields
+  // are already unset.
+  // Trusted bulk flows (customer import, quote wizard, call pipeline —
+  // requireConfirmation:false) never promote a waitlist row (Codex
+  // #4737 r2 P1): the waitlist proved neither email ownership nor
+  // newsletter consent, so only the subscriber's own double-opt-in
+  // brings it into sends — the same rule the inactive branch below
+  // applies to sunset rows.
+  if (!requireConfirmation && !promoteWaitlist) {
+    return { subscriber: existing, action: 'skipped_waitlist' };
+  }
+  const updates = {
+    source,
+    first_name: firstName !== null ? firstName : existing.first_name,
+    last_name: lastName !== null ? lastName : existing.last_name,
+    updated_at: new Date(),
+  };
+  if (requireConfirmation) {
+    updates.status = 'pending';
+    updates.confirmation_sent_at = new Date();
+    updates.confirmation_token = db.raw('gen_random_uuid()');
+  } else {
+    updates.status = 'active';
+    updates.confirmed_at = new Date();
+  }
+  await db('newsletter_subscribers').where({ id: existing.id }).update(updates);
+  if (linkCustomer) await linkToCustomer(lc);
+  const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+  return { subscriber: fresh, action: requireConfirmation ? 'confirmation_sent' : 'resubscribed' };
+}
+
 /**
  * Subscribe (or resubscribe) an email. Idempotent across all call sites.
  *
@@ -71,7 +124,7 @@ async function subscribeOrResubscribe({
   // An operator's explicit single add (admin-newsletter.js POST
   // /subscribers) may promote a waitlist row straight to active; bulk and
   // automatic trusted flows never do (Codex #4737 r3 P2).
-  promoteWaitlist = false,
+  promoteWaitlist,
 } = {}) {
   if (!email) {
     const err = new Error('email required');
@@ -124,50 +177,11 @@ async function subscribeOrResubscribe({
     }
 
     if (existing.status === 'waitlist') {
-      // Codex pre-push P1 :1087, 2026-09-24 — a 'waitlist' row (the
-      // out-of-area inspection-link prompt, inspection-public.js's POST
-      // /:token/waitlist) intentionally carries NO subscription: it skips
-      // this function entirely at insert time (status:'waitlist', never
-      // 'pending') specifically so it never enrols in ordinary sends
-      // (buildSubscriberQuery selects status='active' only) or triggers a
-      // confirmation email just for joining the waitlist. But this function
-      // didn't know the status existed, so a LATER deliberate newsletter
-      // signup by the same email fell through to the final "already
-      // active" branch below — no confirmation sent, and the row stayed
-      // excluded forever. Treated exactly like a brand-new email would be
-      // (the row is reused, not re-inserted, since email is unique):
-      // requireConfirmation lands at 'pending' + a fresh confirmation
-      // token/email, same as any new public-form signup. Never resets
-      // resubscribed_at/unsubscribed_at or the sunset hygiene markers —
-      // a waitlist row was never part of that lifecycle, so those fields
-      // are already unset.
-      // Trusted bulk flows (customer import, quote wizard, call pipeline —
-      // requireConfirmation:false) never promote a waitlist row (Codex
-      // #4737 r2 P1): the waitlist proved neither email ownership nor
-      // newsletter consent, so only the subscriber's own double-opt-in
-      // brings it into sends — the same rule the inactive branch below
-      // applies to sunset rows.
-      if (!requireConfirmation && !promoteWaitlist) {
-        return { subscriber: existing, action: 'skipped_waitlist' };
-      }
-      const updates = {
-        source,
-        first_name: firstName !== null ? firstName : existing.first_name,
-        last_name: lastName !== null ? lastName : existing.last_name,
-        updated_at: new Date(),
-      };
-      if (requireConfirmation) {
-        updates.status = 'pending';
-        updates.confirmation_sent_at = new Date();
-        updates.confirmation_token = db.raw('gen_random_uuid()');
-      } else {
-        updates.status = 'active';
-        updates.confirmed_at = new Date();
-      }
-      await db('newsletter_subscribers').where({ id: existing.id }).update(updates);
-      if (linkCustomer) await linkToCustomer(lc);
-      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
-      return { subscriber: fresh, action: requireConfirmation ? 'confirmation_sent' : 'resubscribed' };
+      // Its own status-specific transition (Codex #4737 r9 P2) — see
+      // transitionWaitlistRow below.
+      return transitionWaitlistRow(existing, {
+        source, firstName, lastName, requireConfirmation, promoteWaitlist, linkCustomer, lc,
+      });
     }
 
     if (existing.status === 'unsubscribed' || existing.status === 'inactive') {

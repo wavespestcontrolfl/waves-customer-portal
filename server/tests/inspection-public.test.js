@@ -452,8 +452,75 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
 // LOCATION_CHANGED_RETRY must answer through the booking result path, the
 // same as a slot race — 409 SLOT_TAKEN-style, refreshed at the customer's
 // CURRENT address, not the pre-race pin the caller offered the slot at.
+describe('Codex #4737 r9: lead-scoped dedupe, trusted-customer change to null, catalog-linked assessments, shared attach', () => {
+  const slotDay = () => ({
+    days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+  });
+
+  test('P1: the booking carries leadDedupe with every provenance profile of the lead', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    listResults.lead_activities = [
+      { metadata: JSON.stringify({ customer_id: 'cust-other' }) },
+      { metadata: { customer_id: 'cust-1' } },
+    ];
+    mockBuildAvailability.mockResolvedValueOnce(slotDay());
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(200);
+    const { leadDedupe } = mockCreateSelfBooking.mock.calls[0][0].callbackVisit;
+    expect(leadDedupe.leadId).toBe(LEAD_ID);
+    expect([...leadDedupe.customerIds].sort()).toEqual(['cust-1', 'cust-other']);
+  });
+
+  test('P1: a trusted customer that changed to null under the lead lock is a retry — nothing linked, created or booked', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce(slotDay());
+    // Staff unlinks the lead the moment phase 1 takes its lock.
+    const original = db.transaction.getMockImplementation();
+    db.transaction.mockImplementationOnce(async (fn) => {
+      firstResults.leads = { ...LINKED_LEAD, customer_id: null };
+      return original(fn);
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(422);
+    expect(res.body.error).toBe('address_unresolved');
+    expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
+    expect(updateCalls.some((c) => c.table === 'leads')).toBe(false);
+  });
+
+  test('P2: an open visit linked to the assessment catalog row with a customized service_type is already_booked, not converted', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.services = { id: 'svc-catalog-1', service_key: ASSESSMENT_SERVICE_KEY, name: 'Waves Assessment', default_duration_minutes: 30 };
+    listResults.scheduled_services = [
+      { id: 'ss-custom', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Custom walkthrough', service_id: 'svc-catalog-1', reschedule_token: 'c-tok' },
+    ];
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.state).toBe('already_booked');
+  });
+
+  test('P1: both account-attach paths call the one shared helper', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const [file, fn] of [['../routes/admin-customers.js', 'async function attachMatchedCustomerToAccount('], ['../routes/inspection-public.js', 'async function attachLinkedProfileToOwnAccount(']]) {
+      const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+      const start = src.indexOf(fn);
+      const body = src.slice(start, src.indexOf('\n}\n', start));
+      expect(start).toBeGreaterThan(-1);
+      expect(body).toContain("require('../services/customer-account-attach')");
+      expect(body).not.toContain("'customer_accounts'");
+    }
+  });
+});
+
 describe('Codex #4737 r8 P2: LOCATION_CHANGED_RETRY answers like a slot race, at the CURRENT stored pin', () => {
-  test('sendBookingFailure refreshes availability at the customer\'s CURRENT pin, not the stale pre-race bookingLocation', async () => {
+  // Codex #4737 r9 P2: CUSTOMER_CHANGED_RETRY (an address TEXT edit caught
+  // by the comms fingerprint) answers the same way.
+  test.each(['LOCATION_CHANGED_RETRY', 'CUSTOMER_CHANGED_RETRY'])('%s: sendBookingFailure refreshes availability at the customer\'s CURRENT pin, not the stale pre-race bookingLocation', async (raceCode) => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
     // No stored coordinates yet — phase 1 geocodes the customer's own
     // stored address TEXT (the pre-race pin) and writes it back; bookingLocation
@@ -471,7 +538,7 @@ describe('Codex #4737 r8 P2: LOCATION_CHANGED_RETRY answers like a slot race, at
       // commit-time fence — AFTER phase 1 (and bookingLocation) already ran
       // against the old one.
       firstResults.customers = { ...firstResults.customers, latitude: 27.9, longitude: -82.9 };
-      return { ok: false, status: 409, error: 'Your address just changed — please pick a time again.', code: 'LOCATION_CHANGED_RETRY' };
+      return { ok: false, status: 409, error: 'Your address just changed — please pick a time again.', code: raceCode };
     });
     const token = mintLeadConsultationToken(LEAD_ID);
     const res = await callPost(token, { date: FUTURE_DATE, time: '09:00' });

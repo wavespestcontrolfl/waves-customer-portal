@@ -2780,6 +2780,17 @@ async function createSelfBooking(payload = {}) {
           ['reservice-lane', `${custId}:${callbackVisit.serviceKey}`],
         );
       }
+      // callbackVisit.leadDedupe (consultation page only, Codex #4737 r9 P1):
+      // one lead can book through several property profiles, so its
+      // dedupe is LEAD-scoped too — a lead lock taken after the per-customer
+      // lane lock (same order in every commit), then the open-assessment
+      // check across every profile of the lead, below.
+      if (callbackVisit?.leadDedupe?.leadId) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['inspection-lead', String(callbackVisit.leadDedupe.leadId)],
+        );
+      }
 
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate. A
@@ -2822,6 +2833,20 @@ async function createSelfBooking(payload = {}) {
             isOperational: true,
             code: 'ALREADY_BOOKED',
           });
+        }
+      }
+      if (callbackVisit?.leadDedupe?.leadId) {
+        const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');
+        const lane = laneForCallbackRow({ serviceKey: callbackVisit.serviceKey });
+        for (const profileId of callbackVisit.leadDedupe.customerIds || []) {
+          if (String(profileId) === String(custId)) continue;
+          if (await openCallbackExistsForLane(trx, profileId, lane)) {
+            throw Object.assign(new Error('You already have a consultation on the books.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'ALREADY_BOOKED',
+            });
+          }
         }
       }
 
@@ -3159,13 +3184,15 @@ async function createSelfBooking(payload = {}) {
       // crossed the notice boundary while this request waited — another
       // "pick another slot" outcome that must not strand a just-created
       // profile.
+      // CUSTOMER_CHANGED_RETRY too (Codex #4737 r9 P2) — the same race seen
+      // through the comms fingerprint (an address TEXT edit), checked first.
       // LOCATION_CHANGED_RETRY rides it too (Codex #4737 r8 P2): the
       // customer's stored pin moved under the fence (callbackVisit's
       // expectedLocation check above) — a "pick a time again at the
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is

@@ -196,7 +196,7 @@ const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { isInServiceAreaBox } = require('../services/service-area');
-const { isAssessmentServiceType, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
+const { isAssessmentBooking, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
 // the offer (buildAvailabilityForLead) and the commit (callbackVisit).
 const ASSESSMENT_EXPECTED_IDENTITY = Object.freeze({ catalogServiceKey: ASSESSMENT_SERVICE_KEY, serviceType: 'Waves Assessment' });
@@ -689,11 +689,13 @@ async function findOpenVisit(dbConn, customerId, { assessmentOnly = false, exclu
     .where({ customer_id: customerId })
     .whereNotIn('status', TERMINAL_STATUSES)
     .orderBy([{ column: 'scheduled_date', order: 'asc' }, { column: 'window_start', order: 'asc' }])
-    .select('id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'reschedule_token');
+    .select('id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'service_id', 'reschedule_token');
   if (futureOnly) q = q.where('scheduled_date', '>=', etDateString());
   const rows = await q.limit(50);
   for (const row of rows) {
-    const assessment = isAssessmentServiceType(row.service_type);
+    // The catalog identity too (Codex #4737 r9 P2): a row linked to the
+    // assessment service with a customized service_type is still one.
+    const assessment = await isAssessmentBooking(row, dbConn);
     if (assessmentOnly && !assessment) continue;
     if (excludeAssessment && assessment) continue;
     return row;
@@ -1024,28 +1026,9 @@ async function attachLinkedProfileToOwnAccount(trx, linked) {
   if (!(await tryLockCustomerComms(trx, linked.id))) return null;
   const fresh = await trx('customers').where({ id: linked.id }).first();
   if (!fresh || fresh.account_id) return null;
-  const accountId = fresh.id;
-  await trx('customer_accounts')
-    .insert({
-      id: accountId,
-      first_name: fresh.first_name,
-      last_name: fresh.last_name,
-      phone: fresh.phone || null,
-      email: fresh.email ? String(fresh.email).trim().toLowerCase() : null,
-      company_name: fresh.company_name || null,
-      created_at: fresh.created_at || new Date(),
-      updated_at: new Date(),
-    })
-    .onConflict('id')
-    .ignore();
-  await trx('customers')
-    .where({ id: fresh.id })
-    .update({
-      account_id: accountId,
-      is_primary_profile: fresh.is_primary_profile === false ? false : true,
-      profile_label: fresh.profile_label || 'Primary',
-      updated_at: new Date(),
-    });
+  // Shared write (Codex #4737 r9 P1) — see services/customer-account-attach.js.
+  const { attachCustomerToNewAccount } = require('../services/customer-account-attach');
+  const accountId = await attachCustomerToNewAccount(trx, fresh);
   return { accountId, existingCustomer: { ...fresh, account_id: accountId } };
 }
 
@@ -1412,9 +1395,13 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
     if (!freshLead) return { eligibility: { state: 'gone', visit: null, rescheduleUrl: null } };
     const freshCustRow = await loadTrustedCustomer(trx, freshLead, verified);
     // The trusted customer changed between the pre-lock read and the locks
-    // (a conversion or merge landed): its row is not the one locked above,
-    // so nothing is written — the client retries against the new state.
-    if ((freshCustRow?.id || null) !== (custRow?.id || null) && freshCustRow) {
+    // (a conversion, merge, or unlink landed): its row is not the one
+    // locked above, so nothing is written — the client retries against the
+    // new state. This must also catch a change TO null (Codex #4737 r9
+    // P1) — dropping the `&& freshCustRow` guard that used to let a
+    // custRow-to-null change fall through and get silently re-provisioned
+    // as if no trusted customer had ever existed.
+    if ((freshCustRow?.id || null) !== (custRow?.id || null)) {
       return { locationFailure: 'address_unresolved' };
     }
 
@@ -1558,7 +1545,7 @@ function parseCommitBody(body) {
 
 // Phase 2 — createSelfBooking with the assessment's internal callbackVisit
 // (see the handler's phase-2 note for the lane-dedupe contract).
-async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation }) {
+async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe }) {
   const { createSelfBooking } = booking._internals;
   return createSelfBooking({
     slot_date: date,
@@ -1590,14 +1577,44 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
       // has moved since (Codex #4737 r5 P1).
       expectedLocation: bookingLocation,
       alertLabel: '🔁 Free consultation self-booked:',
+      leadDedupe,
     },
   });
+}
+
+// The first non-ok eligibility across the booked profile and the lead's
+// other profiles, else the booked profile's own.
+async function leadWideEligibility(lead, custRow, profileIds) {
+  const own = await resolveEligibility(db, lead, custRow);
+  if (own.state !== 'ok') return own;
+  for (const id of profileIds) {
+    if (String(id) === String(custRow.id)) continue;
+    const profile = await loadCustomer(db, id);
+    const other = profile ? await resolveEligibility(db, lead, profile) : null;
+    if (other && other.state !== 'ok') return other;
+  }
+  return own;
+}
+
+// The lead's property profiles: every customer its consultation_prospect
+// provenance names, its current link, and the profile being booked.
+async function leadProfileIds(leadId, custId) {
+  const [activities, lead] = await Promise.all([
+    db('lead_activities').where({ lead_id: leadId, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata'),
+    db('leads').where({ id: leadId }).first('customer_id'),
+  ]);
+  const ids = new Set([custId, lead?.customer_id].filter(Boolean).map(String));
+  for (const row of activities || []) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+    if (meta?.customer_id) ids.add(String(meta.customer_id));
+  }
+  return [...ids];
 }
 
 // A failed createSelfBooking mapped to the page's responses: ALREADY_BOOKED
 // resolves to GET's already_booked shape; a 409 is SLOT_TAKEN with fresh
 // times; anything else passes through.
-async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog }) {
+async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, profileIds = [] }) {
   // A validated, in-area address the lead supplied through their own
   // link stays on the customer even when this attempt fails (owner
   // ruling 2026-09-24): undoing it raced concurrent bookings that had
@@ -1607,11 +1624,13 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
     // The atomic lane dedupe inside createSelfBooking's own insert
     // transaction caught a duplicate — resolve and return the SAME
     // already_booked shape GET returns, pointing at whichever visit is
-    // now the customer's open assessment.
-    const eligibility = await resolveEligibility(db, lead, custRow);
-    return res.json(eligibilityResponse(eligibility, leadPayload));
+    // now the open assessment — on ANY of the lead's profiles (the
+    // lead-scoped dedupe, Codex #4737 r9 P1).
+    return res.json(eligibilityResponse(await leadWideEligibility(lead, custRow, profileIds), leadPayload));
   }
-  if (result.code === 'LOCATION_CHANGED_RETRY') {
+  // An address/account edit under the booking fence (Codex #4737 r8 + r9
+  // P2s): fresh times at the customer's CURRENT pin.
+  if (result.code === 'LOCATION_CHANGED_RETRY' || result.code === 'CUSTOMER_CHANGED_RETRY') {
     // createSelfBooking's own fence found the customer's stored pin had
     // moved AFTER phase 1 committed (Codex #4737 r8 P2) — `bookingLocation`
     // is the pin as it stood then, now stale. Answer with fresh times at
@@ -1774,10 +1793,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // A duplicate throws ALREADY_BOOKED, caught below and mapped to the
     // same `{ state: 'already_booked', visit, rescheduleUrl }` shape GET
     // returns, resolved against whichever visit survived.
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation });
+    // Every property profile of this lead (Codex #4737 r9 P1): the booking
+    // transaction dedupes the assessment across all of them under a lead
+    // lock, so two commits with different addresses never both book. Read
+    // after phase 1, whose per-lead lock serialized every earlier commit's
+    // provenance / link writes before this one.
+    const profileIds = await leadProfileIds(lead.id, custRow.id);
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, customerIds: profileIds } });
 
     if (!result.ok) {
-      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, profileIds });
     }
 
     return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));
