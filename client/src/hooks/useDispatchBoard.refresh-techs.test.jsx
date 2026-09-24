@@ -276,3 +276,78 @@ describe('superseded refresh leaves no buffer behind (pre-push auditor P1 on PR 
     expect(result.current.jobs[0].technician_id).toBe('tech-3');
   });
 });
+
+describe('initial hydration is load #1 of the same sequence (pre-push auditor P1 on PR #4678, round 4)', () => {
+  it('a broadcast-triggered refresh during hydration supersedes the initial response', async () => {
+    // The initial /board read is slow; an absence broadcast arrives and
+    // its refresh returns first with the tech marked Out. The initial
+    // response (older, out_today false) must not roll that back.
+    const initial = deferredResponse({
+      techs: [{ id: 'tech-1', name: 'Tech One', status: 'idle', out_today: false, updated_at: 't0' }],
+      jobs: [],
+    });
+    fetch.mockResolvedValueOnce(initial.response);
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(typeof socketHandlers['dispatch:tech_absence']).toBe('function'));
+
+    const refreshed = deferredResponse({
+      techs: [{ id: 'tech-1', name: 'Tech One', status: 'idle', out_today: true, updated_at: 't1' }],
+      jobs: [],
+    });
+    fetch.mockResolvedValueOnce(refreshed.response);
+    await act(async () => {
+      socketHandlers['dispatch:tech_absence']({ tech_id: 'tech-1', date: '2026-09-30', out: true, absence_id: 'a-1' });
+    });
+    await act(async () => { refreshed.release(); await Promise.resolve(); });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.techs[0].out_today).toBe(true);
+
+    await act(async () => { initial.release(); await Promise.resolve(); await Promise.resolve(); });
+    expect(result.current.techs[0].out_today).toBe(true);
+    expect(result.current.techs[0].updated_at).toBe('t1');
+    expect(result.current.error).toBeNull();
+  });
+
+  it('a socket update that arrives mid-hydration survives the initial response', async () => {
+    const initial = deferredResponse({
+      techs: [{ id: 'tech-1', name: 'Tech One', status: 'idle', out_today: false, updated_at: 't0' }],
+      jobs: [{ id: 'job-1', technician_id: 'tech-1', status: 'confirmed', address: '123 Main St' }],
+    });
+    fetch.mockResolvedValueOnce(initial.response);
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(typeof socketHandlers['dispatch:job_update']).toBe('function'));
+
+    await act(async () => {
+      socketHandlers['dispatch:job_update']({ job_id: 'job-1', tech_id: 'tech-2', status: 'confirmed', address: '123 Main St' });
+    });
+    await act(async () => { initial.release(); await Promise.resolve(); });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.jobs[0].technician_id).toBe('tech-2');
+    expect(result.current.techs[0].name).toBe('Tech One');
+  });
+
+  it('an initial load that fails while still the latest sets error; one superseded by a successful refresh does not', async () => {
+    fetch.mockRejectedValueOnce(new Error('boom'));
+    const first = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(first.result.current.loading).toBe(false));
+    expect(first.result.current.error).toBe('boom');
+    first.unmount();
+    for (const key of Object.keys(socketHandlers)) delete socketHandlers[key];
+
+    // The initial fetch is still pending when a broadcast refresh starts
+    // and succeeds; the initial request then fails — superseded, so it
+    // must not set `error` over a board that loaded fine.
+    let failInitial;
+    fetch.mockReturnValueOnce(new Promise((_resolve, reject) => { failInitial = reject; }));
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(typeof socketHandlers['dispatch:tech_absence']).toBe('function'));
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
+    await act(async () => {
+      socketHandlers['dispatch:tech_absence']({ tech_id: 'tech-1', date: '2026-09-30', out: true, absence_id: 'a-1' });
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => { failInitial(new Error('HTTP 500')); await Promise.resolve(); await Promise.resolve(); });
+    expect(result.current.error).toBeNull();
+    expect(result.current.techs[0].name).toBe('Tech One');
+  });
+});

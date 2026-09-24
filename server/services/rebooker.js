@@ -2351,9 +2351,19 @@ class SmartRebooker {
           // that lock in the opposite order, so never wait for maintenance
           // after the callback: try it here while only occupancy is held.
           await preflightReviewedMaintenance();
-          if (Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) {
+          {
             // Fence every source holder and projected destination before
-            // callback rows; the locked fingerprint catches assignments that
+            // callback rows and before ANY technician row lock in the loop
+            // below — for EVERY series move, not only a snapshot-guarded one.
+            // The per-sibling dated eligibility check (assertAssignable-
+            // SlotTechnician, technicians FOR SHARE) runs before that
+            // sibling's own slot-reserve lock; tech-out's markTechOut takes
+            // the tech-day fence FIRST and then the technician row FOR
+            // UPDATE, so without these up-front fences the two orders
+            // invert and one side deadlocks (pre-push auditor P1 on #4678).
+            // Same-session re-acquisition of a fence later in the loop is a
+            // no-op (xact advisory locks are reentrant). With a snapshot,
+            // the locked fingerprint additionally catches assignments that
             // committed while these fences were awaited.
             const sweptSet = new Set(sweptIds.map(String));
             const techDays = [];

@@ -1103,11 +1103,13 @@ describe('live-status reschedule override (allowLive)', () => {
     );
 
     // The slot-reserve tech lock is held (this is the ONLY lock
-    // slot-reservation writers share)...
+    // slot-reservation writers share) — TWICE on the anchor key: once by
+    // the up-front series fence (lockTechDays, every series move — tech-out
+    // lock order, #4678) and once by the anchor's own guard lock...
     const slotLocks = trx.raw.mock.calls
       .filter((c) => Array.isArray(c[1]) && c[1][0] === 'slot-reserve')
       .map((c) => c[1][1]);
-    expect(slotLocks).toContain(`tech-5:${TARGET}`);
+    expect(slotLocks.filter((key) => key === `tech-5:${TARGET}`)).toHaveLength(2);
     // ...and the tech overlap query probes the duration-derived span
     // (90 min → 10:30), not a skipped/flat one.
     expect(techOverlapProbe.whereRaw).toHaveBeenCalledWith(
@@ -1126,10 +1128,13 @@ describe('live-status reschedule override (allowLive)', () => {
         { technicianId: 'tech-5' },
       );
 
+      // The up-front series fence (lockTechDays) still takes the anchor key
+      // once — it is a lock-order invariant, not part of the guard (#4678) —
+      // but the guard's OWN lock on that key is skipped: exactly one, not two.
       const slotLocks = trx.raw.mock.calls
         .filter((c) => Array.isArray(c[1]) && c[1][0] === 'slot-reserve')
         .map((c) => c[1][1]);
-      expect(slotLocks).toEqual([]);
+      expect(slotLocks.filter((key) => key === `tech-5:${TARGET}`)).toHaveLength(1);
       expect(anchorUpdate.update).toHaveBeenCalled();
     } finally {
       delete process.env.REBOOKER_NULL_END_OCCUPANCY;
