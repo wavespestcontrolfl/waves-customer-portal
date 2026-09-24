@@ -246,6 +246,13 @@ describe('sms gratitude qualification', () => {
     'server/services/sms-response-policy.js',
     'server/utils/phone.js',
     'server/services/sms-suggest-mode.js',
+    'server/services/messaging/send-customer-message.js',
+    'server/services/messaging/providers/twilio-sms.js',
+    'server/services/twilio.js',
+    'server/services/messaging/push-channel-routing.js',
+    'server/services/messaging/send-manual-customer-sms.js',
+    'server/routes/admin-drafts.js',
+    'server/services/intelligence-bar/comms-tools.js',
   ])('changes to direct safety dependency %s invalidate a pass', async (relative) => {
     const store = memoryDb();
     const { qualification } = loadQualification({ dbi: store });
