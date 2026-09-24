@@ -10367,7 +10367,9 @@ const CallRecordingProcessor = {
                     raw_text: null,
                   });
                   return trx.raw(
-                    "CASE WHEN (COALESCE(payload, '{}'::jsonb) ? 'scheduling_window') "
+                    // jsonb_exists(), never the bare `?` operator knex reads
+                    // as a binding placeholder.
+                    "CASE WHEN jsonb_exists(COALESCE(payload, '{}'::jsonb), 'scheduling_window') "
                     + "THEN jsonb_set(COALESCE(payload, '{}'::jsonb) || ?::jsonb, '{scheduling_window,requested_address}', COALESCE(payload #> '{scheduling_window,requested_address}', '{}'::jsonb) || ?::jsonb, true) "
                     + "ELSE COALESCE(payload, '{}'::jsonb) || ?::jsonb END",
                     [merged, resolvedAddress, merged],

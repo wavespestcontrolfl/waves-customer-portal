@@ -341,8 +341,22 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(processor).toContain("if (disputedPremise(entry.address_line1)) continue;");
     // A standing hold carried over without fresh AV evidence restores the disputed street (codex r33 P1).
     expect(processor).toContain("if (!disputedStatedStreet) disputedStatedStreet = standingPayload?.stated_street || null;");
-    // A kept card's booking ask follows the positively resolved premise (codex r34 P1).
-    expect(processor).toContain("'{scheduling_window,requested_address}', COALESCE(payload #> '{scheduling_window,requested_address}', '{}'::jsonb) || ?::jsonb, true)");
+    // A kept card's booking ask follows the positively resolved premise (codex r34 P1) — and the
+    // raw expression COMPILES under knex (a bare `?` existence operator would read as a binding).
+    expect(processor).toContain("CASE WHEN jsonb_exists(COALESCE(payload, '{}'::jsonb), 'scheduling_window') ");
+    const knex = require('knex')({ client: 'pg' });
+    const merged = JSON.stringify({ address_dispute_cleared_at: 'x' });
+    const resolvedAddress = JSON.stringify({ street_line_1: '1260 Example St' });
+    const compiled = knex('triage_items').where({ id: 1 }).update({
+      payload: knex.raw(
+        "CASE WHEN jsonb_exists(COALESCE(payload, '{}'::jsonb), 'scheduling_window') "
+        + "THEN jsonb_set(COALESCE(payload, '{}'::jsonb) || ?::jsonb, '{scheduling_window,requested_address}', COALESCE(payload #> '{scheduling_window,requested_address}', '{}'::jsonb) || ?::jsonb, true) "
+        + "ELSE COALESCE(payload, '{}'::jsonb) || ?::jsonb END",
+        [merged, resolvedAddress, merged],
+      ),
+    }).toSQL();
+    expect(compiled.bindings).toEqual([merged, resolvedAddress, merged, 1]);
+    knex.destroy();
     // A reprocess re-binds the identity only for a LINKED call; an unlink keeps the filing identity (codex r29 P2).
     expect(processor).toContain("...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),");
   });
