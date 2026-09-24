@@ -1180,6 +1180,27 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0].auto_reply_status).toBe('posted');
   });
 
+  test('a reused draft that fails re-verification, with every redraft rejected, is cleared — never rebound to the new grounding (Codex #4713 r11)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const fp = Runner.reviewFingerprint(row());
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, review_reply: `[DRAFT] ${GOOD_DRAFT.text}`, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
+    mockVerify.mockReturnValueOnce('repetitive_opening');
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'verifier_reject', rejections: ['url'], mode: 'service_quality', version: 'reply-v1' });
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject', auto_reply_draft: null, auto_reply_version: null, review_reply: null });
+  });
+
+  test('a draft kept through a provider outage keeps its OWN grounding stamp (Codex #4713 r11)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockDraft.mockResolvedValue({ ok: false, reason: 'provider_unavailable', error: 'down', mode: 'service_quality', version: 'reply-v1' });
+    const oldStamp = { fingerprint: 'drafted-for-this', accountFingerprint: 'fp:old' };
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'provider_unavailable', auto_reply_attempts: Runner.MAX_ATTEMPTS - 1, auto_reply_draft: 'kept', auto_reply_version: 'reply-v1', auto_reply_grounding: oldStamp })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_draft: 'kept' });
+    const stamp = typeof state.rows[0].auto_reply_grounding === 'string' ? JSON.parse(state.rows[0].auto_reply_grounding) : state.rows[0].auto_reply_grounding;
+    expect(stamp).toEqual(oldStamp);
+  });
+
   test('applyRequeueOnIdentity only revives a row STILL parked for the snapshot reason (an admin Skip wins)', async () => {
     const parked = row({ id: 'p', auto_reply_status: 'parked', auto_reply_reason: 'no_gbp_resource', gbp_review_name: null, dismissed: false });
     state.rows = [{ ...parked, auto_reply_status: 'skipped', auto_reply_reason: 'admin_skip' }];

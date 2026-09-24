@@ -168,6 +168,45 @@ function titleCase(s) {
   return s.split(' ').map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ');
 }
 
+const PUBLIC_FAMILY_BY_TYPE = Object.freeze({
+  'Quarterly Pest Control': 'Pest Control',
+  'General Pest Control': 'Pest Control',
+  'Pest Control Service': 'Pest Control',
+  'Pest Control': 'Pest Control',
+  'German Roach Treatment': 'Cockroach Treatment',
+  'Cockroach Treatment Service': 'Cockroach Treatment',
+  'Bed Bug Treatment Service': 'Bed Bug Treatment',
+  'Ant Treatment': 'Ant Treatment',
+  'Flea & Tick Treatment': 'Flea & Tick Treatment',
+  'Stinging Insect Removal': 'Stinging Insect Service',
+  'Tent Fumigation': 'Fumigation',
+  'Rodent Wire Mesh Exclusion Service': 'Rodent Control',
+  'Rodent Exclusion': 'Rodent Control',
+  'Rodent Control': 'Rodent Control',
+  'Mole Control': 'Mole Control',
+  'WDO Inspection': 'Inspection',
+  'Termite Inspection': 'Inspection',
+  Inspection: 'Inspection',
+  'Bora-Care Wood Treatment Service': 'Termite Control',
+  'Termite Treatment': 'Termite Control',
+  'Termite Bait Monitoring': 'Termite Control',
+  'Termite Service': 'Termite Control',
+  'Lawn Care Visit': 'Lawn Care',
+  'Lawn Care': 'Lawn Care',
+  'Lawn Fertilization': 'Lawn Care',
+  'Weed Control': 'Lawn Care',
+  'Lawn Dethatching Service': 'Lawn Care',
+  'Lawn Top Dressing Service': 'Lawn Care',
+  'Lawn Aeration': 'Lawn Care',
+  'Sod Installation': 'Lawn Care',
+  'Seasonal Mosquito Control Service': 'Mosquito Control',
+  'Monthly Mosquito Control Service': 'Mosquito Control',
+  'Mosquito Barrier Treatment': 'Mosquito Control',
+  'Tree & Shrub Care': 'Tree & Shrub Care',
+  'Palm Injection': 'Tree & Shrub Care',
+  'Arborjet Treatment': 'Tree & Shrub Care',
+});
+
 // One completed service_type → a public-safe display name, or null when it
 // carries no safe public name (too short, names a product/brand, or matches
 // no known service family).
@@ -190,7 +229,13 @@ function normalizeServiceName(serviceType) {
   // P1). Only the placeholder word is checked on the raw label — brand names
   // there still genericize through the map ("Pre-Slab Termidor").
   if (/\bappointment\b/i.test(raw)) return null;
-  const label = mappedServiceLabel(raw);
+  const mapped = mappedServiceLabel(raw);
+  // Public copy names only the service FAMILY, never the specific variant
+  // (Codex #4713 r6/r8/r11: lawn vs tree & shrub fertilization, inspection
+  // vs removal, bait installation vs monitoring — each a within-family
+  // mislabel the loose legacy map made). A family name is true for every
+  // label that maps into it; anything outside the table is dropped.
+  const label = mapped ? PUBLIC_FAMILY_BY_TYPE[mapped] : null;
   if (!label) return null;
   if (SERVICE_PRODUCT_WORD_RE.test(label)) return null;
   // Strip a trailing generic suffix ("… Service", "… Visit", "… Appointment

@@ -776,6 +776,18 @@ describe('2026-09-24 round-6 P1 fixes: outcome idioms, negated membership, reply
     g.allow.names = [name];
     expect(Drafter.verifyReplyText(good(`Hi ${name},\n\n${piece} was glad to help.`), g)).toBe('unlisted_name');
   });
+  test.each([
+    'Thanks for being on our plan.',
+    'We appreciate you trusting us with your plan.',
+  ])('possessive/status plan wording needs review evidence (round 11): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBe('unlisted_service_claim');
+  });
+  test('ordinary "the plan" prose still passes, and a negated plan rejects the possessive (round 11)', () => {
+    const g = genericGrounding('Marcus explained the plan and was great.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad Marcus explained the plan.'), { ...g, allow: { ...g.allow, names: [...g.allow.names, 'Marcus'] } })).toBeNull();
+    // Rejected either way: "on our plan" is not the review's literal wording.
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for being on our plan.'), genericGrounding('We are not on your plan.'))).toMatch(/^(?:negated_review_claim|unlisted_service_claim)$/);
+  });
   test('REPLY_VERSION moved past reply-v1 so stored safe-copy drafts are never reused on a publish retry', () => {
     expect(Drafter.REPLY_VERSION).not.toBe('reply-v1');
   });

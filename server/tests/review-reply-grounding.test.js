@@ -228,9 +228,9 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
     // (2026-09-25 round-5 P1 fix: mappedServiceLabel is map-only now, no
     // catalog branch) and is skipped entirely — so the cap-at-4 selection
     // reaches one row further down than before, to "Pre-Slab Termidor",
-    // which the map still genericizes to "Termite Treatment" (the brand
+    // which the family table names "Termite Control" (the brand
     // name itself never survives, whether via the map or the backstop).
-    expect(G.servicesPerformedFrom(visits)).toEqual(['Cockroach Treatment', 'Pest Control', 'WDO Inspection', 'Termite Treatment']);
+    expect(G.servicesPerformedFrom(visits)).toEqual(['Cockroach Treatment', 'Pest Control', 'Inspection', 'Termite Control']);
   });
   test('a legacy label with price/duration never leaks a digit or a dollar sign (2026-09-25 P1 fix)', () => {
     const visits = [{ service_type: 'Pest Control Service - 1 hour - $117', scheduled_date: '2026-01-01' }];
@@ -262,7 +262,7 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
     const a = { service_type: 'Bed Bug Treatment', scheduled_date: '2026-01-01' };
     const b = { service_type: 'WDO Inspection Service', scheduled_date: '2026-01-01' };
     expect(G.servicesPerformedFrom([a, b])).toEqual(G.servicesPerformedFrom([b, a]));
-    expect(G.servicesPerformedFrom([a, b])).toEqual(['Bed Bug Treatment', 'WDO Inspection']);
+    expect(G.servicesPerformedFrom([a, b])).toEqual(['Bed Bug Treatment', 'Inspection']);
   });
   test('normalizeServiceName: mappedServiceLabel first, then suffix/parenthetical strip and the product backstop', () => {
     // mappedServiceLabel's fixed family-label mapping wins over the local
@@ -276,32 +276,34 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
     // catalog branch) and is dropped entirely — acceptable, since the
     // alternative is trusting an unmapped raw label.
     expect(G.normalizeServiceName('Rodent Trapping Service')).toBeNull();
-    expect(G.normalizeServiceName('WDO Inspection Service')).toBe('WDO Inspection');
+    expect(G.normalizeServiceName('WDO Inspection Service')).toBe('Inspection');
     // "pest control … quarterly" (in that order) is its own, earlier
     // SERVICE_TYPE_MAP entry, so this one keeps its cadence.
-    expect(G.normalizeServiceName('General Pest Control (Quarterly)')).toBe('Quarterly Pest Control');
+    expect(G.normalizeServiceName('General Pest Control (Quarterly)')).toBe('Pest Control');
     expect(G.normalizeServiceName('Cockroach Treatment')).toBe('Cockroach Treatment');
     expect(G.normalizeServiceName('Pest Control Service - 1 hour - $117')).toBe('Pest Control');
     // "Pre-Slab Termidor" now genericizes through mappedServiceLabel's
     // own termidor→"Termite Treatment" mapping rather than being dropped —
     // the brand name itself never survives either way.
-    expect(G.normalizeServiceName('Pre-Slab Termidor')).toBe('Termite Treatment');
+    expect(G.normalizeServiceName('Pre-Slab Termidor')).toBe('Termite Control');
     // A brand word the normalizer does not recognize at all is still dropped
     // by the product-word backstop.
     expect(G.normalizeServiceName('Taurus SC Treatment')).toBeNull();
     expect(G.normalizeServiceName('')).toBeNull();
   });
-  test('brand names mappedServiceLabel itself emits are still dropped (2026-09-25 P1 fix)', () => {
-    // service-normalizer's own SERVICE_TYPE_MAP maps these raw labels to
-    // types that carry a brand name — Bora-Care, Arborjet — so the
-    // product-word backstop has to catch the NORMALIZER's output, not just
-    // an unmapped raw label.
-    expect(G.normalizeServiceName('Bora-Care Wood Treatment Service')).toBeNull();
-    expect(G.normalizeServiceName('Arborjet Treatment')).toBeNull();
-    expect(G.servicesPerformedFrom([
-      { service_type: 'Bora-Care Wood Treatment Service', scheduled_date: '2026-01-01' },
-      { service_type: 'Arborjet Treatment', scheduled_date: '2026-01-02' },
-    ])).toEqual([]);
+  test('brand names mappedServiceLabel itself emits never reach public copy (2026-09-25 P1 fix)', () => {
+    // SERVICE_TYPE_MAP maps these raw labels to types that carry a brand
+    // name — Bora-Care, Arborjet. The public family table (Codex #4713 r11)
+    // names only the family, so the brand never survives.
+    expect(G.normalizeServiceName('Bora-Care Wood Treatment Service')).toBe('Termite Control');
+    expect(G.normalizeServiceName('Arborjet Treatment')).toBe('Tree & Shrub Care');
+  });
+  test('public copy names only the service family, never a variant (Codex #4713 r11)', () => {
+    expect(G.normalizeServiceName('Termite Bait System Installation (Trelona)')).toBe('Termite Control');
+    expect(G.normalizeServiceName('Termite Bait Monitoring')).toBe('Termite Control');
+    expect(G.normalizeServiceName('Tree & Shrub Fertilization')).toBe('Tree & Shrub Care');
+    expect(G.normalizeServiceName('Bee / Yellowjacket Inspection')).toBe('Inspection');
+    expect(G.normalizeServiceName('Lawn Fertilization')).toBe('Lawn Care');
   });
   test('fails closed on anything mappedServiceLabel leaves unmatched: digits, "$", duration words, or a " - " separator (2026-09-25 round-3 P1 fix)', () => {
     // normalizeServiceType returns unrecognized free text VERBATIM, and its
@@ -331,7 +333,7 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
     expect(G.normalizeServiceName('Cockroach Treatment')).toBe('Cockroach Treatment');
     expect(G.normalizeServiceName('Quarterly Pest Control Service')).toBe('Pest Control');
     expect(G.normalizeServiceName('Monthly Pest Control')).toBe('Pest Control');
-    expect(G.normalizeServiceName('WDO Inspection Service')).toBe('WDO Inspection');
+    expect(G.normalizeServiceName('WDO Inspection Service')).toBe('Inspection');
   });
 });
 

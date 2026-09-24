@@ -566,6 +566,29 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
   }
   // No draft text (verifier/provider failure): the state write is still
   // token-matched — a lost claim means an admin cancelled meanwhile.
+  // A stored draft must never be rebound to a grounding snapshot it was not
+  // written for (Codex #4713 r11): pipelineDraftGuard trusts the stored
+  // fingerprints and would let Use Draft publish it. A draft kept through a
+  // failure (a provider outage) keeps its OWN grounding, so the guard still
+  // sees any change since it was drafted…
+  if (row.auto_reply_draft && !extra.discardStored) delete patch.auto_reply_grounding;
+  if (extra.discardStored && row.auto_reply_draft) {
+    // …and one this run re-verified and REJECTED, with no replacement,
+    // goes,
+    // with its mirrored [DRAFT] slot compare-and-set on the exact text (a
+    // slot someone edited meanwhile is genuinely theirs and stays), same as
+    // the under-4★ Post now exit.
+    const cleared = { ...patch, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_version: null, auto_reply_mode: null };
+    const mirrored = isDraftReply(row.review_reply)
+      && stripDraftPrefix(row.review_reply).trim() === String(row.auto_reply_draft).trim();
+    if (mirrored) {
+      const n = await db('google_reviews')
+        .where({ id: row.id, auto_reply_claimed_until: row._claimToken, review_reply: row.review_reply })
+        .update({ ...cleared, review_reply: null, reply_updated_at: null });
+      if ((Array.isArray(n) ? n.length : n) > 0) return true;
+    }
+    return releaseClaim(row, cleared);
+  }
   return releaseClaim(row, patch);
 }
 
@@ -721,11 +744,11 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: 'provider_unavailable', auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: String(draft.error || '') });
         return { outcome: 'retry', reason: 'provider_unavailable' };
       }
-      if (!(await storeDraft(merged, draft, STATUS.PARKED, 'provider_down', { grounding: snapshot, fields: { auto_reply_attempts: attempts } }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
+      if (!(await storeDraft(merged, draft, STATUS.PARKED, 'provider_down', { grounding: snapshot, discardStored: reusable && !reuseOk, fields: { auto_reply_attempts: attempts } }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
       await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — reply providers were down ${attempts} times. Draft one by hand.`, reason: 'provider_down', action: true });
       return { outcome: 'parked', reason: 'provider_down' };
     }
-    if (!(await storeDraft(merged, draft, STATUS.PARKED, 'verifier_reject', { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
+    if (!(await storeDraft(merged, draft, STATUS.PARKED, 'verifier_reject', { grounding: snapshot, discardStored: reusable && !reuseOk }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — no draft passed the safety checks (${(draft.rejections || []).join(', ')}).`, reason: 'verifier_reject', action: true });
     return { outcome: 'parked', reason: 'verifier_reject' };
   }
