@@ -690,7 +690,7 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-15T00:00:00Z').toISOString());
   });
 
-  test('round 12 (P1 :923): a booking created on the SAME calendar day as the visit, by the visit\'s OWN technician, flips warm to won with won_via closeout_booking (the tech booked it themselves, at the door)', async () => {
+  test('round 12 fix (codex P1 audit, post-push): a booking created SAME-DAY and ASSIGNED to the consultation\'s own technician is NOT closeout evidence — office/admin routes have no real "who booked this" signal, so it resolves office_booking, the exact bug the audit caught (technician_id is the assignee, never the creator)', async () => {
     const fakeDb = seededDb();
     fakeDb.__store.scheduled_services.push({
       id: 'visit-closeout', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
@@ -698,46 +698,7 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     });
     const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
     expect(saved.outcome).toBe('won');
-    expect(saved.won_via).toBe('closeout_booking');
-  });
-
-  test('round 12 (P1 :923): a same-day booking by a DIFFERENT technician is not closeout evidence — stays office_booking', async () => {
-    const fakeDb = seededDb();
-    fakeDb.__store.scheduled_services.push({
-      id: 'visit-office', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
-      created_at: new Date(`${SCHEDULED_DATE}T15:00:00Z`), status: 'confirmed', technician_id: 'tech-9',
-    });
-    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
-    expect(saved.outcome).toBe('won');
     expect(saved.won_via).toBe('office_booking');
-  });
-
-  test('round 12 (P1 :923): the visit\'s OWN technician booking on a LATER calendar day (an office follow-up, not booked at the door) stays office_booking', async () => {
-    const fakeDb = seededDb();
-    fakeDb.__store.scheduled_services.push({
-      id: 'visit-later', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
-      created_at: new Date('2026-09-12T15:00:00Z'), status: 'confirmed', technician_id: 'tech-1',
-    });
-    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
-    expect(saved.outcome).toBe('won');
-    expect(saved.won_via).toBe('office_booking');
-  });
-
-  test('P1 :761 regression — a booking created at 21:00 ET (01:00Z the NEXT calendar day) on the visit\'s own day is still same-day evidence (etDateString, not toDateOnlyString, reads a TIMESTAMP\'s calendar day)', async () => {
-    // 2026-09-10 21:00 America/New_York (EDT, UTC-4) serializes as
-    // 2026-09-11T01:00:00Z — a DIFFERENT UTC calendar day than the visit's
-    // own SCHEDULED_DATE ('2026-09-10'). The pre-fix isCloseoutEvidence ran
-    // this TIMESTAMP through toDateOnlyString (the UTC-calendar-day reader
-    // meant for DATE columns), reading '2026-09-11' and missing the match —
-    // every booking made after ~8pm ET silently lost its closeout credit.
-    const fakeDb = seededDb();
-    fakeDb.__store.scheduled_services.push({
-      id: 'visit-late-close', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
-      created_at: new Date('2026-09-11T01:00:00Z'), status: 'confirmed', technician_id: 'tech-1',
-    });
-    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
-    expect(saved.outcome).toBe('won');
-    expect(saved.won_via).toBe('closeout_booking');
   });
 
   test('P1-2: evidence dated in the FUTURE relative to `now` does not count', async () => {
@@ -910,8 +871,17 @@ describe('markWonForCustomer', () => {
 });
 
 // ---- markWonForCustomer — P1 :774/:923 per-row closeout_booking provenance (round 12) --
+//
+// evidenceCreatorTechnicianId is NOT supplied by any production caller
+// today (admin-leads.js/admin-schedule.js are office tools and stopped
+// passing anything after the codex P1 audit caught the assignee-vs-creator
+// bug — see isCloseoutEvidence's own comment in the service file). These
+// tests exercise the MECHANISM directly — proving isCloseoutEvidence's
+// logic is correct once a real creator signal exists — the way a future
+// tech-closeout PR's own caller would supply it; they do not claim any
+// current route produces closeout_booking today.
 
-describe('markWonForCustomer — per-row closeout_booking provenance (round 12, P1 :774 fixing the P1 :923 pre-check)', () => {
+describe('markWonForCustomer — per-row closeout_booking provenance (round 12, P1 :774 fixing the P1 :923 pre-check; codex-audited signal fix)', () => {
   function seededDb() {
     return makeFakeDb({
       scheduled_services: [
@@ -924,44 +894,44 @@ describe('markWonForCustomer — per-row closeout_booking provenance (round 12, 
     });
   }
 
-  test('evidence created same-day, same-technician as the customer\'s own open visit sets won_via closeout_booking on that row\'s own UPDATE', async () => {
+  test('mechanism: evidenceCreatorTechnicianId matching same-day + the visit\'s own technician sets won_via closeout_booking on that row\'s own UPDATE', async () => {
     const fakeDb = seededDb();
     const count = await markWonForCustomer('cust-1', {
       via: 'office_booking',
       trx: fakeDb,
       now: new Date('2026-09-10T20:00:00Z'),
       evidenceCreatedAt: new Date('2026-09-10T15:00:00Z'),
-      evidenceTechnicianId: 'tech-1',
+      evidenceCreatorTechnicianId: 'tech-1',
     });
     expect(count).toBe(1);
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking');
   });
 
-  test('evidence from a DIFFERENT technician than the visit is not closeout evidence — won_via stays as passed (office_booking)', async () => {
+  test('mechanism: a creator signal for a DIFFERENT technician than the visit is not closeout evidence — won_via stays as passed (office_booking)', async () => {
     const fakeDb = seededDb();
     await markWonForCustomer('cust-1', {
       via: 'office_booking',
       trx: fakeDb,
       now: new Date('2026-09-10T20:00:00Z'),
       evidenceCreatedAt: new Date('2026-09-10T15:00:00Z'),
-      evidenceTechnicianId: 'tech-9',
+      evidenceCreatorTechnicianId: 'tech-9',
     });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
   });
 
-  test('evidence on a LATER calendar day than the visit is not closeout evidence — won_via stays as passed', async () => {
+  test('mechanism: a creator signal on a LATER calendar day than the visit is not closeout evidence — won_via stays as passed', async () => {
     const fakeDb = seededDb();
     await markWonForCustomer('cust-1', {
       via: 'office_booking',
       trx: fakeDb,
       now: new Date('2026-09-12T20:00:00Z'),
       evidenceCreatedAt: new Date('2026-09-12T15:00:00Z'),
-      evidenceTechnicianId: 'tech-1',
+      evidenceCreatorTechnicianId: 'tech-1',
     });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
   });
 
-  test('P1 :761 regression — a booking made at 21:00 ET (01:00Z the NEXT calendar day) on the visit\'s own day still reads as the same ET day, so it IS closeout evidence', async () => {
+  test('P1 :761 regression (mechanism): a creator signal timestamped 21:00 ET (01:00Z the NEXT calendar day) on the visit\'s own day still reads as the same ET day, so it IS closeout evidence', async () => {
     // 2026-09-10 21:00 America/New_York (EDT, UTC-4) is 2026-09-11 01:00Z —
     // a different UTC calendar day than the visit's own scheduled_date.
     // The pre-fix code ran evidenceCreatedAt through toDateOnlyString (the
@@ -975,18 +945,18 @@ describe('markWonForCustomer — per-row closeout_booking provenance (round 12, 
       trx: fakeDb,
       now: new Date('2026-09-11T02:00:00Z'),
       evidenceCreatedAt: new Date('2026-09-11T01:00:00Z'), // 2026-09-10 21:00 ET
-      evidenceTechnicianId: 'tech-1',
+      evidenceCreatorTechnicianId: 'tech-1',
     });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking');
   });
 
-  test('no evidence hint passed (backward compatible with every pre-round-12 caller) — won_via is exactly `via` on every row', async () => {
+  test('no evidence hint passed (the real shape of every production caller today) — won_via is exactly `via` on every row', async () => {
     const fakeDb = seededDb();
     await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
   });
 
-  test('P1 :774 — two open outcomes for the same customer (last week\'s and today\'s); a same-day booking by today\'s technician credits ONLY today\'s row as closeout_booking — last week\'s wins as office_booking, not copied', async () => {
+  test('P1 :774 (mechanism): two open outcomes for the same customer (last week\'s and today\'s); a creator signal for today\'s technician credits ONLY today\'s row as closeout_booking — last week\'s wins as office_booking, not copied', async () => {
     const fakeDb = makeFakeDb({
       scheduled_services: [
         { id: 'visit-last-week', scheduled_date: '2026-09-03', technician_id: 'tech-1' },
@@ -1004,7 +974,7 @@ describe('markWonForCustomer — per-row closeout_booking provenance (round 12, 
       trx: fakeDb,
       now: new Date('2026-09-10T20:00:00Z'),
       evidenceCreatedAt: new Date('2026-09-10T15:00:00Z'), // today, by tech-1 — matches ONLY visit-today
-      evidenceTechnicianId: 'tech-1',
+      evidenceCreatorTechnicianId: 'tech-1',
     });
 
     expect(count).toBe(2); // both are still within the 90-day window and both win

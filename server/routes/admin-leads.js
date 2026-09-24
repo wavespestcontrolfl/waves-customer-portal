@@ -1800,13 +1800,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // but stays correct if this endpoint ever grows any of those fields.
       if (!assessmentVisit
         && require('../services/consultation-outcomes').isQualifyingSaleBooking(appt)) {
+        // round 12 fix (codex P1 audit, post-push): this route is an
+        // office/admin tool — never pass appt.technician_id as a
+        // closeout-detection hint. That field is the visit's ASSIGNEE, not
+        // who booked it; an office admin assigning a new visit to the
+        // consultation's own technician is an ordinary office booking, not
+        // a door-side close. See isCloseoutEvidence's own comment for why
+        // no real "booked by" signal exists on scheduled_services today.
         await require('../services/consultation-outcomes')
-          .markWonForCustomer(customerId, {
-            via: 'office_booking',
-            trx,
-            evidenceCreatedAt: appt.created_at,
-            evidenceTechnicianId: appt.technician_id,
-          });
+          .markWonForCustomer(customerId, { via: 'office_booking', trx });
       }
       await trx('lead_activities').insert({
         lead_id: req.params.id,

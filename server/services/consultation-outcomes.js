@@ -24,13 +24,18 @@
  * (last_reconciled_at NULLS FIRST, recorded_at ASC), not recorded_at alone
  * — see the FAIRNESS paragraph above reconcileOpenConsultationOutcomes.
  *
- * WON_VIA PROVENANCE (round 12): 'closeout_booking' — the technician booked
- * the next visit themselves, at the door, same-day — vs. 'office_booking'/
- * 'estimate_accept' otherwise. Decided by isCloseoutEvidence (same-day,
- * same-technician as the consultation visit) wherever won_via is set: the
- * sweep and recordOutcome's own reconciliation via attemptEvidenceBasedWin,
- * and the direct hooks via markWonForCustomer's evidenceCreatedAt/
- * evidenceTechnicianId pre-check.
+ * WON_VIA PROVENANCE (round 12, DORMANT — codex P1 audit): 'closeout_booking'
+ * is meant for the technician booking the next visit themselves, at the
+ * door, same-day — vs. 'office_booking'/'estimate_accept' otherwise —
+ * decided by isCloseoutEvidence (same ET day + the SAME TECHNICIAN WHO
+ * CREATED the winning booking, never the booking's mere assignee — that
+ * confusion was this round's own bug, caught by codex post-push). No
+ * column on scheduled_services distinguishes who booked a row from who
+ * it's assigned to (grepped; see isCloseoutEvidence's own comment), so
+ * isCloseoutEvidence always returns false today and every real win reads
+ * office_booking/estimate_accept — 'closeout_booking' stays in the DB
+ * CHECK enum and this function's contract, dormant, for a future
+ * tech-closeout PR to activate once a real creator signal exists.
  */
 
 const db = require('../models/db');
@@ -347,21 +352,43 @@ function isQualifyingSaleBooking(row) {
 }
 
 // Round 12: 'closeout_booking' is the FIRST won_via value in the CHECK
-// enum (20260923000010) but no production write path ever produced it —
-// every real win read as office_booking/estimate_accept, so
-// consultationStats' won_at_door metric was permanently 0. scheduled_services
-// has no `source`/`created_by` column distinguishing "booked from the tech
-// closeout/tech portal" (grepped — neither exists on this table), so the
-// only available signal is: the winning booking was created on the
-// consultation VISIT's own calendar day, by the SAME technician the visit
-// was assigned to — the tech closed the sale right there at the door,
-// rather than the office booking it in later or the customer accepting a
-// mailed estimate. Scoped to evidence type (c) only (a genuine NEW
-// booking) — a lead conversion (a) or an accepted estimate (b) is never a
-// door-side close by definition, so those two keep their existing
-// office_booking/estimate_accept values unconditionally.
-function isCloseoutEvidence(evidenceCreatedAt, evidenceTechnicianId, visitScheduledDateStr, visitTechnicianId) {
-  if (!evidenceCreatedAt || !evidenceTechnicianId || !visitTechnicianId) return false;
+// enum (20260923000010) but no production write path ever produces it —
+// every real win reads as office_booking/estimate_accept, so
+// consultationStats' won_at_door metric is permanently 0 today. KEPT in the
+// enum and in this function's contract for a future tech-closeout PR to
+// populate for real (see creatorTechnicianId below) — this is currently
+// dormant, not removed.
+//
+// round-12-fix (codex P1 audit, post-push): the FIRST attempt at this
+// (same push) used scheduled_services.technician_id — the winning
+// booking's ASSIGNEE — as the "who closed this" signal, reasoning it was
+// the only field available. That was wrong: technician_id is who the
+// visit is ASSIGNED to, never who CREATED the row. Both of this file's
+// callers (admin-leads.js/admin-schedule.js schedule-appointment routes)
+// are OFFICE/ADMIN tools — an office admin booking a new visit and
+// assigning it to the consultation's own technician (routine, e.g. the
+// tech's existing route) is an ordinary office_booking, not a door-side
+// close, and the assignee-based check mislabelled it closeout_booking.
+// Re-grepped this repo for a real "who booked this row" signal
+// (`source`, `created_by`, `booked_by_technician_id`, or similar) on
+// scheduled_services: NONE EXISTS. `created_by_technician_id` exists on
+// several OTHER tables (admin_layer, lawn_diagnostic_runs,
+// prospect_photo_assessments, treatment_zone_maps) but was never added to
+// scheduled_services, and the tech portal has no booking-CREATION route
+// today (server/routes/tech-*.js has no scheduled_services insert). So the
+// required signal is always absent, and creatorTechnicianId below is
+// always null from every current caller — this function always returns
+// false, and every evidence type (c) booking resolves as office_booking,
+// exactly the pre-round-12 behavior. When a future tech-closeout PR adds a
+// real creator column (on scheduled_services, or an explicit signal a
+// tech-portal booking route stamps), it threads THAT through here as
+// creatorTechnicianId — never technician_id/the assignee again — or, more
+// simply, calls markWonForCustomer/recordOutcome with an explicit
+// `won_via: 'closeout_booking'` directly, since a tech-portal closeout
+// route would already know contextually it IS one and would not need
+// auto-detection at all.
+function isCloseoutEvidence(evidenceCreatedAt, creatorTechnicianId, visitScheduledDateStr, visitTechnicianId) {
+  if (!evidenceCreatedAt || !creatorTechnicianId || !visitTechnicianId) return false;
   // round 12 fix (codex P1 :761): evidenceCreatedAt is a TIMESTAMP (an
   // instant, e.g. scheduled_services.created_at) — it must go through
   // etDateString to read its ET calendar day, exactly like every other
@@ -373,7 +400,7 @@ function isCloseoutEvidence(evidenceCreatedAt, evidenceTechnicianId, visitSchedu
   // visitScheduledDateStr stays exactly as passed in — it is always
   // already a DATE-column string (toDateOnlyString'd by the caller), never
   // run through etDateString here.
-  return String(evidenceTechnicianId) === String(visitTechnicianId)
+  return String(creatorTechnicianId) === String(visitTechnicianId)
     && etDateString(evidenceCreatedAt) === visitScheduledDateStr;
 }
 
@@ -395,12 +422,15 @@ function isCloseoutEvidence(evidenceCreatedAt, evidenceTechnicianId, visitSchedu
  *       included $0 follow-up minted from a completion (followup_included),
  *       or any other ALWAYS-free service type (isAlwaysFreeServiceType —
  *       appointment/estimate/re-service/follow-up/re-visit by name) is
- *       never itself a sale. won_via is 'closeout_booking' when this
- *       booking was created same-day, same-technician as the consultation
- *       (isCloseoutEvidence, round 12) — otherwise 'office_booking'.
+ *       never itself a sale. won_via would be 'closeout_booking' when the
+ *       booking was created same-day BY the consultation's own technician
+ *       (isCloseoutEvidence) — but no signal on scheduled_services says who
+ *       CREATED a booking (only who it's assigned to), so this always
+ *       resolves 'office_booking' today (dormant — see isCloseoutEvidence's
+ *       own comment).
  * Returns { won_via, won_at } for the first match, or null. `technicianId`
  * is the CONSULTATION visit's own assigned technician (not the winning
- * booking's) — only used for the closeout determination above.
+ * booking's) — only used for the dormant closeout determination above.
  */
 async function findSaleEvidenceForConsultation(database, {
   customerId, scheduledDateStr, technicianId = null, now = new Date(),
@@ -459,12 +489,18 @@ async function findSaleEvidenceForConsultation(database, {
       // see the comment above that function for what each one decides.
       'status', 'source_action', 'customer_confirmed',
       'is_callback', 'recurring_parent_id', 'followup_included',
-      'estimated_price', 'annual_prepay_term_id', 'technician_id',
+      'estimated_price', 'annual_prepay_term_id',
     );
   for (const booking of bookings) {
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale — separate, async, not part of the sync predicate
     if (!isQualifyingSaleBooking(booking)) continue;
-    const wonVia = isCloseoutEvidence(booking.created_at, booking.technician_id, scheduledDateStr, technicianId)
+    // round 12 fix (codex P1 audit, post-push): no real "who booked this
+    // row" signal exists on scheduled_services (see isCloseoutEvidence's
+    // own comment) — pass null explicitly rather than booking.technician_id
+    // (the ASSIGNEE, not the creator — the exact wrong signal the audit
+    // caught). Always resolves office_booking until a future PR supplies a
+    // genuine creator signal.
+    const wonVia = isCloseoutEvidence(booking.created_at, null, scheduledDateStr, technicianId)
       ? 'closeout_booking'
       : 'office_booking';
     return { won_via: wonVia, won_at: new Date(booking.created_at) };
@@ -711,15 +747,22 @@ async function recordOutcome(params = {}, { trx } = {}) {
  * the booking/accept that is reconciling. Returns the count won (0 on any
  * failure or no match) — never throws.
  *
- * won_via provenance (round 12, P1 :774): optional evidenceCreatedAt/
- * evidenceTechnicianId (the booking/accept row that triggered this call)
- * decide 'closeout_booking' vs `via` PER open row, against THAT row's own
- * visit (isCloseoutEvidence) — never once for the whole batch. Each row
- * wins through its own guarded UPDATE (see the loop below); no row is a
- * bulk-decided value copied onto every other open row for the customer.
+ * won_via provenance (round 12, P1 :774 / codex P1 audit): optional
+ * evidenceCreatedAt/evidenceCreatorTechnicianId decide 'closeout_booking'
+ * vs `via` PER open row, against THAT row's own visit (isCloseoutEvidence)
+ * — never once for the whole batch. Each row wins through its own guarded
+ * UPDATE (see the loop below); no row is a bulk-decided value copied onto
+ * every other open row for the customer. evidenceCreatorTechnicianId must
+ * be the technician CONFIRMED to have personally created the winning
+ * booking — NEVER scheduled_services.technician_id (that row's assignee;
+ * see isCloseoutEvidence's own comment). No caller passes either param
+ * today (admin-leads.js/admin-schedule.js are office tools and stopped
+ * passing them after the codex P1 audit caught exactly this
+ * assignee-vs-creator confusion) — they exist for a future tech-closeout
+ * PR that has a real creator signal to supply.
  */
 async function markWonForCustomer(customerId, {
-  via, trx, now = new Date(), evidenceCreatedAt = null, evidenceTechnicianId = null,
+  via, trx, now = new Date(), evidenceCreatedAt = null, evidenceCreatorTechnicianId = null,
 } = {}) {
   if (!customerId || !trx || !via) return 0;
   try {
@@ -792,12 +835,12 @@ async function markWonForCustomer(customerId, {
         // etDateString) against THIS row's own visit DATE (toDateOnlyString
         // — see its own comment on why a DATE column must never go through
         // etDateString) and THIS row's own visit's technician — never a
-        // different open row's. No evidence hint passed (the common case:
-        // estimate-converter.js/proposal-win.js never pass one) always
-        // returns false, so wonVia is exactly `via`, unchanged from before
+        // different open row's. No caller passes evidenceCreatorTechnicianId
+        // today (see the docstring above) so this always returns false, and
+        // wonVia is exactly `via` for every row — unchanged from before
         // round 12.
         const wonVia = isCloseoutEvidence(
-          evidenceCreatedAt, evidenceTechnicianId, toDateOnlyString(row.scheduled_date), row.technician_id,
+          evidenceCreatedAt, evidenceCreatorTechnicianId, toDateOnlyString(row.scheduled_date), row.technician_id,
         ) ? 'closeout_booking' : via;
         // Same WHERE shape the old single bulk UPDATE used — outcome guard
         // + customer/lead match + live-visit window — scoped to this ONE

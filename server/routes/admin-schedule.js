@@ -7376,13 +7376,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // savepoint-isolated inside markWonForCustomer (waves-db §5b).
       if (!(await require('../services/assessment-booking').isAssessmentBooking(svc, trx))
         && require('../services/consultation-outcomes').isQualifyingSaleBooking(svc)) {
+        // round 12 fix (codex P1 audit, post-push): this route is an
+        // office/admin tool — never pass svc.technician_id as a
+        // closeout-detection hint. That field is the visit's ASSIGNEE, not
+        // who booked it; an office admin assigning a new visit to the
+        // consultation's own technician is an ordinary office booking, not
+        // a door-side close. See isCloseoutEvidence's own comment for why
+        // no real "booked by" signal exists on scheduled_services today.
         await require('../services/consultation-outcomes')
-          .markWonForCustomer(customerId, {
-            via: 'office_booking',
-            trx,
-            evidenceCreatedAt: svc.created_at,
-            evidenceTechnicianId: svc.technician_id,
-          });
+          .markWonForCustomer(customerId, { via: 'office_booking', trx });
       }
 
       // Create recurring instances from the dates precomputed (and locked)
