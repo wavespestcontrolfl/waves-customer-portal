@@ -249,56 +249,35 @@ describe('content-astro github-client pagination', () => {
       expect(global.fetch).toHaveBeenCalledTimes(6);
     });
 
-    test('a push that lands during the merge: reports the verified merge and closes the PR FIRST, then comments (close is not gated on the comment)', async () => {
+    test('a push that lands during the merge: reports the verified merge, leaves the PR open, and comments', async () => {
       global.fetch = jest.fn()
         .mockResolvedValueOnce(openPr())
         .mockResolvedValueOnce(testMergeCommit())
         .mockResolvedValueOnce(newCommit())
         .mockResolvedValueOnce(refPatchOk())
         .mockResolvedValueOnce(openPr({ head: { sha: 'newer-head-sha' } }))
-        .mockResolvedValueOnce(jsonResponse({ state: 'closed' }))
         .mockResolvedValueOnce(jsonResponse({ id: 1 }));
 
       await expect(gh.mergePr(42, {
         sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
-      })).resolves.toEqual({ sha: 'new-merge-commit-sha', merged: true, headAdvanced: 'newer-head-sha', retired: true });
-      expect(global.fetch.mock.calls[5][0]).toContain('/pulls/42');
-      expect(JSON.parse(global.fetch.mock.calls[5][1].body)).toEqual({ state: 'closed' });
-      expect(global.fetch.mock.calls[6][0]).toContain('/issues/42/comments');
-      expect(JSON.parse(global.fetch.mock.calls[6][1].body).body).toContain('newer-he');
+      })).resolves.toEqual({ sha: 'new-merge-commit-sha', merged: true, headAdvanced: 'newer-head-sha' });
+      expect(global.fetch).toHaveBeenCalledTimes(6);
+      expect(global.fetch.mock.calls[5][0]).toContain('/issues/42/comments');
+      expect(JSON.parse(global.fetch.mock.calls[5][1].body).body).toContain('newer-he');
+      expect(global.fetch.mock.calls.some(([, init]) => init?.method === 'PATCH' && String(init.body).includes('closed'))).toBe(false);
     });
 
-    test('a close that fails after head-advance reports retired:false but still attempts the independent comment (Codex P1: a swallowed close must not skip retirement)', async () => {
+    test('a failed post-merge read or comment still reports the merge', async () => {
       global.fetch = jest.fn()
         .mockResolvedValueOnce(openPr())
         .mockResolvedValueOnce(testMergeCommit())
         .mockResolvedValueOnce(newCommit())
         .mockResolvedValueOnce(refPatchOk())
-        .mockResolvedValueOnce(openPr({ head: { sha: 'newer-head-sha' } }))
-        .mockResolvedValueOnce({ ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => 'gone' })
-        .mockResolvedValueOnce(jsonResponse({ id: 1 }));
-
-      await expect(gh.mergePr(42, {
-        sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
-      })).resolves.toEqual({ sha: 'new-merge-commit-sha', merged: true, headAdvanced: 'newer-head-sha', retired: false });
-      expect(global.fetch.mock.calls[5][1].method).toBe('PATCH');
-      expect(global.fetch.mock.calls[6][0]).toContain('/issues/42/comments');
-    });
-
-    test('a comment failure after head-advance never skips or undoes the close — retired:true still reported', async () => {
-      global.fetch = jest.fn()
-        .mockResolvedValueOnce(openPr())
-        .mockResolvedValueOnce(testMergeCommit())
-        .mockResolvedValueOnce(newCommit())
-        .mockResolvedValueOnce(refPatchOk())
-        .mockResolvedValueOnce(openPr({ head: { sha: 'newer-head-sha' } }))
-        .mockResolvedValueOnce(jsonResponse({ state: 'closed' }))
         .mockResolvedValueOnce({ ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => 'gone' });
 
       await expect(gh.mergePr(42, {
         sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
-      })).resolves.toEqual({ sha: 'new-merge-commit-sha', merged: true, headAdvanced: 'newer-head-sha', retired: true });
-      expect(global.fetch.mock.calls[5][1].method).toBe('PATCH');
+      })).resolves.toMatchObject({ sha: 'new-merge-commit-sha', merged: true });
     });
   });
 });

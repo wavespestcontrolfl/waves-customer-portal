@@ -288,8 +288,8 @@ function baseMovedError(number, baseRef, detail) {
 //      this PATCH the atomic compare-and-swap: it 422s if base moved.
 // Trade-off: the merge endpoint's head pin is not reproduced — a push landing
 // between step 1 and step 5 does not stop the ref update. What lands is still
-// exactly the verified, signed head, and settleAdvancedHead closes the PR as
-// superseded so the unpublished commit is not left looking merge-pending.
+// exactly the verified, signed head; settleAdvancedHead leaves the PR open and
+// comments that the later commit was not published.
 // Any inconsistency throws the same retryable BLOG_BASE_MOVED code the old
 // pre-check used, so callers that already treat that code as "re-verify
 // next tick" need no changes.
@@ -397,45 +397,22 @@ async function createAndFastForward(number, { owner, repo, title, message, treeS
   return newSha;
 }
 
-// The ref update published exactly the verified head. If the PR received a
-// push in the meantime, GitHub leaves it open with a commit nothing reviewed
-// or published — close it as superseded so no open PR implies they will
-// ship it. Close FIRST: an unreviewed extra commit sitting open (and, once
-// GitHub recomputes mergeable, human-mergeable) is the real risk; the
-// explanatory comment is cosmetic and must never gate or undo the close.
-//
-// `retired` reports whether the close itself landed. false means the
-// caller MUST persist a durable retirement debt — the existing
-// astro_retire_pr_number mechanism (blog_posts / autonomous_runs), swept
-// every poll tick by reconcileTopicBlockedPostPrs / reconcileHeadAdvancedPrs
-// — so a lost response here still converges instead of leaving the PR open
-// and mergeable indefinitely.
+// The ref update published exactly the verified head. A push landing in the
+// merge window leaves the PR open with that later commit unpublished. Owner
+// ruling 2026-09-24: leave it open — closing a PR whose content shipped
+// makes the pollers read "closed, unmerged" — and explain on the PR.
+// Best effort: the merge already happened and must still be reported.
 async function settleAdvancedHead(number, headSha, newSha) {
   const result = { sha: newSha, merged: true };
-  let after;
   try {
-    after = await getPr(number);
+    const after = await getPr(number);
+    const afterHead = String(after?.head?.sha || '').toLowerCase();
+    if (after?.state !== 'open' || !afterHead || afterHead === headSha.toLowerCase()) return result;
+    result.headAdvanced = afterHead;
+    logger.warn(`[github] PR #${number}: head advanced to ${afterHead.slice(0, 9)} during merge; published verified head ${headSha.slice(0, 9)}`);
+    await createIssueComment(number, `Merged the verified head ${headSha.slice(0, 9)} as ${newSha.slice(0, 9)}. Commit ${afterHead.slice(0, 9)} arrived during the merge and was NOT published; it remains on this PR and needs its own review before it can ship.`);
   } catch (err) {
     logger.warn(`[github] PR #${number}: post-merge head check failed: ${err.message}`);
-    return result;
-  }
-  const afterHead = String(after?.head?.sha || '').toLowerCase();
-  if (after?.state !== 'open' || !afterHead || afterHead === headSha.toLowerCase()) return result;
-
-  result.headAdvanced = afterHead;
-  logger.warn(`[github] PR #${number}: head advanced to ${afterHead.slice(0, 9)} during merge; published verified head ${headSha.slice(0, 9)}`);
-  try {
-    await closePr(number);
-    result.retired = true;
-  } catch (err) {
-    result.retired = false;
-    logger.warn(`[github] PR #${number}: close after head-advance failed: ${err.message} (retried via the caller's retirement debt)`);
-  }
-  // Independently best-effort — its failure must never skip or undo the close.
-  try {
-    await createIssueComment(number, `Merged the verified head ${headSha.slice(0, 9)} as ${newSha.slice(0, 9)}. Commit ${afterHead.slice(0, 9)} arrived during the merge and was not published; closing this PR. Open a new PR for that change.`);
-  } catch (err) {
-    logger.warn(`[github] PR #${number}: post-merge explanatory comment failed: ${err.message}`);
   }
   return result;
 }

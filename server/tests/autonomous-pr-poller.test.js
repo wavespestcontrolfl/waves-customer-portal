@@ -1247,62 +1247,6 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.getPr).not.toHaveBeenCalled();
   });
 
-  describe('reconcileHeadAdvancedPrs (Codex P1: a mergePrAtomic head-advance whose inline close failed)', () => {
-    test('closes + deletes the branch of an open leftover PR, clears the debt, and touches only the debt column (never the run outcome/finalize machinery)', async () => {
-      const debtRun = { id: 'run-debt', astro_retire_pr_number: 42 };
-      const updates = setupDb({ pending: [debtRun] });
-      gh.getPr.mockResolvedValueOnce({ number: 42, state: 'open', merged: false, head: { ref: 'content/autonomous-pushed' } });
-
-      const r = await poller._internals.reconcileHeadAdvancedPrs(gh);
-
-      expect(r).toMatchObject({ count: 1, retired: 1 });
-      expect(gh.closePr).toHaveBeenCalledWith(42);
-      expect(gh.deleteRef).toHaveBeenCalledWith('content/autonomous-pushed');
-      const runUpdatesForDebt = updates.filter((u) => u.table === 'autonomous_runs');
-      expect(runUpdatesForDebt.some((u) => u.updates.astro_retire_pr_number === null)).toBe(true);
-      // Only the debt column (+ updated_at) is ever written here — no
-      // outcome/skip_reason/park field, since the run already finalized.
-      expect(runUpdatesForDebt.every((u) => Object.keys(u.updates).every((k) => ['astro_retire_pr_number', 'updated_at'].includes(k)))).toBe(true);
-    });
-
-    test('a close that fails keeps the debt for the next tick', async () => {
-      const debtRun = { id: 'run-debt', astro_retire_pr_number: 42 };
-      const updates = setupDb({ pending: [debtRun] });
-      gh.getPr.mockResolvedValueOnce({ number: 42, state: 'open', merged: false, head: { ref: 'content/autonomous-pushed' } });
-      gh.closePr.mockRejectedValueOnce(new Error('github 502'));
-
-      const r = await poller._internals.reconcileHeadAdvancedPrs(gh);
-
-      expect(r).toMatchObject({ count: 1, retired: 0 });
-      expect(updates.some((u) => u.table === 'autonomous_runs' && u.updates.astro_retire_pr_number === null)).toBe(false);
-    });
-
-    // The PR is already merged (a human merged the leftover PR before the
-    // reconciler got to it, or — the invariant this proves — its head never
-    // advanced beyond what was actually merged): never re-closes it, never
-    // re-applies a publish effect (finalizeMerged already ran one for this
-    // run); only terminal-stamps 'merged' and clears the debt.
-    test('found already merged: never closes it again and never un-merges/re-publishes — just terminal-stamps and clears the debt', async () => {
-      const debtRun = { id: 'run-debt', astro_retire_pr_number: 42 };
-      const updates = setupDb({ pending: [debtRun] });
-      gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-09-24T00:00:00Z', head: { ref: 'content/autonomous-pushed' } });
-
-      const r = await poller._internals.reconcileHeadAdvancedPrs(gh);
-
-      expect(r).toMatchObject({ count: 1, retired: 1 });
-      expect(gh.closePr).not.toHaveBeenCalled();
-      expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'merged')).toBeDefined();
-      expect(updates.some((u) => u.table === 'autonomous_runs' && u.updates.astro_retire_pr_number === null)).toBe(true);
-    });
-
-    test('rows with no debt are skipped without a GitHub call', async () => {
-      setupDb({ pending: [makeRun()] }); // no astro_retire_pr_number field
-      const r = await poller._internals.reconcileHeadAdvancedPrs(gh);
-      expect(r).toMatchObject({ count: 1, retired: 0 });
-      expect(gh.getPr).not.toHaveBeenCalled();
-    });
-  });
-
   test('queueRowStillParkedLocked: the final pre-merge check locks the queue row on the merge transaction and fails closed (hook r31 P1)', async () => {
     const run = makeRun({ created_at: '2026-08-28T04:00:00Z' });
     const fakeTrx = ({ row, newer = null, throwOn = null }) => jest.fn((table) => {
@@ -2161,46 +2105,6 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published', published_url: CANONICAL });
     expect(indexNow.submit).toHaveBeenCalledWith(CANONICAL);
     expect(publisher.planInternalLinksForTarget).toHaveBeenCalled();
-  });
-
-  test('a head-advanced auto-merge whose own inline close failed persists the durable retirement debt (Codex P1: reconciled every poll tick by reconcileHeadAdvancedPrs)', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    const updates = setupDb({ pending: [makeRun()] });
-    gh.getPr.mockResolvedValue(openPr());
-    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
-    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
-    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
-    publisher.assertCodexReviewClear.mockResolvedValue(true);
-    // mergePrAtomic's own inline close attempt failed (settleAdvancedHead
-    // returns retired:false) — maybeAutoMerge must persist the debt itself.
-    gh.mergePr.mockResolvedValue({ merged: true, sha: 'mergesha', headAdvanced: 'newer-head-sha', retired: false });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue({ url: CANONICAL, queued: 1, candidates: 1 });
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
-    const debt = updates.find((u) => u.table === 'autonomous_runs' && u.updates.astro_retire_pr_number === 42);
-    expect(debt).toBeDefined();
-    expect(debt.filters).toMatchObject({ id: 'run-1', astro_retire_pr_number: null });
-  });
-
-  test('a head-advanced auto-merge whose own inline close SUCCEEDED (retired:true) persists no extra debt', async () => {
-    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    const updates = setupDb({ pending: [makeRun()] });
-    gh.getPr.mockResolvedValue(openPr());
-    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
-    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
-    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
-    publisher.assertCodexReviewClear.mockResolvedValue(true);
-    gh.mergePr.mockResolvedValue({ merged: true, sha: 'mergesha', headAdvanced: 'newer-head-sha', retired: true });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-    publisher.planInternalLinksForTarget.mockResolvedValue({ url: CANONICAL, queued: 1, candidates: 1 });
-
-    const res = await poller.pollPending();
-
-    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
-    expect(updates.some((u) => u.table === 'autonomous_runs' && u.updates.astro_retire_pr_number === 42)).toBe(false);
   });
 
   test('per-poll cap: only one auto-merge per tick, the rest defer', async () => {

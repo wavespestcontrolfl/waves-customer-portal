@@ -3290,49 +3290,6 @@ describe('mergeAstro head pinning (audit regression — merge was not sha-pinned
     }));
   });
 
-  test('a head-advanced merge whose own inline close failed persists the durable retirement debt (Codex P1: reconciled every pages-poll tick)', async () => {
-    const stamps = [];
-    const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
-    const queries = [read];
-    db.mockImplementation(() => queries.shift() || chain({ update: jest.fn((patch) => { stamps.push(patch); return Promise.resolve(1); }) }));
-    gh.getPr.mockResolvedValue({
-      number: 42, state: 'open', merged: false,
-      head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA },
-    });
-    mockHubOnlyBranchFile();
-    gh.listIssueComments.mockResolvedValue([{ user: { login: 'wavespestcontrolfl' }, body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`, created_at: '2026-07-02T12:00:00Z' }]);
-    gh.listPrReviews.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector' }, body: "Codex Review: Didn't find any major issues.", state: 'COMMENTED', commit_id: HEAD_SHA, submitted_at: '2026-07-02T12:05:00Z' }]);
-    // mergePrAtomic's own inline close attempt failed (settleAdvancedHead
-    // returns retired:false) — mergeAstro must persist the debt itself.
-    gh.mergePr.mockResolvedValue({ merged: true, sha: 'merge-commit-sha', headAdvanced: 'newer-head-sha', retired: false });
-
-    const result = await AstroPublisher.mergeAstro('post-pin-1');
-
-    expect(result.merged).toBe(true);
-    const debtStamp = stamps.find((p) => p.astro_retire_pr_number === 42);
-    expect(debtStamp).toBeDefined();
-  });
-
-  test('a head-advanced merge whose own inline close SUCCEEDED (retired:true) persists no extra debt — nothing left for the reconciler', async () => {
-    const stamps = [];
-    const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
-    const queries = [read];
-    db.mockImplementation(() => queries.shift() || chain({ update: jest.fn((patch) => { stamps.push(patch); return Promise.resolve(1); }) }));
-    gh.getPr.mockResolvedValue({
-      number: 42, state: 'open', merged: false,
-      head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA },
-    });
-    mockHubOnlyBranchFile();
-    gh.listIssueComments.mockResolvedValue([{ user: { login: 'wavespestcontrolfl' }, body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`, created_at: '2026-07-02T12:00:00Z' }]);
-    gh.listPrReviews.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector' }, body: "Codex Review: Didn't find any major issues.", state: 'COMMENTED', commit_id: HEAD_SHA, submitted_at: '2026-07-02T12:05:00Z' }]);
-    gh.mergePr.mockResolvedValue({ merged: true, sha: 'merge-commit-sha', headAdvanced: 'newer-head-sha', retired: true });
-
-    const result = await AstroPublisher.mergeAstro('post-pin-1');
-
-    expect(result.merged).toBe(true);
-    expect(stamps.some((p) => p.astro_retire_pr_number !== undefined)).toBe(false);
-  });
-
   test('expectHeadSha mismatch (green build of an older commit) refuses to merge', async () => {
     const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
     const queries = [read];
