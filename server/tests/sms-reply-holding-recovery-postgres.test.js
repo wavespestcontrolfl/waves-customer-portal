@@ -14,6 +14,7 @@ const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
 const suggest = require('../services/sms-suggest-mode');
 const autoSend = require('../services/sms-auto-send');
+const providerCoordination = require('../services/messaging/provider-handoff-reservation');
 jest.setTimeout(30000);
 
 postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
@@ -96,6 +97,102 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     })).toBe(true);
     return id;
   }
+
+  test('provider coordination preserves exact accepted SMS evidence when the ordinary provider row is missing', async () => {
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '(202) 555-0101', fromNumber: '+19413529161', body: 'Draft body',
+      messageType: 'estimate_service_details',
+    });
+    expect(prepared.blocked).not.toBe(true);
+    const reservedAt = new Date(Date.now() - 10000);
+    const inboundAt = new Date(Date.now() - 5000);
+    const providerAcceptedAt = new Date(Date.now() - 1000);
+    await trx('sms_log').where({ id: prepared.handle.reservationId }).update({ created_at: reservedAt });
+    providerCoordination.captureProviderContext(prepared.handle, {
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Final normalized body',
+      messageType: 'estimate_service_details', channel: 'sms', providerAcceptedAt,
+      metadata: { pre_handoff_stamp: true },
+    });
+    const sid = `SM${'a'.repeat(32)}`;
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: sid, channel: 'sms',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+
+    const row = await trx('sms_log').where({ id: prepared.handle.reservationId }).first();
+    expect(row).toMatchObject({
+      from_phone: '+19413529161', to_phone: '+12025550101', message_body: 'Final normalized body',
+      message_type: 'estimate_service_details', status: 'sent', twilio_sid: sid,
+    });
+    expect(row.created_at.getTime()).toBe(providerAcceptedAt.getTime());
+    expect(row.created_at.getTime()).toBeGreaterThan(inboundAt.getTime());
+    expect(row.metadata).toMatchObject({
+      provider_handoff_reservation: true, provider_outcome: 'accepted',
+      provider_channel: 'sms', pre_handoff_stamp: true,
+    });
+  });
+
+  test('provider coordination removes only a duplicate accepted SMS reservation', async () => {
+    const sid = `MM${'b'.repeat(32)}`;
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Photo caption', messageType: 'manual',
+    });
+    await trx('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: '+19413529161', to_phone: '+12025550101',
+      message_body: 'Photo caption', message_type: 'manual', status: 'sent', twilio_sid: sid,
+      metadata: {},
+    });
+    providerCoordination.captureProviderContext(prepared.handle, {
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Photo caption',
+      messageType: 'manual', channel: 'sms',
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: sid, channel: 'sms',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeUndefined();
+  });
+
+  test.each([false, true])('accepted push coordination %s an ordinary proof row preserves exactly one receipt', async (hasProof) => {
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Push body', messageType: 'receipt',
+    });
+    const providerAcceptedAt = new Date();
+    if (hasProof) {
+      await trx('sms_log').insert({
+        id: randomUUID(), direction: 'outbound', from_phone: 'push', to_phone: '+12025550101',
+        message_body: 'Push body', message_type: 'receipt', status: 'sent', twilio_sid: null, created_at: providerAcceptedAt,
+        metadata: { channel: 'push', providerAccepted: true },
+      });
+    }
+    providerCoordination.captureProviderContext(prepared.handle, {
+      to: '+12025550101', fromNumber: 'push', body: 'Push body', messageType: 'receipt',
+      channel: 'push', providerAcceptedAt, metadata: { channel: 'push', providerAccepted: true, provider_from_number: '+19413529161' },
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: 'push:notification-1', channel: 'push',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    const reservation = await trx('sms_log').where({ id: prepared.handle.reservationId }).first();
+    if (hasProof) expect(reservation).toBeUndefined();
+    else expect(reservation).toMatchObject({ from_phone: 'push', status: 'sent', twilio_sid: null });
+  });
+
+  test.each([
+    [23, true],
+    [25, false],
+  ])('provider uncertainty aged %sh is retained only inside the reconciliation window', async (hours, retained) => {
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Maybe sent', messageType: 'manual',
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, { deliveryOutcome: 'uncertain' });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    const agedAt = new Date(Date.now() - hours * 60 * 60 * 1000);
+    await trx('sms_log').where({ id: prepared.handle.reservationId }).update({ created_at: agedAt, updated_at: agedAt });
+    await suggest.recoverSuggestionHoldingStates();
+    await autoSend.reconcileAutoSendClaims();
+    expect(Boolean(await trx('sms_log').where({ id: prepared.handle.reservationId }).first())).toBe(retained);
+  });
 
   test.each([
     ['ordinary unmarked uncertainty keeps the old 30-minute cleanup behavior', 31, false, 1, false],

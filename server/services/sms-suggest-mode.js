@@ -201,9 +201,16 @@ async function threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreat
   const replyInFlight = await trx('sms_log')
     .where({ direction: 'outbound' })
     .where(byThread('to_phone'))
-    .whereIn('message_type', HUMAN_REPLY_TYPES)
+    .where(function replyOrProviderHandoff() {
+      this.where(function humanReplyAfterInbound() {
+        this.whereIn('message_type', HUMAN_REPLY_TYPES)
+          .where('created_at', '>', after);
+      }).orWhere(function liveProviderHandoff() {
+        this.whereRaw("metadata->>'provider_handoff_reservation' = 'true'")
+          .where('created_at', '>=', new Date(Date.now() - REPLY_RESERVATION_HOLD_HOURS * 60 * 60 * 1000));
+      });
+    })
     .whereIn('status', ['scheduled', 'sending'])
-    .where('created_at', '>', after)
     .first('id');
   if (replyInFlight) return 'reply_in_flight';
 
@@ -702,10 +709,14 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
 async function createReplyHoldingReservation(dbh, {
   to, customerId = null, fromNumber, body, adminUserId = null,
   agentDecisionId = null, parkedDecisionIds = [], reservationKind = 'manual', uncertain = false,
-  manualWrapperReservation = false,
+  manualWrapperReservation = false, messageType = null, extraMetadata = null,
 }) {
+  const reservationMarker = reservationKind === 'provider_handoff'
+    ? 'provider_handoff_reservation'
+    : `${reservationKind}_send_reservation`;
   const metadata = {
-    [`${reservationKind}_send_reservation`]: true,
+    ...(extraMetadata && typeof extraMetadata === 'object' ? extraMetadata : {}),
+    [reservationMarker]: true,
     ...(uncertain ? { provider_outcome_uncertain: true } : {}),
     ...(manualWrapperReservation ? { manual_wrapper_reservation: true } : {}),
     ...(agentDecisionId ? { agent_decision_id: agentDecisionId } : {}),
@@ -719,7 +730,7 @@ async function createReplyHoldingReservation(dbh, {
       to_phone: to,
       message_body: body,
       status: 'sending',
-      message_type: reservationKind === 'auto' ? 'ai_autosent' : 'manual',
+      message_type: messageType || (reservationKind === 'auto' ? 'ai_autosent' : 'manual'),
       admin_user_id: adminUserId,
       metadata: JSON.stringify(metadata),
     })
@@ -750,14 +761,36 @@ async function settleReplyHoldingReservation({ reservationId, uncertain = false,
   if (!reservationId) return true;
   try {
     if (acceptedResult) {
+      const context = acceptedResult.reservationContext || {};
+      const providerMessageId = acceptedResult.providerMessageId || null;
+      const providerSid = /^(SM|MM)[a-f0-9]{32}$/i.test(providerMessageId || '')
+        ? providerMessageId
+        : null;
+      const providerAcceptedAt = context.providerAcceptedAt
+        ? new Date(context.providerAcceptedAt)
+        : null;
+      const validProviderAcceptedAt = providerAcceptedAt && !Number.isNaN(providerAcceptedAt.getTime())
+        ? providerAcceptedAt
+        : null;
+      const metadataPatch = {
+        ...(context.metadata && typeof context.metadata === 'object' ? context.metadata : {}),
+        provider_outcome: 'accepted',
+        ...(context.channel ? { provider_channel: context.channel } : {}),
+        ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
+      };
       const updated = await db('sms_log')
         .where({ id: reservationId, direction: 'outbound', status: 'sending' })
         .update({
           status: 'sent',
-          twilio_sid: acceptedResult.providerMessageId || null,
+          twilio_sid: providerSid,
+          ...(validProviderAcceptedAt ? { created_at: validProviderAcceptedAt } : {}),
+          ...(context.fromNumber ? { from_phone: context.fromNumber } : {}),
+          ...(context.to ? { to_phone: context.to } : {}),
+          ...(Object.prototype.hasOwnProperty.call(context, 'body') ? { message_body: context.body } : {}),
+          ...(context.messageType ? { message_type: context.messageType } : {}),
           metadata: db.raw(
             "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-            [JSON.stringify({ provider_outcome: 'accepted' })]
+            [JSON.stringify(metadataPatch)]
           ),
           updated_at: new Date(),
         });
@@ -1134,6 +1167,17 @@ async function recoverSuggestionHoldingStates({ orphanMinutes = 30, uncertainRec
       correction_note: 'Scheduled send never fired — suggestion reopened by the recovery sweep.',
       updated_at: new Date(),
     });
+  try {
+    await db('sms_log')
+      .where({ direction: 'outbound' })
+      .whereIn('status', ['sending', 'sent', 'delivered', 'failed', 'undelivered', 'canceled'])
+      .whereRaw("metadata->>'provider_handoff_reservation' = 'true'")
+      .where('created_at', '<', uncertainCutoff)
+      .modify(preserveSoleAcceptedReplyReceipts)
+      .del();
+  } catch (err) {
+    logger.warn(`[sms-suggest] provider-handoff reservation cleanup failed: ${err.message}`);
+  }
   if (reopened > 0) logger.info(`[sms-suggest] reopened ${reopened} orphaned scheduled suggestions`);
   return reopened;
 }
