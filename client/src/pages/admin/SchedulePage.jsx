@@ -12626,15 +12626,40 @@ export function CompletionPanel({
         .map((station) => station.id),
       ...stationNew.map((station) => station.key),
     ];
+    // On inspection_only, the VISIT-SPECIFIC counts (checked / inaccessible
+    // / activity) also need an explicit tap or move — the zero-tap default
+    // is not itself an inspection (codex round-8 P1: stations_checked still
+    // claimed every visible station on a partial inspection, contradicting
+    // the filtered termiteStations payload). total_stations stays the full
+    // property pin count regardless of outcome — it is the map's roster
+    // size, not a visit result, and narrowing it too made the report's
+    // partial-inspection denominator disappear along with the numerator
+    // (codex round-9 P1). A newly placed pin is inherently explicit
+    // regardless of outcome.
+    // A "Customer declined" visit inspected NOTHING — the server discards
+    // its whole station payload (no check rows, taps included), so the
+    // visit-specific counts are zero: leaving them at every visible pin
+    // let the termite report (which falls back to the typed counts when a
+    // visit has no check rows) tell the declined customer every station
+    // was inspected (codex round-2 P1).
+    const isInspectionOnly = visitOutcome === "inspection_only";
+    const isCustomerDeclined = visitOutcome === "customer_declined";
+    const checkedKeys = isCustomerDeclined
+      ? []
+      : isInspectionOnly
+        ? activeKeys.filter((key) => stationMoves[key]
+          || stationNew.some((station) => station.key === key)
+          || Object.prototype.hasOwnProperty.call(stationStatuses, key))
+        : activeKeys;
     const statusOf = (key) => stationStatuses[key] || "ok";
-    const inaccessible = activeKeys.filter((key) => statusOf(key) === "inaccessible").length;
+    const inaccessible = checkedKeys.filter((key) => statusOf(key) === "inaccessible").length;
     // Each program maps to ITS schema's count keys — never auto-write a key
     // the schema doesn't own, or submit validation rejects the unknown
     // field. Trapping owns traps_checked only: captures is a tech-judgment
     // count (one trap can hold multiple captures), and the schema has no
     // total/inaccessible keys.
     const counts = stationProgram === "trapping"
-      ? { traps_checked: String(activeKeys.length - inaccessible) }
+      ? { traps_checked: String(checkedKeys.length - inaccessible) }
       : {
         // total_stations is termite-only since 2026-07-23: the rodent
         // schema retired it (the map's pins ARE the roster), and writing it
@@ -12643,12 +12668,12 @@ export function CompletionPanel({
         ...(stationProgram === "termite"
           ? { total_stations: String(activeKeys.length) }
           : {}),
-        stations_checked: String(activeKeys.length - inaccessible),
+        stations_checked: String(checkedKeys.length - inaccessible),
         stations_inaccessible: String(inaccessible),
         // Only the termite schema carries a per-station activity COUNT; the
         // rodent flow records consumption as a select (tech judgment).
         ...(stationProgram === "termite"
-          ? { stations_with_activity: String(activeKeys.filter((key) => statusOf(key) === "activity").length) }
+          ? { stations_with_activity: String(checkedKeys.filter((key) => statusOf(key) === "activity").length) }
           : {}),
       };
     // Snapshot the last auto-written values BEFORE scheduling the state
@@ -12695,7 +12720,7 @@ export function CompletionPanel({
       });
     }
     stationAutoCountsRef.current = counts;
-  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired, generating]);
+  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired, generating, visitOutcome]);
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
@@ -17137,18 +17162,27 @@ export function CompletionPanel({
                 return;
               }
               const moved = stationMoves[station.id];
+              // `touched` distinguishes an explicit tap from the zero-tap
+              // 'ok' default so an inspection_only closeout (the tech DID
+              // service the property but skipped some stations) can persist
+              // only what was actually checked (codex round-4 P1) — moving
+              // a pin is itself an explicit action regardless of status.
+              const explicitlyTapped = Object.prototype.hasOwnProperty.call(stationStatuses, station.id);
               const status = stationStatuses[station.id] || "ok";
-              if (moved && ref) entries.push({ id: station.id, shape: { ...moved, ref }, status });
+              const touched = { ...(moved || explicitlyTapped ? { touched: true } : {}) };
+              if (moved && ref) entries.push({ id: station.id, shape: { ...moved, ref }, status, ...touched });
               // A drift-hidden pin that was never re-placed submits NOTHING:
               // a status would mint a check row for a station the visit's
               // map cannot show (mirrors the auto-count exclusion above).
-              else if (station.shape) entries.push({ id: station.id, status });
+              else if (station.shape) entries.push({ id: station.id, status, ...touched });
             });
             if (ref) {
               stationNew.forEach((station) => {
                 entries.push({
                   shape: { ...station.shape, ref },
                   status: stationStatuses[station.key] || "ok",
+                  // A newly placed pin is inherently an explicit action.
+                  touched: true,
                 });
               });
             }

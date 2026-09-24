@@ -59,7 +59,7 @@ function isRealCalendarDate(value) {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
-const { startOfETMonth, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { startOfETMonth, etDateString, etParts, parseETDateTime, etWallClockOccurrences } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
 // A date-only end_date (e.g. "2026-06-30") parses as midnight UTC, so an
@@ -1363,6 +1363,16 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
     const [hour, minute] = time.split(':').map(Number);
     if (etDateString(callbackAt) !== date || callbackParts.hour !== hour || callbackParts.minute !== minute) {
       return res.status(400).json({ error: 'The selected time does not exist in Eastern time' });
+    }
+    // The fall-back Sunday repeats 1:00-1:59 AM ET (once in EDT, once in
+    // EST): a wall time that occurs twice round-trips cleanly under BOTH
+    // offsets, so the gap check above cannot see it, and parseETDateTime
+    // silently keeps the first (EDT) occurrence — an hour away from what the
+    // operator may have meant. Reject the ambiguity the way
+    // parseQuotedETDeadline does instead of storing a guess (codex round-3
+    // P2).
+    if (etWallClockOccurrences(callbackAt) !== 1) {
+      return res.status(400).json({ error: 'That time happens twice in Eastern time on the daylight saving change — pick a time outside 1:00–1:59 AM' });
     }
     const saved = await db.transaction(async (trx) => {
       const changed = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update({
