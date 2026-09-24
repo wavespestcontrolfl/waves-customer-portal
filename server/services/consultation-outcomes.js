@@ -18,6 +18,7 @@ const {
   isAssessmentServiceType,
   isAssessmentBooking,
 } = require('./assessment-booking');
+const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 
 const OUTCOME_VALUES = ['warm', 'cold', 'lost'];
 const LOST_REASON_VALUES = ['price', 'competitor', 'diy', 'not_ready', 'no_show', 'other'];
@@ -259,10 +260,12 @@ function toDateOnlyString(value) {
  *       accepted_at),
  *   (c) a non-assessment scheduled_services row for this customer created
  *       after the visit that is a genuine NEW booking — another
- *       consultation (P1-B: nor a free callback [is_callback] or a
- *       recurring-series child spawned onto an EXISTING plan
- *       [recurring_parent_id] — neither is a new sale) is never itself a
- *       sale.
+ *       consultation, a free callback (is_callback), a recurring-series
+ *       child spawned onto an EXISTING plan (recurring_parent_id), an
+ *       included $0 follow-up minted from a completion (followup_included),
+ *       or any other ALWAYS-free service type (isAlwaysFreeServiceType —
+ *       appointment/estimate/re-service/follow-up/re-visit by name) is
+ *       never itself a sale.
  * Returns { won_via, won_at } for the first match, or null.
  */
 async function findSaleEvidenceForConsultation(database, { customerId, scheduledDateStr, now = new Date() }) {
@@ -314,7 +317,7 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
     .where('created_at', '>=', lowerBound)
     .where('created_at', '<=', upperBound)
     .orderBy('created_at', 'asc')
-    .select('id', 'service_type', 'service_id', 'created_at', 'is_callback', 'recurring_parent_id');
+    .select('id', 'service_type', 'service_id', 'created_at', 'is_callback', 'recurring_parent_id', 'followup_included');
   for (const booking of bookings) {
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale
     // P1-B: a free re-service callback (the persisted flag every
@@ -328,6 +331,20 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
     // enrollment) is unaffected and still qualifies as a genuine new sale.
     if (booking.is_callback) continue;
     if (booking.recurring_parent_id) continue;
+    // round 8: admin-dispatch.js's POST /:serviceId/schedule-followup mints
+    // an included $0 appointment for a typed-completion follow-up — it
+    // inherits the SOURCE visit's own service_type (so it rarely matches
+    // isAlwaysFreeServiceType by name) and is neither a callback nor a
+    // recurring child, so followup_included is the ONLY signal that marks
+    // it not-a-sale. Also exclude any OTHER service type this codebase
+    // already treats as never-billable by name — appointment / estimate /
+    // re-service / follow-up / re-visit (isAlwaysFreeServiceType,
+    // server/services/no-cost-visit-types.js) — the same combined check
+    // field-team-program.js and job-costing.js already use together
+    // (`followup_included === true || isAlwaysFreeServiceType(...)`) for
+    // "is this visit free/no-cost".
+    if (booking.followup_included) continue;
+    if (isAlwaysFreeServiceType(booking.service_type)) continue;
     return { won_via: 'office_booking', won_at: new Date(booking.created_at) };
   }
 

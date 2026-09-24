@@ -1789,13 +1789,17 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // inside markWonForCustomer (waves-db §5b).
       // P1-B: gated on `appt` (this same INSERT's own RETURNING row) rather
       // than a fresh re-query — this manual booking form never sets
-      // is_callback/recurring_parent_id (not in insertData above, so both
-      // come back at their DB defaults), but a free callback or a
-      // recurring-series child spawned onto an EXISTING plan is never
-      // itself a sale (server/services/re-service.js,
-      // recurring-appointment-seeder.js), so the guard stays correct if
-      // this endpoint's insertData ever grows either field.
-      if (!assessmentVisit && !appt.is_callback && !appt.recurring_parent_id) {
+      // is_callback/recurring_parent_id/followup_included (none are in
+      // insertData above, so all come back at their DB defaults), but a
+      // free callback, a recurring-series child spawned onto an EXISTING
+      // plan, an included $0 follow-up (admin-dispatch.js's
+      // schedule-followup — a different endpoint, but the guard stays
+      // correct if THIS one ever grows the field), or any other always-free
+      // service type by name is never itself a sale
+      // (server/services/re-service.js, recurring-appointment-seeder.js,
+      // no-cost-visit-types.js).
+      if (!assessmentVisit && !appt.is_callback && !appt.recurring_parent_id && !appt.followup_included
+        && !require('../services/no-cost-visit-types').isAlwaysFreeServiceType(appt.service_type)) {
         await require('../services/consultation-outcomes')
           .markWonForCustomer(customerId, { via: 'office_booking', trx });
       }

@@ -725,15 +725,19 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     });
   });
 
-  // This endpoint's own insertData never sets is_callback/recurring_parent_id
-  // today (a manual staff booking is never a free callback or an
-  // auto-spawned recurring child) — these two prove the GUARD ITSELF is
-  // correct, using the same insert-returning row the route reads, so it
-  // stays correct if that ever changes rather than relying on today's
-  // insertData shape as an unstated invariant.
+  // This endpoint's own insertData never sets is_callback/recurring_parent_id/
+  // followup_included today (a manual staff booking is never a free
+  // callback, an auto-spawned recurring child, or an included $0
+  // follow-up — that last one is admin-dispatch.js's separate
+  // schedule-followup endpoint) — these prove the GUARD ITSELF is correct,
+  // using the same insert-returning row the route reads, so it stays
+  // correct if that ever changes rather than relying on today's insertData
+  // shape as an unstated invariant.
   it.each([
     ['a free callback (is_callback on the inserted row)', (row) => ({ ...row, is_callback: true })],
     ['a recurring-series child (recurring_parent_id on the inserted row)', (row) => ({ ...row, recurring_parent_id: 'parent-visit-0' })],
+    ['an included $0 follow-up (followup_included on the inserted row — round 8, admin-dispatch.js\'s schedule-followup shape)', (row) => ({ ...row, followup_included: true })],
+    ['an always-free-by-name service type (round 8, no-cost-visit-types.js)', (row) => ({ ...row, service_type: 'Estimate Visit' })],
   ])('P1-B: does NOT reconcile consultation outcomes when the booked visit is %s', async (_label, stampAppt) => {
     const { markWonForCustomer } = require('../services/consultation-outcomes');
     markWonForCustomer.mockClear();

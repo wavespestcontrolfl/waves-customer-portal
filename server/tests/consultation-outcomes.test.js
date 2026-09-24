@@ -460,14 +460,45 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(saved.outcome).toBe('warm');
   });
 
-  test('P1-B: a genuine new booking (neither a callback nor a recurring child) still flips warm to won, even alongside a same-day callback/child that must be skipped', async () => {
+  test('P1-B (round 8): an included $0 follow-up minted from a typed completion (followup_included) is NOT sale evidence — stays warm', async () => {
+    // Exact booking shape admin-dispatch.js's POST /:serviceId/schedule-followup
+    // inserts: service_type is INHERITED from the source visit (so it does
+    // NOT match an always-free name pattern), is_recurring: false, no
+    // recurring_parent_id, no is_callback — followup_included is the ONLY
+    // signal that marks it not-a-sale.
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push({
+      id: 'visit-followup',
+      service_type: 'Quarterly Pest Control', // inherited from svc.service_type, not a free-name match
+      customer_id: 'cust-1',
+      created_at: new Date('2026-09-14T00:00:00Z'),
+      is_recurring: false,
+      followup_included: true,
+      followup_source_service_id: 'some-completed-visit',
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('warm');
+  });
+
+  test('P1-B (round 8): an always-free-by-name service type (e.g. a free estimate/appointment visit) is NOT sale evidence — stays warm', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push({
+      id: 'visit-estimate', service_type: 'Estimate Visit', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z'),
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('warm');
+  });
+
+  test('P1-B: a genuine new booking (none of: another consultation, a callback, a recurring child, an included follow-up, an always-free name) still flips warm to won, even alongside earlier non-qualifying rows that must all be skipped', async () => {
     const fakeDb = seededDb();
     fakeDb.__store.scheduled_services.push(
-      // Both dated BEFORE the real sale — proves the loop doesn't just skip
+      // All dated BEFORE the real sale — proves the loop doesn't just skip
       // the first non-qualifying row and stop; it keeps scanning until it
       // finds (or exhausts) real evidence.
-      { id: 'visit-cb', service_type: 'Pest Control Re-Service', customer_id: 'cust-1', created_at: new Date('2026-09-12T00:00:00Z'), is_callback: true },
-      { id: 'visit-child', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-13T00:00:00Z'), recurring_parent_id: 'parent-visit-0' },
+      { id: 'visit-cb', service_type: 'Pest Control Re-Service', customer_id: 'cust-1', created_at: new Date('2026-09-11T00:00:00Z'), is_callback: true },
+      { id: 'visit-child', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-12T00:00:00Z'), recurring_parent_id: 'parent-visit-0' },
+      { id: 'visit-followup', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-13T00:00:00Z'), followup_included: true },
+      { id: 'visit-estimate', service_type: 'Estimate Visit', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z') },
       { id: 'visit-real', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-17T00:00:00Z') },
     );
     const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
