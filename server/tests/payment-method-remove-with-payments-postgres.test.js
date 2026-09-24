@@ -100,4 +100,32 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       card_last_four: '4242',
     });
   });
+
+  test('payment history falls back to the charge-time snapshot once the method is removed (GH codex r1 P2)', async () => {
+    // getPaymentHistory reads on the global pool, so these rows are
+    // committed and removed in finally.
+    const [customer] = await db('customers')
+      .insert({ first_name: 'FkProbe', last_name: 'History', phone: '+15550001235' })
+      .returning('id');
+    const customerId = customer.id ?? customer;
+    try {
+      const [method] = await db('payment_methods')
+        .insert({ customer_id: customerId, processor: 'stripe', method_type: 'card', card_brand: 'VISA', last_four: '1310' })
+        .returning('id');
+      await db('payments').insert({
+        customer_id: customerId, payment_method_id: method.id ?? method,
+        payment_date: '2026-09-03', amount: '102.33', status: 'paid',
+        card_brand: 'VISA', card_last_four: '1310',
+      });
+      await StripeService.removeCard(customerId, method.id ?? method, { cascadeAutopay: false });
+
+      const history = await StripeService.getPaymentHistory(customerId);
+      expect(history).toHaveLength(1);
+      expect(history[0]).toMatchObject({ payment_method_id: null, card_brand: 'VISA', last_four: '1310' });
+    } finally {
+      await db('payments').where({ customer_id: customerId }).del();
+      await db('payment_methods').where({ customer_id: customerId }).del();
+      await db('customers').where({ id: customerId }).del();
+    }
+  });
 });
