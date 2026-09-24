@@ -17497,10 +17497,15 @@ async function seriesPropertyKey(conn, row, cols) {
 // check in ADVISORY-ONLY mode (opts.overlapAdvisoryOnly), where a clash
 // never changes which date gets picked — only whether a warning is
 // logged — so skipping it here changes no outcome and spares a probe-only
-// occupancy query. Returns null when there's no live visit to anchor from,
-// or when 12 cadence steps find nothing open — the SAME give-up
-// conditions extendSeriesOnceLocked itself uses.
-async function resolveTopUpProbeCandidateDate(conn, parentId, parent, cols) {
+// occupancy query. opts.maxDate (Codex GitHub r2 P1): the SAME horizon cap
+// extendSeriesOnceLocked's own real insert honors, so a candidate this
+// capped run would never actually attempt is never probed as if it would
+// be. Returns null when there's no live visit to anchor from, when 12
+// cadence steps find nothing open, or when every remaining candidate falls
+// past maxDate — the SAME give-up conditions extendSeriesOnceLocked itself
+// uses (dates only advance forward as `attempt` climbs, so once one
+// candidate passes maxDate every later one does too).
+async function resolveTopUpProbeCandidateDate(conn, parentId, parent, cols, opts = {}) {
   const latest = await latestLiveSeriesVisit(conn, parentId);
   if (!latest) return null;
   const rOpts = {
@@ -17523,6 +17528,7 @@ async function resolveTopUpProbeCandidateDate(conn, parentId, parent, cols) {
     if (!candidate) { attempt++; continue; }
     if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) { attempt++; continue; }
     if (candidate <= etDateString()) { attempt++; continue; }
+    if (opts.maxDate && candidate > opts.maxDate) { attempt++; continue; }
     if (existingDates.has(candidate)) { attempt++; continue; }
     return { candidate, skipParent, autoExtendBlackoutDates };
   }
@@ -17544,15 +17550,22 @@ async function resolveTopUpProbeCandidateDate(conn, parentId, parent, cols) {
 // directly — the SAME authoritative verdict extendSeriesOnceLocked itself
 // consults, never a second hand-rolled approximation — against the real
 // next candidate date and its real due add-ons (resolveTopUpProbeCandidateDate
-// above). No candidate date to probe (no live visit, or 12 cadence steps
-// found nothing open) proves nothing unbillable, so it defaults to
-// billable rather than block the ranking on an inconclusive read — the
-// same "never overcount unbillable" direction as before.
-async function isCandidateTopUpBillable(conn, row, cols) {
+// above). No candidate date to probe (no live visit, 12 cadence steps
+// found nothing open, or — Codex GitHub r2 P1 — every remaining candidate
+// falls past this run's horizon, so this capped run would never actually
+// attempt it) proves nothing unbillable, so it defaults to billable rather
+// than block the ranking on an inconclusive read — the same "never
+// overcount unbillable" direction as before. Without the horizon check, a
+// newer duplicate already booked THROUGH the horizon (so it should win
+// outright — see isSupersededSeries) could get wrongly disqualified by a
+// coincidentally-unbillable POST-horizon date it will never be asked to
+// fill this run, letting the older root win instead and (with overlaps now
+// advisory-only) insert a genuine duplicate visit alongside it.
+async function isCandidateTopUpBillable(conn, row, cols, effectiveHorizon) {
   const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: row.id });
   const storedDiscountScope = await loadStoredDiscountScope(conn, row, parentAddons);
   const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, row.id, row);
-  const probe = await resolveTopUpProbeCandidateDate(conn, row.id, row, cols);
+  const probe = await resolveTopUpProbeCandidateDate(conn, row.id, row, cols, { maxDate: effectiveHorizon });
   if (!probe) return true;
   const unbillable = await seriesExtensionUnbillable(conn, {
     parent: row, dates: [probe.candidate], cols, parentAddons, storedDiscountScope,
@@ -17631,7 +17644,7 @@ async function isCandidateTopUpEligible(conn, row, cols) {
   if (await isAnnualPrepaySeries(conn, row, row.id, cols)) return false;
   return true;
 }
-async function isSupersededSeries(conn, parent, parentId, cols) {
+async function isSupersededSeries(conn, parent, parentId, cols, effectiveHorizon) {
   const family = await seriesFamilyOf(conn, parent);
   if (!family) return false;
   const propertyKey = await seriesPropertyKey(conn, parent, cols);
@@ -17672,7 +17685,7 @@ async function isSupersededSeries(conn, parent, parentId, cols) {
   const billableIds = new Set();
   for (const row of candidates) {
     // Sequential, not parallel: same small candidate set gathered above.
-    if (await isCandidateTopUpBillable(conn, row, cols)) billableIds.add(row.id);
+    if (await isCandidateTopUpBillable(conn, row, cols, effectiveHorizon)) billableIds.add(row.id);
   }
   // A `parent` that is itself unbillable while a sibling is billable is
   // never labeled superseded_series here — mislabeling would be exactly
@@ -17693,12 +17706,15 @@ const TOPUP_SERIES_INELIGIBILITY_RULES = [
   ['plan_hold', isFamilyOnPlanHold],
   ['superseded_series', isSupersededSeries],
 ];
-async function topupSeriesSkipReason(conn, parent, parentId, cols) {
+async function topupSeriesSkipReason(conn, parent, parentId, cols, effectiveHorizon) {
   for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
     // Sequential, not parallel: one rule today, and each is a DB read, so
     // there's nothing to gain from Promise.all here and it'd only cost
-    // clarity.
-    if (await test(conn, parent, parentId, cols)) return reason;
+    // clarity. effectiveHorizon is passed to every rule for a uniform
+    // signature; only isSupersededSeries reads it today (Codex GitHub r2
+    // P1) — isAnnualPrepaySeries and isFamilyOnPlanHold simply ignore the
+    // extra argument.
+    if (await test(conn, parent, parentId, cols, effectiveHorizon)) return reason;
   }
   return null;
 }
@@ -17792,7 +17808,19 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   );
   if (!advisoryTryLockAcquired(prepayLockResult)) return { spawnedVisits: [], skipped: 'annual_prepay_busy' };
 
-  const seriesSkip = await topupSeriesSkipReason(conn, parent, parentId, cols);
+  // Computed here — before topupSeriesSkipReason, not after — so
+  // isSupersededSeries's own billability probe (via isCandidateTopUpBillable
+  // → resolveTopUpProbeCandidateDate) can be horizon-aware (Codex GitHub r2
+  // P1): a sibling already booked through the horizon whose real NEXT
+  // occurrence falls past it would otherwise get probed on that
+  // post-horizon date, which this capped run would never actually attempt,
+  // and a coincidentally unbillable result there could wrongly disqualify
+  // an otherwise-winning sibling. Pure/no-DB, so moving it earlier changes
+  // nothing else here.
+  const todayStr = etDateString();
+  const effectiveHorizon = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), horizonDays));
+
+  const seriesSkip = await topupSeriesSkipReason(conn, parent, parentId, cols, effectiveHorizon);
   if (seriesSkip) return { spawnedVisits: [], skipped: seriesSkip };
 
   // Pure/no-DB — depends only on parent.window_start/window_end/duration,
@@ -17803,9 +17831,6 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   if (normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end)?.unplaceable) {
     return { spawnedVisits: [], skipped: 'window_unplaceable' };
   }
-
-  const todayStr = etDateString();
-  const effectiveHorizon = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), horizonDays));
 
   const spawnedVisits = [];
   // The raw (non-fast-forwarded) date of the series' latest live visit as of
@@ -17833,7 +17858,17 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
       if (!freshOngoing || !freshOngoing.recurring_ongoing) break;
     }
     const latest = await latestLiveSeriesVisit(conn, parentId);
-    if (!latest) break;
+    if (!latest) {
+      // An ongoing root with no live visit at all (every row cancelled or
+      // rescheduled) has nothing to anchor an extension from — genuinely
+      // different from every other empty-run reason above, and previously
+      // reported as a bare `skipped: null` the ops script's own fallback
+      // text wrongly attributed to a warning that was never logged for
+      // this path (extendSeriesOnceLocked is never even reached here —
+      // Codex GitHub r2 P2).
+      if (spawnedVisits.length === 0) noInsertReason = 'no_live_visit';
+      break;
+    }
     if (priorBookedThrough === null) priorBookedThrough = dateOnly(latest.scheduled_date) || null;
     const rOpts = {
       ...recurrenceOrdinalOptions(parent.scheduled_date, {

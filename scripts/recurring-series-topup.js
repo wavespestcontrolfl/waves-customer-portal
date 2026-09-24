@@ -135,12 +135,15 @@ async function main() {
       console.log(
         `customer=${result.customerId || '(unknown)'} | ${result.serviceType || '(no service type)'} | ${result.recurringPattern || '(no pattern)'} `
         + `| booked through ${result.priorBookedThrough || '(no live visit)'} `
-        // A falsy `skipped` here (result?.skipped was already handled above)
-        // with an empty insertedDates means extendSeriesOnceLocked's own
-        // 12-cadence-step search came up empty and already logged its own
-        // "already booked" warning above this line — never re-claim a
-        // specific reason ("already at horizon") this branch doesn't
-        // actually know to be true.
+        // A falsy `skipped` here (result?.skipped was already handled above,
+        // including the honest at_horizon / no_live_visit / unbillable
+        // reasons — every empty-run case topUpRecurringSeriesLocked can
+        // actually name) with an empty insertedDates means
+        // extendSeriesOnceLocked's own 12-cadence-step search came up empty
+        // for some OTHER reason (a busy calendar in non-advisory mode, a
+        // persistent blackout shift) and already logged its own "already
+        // booked" warning above this line — never re-claim a specific
+        // reason this branch doesn't actually know to be true.
         + `| ${APPLY ? 'added' : 'would add'} ${insertedDates.length ? insertedDates.join(', ') : '(nothing inserted — see warning above)'}`,
       );
     } catch (e) {

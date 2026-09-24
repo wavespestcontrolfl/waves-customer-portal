@@ -426,6 +426,19 @@ describe('topUpRecurringSeriesLocked — eligibility', () => {
     expect(result.skipped).toBe('not_found');
   });
 
+  test('reports no_live_visit for an ongoing root whose rows are all cancelled/rescheduled — never a bare null (Codex GitHub #4782 r2 P2)', async () => {
+    // latestLiveSeriesVisit finds nothing for this series at all — never
+    // reaches extendSeriesOnceLocked, so no warning is ever logged for
+    // this case. Before this reason existed, the ops script's own fallback
+    // text wrongly pointed operators at "see warning above" for a case
+    // where no warning was ever printed, and the summary table silently
+    // dropped the series instead of counting it.
+    const { conn, inserted } = topupScenario({ seriesDates: [] });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('no_live_visit');
+    expect(inserted).toHaveLength(0);
+  });
+
   test('reads the customer row FOR UPDATE — the same lock PUT /:id/stage takes (Codex GitHub r3 P1)', async () => {
     const customerCalls = [];
     const { conn } = topupScenario({ seriesDates: [daysOut(0)], captureCustomerCalls: customerCalls });
@@ -1040,6 +1053,37 @@ describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Co
     expect(legacyResult.skipped).toBe('superseded_series');
     const replacementResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
     expect(replacementResult.skipped).not.toBe('superseded_series');
+  });
+
+  test('a newer at-horizon sibling with an unbillable POST-horizon candidate still wins — the billability probe is horizon-aware (Codex GitHub #4782 r2 P1)', async () => {
+    // Root 99 is already booked through nearly the whole horizon (day 29 of
+    // a 30-day horizon) — its real next weekly candidate lands around day
+    // 36, PAST the horizon this run is capped to, and (billable: false)
+    // would read as unbillable if it were ever actually probed. Without a
+    // horizon-aware probe, that post-horizon unbillable read would wrongly
+    // drop root 99 out of billableIds, letting the OLDER root 10 (which
+    // still has real headroom before the horizon) win instead and keep
+    // extending itself — while root 99, never recognized as the winner,
+    // stays "not superseded" too and eventually resumes inserting on some
+    // later run once the horizon catches up, so BOTH series independently
+    // replenish the same family/property (duplicate visits, worse with
+    // overlaps now advisory-only). The fix: a candidate this capped run
+    // would never actually attempt is never probed for billability at all,
+    // so root 99 counts as billable on the strength of what it already
+    // has booked, wins the ranking outright, and its own turn correctly
+    // no-ops as at_horizon (it already covers the horizon — nothing to add).
+    const roots = [
+      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', createdAt: '2020-01-01T00:00:00Z', latestDate: daysOut(5) },
+      {
+        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', createdAt: '2026-01-01T00:00:00Z',
+        latestDate: daysOut(29), billable: false,
+      },
+    ];
+    const olderResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 30 });
+    expect(olderResult.skipped).toBe('superseded_series');
+    const newerResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 30 });
+    expect(newerResult.skipped).not.toBe('superseded_series');
+    expect(newerResult.skipped).toBe('at_horizon');
   });
 });
 
