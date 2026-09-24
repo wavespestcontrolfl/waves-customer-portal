@@ -1337,7 +1337,7 @@ function seriesSameProperty(matchA, ownerA, matchB, ownerB, propertiesById) {
 // conflict. recurringServiceAddress (booking/visit-financial-stamps.js)
 // mirrors findActiveRecurringSeries' own address normalization onto the
 // extra rows, so seriesSameProperty compares like shapes either way.
-async function cancelledParentStillLive(database, row) {
+async function cancelledParentStillLive(database, row, columns) {
   if (row.recurring_ongoing === true) return true;
   const { etDateString } = require('../utils/datetime-et');
   // Tracker-aware, via the lifecycle guard's shared clause (GitHub Codex
@@ -1348,7 +1348,7 @@ async function cancelledParentStillLive(database, row) {
   const today = etDateString();
   const upcoming = await database('scheduled_services')
     .where({ recurring_parent_id: row.id, is_recurring: true })
-    .where(function liveChild() { whereVisitRowLive(this, today); })
+    .where(function liveChild() { whereVisitRowLive(this, today, { trackState: !!columns?.track_state }); })
     .first('id');
   return !!upcoming;
 }
@@ -1399,7 +1399,7 @@ async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
     const keyMatch = targetKey != null && row.service_type && duplicateGuardFamilyKey(row.service_type) === targetKey;
     if (!idMatch && !keyMatch) continue;
      
-    if (!(await cancelledParentStillLive(database, row))) continue;
+    if (!(await cancelledParentStillLive(database, row, columns))) continue;
     seen.add(String(row.id));
     matches.push({ ...row, ...recurringServiceAddress(row) });
   }

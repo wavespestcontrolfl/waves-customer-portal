@@ -71,8 +71,11 @@ const TERMINAL_TRACK_STATES = ['complete', 'cancelled'];
 // merge guard's cancelled-parent child probe (customer-dedupe.js
 // cancelledParentStillLive; GitHub Codex #4684 r8 P1: its status-only copy
 // missed a tracker-live child with a stale status and blocked on a
-// tracker-terminal child with a stale live status).
-function whereVisitRowLive(qb, today) {
+// tracker-terminal child with a stale live status). Also the canonical
+// series lookup's upcoming-row probe (recurring-appointment-seeder.js
+// findActiveRecurringSeries). `trackState: false` is for a schema without
+// the track_state column — status/date rule only.
+function whereVisitRowLive(qb, today, { trackState = true } = {}) {
   const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
   const dateExemptStatuses = ['rescheduled', ...IN_PROGRESS_STATUSES];
   const liveTrackStatesSql = LIVE_TRACK_STATES.map(() => '?').join(', ');
@@ -83,9 +86,10 @@ function whereVisitRowLive(qb, today) {
     }).where(function activeBound() {
       this.where('scheduled_date', '>=', today);
       for (const status of dateExemptStatuses) this.orWhere('status', status);
-    }).whereRaw(`(track_state IS NULL OR track_state NOT IN (${terminalTrackStatesSql}))`, TERMINAL_TRACK_STATES);
+    });
+    if (trackState) this.whereRaw(`(track_state IS NULL OR track_state NOT IN (${terminalTrackStatesSql}))`, TERMINAL_TRACK_STATES);
   });
-  qb.orWhereRaw(`track_state IN (${liveTrackStatesSql})`, LIVE_TRACK_STATES);
+  if (trackState) qb.orWhereRaw(`track_state IN (${liveTrackStatesSql})`, LIVE_TRACK_STATES);
 }
 
 async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
