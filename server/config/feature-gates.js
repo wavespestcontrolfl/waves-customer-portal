@@ -2757,6 +2757,17 @@ const gates = {
   // (services/tech-out.js, routes/admin-tech-out.js) read gateEnvValue at
   // CALL time.
   techOutRedistribute: gateEnvValue('GATE_TECH_OUT_REDISTRIBUTE'),
+  // Nightly recurring-series top-up: keeps every ongoing recurring plan
+  // booked out to RECURRING_TOPUP_HORIZON_DAYS (default 365) instead of
+  // relying solely on the completion-time auto-extend (which only fires when
+  // a visit is COMPLETED, so a plan left on_site/unclosed can run dry — see
+  // services/recurring-series-topup.js). **Ships DARK: off unless exactly
+  // `true`** — the canonical CALL-TIME reader is recurringSeriesTopUpLive()
+  // below, same discountStackingLive() convention, so a flip needs no
+  // redeploy. Off, the nightly cron still runs a SHADOW pass (computes what
+  // it would insert, inside a transaction it rolls back, and logs the count
+  // only — no writes). This entry is for logGateStatus only.
+  recurringSeriesTopUp: process.env.GATE_RECURRING_SERIES_TOPUP === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -2788,6 +2799,17 @@ function discountStackingLive() {
 // every caller (the public page route, buildLeadConsultationLink, and the
 // new_lead email runner) must use, so none of them can drift from what an
 // admin flip actually does.
+// GATE_RECURRING_SERIES_TOPUP read at CALL time — strict `=== 'true'`, same
+// convention as discountStackingLive() / leadInspectionLinkLive(). The
+// `recurringSeriesTopUp` gates-map entry above is for logGateStatus only;
+// this is the one canonical reader the nightly cron (scheduler.js) and the
+// one-shot ops script (scripts/recurring-series-topup.js) both use, so a
+// flip is a live kill/enable with no redeploy and neither caller can drift
+// on what "on" means.
+function recurringSeriesTopUpLive() {
+  return process.env.GATE_RECURRING_SERIES_TOPUP === 'true';
+}
+
 function leadInspectionLinkLive() {
   return process.env.GATE_LEAD_INSPECTION_LINK === 'true';
 }
@@ -2851,5 +2873,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive };
 // gates 1775330914

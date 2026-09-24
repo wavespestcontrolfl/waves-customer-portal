@@ -1,0 +1,369 @@
+/**
+ * Nightly recurring-series top-up (routes/admin-schedule.js's
+ * topUpRecurringSeriesLocked / topUpRecurringSeries, and the sweep wrapper
+ * in services/recurring-series-topup.js).
+ *
+ * The completion-time auto-extend (runRecurringSeriesMaintenance) only fires
+ * on COMPLETED visits and only ever adds one — an ongoing plan whose visits
+ * stay on_site/unclosed never re-triggers it. This suite drives the
+ * extracted horizon-fill loop directly with a scripted fake connection
+ * (house style — see recurring-series-maintenance.test.js), so it exercises
+ * the SAME extendSeriesOnceLocked insert step the completion path uses.
+ */
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: jest.fn(async () => ({ synthesized: true, billingType: null })),
+}));
+jest.mock('../services/appointment-reminders', () => ({
+  registerAppointment: jest.fn().mockResolvedValue(undefined),
+  resolveCommittedVisitTime: jest.fn(async () => null),
+  alertRegistrationFailure: jest.fn().mockResolvedValue(undefined),
+}));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  coveredTermsAsOf: jest.fn(),
+}));
+
+const adminScheduleRouter = require('../routes/admin-schedule');
+const {
+  topUpRecurringSeriesLocked, topUpRecurringSeries, TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
+} = adminScheduleRouter._test;
+const AppointmentReminders = require('../services/appointment-reminders');
+const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
+const { etDateString } = require('../utils/datetime-et');
+
+function daysOut(n) {
+  const d = new Date(`${etDateString()}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+const BASE_COLS = {
+  recurring_ongoing: {}, skip_weekends: {}, weekend_shift: {}, service_id: {},
+  create_invoice_on_complete: {}, is_callback: {}, discount_dollars: {},
+  payer_id: {}, po_number: {}, self_pay_override: {},
+  property_id: {}, service_address_line1: {}, service_address_line2: {},
+  service_address_city: {}, service_address_state: {}, service_address_zip: {},
+  lat: {}, lng: {}, service_key_snapshot: {}, appointment_type: {},
+};
+
+// Scriptable fake knex connection — same shape/conventions as
+// recurring-series-maintenance.test.js's makeConn, extended with `pluck`
+// (seriesTermIds / the customer-level term scan) and a `customers` table.
+function makeConn(handler, opts = {}) {
+  const buildTable = (table) => {
+    const calls = [];
+    const b = {};
+    const record = (name) => (...args) => {
+      if ((name === 'where' || name === 'whereNotExists') && typeof args[0] === 'function') {
+        const nested = [];
+        const sub = {};
+        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw', 'orWhereNotIn']) {
+          sub[nm] = (...a) => { nested.push([nm, ...a]); return sub; };
+        }
+        args[0].call(sub, sub);
+        calls.push(['whereFn', nested]);
+      } else {
+        calls.push([name, ...args]);
+      }
+      return b;
+    };
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'forShare', 'distinct', 'andWhere']) {
+      b[m] = record(m);
+    }
+    b.modify = (fn) => { fn(b); return b; };
+    b.first = (...args) => {
+      calls.push(['first', ...args]);
+      return Promise.resolve(handler({ table, calls, op: 'first' }));
+    };
+    b.pluck = (field) => {
+      calls.push(['pluck', field]);
+      return Promise.resolve(handler({ table, calls, op: 'pluck', field }));
+    };
+    b.columnInfo = () => Promise.resolve(handler({ table, calls, op: 'columnInfo' }));
+    b.insert = (data) => {
+      calls.push(['insert', data]);
+      return {
+        returning: () => Promise.resolve(handler({ table, calls, op: 'insertReturning', data })),
+        then: (res, rej) => Promise.resolve(handler({ table, calls, op: 'insert', data })).then(res, rej),
+      };
+    };
+    b.then = (res, rej) => Promise.resolve(handler({ table, calls, op: 'await' })).then(res, rej);
+    return b;
+  };
+  const build = (isTransaction) => {
+    const fn = (table) => buildTable(table);
+    fn.isTransaction = isTransaction;
+    fn.raw = () => Promise.resolve();
+    fn.fn = { now: () => new Date() };
+    fn.transaction = (cb) => {
+      const exec = () => Promise.resolve().then(() => cb(build(true)));
+      if (!opts.mutex || isTransaction) return exec();
+      const prev = opts.mutex.tail || Promise.resolve();
+      let release;
+      opts.mutex.tail = new Promise((r) => { release = r; });
+      return prev.then(exec).finally(() => release());
+    };
+    return fn;
+  };
+  return build(false);
+}
+
+// A stateful ongoing-series fixture: `seriesDates` grows with every insert,
+// so a repeated topUpRecurringSeriesLocked loop sees its own prior inserts
+// as the new "latest" on the next iteration — the real anchor-chaining
+// behavior extendSeriesOnceLocked relies on.
+function topupScenario({
+  parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
+  colsOverrides = {}, linkedTermIds = [], customerTermIds = [],
+} = {}) {
+  const parent = {
+    id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'weekly',
+    recurring_ongoing: true, scheduled_date: daysOut(0),
+    window_start: '08:00', window_end: '10:00',
+    service_type: 'Weekly Pest Control', time_window: 'morning', zone: 'A',
+    estimated_duration_minutes: 60, skip_weekends: false,
+    create_invoice_on_complete: false,
+    ...parentOverrides,
+  };
+  const customer = {
+    id: 5, active: true, deleted_at: null, service_paused_at: null, pipeline_stage: 'active_customer',
+    ...customerOverrides,
+  };
+  const cols = { ...BASE_COLS, ...colsOverrides };
+  const seriesDates = new Set(initialDates);
+  const inserted = [];
+  let nextId = 900;
+  const handler = ({ table, calls, op, data, field }) => {
+    if (table === 'scheduled_services') {
+      if (op === 'columnInfo') return cols;
+      if (op === 'pluck' && field === 'annual_prepay_term_id') return linkedTermIds;
+      if (op === 'first') {
+        const firstCall = calls.find((c) => c[0] === 'first');
+        if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: parent.recurring_ongoing };
+        if (firstCall[1] === 'customer_id') return { customer_id: parent.customer_id };
+        if (firstCall[1] === 'status') return { status: 'pending' };
+        if (calls.some((c) => c[0] === 'orderBy')) {
+          if (!seriesDates.size) return undefined;
+          const latest = [...seriesDates].sort().slice(-1)[0];
+          return { scheduled_date: latest };
+        }
+        const whereCall = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'id' in c[1]);
+        if (whereCall && whereCall[1].id !== parent.id) return undefined;
+        return parent;
+      }
+      if (op === 'await') {
+        if (calls.some((c) => c[0] === 'whereRaw')) return []; // global occupancy probe — never clashes here
+        if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) {
+          return [...seriesDates].map((scheduled_date) => ({ scheduled_date }));
+        }
+        return [];
+      }
+      if (op === 'insertReturning') {
+        const id = ++nextId;
+        inserted.push({ id, ...data });
+        seriesDates.add(data.scheduled_date);
+        return [{ id, ...data }];
+      }
+      if (op === 'insert') { inserted.push(data); seriesDates.add(data.scheduled_date); return [1]; }
+    }
+    if (table === 'scheduled_service_addons') {
+      if (op === 'columnInfo') return {};
+      return [];
+    }
+    if (table === 'customers') {
+      if (op === 'first') return customer;
+    }
+    if (table === 'annual_prepay_terms') {
+      if (op === 'pluck' && field === 'id') return customerTermIds;
+    }
+    if (table === 'system_settings') return null;
+    if (table === 'schedule_blackout_dates') return [];
+    return null;
+  };
+  return { conn: makeConn(handler), inserted, parent, customer, seriesDates };
+}
+
+describe('topUpRecurringSeriesLocked — eligibility', () => {
+  test('skips a non-ongoing parent', async () => {
+    const { conn, inserted } = topupScenario({ parentOverrides: { recurring_ongoing: false } });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('not_ongoing');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('skips a non-recurring / no-pattern parent', async () => {
+    const { conn } = topupScenario({ parentOverrides: { recurring_pattern: null } });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('not_recurring');
+  });
+
+  test('skips a churned customer', async () => {
+    const { conn, inserted } = topupScenario({ customerOverrides: { pipeline_stage: 'churned' } });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('customer_churned');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('skips a past_customer / dormant stage too (FORMER_CUSTOMER_STAGES)', async () => {
+    for (const stage of ['past_customer', 'dormant']) {
+      const { conn } = topupScenario({ customerOverrides: { pipeline_stage: stage } });
+      const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+      expect(result.skipped).toBe('customer_churned');
+    }
+  });
+
+  test('skips a paused customer', async () => {
+    const { conn, inserted } = topupScenario({ customerOverrides: { service_paused_at: new Date() } });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('customer_service_paused');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('skips a deleted customer', async () => {
+    const { conn } = topupScenario({ customerOverrides: { deleted_at: new Date() } });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('customer_deleted');
+  });
+
+  test('skips an explicitly inactive customer', async () => {
+    const { conn } = topupScenario({ customerOverrides: { active: false } });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('customer_inactive');
+  });
+
+  test('skips a not-found parent', async () => {
+    const { conn } = topupScenario();
+    const result = await topUpRecurringSeriesLocked(conn, 999, { horizonDays: 365 });
+    expect(result.skipped).toBe('not_found');
+  });
+});
+
+describe('topUpRecurringSeriesLocked — horizon fill', () => {
+  test('fills a weekly series to the horizon and stops (no past-dated or duplicate inserts)', async () => {
+    const { conn, inserted, seriesDates } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    // Weekly cadence, 30-day horizon starting from today → 4 candidates
+    // (day7/14/21/28) land inside the horizon; day35 does not.
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(inserted.length).toBeLessThan(TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN);
+    const today = daysOut(0);
+    const horizon = daysOut(30);
+    const seen = new Set();
+    for (const row of inserted) {
+      // Never past-dated.
+      expect(row.scheduled_date > today).toBe(true);
+      // Never past the horizon this run was asked to fill to.
+      expect(row.scheduled_date < horizon).toBe(true);
+      // Never a duplicate date within this series.
+      expect(seen.has(row.scheduled_date)).toBe(false);
+      seen.add(row.scheduled_date);
+    }
+    // Every inserted date actually landed in the series' occupied-dates set.
+    for (const d of seen) expect(seriesDates.has(d)).toBe(true);
+  });
+
+  test('stops at the hard 24-insert cap even with horizon room left', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+    });
+    // 1000 days at a 7-day cadence is >100 possible slots — the cap must
+    // bind, not the horizon.
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 1000 });
+    expect(result.skipped).toBeNull();
+    expect(inserted).toHaveLength(TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN);
+  });
+
+  test('a series already booked past the horizon inserts nothing', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(60)],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted).toHaveLength(0);
+    expect(result.priorBookedThrough).toBe(daysOut(60));
+  });
+});
+
+describe('topUpRecurringSeriesLocked — annual-prepay term_end cap', () => {
+  test('never inserts past a linked term\'s term_end, even though the horizon allows more', async () => {
+    const termEnd = daysOut(20);
+    coveredTermsAsOf.mockReturnValue({
+      whereIn: () => ({ select: async () => [{ term_end: termEnd }] }),
+    });
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+      colsOverrides: { annual_prepay_term_id: {} },
+      linkedTermIds: ['term-A'],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBeNull();
+    expect(result.termCap).toBe(termEnd);
+    expect(result.effectiveHorizon).toBe(termEnd);
+    for (const row of inserted) {
+      expect(row.scheduled_date < termEnd).toBe(true);
+    }
+    expect(inserted.length).toBeGreaterThan(0);
+  });
+
+  test('discovers a term the customer holds directly, with no scheduled_services link yet', async () => {
+    const termEnd = daysOut(10);
+    coveredTermsAsOf.mockReturnValue({
+      whereIn: () => ({ select: async () => [{ term_end: termEnd }] }),
+    });
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+      colsOverrides: { annual_prepay_term_id: {} },
+      linkedTermIds: [],
+      customerTermIds: ['term-B'],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.effectiveHorizon).toBe(termEnd);
+    for (const row of inserted) expect(row.scheduled_date < termEnd).toBe(true);
+  });
+
+  test('fails closed (skips the series) when the term-cap lookup errors — never guesses "no cap"', async () => {
+    coveredTermsAsOf.mockImplementation(() => { throw new Error('boom'); });
+    const { conn, inserted } = topupScenario({
+      colsOverrides: { annual_prepay_term_id: {} },
+      linkedTermIds: ['term-A'],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('prepay_cap_unresolved');
+    expect(inserted).toHaveLength(0);
+  });
+});
+
+describe('topUpRecurringSeries — the writing wrapper', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('registers a reminder for each spawned visit after commit, with no confirmation SMS', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+    });
+    const result = await topUpRecurringSeries(conn, 10, { horizonDays: 14 });
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledTimes(inserted.length);
+    for (const call of AppointmentReminders.registerAppointment.mock.calls) {
+      expect(call[5]).toMatchObject({ sendConfirmation: false });
+      expect(call[4]).toBe('recurring_auto_extend');
+    }
+    expect(result.spawnedVisits).toHaveLength(inserted.length);
+  });
+
+  test('an ineligible series registers no reminder and inserts nothing', async () => {
+    const { conn, inserted } = topupScenario({ customerOverrides: { pipeline_stage: 'churned' } });
+    const result = await topUpRecurringSeries(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('customer_churned');
+    expect(inserted).toHaveLength(0);
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+});
