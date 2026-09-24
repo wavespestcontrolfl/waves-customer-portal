@@ -1518,12 +1518,22 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
   const association = singleProperty && (requestedAddressIsOnFile(item) || adoptedAddress) && window
     ? parents.filter((v) => inAsk(v) && (adoptedAddress ? visitAtStatedAddress(item, v, places) : visitAtOnFileAddress(item, v, places)))
     : [];
+  // A house-number dispute the processor durably CLEARED (the stated
+  // premise is a saved secondary property, or the record validated): its
+  // preserved requested premise is the ask, and a manual booking there
+  // (no source_call_log_id) covers it — service, cadence, window, hour and
+  // unit checks still apply through inAsk + bookingAtReadings (codex r36
+  // P1).
+  const clearedDispute = item.reason_code === 'on_file_house_number_conflict' && !!parseMaybeJson(item.payload)?.address_dispute_cleared_at;
+  const clearedAssociation = singleProperty && clearedDispute && window && asked.length === 1
+    ? parents.filter((v) => inAsk(v) && bookingAtReadings(item, v, places, asked[0]))
+    : [];
   // Every address the call named needs its own covering bookings — a
   // two-property ask is not answered by bookings at one of them (codex r24
   // P2); the association pool applies only to a one-address on-file ask.
   const words = (v) => `${v.service_type || ''} ${v.service_category_snapshot || ''}`;
   return asked.every((readings, i) => coveredByDistinct(categories,
-    direct.filter((v) => bookingAtReadings(item, v, places, readings)).concat(i === 0 ? association : []), words));
+    direct.filter((v) => bookingAtReadings(item, v, places, readings)).concat(i === 0 ? association.concat(clearedAssociation) : []), words));
 }
 
 // The priced LINES an estimate carries, each with its own service words
