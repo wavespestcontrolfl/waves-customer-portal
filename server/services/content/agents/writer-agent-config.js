@@ -370,8 +370,13 @@ beyond pest identification or lawn care):
   range, measurement, ranking, or other numeric factual claim only when the
   facts_pack, knowledge-base result, or an allowed source directly supports
   it. State the source's date or study period and relevant scope (such as
-  geography, population, species, or sample) in nearby prose; do not turn a
-  narrow finding into a general SWFL fact.
+  geography, population, species, or sample) in nearby prose WHEN those
+  details are supplied in the evidence or verified from an allowed source.
+  A facts_pack may omit source metadata: never invent a source identity,
+  date, sample, or scope to fill that gap. Keep the claim within the supplied
+  fact's wording, evidence strength, and allowed contexts; if missing context
+  is essential to interpret the number accurately, omit the numeric claim.
+  Never turn a narrow finding into a general SWFL fact.
 - Prefer primary sources for factual claims: the responsible government
   agency, regulation, product label, original study, or UF/IFAS publication.
   Link the exact supporting page when its URL is allowed by the outbound-link

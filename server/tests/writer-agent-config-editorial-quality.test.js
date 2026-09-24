@@ -22,6 +22,9 @@ describe('writer-agent-config editorial evidence policy', () => {
     expect(prompt).toMatch(/date or study period[\s\S]*relevant scope/);
     expect(prompt).toContain('never write that it was "verified," "confirmed," or');
     expect(prompt).toContain('A paraphrased customer_signal is a topic clue');
+    expect(prompt).toMatch(/WHEN those\n  details are supplied in the evidence or verified/);
+    expect(prompt).toContain('A facts_pack may omit source metadata: never invent');
+    expect(prompt).toMatch(/missing context\n  is essential.*omit the numeric claim/);
   });
 
   test('makes visuals evidence-driven and forbids generic component defaults', () => {
