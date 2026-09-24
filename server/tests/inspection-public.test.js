@@ -555,6 +555,14 @@ describe('Codex #4737 r9: lead-scoped dedupe, trusted-customer change to null, c
     expect(res.body.state).toBe('already_booked');
   });
 
+  // Codex #4737 r11 pre-push P1: the in-booking check row-locks the lead.
+  test('commitVerdict reads the lead FOR UPDATE (held through the booking transaction)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/inspection-public.js'), 'utf8');
+    const start = src.indexOf('async function commitVerdict(');
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    expect(body).toContain('loadLead(conn, leadId, { forUpdate: true })');
+  });
+
   test('P1: both account-attach paths call the one shared helper', () => {
     const fs = require('fs');
     const path = require('path');

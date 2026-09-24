@@ -1705,7 +1705,12 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
 // or a visit landed since phase 1 — the same resolveEligibility GET uses,
 // Codex #4737 r10 pre-push P1); else 'ok'.
 async function commitVerdict(conn, leadId, token, customerId) {
-  const freshLead = await loadLead(conn, leadId);
+  // Row-locked through the booking transaction (Codex #4737 r11 pre-push
+  // P1): admin-leads updates the lead's phone/customer_id without the
+  // inspection-lead lock, so an unlocked read could be overtaken before the
+  // insert. The booking already holds this customer's comms fence, so the
+  // order matches admin-leads' (comms → customer → lead).
+  const freshLead = await loadLead(conn, leadId, { forUpdate: true });
   const trusted = freshLead ? await loadTrustedCustomer(conn, freshLead, token) : null;
   if (!trusted || String(trusted.id) !== String(customerId)) return 'customer_changed';
   const eligibility = await resolveEligibility(conn, freshLead, trusted, { includeRescheduleUrl: false });
