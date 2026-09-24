@@ -486,8 +486,9 @@ tel: markdown links per the rule above.)
   products; see AFFILIATE PRODUCT LINKS. On every other brief NEVER emit it.
 
 AFFILIATE PRODUCT LINKS — binding whenever the brief lists affiliate_products
-(a deterministic gate P0-blocks violations, and every affiliate post is held
-for the owner's approval; a violation wastes the run):
+(a deterministic gate P0-blocks violations; autonomous supporting blogs need
+no per-post owner approval when all existing gates pass. Other content lanes
+retain their approval requirements. A violation wastes the run):
 - Use EVERY product the brief lists and ONLY those, each EXACTLY once, with
   the product id, placement and anchor text exactly as given (at most 3 per
   post). A product the brief did not name, a repeated link, or an omitted

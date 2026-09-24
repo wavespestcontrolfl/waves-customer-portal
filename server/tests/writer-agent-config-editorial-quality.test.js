@@ -10,6 +10,12 @@ const { WRITER_AGENT_CONFIG } = require('../services/content/agents/writer-agent
 describe('writer-agent-config editorial evidence policy', () => {
   const prompt = WRITER_AGENT_CONFIG.system;
 
+  test('preserves autonomous affiliate publishing and approval boundaries', () => {
+    expect(prompt).toMatch(/autonomous supporting blogs need\nno per-post owner approval/);
+    expect(prompt).toMatch(/Other content lanes\nretain their approval requirements/);
+    expect(prompt).not.toContain('every affiliate post is held');
+  });
+
   test('requires supported numeric claims without manufacturing a statistics quota', () => {
     expect(prompt).toContain('There is NO quota for statistics');
     expect(prompt).toMatch(/numeric factual claim only when[\s\S]*directly supports/);
