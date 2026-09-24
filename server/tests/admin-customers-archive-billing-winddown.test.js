@@ -90,14 +90,15 @@ function wouldActuallyBeCharged(customerId) {
     const refused = status === 409;
     const woundDown = status === 200
       && !!afterArchive.deleted_at
-      && afterArchive.active === false
+      // r6: archive leaves `active` as it was (deleted_at alone removes the
+      // row from every charge set) — only the billing arms are wound down.
       && afterArchive.autopay_enabled === false
       && afterArchive.next_charge_date == null;
     expect(refused || woundDown).toBe(true);
 
     if (woundDown) {
-      // Restore (round 3) re-establishes active=true (the row must read as
-      // a live customer_stage row again) but must NOT re-arm autopay_enabled
+      // Restore (round 3 → r6) hands the row back as archived (this fixture
+      // was active=true) but must NOT re-arm autopay_enabled
       // or next_charge_date — confirm the row would still never actually be
       // charged post-restore, even though it is once again a raw candidate.
       const restoreStatus = await withServer(async (baseUrl) => {

@@ -309,4 +309,17 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
     expect(conflict).not.toBeNull();
     expect(conflict.code).toBe('duplicate_series_conflict');
   });
+
+  test('a recurring-shaped CALLBACK on the winner is not a live plan — merge is not blocked (round-6 GitHub Codex P2)', async () => {
+    const winnerId = await makeCustomer({ address_line1: '17 Palm Ct', city: 'Bradenton', zip: '34205' });
+    const loserId = await makeCustomer({ address_line1: '17 Palm Ct', city: 'Bradenton', zip: '34205' });
+    const callbackId = await seedParent(winnerId, { seedChild: false });
+    await db('scheduled_services').where({ id: callbackId }).update({ is_callback: true });
+    await seedParent(loserId, {}); // loser: the real plan.
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).toBeNull();
+  });
 });

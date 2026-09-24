@@ -187,4 +187,57 @@ const isoDaysAhead = (n) => new Date(Date.now() + n * 24 * 3600 * 1000).toISOStr
     expect(customer.pipeline_stage).toBe('churned');
     expect(customer.churn_reason).toBe('moved away');
   });
+
+  test('a clean churned row with a still-armed Auto Pay card gets the RAIL-ONLY repair on a re-save — no refusal, rails disarmed (round-6 GitHub Codex P1)', async () => {
+    const customerId = randomUUID();
+    await db('customers').insert({
+      id: customerId, first_name: 'RailResidueRepro', last_name: 'Customer',
+      phone: '9415550305', email: `rail-residue-repro-${customerId}@example.com`,
+      pipeline_stage: 'churned', churned_at: isoDaysAhead(-30), churn_reason: 'moved',
+      active: false, autopay_enabled: false, next_charge_date: null, monthly_rate: 0,
+    });
+    const paymentMethodId = randomUUID();
+    await db('payment_methods').insert({ id: paymentMethodId, customer_id: customerId, autopay_enabled: true, is_default: true });
+    // A live prepay term: would REFUSE a transition, but this row is a clean
+    // churn — only the independent rail is repaired.
+    await db('annual_prepay_terms').insert({
+      id: randomUUID(), customer_id: customerId, status: 'active', term_start: isoDaysAhead(-200), term_end: isoDaysAhead(100),
+    });
+    const status = await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/customers/${customerId}/stage`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ stage: 'churned' }),
+      });
+      return res.status;
+    });
+    expect([200, 500]).toContain(status);
+    const pm = await db('payment_methods').where({ id: paymentMethodId }).first('autopay_enabled');
+    expect(pm.autopay_enabled).toBe(false);
+    const customer = await db('customers').where({ id: customerId }).first('pipeline_stage', 'active');
+    expect(customer.pipeline_stage).toBe('churned');
+    expect(customer.active).toBe(false);
+  });
+
+  test('archive + restore hands a deliberately INACTIVE non-churned customer back inactive (round-6 GitHub Codex P1)', async () => {
+    const customerId = randomUUID();
+    await db('customers').insert({
+      id: customerId, first_name: 'InactiveRestoreRepro', last_name: 'Customer',
+      phone: '9415550306', email: `inactive-restore-repro-${customerId}@example.com`,
+      pipeline_stage: 'dormant', active: false, autopay_enabled: true, monthly_rate: 49, next_charge_date: isoDaysAhead(5),
+    });
+    const archiveStatus = await withServer(async (baseUrl) => (await fetch(`${baseUrl}/admin/customers/${customerId}`, { method: 'DELETE' })).status);
+    expect(archiveStatus).toBe(200);
+    const archived = await db('customers').where({ id: customerId }).first('active', 'autopay_enabled', 'next_charge_date', 'deleted_at');
+    expect(archived.deleted_at).not.toBeNull();
+    expect(archived.active).toBe(false);
+    expect(archived.autopay_enabled).toBe(false);
+    expect(archived.next_charge_date).toBeNull();
+    const restoreStatus = await withServer(async (baseUrl) => (await fetch(`${baseUrl}/admin/customers/${customerId}/restore`, { method: 'PATCH' })).status);
+    expect(restoreStatus).toBe(200);
+    const restored = await db('customers').where({ id: customerId }).first('active', 'autopay_enabled', 'deleted_at', 'pipeline_stage');
+    expect(restored.deleted_at).toBeNull();
+    expect(restored.active).toBe(false);
+    expect(restored.autopay_enabled).toBe(false);
+    expect(restored.pipeline_stage).toBe('dormant');
+  });
 });

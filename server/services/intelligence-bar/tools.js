@@ -1257,10 +1257,9 @@ async function updateCustomer(customerId, updates, expectedVersion) {
       // transaction, after the version check above — a refusal rolls the
       // whole thing back, and the disarm's updated_at bump can never
       // invalidate the version this same action was prepared against.
-      const { churnGuardApplies } = require('../customer-lifecycle-guard');
-      if (clean.pipeline_stage === 'churned' && churnGuardApplies(lockedBefore)) {
-        const { churnGuardForRow, describeLiveVisit } = require('../customer-lifecycle-guard');
-        const decision = await churnGuardForRow(trx, customerId);
+      if (clean.pipeline_stage === 'churned') {
+        const { churnGuardOrRepair, describeLiveVisit } = require('../customer-lifecycle-guard');
+        const decision = await churnGuardOrRepair(trx, customerId, lockedBefore);
         if (decision.blocked) {
           const err = new Error(decision.liveVisit
             ? `Cannot mark Churned: ${describeLiveVisit(decision.liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
@@ -1559,15 +1558,15 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // rest down itself through the canonical cancellation-processor.js
       // write as it checks them — no separate post-update pass needed.
       if (clean.pipeline_stage === 'churned') {
-        const { churnGuardForRow, churnGuardApplies } = require('../customer-lifecycle-guard');
+        const { churnGuardOrRepair } = require('../customer-lifecycle-guard');
         const liveRowById = new Map(liveRows.map((r) => [String(r.id), r]));
         const blocked = [];
         for (const cid of targetIds) {
-          // Already-churned rows with billing already wound down are left
-          // alone (see churnGuardApplies) — a bulk re-label must not 409
-          // customers who already followed the "Cancel plan…" advice.
-          if (!churnGuardApplies(liveRowById.get(String(cid)))) continue;
-          const decision = await churnGuardForRow(trx, cid);
+          // Already-churned rows with customer-level billing already wound
+          // down get the rail-only repair (see churnGuardOrRepair) — a bulk
+          // re-label must not 409 customers who already followed the
+          // "Cancel plan…" advice.
+          const decision = await churnGuardOrRepair(trx, cid, liveRowById.get(String(cid)));
           if (decision.blocked) {
             blocked.push({ customer_id: cid, error: decision.error });
           }
@@ -1694,10 +1693,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
         // Churned combined with an address/email edit self-heals a pre-fix
         // residue row too. churnGuardForRow winds billing down itself
         // through the canonical cancellation-processor.js write.
-        const { churnGuardApplies } = require('../customer-lifecycle-guard');
-        if (clean.pipeline_stage === 'churned' && churnGuardApplies(lockedBefore)) {
-          const { churnGuardForRow } = require('../customer-lifecycle-guard');
-          const decision = await churnGuardForRow(trx, customerId);
+        if (clean.pipeline_stage === 'churned') {
+          const { churnGuardOrRepair } = require('../customer-lifecycle-guard');
+          const decision = await churnGuardOrRepair(trx, customerId, lockedBefore);
           if (decision.blocked) {
             const err = new Error(decision.error);
             err.churnBlocked = true;
@@ -1744,7 +1742,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
         continue;
       }
       if (e && e.churnBlocked) {
-        errors.push({ customer_id: customerId, error: e.message });
+        errors.push({ customer_id: customerId, error: e.message, churn_blocked: true });
         continue;
       }
       if (e && e.code === '23505') {
@@ -1788,7 +1786,17 @@ async function bulkUpdateCustomers(customerIds, updates) {
       errors,
       // The confirm card renders `warning` — a partial bulk update must never
       // read as a clean Done (W0B).
-      warning: `${errors.length} of ${count + errors.length} customers were NOT updated (${errors.length === 1 ? 'it' : 'they'} no longer resolved at commit); ${count} updated.`,
+      // Churn refusals carry their own actionable reason (GitHub Codex
+      // #4684 r6 P2) — the card renders only `warning`, so "no longer
+      // resolved" must not paper over a "use Cancel plan…" instruction.
+      warning: (() => {
+        const churnBlocked = errors.filter((e) => e.churn_blocked);
+        const other = errors.length - churnBlocked.length;
+        const parts = [];
+        if (churnBlocked.length) parts.push(`${churnBlocked.length} refused (${churnBlocked.map((e) => e.error).join('; ')})`);
+        if (other) parts.push(`${other} no longer resolved at commit`);
+        return `${errors.length} of ${count + errors.length} customers were NOT updated — ${parts.join('; ')}; ${count} updated.`;
+      })(),
     } : {}),
   };
 }

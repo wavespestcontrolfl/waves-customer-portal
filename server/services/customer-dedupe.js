@@ -1365,9 +1365,21 @@ function parentRowIsPlanShaped(row, isOneTimeBookingSource) {
 async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
   const { findActiveRecurringSeries, duplicateGuardFamilyKey } = require('./recurring-appointment-seeder');
   const active = await findActiveRecurringSeries(database, { customerId, serviceId, serviceType });
-  const matches = Array.isArray(active) ? [...active] : [];
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
+  // The canonical lookup neither selects nor filters is_callback/source
+  // (its own callers never seed callbacks as recurring parents, but a
+  // recurring-shaped callback or one-time booking can exist), so its rows
+  // get the same plan-shape filter the cancelled-parent additions and the
+  // loser identities already pass through (GitHub Codex #4684 r6 P2).
+  let matches = Array.isArray(active) ? [...active] : [];
+  if (matches.length) {
+    const shapeRows = await database('scheduled_services')
+      .whereIn('id', matches.map((m) => m.id))
+      .select('id', 'is_callback', 'source');
+    const shapeById = new Map((Array.isArray(shapeRows) ? shapeRows : []).map((r) => [String(r.id), r]));
+    matches = matches.filter((m) => parentRowIsPlanShaped(shapeById.get(String(m.id)) || m, isOneTimeBookingSource));
+  }
   const rows = await database('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true, status: 'cancelled' })
     .whereNull('recurring_parent_id')
