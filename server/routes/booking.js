@@ -2850,6 +2850,13 @@ async function createSelfBooking(payload = {}) {
             await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
           }
         }
+        // The customer row BEFORE any estimate row (codex r38 P2): the
+        // Customer 360 edit locks the customer first and then rewrites
+        // matching open estimates, so the reverse order here would deadlock
+        // a booking against a staff address edit. A re-lock later is a no-op.
+        if (custId && ((pricing_estimate_id && estimate_token) || (estimate?.id && estimate_share_token))) {
+          await trx('customers').where({ id: custId }).forUpdate().first('id');
+        }
         if (pricing_estimate_id && estimate_token) {
           const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
           if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {

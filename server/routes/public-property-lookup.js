@@ -617,18 +617,24 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
             .select('id', 'address');
           const unblocked = blocked
-            .filter((row) => samePremiseDisplay(row.address, fullAddress, { requireLocality: true }))
-            .map((row) => row.id);
-          if (unblocked.length) {
+            .filter((row) => samePremiseDisplay(row.address, fullAddress, { requireLocality: true }));
+          // Each lift re-asserts the row's matched address AND this contact
+          // pair (codex r38 P1): a Customer 360 edit that moved the row to
+          // another pair and premise — and a lookup under that pair that
+          // stamped a fresh rejection — must win, never be cleared by this
+          // pair's clean answer.
+          for (const row of unblocked) {
             await trx('estimates')
-              .whereIn('id', unblocked)
+              .where({ id: row.id, address: row.address })
+              .whereRaw('LOWER(customer_email) = ?', [String(email).toLowerCase().trim()])
+              .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(normPhone).replace(/\D/g, '').slice(-10)])
               .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
               .update({
                 estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
                 updated_at: new Date(),
               });
-            logger.info(`[public-property-lookup] clean verdict lifted the address block on ${unblocked.length} legacy estimate(s)`);
           }
+          if (unblocked.length) logger.info(`[public-property-lookup] clean verdict lifted the address block on ${unblocked.length} legacy estimate(s)`);
         }
         await trx('leads').where({ id: lead.id }).update({
           extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({

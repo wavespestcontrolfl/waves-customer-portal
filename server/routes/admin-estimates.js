@@ -484,7 +484,12 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
       // deadline (crashed or delayed) leaves the link-visible scope once
       // expired, yet still decides whether a later group send can deliver
       // (GH codex P2 r2 on #4309).
-      .orWhere((fixed) => fixed.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
+      .orWhere((fixed) => fixed.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`))
+      // …and any PUBLISHED sibling (expired ones included — the shared link
+      // still renders them) under the county-roll address block, so the
+      // scheduling preflight refuses what the cron's final verdict would
+      // abort (codex #4667 r38 P1).
+      .orWhere((held) => held.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")));
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
