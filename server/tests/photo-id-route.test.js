@@ -985,6 +985,46 @@ describe('real averageScores merges never leave the composite empty (why raw evi
       expect(body.result.scores.color_health).toBe(8);
     });
   });
+
+  test('lawn: numeric-only real evidence (no signal fields reported by either model) omits every signal, never a false "none"/"low" (codex GH r9 P1)', async () => {
+    // Both models reported ONLY the 3 numeric scores — no fungal/insect/
+    // mechanical/thatch data at all. Real averageScores would otherwise
+    // default all 4 to a confident 'none'/'low' baseline.
+    const numericOnly = { turf_density: 80, weed_coverage: 10, color_health: 8 };
+    const realResult = { claude: numericOnly, gemini: numericOnly, composite: realLawnAssessment.averageScores(numericOnly, numericOnly).composite };
+    // Prove the bug is real before asserting the route corrects it.
+    expect(realResult.composite.fungal_activity).toBe('none');
+    expect(realResult.composite.thatch_visibility).toBe('low');
+    mockLawnAnalyzePhoto.mockResolvedValue(realResult);
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      const body = await res.json();
+      expect(body.result.scores).toEqual({ turf_density: 80, weed_coverage: 10, color_health: 8 });
+      // None of the 4 never-assessed signals may appear as a false-clean reading.
+      expect(body.result.signals).toEqual([]);
+    });
+  });
+
+  test('tree_shrub: numeric-only real evidence (no severity fields reported by either model) reads those categories as untracked, never a confident 95', async () => {
+    // Both models reported ONLY foliage/color — no pest/disease/water-heat
+    // signal data at all. Real averageScores/toCategoryScores would
+    // otherwise default all three severity categories to 95 ('none').
+    const numericOnly = { foliage_fullness: 80, leaf_color_vigor: 75 };
+    const realResult = { claude: numericOnly, gemini: numericOnly, composite: realTreeShrubAssessment.averageScores(numericOnly, numericOnly).composite };
+    // Prove the bug is real before asserting the route corrects it.
+    expect(realResult.composite.pest_signals).toBe('none');
+    mockTreeAnalyzePhoto.mockResolvedValue(realResult);
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
+      const body = await res.json();
+      expect(body.result.scores.foliage_fullness).toBe(80);
+      expect(body.result.scores.leaf_color_vigor).toBe(75);
+      // The three never-assessed signal categories read as 'tracking' (the
+      // existing null-score status), never a confident 'strong'/'healthy'.
+      const levels = body.result.signals.map((s) => s.level);
+      expect(levels.every((level) => level === 'tracking')).toBe(true);
+    });
+  });
 });
 
 // A tiny local mirror of the route's own check, for the assertion above —

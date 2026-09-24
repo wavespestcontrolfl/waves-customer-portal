@@ -450,6 +450,28 @@ function lawnRecomputeScoreField(claude, gemini, key) {
   return null;
 }
 
+// codex GH r9 P1: the SAME dilution/false-baseline bug the numeric fields
+// had also applies to the 4 categorical severity fields — fungal_activity /
+// insect_damage / mechanical_damage default a MISSING side to rank 0
+// ('none') before averaging (`FUNGAL_MAP[claudeResult[f]] ?? 0`), and
+// thatch_visibility does the same via THATCH_MAP. A genuinely unassessed
+// signal was therefore always published as a confident "none"/"low" reading
+// instead of being omitted. (drought_stress already filters missing values
+// correctly inside lawn-assessment.js itself — no fix needed there.)
+function lawnRawCategoricalValue(raw, key, rankMap) {
+  if (!raw || raw[key] == null || raw[key] === '') return null;
+  return rankMap[raw[key]] != null ? raw[key] : null;
+}
+
+function lawnRecomputeCategoricalField(claude, gemini, key, rankMap, orderList) {
+  const c = lawnRawCategoricalValue(claude, key, rankMap);
+  const g = lawnRawCategoricalValue(gemini, key, rankMap);
+  if (c != null && g != null) return orderList[Math.round((rankMap[c] + rankMap[g]) / 2)];
+  if (c != null) return c;
+  if (g != null) return g;
+  return null;
+}
+
 function lawnSanitizeScoreFields(analysis) {
   const { claude, gemini, composite } = analysis;
   if (!composite) return null;
@@ -457,6 +479,10 @@ function lawnSanitizeScoreFields(analysis) {
   for (const key of ['turf_density', 'weed_coverage', 'color_health']) {
     sanitized[key] = lawnRecomputeScoreField(claude, gemini, key);
   }
+  sanitized.fungal_activity = lawnRecomputeCategoricalField(claude, gemini, 'fungal_activity', LAWN_SEVERITY_RANK, LAWN_SEVERITY_ORDER);
+  sanitized.insect_damage = lawnRecomputeCategoricalField(claude, gemini, 'insect_damage', LAWN_SEVERITY_RANK, LAWN_SEVERITY_ORDER);
+  sanitized.mechanical_damage = lawnRecomputeCategoricalField(claude, gemini, 'mechanical_damage', LAWN_SEVERITY_RANK, LAWN_SEVERITY_ORDER);
+  sanitized.thatch_visibility = lawnRecomputeCategoricalField(claude, gemini, 'thatch_visibility', THATCH_RANK, THATCH_ORDER);
   return sanitized;
 }
 
@@ -639,6 +665,25 @@ function treeShrubRawHasEvidence(raw) {
 // / buildTreeShrubTechFindings) rather than calling that helper directly —
 // it has no hook to filter a composite for evidence before merging, and
 // evidence-filtering is exactly the fix this needs.
+// codex GH r9 P1: tree-shrub-assessment.js's averageScores already uses the
+// SOLE reported value when only one model has a severity field (no dilution
+// bug there, unlike lawn) — but when NEITHER model reports it, it still
+// defaults to 'none' (`SEVERITY_REVERSE[cHas ? ci : (gHas ? gi : 0)]`, the
+// `: 0` firing with zero evidence), and toCategoryScores/mergePhotoComposites
+// (shared, not touched) always coerce a missing field the same way, so
+// there is no way to represent "never assessed" through those functions'
+// own vocabulary. This checks the RAW evidence directly, across every
+// evidence-bearing photo, and nulls the SCORE (not the raw field) for a
+// dimension neither model ever reported on any photo — buildCustomerTreeShrubReport
+// already renders a null score as the neutral 'tracking' status via
+// buildTreeShrubVisualCategories' own existing null-handling.
+function treeShrubFieldEverReported(analyses, key) {
+  return analyses.some((a) => a && (
+    (a.claude && a.claude[key] != null && a.claude[key] !== '')
+    || (a.gemini && a.gemini[key] != null && a.gemini[key] !== '')
+  ));
+}
+
 async function previewTreeShrubWithEvidence(photoInputs) {
   const analyses = await Promise.all(photoInputs.map((photo) => analyzeTreeShrubPhoto(photo.data, photo.mimeType)
     .catch((err) => { logger.warn(`[photo-id] tree-shrub analyzePhoto failed: ${err.message}`); return null; })));
@@ -647,6 +692,11 @@ async function previewTreeShrubWithEvidence(photoInputs) {
   if (!composites.length) return null;
   const mergedRaw = mergeTreeShrubComposites(composites);
   const scores = toCategoryScores(mergedRaw);
+  if (!treeShrubFieldEverReported(withEvidence, 'pest_signals')) scores.pestActivity = null;
+  if (!treeShrubFieldEverReported(withEvidence, 'disease_signals')) scores.diseaseLeafSpot = null;
+  if (!treeShrubFieldEverReported(withEvidence, 'water_heat_stress') && !treeShrubFieldEverReported(withEvidence, 'pruning_mechanical')) {
+    scores.waterHeatStress = null;
+  }
   scores.overallScore = calculateOverall(scores);
   return {
     scores,
