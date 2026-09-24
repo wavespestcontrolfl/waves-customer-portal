@@ -335,11 +335,37 @@ Please search for current FL and federal tax changes, then provide your analysis
         })
         .orderBy('effective_date', 'desc');
       const seenCounties = new Set();
-      return rows.filter((row) => {
+      const current = rows.filter((row) => {
         if (seenCounties.has(row.county)) return false;
         seenCounties.add(row.county);
         return true;
       });
+
+      // Compatibility: a county whose current rate was staged by the OLD
+      // (pre-fix) route — predecessor demoted to active=false with its
+      // expiry_date on the future effective date, successor active but not
+      // yet effective — has no row satisfying the active=true bound above
+      // during that gap, so it silently dropped out of this report instead
+      // of showing its (still genuinely in force) predecessor rate — the
+      // same fallback calculateTax applies (codex round-2 P1).
+      const allCounties = await db('tax_rates').distinct('county').pluck('county');
+      const missingCounties = allCounties.filter((county) => !seenCounties.has(county));
+      if (missingCounties.length) {
+        const fallbackRows = await db('tax_rates')
+          .whereIn('county', missingCounties)
+          .andWhere('active', false)
+          .andWhere('effective_date', '<=', nowET)
+          .andWhere('expiry_date', '>', nowET)
+          .orderBy('effective_date', 'desc');
+        const seenFallback = new Set();
+        for (const row of fallbackRows) {
+          if (seenFallback.has(row.county)) continue;
+          seenFallback.add(row.county);
+          current.push(row);
+        }
+      }
+
+      return current;
     } catch { return []; }
   }
 

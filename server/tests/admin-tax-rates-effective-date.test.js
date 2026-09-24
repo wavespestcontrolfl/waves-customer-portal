@@ -193,6 +193,18 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
     expect(r.rate).toBeCloseTo(0.07, 6);
     expect(r.reason).toContain('Charlotte');
   });
+
+  test('the tax advisor also honors the old-shape predecessor instead of dropping the county (codex round-2 P1)', async () => {
+    const TaxAdvisor = require('../services/tax-advisor');
+    const rates = await TaxAdvisor.getCurrentTaxRates();
+    const charlotteRows = rates.filter((r) => r.county === county);
+    // EXPECTED: exactly one row for Charlotte (the still-in-force
+    // predecessor), not zero (dropped because neither row satisfied the
+    // active=true bound during the staged gap) and not the not-yet-
+    // effective successor.
+    expect(charlotteRows).toHaveLength(1);
+    expect(parseFloat(charlotteRows[0].combined_rate)).toBeCloseTo(0.07, 6);
+  });
 });
 
 // No database needed: validation runs (and rejects) before the route ever
