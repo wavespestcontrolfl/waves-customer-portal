@@ -77,6 +77,17 @@ describe('shared service-line inference (utils/service-line-infer)', () => {
     expect(inferServiceBucket('Lawn Pest Control')).toBe('one_time_entry');
   });
 
+  test('mosquito misting system is a distinct high-ticket lead identity, not the recurring barrier program (catalog 20260924000020)', () => {
+    expect(inferSpecificService('mosquito misting system')).toBe('mosquito_misting');
+    expect(inferServiceBucket('mosquito misting system')).toBe('high_ticket_specialty');
+    expect(inferServiceLine('mosquito misting system')).toBe('mosquito');
+    expect(inferSpecificService('Mosquito Misting System Service')).toBe('mosquito_misting');
+    // Plain "mosquito control" (barrier program) is unaffected — still the
+    // recurring bucket.
+    expect(inferSpecificService('mosquito control')).toBe('mosquito_program');
+    expect(inferServiceBucket('mosquito control')).toBe('recurring');
+  });
+
   test('palmetto bugs are a PEST term, not a palm match (codex rd3)', () => {
     for (const interest of ['Palmetto Bugs', 'palmetto bug treatment']) {
       expect(inferServiceLine(interest)).toBe('pest');
