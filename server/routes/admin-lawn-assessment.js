@@ -131,25 +131,25 @@ function finiteNumberOrNull(value) {
 // floor) fall back to worst-of(fungus, thatch) — never 0.
 function legacyConfirmFinalScores(assessment, adjustedScores) {
   const aiKnown = (key) => assessment[key] != null;
+  // The drawer posts only typed keys, so a key that is neither AI-known nor
+  // typed stays unknown (null) — never scoreValue's 0 default.
+  const typed = (key) => adjustedScores?.[key] != null && adjustedScores[key] !== ''
+    && Number.isFinite(Number(adjustedScores[key]));
   const finalScores = Object.fromEntries(
     ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level']
-      .map((key) => [key, aiKnown(key) ? scoreValue(assessment[key]) : scoreValue(adjustedScores?.[key], assessment[key])]),
+      .map((key) => [key, aiKnown(key) ? scoreValue(assessment[key]) : (typed(key) ? scoreValue(adjustedScores[key]) : null)]),
   );
   if (aiKnown('stress_damage')) {
     finalScores.stress_damage = scoreValue(assessment.stress_damage);
     return finalScores;
   }
-  // Number(null) is 0, so check for a stored value first — a missing floor
-  // is the 95 fallback, never a 0 that drags Stress to zero.
-  const aiFloor = assessment.stress_damage != null && Number.isFinite(Number(assessment.stress_damage))
-    ? Number(assessment.stress_damage)
-    : 95;
-  const derivedStress = Math.min(
-    Number(finalScores.fungus_control),
-    Number(finalScores.thatch_level),
-    aiFloor,
-  );
-  finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
+  if (typed('stress_damage')) {
+    finalScores.stress_damage = scoreValue(adjustedScores.stress_damage);
+    return finalScores;
+  }
+  // Derive from the KNOWN components only, with the 95 floor.
+  const parts = [finalScores.fungus_control, finalScores.thatch_level, 95].filter((v) => v != null);
+  finalScores.stress_damage = Math.min(...parts);
   return finalScores;
 }
 
@@ -1132,7 +1132,12 @@ router.post('/confirm', async (req, res, next) => {
         confirmed_at: new Date(),
         updated_at: new Date(),
         ...finalScores,
-        overall_score: calculateOverallScore(finalScores),
+        // No stored overall until every displayed score exists; readers then
+        // recompute it null-aware (calculateLawnOverallScore) instead of
+        // counting a blank as 0.
+        overall_score: ['turf_density', 'weed_suppression', 'color_health', 'stress_damage'].every((key) => finalScores[key] != null)
+          ? calculateOverallScore(finalScores)
+          : null,
       };
 
       // If tech provided adjusted scores, apply them

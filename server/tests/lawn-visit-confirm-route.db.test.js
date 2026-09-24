@@ -295,6 +295,12 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(Object.values(techScores).every((v) => v !== undefined)).toBe(true);
   });
 
+  test('legacy sparse confirmation keeps unknown scores blank and derives Stress from known components only', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null, thatch_level: 85, stress_damage: null }, { run: false });
+    const result = await request(assessment.id, { adjustedScores: {} });
+    expect(result.body.assessment).toMatchObject({ color_health: null, fungus_control: null, thatch_level: 85, stress_damage: 85, overall_score: null });
+  });
+
   test.each([false, true])('legacy confirmation works when the optional run table is missing: %s', async (missingTable) => {
     const { assessment } = await seed(COMPLETE, { run: false });
     if (missingTable) await mockKnex.schema.renameTable('lawn_assessment_runs', 'temporarily_missing_runs');
