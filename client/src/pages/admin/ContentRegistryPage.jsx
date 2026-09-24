@@ -177,23 +177,25 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncNotice, setSyncNotice] = useState("");
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [syncError, setSyncError] = useState("");
   const loadGen = useRef(0);
 
   const load = useCallback(async (background = false) => {
     const gen = ++loadGen.current;
     if (!background) setLoading(true);
-    setError("");
+    setReadError("");
     try {
       const next = await adminFetch(buildQuery({ status, contentType, source, liveStatus, search }));
       if (gen !== loadGen.current) return;
       setData(next);
+      setReadError("");
       setSelectedId((current) => (
         next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null
       ));
     } catch (err) {
       if (gen !== loadGen.current) return;
-      setError(err.message);
+      setReadError(err.message);
     } finally {
       if (gen === loadGen.current) setLoading(false);
     }
@@ -202,7 +204,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
   const runSync = useCallback(async () => {
     loadGen.current += 1;
     setSyncing(true);
-    setError("");
+    setSyncError("");
     setSyncNotice("");
     try {
       const result = await adminFetch("/admin/content-registry/sync", {
@@ -213,7 +215,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
       setSyncNotice(`Sync complete: ${Number(summary.astro_files_scanned || 0).toLocaleString()} Astro files, ${Number(summary.matched_count || 0).toLocaleString()} matched, ${Number(summary.conflict_count || 0).toLocaleString()} conflicts.`);
       await load();
     } catch (err) {
-      setError(err.message);
+      setSyncError(err.message);
     } finally {
       setSyncing(false);
     }
@@ -275,10 +277,17 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
         </div>
       )}
 
-      {error && (
+      {syncError && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
           <AlertTriangle size={16} strokeWidth={2} />
-          <span style={{ fontSize: 13, fontWeight: 700 }}>{error}</span>
+          <span style={{ fontSize: 13, fontWeight: 700 }}>{syncError}</span>
+        </div>
+      )}
+
+      {readError && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
+          <AlertTriangle size={16} strokeWidth={2} />
+          <span style={{ fontSize: 13, fontWeight: 700 }}>{readError}</span>
           <button
             type="button"
             onClick={() => load()}

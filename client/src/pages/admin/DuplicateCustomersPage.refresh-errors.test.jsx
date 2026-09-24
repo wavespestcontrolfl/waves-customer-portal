@@ -86,3 +86,32 @@ it("keeps a mutation error while a later successful poll clears its read error",
   expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   expect(screen.getByText("Synthetic action failure")).toBeInTheDocument();
 });
+
+
+it("retains loaded merge history on a failed secondary poll and accepts a later empty journal", async () => {
+  let journalMode = "loaded";
+  rawAdminFetch.mockImplementation((path) => {
+    if (path === "/admin/customer-duplicates") {
+      return response(journalMode === "loaded" ? duplicateGroups : { groups: [] });
+    }
+    if (path === "/admin/customer-duplicates/merges") {
+      if (journalMode === "failed") return Promise.reject(new Error("Journal unavailable"));
+      return response({ merges: journalMode === "loaded" ? [{
+        journalId: "journal-1", winnerId: "winner", winnerName: "Kept Customer",
+        loserName: "Prior Customer", createdAt: "2026-09-24T12:00:00Z",
+        performedBy: "Fixture operator", tier: "green", revertible: true,
+      }] : [] });
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  render(<MemoryRouter><DuplicateCustomersPage /></MemoryRouter>);
+  expect(await screen.findByRole("button", { name: "Undo merge" })).toBeInTheDocument();
+  journalMode = "failed";
+  await act(async () => refresh.callback());
+  expect(screen.getByText("No duplicate customers pending review.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Undo merge" })).toBeInTheDocument();
+  expect(screen.getByText("Prior Customer")).toBeInTheDocument();
+  journalMode = "empty";
+  await act(async () => refresh.callback());
+  expect(screen.queryByRole("button", { name: "Undo merge" })).toBeNull();
+});

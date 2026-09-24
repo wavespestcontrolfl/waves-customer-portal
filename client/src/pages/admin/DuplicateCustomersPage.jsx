@@ -96,12 +96,13 @@ export default function DuplicateCustomersPage() {
     try {
       const data = await api("/admin/customer-duplicates");
 
-      // The undo surface is secondary — a merges-list failure must not blank
-      // the review queue, so it degrades to an empty section silently.
-      const journal = await api("/admin/customer-duplicates/merges").catch(() => ({ merges: [] }));
+      // A secondary read failure must not erase the loaded Undo history
+      // during a background refresh. The primary queue can still update.
+      const journal = await api("/admin/customer-duplicates/merges").catch(() => null);
       if (seq !== loadSeq.current) return;
       setGroups(data.groups || []);
-      setMerges(journal.merges || []);
+      if (journal) setMerges(journal.merges || []);
+      else if (!background) setMerges([]);
       setReadError("");
     } catch (err) {
       if (seq === loadSeq.current) setReadError(err.message || "Could not load duplicate customers");

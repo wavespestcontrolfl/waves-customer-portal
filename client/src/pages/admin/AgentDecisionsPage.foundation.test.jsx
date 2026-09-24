@@ -170,6 +170,36 @@ it('clears a decision refresh error after a successful automatic poll', async ()
   expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
 });
 
+it('preserves a failed decision action while automatic polls clear only read errors', async () => {
+  let failNextRead = false;
+  adminFetch.mockImplementation((url, options) => {
+    if (options?.method === 'POST') return Promise.reject(new Error('Decision action failed'));
+    if (url.endsWith('/context')) return Promise.resolve({ context: {} });
+    if (failNextRead) {
+      failNextRead = false;
+      return Promise.reject(new Error('Decision read failed'));
+    }
+    return Promise.resolve({
+      decisions: [{ id: 'decision-a', customerName: 'Customer A', recommendedActions: [] }],
+    });
+  });
+
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Accept', exact: true }));
+  await screen.findByText('Decision action failed');
+
+  failNextRead = true;
+  await act(async () => refresh.callback());
+  expect(screen.getByText('Decision action failed')).toBeInTheDocument();
+  expect(screen.getByText('Decision read failed')).toBeInTheDocument();
+  expect(screen.getAllByRole('button', { name: 'Try again' })).toHaveLength(1);
+
+  await act(async () => refresh.callback());
+  expect(screen.getByText('Decision action failed')).toBeInTheDocument();
+  expect(screen.queryByText('Decision read failed')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+});
+
 it('clears foreground loading when a newer background poll wins', async () => {
   let resolveRetry;
   let listReads = 0;

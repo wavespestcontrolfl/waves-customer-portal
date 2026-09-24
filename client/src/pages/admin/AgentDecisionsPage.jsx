@@ -98,7 +98,8 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [correctionNote, setCorrectionNote] = useState("");
   const [correctedActions, setCorrectedActions] = useState("");
   const [idealReply, setIdealReply] = useState("");
@@ -123,18 +124,18 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     const editEpoch = editEpochRef.current;
     if (!background) {
       setLoading(true);
-      setError("");
+      setReadError("");
     }
     try {
       const next = await adminFetch(`/admin/agent-decisions?status=${encodeURIComponent(status)}&limit=100`);
       if (request !== requestRef.current || editEpoch !== editEpochRef.current) return;
       setData(next);
-      setError("");
+      setReadError("");
       setSelectedId((current) => (
         next.decisions?.some((d) => d.id === current) ? current : next.decisions?.[0]?.id || null
       ));
     } catch (err) {
-      if (request === requestRef.current && editEpoch === editEpochRef.current) setError(err.message);
+      if (request === requestRef.current && editEpoch === editEpochRef.current) setReadError(err.message);
     } finally {
       if (request === requestRef.current) setLoading(false);
     }
@@ -250,7 +251,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const review = useCallback(async (decision, verdict) => {
     if (!decision) return;
     setBusyId(`${decision.id}:${verdict}`);
-    setError("");
+    setActionError("");
     setNotice("");
     try {
       const body = { verdict };
@@ -275,7 +276,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       setNotice(`Decision ${statusLabel(verdict).toLowerCase()}.`);
       await load();
     } catch (err) {
-      setError(err.message);
+      setActionError(err.message);
     } finally {
       setBusyId("");
     }
@@ -284,7 +285,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const saveReplyTraining = useCallback(async (decision, replyVerdict) => {
     if (!decision || !replyContextReady) return;
     setBusyId(`${decision.id}:reply:${replyVerdict}`);
-    setError("");
+    setActionError("");
     setNotice("");
     try {
       const finalReply = replyVerdict === "accepted"
@@ -312,7 +313,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       };
       setNotice(`Reply training ${statusLabel(replyVerdict).toLowerCase()} saved.`);
     } catch (err) {
-      setError(err.message);
+      setActionError(err.message);
     } finally {
       setBusyId("");
     }
@@ -341,7 +342,8 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           </ActionFeedback>
         )}
 
-        {error && <ActionFeedback error onRetry={load}>{error}</ActionFeedback>}
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
+        {readError && <ActionFeedback error onRetry={load}>{readError}</ActionFeedback>}
         {notice && <ActionFeedback>{notice}</ActionFeedback>}
 
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">

@@ -186,7 +186,9 @@ describe("OwedTabV2", () => {
 it("keeps expanded owed pages when refreshing automatically", async () => {
   const first = rows()[0];
   const second = { ...rows()[1], description: "Second page promise" };
+  const requested = [];
   globalThis.fetch.mockImplementation(async (url) => {
+    requested.push(String(url));
     const later = String(url).includes("offset=200");
     return { ok: true, status: 200, json: async () => ({
       commitments: later ? [second] : [first], has_more: !later, next_offset: later ? null : 200,
@@ -197,7 +199,85 @@ it("keeps expanded owed pages when refreshing automatically", async () => {
   fireEvent.click(screen.getByRole("button", { name: /Load more/ }));
   await screen.findByText(second.description);
   await act(async () => window.dispatchEvent(new Event("focus")));
+  await waitFor(() => expect(requested.filter((url) => url.includes("offset=200"))).toHaveLength(3));
   expect(screen.getByText(first.description)).toBeInTheDocument();
   expect(screen.getByText(second.description)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+});
+
+it("restarts an expanded refresh when page-boundary drift skips a row", async () => {
+  const first = rows()[0];
+  const second = { ...rows()[1], description: "Second page promise" };
+  const inserted = { ...first, id: "inserted", description: "Inserted then fulfilled" };
+  let requestNumber = 0;
+  globalThis.fetch.mockImplementation(async (url) => {
+    requestNumber += 1;
+    const later = String(url).includes("offset=200");
+    let commitments;
+    // Initial two-page view.
+    if (requestNumber <= 2) commitments = later ? [second] : [first];
+    // Walk one: a new first row shifts the old first row across the page
+    // boundary, then disappears before offset 200 is read. The offset page
+    // skips `first`, producing the incomplete [inserted, second] walk.
+    else if (requestNumber <= 4) commitments = later ? [second] : [inserted];
+    // Walks two and three see the settled ordering and must agree before it
+    // can replace the previously rendered rows.
+    else commitments = later ? [second] : [first];
+    return { ok: true, status: 200, json: async () => ({
+      commitments,
+      has_more: !later,
+      next_offset: later ? null : 200,
+    }) };
+  });
+
+  render(<OwedTabV2 />);
+  await screen.findByText(first.description);
+  fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+  await screen.findByText(second.description);
+
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  await waitFor(() => expect(requestNumber).toBe(8));
+  expect(screen.getByText(first.description)).toBeInTheDocument();
+  expect(screen.getByText(second.description)).toBeInTheDocument();
+  expect(screen.queryByText(inserted.description)).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("keeps the rendered expanded queue when three walks never stabilize", async () => {
+  const first = rows()[0];
+  const second = { ...rows()[1], description: "Second page promise" };
+  let requestNumber = 0;
+  let unstable = true;
+  globalThis.fetch.mockImplementation(async (url) => {
+    requestNumber += 1;
+    const later = String(url).includes("offset=200");
+    const walk = Math.max(0, Math.ceil((requestNumber - 2) / 2));
+    const changing = { ...first, id: `changing-${walk}`, description: `Changing row ${walk}` };
+    return { ok: true, status: 200, json: async () => ({
+      commitments: requestNumber <= 2 || !unstable
+        ? (later ? [second] : [first])
+        : (later ? [second] : [changing]),
+      has_more: !later,
+      next_offset: later ? null : 200,
+    }) };
+  });
+
+  render(<OwedTabV2 />);
+  await screen.findByText(first.description);
+  fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+  await screen.findByText(second.description);
+
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "The owed queue changed while refreshing",
+  );
+  expect(requestNumber).toBe(8);
+  expect(screen.getByText(first.description)).toBeInTheDocument();
+  expect(screen.getByText(second.description)).toBeInTheDocument();
+  unstable = false;
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(requestNumber).toBe(12));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByText(first.description)).toBeInTheDocument();
+  expect(screen.getByText(second.description)).toBeInTheDocument();
 });
