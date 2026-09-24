@@ -380,6 +380,9 @@ function isValidPestIdentification(parsed) {
   if (typeof parsed.best_match !== 'string' || !parsed.best_match.trim()) return false;
   if (!clampEnum(parsed.category, CATEGORIES)) return false;
   if (!clampEnum(parsed.confidence, CONFIDENCES)) return false;
+  // mergeModelResults reads not_a_pest; a missing flag would read as "is a
+  // pest" and offer a consultation for a harmless bug (Codex r3).
+  if (typeof parsed.not_a_pest !== 'boolean' && !['true', 'false'].includes(String(parsed.not_a_pest).trim().toLowerCase())) return false;
   return true;
 }
 

@@ -117,6 +117,8 @@ describe('analyzePhoto — an incomplete Gemini answer is a miss', () => {
     ['blank best_match', { ...GEMINI_ID, best_match: '  ' }],
     ['unknown category', { ...GEMINI_ID, category: 'bug' }],
     ['missing confidence', (({ confidence, ...rest }) => rest)(GEMINI_ID)],
+    ['missing not_a_pest', (({ not_a_pest, ...rest }) => rest)(GEMINI_ID)],
+    ['null not_a_pest', { ...GEMINI_ID, not_a_pest: null }],
   ])('%s → falls back to Claude', async (_label, body) => {
     global.fetch = jest.fn().mockResolvedValue(geminiResponse(body));
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify(CLAUDE_ID) }] });

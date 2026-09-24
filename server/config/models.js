@@ -316,7 +316,9 @@ const TEXT_POLICIES = Object.freeze({
     // GEMINI_VISION_BEST is the primary, Claude VISION is the fallback (only
     // when Gemini returns nothing), matching the waves-llm skill's rule that
     // every cross-provider call site keeps an automatic Claude fallback.
-    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
+    // Honors the shared GEMINI_VISION_MODEL override the other photo lanes
+    // read, so one env var moves (or rolls back) every Gemini photo lane.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
   }),
   lawnVisitAssessment: Object.freeze({
