@@ -194,9 +194,14 @@ function pestPublicResult(contract) {
 // worry about" copy — the hedged/generic check runs BEFORE the not_a_pest
 // check, so only a confident, uncontested benign call reads as 'none'.
 // Inspection stays first regardless of confidence (termite/rodent/WDO-style
-// entries are inspection-first at ANY confidence, by design).
-function pestNextStepKind(result, idLabel, type, access) {
+// entries are inspection-first at ANY confidence, by design). `partial`
+// (codex r4 P1) also runs before not_a_pest/lane-default: identifyPest
+// returns ok:true as soon as ONE photo merges successfully, so a benign
+// photo succeeding while an actual pest photo silently fails must not read
+// as "nothing to worry about" either.
+function pestNextStepKind(result, idLabel, type, access, partial) {
   if (result.recommendation && result.recommendation.inspection_required) return 'inspection';
+  if (partial) return 'unclear';
   if (idLabel.hedged && idLabel.specificity === 'generic') return 'unclear';
   if (result.not_a_pest) return 'none';
   return laneOutcomeKind(type, access);
@@ -208,6 +213,7 @@ async function handlePest(req, res, { note, location }) {
   if (!result.ok) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
   }
+  const partial = result.perPhoto.length < photoInputs.length;
 
   const contract = buildPestReportContract(result);
   const [row] = await db('pest_identifications').insert({
@@ -217,6 +223,7 @@ async function handlePest(req, res, { note, location }) {
     customer_id: req.customer.id,
     ai_analysis: JSON.stringify({
       customer_note: note,
+      partial,
       per_photo: result.perPhoto.map((photo) => ({
         slug: photo.entry ? photo.entry.slug : null,
         confidence: photo.confidence,
@@ -246,7 +253,7 @@ async function handlePest(req, res, { note, location }) {
   const pestResult = pestPublicResult(contract);
   const idLabel = publicIdentificationLabel(contract);
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = pestNextStepKind(pestResult, idLabel, 'pest', access);
+  const kind = pestNextStepKind(pestResult, idLabel, 'pest', access, partial);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('pest', { location, note }),
@@ -504,7 +511,8 @@ function pestNextStepKindFromRow(row, access) {
   const contract = parseJsonSafe(row.report_contract);
   const publicReport = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
   const idLabel = publicIdentificationLabel(contract);
-  return pestNextStepKind(publicReport, idLabel, 'pest', access);
+  const partial = !!parseJsonSafe(row.ai_analysis).partial;
+  return pestNextStepKind(publicReport, idLabel, 'pest', access, partial);
 }
 
 function lawnNextStepKindFromRow(row, access) {
@@ -530,7 +538,7 @@ router.get('/', async (req, res, next) => {
     const customerId = req.customer.id;
     const [pestRows, lawnRows, treeRows] = await Promise.all([
       db('pest_identifications').where({ customer_id: customerId, mode: 'customer' })
-        .orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract'),
+        .orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract', 'ai_analysis'),
       db('lawn_diagnostics').where({ customer_id: customerId, mode: 'customer' })
         .orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract'),
       db('tree_shrub_assessments').where({ customer_id: customerId, mode: 'customer' })
@@ -576,7 +584,8 @@ router.get('/:type/:id', async (req, res, next) => {
       const contract = parseJsonSafe(row.report_contract);
       const pestResult = pestPublicResult(contract);
       const idLabel = publicIdentificationLabel(contract);
-      const kind = pestNextStepKind(pestResult, idLabel, 'pest', access);
+      const partial = !!parseJsonSafe(row.ai_analysis).partial;
+      const kind = pestNextStepKind(pestResult, idLabel, 'pest', access, partial);
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
         prefill: prefillFor('pest', { location: row.location, note: row.note }),

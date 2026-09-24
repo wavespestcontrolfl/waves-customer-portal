@@ -377,6 +377,21 @@ describe('next_step branches', () => {
     });
   });
 
+  test('pest: one photo silently failing to merge forces unclear, never a confident read off the rest', async () => {
+    // codex r4 P1 — identifyPest returns ok:true as soon as ONE photo merges;
+    // a benign photo succeeding while a real pest photo fails must not read
+    // as "nothing to worry about" (or any other confident outcome).
+    const benign = pestResultFor('ghost-ant');
+    mockIdentifyPest.mockResolvedValue({ ...benign, perPhoto: benign.perPhoto.slice(0, 1) });
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-z', lanes: ['pest'] }); // would otherwise win as 'reservice'
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('unclear');
+    });
+  });
+
   test('pest: contested/low-confidence not_a_pest read -> unclear, never "nothing to worry about"', async () => {
     // A lovebug/beneficial call that disagreed across photos must not read as
     // confidently benign (codex r1 P1).
