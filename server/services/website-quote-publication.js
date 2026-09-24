@@ -7,6 +7,7 @@ const { lineRequiresReview, lineHasHeuristicTurf } = require('./estimator-engine
 const { estimateExpiresAt } = require('./admin-estimate-persistence');
 const { moneyCents } = require('./estimate-pricing-bundle-utils');
 const { recordAuditEvent } = require('./audit-log');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 // Called only with THIS /calculate run's server result, after its existing
 // self-bookability checks. The website may request publication; it never
@@ -19,12 +20,24 @@ async function publishWebsiteQuote({ estimateId, leadId, engineInput, engineResu
   ))) return null;
 
   return db.transaction(async (trx) => {
-    // Same lock order as acceptance: estimate, then customer. A staff edit,
-    // another calculation, or a concurrent acceptance cannot cross this mint.
+    // The customer's comms lock FIRST (lock-order contract,
+    // utils/customer-comms-lock.js), resolved → locked → re-verified:
+    // wizard-plan activation (booking.js activateWizardSeries) holds this
+    // same key before its customer → estimate row locks, so taking it here
+    // ahead of this path's estimate → customer row locks serializes the two
+    // before either holds a row (#4716 pre-push P1 — they deadlocked).
+    const peek = await trx('estimates').where({ id: estimateId }).first('customer_id');
+    if (!peek?.customer_id) return null;
+    await lockCustomerComms(trx, peek.customer_id);
+    // Then the same row order as acceptance: estimate, then customer. A
+    // staff edit, another calculation, or a concurrent acceptance cannot
+    // cross this mint.
     const row = await trx('estimates')
       .where({ id: estimateId, source: 'quote_wizard', status: 'draft', pricing_authority: 'SERVER' })
       .whereNull('archived_at').whereNull('price_locked_at').forUpdate().first();
-    if (!row) return null;
+    // Re-verify under the lock: a merge that repointed the draft between the
+    // peek and here would leave this transaction fenced on the wrong key.
+    if (!row || String(row.customer_id) !== String(peek.customer_id)) return null;
     const stored = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data;
     const fee = stored.setupFeeQuote || {};
     if (stored.lead_id !== leadId || fee.unverified

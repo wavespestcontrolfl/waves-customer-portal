@@ -138,6 +138,129 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     expect((await getLog('?needsResponse=true&search=estimate')).body.messages).toEqual([]);
   });
 
+  test.each([
+    ['an exact provider SID', 'SM-immutable-peer'],
+    ['a unique null-SID backfill link', null],
+  ])('needs-response history keeps the event peer after a customer phone change using %s', async (_label, sid) => {
+    const customerId = randomUUID();
+    const conversationId = randomUUID();
+    const pendingId = randomUUID();
+    const replyId = randomUUID();
+    const originalPhone = '+19415559820';
+    const changedPhone = '+19415559821';
+    const ours = '+19415550199';
+    await mockPg('customers').insert({
+      id: customerId, phone: originalPhone, first_name: 'Ada', last_name: 'Changed',
+    });
+    await mockPg('conversations').insert({
+      id: conversationId, customer_id: customerId, channel: 'sms',
+      our_endpoint_id: ours, contact_phone: originalPhone,
+    });
+    await mockPg('messages').insert({
+      id: pendingId, conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+      body: 'Can you confirm the original address?', author_type: 'customer',
+      delivery_status: 'received', message_type: 'inbound', twilio_sid: sid,
+      created_at: '2026-09-23T12:00:00Z',
+    });
+    await mockPg('sms_log').insert({
+      customer_id: customerId, direction: 'inbound', from_phone: originalPhone, to_phone: ours,
+      message_body: 'Can you confirm the original address?', message_type: 'inbound',
+      status: 'received', twilio_sid: sid, created_at: '2026-09-23T12:00:00Z',
+    });
+    await mockPg('customers').where({ id: customerId }).update({ phone: changedPhone });
+    await mockPg('conversations').where({ id: conversationId }).update({ contact_phone: changedPhone });
+    await mockPg('messages').insert({
+      id: replyId, conversation_id: conversationId, channel: 'sms', direction: 'outbound',
+      body: 'Reply sent to the new number', author_type: 'admin', delivery_status: 'sent',
+      message_type: 'manual', twilio_sid: 'SM-new-number-reply',
+      created_at: '2026-09-23T12:01:00Z',
+    });
+    await mockPg('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: ours, to_phone: changedPhone,
+      message_body: 'Reply sent to the new number', message_type: 'manual', status: 'sent',
+      twilio_sid: 'SM-new-number-reply', created_at: '2026-09-23T12:01:00Z',
+    });
+
+    const pending = await getLog('?needsResponse=true');
+    expect(pending.status).toBe(200);
+    expect(pending.body.messages).toEqual([
+      expect.objectContaining({
+        id: pendingId, from: originalPhone, to: ours, customerId: null,
+        customerName: 'Ada Changed', responseNeedsResponse: true,
+      }),
+    ]);
+    expect((await getLog(`?needsResponse=true&phone=${encodeURIComponent(originalPhone)}`))
+      .body.messages.map((message) => message.id)).toEqual([pendingId]);
+    expect((await getLog(`?needsResponse=true&search=${encodeURIComponent(originalPhone)}`))
+      .body.messages.map((message) => message.id)).toEqual([pendingId]);
+
+    const ordinary = await getLog();
+    expect(ordinary.status).toBe(200);
+    expect(ordinary.body.messages.find((message) => message.id === replyId)).toMatchObject({
+      from: ours, to: changedPhone, customerId,
+    });
+    expect(ordinary.body.messages.find((message) => message.id === pendingId)).toMatchObject({
+      from: originalPhone, to: ours, customerId: null, customerName: 'Ada Changed',
+    });
+    expect(ordinary.body.messages.every((message) => !Object.hasOwn(message, 'responseNeedsResponse'))).toBe(true);
+  });
+
+  test('authoritative pending flag survives legacy-only prior question context', async () => {
+    const conversationId = randomUUID();
+    const statementId = randomUUID();
+    const okayId = randomUUID();
+    const contactPhone = '+19415559822';
+    const ours = '+19415550199';
+    await mockPg('conversations').insert({
+      id: conversationId, channel: 'sms', our_endpoint_id: ours,
+      unknown_contact: true, contact_phone: contactPhone,
+    });
+    await mockPg('messages').insert([
+      {
+        id: statementId, conversation_id: conversationId, channel: 'sms', direction: 'outbound',
+        body: 'The work is complete.', author_type: 'admin', delivery_status: 'sent',
+        message_type: 'manual', twilio_sid: 'SM-canonical-statement',
+        created_at: '2026-09-23T12:00:00Z',
+      },
+      {
+        id: okayId, conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+        body: 'Okay', author_type: 'customer', delivery_status: 'received',
+        message_type: 'inbound', twilio_sid: 'SM-canonical-okay',
+        created_at: '2026-09-23T12:02:00Z',
+      },
+    ]);
+    await mockPg('sms_log').insert([
+      {
+        direction: 'outbound', from_phone: ours, to_phone: contactPhone,
+        message_body: 'The work is complete.', message_type: 'manual', status: 'sent',
+        twilio_sid: 'SM-canonical-statement', created_at: '2026-09-23T12:00:00Z',
+      },
+      {
+        direction: 'outbound', from_phone: ours, to_phone: contactPhone,
+        message_body: 'Does 9am work?', message_type: 'manual', status: 'sent',
+        twilio_sid: 'SM-legacy-only-question', created_at: '2026-09-23T12:01:00Z',
+      },
+      {
+        direction: 'inbound', from_phone: contactPhone, to_phone: ours,
+        message_body: 'Okay', message_type: 'inbound', status: 'received',
+        twilio_sid: 'SM-canonical-okay', created_at: '2026-09-23T12:02:00Z',
+      },
+    ]);
+
+    const { status, body } = await getLog('?needsResponse=true');
+    expect(status).toBe(200);
+    expect(body.messages.find((message) => message.id === okayId)).toMatchObject({
+      courtesyOnly: true,
+      responseNeedsResponse: true,
+      from: contactPhone,
+      to: ours,
+    });
+    expect(body.messages.find((message) => message.id === statementId)).toMatchObject({
+      responseNeedsResponse: false,
+    });
+    expect(body.messages.some((message) => message.body === 'Does 9am work?')).toBe(false);
+  });
+
   test('pending search supports multiple matching rows across multiple peers', async () => {
     await insertThread({ contactPhone: '+19415559870', body: 'Can you confirm the estimate?' });
     await insertThread({ contactPhone: '+19415559871', body: 'Can you revise the estimate?' });

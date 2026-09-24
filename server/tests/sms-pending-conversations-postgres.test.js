@@ -25,6 +25,7 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     mockTrx = await database.transaction();
     await createSmsResponseTables(mockTrx);
     await mockTrx.raw('CREATE INDEX messages_conversation_created_idx ON messages (conversation_id, created_at DESC)');
+    await mockTrx.raw('CREATE INDEX sms_log_twilio_sid_idx ON sms_log (twilio_sid) WHERE twilio_sid IS NOT NULL');
   });
 
   afterAll(async () => { await mockTrx?.rollback(); await database?.destroy(); });
@@ -135,6 +136,45 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
     await seed({ direction: 'outbound', messageType: 'manual', status: 'sent', body: 'Calling now' });
     await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+  });
+
+  test.each(['canonical', 'legacy-only'])(
+    'an unlinked %s reply on the same immutable peer and endpoint closes global and customer-scoped work',
+    async (source) => {
+      const candidate = await seed({ customerId: 'new', body: 'Please confirm this visit' });
+      const reply = await seed({
+        customerId: null,
+        phone: '+19415550100',
+        ours: '+19415550190',
+        direction: 'outbound',
+        messageType: 'manual',
+        status: 'sent',
+        body: 'Confirmed.',
+        legacy: source === 'legacy-only',
+      });
+      if (source === 'legacy-only') await mockTrx('messages').where({ id: reply.messageId }).del();
+      await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+      await expect(countPendingSmsConversations({ customerId: candidate.customerId }))
+        .resolves.toEqual({ conversations: 0, messages: 0 });
+    },
+  );
+
+  test.each([
+    ['peer', { phone: '+19415550109', ours: '+19415550190' }],
+    ['endpoint', { phone: '+19415550100', ours: '+19415550191' }],
+  ])('an unlinked reply on a different %s does not close customer-scoped work', async (_difference, reply) => {
+    const candidate = await seed({ customerId: 'new', body: 'Please confirm this visit' });
+    await seed({
+      customerId: null,
+      ...reply,
+      direction: 'outbound',
+      messageType: 'manual',
+      status: 'sent',
+      body: 'Confirmed.',
+    });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+    await expect(countPendingSmsConversations({ customerId: candidate.customerId }))
+      .resolves.toEqual({ conversations: 1, messages: 1 });
   });
 
   test.each(['manual', 'ai_approved'])('a legacy-only %s reply closes canonical work for badge and digest', async (messageType) => {
@@ -317,19 +357,121 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     });
   });
 
+  test('canonical-only messages retain their phone identity after the customer phone changes', async () => {
+    const originalPhone = '+19415550100';
+    const changedPhone = '+19415550109';
+    const ours = '+19415550190';
+    const question = await seed({ customerId: 'new', legacy: false, metadata: {
+      sms_contact_phone: originalPhone, sms_our_endpoint_id: ours,
+    } });
+    await mockTrx('conversations').where({ id: question.conversationId }).update({ contact_phone: null });
+    await mockTrx('customers').where({ id: question.customerId }).update({ phone: changedPhone });
+    await seed({ phone: changedPhone, direction: 'outbound' });
+    await expect(countPendingSmsConversations({ includePending: true })).resolves.toEqual({
+      conversations: 1, messages: 1, pendingMessageIds: [question.messageId],
+    });
+    const reply = await seed({ customerId: question.customerId, legacy: false, direction: 'outbound', metadata: {
+      sms_contact_phone: originalPhone, sms_our_endpoint_id: ours,
+    } });
+    await mockTrx('conversations').where({ id: reply.conversationId }).update({ contact_phone: null });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+    await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([]);
+  });
+
+  test.each(['question', 'courtesy', 'approved_reply'])('null-SID backfill twins preserve canonical candidates and legacy evidence: %s', async (kind) => {
+    const inbound = await seed({ customerId: 'new', body: kind === 'courtesy' ? 'Thanks!' : 'Can you confirm the window?' });
+    const canonicalId = '00000000-0000-4000-8000-000000000001';
+    const legacyId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    await mockTrx('messages').where({ id: inbound.messageId }).update({ id: canonicalId, twilio_sid: null, metadata: '{}' });
+    await mockTrx('sms_log').where({ id: inbound.smsLogId }).update({
+      id: legacyId, twilio_sid: null,
+      metadata: JSON.stringify(kind === 'courtesy' ? { courtesyOnly: true } : { synthetic_backfill: true }),
+    });
+    await mockTrx('conversations').where({ id: inbound.conversationId }).update({ contact_phone: null });
+    if (kind === 'approved_reply') {
+      const draftId = randomUUID();
+      await mockTrx('message_drafts').insert({ id: draftId, sms_log_id: legacyId, intent: 'customer_reply' });
+      const reply = await seed({ customerId: inbound.customerId, direction: 'outbound', messageType: 'ai_approved', metadata: { draft_id: draftId } });
+      await mockTrx('messages').where({ id: reply.messageId }).update({ twilio_sid: null, metadata: '{}' });
+      await mockTrx('sms_log').where({ id: reply.smsLogId }).update({ twilio_sid: null });
+    }
+    if (kind !== 'question') {
+      await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+      await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([]);
+      return;
+    }
+    // A repeat backfill produces another canonical UUID for the same event.
+    const duplicateId = '00000000-0000-4000-8000-000000000002';
+    const original = await mockTrx('messages').where({ id: canonicalId }).first();
+    await mockTrx('messages').insert({ ...original, id: duplicateId });
+    await expect(countPendingSmsConversations({ includePending: true })).resolves.toEqual({
+      conversations: 1, messages: 1, pendingMessageIds: [duplicateId],
+    });
+    await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([
+      expect.objectContaining({ id: duplicateId, source: 'canonical', metadata: { synthetic_backfill: true } }),
+    ]);
+  });
+
+  test.each([false, true])('null-SID historical STOP stays on its original phone in global and customer-scoped reads (ambiguous=%s)', async (ambiguous) => {
+    const oldQuestion = await seed({ customerId: 'new' });
+    const newQuestion = await seed({ customerId: 'new', phone: '+19415550109' });
+    const stop = await seed({ customerId: oldQuestion.customerId, body: 'STOP', messageType: 'opt_out' });
+    await mockTrx('messages').where({ id: stop.messageId }).update({ twilio_sid: null, metadata: '{}' });
+    await mockTrx('sms_log').where({ id: stop.smsLogId }).update({ twilio_sid: null });
+    if (ambiguous) {
+      const legacyStop = await mockTrx('sms_log').where({ id: stop.smsLogId }).first();
+      await mockTrx('sms_log').insert({ ...legacyStop, id: randomUUID() });
+    }
+    await mockTrx('conversations').where({ customer_id: oldQuestion.customerId }).update({ contact_phone: null });
+    await mockTrx('customers').where({ id: oldQuestion.customerId }).update({ phone: '+19415550109' });
+    for (const customerId of [null, newQuestion.customerId]) {
+      await expect(countPendingSmsConversations({ customerId, includePending: true })).resolves.toEqual({
+        conversations: 1, messages: 1, pendingMessageIds: [newQuestion.messageId],
+      });
+    }
+    await expect(countPendingSmsConversations({ customerId: oldQuestion.customerId })).resolves.toEqual({ conversations: 0, messages: 0 });
+  });
+
+  test.each(['timestamp', 'endpoint', 'body', 'customer', 'ambiguous'])('null-SID fallback does not link a different or ambiguous legacy event: %s', async (difference) => {
+    const inbound = await seed({ customerId: 'new' });
+    await mockTrx('messages').where({ id: inbound.messageId }).update({
+      id: '00000000-0000-4000-8000-000000000001', twilio_sid: null, metadata: '{}',
+    });
+    const patch = { twilio_sid: null, metadata: JSON.stringify({ courtesyOnly: true }) };
+    if (difference === 'timestamp') patch.created_at = new Date(inbound.createdAt.getTime() - 1000);
+    if (difference === 'endpoint') patch.to_phone = '+19415550191';
+    if (difference === 'body') patch.message_body = 'A different text';
+    if (difference === 'customer') patch.customer_id = null;
+    await mockTrx('sms_log').where({ id: inbound.smsLogId }).update(patch);
+    if (difference === 'ambiguous') {
+      const row = await mockTrx('sms_log').where({ id: inbound.smsLogId }).first();
+      await mockTrx('sms_log').insert({ ...row, id: randomUUID() });
+      // Both legacy rows are ambiguous; neither may stamp canonical metadata.
+    }
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+  });
+
   test('planner materializes outbound history once', async () => {
     const conversations = [];
     const messages = [];
+    const legacyRows = [];
     for (let i = 0; i < 100; i += 1) {
       const conversationId = randomUUID();
       const createdAt = new Date(2026, 8, 1, 12, 0, i);
       conversations.push({ id: conversationId, channel: 'sms', contact_phone: `+1941${String(5550000 + i).padStart(7, '0')}`, our_endpoint_id: '+19415550190' });
-      messages.push({ id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'inbound', body: 'Question?', media: '[]', metadata: '{}', message_type: 'inbound', delivery_status: 'received', created_at: createdAt });
-      for (let h = 1; h <= 5; h += 1) messages.push({ ...messages.at(-1), id: randomUUID(), direction: 'outbound', body: 'Prior', message_type: 'reminder', delivery_status: 'delivered', created_at: new Date(createdAt - h * 60_000) });
+      messages.push({ id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'inbound', body: 'Question?', media: '[]', metadata: '{}', message_type: 'inbound', delivery_status: 'received', twilio_sid: `SM${randomUUID().replaceAll('-', '')}`, created_at: createdAt });
+      for (let h = 1; h <= 5; h += 1) messages.push({ ...messages.at(-1), id: randomUUID(), twilio_sid: `SM${randomUUID().replaceAll('-', '')}`, direction: 'outbound', body: 'Prior', message_type: 'reminder', delivery_status: 'delivered', created_at: new Date(createdAt - h * 60_000) });
+      for (const message of messages.slice(-6)) legacyRows.push({
+        id: randomUUID(), direction: message.direction, message_body: message.body,
+        from_phone: message.direction === 'inbound' ? conversations.at(-1).contact_phone : '+19415550190',
+        to_phone: message.direction === 'inbound' ? '+19415550190' : conversations.at(-1).contact_phone,
+        twilio_sid: message.twilio_sid, created_at: message.created_at, message_type: message.message_type, status: message.delivery_status,
+      });
     }
     await mockTrx.batchInsert('conversations', conversations, 100);
     await mockTrx.batchInsert('messages', messages, 100);
-    await mockTrx.raw('ANALYZE messages; ANALYZE conversations');
+    await mockTrx.batchInsert('sms_log', legacyRows, 100);
+    await mockTrx.raw('ANALYZE messages; ANALYZE conversations; ANALYZE sms_log');
     mockRawCalls.length = 0;
     await countPendingSmsConversations();
     const [sql, bindings] = mockRawCalls.find(([statement]) => statement.includes('WITH canonical_sms AS'));
@@ -340,5 +482,9 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     const scans = nodes.filter(node => node['CTE Name'] === 'outbound_events' && node.Alias === 'prev');
     expect(scans).toHaveLength(1);
     expect(scans[0]['Actual Loops']).toBe(1);
+    expect(nodes.some(node => node['Index Name'] === 'sms_log_twilio_sid_idx'
+      && node['Actual Loops'] >= messages.length)).toBe(true);
+    expect(nodes.filter(node => node['Node Type'] === 'Seq Scan' && node['Relation Name'] === 'sms_log')
+      .every(node => node['Actual Loops'] <= 1)).toBe(true);
   });
 });

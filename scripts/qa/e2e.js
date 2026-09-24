@@ -199,11 +199,16 @@ async function main() {
       assert.equal((await db('sms_log').where({ twilio_sid: sids[1] }).first()).is_read, false);
       const count = await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers }));
       assert.deepEqual(count, { conversations: 1, messages: 1 });
+      const pendingLog = async () => json(await page.request.get(`${baseUrl}/api/admin/communications/log?customerId=${fixture.customerId}&needsResponse=true`, { headers }));
+      const pendingBeforeRead = await pendingLog();
+      assert.deepEqual(pendingBeforeRead.messages.filter(message => message.responseNeedsResponse).map(message => message.id), [inbound[1]]);
       await json(await page.request.post(`${baseUrl}/api/admin/communications/messages/read`, { headers, data: { messageIds: [inbound[1]] } }));
       assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 1, messages: 1 });
+      assert.deepEqual((await pendingLog()).messages.filter(message => message.responseNeedsResponse).map(message => message.id), [inbound[1]]);
       await db('messages').insert({ id: crypto.randomUUID(), conversation_id: unified.conversation_id, channel: 'sms', direction: 'outbound', author_type: 'admin',
         body: 'Yes, the QA visit time is confirmed.', message_type: 'manual', delivery_status: 'delivered', created_at: new Date(boundary.getTime() + 1500) });
       assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 0, messages: 0 });
+      assert.deepEqual((await pendingLog()).messages, []);
       await db('messages').insert({ id: crypto.randomUUID(), conversation_id: unified.conversation_id, channel: 'sms', direction: 'inbound', author_type: 'customer',
         body: 'Can you also confirm the QA arrival window?', is_read: true, created_at: new Date(boundary.getTime() + 2000) });
       assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 1, messages: 1 });

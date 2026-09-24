@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LeadsSection } from './LeadsTabs';
@@ -14,7 +14,10 @@ vi.mock('../../components/admin/customer360/CustomerSmsPanel', () => ({
 }));
 const lead = { id: 'lead-qa', first_name: 'QA', last_name: 'Prospect', status: 'estimate_viewed', service_interest: 'Mosquito', first_contact_at: new Date().toISOString() };
 let calls;
-function Location() { return <output aria-label="Current route">{useLocation().search}</output>; }
+function Location() {
+  const navigate = useNavigate();
+  return <><output aria-label="Current route">{useLocation().search}</output><button onClick={() => navigate(-1)}>Browser back</button></>;
+}
 function mount(url = '/admin/pipeline', props = {}) {
   return render(<MemoryRouter initialEntries={[url]}><LeadsSection {...props} /><Location /></MemoryRouter>);
 }
@@ -213,4 +216,50 @@ describe('Pipeline queue navigation', () => {
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
   });
 
+});
+
+describe('Linked lead history preview', () => {
+  function linkedFixture(status = 'won') {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options) => {
+      if (String(url).includes('/admin/leads/lead-qa?leadReview=1')) {
+        calls.push({ path: String(url), options });
+        return { ok: true, json: async () => ({ activities: [], calls: [], linkedHistory: {
+          canonical: { id: 'primary-qa', first_name: 'Original', last_name: 'Example', status, service_interest: 'Lawn' },
+          original: null, linked: [], unresolved: false, hasMore: false,
+        } }) };
+      }
+      return base(url, options);
+    });
+  }
+  it('requires explicit preview opt-in', async () => {
+    linkedFixture();
+    mount('/admin/pipeline?lead=lead-qa');
+    await screen.findByText('No activities logged');
+    expect(screen.queryByRole('region', { name: 'Linked lead history' })).not.toBeInTheDocument();
+    expect(calls.some(c => c.path.includes('leadReview=1'))).toBe(false);
+  });
+  it('keeps historical links with a missing status readable', async () => {
+    linkedFixture(null);
+    mount('/admin/pipeline?lead=lead-qa&leadReview=1');
+    expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Unknown status');
+    expect(screen.getByRole('button', { name: 'Review record' })).toBeEnabled();
+  });
+  it('opens the exact linked record and preserves review mode', async () => {
+    linkedFixture();
+    mount('/admin/pipeline?leadReview=1&leadStatus=estimate_viewed&leadSearch=QA&leadPage=3&source_name=Paid');
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect', exact: true }));
+    expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Primary record: Original Example');
+    fireEvent.click(screen.getByRole('button', { name: 'Review record' }));
+    await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=primary-qa'));
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('leadReview=1');
+    await waitFor(() => expect(queueCalls().some(c => {
+      const params = new URL(c.path, 'http://localhost').searchParams;
+      return params.get('id') === 'primary-qa' && params.get('page') === '1'
+        && !params.has('status') && !params.has('search') && !params.has('source_name');
+    })).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+    await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=lead-qa'));
+    expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Primary record: Original Example');
+  });
 });

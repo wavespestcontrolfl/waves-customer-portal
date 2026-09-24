@@ -748,19 +748,18 @@ describe('lawn pricing production follow-up', () => {
     expect(floor.pricingSource).toBe('COST_FLOOR');
   });
 
-  test('default tiers expose 6/9/12 application options (4x retired 2026-07-09)', () => {
+  test('default tiers expose 9/12 application options (4x retired 2026-07-09, 6x retired 2026-09-24)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    expect(lawn.tiers).toHaveLength(3);
-    expect(lawn.tiers.map(t => t.tier)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(lawn.tiers).toHaveLength(2);
+    expect(lawn.tiers.map(t => t.tier)).toEqual(['enhanced', 'premium']);
     expect(lawn.tiers.every(t => t.label)).toBe(true);
-    expect(lawn.tiers[0].label).toBe('6x applications/yr');
-    expect(lawn.tiers[1].label).toBe('9x applications/yr');
-    expect(lawn.tiers[2].label).toBe('12x applications/yr');
+    expect(lawn.tiers[0].label).toBe('9x applications/yr');
+    expect(lawn.tiers[1].label).toBe('12x applications/yr');
   });
 
-  test('includeHiddenTiers is a no-op — basic/4x is fully retired (owner 2026-08-04)', () => {
+  test('includeHiddenTiers still exposes the hidden 6x anchor (basic/4x is fully retired 2026-08-04; standard/6x is hidden, not removed, 2026-09-24)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, {
       track: 'st_augustine', lawnFreq: 9, includeHiddenTiers: true,
@@ -1139,25 +1138,26 @@ describe('lawn pricing production follow-up', () => {
   });
 
   test('a manual discount on a lawn-only estimate applies in full — program minimum disarmed (owner 2026-07-17)', () => {
-    // Lawn-only, standard/6x at 4,500 sqft: the $38/mo bracket cell used to
-    // floor to $50/mo ($600/yr) and zero out the manual discount's recurring
-    // slice. Owner 2026-07-17 ("forget all pricing floors"): the cell sells
-    // at its market $456/yr, and the 10% manual discount ($45.60) applies in
-    // full — no lawn_program_minimum cap, plan bills $410.40.
+    // Lawn-only, enhanced/9x at 4,500 sqft (standard/6x is retired for new
+    // sales 2026-09-24 and hidden — a lawnFreq:6 request here would now
+    // silently resolve at the enhanced price instead, so this generic
+    // discount-math test moved to a still-sold cadence): the $48/mo bracket
+    // cell sells at its market $576/yr, and the 10% manual discount ($57.60)
+    // applies in full — no lawn_program_minimum cap, plan bills $518.40.
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4500,
       services: {
-        lawn: { track: 'st_augustine', lawnFreq: 6 },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
       },
       manualDiscount: { type: 'PERCENT', value: 10 },
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
-    expect(lawn.annual).toBe(456);
+    expect(lawn.annual).toBe(576);
     expect(lawn.programMinimumApplied).toBe(false);
-    expect(estimate.summary.manualDiscount.recurringAmount).toBe(45.6);
+    expect(estimate.summary.manualDiscount.recurringAmount).toBe(57.6);
     expect(estimate.summary.manualDiscount.capped).toBe(false);
     expect(estimate.summary.manualDiscount.capReason).toBeNull();
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(410.4);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(518.4);
   });
 
   test('requesting the retired 4-application tier falls back to enhanced (quarterly retired 2026-07-09)', () => {
@@ -1166,14 +1166,17 @@ describe('lawn pricing production follow-up', () => {
       track: 'st_augustine', tier: 'basic', lawnFreq: 4,
     });
 
-    expect(lawn.tiers).toHaveLength(3);
-    expect(lawn.tiers.map(t => t.tier)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(lawn.tiers).toHaveLength(2);
+    expect(lawn.tiers.map(t => t.tier)).toEqual(['enhanced', 'premium']);
     expect(lawn.selected.tier).toBe('enhanced');
     expect(lawn.tier).toBe('enhanced');
     expect(lawn.frequency).toBe(9);
 
     // Full retirement (owner 2026-08-04): includeHiddenTiers no longer
     // resurrects basic — legacy replays land on the enhanced default too.
+    // (includeHiddenTiers DOES still expose standard/6x — see the dedicated
+    // test above — basic and standard are retired one step apart on
+    // purpose: basic is fully removed, standard stays as the anchor.)
     const withHidden = priceLawnCare(property, {
       track: 'st_augustine', tier: 'basic', lawnFreq: 4, includeHiddenTiers: true,
     });
@@ -1181,21 +1184,46 @@ describe('lawn pricing production follow-up', () => {
     expect(withHidden.frequency).toBe(9);
   });
 
+  test('requesting the retired 6-application/bi-monthly tier falls back to enhanced (owner directive 2026-09-24)', () => {
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
+    const lawn = priceLawnCare(property, {
+      track: 'st_augustine', tier: 'standard', lawnFreq: 6,
+    });
+
+    expect(lawn.tiers).toHaveLength(2);
+    expect(lawn.tiers.map(t => t.tier)).toEqual(['enhanced', 'premium']);
+    expect(lawn.selected.tier).toBe('enhanced');
+    expect(lawn.tier).toBe('enhanced');
+    expect(lawn.frequency).toBe(9);
+
+    // Hidden, not removed (owner directive 2026-09-24 stops one step short
+    // of the 2026-08-04 basic/4x full removal): includeHiddenTiers still
+    // resolves standard/6x — it stays the internal price anchor
+    // (lookupLawnBracket's 9x/12x discount caps, priceOneTimeLawn).
+    const withHidden = priceLawnCare(property, {
+      track: 'st_augustine', tier: 'standard', lawnFreq: 6, includeHiddenTiers: true,
+    });
+    expect(withHidden.selected.tier).toBe('standard');
+    expect(withHidden.frequency).toBe(6);
+  });
+
   test('a deep lawn-only manual discount surfaces the below-margin warning while disarmed (report-only)', () => {
-    // 4,500 sqft standard/6x: market $456/yr, 50% manual → $228 collected.
-    // Nothing caps it (floors disarmed), but the owner still gets the
-    // "looks low" signal — the same warn path pest/tree lines already have
-    // (codex P2 on the #2827 main-merge: guardedLineCost had no lawn branch).
+    // 4,500 sqft enhanced/9x (standard/6x is retired for new sales
+    // 2026-09-24 and hidden — moved off it, same reasoning as the discount
+    // test above): market $576/yr, 50% manual → $288 collected. Nothing
+    // caps it (floors disarmed), but the owner still gets the "looks low"
+    // signal — the same warn path pest/tree lines already have (codex P2 on
+    // the #2827 main-merge: guardedLineCost had no lawn branch).
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4500,
-      services: { lawn: { track: 'st_augustine', lawnFreq: 6 } },
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
       manualDiscount: { type: 'PERCENT', value: 50 },
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
     expect(estimate.summary.manualDiscount.capped).toBe(false);
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(228);
-    expect(lawn.manualFinalAnnual).toBe(228);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(288);
+    expect(lawn.manualFinalAnnual).toBe(288);
     expect(lawn.manualFinalMargin).toBeLessThan(0.35);
     expect(lawn.manualMarginWarning).toBe(true);
     const warning = estimate.marginWarnings.find((w) => (

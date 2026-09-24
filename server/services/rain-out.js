@@ -1730,7 +1730,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
 // How long a Quick Move series-text claim (series_moves.notified_at with
 // customer_notified=false) stays exclusive before a retry may reclaim it.
 const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
@@ -2057,9 +2057,21 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     const jobDateStr = job.scheduled_date
       ? String(job.scheduled_date instanceof Date ? job.scheduled_date.toISOString() : job.scheduled_date).slice(0, 10)
       : null;
+    // codex-review P0 (PR #4673 round 3): the ROUTE's own admin-only gate
+    // decides from ITS pre-call read of the visit's scheduled_date, which
+    // races this function's own re-read (loadServiceWithCustomer above) —
+    // a concurrent date change landing in between could leave the route's
+    // check believing no series-widening is possible while THIS read
+    // disagrees, reaching the series branch with no ownership enforcement
+    // at all (requireAssignedTechnicianId only fenced the single-job
+    // fallback). A restricted (technician) caller can never take the
+    // series-shift branch here, full stop, regardless of any race — every
+    // technician request is forced onto the single-job path below, which
+    // is unconditionally fenced by requireAssignedTechnicianId's CAS.
     const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
       && !!job.is_recurring
-      && String(target.date) !== jobDateStr;
+      && String(target.date) !== jobDateStr
+      && !requireAssignedTechnicianId;
     // The anchor's on-the-hour normalization for this path lives at the
     // TOP of commit() (before the custom move's SMS pre-render) — by here
     // target.window is already the window that books.
@@ -2156,8 +2168,21 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // it is the fallback after a series attempt (the visit moves ALONE
           // by design) or the sheet asked for a single move.
           seriesPolicy: 'single',
-          ...(wantsSeriesShift
-            ? { expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
+          ...(wantsSeriesShift || requireAssignedTechnicianId
+            ? {
+                expect: {
+                  ...(wantsSeriesShift ? { scheduled_date: job.scheduled_date, window_start: job.window_start } : {}),
+                  // codex-review P1 (PR #4673): a technician-initiated
+                  // rain-out fences the ACTUAL write, not just the route's
+                  // pre-check — a reassignment landing between that check
+                  // and this call now makes the write miss and 409, the
+                  // same concurrent-change fence every other CAS field in
+                  // rebooker.reschedule already gets. Admin-initiated
+                  // rain-outs (requireAssignedTechnicianId null) stay
+                  // unscoped.
+                  ...(requireAssignedTechnicianId ? { technician_id: requireAssignedTechnicianId } : {}),
+                },
+              }
             : {}),
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);

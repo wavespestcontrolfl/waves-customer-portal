@@ -5,6 +5,7 @@ const {
   inboundSmsReceiptProjectionSql,
   loadPriorOutboundBodies,
 } = require('./sms-response-policy');
+const { signMediaForClient } = require('./sms-media');
 
 const TIMELINE_TYPES = new Set([
   'all', 'interaction', 'sms', 'call', 'service', 'invoice', 'estimate',
@@ -387,6 +388,18 @@ function mapCommsMessage(message, customer, twilioNumbers) {
   };
 }
 
+// mapCommsMessage stays synchronous (existing callers/tests destructure it
+// as a pure mapper), so signing the stored media into viewer-usable URLs —
+// same signMediaForClient the general /communications/log inbox uses — is a
+// separate async pass over its output. Without this, mapped messages carry
+// only the raw stored media (key/contentType, no url), which is unusable
+// for rendering or for the Analyze-photos flow off Customer 360's composer.
+async function signCommsMedia(mapped) {
+  return Promise.all(mapped.map(async (message) => ({
+    ...message, media: await signMediaForClient(message.media),
+  })));
+}
+
 async function listCustomerComms(db, customer, query = {}) {
   const customerId = customer.id;
   const parsed = parseCommsRequest(query, customerId);
@@ -462,7 +475,7 @@ async function listCustomerComms(db, customer, query = {}) {
   const conversationIds = await db('conversations').where({ customer_id: customerId }).pluck('id');
   let twilioNumbers;
   try { twilioNumbers = require('../config/twilio-numbers'); } catch { twilioNumbers = null; }
-  const comms = pageRows.map(message => mapCommsMessage(message, customer, twilioNumbers));
+  const comms = await signCommsMedia(pageRows.map(message => mapCommsMessage(message, customer, twilioNumbers)));
   const primaryPhoneKey = phoneIdentityKey(customer.phone);
   let composerComms = [];
   if (primaryPhoneKey) {
@@ -500,7 +513,7 @@ async function listCustomerComms(db, customer, query = {}) {
         row.response_prior_outbound_body = composerPriorOutboundBodies.get(String(row.id));
       }
     }
-    composerComms = composerRows.map(message => mapCommsMessage(message, customer, twilioNumbers));
+    composerComms = await signCommsMedia(composerRows.map(message => mapCommsMessage(message, customer, twilioNumbers)));
   }
   return {
     comms, composerComms, total: comms.length, limit: parsed.limit, channel: parsed.channel,
@@ -513,5 +526,5 @@ module.exports = {
   TIMELINE_TYPES,
   listCustomerComms,
   listCustomerTimeline,
-  _private: { decodeCursor, encodeCursor, parseCommsRequest, parseTimelineRequest, compareEvents, mapCommsMessage },
+  _private: { decodeCursor, encodeCursor, parseCommsRequest, parseTimelineRequest, compareEvents, mapCommsMessage, signCommsMedia },
 };

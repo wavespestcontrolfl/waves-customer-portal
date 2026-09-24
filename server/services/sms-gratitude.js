@@ -63,14 +63,17 @@ const BANK_ACK_RE = /^Hello [\p{L}\p{M}'’ -]+! We got your bank payment for in
  * existing agent still handles those normally. Caller supplies the complete
  * recent SAME-ENDPOINT thread and authoritative first name; no name mining.
  */
-function evaluateGratitudeContext({ inbound, history, firstName, contextComplete = false, pendingWork = false } = {}) {
+function evaluateGratitudeContext({ inbound, history, firstName, contextComplete, pendingWork = false } = {}) {
   const deny = reason => ({ eligible: false, reason, reply: '' });
   if (!inbound?.id || inbound.direction !== 'inbound' || !isGratitudeOnly(inbound.body)) return deny('not_gratitude');
-  if (inbound.mediaCount !== 0) return deny('media_or_unknown');
-  if (!contextComplete || !Array.isArray(history)) return deny('context_unavailable');
-  if (pendingWork !== false) return deny('pending_work');
+  const invalidContext = [
+    [() => inbound.mediaCount !== 0, 'media_or_unknown'],
+    [() => !contextComplete || !Array.isArray(history), 'context_unavailable'],
+    [() => pendingWork !== false, 'pending_work'],
+    [() => !Number.isFinite(timestamp(inbound.createdAt)), 'invalid_context_time'],
+  ].find(([invalid]) => invalid());
+  if (invalidContext) return deny(invalidContext[1]);
   const received = timestamp(inbound.createdAt);
-  if (!Number.isFinite(received)) return deny('invalid_context_time');
   const rows = history.filter(row => row.id !== inbound.id);
   if (rows.some(row => !Number.isFinite(timestamp(row.createdAt)) || !['inbound', 'outbound'].includes(row.direction))) return deny('invalid_context');
   if (rows.some(row => timestamp(row.createdAt) >= received)) return deny('thread_advanced');
@@ -85,8 +88,11 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
       || /^(?:(?:our|my) pleasure|you['’]?re (?:very )?welcome|no problem)(?:[ ,]+[\p{L}\p{M}'’ -]+)?[!.\s]*$/iu.test(row.body || ''))) return deny('courtesy_already_sent');
   const body = withoutOptionalFooter(String(previous.body || ''));
   const bankAcknowledgement = BANK_ACK_RE.test(body);
-  if (!bankAcknowledgement && (outboundAsksForReply(body) || PENDING_OUTBOUND_RE.test(body))) return deny('outbound_needs_attention');
-  if (!bankAcknowledgement && !CLOSED_OUTBOUND_RE.test(body)) return deny('closure_not_established');
+  const invalidClosure = [
+    [() => !bankAcknowledgement && (outboundAsksForReply(body) || PENDING_OUTBOUND_RE.test(body)), 'outbound_needs_attention'],
+    [() => !bankAcknowledgement && !CLOSED_OUTBOUND_RE.test(body), 'closure_not_established'],
+  ].find(([invalid]) => invalid());
+  if (invalidClosure) return deny(invalidClosure[1]);
   // A later template cannot erase an earlier unanswered operational message.
   // This deliberately gives up some valid thanks instead of inferring that a
   // report/reminder satisfied a separate request or a promised follow-up.

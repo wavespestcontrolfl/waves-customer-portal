@@ -8,6 +8,11 @@ import { SmsTab } from "./CommunicationsPageV2";
 import { SMS_DRAFT_STORAGE_KEY } from "../../hooks/useSmsDraft";
 
 vi.mock("../../utils/imageCompression", async (original) => ({ ...await original(), fitImagesToBudget: async (files) => ({ ok: true, files }) }));
+const mockNavigate = vi.fn();
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, useNavigate: () => mockNavigate };
+});
 
 const line = "+19413187612";
 const inbound = (id, body, phone = "+19415550100") => ({
@@ -30,6 +35,7 @@ const saveDraft = (owner, draft) => sessionStorage.setItem(SMS_DRAFT_STORAGE_KEY
 
 beforeEach(() => {
   vi.useFakeTimers();
+  mockNavigate.mockReset();
   Element.prototype.scrollIntoView = vi.fn();
   localStorage.setItem("waves_admin_token", "synthetic-token");
   sessionStorage.clear();
@@ -276,6 +282,132 @@ it("refreshes loaded unanswered pages without discarding a still-pending page-tw
   expect(screen.getByRole("combobox", { name: "Filter conversations" })).toBeInTheDocument();
 });
 
+it("closes an answered open thread after a complete loaded-page refresh even when older pages remain", async () => {
+  let answered = false;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    if (url.searchParams.get("needsResponse") !== "true") {
+      return response({ messages: [inbound("ordinary", "Ordinary message")], hasMore: false, page });
+    }
+    if (url.searchParams.has("phone")) {
+      return response({ messages: [], hasMore: false, page });
+    }
+    return response({
+      messages: answered
+        ? [{ ...inbound("other", "Another pending question", "+19415550101"), responseNeedsResponse: true }]
+        : [{ ...inbound("selected", "Selected pending question"), responseNeedsResponse: true }],
+      hasMore: true,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByText("Selected pending question"));
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+
+  answered = true;
+  await tick(30000);
+
+  expect(screen.queryByText("Selected pending question")).not.toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Load older/ })).toBeInTheDocument();
+});
+
+it("keeps an open pending thread when a newer peer pushes it beyond the loaded prefix", async () => {
+  let shifted = false;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    const phone = url.searchParams.get("phone");
+    if (url.searchParams.get("needsResponse") !== "true") {
+      return response({ messages: [inbound("ordinary", "Ordinary message")], hasMore: false, page });
+    }
+    if (phone) {
+      return response({
+        messages: [{ ...inbound("selected", "Selected pending question refreshed"), responseNeedsResponse: true }],
+        hasMore: false,
+        page,
+      });
+    }
+    return response({
+      messages: shifted
+        ? [{ ...inbound("newer", "Newer pending peer", "+19415550101"), responseNeedsResponse: true }]
+        : [{ ...inbound("selected", "Selected pending question"), responseNeedsResponse: true }],
+      hasMore: true,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.change(screen.getByPlaceholderText("Search all SMS by name, phone, or message text…"), { target: { value: "selected" } }); await tick();
+  fireEvent.click(screen.getByText("Selected pending question"));
+
+  shifted = true;
+  await tick(30000);
+
+  expect(screen.getAllByText("Selected pending question refreshed").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+  const targeted = logRequests().map(([url]) => new URL(String(url), "http://localhost"))
+    .find((url) => url.searchParams.has("phone"));
+  expect(targeted.searchParams.get("phone")).toBe("+19415550100");
+  expect(targeted.searchParams.get("needsResponse")).toBe("true");
+  expect(targeted.searchParams.get("search")).toBe("selected");
+});
+
+it("keeps stale open-thread state and shows a recoverable error when peer confirmation fails", async () => {
+  let shifted = false;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    if (url.searchParams.get("needsResponse") !== "true") {
+      return response({ messages: [inbound("ordinary", "Ordinary message")], hasMore: false, page });
+    }
+    if (url.searchParams.has("phone")) return response({ error: "Unavailable" }, 503);
+    return response({
+      messages: shifted
+        ? [{ ...inbound("newer", "Newer pending peer", "+19415550101"), responseNeedsResponse: true }]
+        : [{ ...inbound("selected", "Selected pending question"), responseNeedsResponse: true }],
+      hasMore: true,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByText("Selected pending question"));
+
+  shifted = true;
+  await tick(30000);
+
+  expect(screen.getAllByText("Selected pending question").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("last successful load");
+});
+
+it("refreshes every loaded unanswered page after a successful send", async () => {
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    return response({
+      messages: [{
+        ...inbound(`pending-${page}`, `Pending page ${page}`, `+1941555010${page}`),
+        responseNeedsResponse: true,
+      }],
+      hasMore: page < 3,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
+  fireEvent.click(screen.getByText("Pending page 2"));
+  fireEvent.click(screen.getByRole("button", { name: "Text back" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "We can help" } });
+  const beforeSend = logRequests().length;
+
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+
+  const refreshedPages = logRequests().slice(beforeSend)
+    .map(([url]) => new URL(String(url), "http://localhost").searchParams.get("page"));
+  expect(refreshedPages).toEqual(["1", "2"]);
+});
+
 it("restarts an unanswered search at page one after paginating another query", async () => {
   loadLog = (url) => {
     const page = Number(url.searchParams.get("page"));
@@ -372,6 +504,22 @@ it.each(["text", "media"])("keeps a saved %s draft's sender and reply target tog
   fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
   const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
   expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: line, replyToMessageId: "request-a" });
+});
+
+it("replies to a historical phone without attaching the customer's changed phone identity", async () => {
+  messages = [{
+    ...inbound("old-phone-question", "Question from the original phone"),
+    customerId: null, customerName: "Ada Changed", responseNeedsResponse: true,
+  }];
+  setup("/admin/communications?needsResponse=true"); await tick();
+  fireEvent.click(screen.getByText("Question from the original phone"));
+  fireEvent.click(screen.getByRole("button", { name: "Text back" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Confirmed." } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  const payload = JSON.parse(request[1].body);
+  expect(payload).toMatchObject({ to: "+19415550100", fromNumber: line, replyToMessageId: "old-phone-question" });
+  expect(payload).not.toHaveProperty("customerId");
 });
 
 it("replies to the outstanding request on its own line after newer recruiting activity", async () => {
@@ -633,4 +781,125 @@ it.each([null, { id: "another-approval", draftResponse: "Earlier approval", reci
   const stored = JSON.parse(sessionStorage.getItem(SMS_DRAFT_STORAGE_KEY)).owners[owner]["9415550100"];
   expect(stored.loadedMessageDraft).toEqual(loadedMessageDraft);
   expect(stored.replyContext.messageId).toBe("original-reply");
+});
+
+it("shows Analyze photos for an admin operator with an inbound photo on the OPEN thread", async () => {
+  // canAnalyzePhotos gates the button's whole render on admin role AND at
+  // least one analyzable photo in the ACTIVE thread — analyzablePhotos is
+  // [] until a thread is opened (activeThread stays null on the threads
+  // list), so this needs both a fixture message with media AND opening it.
+  const photoPhone = "+19415550600";
+  messages = [{
+    id: "photo-admin-visible", from: photoPhone, to: line, direction: "inbound", body: "A photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-visible",
+    media: [{ key: "sms-media/inbound/visible", url: "https://signed.example/visible", contentType: "image/jpeg" }],
+  }];
+  setupWithOwner("admin-analyze-photos"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  expect(screen.getByRole("button", { name: "Analyze photos" })).toBeInTheDocument();
+});
+
+it("hides Analyze photos for an admin operator when the open thread has no inbound photos", async () => {
+  setupWithOwner("admin-analyze-photos-no-photos"); await tick();
+  fireEvent.click(screen.getByText("Please check the gate"));
+  expect(screen.queryByRole("button", { name: "Analyze photos" })).not.toBeInTheDocument();
+});
+
+it("hides Analyze photos for a technician — the endpoint is admin-only (403 otherwise)", async () => {
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  expect(screen.queryByRole("button", { name: "Analyze photos" })).not.toBeInTheDocument();
+});
+
+it("blocks submit when the selected photos belong to different customers", async () => {
+  const photoPhone = "+19415550300";
+  messages = [
+    {
+      id: "photo-a", from: photoPhone, to: line, direction: "inbound", body: "First customer's photo",
+      isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-aaa",
+      media: [{ key: "sms-media/inbound/aaa", url: "https://signed.example/aaa", contentType: "image/jpeg" }],
+    },
+    {
+      id: "photo-b", from: photoPhone, to: line, direction: "inbound", body: "Second customer's photo",
+      isRead: true, createdAt: "2024-07-01T12:05:00Z", customerId: "customer-bbb",
+      media: [{ key: "sms-media/inbound/bbb", url: "https://signed.example/bbb", contentType: "image/jpeg" }],
+    },
+  ];
+  setupWithOwner("mixed-customer-owner"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  // photo-b (newest) starts pre-checked; check photo-a too so the selection
+  // spans both customer-aaa and customer-bbb.
+  const checkboxes = screen.getAllByRole("checkbox");
+  expect(checkboxes).toHaveLength(2);
+  fireEvent.click(checkboxes[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
+  expect(screen.getByText("Selected photos belong to different customers — pick photos from one customer.")).toBeInTheDocument();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("/photo-assessments/"))).toBe(false);
+});
+
+it("blocks submit when a linked photo is mixed with an UNLINKED one (null customerId) — null is a distinct owner, not \"no opinion\"", async () => {
+  const photoPhone = "+19415550700";
+  messages = [
+    {
+      id: "photo-linked", from: photoPhone, to: line, direction: "inbound", body: "Linked customer's photo",
+      isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-linked",
+      media: [{ key: "sms-media/inbound/linked", url: "https://signed.example/linked", contentType: "image/jpeg" }],
+    },
+    {
+      id: "photo-unlinked", from: photoPhone, to: line, direction: "inbound", body: "Unlinked sender's photo",
+      isRead: true, createdAt: "2024-07-01T12:05:00Z", // no customerId — unlinked conversation
+      media: [{ key: "sms-media/inbound/unlinked", url: "https://signed.example/unlinked", contentType: "image/jpeg" }],
+    },
+  ];
+  setupWithOwner("linked-unlinked-owner"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  // photo-unlinked (newest) starts pre-checked; check photo-linked too so
+  // the selection spans a linked customer AND an unlinked (null) one.
+  const checkboxes = screen.getAllByRole("checkbox");
+  expect(checkboxes).toHaveLength(2);
+  fireEvent.click(checkboxes[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
+  expect(screen.getByText("Selected photos belong to different customers — pick photos from one customer.")).toBeInTheDocument();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("/photo-assessments/"))).toBe(false);
+});
+
+it("a successful Analyze photos submit navigates to the new assessment and closes the dialog", async () => {
+  const photoPhone = "+19415550400";
+  messages = [{
+    id: "photo-solo", from: photoPhone, to: line, direction: "inbound", body: "A single photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-solo",
+    media: [{ key: "sms-media/inbound/solo", url: "https://signed.example/solo", contentType: "image/jpeg" }],
+  }];
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/photo-assessments/")
+    ? response({ success: true, id: "assessment-789", type: "lawn" }, 201)
+    : originalFetch(url, options));
+  setupWithOwner("analyze-photos-success"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" })); await tick();
+  expect(mockNavigate).toHaveBeenCalledWith("/admin/lawn-assessments?open=lawn:assessment-789");
+  expect(screen.queryByText("Analyze photos from this thread")).not.toBeInTheDocument();
+});
+
+it("a failed Analyze photos submit keeps the dialog open with the server's error and never navigates", async () => {
+  const photoPhone = "+19415550500";
+  messages = [{
+    id: "photo-solo-2", from: photoPhone, to: line, direction: "inbound", body: "A single photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-solo-2",
+    media: [{ key: "sms-media/inbound/solo2", url: "https://signed.example/solo2", contentType: "image/jpeg" }],
+  }];
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/photo-assessments/")
+    ? response({ error: "At least one photo is required" }, 400)
+    : originalFetch(url, options));
+  setupWithOwner("analyze-photos-failure"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" })); await tick();
+  expect(screen.getByText("At least one photo is required")).toBeInTheDocument();
+  expect(screen.getByText("Analyze photos from this thread")).toBeInTheDocument();
+  expect(mockNavigate).not.toHaveBeenCalled();
 });

@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
     return query;
   };
   db.raw = (sql, bindings) => {
-    if (typeof sql === 'string' && sql.includes('WITH base_sms AS')) {
+    if (typeof sql === 'string' && sql.includes('WITH canonical_sms AS MATERIALIZED')) {
       mockQueries.push({ sql, bindings, method: 'raw' });
       return Promise.resolve({ rows: mockCountRows });
     }

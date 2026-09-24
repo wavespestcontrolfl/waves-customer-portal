@@ -3,15 +3,17 @@
 // Before the fix, the lawn service-outline email leg called sendgrid.sendOne
 // directly, never consulting email_suppressions or notification_prefs, so a
 // do_not_email-suppressed address (or a portal opt-out) still got the packet
-// email and the packet was stamped 'sent'. This is unchanged for a
-// technician-role token reaching the route at all — that gap is tracked
-// separately (r1-projects-docs-1) and out of scope here.
+// email and the packet was stamped 'sent'. The router is admin-only
+// (ADMIN-BUG-R37 closed the technician-reach gap r1-projects-docs-1 tracked:
+// a technician token is 403 before the send handler runs, covered in
+// admin-service-outlines-tech-authz.test.js), so this suite authenticates
+// as the owner and exercises the suppression path itself.
 jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
   return {
-    adminAuthenticate: (req, _res, next) => { req.techRole = 'technician'; req.technicianId = 'tech-9'; next(); },
-    requireTechOrAdmin: actual.requireTechOrAdmin, // REAL guard
-    requireAdmin: actual.requireAdmin,
+    adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; req.technicianId = 'admin-9'; next(); },
+    requireTechOrAdmin: actual.requireTechOrAdmin,
+    requireAdmin: actual.requireAdmin, // REAL guard
   };
 });
 

@@ -1924,6 +1924,7 @@ describe('admin communications SMS route', () => {
         responseIsAnswer: false,
       });
       expect(body.messages[0]).not.toHaveProperty('metadata');
+      expect(body.messages[0]).not.toHaveProperty('responseNeedsResponse');
       expect(body).toMatchObject({
         page: 1,
         limit: 500,
@@ -1932,6 +1933,54 @@ describe('admin communications SMS route', () => {
       });
       expect(builder.calls.limit).toEqual([501]);
       expect(builder.calls.offset).toEqual([0]);
+    });
+  });
+
+  test('a historical linked row with a changed customer phone produces a send-safe phone-only payload', async () => {
+    const originalPhone = '+15551234567';
+    const builder = makeQueryBuilder([smsMessageRow({
+      customer_id: 'customer-1',
+      customer_phone: '+15557654321',
+      contact_phone: '+15557654321',
+      effective_contact_phone: originalPhone,
+      effective_our_endpoint_id: '+19413187612',
+    })]);
+    db.mockReturnValue(builder);
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, providerMessageId: 'SM1234567890abcdef1234567890abcdef',
+    });
+
+    await withServer(async (baseUrl) => {
+      const logRes = await fetch(`${baseUrl}/admin/communications/log`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const recipient = (await logRes.json()).messages[0];
+      expect(recipient).toMatchObject({
+        customerId: null,
+        customerName: 'Ada Lovelace',
+        from: originalPhone,
+      });
+
+      // Reuse the exact recipient fields a Text back action receives. With no
+      // stale customer id, the send stays on the phone-only validation path.
+      db.mockReset();
+      const sendRes = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: recipient.from,
+          customerId: recipient.customerId,
+          body: 'We can help with the original address.',
+          messageType: 'manual',
+        }),
+      });
+      expect(sendRes.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        to: originalPhone,
+        customerId: undefined,
+        audience: 'lead',
+        identityTrustLevel: 'phone_provided_unverified',
+      }));
     });
   });
 
@@ -2014,23 +2063,27 @@ describe('admin communications SMS route', () => {
       response_created_at: new Date('2026-05-20T12:01:00Z'),
     })]);
     db.mockReturnValue(builder);
-    db.raw
-      .mockResolvedValueOnce({ rows: [{
-        id: 'pending-message', peer: '9415550100', endpoint: '9415550190',
-        message_body: 'Can you confirm the visit?', metadata: {}, media: [],
-      }] })
-      .mockResolvedValueOnce({ rows: [] });
+    db.raw.mockImplementation(async (sql) => (
+      typeof sql === 'string' && sql.includes('WITH canonical_sms AS MATERIALIZED')
+        ? { rows: [{
+          id: 'pending-message', source: 'canonical',
+          peer: '9415550100', endpoint: '9415550190',
+          message_body: 'Can you confirm the visit?', metadata: {}, media: [],
+        }] }
+        : { rows: [] }
+    ));
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/communications/log?needsResponse=true`, {
         headers: { Authorization: 'Bearer admin' },
       });
       expect(res.status).toBe(200);
-      expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('FROM messages pending_message'), [['pending-message']]);
+      expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('= ANY (?::text[])'), [['9415550100']]);
       expect(builder.orderByRaw).toHaveBeenCalledWith(expect.stringContaining('messages.id = ANY'), [['pending-message']]);
       const body = await res.json();
       expect(body.messages.map((message) => message.id)).toEqual(['pending-message']);
       expect(body.messages[0]).toMatchObject({
+        responseNeedsResponse: true,
         createdAt: '2026-05-20T12:03:00.000Z',
         responseCreatedAt: '2026-05-20T12:01:00.000Z',
       });
@@ -2043,12 +2096,15 @@ describe('admin communications SMS route', () => {
       smsMessageRow({ id: 'older-match', direction: 'outbound', body: 'Earlier estimate details' }),
     ]);
     db.mockReturnValue(builder);
-    db.raw
-      .mockResolvedValueOnce({ rows: [{
-        id: 'pending-message', peer: '9415550100', endpoint: '9415550190',
-        message_body: 'Can you confirm the visit?', metadata: {}, media: [],
-      }] })
-      .mockResolvedValueOnce({ rows: [] });
+    db.raw.mockImplementation(async (sql) => (
+      typeof sql === 'string' && sql.includes('WITH canonical_sms AS MATERIALIZED')
+        ? { rows: [{
+          id: 'pending-message', source: 'canonical',
+          peer: '9415550100', endpoint: '9415550190',
+          message_body: 'Can you confirm the visit?', metadata: {}, media: [],
+        }] }
+        : { rows: [] }
+    ));
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/communications/log?needsResponse=true&search=estimate`, {
@@ -2061,6 +2117,7 @@ describe('admin communications SMS route', () => {
       expect(conversationSearch.orWhere).toHaveBeenCalledWith('messages.body', 'ilike', '%estimate%');
       expect(builder.whereIn).toHaveBeenCalledWith(expect.anything(), conversationSearch);
       expect(body.messages.map((message) => message.id)).toEqual(['pending-message', 'older-match']);
+      expect(body.messages.map((message) => message.responseNeedsResponse)).toEqual([true, false]);
     });
   });
 

@@ -55,6 +55,20 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Pest Pressure technician direct score (owner ruling 2026-09-24): on the
+service-report payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), when the visit's rating was entered by staff
+(`client_pest_rating_source = 'technician'`) `pestPressure.score` /
+`displayScore` equal that 0–5 rating exactly, and `label` resolves from the
+active six-band labels (0 None · 1 Very Low · 2 Low · 3 Moderate · 4 Elevated ·
+5 High; a customized label set is kept). When `showComponentBreakdownToCustomer`
+is on, such reports' `components` object is a single
+`technicianActivityRating` entry (`{ value, weight: 100, present: true }`)
+instead of the five weighted components; customer-rated reports keep the
+five-component blend. Customer-visible pressure numbers no longer floor at
+0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
+unchanged.
+
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
 On itemized accepted-plan invoices, each base-application row intentionally may
@@ -252,6 +266,14 @@ per physical service program; capacity-enabled selections use version-2 catalog 
 bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
+
+`PUT /api/estimates/:token/accept` answers 409
+`{ error, reason: 'retired_lawn_cadence_selection' }` when a recurring lawn
+row still resolves to a retired lawn cadence — any tier hidden via
+`lawn_pricing_v2.tiers.<tier>.hidden` (6x/bi-monthly since 2026-09-24) or the
+removed 4x/quarterly — by explicit cadence, visit count, or the cadence's
+catalog key (`lawn_care_recurring` for 6x). The customer picks a current lawn
+option or the office requotes; the accept never silently reprices at 9x.
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
 remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned

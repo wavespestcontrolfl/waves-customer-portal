@@ -1,0 +1,226 @@
+{
+  "schemaVersion": "sms-gratitude-exam.v1",
+  "baselineContext": {
+    "summary": "Casey Fixture — synthetic account",
+    "flags": [],
+    "lastService": {
+      "type": "Synthetic pest service",
+      "date": "2030-01-09T15:00:00.000Z",
+      "notes": "Synthetic completed visit."
+    },
+    "upcomingServices": [],
+    "billing": {
+      "unavailable": false,
+      "outstandingBalance": 0,
+      "autopay": { "on": false, "paused": false },
+      "openInvoice": null,
+      "recentPayments": [],
+      "cardOnFile": null
+    },
+    "customer": {
+      "billingLane": { "label": "annual prepaid", "monthlyBilled": false }
+    },
+    "pendingEstimate": null,
+    "propertyProfile": null,
+    "lawnHealth": null,
+    "serviceHistory": [
+      {
+        "type": "Synthetic pest service",
+        "date": "2030-01-09T15:00:00.000Z",
+        "notes": "Synthetic completed visit.",
+        "areasServiced": ["Exterior"]
+      }
+    ],
+    "recentCalls": []
+  },
+  "fixtures": [
+    {
+      "id": "positive_report",
+      "expectedEligible": true,
+      "source": {
+        "inbound": { "id": "in-report", "body": "Thank you!", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-report", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" }
+        ],
+        "firstName": "Casey",
+        "contextComplete": true,
+        "pendingWork": false
+      }
+    },
+    {
+      "id": "positive_receipt",
+      "expectedEligible": true,
+      "source": {
+        "inbound": { "id": "in-receipt", "body": "Thanks!", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-receipt", "body": "Your receipt: https://example.invalid/receipt/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "invoice_receipt" }
+        ],
+        "firstName": "Casey",
+        "contextComplete": true,
+        "pendingWork": false
+      }
+    },
+    {
+      "id": "positive_completed_service",
+      "expectedEligible": true,
+      "source": {
+        "inbound": { "id": "in-complete", "body": "Thank you very much.", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-complete", "body": "We've completed your service.", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_complete" }
+        ],
+        "firstName": "Casey",
+        "contextComplete": true,
+        "pendingWork": false
+      }
+    },
+    {
+      "id": "positive_bank_ack",
+      "expectedEligible": true,
+      "source": {
+        "inbound": { "id": "in-bank", "body": "Thanks", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-bank", "body": "Hello Casey! We got your bank payment for invoice SYN-001. ACH transfers take 3-5 business days to clear, and we'll send a receipt as soon as it does.", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "bank_payment_ack" }
+        ],
+        "firstName": "Casey",
+        "contextComplete": true,
+        "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_mixed_thanks",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-mixed", "body": "Thanks, but I still have ants.", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-mixed", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_question",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-question", "body": "Thanks! Can you send the invoice?", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-question", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_promise",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-promise", "body": "Thank you", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-promise", "body": "We'll send your report shortly.", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "manual" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_complaint",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-complaint", "body": "Thanks, this service was terrible.", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-complaint", "body": "We've completed your service.", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_complete" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_booking_acceptance",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-booking", "body": "Yes, that would be great. Thank you.", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-booking", "body": "We've completed your service.", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_complete" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_media",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-media", "body": "Thanks", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 1 },
+        "history": [
+          { "id": "out-media", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_prior_operational",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-prior-op", "body": "Thank you", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "in-op", "body": "Please check the kitchen too.", "direction": "inbound", "createdAt": "2030-01-10T14:57:00.000Z", "mediaCount": 0, "messageType": "inbound" },
+          { "id": "out-prior-op", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_new_inbound",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-newer-in", "body": "Thanks", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-newer-in", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" },
+          { "id": "in-after", "body": "One more thing", "direction": "inbound", "createdAt": "2030-01-10T15:01:00.000Z", "mediaCount": 0, "messageType": "inbound" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_new_outbound",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-newer-out", "body": "Thanks", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-newer-out", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" },
+          { "id": "out-after", "body": "A teammate is reviewing your note.", "direction": "outbound", "createdAt": "2030-01-10T15:01:00.000Z", "mediaCount": 0, "messageType": "manual" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_loop",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-loop", "body": "Thanks", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-courtesy", "body": "Our pleasure, Casey!", "direction": "outbound", "createdAt": "2030-01-10T14:57:00.000Z", "mediaCount": 0, "messageType": "ai_gratitude" },
+          { "id": "out-loop-report", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_missing_context",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-missing", "body": "Thanks", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-missing", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" }
+        ],
+        "firstName": "Casey", "contextComplete": false, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_pending_work",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-pending", "body": "Thank you", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-pending", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" }
+        ],
+        "firstName": "Casey", "contextComplete": true, "pendingWork": true
+      }
+    }
+  ]
+}
