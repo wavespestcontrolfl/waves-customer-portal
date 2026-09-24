@@ -224,6 +224,36 @@ router.get('/equipment/:id/calibration-history', async (req, res, next) => {
 // TANK MIXES
 // =========================================================================
 
+// Owner-only per-ounce catalog cost (ADMIN-BUG-R64): cost_per_oz and
+// cost_in_tank are derived straight from products_catalog.best_price
+// (unitCost = best_price / unit_size_oz), and unitSizeOz stays visible to
+// technicians on GET /inventory — so leaving these two per-line fields in a
+// technician response lets best_price be reconstructed exactly
+// (cost_per_oz * unitSizeOz). cost_per_tank / cost_per_1000sf are left
+// alone: EquipmentPage.jsx deliberately shows techs the $/tank and
+// $/1,000 sq ft totals (OWNER_ONLY_EQUIPMENT_TABS keeps only Job Costs and
+// Analytics owner-only), so stripping those would break an intended
+// tech-facing feature, not close a leak.
+function stripMixOwnerOnlyCost(mix) {
+  const wasString = typeof mix.products === 'string';
+  let prods;
+  try {
+    prods = wasString ? JSON.parse(mix.products) : (mix.products || []);
+  } catch {
+    prods = [];
+  }
+  if (!Array.isArray(prods)) return mix;
+  const stripped = prods.map((p) => {
+    if (!p || (p.cost_per_oz === undefined && p.cost_in_tank === undefined)) return p;
+    const { cost_per_oz: _costPerOz, cost_in_tank: _costInTank, ...rest } = p;
+    return rest;
+  });
+  // Preserve the column's original shape (jsonb comes back parsed from a
+  // real DB; this route's own recalculate/create paths JSON.stringify it
+  // before persisting) — never change the response's field type.
+  return { ...mix, products: wasString ? JSON.stringify(stripped) : stripped };
+}
+
 // GET /tank-mixes — list all
 router.get('/tank-mixes', async (req, res, next) => {
   try {
@@ -248,7 +278,9 @@ router.get('/tank-mixes', async (req, res, next) => {
         ? { ...m, cost_incomplete: true }
         : m;
     });
-    res.json({ tank_mixes: withFlags, mixes: withFlags });
+    const isAdminRequest = req.techRole === 'admin';
+    const out = isAdminRequest ? withFlags : withFlags.map(stripMixOwnerOnlyCost);
+    res.json({ tank_mixes: out, mixes: out });
   } catch (err) {
     next(err);
   }
@@ -324,8 +356,12 @@ async function calculateMixCosts(products, tankSizeGal, coverageSqft) {
   };
 }
 
-// POST /tank-mixes — create
-router.post('/tank-mixes', async (req, res, next) => {
+// POST /tank-mixes — create. Admin-only: no client caller creates or edits a
+// tank mix (EquipmentPage.jsx only calls GET and the recalculate POST) — a
+// technician naming any product_id here would have calculateMixCosts price
+// it back, a throwaway-mix probe of the same owner-only catalog cost
+// (ADMIN-BUG-R64).
+router.post('/tank-mixes', requireAdmin, async (req, res, next) => {
   try {
     const {
       name, service_type, tank_size_gal, products,
@@ -362,8 +398,11 @@ router.post('/tank-mixes', async (req, res, next) => {
   }
 });
 
-// PUT /tank-mixes/:id — update
-router.put('/tank-mixes/:id', async (req, res, next) => {
+// PUT /tank-mixes/:id — update. Admin-only, same reasoning as the create
+// route above — no UI edits a tank mix, and the bare `{ ...req.body }`
+// pass-through would let a technician set cost_per_tank/cost_per_1000sf or
+// re-probe a product's cost directly (ADMIN-BUG-R64).
+router.put('/tank-mixes/:id', requireAdmin, async (req, res, next) => {
   try {
     const existing = await db('tank_mixes').where({ id: req.params.id }).first();
     if (!existing) return res.status(404).json({ error: 'Tank mix not found' });
@@ -418,7 +457,8 @@ router.post('/tank-mixes/:id/recalculate', async (req, res, next) => {
       .returning('*');
 
     logger.info(`Tank mix recalculated: ${updated.name} — $${costs.cost_per_tank}/tank`);
-    res.json({ tank_mix: { ...updated, ...(costs.cost_incomplete ? { cost_incomplete: true } : {}) } });
+    const responseMix = { ...updated, ...(costs.cost_incomplete ? { cost_incomplete: true } : {}) };
+    res.json({ tank_mix: req.techRole === 'admin' ? responseMix : stripMixOwnerOnlyCost(responseMix) });
   } catch (err) {
     next(err);
   }

@@ -191,6 +191,8 @@ module.exports = {
   signMediaForClient,
   mediaFromOutboundAttachments,
   createAttachmentToken,
+  parseStoredMedia,
+  isSignableStoredMediaKey,
   // Exposed for tests/review and to document the SSRF guard.
   isAllowedTwilioMediaUrl,
 };

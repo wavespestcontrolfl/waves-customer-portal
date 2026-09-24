@@ -80,6 +80,7 @@ import { Select, Textarea,
 } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { formatETDateOnly } from "../../lib/timezone";
+import { ARCHIVE_BILLING_NOTE, archiveConfirmMessage } from "../../lib/customerArchiveCopy";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -217,7 +218,8 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
           {" "}
           <div className="text-ui-label text-alert-fg mb-2">
             Delete {customer.firstName} {customer.lastName}?
-          </div>{" "}
+          </div>
+          <div className="text-ui-caption text-ink-secondary mb-2">{ARCHIVE_BILLING_NOTE}</div>{" "}
           <div className="flex gap-1.5">
             {" "}
             <Button
@@ -1970,8 +1972,7 @@ export default function CustomersPageV2() {
   };
 
   const handleDeleteCustomer = async (customerId, customerName) => {
-    if (!window.confirm(`Delete ${customerName}? This cannot be undone.`))
-      return;
+    if (!window.confirm(archiveConfirmMessage(customerName))) return;
     try {
       const r = await fetch(`${API_BASE}/admin/customers/${customerId}`, {
         method: "DELETE",

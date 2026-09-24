@@ -15,6 +15,11 @@ jest.mock('../middleware/admin-auth', () => ({
       ? next()
       : res.status(403).json({ error: 'Admin access required' })
   ),
+  requireAdmin: (req, res, next) => (
+    req.techRole === 'admin'
+      ? next()
+      : res.status(403).json({ error: 'Admin access required' })
+  ),
 }));
 
 const express = require('express');

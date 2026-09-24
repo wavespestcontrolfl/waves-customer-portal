@@ -107,6 +107,15 @@ const REGRESSION_CASES = [
     },
   },
   {
+    // lawn.tier: 'standard' (6x/bi-monthly) is retired for new sales (owner
+    // directive 2026-09-24) and hidden — this scenario now legitimately
+    // prices the enhanced (9x) fallback instead, same as any other stale
+    // request for it; the baseline below was intentionally recaptured for
+    // this scenario alone (lawn_care 528/44 -> 756/63) to reflect that. The
+    // 'standard' in this scenario's name is now the fallback INPUT, not the
+    // priced tier — kept for continuity with the pre-2026-09-24 baseline
+    // history. treeShrub.tier: 'standard' is a different, unrelated tier
+    // system (Tree & Shrub's own) and is unaffected.
     name: 'zone_c_bimonthly_pest_zoysia_standard_treeshrub',
     input: {
       homeSqFt: 3000, stories: 2, lotSqFt: 20000,
