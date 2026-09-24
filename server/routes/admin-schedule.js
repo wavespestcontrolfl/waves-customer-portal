@@ -10912,7 +10912,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           : (eligibilityRow?.technician_id || null);
         const finalTechChanging = hasTechnicianIdUpdate
           && (eligibilityRow?.technician_id || null) !== finalTechnicianId;
-        const finalDateChanging = updates.scheduled_date !== undefined;
+        // Only a date that actually CHANGES is a new day to validate: the
+        // edit modal resubmits scheduled_date unchanged on a window / notes
+        // edit, and a tech marked out today must still be able to have
+        // today's stop edited in place (pre-push auditor P1 on #4678).
+        const finalDateChanging = updates.scheduled_date !== undefined
+          && dateOnly(updates.scheduled_date) !== (eligibilityRow?.day || null);
         if (finalTechnicianId && (finalDateChanging || finalTechChanging)) {
           const finalDate = finalDateChanging ? dateOnly(updates.scheduled_date) : (eligibilityRow?.day || null);
           await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });

@@ -208,6 +208,20 @@ describe('PUT /:id/update-details — save-time technician eligibility on the FI
     expect(assignDispatchJob).not.toHaveBeenCalled();
   });
 
+  test('a same-date resubmit (scheduledDate unchanged) for a technician marked out on THAT date is not re-validated: the edit is written (auditor P1)', async () => {
+    setup({
+      svc: baseSvc({ technician_id: TECH_A }),
+      absenceTechId: TECH_A,
+      absenceDate: STORED_DATE,
+    });
+
+    const { status } = await put('svc-1', { scheduledDate: STORED_DATE, notes: 'gate code 1234' });
+
+    expect(status).toBe(200);
+    expect(updateCalls.length).toBeGreaterThan(0);
+    expect(assignDispatchJob).not.toHaveBeenCalled();
+  });
+
   test('tech + date edit onto the NEW technician\'s absence date → 422 TECH_NOT_ASSIGNABLE, nothing written', async () => {
     setup({
       svc: baseSvc({ technician_id: TECH_A }),
