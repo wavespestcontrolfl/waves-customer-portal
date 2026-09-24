@@ -11,16 +11,17 @@
  * that the payment row survives with its card_brand/card_last_four snapshot
  * intact, and that only its payment_method_id pointer goes NULL — mirroring
  * the other four FKs onto payment_methods, which were already ON DELETE
- * SET NULL. Skips cleanly without DATABASE_URL, like the other Postgres
- * suites (see .github/workflows/tests.yml).
+ * SET NULL. Skips cleanly without DATABASE_URL — the `const SKIP =
+ * !process.env.DATABASE_URL` convention the CI workflow's database-enabled
+ * step discovers by grep (.github/workflows/tests.yml) and runs with
+ * DATABASE_URL set against the migrated database.
  */
-const connection = process.env.DATABASE_URL;
-const postgres = connection ? describe : describe.skip;
+const SKIP = !process.env.DATABASE_URL;
 jest.setTimeout(30000);
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-postgres('payment method removal with an existing payments row (real Postgres)', () => {
+(SKIP ? describe.skip : describe)('payment method removal with an existing payments row (real Postgres)', () => {
   let db;
   let StripeService;
 
