@@ -1126,6 +1126,9 @@ async function loadCandidateCalls(db, options) {
     'recording_url',
     // Feeds the on-file fail-open context the live gate receives (round-21 P2).
     'customer_id',
+    // The persisted on-file address verdict a new lead was judged by
+    // (buildFailOpenRoutingContext replays it — #4685 r3 P1).
+    'ai_validation',
   ];
   const selected = optionalColumns
     .filter((col) => callColumns[col])
