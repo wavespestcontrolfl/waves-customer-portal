@@ -1066,6 +1066,9 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
       onResolved({
         availability: body.availability,
         needs_address: false,
+        // The new address resolved in area — any earlier outage flag is
+        // stale (Codex #4737 r23 P2).
+        service_area_unavailable: false,
         lead: { ...(data?.lead || {}), address_display: value, has_address: true },
       });
     } catch {

@@ -624,6 +624,24 @@ describe('InspectionPage: a terminal state from the slot search replaces the pic
   });
 });
 
+// Codex #4737 r23 P2: a new address that resolves in area clears an earlier
+// service-area outage flag.
+describe('InspectionPage: a resolved new address clears a stale outage message', () => {
+  it('an empty calendar after re-resolving never claims the service-area check failed', async () => {
+    stubFetch({
+      get: jsonResponse(okPayload({ availability: null, service_area_unavailable: true })),
+      availability: jsonResponse({ availability: { ...okPayload().availability, days: [] }, needs_address: false }),
+    });
+    renderPage();
+    expect(await screen.findByText(/couldn.t confirm your service area/i)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /Different address\?/i }));
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '2 New Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await waitFor(() => expect(screen.queryByLabelText('Address for the visit')).not.toBeInTheDocument());
+    expect(screen.queryByText(/couldn.t confirm your service area/i)).not.toBeInTheDocument();
+  });
+});
+
 // Codex #4737 r15 P2: an in-flight search for the OLD address is aborted
 // when "Different address?" reopens the gate — its late answer never
 // replaces the new address's times.

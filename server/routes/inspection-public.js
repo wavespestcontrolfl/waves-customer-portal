@@ -885,6 +885,9 @@ async function resolveEligibility(dbConn, lead, custRow, { includeRescheduleUrl 
 // short-circuits (pre-lock fast path, and the lock-protected re-checks) are
 // indistinguishable from a GET reload for the client.
 function eligibilityResponse(eligibility, leadPayload) {
+  // A gone lead reveals nothing about itself (Codex #4737 r23 P0): the
+  // same bare shape GET returns, never a stale identity payload.
+  if (eligibility.state === 'gone') return { state: 'gone' };
   const base = {
     state: eligibility.state,
     lead: leadPayload,
@@ -1872,8 +1875,6 @@ async function commitVerdict(conn, leadId, token, customerId, fencedIds = null) 
   return eligibility.state === 'ok' ? 'ok' : 'ineligible';
 }
 
-// The first non-ok eligibility across the booked profile and the lead's
-// other profiles, else the booked profile's own.
 // Read-side eligibility across EVERY trusted profile of the lead (Codex
 // #4737 r16 P2): the booking dedupes lead-wide, so GET / availability /
 // find-slots must show another trusted profile's open assessment BEFORE
@@ -1949,21 +1950,12 @@ async function trustedLeadWideEligibility(leadId, token) {
   const freshLead = await loadLead(db, leadId);
   if (!freshLead) return { state: 'gone', visit: null, rescheduleUrl: null };
   const trusted = await loadTrustedCustomer(db, freshLead, token);
-  const profileIds = await trustedLeadProfileIds(db, leadId, token, trusted?.id || null);
-  return leadWideEligibility(freshLead, trusted, profileIds);
-}
-
-async function leadWideEligibility(lead, custRow, profileIds) {
-  const own = await resolveEligibility(db, lead, custRow);
-  if (own.state !== 'ok') return own;
-  for (const id of profileIds) {
-    if (custRow && String(id) === String(custRow.id)) continue;
-    const profile = await loadCustomer(db, id);
-    const other = profile ? await resolveEligibility(db, lead, profile) : null;
-    if (other && other.state !== 'ok') return other;
-  }
-  // The booking refused ALREADY_BOOKED, but none of the profiles this token
-  // is trusted for shows why: already booked, with no visit details.
+  // The SAME lead-wide predicate as GET (Codex #4737 r23 P0): trusted
+  // profiles with details, every other profile of the lead detail-free —
+  // so a converted lead answers converted, never a guessed already_booked.
+  const eligibility = await readEligibility(freshLead, trusted, token);
+  if (eligibility.state !== 'ok') return eligibility;
+  // The booking refused ALREADY_BOOKED, but no profile shows why now.
   return { state: 'already_booked', visit: null, rescheduleUrl: null };
 }
 
@@ -2027,7 +2019,7 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
     // DB state, e.g. the lead converted since phase 1. Re-deriving
     // eligibility here on the pre-conversion `lead` closure would see a
     // stale converted_at=null, resolveEligibility would come back 'ok' for
-    // every profile, and leadWideEligibility's own last-resort fallback
+    // every profile, and the last-resort fallback
     // (no profile shows why) would then mislabel a genuine conversion as
     // already_booked. Reload the lead fresh so 'converted' resolves
     // directly, matching what actually made the commit ineligible.

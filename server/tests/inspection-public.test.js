@@ -740,6 +740,47 @@ describe('Codex #4737 r22: the lead-wide profile universe (fences + detail-free 
   });
 });
 
+describe('Codex #4737 r23: bare gone responses; converted preserved on an ALREADY_BOOKED refusal', () => {
+  test('P0: a lead deleted before the commit\'s lock answers { state: gone } with no stale identity', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    const origTx = db.transaction.getMockImplementation();
+    db.transaction.mockImplementationOnce(async (fn) => {
+      firstResults.leads = null; // deleted before phase 1 re-reads it
+      return origTx(fn);
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.body).toEqual({ state: 'gone' });
+  });
+
+  test('P0: ALREADY_BOOKED caused by a paid visit on an untrusted provenance profile answers converted, detail-free', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = (q) => (q.conds.id === 'cust-1' || !q.conds.id
+      ? { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 }
+      : null);
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      // A merge-tainted (requires_verification, unverifiable) provenance
+      // profile got a paid visit after phase 1.
+      listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-tainted', requires_verification: true }) }];
+      listResults.scheduled_services = (q) => (q.conds.customer_id === 'cust-tainted'
+        ? [{ id: 'ss-paid', scheduled_date: '2099-02-01', window_start: '09:00', window_end: '10:00', service_type: 'Quarterly Pest Control', reschedule_token: 'tainted-tok' }]
+        : []);
+      return { ok: false, status: 409, code: 'ALREADY_BOOKED', error: 'You already have a consultation on the books.' };
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.body.state).toBe('converted');
+    expect(JSON.stringify(res.body)).not.toContain('tainted-tok');
+  });
+});
+
 describe('Codex #4737 r20 P2: an elapsed same-day visit is not a future visit', () => {
   const visitToday = (end) => [{ id: 'ss-today', scheduled_date: etDateString(), window_start: '00:00', window_end: end, service_type: 'Quarterly Pest Control', reschedule_token: 'today-tok' }];
   test('a visit from earlier today whose window ended does not make the lead converted', async () => {
