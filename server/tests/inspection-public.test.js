@@ -877,7 +877,7 @@ describe('POST /:token commit', () => {
       const existingCustomer = {
         id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
         address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
-        latitude: 30.0, longitude: -85.0, // far from the default mockGeocode location — matched via zip, not coords
+        latitude: 27.1, longitude: -82.2, // in the service box but far from the default mockGeocode location — matched via zip, not coords
       };
       mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
       listResults.scheduled_services = [];
@@ -1184,7 +1184,7 @@ describe('POST /:token commit', () => {
         // are nowhere near the freshly geocoded MATCH_ADDRESS location
         // (default mockGeocode: {lat:27.4, lng:-82.5}), so the matched
         // row's location must win and be re-validated, not the pre-lock one.
-        const existingCustomer = existingCustomerAt('123 Palm Ave', { latitude: 32.7555, longitude: -97.3308 });
+        const existingCustomer = existingCustomerAt('123 Palm Ave', { latitude: 27.1, longitude: -82.2 }); // in the box, far from MATCH_ADDRESS's geocode
         mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
         listResults.scheduled_services = [];
         // No second mockBuildAvailability value queued — the re-validation
@@ -1203,7 +1203,7 @@ describe('POST /:token commit', () => {
         // row's own (far-away) location — not the pre-lock one — and [2]
         // the SLOT_TAKEN handler's refreshed-availability call.
         expect(mockBuildAvailability).toHaveBeenCalledTimes(3);
-        expect(mockBuildAvailability.mock.calls[1][0]).toEqual(expect.objectContaining({ lat: 32.7555, lng: -97.3308 }));
+        expect(mockBuildAvailability.mock.calls[1][0]).toEqual(expect.objectContaining({ lat: 27.1, lng: -82.2 }));
       });
     });
 
@@ -1424,6 +1424,16 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
   test('key configured, county lookup throws → treated the same as a null county (unavailable, not a silent pass)', async () => {
     mockCounty.mockRejectedValueOnce(new Error('timeout'));
     expect(await checkServiceArea({ lat: 27.4989, lng: -82.5748 })).toEqual({ ok: false, county: null, unavailable: true });
+  });
+
+  // Local audit P1: a same-named county in another state (Charlotte County,
+  // VA) must never pass on the name alone — the box guards both modes.
+  test('outside the service-area box → out of area even when the county NAME is a served one, no lookup', async () => {
+    mockCounty.mockClear();
+    mockCounty.mockResolvedValueOnce('Charlotte');
+    expect(await checkServiceArea({ lat: 36.9, lng: -78.6 })).toEqual({ ok: false, county: null });
+    expect(mockCounty).not.toHaveBeenCalled();
+    mockCounty.mockReset();
   });
 });
 

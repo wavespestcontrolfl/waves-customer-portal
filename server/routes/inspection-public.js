@@ -450,10 +450,13 @@ async function resolveServiceAddress(lead, custRow, suppliedAddress) {
 // available, so it's run explicitly here — never a bare `ok: true`.
 async function checkServiceArea(location) {
   if (!location) return { ok: false, county: null };
+  // The box is a geographic guard in BOTH modes (local audit P1):
+  // reverseGeocodeCounty returns a bare county name, so an out-of-state
+  // county with a served county's name (Charlotte County, VA) would pass
+  // the name match alone. Outside the box is out of area, no network call.
+  if (!isInServiceAreaBox(location.lat, location.lng)) return { ok: false, county: null };
   const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
-  if (!key) {
-    return { ok: isInServiceAreaBox(location.lat, location.lng), county: null };
-  }
+  if (!key) return { ok: true, county: null };
   let county = null;
   try {
     county = await reverseGeocodeCounty({ latitude: location.lat, longitude: location.lng }, key);
