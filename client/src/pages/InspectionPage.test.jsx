@@ -184,6 +184,26 @@ describe('InspectionPage address-first gate', () => {
     fireEvent.click(screen.getByRole('button', { name: /Notify me/i }));
     expect(await screen.findByText(/you.re on the list/i)).toBeInTheDocument();
   });
+
+  it('needs_address + address_unresolved: stays on the form with an inline message, never the waitlist stop', async () => {
+    stubFetch({
+      get: jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })),
+      availability: jsonResponse({ error: 'address_unresolved' }, 422),
+    });
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: 'gibberish text' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+
+    expect(await screen.findByText(/couldn.t find that address/i)).toBeInTheDocument();
+    // Still on the address form — never the out-of-area stop.
+    expect(screen.getByLabelText('Address for the visit')).toBeInTheDocument();
+    expect(screen.queryByText(/we don.t service this area yet/i)).not.toBeInTheDocument();
+  });
 });
 
 describe('InspectionPage booking', () => {
@@ -201,7 +221,7 @@ describe('InspectionPage booking', () => {
     renderPage();
 
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Book .* free/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
 
     await waitFor(() => {
       expect(screen.getByText(/you.re on the calendar/i)).toBeInTheDocument();
@@ -225,7 +245,7 @@ describe('InspectionPage booking', () => {
     renderPage();
     fireEvent.change(await screen.findByLabelText(/Anything we should know/i), { target: { value: 'Ants in the kitchen' } });
     fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Book .* free/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     await waitFor(() => expect(screen.getByText(/you.re on the calendar/i)).toBeInTheDocument());
     const commit = fetchMock.mock.calls.find(([url, opts]) => opts?.method === 'POST'
       && !String(url).includes('find-slots') && !String(url).includes('availability') && !String(url).includes('waitlist'));
@@ -238,9 +258,9 @@ describe('InspectionPage booking', () => {
     });
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Book .* free/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     expect(await screen.findByText(/just taken/i)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Book .* free/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Book /i })).not.toBeInTheDocument();
   });
 
   it('out_of_area on commit: stops on the dedicated card, not a generic error', async () => {
@@ -249,8 +269,53 @@ describe('InspectionPage booking', () => {
     });
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Book .* free/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     expect(await screen.findByText(/we don.t service this area yet/i)).toBeInTheDocument();
+  });
+
+  it('address_unresolved on commit: an inline message, never the raw error code or the out-of-area stop', async () => {
+    stubFetch({
+      post: jsonResponse({ error: 'address_unresolved' }, 422),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    expect(await screen.findByText(/couldn.t verify that address/i)).toBeInTheDocument();
+    expect(screen.queryByText('address_unresolved')).not.toBeInTheDocument();
+    expect(screen.queryByText(/we don.t service this area yet/i)).not.toBeInTheDocument();
+  });
+
+  it('the confirm button names the picked day and arrival window (brief copy contract)', async () => {
+    stubFetch();
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    expect(screen.getByRole('button', { name: /^Book Sun 1:00 PM.3:00 PM$/ })).toBeInTheDocument();
+  });
+
+  it('the AI search sends an address the gate already resolved this page-life', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })),
+      availability: jsonResponse({ availability: okPayload().availability, needs_address: false }),
+      findSlots: jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }),
+    });
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    await waitFor(() => {
+      const search = fetchMock.mock.calls.find(([url]) => String(url).includes('/find-slots'));
+      expect(search).toBeTruthy();
+      expect(JSON.parse(search[1].body)).toMatchObject({ query: 'this weekend', address: '123 Palm Ave, Bradenton, FL 34209' });
+    });
   });
 });
 
@@ -258,13 +323,13 @@ describe('InspectionPage ?slot= preselect', () => {
   it('preselects the requested slot without a click', async () => {
     stubFetch({ get: jsonResponse(okPayload()) });
     renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
-    expect(await screen.findByRole('button', { name: /Book .* free/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^Book /i })).toBeInTheDocument();
   });
 
   it('a requested slot that already filled falls back to the nearest open one, with a notice', async () => {
     stubFetch({ get: jsonResponse(okPayload()) }); // only 13:00 exists
     renderPage('/inspection/deadbeef?slot=2026-07-12|09:00');
-    expect(await screen.findByRole('button', { name: /Book .* free/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^Book /i })).toBeInTheDocument();
     expect(screen.getByText(/moved you to the next open time/i)).toBeInTheDocument();
   });
 });

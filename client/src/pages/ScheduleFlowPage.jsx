@@ -130,6 +130,22 @@ function formatDateLabel(dateStr) {
   }
 }
 
+// Short weekday for the inspection flow's "Book <Day> <window>" confirm
+// button (a button has no room for formatDateLabel's full "Tuesday,
+// September 29" — the day chip above it and the section date heading
+// already carry that).
+function shortDayLabel(dateStr) {
+  if (!dateStr) return '';
+  try {
+    const [y, m, d] = String(dateStr).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
+      weekday: 'short', timeZone: 'UTC',
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
 function formatTimeLabel(hhmm) {
   if (!hhmm) return '';
   const [h, m] = String(hhmm).split(':').map(Number);
@@ -970,6 +986,15 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
         setOutOfArea({ county: body.county || null });
         return;
       }
+      // Recoverable: the address text didn't geocode (typo, unparseable
+      // input, geocoder hiccup) — never conflated with out_of_area, which
+      // means the address DID resolve and is simply outside the service
+      // area. Stay on this form with an inline message instead of stopping
+      // the page.
+      if (res.status === 422 && body.error === 'address_unresolved') {
+        setError("We couldn't find that address. Please check it and try again, or text or call us.");
+        return;
+      }
       if (!res.ok) throw new Error(body.error || 'failed');
       onAddressResolved?.(value);
       onResolved({ availability: body.availability, needs_address: false });
@@ -1173,7 +1198,11 @@ const FLOWS = {
     Hero: InspectionHero,
     Success: ({ result }) => <InspectionSuccessCard result={result} />,
     canConfirm: () => true,
-    actionLabel: ({ submitting }) => (submitting ? 'Booking…' : `Book ${'→'} free`),
+    // "Book <Day> <window>" (brief copy contract) — the only flow whose CTA
+    // names the picked slot; reschedule/reservice keep their generic label.
+    actionLabel: ({ submitting, slot }) => (submitting
+      ? 'Booking…'
+      : slot ? `Book ${shortDayLabel(slot.date)} ${arrivalWindowLabel(slot.start_time)}` : 'Book free'),
     payload: ({ slot, details, address }) => ({
       date: slot.date,
       time: slot.start_time,
@@ -1339,7 +1368,15 @@ export default function ScheduleFlowPage({ flow }) {
     const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}/find-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, ...(flow === 'reservice' ? { lane: selectedLane } : {}) }),
+      body: JSON.stringify({
+        query,
+        ...(flow === 'reservice' ? { lane: selectedLane } : {}),
+        // Inspection only: an addressless lead's search has nothing to
+        // geocode against server-side unless the address gate already
+        // resolved one this page-life (P1 :457 — find-slots now accepts it
+        // the same way the commit and /availability endpoints do).
+        ...(flow === 'inspection' && resolvedAddress ? { address: resolvedAddress } : {}),
+      }),
       signal,
     });
     const body = await res.json().catch(() => ({}));
@@ -1394,6 +1431,14 @@ export default function ScheduleFlowPage({ flow }) {
         setOutOfArea({ county: body.county || null });
         return;
       }
+      // Inspection only: the address didn't geocode at commit time (rare —
+      // usually caught earlier by the address gate) — recoverable, stay on
+      // the picker with an inline message rather than showing the raw error
+      // code or a generic failure line.
+      if (flow === 'inspection' && body.error === 'address_unresolved') {
+        setSubmitError("We couldn't verify that address. Please text or call us and we'll get you booked.");
+        return;
+      }
       if (body.code === 'SLOT_TAKEN') {
         setSelectedSlot(null);
         setAiFiltered(false); // refreshed availability spans the full window
@@ -1446,8 +1491,6 @@ export default function ScheduleFlowPage({ flow }) {
   const days = data?.availability?.days || [];
   const selectedDay = days.find((d) => d.date === selectedDate) || days[0] || null;
 
-  const actionLabel = cfg.actionLabel({ submitting, lane: selectedLane });
-
   return (
     // Single column at every width (owner ask 2026-07-14) — the page keeps
     // the standard flow reading measure on desktop instead of a two-pane
@@ -1499,7 +1542,7 @@ export default function ScheduleFlowPage({ flow }) {
                 onClick={confirm}
                 disabled={submitting || !cfg.canConfirm({ lane: selectedLane })}
               >
-                {actionLabel}
+                {cfg.actionLabel({ submitting, lane: selectedLane, slot })}
               </button>
               {cfg.pickedNote(data, slot, { slotMovedNotice })}
             </>

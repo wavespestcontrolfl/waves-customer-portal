@@ -4,6 +4,15 @@
  * already_booked short-circuit, out-of-area refusal (no booking), slot_taken,
  * waitlist idempotency, and the createSelfBooking `callbackVisit` contract
  * (isCallback:false / dedupeLane:false, no lead_id, never converts).
+ *
+ * Codex pre-push audit 2026-09-24 (1 P0, 6 P1) added: the router-level
+ * dark-gate middleware runs before every rate limiter; resolveServiceAddress
+ * (stored address wins only when it actually resolves, supplied wins
+ * otherwise, address_unresolved vs out_of_area is never conflated); the
+ * find-slots address parameter; the address write-back onto an addressless/
+ * unresolvable customer; and the two-phase per-lead advisory lock around
+ * customer provisioning + booking (concurrent-commit dedupe, converted-lead
+ * refusal under the lock).
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'inspection-test-secret';
@@ -33,6 +42,13 @@ jest.mock('../services/reschedule-link', () => ({
   buildRescheduleLink: (...args) => mockRescheduleLink(...args),
 }));
 
+const mockParseWhen = jest.fn(async () => ({ dateFrom: '2027-01-01', dateTo: '2027-01-14', timeOfDay: 'any', understood: true }));
+const mockSummarizeWindow = jest.fn(() => 'Here is what is open.');
+jest.mock('../services/scheduling/parse-when', () => ({
+  parseWhen: (...args) => mockParseWhen(...args),
+  summarizeWindow: (...args) => mockSummarizeWindow(...args),
+}));
+
 const mockBookingConfig = jest.fn(async () => ({}));
 const mockBuildAvailability = jest.fn(async () => ({ slots: [], days: [] }));
 const mockCreateSelfBooking = jest.fn(async () => ({ ok: true, body: { booking: { id: 'sb-1' } } }));
@@ -47,10 +63,15 @@ jest.mock('../routes/booking', () => ({
 // Universal query-chain mock: chain methods return the chain; `.first()`
 // resolves firstResults[table]; the chain itself (list terminal, via `.then`)
 // resolves listResults[table]; `.insert(...).returning('*')` resolves
-// insertResults[table]; `.update()` / `.onConflict().ignore()` are no-ops.
+// insertResults[table]; `.update()` records its payload in `updateCalls` and
+// resolves 1; `db.transaction(fn)` runs `fn` against this SAME mock object
+// (standing in for `trx` — the mock doesn't distinguish connections, so a
+// re-read inside a "transaction" sees whatever `firstResults`/`listResults`
+// hold at that moment, same as a plain `db` read would).
 const firstResults = {};
 const listResults = {};
 const insertResults = {};
+const updateCalls = [];
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
@@ -61,7 +82,7 @@ jest.mock('../models/db', () => {
     ];
     for (const m of passthrough) q[m] = () => q;
     q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
-    q.update = async () => 1;
+    q.update = async (payload) => { updateCalls.push({ table, payload }); return 1; };
     q.del = async () => 1;
     q.ignore = async () => [];
     q.merge = async () => [];
@@ -72,14 +93,15 @@ jest.mock('../models/db', () => {
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(table));
-  dbFn.raw = (sql) => sql;
-  dbFn.transaction = async () => { throw new Error('transaction should not be reached in these tests'); };
+  dbFn.raw = jest.fn((sql) => sql);
+  dbFn.transaction = jest.fn(async (fn) => fn(dbFn));
   return dbFn;
 });
 
 const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
 const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType } = require('../services/assessment-booking');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const db = require('../models/db');
 const inspectionPublicRouter = require('../routes/inspection-public');
 
 const LEAD_ID = '5b8d1c9e-4a2f-4b6e-9c3d-8e7f6a5b4c3d';
@@ -128,17 +150,44 @@ async function callWaitlist(token, body = {}) {
   return res;
 }
 
+async function callAvailability(token, body = {}) {
+  const handler = findHandler('/:token/availability', 'post');
+  const res = mkRes();
+  const next = jest.fn();
+  await handler({ params: { token }, body }, res, next);
+  expect(next).not.toHaveBeenCalled();
+  return res;
+}
+
+async function callFindSlots(token, body = {}) {
+  const handler = findHandler('/:token/find-slots', 'post');
+  const res = mkRes();
+  const next = jest.fn();
+  await handler({ params: { token }, body }, res, next);
+  expect(next).not.toHaveBeenCalled();
+  return res;
+}
+
 afterEach(() => {
   for (const key of Object.keys(firstResults)) delete firstResults[key];
   for (const key of Object.keys(listResults)) delete listResults[key];
   for (const key of Object.keys(insertResults)) delete insertResults[key];
+  updateCalls.length = 0;
   gateState.live = true;
   mockGeocode.mockClear();
+  mockGeocode.mockImplementation(async () => ({ location: { lat: 27.4, lng: -82.5 } }));
   mockCounty.mockClear();
+  mockCounty.mockImplementation(async () => 'Manatee');
   mockRescheduleLink.mockClear();
   mockBookingConfig.mockClear();
   mockBuildAvailability.mockClear();
+  mockBuildAvailability.mockImplementation(async () => ({ slots: [], days: [] }));
   mockCreateSelfBooking.mockClear();
+  mockCreateSelfBooking.mockImplementation(async () => ({ ok: true, body: { booking: { id: 'sb-1' } } }));
+  mockParseWhen.mockClear();
+  mockSummarizeWindow.mockClear();
+  db.transaction.mockClear();
+  db.raw.mockClear();
 });
 
 const LEAD_ROW = {
@@ -153,6 +202,34 @@ describe('gate off', () => {
     expect((await callGet(token)).statusCode).toBe(404);
     expect((await callPost(token, { date: '2027-01-01', time: '09:00' })).statusCode).toBe(404);
     expect((await callWaitlist(token, { email: 'a@b.com' })).statusCode).toBe(404);
+  });
+
+  // Codex pre-push P0, 2026-09-24: the gate check must be the router's FIRST
+  // middleware — before noStore and every rate limiter — so a prober
+  // hammering the route while dark always sees a uniform 404, never a 429
+  // that would leak "this route exists and is rate-limited" (a dark route
+  // must be unobservable). Verified two ways: (1) the gate layer really is
+  // `router.stack[0]`, ahead of every other `router.use`; (2) calling it
+  // directly 20 times in a row while dark always short-circuits with 404
+  // and never calls `next()` — so the rate-limiter layers behind it are
+  // categorically unreachable no matter how many requests arrive.
+  test('the dark-gate check is the router\'s first middleware, ahead of every rate limiter', () => {
+    const useLayers = inspectionPublicRouter.stack.filter((l) => !l.route);
+    expect(useLayers.length).toBeGreaterThan(1);
+    expect(useLayers[0]).toBe(inspectionPublicRouter.stack[0]);
+  });
+
+  test('20 rapid hits while dark all 404 — the limiter is never reached', () => {
+    gateState.live = false;
+    const gateLayer = inspectionPublicRouter.stack[0];
+    for (let i = 0; i < 20; i += 1) {
+      const res = mkRes();
+      const next = jest.fn();
+      gateLayer.handle({}, res, next);
+      expect(res.statusCode).toBe(404);
+      expect(res.body).toEqual({ error: 'not_found' });
+      expect(next).not.toHaveBeenCalled();
+    }
   });
 });
 
@@ -247,6 +324,65 @@ describe('GET /:token state shapes', () => {
   });
 });
 
+describe('POST /:token/availability — address resolution (P1 :219)', () => {
+  test('a geocode failure answers address_unresolved, never out_of_area', async () => {
+    firstResults.leads = LEAD_ROW;
+    mockGeocode.mockResolvedValueOnce({ location: null });
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callAvailability(token, { address: 'not a real place' });
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ error: 'address_unresolved' });
+  });
+
+  test('a resolved location outside the service area answers out_of_area', async () => {
+    firstResults.leads = LEAD_ROW;
+    mockCounty.mockResolvedValueOnce('Hardee');
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callAvailability(token, { address: '1 Somewhere Rd, Wauchula, FL 33873' });
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ error: 'out_of_area', county: 'Hardee' });
+  });
+
+  test('a resolved in-area location returns availability', async () => {
+    firstResults.leads = LEAD_ROW;
+    mockBuildAvailability.mockResolvedValueOnce({ slots: [], days: [{ date: '2027-01-10', slots: [] }] });
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callAvailability(token, { address: '123 Palm Ave, Bradenton, FL 34209' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.needs_address).toBe(false);
+  });
+});
+
+describe('POST /:token/find-slots (P1 :457)', () => {
+  test('an addressless lead with no supplied address is asked for one', async () => {
+    firstResults.leads = LEAD_ROW;
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callFindSlots(token, { query: 'this weekend' });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/address/i);
+    expect(mockParseWhen).not.toHaveBeenCalled();
+  });
+
+  test('a supplied address resolves the search for an addressless lead', async () => {
+    firstResults.leads = LEAD_ROW;
+    mockBuildAvailability.mockResolvedValueOnce({ slots: [], days: [{ date: '2027-01-10', slots: [{ start_time: '09:00' }] }] });
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callFindSlots(token, { query: 'this weekend', address: '123 Palm Ave, Bradenton, FL 34209' });
+    expect(res.statusCode).toBe(200);
+    expect(mockGeocode).toHaveBeenCalledWith(expect.stringContaining('123 Palm Ave'), expect.any(Object));
+    expect(res.body.availability.days[0].date).toBe('2027-01-10');
+  });
+
+  test('an unresolvable supplied address is reported distinctly', async () => {
+    firstResults.leads = LEAD_ROW;
+    mockGeocode.mockResolvedValueOnce({ location: null });
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callFindSlots(token, { query: 'this weekend', address: 'gibberish text' });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/couldn.t find that address/i);
+  });
+});
+
 describe('POST /:token commit', () => {
   const okBody = () => ({ date: FUTURE_DATE, time: '09:00' });
 
@@ -262,6 +398,33 @@ describe('POST /:token commit', () => {
     expect(res.body.state).toBe('already_booked');
     expect(res.body.code).toBe('ALREADY_BOOKED');
     expect(mockGeocode).not.toHaveBeenCalled();
+    expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  // P1 :544 — POST for a converted lead must answer the same shape GET
+  // does and book nothing, not just an already-open-assessment lead.
+  test('converted: a direct POST for a converted lead books nothing', async () => {
+    firstResults.leads = { ...LEAD_ROW, converted_at: new Date() };
+    firstResults.customers = null;
+    listResults.scheduled_services = [];
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, okBody());
+    expect(res.statusCode).toBe(200);
+    expect(res.body.state).toBe('converted');
+    expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    expect(mockGeocode).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('address_unresolved: nothing on file resolves and the supplied address fails too (P1 :219)', async () => {
+    firstResults.leads = LEAD_ROW;
+    listResults.scheduled_services = [];
+    mockGeocode.mockResolvedValueOnce({ location: null });
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: 'gibberish' });
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ error: 'address_unresolved' });
     expect(mockCreateSelfBooking).not.toHaveBeenCalled();
   });
 
@@ -300,6 +463,7 @@ describe('POST /:token commit', () => {
     expect(res.statusCode).toBe(409);
     expect(res.body.code).toBe('SLOT_TAKEN');
     expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('happy path: books through createSelfBooking with the assessment callbackVisit contract — never converts, no lead_id', async () => {
@@ -336,6 +500,108 @@ describe('POST /:token commit', () => {
       alertLabel: expect.stringContaining('Free consultation self-booked'),
     }));
     expect(isAssessmentServiceType(callArgs.callbackVisit.serviceType)).toBe(true);
+
+    // The customer's own address already resolved — no address write-back.
+    expect(updateCalls.some((c) => c.table === 'customers')).toBe(false);
+  });
+
+  // P1 :532/:544 — the two-phase per-lead advisory lock: both phases take
+  // the SAME hashtext key (the coordinator's literal spec), and the whole
+  // provisioning/booking critical section runs inside `db.transaction`.
+  test('the commit takes a per-lead advisory lock (same key, twice) around provisioning + booking', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.customers = custRow;
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    firstResults.scheduled_services = { id: 'ss-1', reschedule_token: 'tok-lock' };
+
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, okBody());
+    expect(res.statusCode).toBe(200);
+
+    // Two lock-holding transactions (phase 1: provisioning, phase 2: the
+    // booking itself), each taking the SAME per-lead key.
+    expect(db.transaction).toHaveBeenCalledTimes(2);
+    const lockCalls = db.raw.mock.calls.filter(([sql]) => String(sql).includes('pg_advisory_xact_lock'));
+    expect(lockCalls).toHaveLength(2);
+    for (const [, args] of lockCalls) {
+      expect(args).toEqual([`inspection_commit:${LEAD_ID}`]);
+    }
+  });
+
+  // P1 :532 — createSelfBooking's own dedupe only catches an exact repeat
+  // customer/date/time (skipped here via dedupeLane:false); the route's own
+  // eligibility re-check under the lock is what stops a SECOND commit for
+  // the same lead (any slot) once the first has actually booked.
+  test('concurrent-commit dedupe: a second commit after the first booked short-circuits instead of double-booking', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.customers = custRow;
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockBuildAvailability.mockResolvedValue({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    firstResults.scheduled_services = { id: 'ss-1', reschedule_token: 'tok-1' };
+
+    // The first booking's side effect: the lead's customer now has an open
+    // assessment, same as a real commit would leave behind.
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      listResults.scheduled_services = [
+        { id: 'svc-new', scheduled_date: FUTURE_DATE, window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok-new' },
+      ];
+      return { ok: true, body: { booking: { id: 'sb-1' } } };
+    });
+
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const first = await callPost(token, okBody());
+    expect(first.statusCode).toBe(200);
+    expect(first.body.success).toBe(true);
+    expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+
+    const second = await callPost(token, okBody());
+    expect(second.statusCode).toBe(200);
+    expect(second.body.state).toBe('already_booked');
+    expect(second.body.code).toBe('ALREADY_BOOKED');
+    // Still just the one booking — the second commit never reaches createSelfBooking.
+    expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+  });
+
+  // P1 :546/:597 — a stored address that fails to geocode must not block a
+  // supplied one, and the address that DOES resolve gets written back onto
+  // the customer row so the lead isn't asked for it again.
+  test('a supplied address wins when the stored one fails to geocode, and gets persisted onto the customer', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', address_line1: '1 Bad Rd', city: 'Nowhere', state: 'FL', zip: '00000', latitude: null, longitude: null };
+    firstResults.customers = custRow;
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+
+    mockGeocode.mockImplementation(async (addressStr) => (
+      String(addressStr).startsWith('1 Bad Rd') ? { location: null } : { location: { lat: 27.5, lng: -82.6 } }
+    ));
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    firstResults.scheduled_services = { id: 'ss-2', reschedule_token: 'tok-2' };
+
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '456 Good Ave, Bradenton, FL 34209' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+    expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.address_line1).toMatch(/456 Good Ave/);
+
+    const customerUpdate = updateCalls.find((c) => c.table === 'customers');
+    expect(customerUpdate).toBeTruthy();
+    expect(customerUpdate.payload.address_line1).toMatch(/456 Good Ave/);
+    expect(customerUpdate.payload.latitude).toBe(27.5);
+    expect(customerUpdate.payload.longitude).toBe(-82.6);
   });
 });
 
