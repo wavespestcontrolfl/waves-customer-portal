@@ -11603,6 +11603,25 @@ async function computeUpdateDetailsFinancialPlan({
       if (zeroCols.line_discount_id) updates.line_discount_id = null;
       if (zeroCols.line_discount_type) updates.line_discount_type = null;
       if (zeroCols.line_discount_amount) updates.line_discount_amount = null;
+      // Pre-push fallback audit P1 on #4657 (808ab6b50e): the canonical
+      // restack above planned `updates.pricing_provenance` with caps
+      // frozen for the discounts as they stood BEFORE this conversion —
+      // and this block then removes every one of them (each add-on's
+      // discount below, the primary line's five columns just above). A
+      // marker left carrying caps for ids on no current line is exactly
+      // the resurrection hazard round 16's pruneObsoleteFrozenAddonCaps
+      // closes (a later fresh re-pick clamps to the stale frozen cap,
+      // not the live catalog cap). Re-freeze the planned snapshot for
+      // what this save actually leaves on the row: no add-on caps, no
+      // line cap. The regime marker itself stays — the row IS
+      // canonically priced, at $0.
+      if (zeroCols.pricing_provenance && updates.pricing_provenance && typeof updates.pricing_provenance === 'object') {
+        const pruned = pruneObsoleteFrozenAddonCaps(updates.pricing_provenance.caps, [], null);
+        updates.pricing_provenance = {
+          ...updates.pricing_provenance,
+          caps: { ...(pruned || {}), line: { id: null, cap: null }, addons: { ...(pruned?.addons || {}) } },
+        };
+      }
     } catch { /* non-blocking */ }
     if (Array.isArray(replaceAddons)) {
       replaceAddons = replaceAddons.map((line) => ({

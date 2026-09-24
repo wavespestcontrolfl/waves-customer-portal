@@ -1266,6 +1266,75 @@ postgres('round 4 on #4657 — preview must equal what the PUT persists, verbati
     expect(savedRow.line_discount_type).toBeNull();
     expect(savedRow.line_discount_amount).toBeNull();
   });
+
+  // Pre-push fallback audit P1 on #4657 (808ab6b50e): the same conversion
+  // on a MARKED row whose add-on carried a CAPPED stamp planned a
+  // re-frozen marker (the canonical restack runs before the zero block)
+  // still holding that add-on's cap — and the primary line's — after the
+  // save had removed every discount from the row. A later fresh re-pick
+  // of that preset would clamp to the stale frozen cap, not the live one.
+  test('fallback P1 (808ab6b50e) — a free-callback conversion on a MARKED row re-freezes the marker with NO add-on caps and NO line cap, never the pre-conversion snapshot', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    let service = await trx('services').where({ service_key: 'pest_re_service' }).first();
+    if (!service) {
+      [service] = await trx('services').insert({
+        id: randomUUID(), service_key: 'pest_re_service', name: 'Pest Re-Service',
+        category: 'pest', frequency: 'as_needed', billing_type: 'one_time', visits_per_year: 0,
+      }).returning('*');
+    }
+    await trx('customers').where({ id: customerId }).update({ waveguard_tier: 'Silver' });
+    const lineDiscountId = randomUUID();
+    const addonDiscountId = randomUUID();
+    await trx('discounts').insert({
+      id: addonDiscountId, discount_key: `fixture_zero_${addonDiscountId.slice(0, 8)}`, name: 'Fixture 20% (cap $5)',
+      discount_type: 'percentage', amount: 20, max_discount_dollars: 5, is_active: true, show_in_invoices: true,
+    });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      // Stored total = the figure the conversion classifier re-derives from
+      // the echoed body (90 net primary + applyDiscount(100, 20%) = 80), so
+      // the round-trip reads as "no new charge" and the free conversion fires.
+      estimated_price: 170, primary_line_price: 100, is_callback: false,
+      line_discount_type: 'percentage', line_discount_amount: 10, line_discount_id: lineDiscountId,
+      line_discount_dollars: 10, line_discount_name: 'Fixture 10% Primary',
+      pricing_provenance: {
+        pricing_regime: 'discount_stack_v1', engine_version: 1,
+        caps: { line: { id: lineDiscountId, cap: null }, addons: { [addonDiscountId]: 5 } },
+      },
+    }).returning('*');
+    visitId = row.id;
+    const addonRowId = randomUUID();
+    await trx('scheduled_service_addons').insert({
+      id: addonRowId, scheduled_service_id: visitId, service_name: 'Fixture Capped Add-On',
+      base_price: 100, estimated_price: 95,
+      discount_id: addonDiscountId, discount_type: 'percentage', discount_amount: 20, discount_dollars: 5,
+    });
+    // Converts to the re-service pick; the modal round-trips the add-on
+    // and its stored stamp verbatim.
+    const body = {
+      serviceId: service.id, serviceType: 'Pest Re-Service', primaryLinePrice: 90,
+      addons: [{
+        id: addonRowId, serviceName: 'Fixture Capped Add-On', basePrice: 100,
+        discountId: addonDiscountId, discountName: 'Fixture 20% (cap $5)', discountType: 'percentage', discountAmount: 20,
+      }],
+    };
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.estimated_price)).toBe(0);
+    const prov = typeof savedRow.pricing_provenance === 'string' ? JSON.parse(savedRow.pricing_provenance) : savedRow.pricing_provenance;
+    // Still canonically priced (at $0) — the marker stays…
+    expect(prov.pricing_regime).toBe('discount_stack_v1');
+    // …but its frozen caps describe THIS row: nothing on any line.
+    expect(prov.caps.addons).toEqual({});
+    expect(prov.caps.line).toEqual({ id: null, cap: null });
+    const savedAddon = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).first();
+    expect(Number(savedAddon.estimated_price)).toBe(0);
+    expect(savedAddon.discount_id).toBeNull();
+  });
 });
 
 postgres('round 12 on #4657 — collective-move date semantics mirrored in the preview (:13843)', () => {
