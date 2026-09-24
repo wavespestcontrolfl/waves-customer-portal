@@ -15,6 +15,7 @@ const db = require('../models/db');
 const suggest = require('../services/sms-suggest-mode');
 const autoSend = require('../services/sms-auto-send');
 const providerCoordination = require('../services/messaging/provider-handoff-reservation');
+const { gratitudeThreadAdvanced } = require('../services/sms-gratitude-context');
 jest.setTimeout(30000);
 
 postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
@@ -293,6 +294,62 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     const reservation = await trx('sms_log').where({ id: prepared.handle.reservationId }).first();
     if (hasProof) expect(reservation).toBeUndefined();
     else expect(reservation).toMatchObject({ from_phone: 'push', status: 'sent', twilio_sid: null });
+  });
+
+  test.each(['ordinary proof', 'promoted sole receipt', 'scheduled fallback'].flatMap(kind => [
+    [kind, 'after the inbound on the same thread', 60000, '+19413529161', '+12025550101', true],
+    [kind, 'before the inbound', -60000, '+19413529161', '+12025550101', false],
+    [kind, 'from another Waves endpoint', 60000, '+19413529162', '+12025550101', false],
+    [kind, 'to another recipient', 60000, '+19413529161', '+12025550102', false],
+  ]))('%s %s advances only the exact gratitude thread', async (
+    kind, _case, proofOffsetMs, providerFromNumber, recipient, advanced,
+  ) => {
+    const inboundId = randomUUID();
+    const inboundAt = new Date(Date.now() - 2 * 60 * 1000);
+    await trx('sms_log').insert({
+      id: inboundId, direction: 'inbound', from_phone: '+12025550101', to_phone: '+19413529161',
+      message_body: 'Thank you!', message_type: 'inbound', status: 'received', created_at: inboundAt,
+      metadata: {},
+    });
+    const proofAt = new Date(inboundAt.getTime() + proofOffsetMs);
+    if (kind === 'ordinary proof') {
+      await trx('sms_log').insert({
+        id: randomUUID(), direction: 'outbound', from_phone: 'push', to_phone: recipient,
+        message_body: 'Our pleasure!', message_type: 'receipt', status: 'sent', created_at: proofAt,
+        metadata: {
+          channel: 'push', providerAccepted: true, provider_from_number: providerFromNumber,
+        },
+      });
+    } else if (kind === 'promoted sole receipt') {
+      const prepared = await providerCoordination.prepareProviderHandoffReservation({
+        to: recipient, fromNumber: providerFromNumber, body: 'Our pleasure!', messageType: 'receipt',
+      });
+      providerCoordination.captureProviderContext(prepared.handle, {
+        to: recipient, fromNumber: 'push', body: 'Our pleasure!', messageType: 'receipt',
+        channel: 'push', providerAcceptedAt: proofAt,
+        metadata: { channel: 'push', providerAccepted: true, provider_from_number: providerFromNumber },
+      });
+      providerCoordination.recordProviderOutcome(prepared.handle, {
+        deliveryOutcome: 'accepted', providerMessageId: `push:${randomUUID()}`, channel: 'push',
+      });
+      expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    } else {
+      // When the ordinary proof insert fails, attemptPushFirst promotes the
+      // existing scheduled row. Its queued From may differ from the endpoint
+      // actually selected at delivery, so the trusted metadata is decisive.
+      await trx('sms_log').insert({
+        id: randomUUID(), direction: 'outbound', from_phone: '+19419999999', to_phone: recipient,
+        message_body: 'Our pleasure!', message_type: 'receipt', status: 'sent', created_at: proofAt,
+        metadata: {
+          channel: 'push', providerAccepted: true, push_settled_without_proof: true,
+          provider_from_number: providerFromNumber,
+        },
+      });
+    }
+
+    await expect(gratitudeThreadAdvanced(trx, {
+      inboundId, fromPhone: '+12025550101', toPhone: '+19413529161',
+    })).resolves.toBe(advanced);
   });
 
   test.each([
