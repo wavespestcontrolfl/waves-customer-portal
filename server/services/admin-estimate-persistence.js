@@ -3099,6 +3099,11 @@ async function reviseAdminEstimate({
       const parsePre = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
       const synced = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
       if (synced?.customer_id && parsePre(synced.estimate_data)?.addressUnverified === true) {
+        // The property-preferences advisory lock FIRST, then the customer
+        // row — the order the Customer 360 edit uses; the correction's
+        // fan-out (markSprinklerSettingsMoved) takes that advisory lock
+        // later, and the reverse order would deadlock (codex r33 P1).
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(synced.customer_id)]);
         await trx('customers').where({ id: synced.customer_id }).whereNull('deleted_at').forUpdate().first('id');
       }
     }

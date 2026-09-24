@@ -2497,6 +2497,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           if (verdict.status === 'clean') {
             const newestCleanAt = Math.max(acceptedCleanAt, Date.parse(cleanEvidenceAt || '') || 0, Date.parse(cachedCleanAt || '') || 0);
             if (newestCleanAt) verdict.at = new Date(newestCleanAt).toISOString();
+          } else if (verdict.status === 'unanswered' && !addressUnverified && leadCleanVerdict) {
+            // An UNANSWERED cached profile (no county answer) newer than a
+            // recovered staff confirmation must not overwrite the lead's
+            // clean verdict with 'unanswered' — older sibling-lead flags
+            // would reactivate the block. The reconciled clean verdict
+            // stands, at its original timestamp (codex r33 P1).
+            const keptAt = Math.max(acceptedCleanAt, Date.parse(cleanEvidenceAt || '') || 0);
+            Object.assign(verdict, buildAddressVerdict({ flag: null, enriched: { addressVerdict: 'audited' }, profileFound: true, address: normalizedAddress }), keptAt ? { at: new Date(keptAt).toISOString() } : {});
           }
           await trx('leads').where({ id: lead.id }).update({
             extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
