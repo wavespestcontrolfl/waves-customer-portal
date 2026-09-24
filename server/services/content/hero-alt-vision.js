@@ -112,6 +112,8 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 // only, or on the left chest fails — Codex r1 P1 on #4761) and still
 // forbidden anywhere else. The model reports where it sees the mark under
 // waves_logo_placements; its own lettering is never readable_text there.
+const SCREEN_MAX_TOKENS = 400;
+const SCREEN_MAX_TOKENS_WITH_LOGO = 1200;
 const UNIFORM_LOGO_DESCRIPTION = 'the Waves company logo (a smiling blue wave mascot in a red-and-blue shield, lettered "WAVES" and "LAWN & PEST")';
 function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniformLogo = false } = {}) {
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
@@ -337,7 +339,10 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       text: buildScreenPrompt({ allowedText, avoidDepicting, allowUniformLogo }),
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: true,
-      maxTokens: 400,
+      // The per-technician answer (technicians[], placements, lettering) is
+      // several times the plain one; a truncated JSON would fail OPEN as
+      // unusable, so give it room (pre-push fallback P1 on 8860b77737).
+      maxTokens: allowUniformLogo ? SCREEN_MAX_TOKENS_WITH_LOGO : SCREEN_MAX_TOKENS,
       ...(timeoutMs > 0 ? { timeoutMs } : {}),
     });
     if (!res.ok) {
@@ -357,4 +362,4 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
 }
 
 module.exports = { describeHeroForAlt, sanitizeAlt, buildAltPrompt, screenGeneratedImage, buildScreenPrompt, parseScreen };
-module.exports._internals = { isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, matchCaptions, isLogoWord, UNIFORM_LOGO_DESCRIPTION };
+module.exports._internals = { SCREEN_MAX_TOKENS, SCREEN_MAX_TOKENS_WITH_LOGO, isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, matchCaptions, isLogoWord, UNIFORM_LOGO_DESCRIPTION };

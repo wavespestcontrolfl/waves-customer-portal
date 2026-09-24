@@ -114,6 +114,9 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     const r = await screen();
     expect(r).toMatchObject({ ok: true, checked: true, reasons: [], violations: 0, logos: [], placements: ['cap', 'right chest'] });
     expect(mockDispatch.mock.calls[0][1].text).toMatch(/technicians/);
+    // the larger per-technician JSON gets room: a truncated answer would fail OPEN (pre-push P1 on 8860b77737)
+    expect(mockDispatch.mock.calls[0][1].maxTokens).toBe(_internals.SCREEN_MAX_TOKENS_WITH_LOGO);
+    expect(_internals.SCREEN_MAX_TOKENS_WITH_LOGO).toBeGreaterThanOrEqual(1000);
   });
 
   test('a technician in frame with the logo missing, on one garment only, or on the LEFT chest fails (Codex r1 P1 on #4761)', async () => {
@@ -197,6 +200,7 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(r.ok).toBe(false);
     expect(r.violations).toBe(2);
     expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/EXCEPTION/);
+    expect(mockDispatch.mock.calls[0][1].maxTokens).toBe(_internals.SCREEN_MAX_TOKENS);
   });
 
   test('helpers: placement classification and the allowlist', () => {
