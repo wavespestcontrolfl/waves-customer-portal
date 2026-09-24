@@ -25,10 +25,12 @@ function boolEnv(key, defaultValue = false) {
 }
 
 // Best-first, matching the blog engine's policy (owner directive 2026-08-27):
-// gpt-image-2 leads, image-native Gemini (Nano Banana line) is the fallback,
-// then the older gpt-image slugs and the legacy Gemini text-model slug —
-// resilience over any single provider/model ID. Override: SOCIAL_IMAGE_PROVIDER.
-const SOCIAL_DEFAULT_CHAIN = 'gpt-image-2,gemini-image-best,gemini-image,gpt-image-1.5,gpt-image-1,gemini';
+// gpt-image-2 leads, then the older gpt-image slugs. OpenAI-only since
+// 2026-09-24 (owner: no invisible watermarks) — every Gemini image model
+// embeds SynthID in the pixels, and image-generator's parseChain drops those
+// slugs from ANY chain, so a SOCIAL_IMAGE_PROVIDER override cannot bring
+// them back without ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true.
+const SOCIAL_DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1';
 
 const CREATIVE_FLAGS = {
   get enabled() { return boolEnv('SOCIAL_CREATIVE_ENGINE_ENABLED', false); },
