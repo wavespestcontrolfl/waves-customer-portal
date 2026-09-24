@@ -264,6 +264,31 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
     }
   });
 
+  test('cancelled fixed-length parent liveness follows track_state over a stale status, in both directions (round-8 GitHub Codex P1)', async () => {
+    const isoDaysAgo = (n) => new Date(Date.now() - n * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const cases = [
+      // Tech rolling on a past-dated child whose status sync failed → live.
+      { status: 'confirmed', track_state: 'en_route', expectConflict: true },
+      // Tracker says done, status stuck at 'rescheduled' → lapsed.
+      { status: 'rescheduled', track_state: 'complete', expectConflict: false },
+    ];
+    for (const c of cases) {
+      const winnerId = await makeCustomer({ address_line1: '16 Palm Ct', city: 'Bradenton', zip: '34205' });
+      const loserId = await makeCustomer({ address_line1: '16 Palm Ct', city: 'Bradenton', zip: '34205' });
+      await seedParent(winnerId, {});
+      const parentId = await seedParent(loserId, { parentStatus: 'cancelled', seedChild: true });
+      await db('scheduled_services').where({ id: parentId }).update({ recurring_ongoing: false });
+      await db('scheduled_services').where({ recurring_parent_id: parentId })
+        .update({ scheduled_date: isoDaysAgo(2), status: c.status, track_state: c.track_state });
+
+      const winner = await db('customers').where({ id: winnerId }).first();
+      const loser = await db('customers').where({ id: loserId }).first();
+      const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+      if (c.expectConflict) expect(conflict?.code).toBe('duplicate_series_conflict');
+      else expect(conflict).toBeNull();
+    }
+  });
+
   test('UNSTAMPED parents whose source estimates are linked to the same secondary property conflict, even with different home addresses (pre-push audit P1)', async () => {
     const winnerId = await makeCustomer({ address_line1: '1 Alpha St', city: 'Sarasota', zip: '34231' });
     const loserId = await makeCustomer({ address_line1: '5 Beta Ave', city: 'Sarasota', zip: '34232' });

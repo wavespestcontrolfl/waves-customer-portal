@@ -1340,15 +1340,15 @@ function seriesSameProperty(matchA, ownerA, matchB, ownerB, propertiesById) {
 async function cancelledParentStillLive(database, row) {
   if (row.recurring_ongoing === true) return true;
   const { etDateString } = require('../utils/datetime-et');
+  // Tracker-aware, via the lifecycle guard's shared clause (GitHub Codex
+  // #4684 r8 P1): track_state can lead a best-effort status sync in both
+  // directions, so a status-only probe missed a tracker-live child and
+  // blocked on a tracker-finished one.
+  const { whereVisitRowLive } = require('./customer-lifecycle-guard');
+  const today = etDateString();
   const upcoming = await database('scheduled_services')
     .where({ recurring_parent_id: row.id, is_recurring: true })
-    .whereIn('status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
-    .where(function activeBound() {
-      this.where('scheduled_date', '>=', etDateString())
-        .orWhere('status', 'rescheduled')
-        .orWhere('status', 'en_route')
-        .orWhere('status', 'on_site');
-    })
+    .where(function liveChild() { whereVisitRowLive(this, today); })
     .first('id');
   return !!upcoming;
 }
