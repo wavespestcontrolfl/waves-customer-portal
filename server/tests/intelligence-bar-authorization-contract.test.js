@@ -291,6 +291,50 @@ test('customer updates disclose address ripples and stage lifecycle stamps; bulk
   expect(plain.effects.some((e) => /Address change|lifecycle fields/.test(e.label))).toBe(false);
 });
 
+test('a churn stage move discloses the billing disarm (GitHub Codex #4684 r4); other stages do not', () => {
+  const single = buildContract({ toolName: 'update_customer', params: { customer_id: 'c1', updates: { pipeline_stage: 'churned' } }, displayParams: { updates: { pipeline_stage: 'churned' } } });
+  const billingLine = single.effects.find((e) => e.kind === 'billing' && /Auto Pay/.test(e.label));
+  expect(billingLine).toBeDefined();
+  expect(billingLine.label).toBe('Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — REFUSED at commit if a future scheduled visit, an active prepay term, or an unpaid annual-prepay invoice is still on file');
+  // The generic lifecycle-stamps line stays alongside the new billing line.
+  expect(single.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Stage → churned also stamps lifecycle fields/));
+
+  // A non-churned stage never gets the billing disarm disclosure.
+  const won = buildContract({ toolName: 'update_customer', params: { updates: { pipeline_stage: 'won' } }, displayParams: { updates: { pipeline_stage: 'won' } } });
+  expect(won.effects.some((e) => /Auto Pay/.test(e.label))).toBe(false);
+  const plain = buildContract({ toolName: 'update_customer', params: { updates: { city: 'Venice' } }, displayParams: { updates: { city: 'Venice' } } });
+  expect(plain.effects.some((e) => /Auto Pay/.test(e.label))).toBe(false);
+});
+
+test('bulk churn stage move discloses the per-customer billing disarm with the "For each of N" prefix, and reports blocks as skipped', () => {
+  const bulk = buildContract({
+    toolName: 'bulk_update_customers',
+    params: { customer_ids: ['a', 'b', 'c'], updates: { pipeline_stage: 'churned' } },
+    displayParams: { customer_ids: ['a', 'b', 'c'], updates: { pipeline_stage: 'churned' } },
+  });
+  const billingLine = bulk.effects.find((e) => e.kind === 'billing' && /Auto Pay/.test(e.label));
+  expect(billingLine).toBeDefined();
+  expect(billingLine.label).toBe('For each of 3 customers: Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — skipped at commit and reported back (not updated), never silently if a future scheduled visit, an active prepay term, or an unpaid annual-prepay invoice is still on file');
+
+  // A single-id bulk call gets no "For each of N" prefix (n === 1).
+  const bulkOne = buildContract({
+    toolName: 'bulk_update_customers',
+    params: { customer_ids: ['a'], updates: { pipeline_stage: 'churned' } },
+    displayParams: { customer_ids: ['a'], updates: { pipeline_stage: 'churned' } },
+  });
+  const oneLine = bulkOne.effects.find((e) => e.kind === 'billing' && /Auto Pay/.test(e.label));
+  expect(oneLine.label.startsWith('For each of')).toBe(false);
+  expect(oneLine.label.startsWith('Turns off Auto Pay')).toBe(true);
+
+  // A non-churned bulk stage move never gets the billing disarm disclosure.
+  const bulkWon = buildContract({
+    toolName: 'bulk_update_customers',
+    params: { customer_ids: ['a', 'b'], updates: { pipeline_stage: 'won' } },
+    displayParams: { customer_ids: ['a', 'b'], updates: { pipeline_stage: 'won' } },
+  });
+  expect(bulkWon.effects.some((e) => /Auto Pay/.test(e.label))).toBe(false);
+});
+
 test('preview fingerprint hashes arrays as sets (SQL row order) but ordered plans still bind via position', () => {
   const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
   const a = previewFingerprint({ stops: [{ id: 's1', service: 'Pest' }, { id: 's2', service: 'Lawn' }] });

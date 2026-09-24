@@ -36,11 +36,22 @@ jest.mock('../services/customer-address-fanout', () => ({
 jest.mock('../services/geocoder', () => ({
   ensureCustomerGeocoded: jest.fn(() => Promise.resolve({ latitude: 27.1, longitude: -82.4 })),
 }));
+// Churn billing disarm disclosure (GitHub Codex #4684 r4): churnGuardForRow
+// itself (its live-visit/prepay-term/pending-invoice checks and its call
+// into cancellation-processor.js's disarm helpers) is exercised elsewhere
+// (customer-lifecycle-guard's own tests) — here it is mocked so the tool
+// RESULT shape can be asserted for both the blocked and wound-down paths
+// without re-deriving every one of its DB reads.
+jest.mock('../services/customer-lifecycle-guard', () => ({
+  churnGuardForRow: jest.fn(),
+  describeLiveVisit: jest.fn(() => 'This customer still has a scheduled visit'),
+}));
 
 const db = require('../models/db');
 const customerProperties = require('../services/customer-properties');
 const addressFanout = require('../services/customer-address-fanout');
 const geocoder = require('../services/geocoder');
+const { churnGuardForRow } = require('../services/customer-lifecycle-guard');
 const { executeTool } = require('../services/intelligence-bar/tools');
 
 const CUSTOMER_ID = 'cust-1';
@@ -159,6 +170,94 @@ test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode 
   expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ latitude: null, longitude: null }));
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith('cust-a');
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith('cust-b');
+});
+
+describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684 r4)', () => {
+  test('update_customer stage->churned reports billing_wound_down when churnGuardForRow does not block', async () => {
+    db.__qb.first
+      .mockResolvedValueOnce(baseRow) // before (pre-transaction read)
+      .mockResolvedValueOnce(baseRow) // locked in-transaction read (FOR UPDATE)
+      .mockResolvedValueOnce({ ...baseRow, pipeline_stage: 'churned', active: false }); // after
+    churnGuardForRow.mockResolvedValueOnce({ blocked: false });
+
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID,
+      updates: { pipeline_stage: 'churned' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(churnGuardForRow).toHaveBeenCalledWith(expect.anything(), CUSTOMER_ID);
+    expect(result.billing_wound_down).toBe(true);
+    expect(result.billing_wound_down_fields).toEqual(expect.arrayContaining([
+      'active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at',
+    ]));
+  });
+
+  test('update_customer stage->churned refuses (no billing_wound_down) when churnGuardForRow blocks on a live visit', async () => {
+    db.__qb.first
+      .mockResolvedValueOnce(baseRow) // before
+      .mockResolvedValueOnce(baseRow); // locked in-transaction read
+    churnGuardForRow.mockResolvedValueOnce({
+      blocked: true,
+      liveVisit: { liveReason: 'upcoming_visit', scheduled_date: '2026-10-01', status: 'confirmed' },
+      liveTerm: null,
+      pendingPrepayInvoice: null,
+      error: 'still has a scheduled visit — use "Cancel plan…" first',
+    });
+
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID,
+      updates: { pipeline_stage: 'churned' },
+    });
+
+    expect(result.error).toMatch(/^Cannot mark Churned:/);
+    expect(result.preview_changed).toBe(true);
+    expect(result.billing_wound_down).toBeUndefined();
+  });
+
+  test('bulk_update_customers (fast CASE path) reports billing_wound_down_count for non-blocked rows and skips the blocked one', async () => {
+    db.__qb.select.mockResolvedValueOnce([{ id: 'cust-a' }, { id: 'cust-b' }, { id: 'cust-c' }]);
+    churnGuardForRow.mockImplementation((trx, cid) => Promise.resolve(
+      cid === 'cust-b' ? { blocked: true, error: 'still has an active prepay term — use "Cancel plan…" first' } : { blocked: false },
+    ));
+
+    const result = await executeTool('bulk_update_customers', {
+      customer_ids: ['cust-a', 'cust-b', 'cust-c'],
+      updates: { pipeline_stage: 'churned' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(churnGuardForRow).toHaveBeenCalledTimes(3);
+    expect(result.billing_wound_down_count).toBe(2);
+    expect(result.skipped_customers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ customer_id: 'cust-b' }),
+    ]));
+  });
+
+  test('bulk_update_customers (per-row path, churn + address combined) reports billing_wound_down_count only for the row that committed', async () => {
+    const rowA = { ...baseRow, id: 'cust-a' };
+    const rowB = { ...baseRow, id: 'cust-b' };
+    db.__qb.first
+      .mockResolvedValueOnce(rowA) // before (cust-a)
+      .mockResolvedValueOnce(rowA) // locked read (cust-a)
+      .mockResolvedValueOnce(rowB) // before (cust-b)
+      .mockResolvedValueOnce(rowB); // locked read (cust-b)
+    churnGuardForRow.mockImplementation((trx, cid) => Promise.resolve(
+      cid === 'cust-b' ? { blocked: true, error: 'still has a scheduled visit — use "Cancel plan…" first' } : { blocked: false },
+    ));
+
+    const result = await executeTool('bulk_update_customers', {
+      customer_ids: ['cust-a', 'cust-b'],
+      updates: { pipeline_stage: 'churned', city: 'Venice' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.updated_count).toBe(1);
+    expect(result.billing_wound_down_count).toBe(1);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ customer_id: 'cust-b' }),
+    ]));
+  });
 });
 
 test('a bulk NON-address edit skips per-customer fanout (one transaction, no address machinery)', async () => {

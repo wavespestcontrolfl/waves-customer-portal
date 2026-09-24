@@ -1432,6 +1432,16 @@ async function updateCustomer(customerId, updates, expectedVersion) {
     // how many open lead/estimate/newsletter copies were synced and how many
     // email review cards the correction resolved.
     ...(emailSync && Object.values(emailSyncCounts).some(Boolean) ? { email_sync: emailSyncCounts } : {}),
+    // Churn billing disarm disclosure (GitHub Codex #4684 r4): reaching this
+    // return with clean.pipeline_stage === 'churned' means churnGuardForRow
+    // ran INSIDE the committed transaction and did NOT block (a block throws
+    // and returns an error above instead) — so the wind-down always ran.
+    // Names what happened rather than leaving the confirm card's disclosure
+    // as the only place the operator ever sees it.
+    ...(clean.pipeline_stage === 'churned' ? {
+      billing_wound_down: true,
+      billing_wound_down_fields: ['active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at'],
+    } : {}),
   };
 }
 
@@ -1513,7 +1523,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // explicitly in the same transaction. Per-row decision, since each
     // row's before-state differs under one shared update payload.
     const laneStampRelevant = clean.monthly_rate !== undefined || clean.waveguard_tier !== undefined;
-    const { count, laneStampIds, skippedRows } = await db.transaction(async (trx) => {
+    const { count, laneStampIds, skippedRows, churnWoundDownCount } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
       let stampIds = [];
       if (laneStampRelevant) {
@@ -1561,7 +1571,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
         const { churnGuardForRow } = require('../customer-lifecycle-guard');
         const blocked = [];
         for (const cid of targetIds) {
-           
+
           const decision = await churnGuardForRow(trx, cid);
           if (decision.blocked) {
             blocked.push({ customer_id: cid, error: decision.error });
@@ -1573,7 +1583,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
           skipped.push(...blocked);
         }
       }
-      if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped };
+      // churnGuardForRow (above) already ran and disarmed billing for every
+      // remaining targetId before either return below — its own disarm is
+      // unconditional-if-not-blocked, independent of the stage UPDATE that
+      // follows — so the count is fixed here, not derived from `updated`.
+      const churnWoundDownCount = clean.pipeline_stage === 'churned' ? targetIds.length : 0;
+      if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped, churnWoundDownCount };
       if (laneStampRelevant) {
         const beforeRows = await trx('customers')
           .whereIn('id', targetIds)
@@ -1600,7 +1615,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
-      return { count: updated, laneStampIds: stampIds, skippedRows: skipped };
+      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount };
     });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
@@ -1620,6 +1635,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
         skipped_customers: skippedRows,
         warning: `${skippedRows.length} approved customer(s) were NOT updated — see skipped_customers for why.`,
       } : {}),
+      // Churn billing disarm disclosure (GitHub Codex #4684 r4) — how many
+      // of the approved rows actually went through churnGuardForRow's
+      // wind-down (a blocked row lands in skipped_customers instead).
+      ...(churnWoundDownCount ? { billing_wound_down_count: churnWoundDownCount } : {}),
     };
   }
 
@@ -1639,6 +1658,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
   let count = 0;
   const errors = [];
   const perRowLaneStampIds = [];
+  let churnWoundDownCount = 0;
   for (const customerId of customerIds) {
     const before = await db('customers').where('id', customerId).first();
     if (!before) {
@@ -1768,6 +1788,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .catch(() => {});
     }
     if (rowLaneStamp) perRowLaneStampIds.push(customerId);
+    // Reaching here means the per-row transaction committed — a blocked
+    // churnGuardForRow throws churnBlocked above and lands in `errors`
+    // instead, so every row counted here that carries a churn move actually
+    // had its billing wound down inside that same transaction.
+    if (clean.pipeline_stage === 'churned') churnWoundDownCount += 1;
     count += 1;
   }
   logger.info(`[intelligence-bar] Bulk updated ${count} customers (address path):`, logUpdates);
@@ -1784,6 +1809,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // read as a clean Done (W0B).
       warning: `${errors.length} of ${count + errors.length} customers were NOT updated (${errors.length === 1 ? 'it' : 'they'} no longer resolved at commit); ${count} updated.`,
     } : {}),
+    // Churn billing disarm disclosure (GitHub Codex #4684 r4) — same
+    // contract as the fast CASE path above.
+    ...(churnWoundDownCount ? { billing_wound_down_count: churnWoundDownCount } : {}),
   };
 }
 
