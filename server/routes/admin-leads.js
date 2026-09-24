@@ -1309,7 +1309,13 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    const callbackAt = new Date(`${date}T${time}`);
+    // The operator's date+time picker is the office's Eastern wall-clock, not
+    // server-local — Railway runs UTC, so a bare `new Date()` parse silently
+    // stored the promise 4-5h early (audit r1-leads-reviews-1).
+    const callbackAt = parseETDateTime(`${date}T${time}`);
+    if (Number.isNaN(callbackAt.getTime())) {
+      return res.status(400).json({ error: 'Invalid date or time' });
+    }
 
     await db('lead_activities').insert({
       lead_id: req.params.id,

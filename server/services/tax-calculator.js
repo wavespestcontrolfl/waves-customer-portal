@@ -92,9 +92,16 @@ const TaxCalculator = {
       return { rate: defaultRate, amount, taxable: true, county: 'unknown', reason: 'Default FL rate (county could not be inferred from ZIP)' };
     }
 
+    // Bound by effective_date so a staged future-dated rate (posted ahead of
+    // its start date) never applies before it takes effect, and by
+    // expiry_date so a retired rate never resurfaces (audit r1-billing-1).
+    const nowET = todayET();
     const taxRate = await conn('tax_rates')
       .where({ county, active: true })
-      .whereNull('expiry_date')
+      .andWhere('effective_date', '<=', nowET)
+      .andWhere(function () {
+        this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
+      })
       .orderBy('effective_date', 'desc')
       .first();
 

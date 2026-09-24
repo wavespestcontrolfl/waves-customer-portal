@@ -318,7 +318,16 @@ Please search for current FL and federal tax changes, then provide your analysis
 
   async getCurrentTaxRates() {
     try {
-      return await db('tax_rates').where('active', true);
+      // Same effective/expiry bound as TaxCalculator.calculateTax — a staged
+      // future-dated rate must not show as current before its start date
+      // (audit r1-billing-1).
+      const nowET = etDateString();
+      return await db('tax_rates')
+        .where('active', true)
+        .andWhere('effective_date', '<=', nowET)
+        .andWhere(function () {
+          this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
+        });
     } catch { return []; }
   }
 

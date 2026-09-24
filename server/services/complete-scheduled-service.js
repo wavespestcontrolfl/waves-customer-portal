@@ -7894,15 +7894,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // presentation data and must never abort a committed completion.
     // AUTHORIZATION: the server-resolved profile must carry the
     // termite_bait_station flow (primary or companion) — a stale/crafted
-    // non-termite body must not mutate the registry. Incomplete visits skip
-    // the sync entirely (same rule as companion findings): recording the
-    // zero-tap default "ok" checks for a visit that didn't happen would
-    // corrupt the station history future reports and trends read.
+    // non-termite body must not mutate the registry. Any visit the server
+    // itself classifies as not performed (incomplete, customer_declined,
+    // inspection_only — see `visitPerformed` above) skips the sync entirely:
+    // recording the zero-tap default "ok" checks for a visit that didn't
+    // happen would corrupt the station history future reports and trends
+    // read (audit ADMIN-BUG-R31 — a declined closeout used to mint a full
+    // "all stations OK" check row per pin the tech never touched).
     if (Array.isArray(termiteStations) && termiteStations.length) {
-      if (isIncompleteVisit || !stationProgram) {
+      if (isIncompleteVisit || !visitPerformed || !stationProgram) {
         logger.warn('[completion] station payload skipped', {
           serviceId: svc.id,
           incomplete: isIncompleteVisit,
+          visitPerformed,
           findingsType: completionProfile?.findingsType || null,
         });
       } else {

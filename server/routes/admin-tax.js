@@ -142,11 +142,37 @@ router.get('/rates', async (req, res, next) => {
 router.post('/rates', async (req, res, next) => {
   try {
     const { county, stateRate, countySurtax, effectiveDate, serviceZone, notes } = req.body;
+    if (!county || typeof county !== 'string' || !county.trim()) {
+      return res.status(400).json({ error: 'county is required' });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(effectiveDate || ''))) {
+      return res.status(400).json({ error: 'effectiveDate must be a YYYY-MM-DD date' });
+    }
+    const parsedStateRate = parseFloat(stateRate);
+    const parsedCountySurtax = parseFloat(countySurtax);
+    if (!Number.isFinite(parsedStateRate) || !Number.isFinite(parsedCountySurtax)) {
+      return res.status(400).json({ error: 'stateRate and countySurtax must be numbers' });
+    }
+    // Normalize casing so a re-post of the same county always matches the
+    // existing active row (audit r1-billing-1 judge note: 'sarasota' vs
+    // 'Sarasota' silently inserted a second, unmatched active row).
+    const normalizedCounty = county.trim();
+    const countyKey = normalizedCounty.charAt(0).toUpperCase() + normalizedCounty.slice(1).toLowerCase();
+
+    // A future effective date is staged, not activated: the current row
+    // stays in force (untouched) until its effective_date arrives, and both
+    // readers (calculateTax, tax-advisor.getCurrentTaxRates) select by
+    // effective_date <= today. Only a same-day-or-past post retires the
+    // previous row immediately (audit r1-billing-1 — a future post used to
+    // retire the current rate and activate the new one on insert).
+    const isImmediate = effectiveDate <= etDateString();
     await db.transaction(async (trx) => {
-      await trx('tax_rates').where({ county, active: true }).update({ active: false, expiry_date: effectiveDate });
+      if (isImmediate) {
+        await trx('tax_rates').where({ county: countyKey, active: true }).update({ active: false, expiry_date: effectiveDate });
+      }
       await trx('tax_rates').insert({
-        county, state: 'FL', state_rate: stateRate, county_surtax: countySurtax,
-        combined_rate: parseFloat(stateRate) + parseFloat(countySurtax),
+        county: countyKey, state: 'FL', state_rate: parsedStateRate, county_surtax: parsedCountySurtax,
+        combined_rate: parsedStateRate + parsedCountySurtax,
         effective_date: effectiveDate, service_zone: serviceZone, notes, active: true,
       });
     });
