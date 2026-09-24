@@ -280,7 +280,10 @@ describe('visitAtStatedAddress', () => {
     expect(visitAtStatedAddress({ ...card, payload: { ...card.payload, stated_street: '1250 North Example St' } }, visit('1250 N Example Street'), new Map())).toBe(true);
     expect(visitAtStatedAddress(card, visit('1250 Example'), new Map())).toBe(true);
     expect(visitAtStatedAddress(card, visit('1260 Example St'), new Map())).toBe(false);
-    expect(visitAtStatedAddress(card, visit('1250 Example St', 'Bradenton'), new Map())).toBe(false);
+    // A different city vetoes only when no ZIP pair agreed; aliased postal
+    // cities on the same ZIP are the same place (codex r33 P2).
+    expect(visitAtStatedAddress(card, visit('1250 Example St', 'Bradenton', null), new Map())).toBe(false);
+    expect(visitAtStatedAddress(card, visit('1250 Example St', 'Bradenton'), new Map())).toBe(true);
     expect(visitAtStatedAddress(card, visit('1250 Example St', 'Parrish', '34221'), new Map())).toBe(false);
   });
 

@@ -674,7 +674,9 @@ function liveAddressIsReviewedPremise(payload, liveOnFile) {
     // ZIP-wins (codex r34 P1): agreeing ZIPs settle the locality over
     // aliased postal-city names (Bradenton / Lakewood Ranch), the rule the
     // detector applies at filing.
-    && (!cityKey(city) || (!!zip5(zip) && zip5(zip) === zip5(liveOnFile?.zip)) || cityKey(city) === cityKey(liveOnFile?.city));
+    // …a BLANK live city (an incomplete edit) still fails — ZIP-wins only
+    // reconciles two PRESENT, aliased names.
+    && (!cityKey(city) || (!!cityKey(liveOnFile?.city) && !!zip5(zip) && zip5(zip) === zip5(liveOnFile?.zip)) || cityKey(city) === cityKey(liveOnFile?.city));
   if (!payload?.stated_street && !payload?.on_file_address?.address_line1) return true;
   return samePremise(payload?.stated_street, payload?.stated_unit, payload?.stated_city, payload?.stated_zip)
     || samePremise(payload?.on_file_address?.address_line1, payload?.on_file_address?.address_line2, payload?.on_file_address?.city, payload?.on_file_address?.zip);
