@@ -1,7 +1,7 @@
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Tag,
-  RefreshCw,
   Send,
   XCircle,
   RotateCcw,
@@ -67,7 +67,8 @@ export default function PriceMatchPage() {
   const [recipient, setRecipient] = useState(null);
   const [drafts, setDrafts] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [readError, setReadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [notice, setNotice] = useState(null);
 
   const [selectedId, setSelectedId] = useState(null);
@@ -81,34 +82,54 @@ export default function PriceMatchPage() {
   // Always-current selection, so an in-flight refresh can't clobber the pane after
   // the operator has moved on to a different draft.
   const selectedIdRef = useRef(null);
-  useEffect(() => {
-    selectedIdRef.current = selectedId;
-  }, [selectedId]);
+  const selectDraft = useCallback((id) => {
+    selectedIdRef.current = id;
+    setSelectedId(id);
+    if (!id) {
+      setDetail(null);
+      setDetailLoading(false);
+      setConfirmSend(false);
+    }
+  }, []);
 
   // Monotonic load id — a slow earlier request (e.g. operator switched tabs) must
   // not overwrite the list with the wrong filter's results when it lands last.
   const loadSeqRef = useRef(0);
 
-  const loadDrafts = useCallback(async () => {
+  const foregroundRead = useRef(0);
+  const loadDrafts = useCallback(async ({ background = false } = {}) => {
     const seq = ++loadSeqRef.current;
-    setLoading(true);
-    setError(null);
+    if (!background) foregroundRead.current = seq;
+    if (!background) { setLoading(true); setReadError(null); }
     try {
       const data = await adminFetch(`/admin/price-match/drafts?status=${filter}`);
       if (seq !== loadSeqRef.current) return; // superseded by a newer load
-      setDrafts((data && data.drafts) || []);
+      const nextDrafts = (data && data.drafts) || [];
+      const currentSelectedId = selectedIdRef.current;
+      if (
+        currentSelectedId &&
+        !nextDrafts.some((draft) => draft.id === currentSelectedId)
+      ) {
+        selectDraft(null);
+      }
+      setDrafts(nextDrafts);
       setRecipient((data && data.recipient) || null);
+      setReadError(null);
     } catch (err) {
       if (seq === loadSeqRef.current)
-        setError(err.message || "Failed to load drafts");
+        setReadError(err.message || "Failed to load drafts");
     } finally {
-      if (seq === loadSeqRef.current) setLoading(false);
+      if (!background && seq === foregroundRead.current) setLoading(false);
     }
-  }, [filter]);
+  }, [filter, selectDraft]);
 
   useEffect(() => {
     loadDrafts();
   }, [loadDrafts]);
+  useVisiblePageRefresh(() => loadDrafts({ background: true }), {
+    intervalMs: 60000, enabled: !loading && !busy && !scanning && !confirmSend,
+  });
+  useEffect(() => { if (busy || scanning) loadSeqRef.current += 1; }, [busy, scanning]);
 
   // Load the selected draft's full body whenever the selection changes.
   useEffect(() => {
@@ -121,13 +142,15 @@ export default function PriceMatchPage() {
     setConfirmSend(false);
     adminFetch(`/admin/price-match/drafts/${selectedId}`)
       .then((d) => {
-        if (active) setDetail((d && d.draft) || null);
+        if (active && selectedIdRef.current === selectedId)
+          setDetail((d && d.draft) || null);
       })
       .catch(() => {
-        if (active) setDetail(null);
+        if (active && selectedIdRef.current === selectedId) setDetail(null);
       })
       .finally(() => {
-        if (active) setDetailLoading(false);
+        if (active && selectedIdRef.current === selectedId)
+          setDetailLoading(false);
       });
     return () => {
       active = false;
@@ -150,13 +173,11 @@ export default function PriceMatchPage() {
   const act = useCallback(
     async (id, action) => {
       setBusy(true);
-      setError(null);
+      setActionError(null);
       setNotice(null);
       try {
         const res = await adminFetch(`/admin/price-match/drafts/${id}/${action}`, { method: "POST" });
-        // Resync FIRST, then set the message LAST — loadDrafts() runs setError(null)
-        // at its start, so any message set before it would be wiped before the
-        // operator sees it.
+        // Resync first so the success message describes the current record.
         await loadDrafts();
         await refreshDetail(id);
         if (action === "send") {
@@ -180,12 +201,11 @@ export default function PriceMatchPage() {
             err.code === "rejected" ||
             err.code === "send_attempt_unrecorded");
         // Resync FIRST (the backend may have advanced the draft, e.g. pending ->
-        // sending), THEN set the message LAST so loadDrafts()'s setError(null) can't
-        // wipe an actionable failure explanation before the operator reads it.
+        // sending), then report any action failure against the current record.
         await loadDrafts();
         await refreshDetail(id);
         if (actionable) {
-          setError(err.message || "The email could not be sent.");
+          setActionError(err.message || "The email could not be sent.");
         } else if (err.status === 409) {
           // Benign state race (already sent/sending, claim lost, or not stale enough
           // to reset/dismiss) — resynced above; just note it.
@@ -193,7 +213,7 @@ export default function PriceMatchPage() {
         } else {
           // Ambiguous failure (e.g. a transport error left the backend holding the
           // draft in 'sending'); surface it (resynced above so the pane reflects it).
-          setError(err.message || `Could not ${action} the draft`);
+          setActionError(err.message || `Could not ${action} the draft`);
         }
       } finally {
         setBusy(false);
@@ -208,7 +228,7 @@ export default function PriceMatchPage() {
   // scan + draft, which runs in the background (poll/refresh for the new draft).
   const triggerScan = useCallback(async (mode) => {
     setScanning(true);
-    setError(null);
+    setActionError(null);
     setNotice(null);
     try {
       const res = await adminFetch(`/admin/price-match/scan`, { method: "POST", body: JSON.stringify({ mode }) });
@@ -226,11 +246,11 @@ export default function PriceMatchPage() {
         );
       } else {
         setNotice(
-          "Scan started — it runs in the background; refresh in a few minutes to see any new draft.",
+          "Scan started — new drafts will appear here automatically.",
         );
       }
     } catch (err) {
-      setError(err.message || "Could not start the scan");
+      setActionError(err.message || "Could not start the scan");
     } finally {
       setScanning(false);
     }
@@ -244,7 +264,7 @@ export default function PriceMatchPage() {
   // The backend protects a fresh claim: reset/dismiss only act once claimed_at is
   // older than the stale window (server STALE_CLAIM_MS). Gate the recovery controls
   // on the same window so a fresh 'sending' row shows a wait state instead of a
-  // button that just 409s. (Recomputed each render; Refresh re-evaluates.)
+  // button that just 409s. (Recomputed as the draft list updates.)
   const STALE_CLAIM_MS = 10 * 60 * 1000;
   const claimedAtMs =
     detail && detail.claimed_at ? new Date(detail.claimed_at).getTime() : null;
@@ -267,13 +287,6 @@ export default function PriceMatchPage() {
         title="Price match"
         icon={Tag}
         actions={[
-          {
-            key: "refresh",
-            label: "Refresh",
-            variant: "ghost",
-            icon: RefreshCw,
-            onClick: loadDrafts,
-          },
           {
             key: "preview",
             label: "Preview scan",
@@ -314,17 +327,20 @@ export default function PriceMatchPage() {
             aria-pressed={filter === f.key}
             onClick={() => {
               setFilter(f.key);
-              setSelectedId(null);
+              selectDraft(null);
             }}
           >
             {f.label}
           </Button>
         ))}
       </div>
-      {error && (
-        <ActionFeedback error className="mb-4">
-          {error}
+      {readError && (
+        <ActionFeedback error onRetry={busy || scanning ? undefined : loadDrafts} className="mb-4">
+          {readError}
         </ActionFeedback>
+      )}
+      {actionError && (
+        <ActionFeedback error className="mb-4">{actionError}</ActionFeedback>
       )}
       {notice && (
         <div className="mb-4 flex items-start justify-between gap-3">
@@ -361,7 +377,7 @@ export default function PriceMatchPage() {
                 key={d.id}
                 variant="ghost"
                 aria-pressed={selectedId === d.id}
-                onClick={() => setSelectedId(d.id)}
+                onClick={() => selectDraft(d.id)}
                 className={cn(
                   "h-auto w-full justify-start whitespace-normal rounded-none border-b border-l-2 border-hairline border-zinc-200 p-4 text-left",
                   selectedId === d.id

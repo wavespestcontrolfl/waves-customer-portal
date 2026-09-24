@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LayoutDashboard, RefreshCw } from "lucide-react";
+import { LayoutDashboard } from "lucide-react";
 import AdminCommandHeader from "../../../components/admin/AdminCommandHeader";
 import {
   Button,
@@ -35,9 +35,6 @@ const PERIODS = [
 export default function DashboardJumpNav({
   title,
   dateLabel,
-  updatedLabel,
-  onRefresh,
-  refreshing,
   sections,
   period,
   customRange,
@@ -101,6 +98,7 @@ export default function DashboardJumpNav({
     <div data-qa="dashboard-jump-nav" className="z-20 mb-5 md:sticky md:top-0 md:bg-surface-page/95 md:pb-3">
       <AdminCommandHeader
         title={title}
+        subtitle={dateLabel}
         icon={LayoutDashboard}
         sections={sections.map((section) => ({ key: section.id, label: section.label }))}
         activeKey={current}
@@ -109,26 +107,11 @@ export default function DashboardJumpNav({
         navGridClassName="grid-cols-5"
         variant="workspace"
         sticky={false}
-        actions={[
-          {
-            key: "refresh",
-            label: refreshing ? "Refreshing" : "Refresh",
-            icon: RefreshCw,
-            variant: "secondary",
-            onClick: onRefresh,
-            disabled: refreshing,
-          },
-        ]}
         className="mb-3 md:mb-3 md:bg-transparent md:pb-0"
       />
 
       <Card>
         <CardBody className="flex flex-col gap-3 py-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-ui-caption text-ink-secondary">
-            <span>{dateLabel}</span>
-            <span>{updatedLabel}</span>
-          </div>
-
           {/* The period controls keep the dashboard's current state and fetch
               semantics; shared controls provide the comfortable target size. */}
           <div className="relative flex min-w-0 items-center gap-2">
