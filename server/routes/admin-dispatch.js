@@ -2865,11 +2865,24 @@ router.put('/:serviceId/reorder', async (req, res, next) => {
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
     let reorderedDay = null;
     await db.transaction(async (trx) => {
-      // codex-review (PR #4673): the FOR UPDATE lock + technicianLiveVisitFilter
-      // predicate here is the real fence — prov.technician_id in the final
-      // update's WHERE below is now a belt-and-suspenders stale-row check,
-      // not the primary ownership gate it used to be (ADMIN-BUG-R35).
-      const prov = await lockOwnedLiveVisit(trx, req, req.params.serviceId, ['technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day")]);
+      // codex-review (PR #4673 round 3): lockOwnedLiveVisit's FOR UPDATE
+      // taken BEFORE lockTechDays inverted the lock order
+      // dispatch-assignment.js:204 uses (advisory tech-day lock first, THEN
+      // row lock/update) — two concurrent transactions taking the two locks
+      // in opposite orders can deadlock. Read the provisional row UNLOCKED
+      // (same as dispatch-assignment.js's own `dayRow` read), THEN take the
+      // advisory lock, THEN validate ownership through the canonical
+      // technicianVisitRowInScope predicate (dead statuses, staleness — not
+      // just a technician_id compare) before the write. A row that changed
+      // between the provisional read and the lock is caught by the same
+      // "0 rows updated = stale, 409" CAS the update already relied on.
+      const prov = await trx('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .first('technician_id', 'status', 'scheduled_date', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+      if (!prov) throw Object.assign(new Error('Service not found'), { status: 404, code: 'not_found' });
+      if (!technicianVisitRowInScope(req, prov)) {
+        throw Object.assign(new Error('Not assigned to this service'), { status: 403, code: 'service_not_assigned' });
+      }
       await lockTechDays(trx, [{ techId: prov.technician_id, date: prov.day }]);
       const updated = await trx('scheduled_services')
         .where({ id: req.params.serviceId })
@@ -2909,13 +2922,15 @@ router.put('/reorder/bulk', async (req, res, next) => {
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
     const reorderedDays = new Set();
     await db.transaction(async (trx) => {
-      // codex-review (PR #4673): FOR UPDATE up front, on the whole batch —
-      // the same reassignment-race fence lockOwnedLiveVisit gives a single
-      // visit, kept batched here since the tech-day lock below needs every
-      // row's technician_id/day together anyway.
+      // codex-review (PR #4673 round 3): a FOR UPDATE here, before
+      // lockTechDays, would invert the lock order dispatch-assignment.js:204
+      // uses (advisory tech-day lock first, then row lock/update) and could
+      // deadlock a concurrent reassignment. Read UNLOCKED — the tech-day
+      // advisory lock below already fences the concurrent-write case this
+      // batch cares about, and the per-item "0 rows updated = stale" CAS
+      // below catches anything that changed between this read and the lock.
       const rows = await trx('scheduled_services')
         .whereIn('id', (order || []).map((i) => i.serviceId))
-        .forUpdate()
         .select('id', 'technician_id', 'status', 'scheduled_date', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
       const byId = new Map(rows.map((r) => [String(r.id), r]));
       await lockTechDays(trx, rows.map((r) => ({ techId: r.technician_id, date: r.day })));
