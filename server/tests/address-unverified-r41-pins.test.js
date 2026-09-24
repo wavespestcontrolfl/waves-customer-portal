@@ -316,3 +316,20 @@ describe('codex r48', () => {
     expect(src).toContain('await adminEstimates.clearGroupSiblingDeliveryClaims(groupRow, quoteDeliveryClaimToken);');
   });
 });
+
+describe('pre-push audit after r48', () => {
+  test('the Intelligence Bar save takes the address-verdict lock before loadContext, group and estimate row locks', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/intelligence-bar/customer-estimate-tools'), 'utf8');
+    const start = src.indexOf('async function saveCustomerEstimate(');
+    const body = src.slice(start, src.indexOf('const preview = await estimatePreview(input, trx, context);', start));
+    const lock = body.indexOf("['address-verdict', key]");
+    expect(lock).toBeGreaterThan(0);
+    expect(lock).toBeLessThan(body.indexOf('const context = await loadContext(input, trx, true);'));
+    expect(lock).toBeLessThan(body.indexOf('lockEstimateGroupAddressRevision'));
+  });
+  test('a live clean lookup persists the newest accepted clean timestamp', () => {
+    const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
+    expect(ppl).toContain("if (verdict.status === 'clean' && newestCleanAt) verdict.at = newestCleanAt;");
+    expect(ppl).toContain('const newestCleanAt = [evidenceAt, reconciledCleanAt].filter(Boolean)');
+  });
+});
