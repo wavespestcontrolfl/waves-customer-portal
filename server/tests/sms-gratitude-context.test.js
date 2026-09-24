@@ -41,7 +41,10 @@ function compilingDb() {
   return { dbh, queries };
 }
 
-function readContextDb({ pendingRequest = false, inboundAvailable = true } = {}) {
+function readContextDb({
+  pendingRequest = false, inboundAvailable = true,
+  inboundFrom = '+1 (941) 555-0100', customerPhone = '+19415550100',
+} = {}) {
   const inboundCreatedAt = '2026-09-24T12:00:00.000Z';
   const draft = contractRow({
     created_at: '2026-09-24T12:00:01.000Z',
@@ -49,7 +52,7 @@ function readContextDb({ pendingRequest = false, inboundAvailable = true } = {})
   });
   const inbound = {
     id: 'sms-1', customer_id: 'customer-1', direction: 'inbound',
-    from_phone: '+1 (941) 555-0100', to_phone: '+19413529161',
+    from_phone: inboundFrom, to_phone: '+19413529161',
     message_body: 'Thank you!', metadata: { media: [] }, created_at: inboundCreatedAt,
   };
   const rows = [
@@ -82,7 +85,7 @@ function readContextDb({ pendingRequest = false, inboundAvailable = true } = {})
     query.select = jest.fn(() => {
       selectedTables.push(table);
       if (table === 'customers') return Promise.resolve([
-        { id: 'customer-1', first_name: 'Dana', phone: '+19415550100' },
+        { id: 'customer-1', first_name: 'Dana', phone: customerPhone },
       ]);
       if (table === 'sms_log') return Promise.resolve(rows);
       return Promise.resolve([]);
@@ -119,7 +122,7 @@ test.each([
 test('pending-work SQL covers every customer and same-thread operational queue', async () => {
   const { dbh, queries } = compilingDb();
   await expect(pendingGratitudeWork(dbh, {
-    customerId: '00000000-0000-4000-8000-000000000003', threadLast10: '9415550100',
+    customerId: '00000000-0000-4000-8000-000000000003', threadKey: '9415550100',
   })).resolves.toBe(false);
   expect(queries.map((q) => q.table)).toEqual([
     'service_requests', 'call_commitments as cc', 'call_commitments as cc_sms',
@@ -140,10 +143,11 @@ test('pending-work SQL covers every customer and same-thread operational queue',
   expect(sql).toContain('"oi"."customer_id"');
   expect(sql).toContain('"ad"."customer_id"');
   expect(sql).toContain('REGEXP_REPLACE');
+  expect(sql).toContain("NOT LIKE '+%'");
   expect(queries.flatMap((q) => q.bindings)).toContain('9415550100');
 });
 
-test('thread advancement SQL excludes only anchor and owned reservation', async () => {
+test('thread advancement normalizes formatted endpoints and excludes only anchor and owned reservation', async () => {
   const { dbh, queries } = compilingDb();
   await expect(gratitudeThreadAdvanced(dbh, {
     inboundId: '00000000-0000-4000-8000-000000000002',
@@ -152,11 +156,15 @@ test('thread advancement SQL excludes only anchor and owned reservation', async 
   })).resolves.toBe(false);
   expect(queries).toHaveLength(1);
   expect(queries[0].sql.match(/not "id" = \?/g)).toHaveLength(2);
-  expect(queries[0].sql).toContain("status IN ('queued','sent','delivered','scheduled','sending')");
-  expect(queries[0].sql).toContain("OR (direction = 'outbound' AND status IN ('queued','scheduled','sending'))");
+  expect(queries[0].sql).toContain("status IN ('accepted','queued','sent','delivered','scheduled','sending')");
+  expect(queries[0].sql).toContain("OR (direction = 'outbound' AND status IN ('accepted','queued','scheduled','sending'))");
+  expect(queries[0].sql).toContain("BTRIM(COALESCE(to_phone, ''))");
+  expect(queries[0].sql).not.toContain('to_phone = ?');
   expect(queries[0].bindings).toEqual(expect.arrayContaining([
     '00000000-0000-4000-8000-000000000002',
     '00000000-0000-4000-8000-000000000099',
+    '9415550100',
+    '9413529161',
   ]));
 });
 
@@ -175,6 +183,16 @@ test('read context fails closed without dereferencing a missing inbound', async 
     draftId: 'draft-1', smsLogId: 'sms-1', expectedPromptVersion: 'house_voice_v11',
     now: '2026-09-24T12:05:00.000Z', activatedAt: '2026-09-24T11:00:00.000Z', dbh,
   })).resolves.toEqual({ ok: false, reason: 'inbound_unavailable' });
+});
+
+test('read context rejects a foreign sender that only shares a US customer suffix', async () => {
+  const { dbh } = readContextDb({
+    inboundFrom: '+445550000001', customerPhone: '+15550000001',
+  });
+  await expect(readGratitudeContext({
+    draftId: 'draft-1', smsLogId: 'sms-1', expectedPromptVersion: 'house_voice_v11',
+    now: '2026-09-24T12:05:00.000Z', activatedAt: '2026-09-24T11:00:00.000Z', dbh,
+  })).resolves.toEqual({ ok: false, reason: 'customer_untrusted' });
 });
 
 test('read context validates against only the explicitly supplied prompt version', async () => {
