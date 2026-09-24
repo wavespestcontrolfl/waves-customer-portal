@@ -334,6 +334,34 @@ describe('POST /api/photo-id/:type happy paths', () => {
     });
   });
 
+  test('lawn: a direct overwatering sign becomes a real `signals` entry and the summary never says "No urgent lawn issues" (codex GH P2)', async () => {
+    // Every OTHER severity reads clean/baseline — before the fix, a bare
+    // `overwatering_signal: true` next to five baseline severities produced
+    // an EMPTY signals array (nothing flagged) and the reassuring
+    // "No urgent lawn issues spotted" summary, silently discarding the one
+    // real signal the photos actually showed.
+    mockLawnAnalyzePhoto.mockResolvedValue(lawnAnalyzeResult({
+      turf_density: 80, weed_coverage: 10, color_health: 8, fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: true, grass_type: 'st_augustine', observations: 'Mushrooms near the irrigation head.',
+    }));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.result.signals).toContainEqual(expect.objectContaining({ key: 'overwatering_signal', level: 'flagged' }));
+      expect(body.result.observations).not.toBe('No urgent lawn issues spotted in these photos.');
+      expect(body.result.observations.toLowerCase()).toContain('overwatering');
+    });
+  });
+
+  test('lawn: no overwatering sign never adds a `signals` entry for it (baseline stays silent, like every other field)', async () => {
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      const body = await res.json();
+      expect(body.result.signals.some((s) => s.key === 'overwatering_signal')).toBe(false);
+      expect(body.result.observations).toBe('No urgent lawn issues spotted in these photos.');
+    });
+  });
+
   test('lawn: out-of-contract scores are clamped to their declared range before egress (codex GH r2-cloud P2)', async () => {
     // The vision prompt's OWN contract advertises turf_density/weed_coverage
     // as 0-100 and color_health as 1-10 — nothing downstream enforced that
@@ -391,7 +419,7 @@ describe('POST /api/photo-id/:type happy paths', () => {
       expect(body.next_step.kind).toBe('unclear');
       // codex GH r1 P1: the successful photo's healthy scores must not stand
       // in the result alongside the unclear warning.
-      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.result.scores).toBeNull();
       expect(body.result.signals).toEqual([]);
       expect(body.result.observations).not.toContain('Looks healthy');
     });
@@ -454,6 +482,42 @@ describe('POST /api/photo-id/:type happy paths', () => {
       const [data, mimeType] = mockLawnAnalyzePhoto.mock.calls[0];
       expect(mimeType).toBe('image/jpeg');
       expect(data).toBe('aGVsbG8='); // the ORIGINAL bytes — sharp never ran
+    });
+  });
+
+  test('an uppercase MIME data URL ("data:image/JPEG;base64,...") parses exactly like lowercase, never silently dropped (codex GH P2)', async () => {
+    // validateRequestPhotos' DATA_URL_PREFIX_RE is case-insensitive — this
+    // proves the route's OWN parser (DATA_URL_RE / splitDataUrl) accepts
+    // exactly what validation already accepted, and normalizes the MIME to
+    // lowercase for every downstream consumer (NEEDS_TRANSCODE_MIME's Set
+    // lookup, the vision call, S3 storage).
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody({ photos: ['data:image/JPEG;base64,aGVsbG8='] }));
+      expect(res.status).toBe(200);
+      const [data, mimeType] = mockLawnAnalyzePhoto.mock.calls[0];
+      expect(mimeType).toBe('image/jpeg');
+      expect(data).toBe('aGVsbG8=');
+    });
+  });
+
+  test('a mixed batch with one uppercase-MIME photo never silently drops it before `partial` is computed (codex GH P2)', async () => {
+    // Before the fix: DATA_URL_RE's implicit lowercase-only literal match
+    // would fail on this one photo, `rawPhotoInputs` would end up shorter
+    // than `validated.photos`, and the batch would silently analyze with
+    // ONE fewer photo than the customer sent — with `partial` computed only
+    // from the (already-shrunk) photoInputs array, so it would never notice.
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-would-win', lanes: ['lawn'] });
+    mockLawnAnalyzePhoto.mockResolvedValue(lawnAnalyzeResult({
+      turf_density: 90, weed_coverage: 5, color_health: 9, fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Looks healthy.',
+    }));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody({ photos: [PHOTO_DATA_URL, 'data:image/JPEG;base64,aGVsbG8='] }));
+      expect(res.status).toBe(200);
+      // Both photos parsed and were analyzed — a real (non-suppressed) result.
+      expect(mockLawnAnalyzePhoto).toHaveBeenCalledTimes(2);
+      const body = await res.json();
+      expect(body.result.scores).toEqual({ turf_density: 90, weed_coverage: 5, color_health: 9 });
+      expect(body.next_step.kind).not.toBe('unclear');
     });
   });
 });
@@ -594,7 +658,7 @@ describe('next_step branches', () => {
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/lawn', photoBody());
       const body = await res.json();
-      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.result.scores).toBeNull();
       expect(body.next_step.kind).toBe('unclear');
     });
   });
@@ -609,7 +673,7 @@ describe('next_step branches', () => {
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/lawn', photoBody());
       const body = await res.json();
-      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.result.scores).toBeNull();
       expect(body.result.signals).toEqual([]);
       expect(body.result.observations).not.toContain('No urgent lawn issues');
       expect(body.next_step.kind).toBe('unclear');
@@ -668,7 +732,7 @@ describe('next_step branches', () => {
       const res = await post(base, '/api/photo-id/lawn', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
       const body = await res.json();
       expect(body.next_step.kind).toBe('unclear');
-      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.result.scores).toBeNull();
       expect(body.result.observations).not.toContain('Looks great');
     });
   });
@@ -699,7 +763,7 @@ describe('next_step branches', () => {
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
       const body = await res.json();
-      expect(body.result.scores.overall).toBeNull();
+      expect(body.result.scores).toBeNull();
       expect(body.next_step.kind).toBe('unclear');
     });
   });
@@ -717,7 +781,7 @@ describe('next_step branches', () => {
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
       const body = await res.json();
-      expect(body.result.scores.overall).toBeNull();
+      expect(body.result.scores).toBeNull();
       expect(body.result.signals).toEqual([]);
       expect(body.next_step.kind).toBe('unclear');
     });
@@ -740,7 +804,7 @@ describe('next_step branches', () => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
       const body = await res.json();
       expect(body.next_step.kind).toBe('unclear');
-      expect(body.result.scores.overall).toBeNull();
+      expect(body.result.scores).toBeNull();
       expect(body.result.summary).not.toContain('Plants look healthy');
     });
   });
@@ -756,7 +820,7 @@ describe('next_step branches', () => {
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
       const body = await res.json();
-      expect(body.result.scores.overall).toBeNull();
+      expect(body.result.scores).toBeNull();
       expect(body.next_step.kind).toBe('unclear');
     });
   });
@@ -1156,7 +1220,7 @@ describe('real averageScores merges never leave the composite empty (why raw evi
       const res = await post(base, '/api/photo-id/lawn', photoBody());
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.result.scores).toBeNull();
       expect(body.next_step.kind).toBe('unclear');
     });
   });
@@ -1206,7 +1270,7 @@ describe('real averageScores merges never leave the composite empty (why raw evi
       // result, not just the signals array — the neutral placeholder (null
       // scores too) and an 'unclear' next_step, exactly like a partial
       // photo batch.
-      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.result.scores).toBeNull();
       expect(body.result.signals).toEqual([]);
       expect(body.next_step.kind).toBe('unclear');
     });
@@ -1231,7 +1295,7 @@ describe('real averageScores merges never leave the composite empty (why raw evi
       // numbers next to it — reassuring overall despite 3 of 5 dimensions
       // never being assessed. finalizeCustomerResult now treats ANY
       // tracking category as incomplete for the WHOLE result.
-      expect(body.result.scores).toEqual({ foliage_fullness: null, leaf_color_vigor: null, overall: null });
+      expect(body.result.scores).toBeNull();
       expect(body.result.signals).toEqual([]);
       expect(body.next_step.kind).toBe('unclear');
     });

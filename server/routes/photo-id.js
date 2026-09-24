@@ -61,7 +61,13 @@ const { etDateString } = require('../utils/datetime-et');
 
 const OFFICE_PHONE = '(941) 297-5749';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DATA_URL_RE = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/;
+// Case-insensitive (codex GH P2): request-photo-validation.js's
+// DATA_URL_PREFIX_RE validates the "data:", "image/", and ";base64," literal
+// segments case-insensitively too — this parser must accept exactly what
+// validation already accepted, never a stricter subset of it, or a
+// validator-approved photo (e.g. `data:IMAGE/jpeg;BASE64,...`) silently fails
+// to parse here and is quietly dropped before `partial` is ever computed.
+const DATA_URL_RE = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/i;
 
 const TYPE_TABLE = {
   pest: 'pest_identifications',
@@ -193,7 +199,13 @@ function cleanString(value, max = 200) {
 function splitDataUrl(dataUrl) {
   const match = DATA_URL_RE.exec(String(dataUrl || ''));
   if (!match) return null;
-  return { mimeType: match[1], data: match[2] };
+  // Lowercase the captured MIME type (codex GH P2): every downstream
+  // consumer — NEEDS_TRANSCODE_MIME's own Set lookup, the vision providers'
+  // mimeType field, S3 content-type — expects the canonical lowercase form;
+  // a validator-accepted `IMAGE/JPEG` must resolve to the SAME real-JPEG
+  // path a lowercase `image/jpeg` does, not silently skip transcoding (or
+  // reach a provider) under a casing that formally means the same thing.
+  return { mimeType: match[1].toLowerCase(), data: match[2] };
 }
 
 // ── Shared "what happens next" copy — the server decides the kind; the
@@ -442,6 +454,16 @@ const LAWN_SIGNAL_LABELS = {
   thatch_visibility: 'Thatch buildup',
 };
 
+// codex GH P2: `overwatering_signal` is a top-level boolean the client's
+// LawnResult never renders (it only maps `signals`) and
+// lawnDeterministicObservations never read — a photo with a real, direct
+// overwatering sign (standing water, algae, mushrooms) could still produce
+// "No urgent lawn issues spotted in these photos." A dedicated label lets
+// lawnPublicResult fold it into the SAME allowlisted `signals` vocabulary
+// (never raw model text) the other five fields use, only when flagged —
+// mirroring their own "baseline never appears, only a departure does" rule.
+const LAWN_OVERWATERING_LABEL = 'Overwatering signs';
+
 // Numeric fields average across photos; categorical severities take the
 // WORST reading across photos — a trouble-spot photo can't be diluted by
 // clean overview shots (same worst-case principle tree-shrub's own
@@ -621,6 +643,14 @@ function lawnPublicResult(merged) {
   const signals = Object.keys(LAWN_SIGNAL_LABELS)
     .filter((key) => merged[key] != null)
     .map((key) => ({ key, label: LAWN_SIGNAL_LABELS[key], level: merged[key] }));
+  // codex GH P2: only ADD a signal when the flag is actually set — a false
+  // reading stays silent, exactly like the other five fields' baseline
+  // values never appear either (LAWN_SIGNAL_BASELINE). Pushed after the
+  // severity fields so lawnDeterministicObservations sees it as one more
+  // flagged item, never a substitute for them.
+  if (merged.overwatering_signal) {
+    signals.push({ key: 'overwatering_signal', label: LAWN_OVERWATERING_LABEL, level: 'flagged' });
+  }
   return {
     grass_type: merged.grass_type ? grassTypeLabel(merged.grass_type) : null,
     scores: { turf_density: merged.turf_density, weed_coverage: merged.weed_coverage, color_health: merged.color_health },
@@ -635,7 +665,11 @@ function lawnPublicResult(merged) {
 // "No urgent lawn issues" copy standing next to the `unclear` next_step.
 const LAWN_PARTIAL_RESULT = {
   grass_type: null,
-  scores: { turf_density: null, weed_coverage: null, color_health: null },
+  // codex GH P2: a truthy `scores` object of nulls still renders — the
+  // client's `{result.scores && (...)}` gate only checks truthiness, so
+  // {turf_density: null, ...} rendered as "null%". A partial/unassessed
+  // result never had usable scores to show; omit the group entirely.
+  scores: null,
   signals: [],
   overwatering_signal: false,
   observations: "We couldn't analyze every photo you sent — send these to our team and we'll take a personal look.",
@@ -733,7 +767,9 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
 // codex GH r1 P1 — same partial/unreliable suppression as pest and lawn.
 const TREE_PARTIAL_RESULT = {
   plant_groups: [],
-  scores: { foliage_fullness: null, leaf_color_vigor: null, overall: null },
+  // codex GH P2: same truthy-object-of-nulls bug as LAWN_PARTIAL_RESULT —
+  // the client's `{result.scores && (...)}` gate only checks truthiness.
+  scores: null,
   signals: [],
   summary: "We couldn't get a reliable read from these photos — send them to our team and we'll take a personal look.",
 };
@@ -946,6 +982,18 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
 
     const rawPhotoInputs = validated.photos.map(splitDataUrl).filter(Boolean);
     if (!rawPhotoInputs.length) return res.status(400).json({ error: 'Photos could not be read.' });
+    // codex GH P2: DATA_URL_RE must accept exactly what validateRequestPhotos
+    // already accepted (same casing rules), so this filter should never
+    // actually drop anything — but if it ever silently parses fewer photos
+    // than were validated, fail the WHOLE request rather than quietly
+    // analyzing a smaller batch: `partial` is computed from `photoInputs`
+    // alone, so a dropped-here photo would never be counted as missing, and
+    // a confident result could be built off strictly fewer photos than the
+    // customer actually sent.
+    if (rawPhotoInputs.length !== validated.photos.length) {
+      logger.error(`[photo-id] parsed ${rawPhotoInputs.length} of ${validated.photos.length} validated photos — DATA_URL_RE/validator casing mismatch`);
+      return res.status(400).json({ error: 'One of your photos could not be read. Try again.' });
+    }
 
     // codex GH r2 (cloud) P1: transcode HEIC/HEIF/nonstandard-jpg to real
     // JPEG BEFORE any vision call or S3 storage — see normalizePhotoInput's

@@ -540,10 +540,11 @@ app.use('/api/requests', express.json({ limit: '30mb' }));
 // signature-only customer-token guard (mirrors requireStaffTokenForLargeBody
 // for /api/admin /api/tech above; the route's own `authenticate` still does
 // the full DB-backed check), THEN the large parser.
-app.use('/api/photo-id', (req, res, next) => {
+function requireCustomerPhotoIdGateOpen(req, res, next) {
   if (!require('./config/feature-gates').isEnabled('customerPhotoId')) return res.status(404).json({ error: 'Not found' });
   return next();
-});
+}
+app.use('/api/photo-id', requireCustomerPhotoIdGateOpen);
 app.use('/api/photo-id', require('./middleware/large-body-auth').requireCustomerTokenForLargeBody);
 app.use('/api/photo-id', express.json({ limit: '30mb' }));
 // Worker-route HMAC signing (link-worker-auth) hashes the RAW request bytes;
