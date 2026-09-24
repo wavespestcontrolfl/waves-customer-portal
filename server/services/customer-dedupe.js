@@ -1337,18 +1337,18 @@ function seriesSameProperty(matchA, ownerA, matchB, ownerB, propertiesById) {
 // conflict. recurringServiceAddress (booking/visit-financial-stamps.js)
 // mirrors findActiveRecurringSeries' own address normalization onto the
 // extra rows, so seriesSameProperty compares like shapes either way.
-async function cancelledParentStillLive(database, row) {
+async function cancelledParentStillLive(database, row, columns) {
   if (row.recurring_ongoing === true) return true;
   const { etDateString } = require('../utils/datetime-et');
+  // Tracker-aware, via the lifecycle guard's shared clause (GitHub Codex
+  // #4684 r8 P1): track_state can lead a best-effort status sync in both
+  // directions, so a status-only probe missed a tracker-live child and
+  // blocked on a tracker-finished one.
+  const { whereVisitRowLive } = require('./customer-lifecycle-guard');
+  const today = etDateString();
   const upcoming = await database('scheduled_services')
     .where({ recurring_parent_id: row.id, is_recurring: true })
-    .whereIn('status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
-    .where(function activeBound() {
-      this.where('scheduled_date', '>=', etDateString())
-        .orWhere('status', 'rescheduled')
-        .orWhere('status', 'en_route')
-        .orWhere('status', 'on_site');
-    })
+    .where(function liveChild() { whereVisitRowLive(this, today, { trackState: !!columns?.track_state }); })
     .first('id');
   return !!upcoming;
 }
@@ -1363,7 +1363,13 @@ function parentRowIsPlanShaped(row, isOneTimeBookingSource) {
 }
 
 async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
-  const { findActiveRecurringSeries, duplicateGuardFamilyKey } = require('./recurring-appointment-seeder');
+  const { findActiveRecurringSeries, duplicateGuardFamilyKey, scheduledServiceColumns } = require('./recurring-appointment-seeder');
+  // Same schema guard the canonical lookup applies before it reads any
+  // recurring column: without is_recurring/recurring_parent_id/
+  // recurring_ongoing there is no series to find (and no supplemental
+  // cancelled-parent probe to run).
+  const columns = await scheduledServiceColumns(database);
+  if (!columns || !columns.is_recurring || !columns.recurring_parent_id || !columns.recurring_ongoing) return [];
   const active = await findActiveRecurringSeries(database, { customerId, serviceId, serviceType });
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
@@ -1393,7 +1399,7 @@ async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
     const keyMatch = targetKey != null && row.service_type && duplicateGuardFamilyKey(row.service_type) === targetKey;
     if (!idMatch && !keyMatch) continue;
      
-    if (!(await cancelledParentStillLive(database, row))) continue;
+    if (!(await cancelledParentStillLive(database, row, columns))) continue;
     seen.add(String(row.id));
     matches.push({ ...row, ...recurringServiceAddress(row) });
   }
