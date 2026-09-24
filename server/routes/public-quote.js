@@ -3229,7 +3229,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           if (carried) draftAddressBlockCarried = true;
           await trx('estimates').where({ id: existingEst.id }).update({
             ...estFields,
-            ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag } } : {}),
+            ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag, addressUnverifiedClearedBy: null } } : {}),
             ...(clearedUnderLock ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
             ...(wizardAddressChanged(lockedEst) ? { property_id: null } : {}),
             archived_at: null,
@@ -3281,7 +3281,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                   .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
                   .update({
                     ...estFields,
-                    ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag } } : {}),
+                    ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag, addressUnverifiedClearedBy: null } } : {}),
                     ...(clearedUnderLock ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
                     ...(wizardAddressChanged(lockedDup) ? { property_id: null } : {}),
                     updated_at: new Date(),
@@ -3311,7 +3311,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             if (recInsert.newerClean) { addressUnverified = null; cleanEvidenceAt = recInsert.newerClean; }
             const [inserted] = await trx('estimates').insert({
               ...estFields,
-              ...(newerForInsert ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: newerForInsert } } : {}),
+              ...(newerForInsert ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: newerForInsert, addressUnverifiedClearedBy: null } } : {}),
               ...(recInsert.newerClean ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
               status: 'draft',
               source: 'quote_wizard',

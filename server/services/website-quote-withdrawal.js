@@ -48,7 +48,7 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
       .whereNull('price_locked_at')
       .update({
         updated_at: new Date(),
-        estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: flag || null })]),
+        estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: flag || null, addressUnverifiedClearedBy: null })]),
       });
   }
   if (!toWithdraw.length) return [];
@@ -69,7 +69,7 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
     .update({
       archived_at: new Date(),
       updated_at: new Date(),
-      estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: flag || null })]),
+      estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: flag || null, addressUnverifiedClearedBy: null })]),
     })
     .returning('id');
   const { recordAuditEvent } = require('../services/audit-log');

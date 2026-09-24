@@ -3257,7 +3257,12 @@ async function reviseAdminEstimate({
     // for this contact pair and premise, or the next /calculate recovers
     // the old warning and re-blocks the row (codex #4667 r27 P1). Under
     // the contact-pair lock taken at the top of this transaction.
-    if (writtenData?.addressUnverifiedClearedBy && priorLockedData?.addressUnverified === true && !writtenData.lead_id
+    // Gated on THIS write actually clearing the block (prior true → written
+    // not true), never on the persisted addressUnverifiedClearedBy alone: a
+    // draft staff cleared earlier and a lookup re-flagged still carries
+    // that stale key (pre-push audit P1).
+    const clearedByThisWrite = priorLockedData?.addressUnverified === true && writtenData?.addressUnverified !== true && !!writtenData?.addressUnverifiedClearedBy;
+    if (clearedByThisWrite && !writtenData.lead_id
       && row.customer_email && row.customer_phone) {
       try {
         const { parseDisplayAddress, recoverAddressUnverified: recoverLeadFlag, flagCoversAddress } = require('./lead-address-unverified');
@@ -3298,7 +3303,7 @@ async function reviseAdminEstimate({
     // still fans its correction out to the linked customer, primary
     // property and downstream snapshots — only the lead-specific writes
     // need the link.
-    if (writtenData?.addressUnverifiedClearedBy && priorLockedData?.addressUnverified === true) {
+    if (clearedByThisWrite) {
       const { parseDisplayAddress } = require('./lead-address-unverified');
       const parsed = parseDisplayAddress(row.address);
       const verdict = {
