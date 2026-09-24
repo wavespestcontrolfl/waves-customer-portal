@@ -966,6 +966,25 @@ describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Co
     const notRecurringResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
     expect(notRecurringResult.skipped).toBe('not_recurring');
   });
+
+  test('an EXACT tie (same latest-visit date AND same created_at) resolves the SAME winner regardless of which root asks (Codex GitHub guards follow-up P1, round 4)', async () => {
+    // Without a final stable tie-break, the winner depended on pool
+    // order — isSupersededSeries always puts its OWN `parent` first in
+    // the candidate list, so calling this once with root 10 as parent and
+    // once with root 99 as parent could crown EACH root a winner in its
+    // own call (both dry-run as eligible; apply's real winner becomes
+    // whichever one's run happens to go first — a genuine race).
+    const roots = [
+      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2026-01-01T00:00:00Z' },
+      { id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2026-01-01T00:00:00Z' },
+    ];
+    const asTen = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    const asNinetyNine = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
+    // Exactly one of the two is superseded_series — never both (both
+    // winning) and never neither (both losing).
+    const outcomes = [asTen.skipped === 'superseded_series', asNinetyNine.skipped === 'superseded_series'];
+    expect(outcomes.filter(Boolean)).toHaveLength(1);
+  });
 });
 
 describe('resolveTopUpProbeCandidateDate — probes the REAL next cadence date, never a fixed "today" (Codex GitHub guards follow-up P1, round 3)', () => {

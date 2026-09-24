@@ -17535,8 +17535,21 @@ async function isCandidateTopUpBillable(conn, row, cols) {
 }
 // Resolves the winning root among a candidate pool: the one with the
 // latest live visit (latestLiveSeriesVisit — the SAME anchor every extend
-// step uses), ties broken by the most recently created root. A candidate
-// with no live visit at all never outranks one that has one.
+// step uses), ties on that broken by the most recently created root, and a
+// FINAL stable tie-break on the row id itself (Codex GitHub guards
+// follow-up P1, round 4): two roots can share both the same latest-visit
+// date and the same created_at (batch-created roots, or two series with no
+// live visit at all — latestDate and createdAt both default the same for
+// either). Without a final total order, the winner depended on POOL ORDER
+// — isSupersededSeries always puts `parent` first in `candidates`, so
+// calling this rule once with root A as parent and once with root B as
+// parent could crown A both times (A first in its own call, and A still
+// wins ties in B's call too) — or, symmetrically, EACH root could crown
+// itself in its own call, so a dry run reports both eligible and apply's
+// winner is whichever one's turn happens to run first. Lexicographic on
+// the id string is a real total order (never a tie) that doesn't depend
+// on which root is doing the asking. A candidate with no live visit at all
+// never outranks one that has one.
 async function pickTopUpWinnerId(conn, pool) {
   let winner = null;
   for (const row of pool) {
@@ -17552,7 +17565,11 @@ async function pickTopUpWinnerId(conn, pool) {
       if (winner.latestDate == null || candidate.latestDate > winner.latestDate) { winner = candidate; }
       continue;
     }
-    if (candidate.createdAt > winner.createdAt) winner = candidate;
+    if (candidate.createdAt !== winner.createdAt) {
+      if (candidate.createdAt > winner.createdAt) winner = candidate;
+      continue;
+    }
+    if (String(candidate.id) > String(winner.id)) winner = candidate;
   }
   return winner.id;
 }
