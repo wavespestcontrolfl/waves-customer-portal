@@ -297,8 +297,10 @@ const LEAD_ROW_FIELDS = [
   'status', 'customer_id', 'converted_at', 'first_contact_channel', 'twilio_call_sid',
 ];
 
-async function loadLead(dbConn, leadId) {
-  return dbConn('leads').where({ id: leadId }).whereNull('deleted_at').first(...LEAD_ROW_FIELDS);
+async function loadLead(dbConn, leadId, { forUpdate = false } = {}) {
+  const q = dbConn('leads').where({ id: leadId }).whereNull('deleted_at');
+  if (forUpdate) q.forUpdate();
+  return q.first(...LEAD_ROW_FIELDS);
 }
 
 // The lead's EXISTING customer link, only when it is proven (Codex #4737 P0):
@@ -374,9 +376,15 @@ function searchParseOpts(config, now = new Date()) {
 // (falls back to a 30-min slot grid), but the commit refuses to book without
 // a real catalog id.
 async function loadAssessmentCatalog() {
-  const row = await db('services')
+  const found = await db('services')
     .where({ service_key: ASSESSMENT_SERVICE_KEY })
-    .first('id', 'default_duration_minutes');
+    .first('id', 'default_duration_minutes', 'is_active', 'is_archived', 'booking_enabled');
+  // A deactivated, archived or booking-disabled assessment row is treated
+  // exactly like a missing one (Codex #4737 r5 P2): the page answers
+  // "temporarily unavailable" instead of scheduling a retired service.
+  const row = found && found.is_active !== false && found.is_archived !== true && found.booking_enabled !== false
+    ? found
+    : null;
   const rawDuration = parseInt(row?.default_duration_minutes, 10);
   return {
     serviceId: row?.id || null,
@@ -386,86 +394,106 @@ async function loadAssessmentCatalog() {
 }
 
 // Single address-resolution authority for this whole route family (GET,
-// /availability, /find-slots, and the commit): tries the linked customer's
-// stored COORDS first (no geocode needed), then its address TEXT, then
-// (only when the customer has no address of its own) the lead's own raw
-// fields, and only falls through to a caller-SUPPLIED address string when
-// none of the stored options resolve. A stored address that merely fails to
-// geocode is treated exactly like a missing one — it must never win over a
-// supplied address just because it's non-empty (Codex pre-push P1,
-// 2026-09-24: the earlier version let stored PRESENCE alone block a
-// supplied address, so a customer whose on-file address had gone stale
-// could never book by typing a fresh one).
+// /availability, /find-slots, and the commit). Order:
+//   1. an explicitly SUPPLIED address (the page's address form) — a
+//      deliberate correction wins over anything stored (Codex #4737 r5 P1:
+//      a retry after a failed commit must book at the corrected address,
+//      not the one the failed attempt already persisted). A supplied
+//      address that does not geocode answers `unresolved` — never a silent
+//      fall-back to the stored address the lead was trying to replace;
+//   2. the linked customer's stored COORDS (no geocode needed);
+//   3. the customer's stored address TEXT, then the lead's own raw fields.
+// A stored address that merely fails to geocode is treated exactly like a
+// missing one.
 //
 // Returns { location: {lat,lng}|null, address: {line1,line2,city,state,zip}|null,
 // source: 'customer'|'lead'|'supplied'|null, unresolved: boolean }. `unresolved`
-// is true when SOME address text existed (stored or supplied) but none of it
-// geocoded — callers answer that 422 `address_unresolved` (recoverable: the
-// client keeps the address form up with an inline message), never
-// `out_of_area` (reserved for an actually-RESOLVED location outside the
-// service county/box — see checkServiceArea, which takes a location, not
-// address text, for exactly this reason).
+// is true when SOME address text existed but none of it geocoded — callers
+// answer that 422 `address_unresolved` (recoverable), never `out_of_area`
+// (reserved for an actually-RESOLVED location outside the service
+// county/box — see checkServiceArea, which takes a location, not text).
 async function resolveServiceAddress(lead, custRow, suppliedAddress) {
-  if (custRow?.latitude != null && custRow?.longitude != null) {
-    return {
-      location: { lat: parseFloat(custRow.latitude), lng: parseFloat(custRow.longitude) },
+  const supplied = suppliedAddressFields(suppliedAddress);
+  if (supplied) {
+    const location = await geocodeServiceAddress(supplied);
+    return location
+      ? { location, address: supplied, source: 'supplied', unresolved: false }
+      : { location: null, address: null, source: null, unresolved: true };
+  }
+  const stored = storedCoordsResolution(custRow);
+  if (stored) return stored;
+  let anyAddressText = false;
+  for (const { address, source } of storedAddressCandidates(lead, custRow)) {
+    anyAddressText = true;
+     
+    const location = await geocodeServiceAddress(address);
+    if (location) return { location, address, source, unresolved: false };
+  }
+  return { location: null, address: null, source: null, unresolved: anyAddressText };
+}
+
+// The page's typed address as structured fields, or null when none.
+function suppliedAddressFields(suppliedAddress) {
+  const input = typeof suppliedAddress === 'string' ? suppliedAddress.trim() : '';
+  if (!input) return null;
+  const parsed = parseRawAddress(input);
+  return {
+    line1: parsed.line1 || input, line2: null,
+    city: parsed.city || null, state: parsed.state || 'FL', zip: parsed.zip || null,
+  };
+}
+
+// The linked customer's stored coordinates as a resolution, or null.
+function storedCoordsResolution(custRow) {
+  if (custRow?.latitude == null || custRow?.longitude == null) return null;
+  return {
+    location: { lat: parseFloat(custRow.latitude), lng: parseFloat(custRow.longitude) },
+    address: {
+      line1: custRow.address_line1 || null, line2: custRow.address_line2 || null,
+      city: custRow.city || null, state: custRow.state || 'FL', zip: custRow.zip || null,
+    },
+    source: 'customer',
+    unresolved: false,
+  };
+}
+
+// Stored address text to try, in order: the customer's own, then (only when
+// the customer has none) the lead's raw fields.
+function storedAddressCandidates(lead, custRow) {
+  const candidates = [];
+  if (custRow?.address_line1) {
+    candidates.push({
+      source: 'customer',
       address: {
-        line1: custRow.address_line1 || null, line2: custRow.address_line2 || null,
+        line1: custRow.address_line1, line2: custRow.address_line2 || null,
         city: custRow.city || null, state: custRow.state || 'FL', zip: custRow.zip || null,
       },
-      source: 'customer',
-      unresolved: false,
-    };
+    });
   }
-
-  let anyAddressText = false;
-  async function tryGeocode(address) {
-    const addressStr = [address.line1, address.city, address.state, address.zip].filter(Boolean).join(', ');
-    if (!addressStr) return null;
-    anyAddressText = true;
-    try {
-      // requireInServiceArea:false — street-level quality filtering stays
-      // (partial matches, ZIP/city centroids, no-match all still reject),
-      // but a genuinely out-of-box address is no longer silently discarded
-      // here as "unresolved". checkServiceArea (below, applied by every
-      // caller) is the one place that decides in/out of area, so a valid
-      // address that's simply outside the box correctly reaches out_of_area
-      // instead of address_unresolved (Codex pre-push P1, 2026-09-24).
-      const { location } = await geocodeAddressWithStatus(addressStr, { serviceAddress: true, requireInServiceArea: false });
-      return location || null;
-    } catch (err) {
-      logger.warn(`[inspection-public] address geocode failed: ${err.message}`);
-      return null;
-    }
+  if (lead?.address) {
+    candidates.push({
+      source: 'lead',
+      address: { line1: lead.address, line2: null, city: lead.city || null, state: 'FL', zip: lead.zip || null },
+    });
   }
+  return candidates;
+}
 
-  if (custRow?.address_line1) {
-    const address = {
-      line1: custRow.address_line1, line2: custRow.address_line2 || null,
-      city: custRow.city || null, state: custRow.state || 'FL', zip: custRow.zip || null,
-    };
-    const location = await tryGeocode(address);
-    if (location) return { location, address, source: 'customer', unresolved: false };
+// Street-level geocode of one address, or null. requireInServiceArea:false —
+// quality filtering stays (partial matches, ZIP/city centroids, no-match all
+// reject), but an out-of-box address is not discarded here as "unresolved":
+// checkServiceArea is the one place that decides in/out of area (Codex
+// pre-push P1, 2026-09-24).
+async function geocodeServiceAddress(address) {
+  const addressStr = [address.line1, address.city, address.state, address.zip].filter(Boolean).join(', ');
+  if (!addressStr) return null;
+  try {
+    const { location } = await geocodeAddressWithStatus(addressStr, { serviceAddress: true, requireInServiceArea: false });
+    return location || null;
+  } catch (err) {
+    logger.warn(`[inspection-public] address geocode failed: ${err.message}`);
+    return null;
   }
-
-  if (lead.address) {
-    const address = { line1: lead.address, line2: null, city: lead.city || null, state: 'FL', zip: lead.zip || null };
-    const location = await tryGeocode(address);
-    if (location) return { location, address, source: 'lead', unresolved: false };
-  }
-
-  const suppliedInput = typeof suppliedAddress === 'string' ? suppliedAddress.trim() : '';
-  if (suppliedInput) {
-    const parsed = parseRawAddress(suppliedInput);
-    const address = {
-      line1: parsed.line1 || suppliedInput, line2: null,
-      city: parsed.city || null, state: parsed.state || 'FL', zip: parsed.zip || null,
-    };
-    const location = await tryGeocode(address);
-    if (location) return { location, address, source: 'supplied', unresolved: false };
-  }
-
-  return { location: null, address: null, source: null, unresolved: anyAddressText };
 }
 
 // County/box verdict for an ALREADY-RESOLVED location — takes a location,
@@ -839,18 +867,55 @@ async function matchExistingAccountProfile(dbConn, account, address, location) {
 // non-ok short-circuit — the caller returns it as-is, same shape every
 // other eligibility short-circuit in this file uses) or `{ customer,
 // location? }`.
+// The distinct live accounts whose customers carry this phone (last ten
+// digits).
+async function phoneMatchedAccountIds(dbConn, phone) {
+  const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (last10.length !== 10) return [];
+  const rows = await dbConn('customers')
+    .whereNull('deleted_at')
+    .whereNotNull('account_id')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .distinct('account_id');
+  return [...new Set(rows.map((r) => r.account_id).filter(Boolean))];
+}
+
+// The ONE profile across these accounts whose address matches the lead's
+// validated address, or null when none or more than one does (a supplied
+// address is required — "no address" never picks a household).
+async function uniqueProfileAcrossAccounts(dbConn, accountIds, resolved) {
+  if (!resolved.address?.line1) return null;
+  const matches = [];
+  for (const accountId of accountIds) {
+     
+    const hit = await matchExistingAccountProfile(dbConn, { accountId, existingCustomer: { id: null } }, resolved.address, resolved.location);
+    if (hit?.id) matches.push(hit);
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
 async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   const { ensureCustomerAccount } = require('./admin-customers');
   const verifiedContact = await leadContactVerified(freshLead, token, trx);
+  // Several live accounts can legitimately share one phone (Codex #4737 r5
+  // P1 — admin-customers.js supports it), while ensureCustomerAccount picks
+  // the first. So a verified lead's property is matched across EVERY
+  // phone-matched account: a unique address match is reused; none or
+  // several get a separate new account, never an "Additional property"
+  // under an arbitrarily chosen household.
+  const sharedPhoneAccounts = verifiedContact ? await phoneMatchedAccountIds(trx, freshLead.phone) : [];
+  const multiAccount = sharedPhoneAccounts.length > 1;
   const account = await ensureCustomerAccount(trx, {
     firstName: freshLead.first_name || 'New Lead',
     lastName: freshLead.last_name || '',
     phone: freshLead.phone || '',
     email: freshLead.email || null,
-    ...(verifiedContact ? {} : { forceNewAccount: true, ignorePhoneMatch: true }),
+    ...(verifiedContact && !multiAccount ? {} : { forceNewAccount: true, ignorePhoneMatch: true }),
   });
   if (verifiedContact) {
-    const matched = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
+    const matched = multiAccount
+      ? await uniqueProfileAcrossAccounts(trx, sharedPhoneAccounts, resolved)
+      : await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
     if (matched) {
       // includeRescheduleUrl:false — this runs under the caller's advisory
       // lock (round 13, Codex pre-push P1, 2026-09-24); see
@@ -1065,7 +1130,12 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${COMMIT_LOCK_NS}:${lead.id}`]);
 
-    const freshLead = await loadLead(trx, lead.id);
+    // Row-locked (Codex #4737 r5 P1): the advisory key is private to this
+    // route, but admin-leads' conversion/booking locks and updates the same
+    // lead row — FOR UPDATE makes this read wait for it and see its
+    // committed customer link / converted_at, never a stale null. Lock
+    // order leads → customers, the same as admin-leads.
+    const freshLead = await loadLead(trx, lead.id, { forUpdate: true });
     if (!freshLead) return { eligibility: { state: 'gone', visit: null, rescheduleUrl: null } };
     const freshCustRow = await loadTrustedCustomer(trx, freshLead, verified);
 

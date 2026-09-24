@@ -231,6 +231,25 @@ describe('InspectionPage address-first gate', () => {
     expect(JSON.parse(call[1].body)).toEqual({ address: '123 Palm Ave, Bradenton, FL 34209' });
   });
 
+  // Codex #4737 r5 P1: the lead can correct a stored address; the typed one
+  // then rides the commit and wins on the server.
+  it('"Different address?" re-opens the address form, and the corrected address drives availability', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(okPayload({
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '1 First Try Rd, Bradenton' },
+      })),
+      availability: jsonResponse({ availability: okPayload().availability, needs_address: false }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Different address\?/i }));
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '2 Corrected Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/availability'));
+      expect(JSON.parse(call[1].body)).toEqual({ address: '2 Corrected Ave, Bradenton, FL 34209' });
+    });
+  });
+
   it('needs_address + out of area: stops on the waitlist card instead of the picker', async () => {
     stubFetch({
       get: jsonResponse(okPayload({

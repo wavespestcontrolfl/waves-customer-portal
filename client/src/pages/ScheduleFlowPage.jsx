@@ -1091,7 +1091,7 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
   );
 }
 
-function InspectionHero({ data, details, onDetails }) {
+function InspectionHero({ data, details, onDetails, onChangeAddress }) {
   const lead = data?.lead || {};
   return (
     <>
@@ -1114,7 +1114,18 @@ function InspectionHero({ data, details, onDetails }) {
           </a>
         </div>
         {lead.address_display ? (
-          <div style={{ marginTop: 10, fontSize: 14, color: S.body }}>{lead.address_display}</div>
+          <div style={{ marginTop: 10, fontSize: 14, color: S.body, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'baseline' }}>
+            <span>{lead.address_display}</span>
+            {onChangeAddress ? (
+              <button
+                type="button"
+                onClick={onChangeAddress}
+                style={{ background: 'none', border: 0, padding: 0, font: 'inherit', fontSize: 14, fontWeight: 700, color: COLORS.glassNavy, textDecoration: 'underline', cursor: 'pointer' }}
+              >
+                Different address?
+              </button>
+            ) : null}
+          </div>
         ) : null}
         <label htmlFor="inspection-notes" style={{ display: 'block', fontSize: 14, fontWeight: 700, marginTop: 16, marginBottom: 6 }}>
           Anything we should know? <span style={{ fontWeight: 500, color: S.body }}>(optional)</span>
@@ -1629,6 +1640,10 @@ export default function ScheduleFlowPage({ flow }) {
         }}
         details={details}
         onDetails={setDetails}
+        // Inspection only: re-open the address form to correct the address
+        // (Codex #4737 r5 P1 — an explicitly typed address wins on the
+        // server, so a corrected retry books there).
+        onChangeAddress={() => mergeData({ needs_address: true })}
       />
       {blockedLanes.map((lane) => (
         <AlreadyBookedCard key={lane.key} lane={lane} />

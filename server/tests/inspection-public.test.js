@@ -91,7 +91,7 @@ jest.mock('../models/db', () => {
     const passthrough = [
       'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
       'whereRaw', 'andWhere', 'orWhere', 'orderBy', 'orderByRaw', 'limit', 'offset',
-      'select', 'join', 'leftJoin', 'groupBy', 'modify', 'onConflict', 'forUpdate', 'forNoKeyUpdate',
+      'select', 'join', 'leftJoin', 'groupBy', 'modify', 'onConflict', 'forUpdate', 'forNoKeyUpdate', 'distinct',
     ];
     for (const m of passthrough) q[m] = () => q;
     q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
@@ -412,6 +412,34 @@ describe('GET /:token state shapes', () => {
 // Codex #4737 P0: leads.customer_id can come from unverified submitted
 // contact info (public-quote.js), so an unproven link must expose nothing of
 // that customer and must never book onto them.
+describe('Codex #4737 r5 P2: a retired assessment catalog row is not bookable', () => {
+  test.each([{ is_active: false }, { is_archived: true }, { booking_enabled: false }])('%o → commit answers 503 temporarily unavailable', async (flags) => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30, ...flags };
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(503);
+    expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+  });
+});
+
+describe('Codex #4737 r5 P1: a verified phone shared by several accounts', () => {
+  test('no unique address match across the phone-matched accounts → a SEPARATE new account, never an additional property under one of them', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: null };
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    listResults.customers = [{ account_id: 'acct-a' }, { account_id: 'acct-b' }];
+    listResults.scheduled_services = [];
+    mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-new', existingCustomer: null, matchType: null });
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '77 Elsewhere St, Bradenton, FL 34209' });
+    expect(res.statusCode).toBe(200);
+    expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ forceNewAccount: true }));
+  });
+});
+
 describe('an UNPROVEN existing lead→customer link', () => {
   const VICTIM = {
     id: 'cust-victim', phone: '9415550101', first_name: 'Vic', last_name: 'Tim',
@@ -1067,6 +1095,35 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(27.51);
     });
 
+    // Codex #4737 r5 P1: a retry with a CORRECTED address books there, even
+    // though the failed first attempt already persisted its own address.
+    test('an explicitly supplied address wins over stored coordinates (a corrected retry)', async () => {
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '1 First Try Rd', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const CORRECTED = { lat: 27.52, lng: -82.53 };
+      mockGeocode.mockResolvedValueOnce({ location: CORRECTED });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '2 Corrected Ave, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(200);
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(CORRECTED.lat);
+      expect(updateCalls.find((c) => c.table === 'customers').payload.address_line1).toBe('2 Corrected Ave');
+    });
+
+    test('a supplied address that does not geocode is address_unresolved — never a silent fall-back to the stored one', async () => {
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '1 First Try Rd', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+      listResults.scheduled_services = [];
+      mockGeocode.mockResolvedValueOnce({ location: null });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: 'nowhere at all' });
+      expect(res.statusCode).toBe(422);
+      expect(res.body.error).toBe('address_unresolved');
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    });
+
     test('stored address present but unresolvable, unchanged under the lock: the validated supplied replacement wins and is written back, fixing up the bad stored address', async () => {
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
       firstResults.customers = {
@@ -1076,9 +1133,8 @@ describe('POST /:token commit', () => {
       listResults.scheduled_services = [];
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       const LOC = { lat: 27.55, lng: -82.55 };
-      mockGeocode
-        .mockResolvedValueOnce({ location: null }) // pre-lock: stored "999 Existing Rd" fails
-        .mockResolvedValueOnce({ location: LOC });  // pre-lock: supplied replacement resolves
+      // The supplied replacement is tried FIRST (Codex #4737 r5 P1) and resolves.
+      mockGeocode.mockResolvedValueOnce({ location: LOC });
       mockBuildAvailability.mockResolvedValueOnce({
         days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
       });
@@ -1091,10 +1147,9 @@ describe('POST /:token commit', () => {
       expect(res.body.success).toBe(true);
       expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(LOC.lat);
-      // Exactly TWO geocode calls (the stored address's own failed attempt,
-      // then the supplied replacement) — nothing under the lock re-tries
-      // either one.
-      expect(mockGeocode).toHaveBeenCalledTimes(2);
+      // Exactly ONE geocode call: the supplied replacement is tried first
+      // and wins (Codex #4737 r5 P1) — nothing under the lock re-tries it.
+      expect(mockGeocode).toHaveBeenCalledTimes(1);
 
       const customerUpdate = updateCalls.find((c) => c.table === 'customers');
       expect(customerUpdate).toBeTruthy();
@@ -1124,9 +1179,8 @@ describe('POST /:token commit', () => {
     listResults.scheduled_services = [];
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
     const IN_AREA = { lat: 27.4989, lng: -82.5748 }; // Bradenton
-    mockGeocode
-      .mockResolvedValueOnce({ location: null })    // pre-lock: stored "1 Rooftop Rd" fails to geocode
-      .mockResolvedValueOnce({ location: IN_AREA }); // pre-lock: supplied replacement resolves, in area
+    // The supplied replacement is tried FIRST (Codex #4737 r5 P1) and resolves in area.
+    mockGeocode.mockResolvedValueOnce({ location: IN_AREA });
     mockCounty.mockResolvedValueOnce('Manatee'); // checkServiceArea for the pre-lock (supplied) location — served
     mockBuildAvailability.mockResolvedValueOnce({
       days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
@@ -1775,6 +1829,10 @@ describe('structural: phase 1 never does network I/O or opens a second connectio
   }
 
   const body = phase1TransactionBody();
+
+  test('Codex #4737 r5 P1: phase 1 row-locks the lead (FOR UPDATE) before reading its customer link', () => {
+    expect(body).toContain('loadLead(trx, lead.id, { forUpdate: true })');
+  });
 
   test('sanity: the phase-1 body was actually captured, not an empty/truncated slice', () => {
     expect(body).toContain('pg_advisory_xact_lock');
