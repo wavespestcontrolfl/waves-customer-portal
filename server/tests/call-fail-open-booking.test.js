@@ -1073,3 +1073,35 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     expect(doubled).toEqual([]);
   });
 });
+
+// commercial_requires_quote demotion (2026-09-24, call-agent audit): a
+// confirmed commercial/HOA booking with an AGREED price must not die in
+// triage over a flag whose entire purpose — get a price agreed — is
+// already satisfied.
+describe('commercial_requires_quote: agreed-price demotion', () => {
+  test('an agreed price on a confirmed commercial booking demotes commercial_requires_quote to advisory', () => {
+    const ex = extraction(['commercial_requires_quote']);
+    ex.service_request = { quoted_price_usd: 100 };
+    const r = canAutoRoute(ex, { addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(true);
+    expect(r.appointmentBlockingFlags || []).not.toContain('commercial_requires_quote');
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['commercial_requires_quote']));
+  });
+
+  test('no agreed price still blocks commercial_requires_quote', () => {
+    const ex = extraction(['commercial_requires_quote']);
+    // No service_request / no quoted_price_usd — nothing was agreed.
+    const r = canAutoRoute(ex, { addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
+  test('a price quoted but NOT yet confirmed (scheduling still requested) still blocks', () => {
+    const ex = extraction(['commercial_requires_quote']);
+    ex.service_request = { quoted_price_usd: 100 };
+    ex.scheduling = { status: 'requested', confirmed_start_at: null };
+    const r = canAutoRoute(ex, { addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+});
