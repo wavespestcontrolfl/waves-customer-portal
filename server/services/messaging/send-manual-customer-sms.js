@@ -93,16 +93,29 @@ async function prepareReservation(input, reviewedBy) {
       adminUserId: reviewedBy,
       blockOnActiveManualReservation: true,
     });
-    return { fromNumber, reply };
+    const providerHandoffReservation = reply.reservationId
+      ? require('./provider-handoff-reservation').borrowProviderHandoffReservation({
+        reservationId: reply.reservationId,
+        to: input.to,
+        fromNumber,
+        body: input.body,
+        messageType: input.metadata?.original_message_type || 'manual',
+        adminUserId: reviewedBy,
+      })
+      : null;
+    return { fromNumber, reply, providerHandoffReservation };
   } catch (err) {
     logger.warn(`[manual-sms] reply reservation failed (${String(err?.code || err?.name || 'error')})`);
     return null;
   }
 }
 
-async function dispatchReserved(input, { fromNumber, reply, reviewedBy }) {
+async function dispatchReserved(input, {
+  fromNumber, reply, reviewedBy, providerHandoffReservation,
+}) {
   const sendInput = {
     ...input,
+    providerHandoffReservation,
     metadata: {
       ...(input.metadata || {}),
       fromNumber,
@@ -157,7 +170,7 @@ async function sendManualCustomerSms(input) {
     'MANUAL_REPLY_RESERVATION_FAILED',
     'Could not reserve this conversation for delivery. Try again in a moment.',
   );
-  const { fromNumber, reply } = prepared;
+  const { fromNumber, reply, providerHandoffReservation } = prepared;
 
   if (reply.autoSendInFlight) {
     return blockedResult(
@@ -182,7 +195,9 @@ async function sendManualCustomerSms(input) {
       'Could not reserve this conversation for delivery. Try again in a moment.',
     );
   }
-  return dispatchReserved(input, { fromNumber, reply, reviewedBy });
+  return dispatchReserved(input, {
+    fromNumber, reply, reviewedBy, providerHandoffReservation,
+  });
 }
 
 module.exports = {

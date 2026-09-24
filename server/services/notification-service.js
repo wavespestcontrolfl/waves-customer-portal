@@ -427,7 +427,7 @@ const NotificationService = {
           skipped: outcome.skipped,
           ...(outcome.retryable ? { retryable: outcome.retryable, retryAfterMs: outcome.retryAfterMs } : {}),
           ...(outcome.reason ? { reason: outcome.reason } : {}),
-          ...(outcome.deduped ? { deduped: true } : {}),
+          ...(outcome.deduped ? { deduped: true, acceptedAt: outcome.acceptedAt } : {}),
         } };
       }
       // The bell is already durable, and request paths such as status changes
