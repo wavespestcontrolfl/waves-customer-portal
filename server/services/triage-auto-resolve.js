@@ -274,6 +274,15 @@ function localityAgrees(file, { city, zip }) {
   return true;
 }
 const localityMatches = (item, reading) => localityAgrees(onFileAddress(item) || {}, reading);
+// ZIP-wins variant for the house-number lane (codex r33 P2 / r34 P1):
+// postal-city names alias (Bradenton / Lakewood Ranch share a ZIP), so
+// agreeing ZIPs settle the locality on their own — the detector's own rule.
+function localityAgreesZipWins(file, reading) {
+  const a = zip5(reading?.zip);
+  const b = zip5(file?.zip);
+  if (a && b) return a === b;
+  return localityAgrees(file || {}, reading || {});
+}
 
 // Readings come ONLY from the card: payload.address_as_heard and the
 // heard_address snapshot call-routing-gates stamps at filing. Never the
@@ -967,10 +976,7 @@ function recordCarriesStatedStreet(item) {
   // Postal-city aliases (Lakewood Ranch / Bradenton share a ZIP): agreeing
   // ZIPs settle the locality on their own, the same ZIP-wins rule the
   // detector applies at filing (codex r33 P2).
-  const recordZip = zip5(item.customer_zip);
-  const statedZip = zip5(payload?.stated_zip);
-  if (recordZip && statedZip) return recordZip === statedZip;
-  return localityAgrees(
+  return localityAgreesZipWins(
     { city: item.customer_city, zip: item.customer_zip },
     { city: payload?.stated_city, zip: payload?.stated_zip },
   );
@@ -1444,7 +1450,7 @@ function visitAtStatedAddress(item, visit, places) {
   if (!sameHouseNumberStreet(payload.stated_street, place.line1 || '')) return false;
   const unit = unitOf(payload.stated_street, payload.stated_unit);
   return (!unit || unit === place.unit)
-    && localityAgrees(place, { city: payload.stated_city, zip: payload.stated_zip });
+    && localityAgreesZipWins(place, { city: payload.stated_city, zip: payload.stated_zip });
 }
 
 function visitAtOnFileAddress(item, visit, places) {
