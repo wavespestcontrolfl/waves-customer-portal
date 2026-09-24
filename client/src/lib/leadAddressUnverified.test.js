@@ -81,4 +81,10 @@ describe('leadAddressUnverified', () => {
     const flag = { source: 'county_roll', reason: 'r', address_line1: '1260 Example St', city: 'Sarasota', zip: '34219', flagged_at: '2026-09-24T00:00:00Z' };
     expect(leadAddressUnverified({ extracted_data: { address_unverified: flag }, address: '1260 Example St Bldg 2 Apt 4, Sarasota, FL 34219' })).toBeTruthy();
   });
+
+  it('keeps the street of a comma-free unit-first segment (codex #4667 r36 P2)', () => {
+    const flag = { source: 'county_roll', reason: 'r', address_line1: '123 Main St', city: 'Sarasota', zip: '34236', flagged_at: '2026-09-24T00:00:00Z' };
+    expect(leadAddressUnverified({ extracted_data: { address_unverified: flag }, address: 'Unit 204 123 Main St, Sarasota, FL 34236' })).toBeTruthy();
+    expect(leadAddressUnverified({ extracted_data: { address_unverified: flag }, address: '#204 123 Main St, Sarasota, FL 34236' })).toBeTruthy();
+  });
 });

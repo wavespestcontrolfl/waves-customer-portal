@@ -73,8 +73,14 @@ const streetKeyNoUnit = (v) => lineKey(stripUnitTail(v))
 // unit (codex #4667 r33 P2).
 const UNIT_SEGMENT_RE = /^(?:#|(?:apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\b)/i;
 const STATE_ZIP_TAIL_RE = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$|^\d{5}(?:-\d{4})?$|^[a-z]{2}$/i;
+// A comma-free unit-first segment ("Unit 204 123 Main St", "#204 900
+// Bayview Ter" — the street begins at the first digit-leading token after
+// the unit) keeps its street: the leading unit is peeled, not the whole
+// segment (codex #4667 r36 P2).
+const UNIT_FIRST_INLINE_RE = /^\s*((?:(?:apartment|apt|unit|ste|suite|building|bldg|floor|fl|space|spc|lot)\.?\s*#?\s*[a-z0-9-]+\s*)+(?:#\s*[a-z0-9-]+\s*)?|#\s*[a-z0-9-]+)\s+(?:at\s+)?(\d.*)$/i;
 function leadAddressSegments(address) {
   return String(address || '').split(',').map((s) => s.trim()).filter(Boolean)
+    .map((seg) => { const m = seg.match(UNIT_FIRST_INLINE_RE); return m ? m[2].trim() : seg; })
     .filter((seg) => !UNIT_SEGMENT_RE.test(seg));
 }
 

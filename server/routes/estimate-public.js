@@ -14095,6 +14095,11 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // An OFF-SURFACE row (the county-roll address block among its markers)
+    // answers the token route's generic 404 like every other surface, never
+    // a 400 that tells a bearer the token maps to a real estimate (codex
+    // #4667 r36 P0); an ordinary inactive state keeps its 400.
+    if (estimateOffCustomerSurface(estimate)) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
     if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
@@ -15689,6 +15694,11 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // An OFF-SURFACE row (the county-roll address block among its markers)
+    // answers the token route's generic 404 like every other surface, never
+    // a 400 that tells a bearer the token maps to a real estimate (codex
+    // #4667 r36 P0); an ordinary inactive state keeps its 400.
+    if (estimateOffCustomerSurface(estimate)) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
     if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
