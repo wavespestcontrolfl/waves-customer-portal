@@ -50,7 +50,8 @@ const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./schedu
 const { resolveGeo, driveMin, HQ } = require('./auto-dispatch/geo');
 const { resolveAlert, emitAlert } = require('./dispatch-alerts');
 const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('./dispatch-assignment');
-const { ALERT_TYPE, ABSENT_STOP_EXCLUDE_STATUSES } = require('./tech-out');
+const { ALERT_TYPE, ABSENT_STOP_EXCLUDE_STATUSES, rankBumpOrder } = require('./tech-out');
+const { LIVE_COMPLETION_CLAIM_STATUSES } = require('./visit-groups');
 
 // Statuses that occupy no route capacity — exactly what the rebooker's
 // probeMoveConflicts excludes (NOT_A_ROUTE_STOP_STATUSES + completed).
@@ -303,6 +304,8 @@ function makeMoveGuard(stop, date) {
 // it. Either way there is nothing left to do — a no-op, never a retry on
 // the next candidate.
 const STALE_CODES = new Set(['TECH_OUT_CLEARED', 'TECH_OUT_ALERT_RESOLVED']);
+// A completion holds a live claim on the stop: no candidate can take it now.
+const COMPLETION_IN_FLIGHT = 'TECH_OUT_COMPLETION_IN_FLIGHT';
 
 /**
  * Runs inside the mover's own transaction (options.beforeMove — after its
@@ -314,8 +317,18 @@ const STALE_CODES = new Set(['TECH_OUT_CLEARED', 'TECH_OUT_ALERT_RESOLVED']);
  * only other lock is the ABSENT tech-day fence, which the mover does not
  * take), so the wait cannot cycle.
  */
-function makeStillParkedGuard({ alertId, absentTechId, date, toTechId, actorId }) {
+function makeStillParkedGuard({ alertId, absentTechId, date, stopId, toTechId, actorId }) {
   return async (trx) => {
+    // A completion already claimed this visit (the claim touches none of the
+    // expect-pinned fields, and the single-row mover has no claim guard):
+    // reassigning it now would let the completion finish under the old tech.
+    const liveClaim = await trx('service_completion_attempts')
+      .where({ service_id: stopId })
+      .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES)
+      .first('id');
+    if (liveClaim) {
+      throw Object.assign(new Error('This visit is being completed'), { statusCode: 409, code: COMPLETION_IN_FLIGHT });
+    }
     const absence = await trx('technician_absences')
       .where({ technician_id: absentTechId, absence_date: date })
       .whereNull('cleared_at')
@@ -485,6 +498,7 @@ function refusalReason(lastErr) {
   // manual-decision rule as the up-front visit_id check.
   if (lastErr.code === 'VISIT_MEMBERSHIP_CHANGED') return 'grouped_visit_manual';
   if (lastErr.code === NO_FIT) return 'no_eligible_candidate';
+  if (lastErr.code === COMPLETION_IN_FLIGHT) return 'completion_in_progress';
   return `move_failed: ${lastErr.message}`;
 }
 
@@ -541,7 +555,7 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
           },
           moveGuard: makeMoveGuard(stop, date),
           beforeMove: makeStillParkedGuard({
-            alertId, absentTechId, date, toTechId: candidate.tech.id, actorId,
+            alertId, absentTechId, date, stopId: stop.id, toTechId: candidate.tech.id, actorId,
           }),
         },
       );
@@ -553,7 +567,7 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
       // it and closes a now-stale card (a racing manual reassignment).
       if (err && (err.statusCode === 409 || err.status === 409) && !err.code) break;
       // Same answer for every candidate: stop and let the next run re-read.
-      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED') break;
+      if (err && (err.code === 'VISIT_MEMBERSHIP_CHANGED' || err.code === COMPLETION_IN_FLIGHT)) break;
       continue;
     }
     // Committed (stop + alert). The board broadcast is best-effort.
@@ -637,23 +651,42 @@ async function refuseOrClose(alertId, reason, stopId, absentTechId, date) {
 
 /**
  * Process every OPEN `tech_out_overflow` alert for one tech-day, most-
- * protected unit first (reverse of bump_order — "bump last" stops get first
+ * protected unit first (mostProtectedFirst — "bump last" stops get first
  * pick of the day's open capacity while it's still there). Each alert runs
  * through the one chokepoint above in its own mover transaction; a failure
  * on one alert never stops the rest.
  */
+/**
+ * Order a tech-day's open cards most-protected first. payload.bump_order is
+ * batch-local (mark-out numbers from 1, and every sweep batch of late
+ * arrivals restarts at 1), so it cannot compare cards across batches:
+ * re-score each card's CURRENT stop with the same rankBumpOrder the parking
+ * used, and walk that "bump first" order backwards. A card whose stop is
+ * gone sorts last (the chokepoint closes it as stale).
+ */
+async function mostProtectedFirst(alerts) {
+  const jobIds = alerts.map((a) => a.job_id).filter(Boolean);
+  const stops = jobIds.length
+    ? await db('scheduled_services').whereIn('id', jobIds).select('id', 'is_recurring', 'status', 'window_start')
+    : [];
+  const byJob = new Map(stops.map((st) => [String(st.id), st]));
+  const known = alerts.filter((a) => a.job_id && byJob.has(String(a.job_id)));
+  const unknown = alerts.filter((a) => !(a.job_id && byJob.has(String(a.job_id))));
+  const bumpFirst = rankBumpOrder(known.map((a) => ({ ...byJob.get(String(a.job_id)), alert_id: a.id })));
+  return [...bumpFirst.reverse().map((r) => ({ id: r.alert_id })), ...unknown.map((a) => ({ id: a.id }))];
+}
+
 async function autoAssignTechDay({ technicianId, date, actorId } = {}) {
   if (!autoMoveEnabled()) return { skipped: 'gate_off', moved: [], left_parked: [] };
   if (!technicianId || !date) {
     throw Object.assign(new Error('technicianId and date are required'), { status: 400, code: 'VALIDATION' });
   }
 
-  const alerts = await db('dispatch_alerts')
+  const alerts = await mostProtectedFirst(await db('dispatch_alerts')
     .where({ type: ALERT_TYPE, tech_id: technicianId })
     .whereNull('resolved_at')
     .whereRaw("payload->>'date' = ?", [date])
-    .orderByRaw("COALESCE(NULLIF(payload->>'bump_order', '')::int, 0) DESC")
-    .select('id');
+    .select('id', 'job_id'));
 
   const moved = [];
   const left_parked = [];

@@ -299,6 +299,7 @@ function autoAttemptReasonLabel(reason) {
   if (reason === 'office_review_pending') return 'Booking still awaiting office review — needs a manual decision';
   if (reason === 'live_status') return 'Stop is already in progress — needs a manual decision';
   if (reason === 'no_eligible_candidate') return 'No eligible technician was free to take it automatically';
+  if (reason === 'completion_in_progress') return 'Visit is being completed right now — no reassignment needed';
   if (reason === 'auto_move_error') return 'Automatic move hit an error — try again or decide manually';
   if (reason === 'window_occupied') return 'Another stop already holds that window — needs a manual decision';
   if (reason === 'no_job_reference') return "Couldn't identify the stop to move automatically";

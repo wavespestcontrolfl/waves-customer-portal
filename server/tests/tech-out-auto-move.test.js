@@ -539,10 +539,17 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
     fn.raw = db.raw;
     return fn;
   }
-  function trxReturning(absence, alert) {
-    const rows = [absence, alert, {}];
+  function trxReturning(absence, alert, claim = null) {
+    const rows = [claim, absence, alert, {}];
     return asTrx(jest.fn(() => query(rows.shift())));
   }
+
+  test('a completion already claimed the visit: refuses inside the move transaction, alert untouched', async () => {
+    const guard = await capturedGuard();
+    await expect(guard(trxReturning({ id: 'abs-1' }, { id: ALERT_ID }, { id: 'claim-1' })))
+      .rejects.toMatchObject({ code: 'TECH_OUT_COMPLETION_IN_FLIGHT' });
+    expect(resolveAlert).not.toHaveBeenCalled();
+  });
 
   test('absence cleared ("Tech is back") after the read: refuses inside the move transaction', async () => {
     const guard = await capturedGuard();
@@ -639,5 +646,33 @@ describe('autoAssignTechDay', () => {
     expect(res.moved).toEqual([]);
     const rawCall = db.raw.mock.calls.find(([sql]) => /COALESCE\(payload/.test(sql));
     expect(JSON.parse(rawCall[1][0]).auto_attempt.reason).toBe('auto_move_error');
+  });
+
+  test('orders cards most-protected first by re-scoring their stops, not by batch-local bump_order', async () => {
+    // alert-late came from a sweep batch (bump_order restarted at 1) but is a
+    // confirmed one-time visit; alert-early is a recurring unconfirmed one.
+    const alertsList = query([
+      { id: 'alert-early', job_id: 'job-early' },
+      { id: 'alert-late', job_id: 'job-late' },
+    ]);
+    const stopsRead = query([
+      { id: 'job-early', is_recurring: true, status: 'pending', window_start: '09:00' },
+      { id: 'job-late', is_recurring: false, status: 'confirmed', window_start: '09:00' },
+    ]);
+    const processed = [];
+    const queue = [alertsList, stopsRead];
+    db.mockImplementation((table) => {
+      const next = queue.shift();
+      if (next) return next;
+      const q = query({});
+      if (table === 'dispatch_alerts') {
+        q.first = jest.fn(async () => { processed.push(q.where.mock.calls[0][0].id); return null; });
+      }
+      return q;
+    });
+
+    await autoAssignTechDay({ technicianId: ABSENT_TECH, date: DATE });
+
+    expect(processed).toEqual(['alert-late', 'alert-early']);
   });
 });
