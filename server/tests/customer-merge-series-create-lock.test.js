@@ -2,27 +2,39 @@
  * executeMerge takes the 'recurring-series-create' advisory locks — the
  * same namespace/keys the series creators (checkActiveSeriesLocked /
  * acquireSeriesCreateLocks in recurring-appointment-seeder.js) take before
- * inserting a new parent — BEFORE its own `customers` row lock (GitHub
- * Codex round-4 P1 #4684).
+ * inserting a new parent — AFTER its own `customers` row lock (GitHub
+ * Codex round-4 P1 #4684; lock order corrected on pre-push audit of
+ * 4c3ff61175).
  *
  * The race this closes: a series creator for the WINNER's identity can
  * pass its own duplicate-series guard while the LOSER still owns the
  * matching series (the creator's guard only ever looks at one customer),
- * then block on this merge's customer row lock, and insert a second live
- * series right after the merge moves the loser's series onto the winner.
- * Taking the creators' own lock namespace first — keyed by BOTH customer
- * ids for every identity either party anchors — means whichever side gets
- * there first (a creator or this merge) runs to completion before the
- * other can proceed.
+ * and insert a second live series right after the merge moves the loser's
+ * series onto the winner. Taking the creators' own lock namespace — keyed
+ * by BOTH customer ids for every identity either party anchors — means
+ * whichever side gets there first (a creator or this merge) runs to
+ * completion before the other can proceed.
+ *
+ * Lock order matters here specifically: the three creators
+ * (admin-schedule.js, booking.js, estimate-converter) all take their OWN
+ * customer row lock FIRST and only wait on this advisory lock SECOND, so
+ * the merge has to match — row lock, THEN advisory lock — or a concurrent
+ * creator holding the customer row while the merge held the series lock
+ * would deadlock (and the guard's fail-open-on-error behavior would then
+ * let the deadlocked creator seed anyway).
  *
  * Two levels of test:
  *   1. A direct unit test of the extracted helper, lockSeriesCreateForMerge
  *      (dedupe, sort, both-customer-ids-per-identity, matches
- *      seriesCreateLockKeys exactly).
+ *      seriesCreateLockKeys exactly) — order-agnostic, since the helper
+ *      itself only acquires locks; it does not touch the row lock.
  *   2. A full executeMerge run (same recording-trx harness style as
  *      customer-dedupe.test.js's "invoice-issued-closeout gate lock" test)
- *      proving the locks land in trx.raw BEFORE the `customers` forUpdate
- *      row lock, in sorted order, for both customer ids.
+ *      proving the locks land in trx.raw AFTER the `customers` forUpdate
+ *      row lock (and before the post-row-lock scheduled_services conflict
+ *      read dbLevelMergeConflict runs), in sorted order, for both customer
+ *      ids — plus an explicit regression test that fails the moment the
+ *      row lock no longer precedes the first series lock.
  */
 jest.mock('../models/db', () => {
   const fn = jest.fn();
@@ -143,10 +155,11 @@ describe('executeMerge — recurring-series-create lock ordering', () => {
 
   // Same chainable knex stub as customer-dedupe.test.js's buildTrx, trimmed
   // to what executeMerge touches on a clean happy-path merge, plus event
-  // logging (shared array, in call order) for the two things this suite
-  // cares about: every trx.raw call, and the `customers` forUpdate row
-  // lock — so ordering can be asserted directly instead of inferred from
-  // array position alone.
+  // logging (shared array, in call order) for the things this suite cares
+  // about: every trx.raw call, the `customers` forUpdate row lock, the
+  // merge's own series-identity read, and the (later)
+  // duplicateSeriesMergeConflict read — so ordering can be asserted
+  // directly instead of inferred from array position alone.
   function buildTrx({ winner, loser, fkRows, recurringParents = [] }) {
     const state = { events: [], propertyRows: [] };
     const route = (table, q) => {
@@ -167,15 +180,25 @@ describe('executeMerge — recurring-series-create lock ordering', () => {
       if (table === 'customer_merge_journal') return [{ id: 'j1' }];
       if (table === 'customer_tags') return q.called('select') ? [] : 1;
       if (table === 'referral_promoters' && q.called('first')) return null;
-      // The merge's own pre-row-lock identity read: whereIn + whereNull,
-      // never .first()/.update().
+      // The merge's own identity read for the locks (lockSeriesCreateForMerge):
+      // .whereIn(customer_id) + .whereNull(recurring_parent_id), never
+      // .first()/.update() — runs AFTER the row lock now, but is still the
+      // only scheduled_services query that uses .whereIn().
       if (table === 'scheduled_services' && q.called('whereIn') && q.called('whereNull')
         && !q.called('update') && !q.called('first')) {
+        state.events.push(['series_lock_identity_read']);
         return recurringParents;
       }
-      // duplicateSeriesMergeConflict / liveFamilyMatches (post-row-lock,
-      // per-customer .where(), never .whereIn()) — kept empty so
-      // dbLevelMergeConflict reads no series conflict.
+      // duplicateSeriesMergeConflict's own read (dbLevelMergeConflict, which
+      // runs AFTER lockSeriesCreateForMerge): per-customer .where() +
+      // .whereNull() + .select('*'), never .whereIn() — kept empty so
+      // dbLevelMergeConflict reads no series conflict, but logged so this
+      // suite can assert it happens strictly after the series locks.
+      if (table === 'scheduled_services' && q.called('where') && q.called('whereNull') && q.called('select')
+        && !q.called('whereIn') && !q.called('update') && !q.called('first')) {
+        state.events.push(['duplicate_series_conflict_read']);
+        return [];
+      }
       if ((table === 'scheduled_services' || table === 'invoices') && q.called('first')) return null;
       if (table === 'invoices' && q.called('whereNotNull') && q.called('select')) return [];
       if (table === 'scheduled_services' && q.called('update')) return 0;
@@ -225,7 +248,7 @@ describe('executeMerge — recurring-series-create lock ordering', () => {
     expect(seriesLockCalls).toEqual([]);
   });
 
-  test('acquires the recurring-series-create locks for BOTH customer ids, per identity, sorted, BEFORE the customers forUpdate row lock', async () => {
+  test('acquires the recurring-series-create locks for BOTH customer ids, per identity, sorted, AFTER the customers forUpdate row lock and before the duplicate-series conflict read', async () => {
     const winner = { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550102' };
     const loser = { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550102' };
     const recurringParents = [
@@ -246,9 +269,11 @@ describe('executeMerge — recurring-series-create lock ordering', () => {
     const seriesLockCalls = trx.raw.mock.calls.filter(([, bindings]) => bindings?.[0] === 'recurring-series-create');
     expect(seriesLockCalls.map(([, bindings]) => bindings[1])).toEqual(expectedKeys);
 
-    // Ordering: every 'raw' event carrying the recurring-series-create
-    // namespace precedes the single 'customers_forupdate' event (the row
-    // lock this file's own comment says every advisory lock must precede).
+    // Ordering: the single 'customers_forupdate' event (the row lock) comes
+    // BEFORE every 'raw' event carrying the recurring-series-create
+    // namespace — the corrected order (pre-push audit on 4c3ff61175):
+    // creators take their row lock first and the advisory lock second, so
+    // this merge must match, not lead with the advisory lock.
     const rowLockIdx = state.events.findIndex(([kind]) => kind === 'customers_forupdate');
     expect(rowLockIdx).toBeGreaterThan(-1);
     const seriesLockEventIdxs = state.events
@@ -256,6 +281,39 @@ describe('executeMerge — recurring-series-create lock ordering', () => {
       .filter(([[kind, bindings]]) => kind === 'raw' && bindings?.[0] === 'recurring-series-create')
       .map(([, i]) => i);
     expect(seriesLockEventIdxs.length).toBe(expectedKeys.length);
-    for (const idx of seriesLockEventIdxs) expect(idx).toBeLessThan(rowLockIdx);
+    for (const idx of seriesLockEventIdxs) expect(idx).toBeGreaterThan(rowLockIdx);
+
+    // The identity read (lockSeriesCreateForMerge's own scheduled_services
+    // query) also happens after the row lock, and the whole lock pass
+    // completes before dbLevelMergeConflict's duplicateSeriesMergeConflict
+    // runs its own scheduled_services conflict read.
+    const identityReadIdx = state.events.findIndex(([kind]) => kind === 'series_lock_identity_read');
+    expect(identityReadIdx).toBeGreaterThan(rowLockIdx);
+    const conflictReadIdx = state.events.findIndex(([kind]) => kind === 'duplicate_series_conflict_read');
+    expect(conflictReadIdx).toBeGreaterThan(-1);
+    expect(identityReadIdx).toBeLessThan(conflictReadIdx);
+    for (const idx of seriesLockEventIdxs) expect(idx).toBeLessThan(conflictReadIdx);
+  });
+
+  // Explicit lock-order regression: fails the instant executeMerge goes
+  // back to acquiring the series-create locks before the row lock (the
+  // original round-4 shape this pre-push audit corrected), independent of
+  // key content — this test only inspects WHICH of the two markers comes
+  // first in state.events.
+  test('regression: the customers row lock strictly precedes the first recurring-series-create lock', async () => {
+    const winner = { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550103' };
+    const loser = { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550103' };
+    const recurringParents = [{ customer_id: WINNER, service_id: SVC_A, service_type: null }];
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS, recurringParents });
+    db.transaction.mockImplementation((fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    const rowLockIdx = state.events.findIndex(([kind]) => kind === 'customers_forupdate');
+    const firstSeriesLockIdx = state.events.findIndex(
+      ([kind, bindings]) => kind === 'raw' && bindings?.[0] === 'recurring-series-create',
+    );
+    expect(rowLockIdx).toBeGreaterThan(-1);
+    expect(firstSeriesLockIdx).toBeGreaterThan(-1);
+    expect(rowLockIdx).toBeLessThan(firstSeriesLockIdx);
   });
 });
