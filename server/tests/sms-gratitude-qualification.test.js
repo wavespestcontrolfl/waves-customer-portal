@@ -88,7 +88,7 @@ function setSnapshot(row, value) {
 }
 
 function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lockError = null,
-  runExclusiveImpl = null, mutateDraft = null, beforeDispatch = null } = {}) {
+  runExclusiveImpl = null, mutateDraft = null, beforeDispatch = null, draftServedModel = undefined } = {}) {
   jest.resetModules();
   const previousVerify = process.env.SHADOW_DRAFT_VERIFY;
   const previousRevisions = process.env.SHADOW_DRAFT_VERIFY_MAX_REVISIONS;
@@ -110,6 +110,9 @@ function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lock
     return {
       ok: true,
       model: policy.primary.model,
+      ...(draftServedModel !== null
+        ? { servedModel: draftServedModel === undefined ? policy.primary.model : draftServedModel }
+        : {}),
       text: JSON.stringify(mutateDraft ? mutateDraft({ fixture, output }) : output),
     };
   });
@@ -196,9 +199,11 @@ describe('sms gratitude qualification', () => {
     expect(negativeResults).toHaveLength(24);
     expect(negativeResults.every(result => result.output.parsed.reply === ''
       && result.output.passes === 1 && result.output.converged === true
+      && result.output.servedModel === completed.pins.routes[result.leg].model
       && result.output.verifierModels.length === 0)).toBe(true);
     expect(completed.results.filter(result => result.fixtureId.startsWith('positive_'))
-      .every(result => result.output.verifierModels.length === 1
+      .every(result => result.output.servedModel === completed.pins.routes[result.leg].model
+        && result.output.verifierModels.length === 1
         && result.output.verifierModels[0] === completed.pins.verifier.model)).toBe(true);
     expect(completed.summary).toMatchObject({ qualified: true, positives: 8, negatives: 24 });
     expect(store.rows[0]).toMatchObject({ status: 'shadow', correction_note: null });
@@ -207,6 +212,22 @@ describe('sms gratitude qualification', () => {
       dbi: store.dbi,
       voiceProfileVersion: 'synthetic-profile-v1',
     })).resolves.toEqual(expect.objectContaining({ eligible: true, blockers: [], qualified: true, positives: 8, negatives: 24 }));
+  });
+
+  test.each([
+    ['missing', null],
+    ['different', 'provider-resolved-alias'],
+  ])('%s served-model telemetry fails qualification closed', async (_label, draftServedModel) => {
+    const store = memoryDb();
+    const { qualification } = loadQualification({ dbi: store, draftServedModel });
+    const run = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+
+    await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id }))
+      .resolves.toMatchObject({ state: 'complete', qualified: false, reason: 'positive_failed' });
+    expect(snapshot(store.rows[0])).toMatchObject({
+      state: 'complete', summary: { qualified: false, reason: 'positive_failed' },
+    });
+    expect(store.rows[0]).toMatchObject({ status: 'qualification_failed', correction_note: 'positive_failed' });
   });
 
   test('pins and freezes only a voice profile that was applied to the system prompt', async () => {

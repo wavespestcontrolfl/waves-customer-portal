@@ -130,6 +130,7 @@ function outputShape(output) {
     passes: output.passes,
     converged: output.converged === true,
     model: output.model,
+    servedModel: typeof output.servedModel === 'string' ? output.servedModel : null,
     verifierModels: Array.isArray(output.verifierModels) ? [...output.verifierModels] : [],
     voiceProfileVersion: output.voiceProfileVersion ?? null,
   };
