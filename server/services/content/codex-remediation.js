@@ -2412,25 +2412,87 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled(run?.action_type)) return { skipped: true, reason: 'disabled' };
   const revalidate = deps.validateAutonomousRunGates || validateAutonomousRunGates;
   const db = deps.db || dbDefault;
+  const gh = deps.gh || ghDefault;
   // Foreign-parent guard (PR #3508 r15 P1): remediation fixes ONE file and
   // re-pins the resulting commit as trusted — so it may only build on a
   // head that is ALREADY publisher-pinned or human-approved. Remediating on
   // top of a foreign push would bless every unrelated change that push
   // carried (JS, config, assets, other content). Missing/unparseable
   // payload or a mismatched head skips remediation (fail closed: the PR
-  // waits for a human; the universal merge pin withholds it anyway).
+  // waits for a human; the universal merge pin withholds it anyway). The
+  // sole descendant exception is a cryptographically verified evidence-only
+  // commit; it becomes the expected parent without changing the DB pin.
   let expectedParentSha = null;
   if (run && run.id && (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page')) {
     let parentOk = false;
     try {
-      const fresh = await db('autonomous_runs').where({ id: run.id }).first();
-      let dp = fresh ? fresh.draft_payload : undefined;
-      if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+      const stableContextValue = (value) => {
+        if (Array.isArray(value)) return value.map(stableContextValue);
+        if (value && typeof value === 'object') return Object.fromEntries(
+          Object.keys(value).sort().map((key) => [key, stableContextValue(value[key])]),
+        );
+        return value;
+      };
+      const readParentContext = async () => {
+        const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+        if (!fresh) return null;
+        let dp = fresh.draft_payload;
+        if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+        let comparison = fresh.comparison_table_result;
+        if (typeof comparison === 'string') { try { comparison = JSON.parse(comparison); } catch (_) { comparison = undefined; } }
+        const approvedAt = fresh.trust_build_approved_at || null;
+        return {
+          pinned: String(dp?.autopublish_head_sha || '').toLowerCase(),
+          approvedSha: String(dp?.trust_build_approved_head_sha || '').toLowerCase(),
+          approvedAt,
+          approvedAtKey: approvedAt instanceof Date ? approvedAt.toISOString() : String(approvedAt || ''),
+          briefId: fresh.brief_id || null,
+          comparisonKey: JSON.stringify(stableContextValue(comparison)),
+          draftKey: JSON.stringify(stableContextValue(dp)),
+        };
+      };
+      const sameParentContext = (a, b) => Boolean(a && b
+        && a.pinned === b.pinned && a.approvedSha === b.approvedSha
+        && a.approvedAtKey === b.approvedAtKey
+        && String(a.briefId || '') === String(b.briefId || '')
+        && a.comparisonKey === b.comparisonKey && a.draftKey === b.draftKey);
+
+      const context = await readParentContext();
       const headSha = String(pr?.head?.sha || '').toLowerCase();
-      const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
-      const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
-      if (headSha && pinned && pinned === headSha) { parentOk = true; expectedParentSha = pinned; }
-      else if (headSha && fresh?.trust_build_approved_at && approvedSha && approvedSha === headSha) { parentOk = true; expectedParentSha = approvedSha; }
+      if (headSha && context?.pinned && context.pinned === headSha) {
+        parentOk = true; expectedParentSha = context.pinned;
+      } else if (headSha && context?.approvedAt && context.approvedSha && context.approvedSha === headSha) {
+        parentOk = true; expectedParentSha = context.approvedSha;
+      } else if (headSha && (context?.pinned || (context?.approvedAt && context?.approvedSha))) {
+        const editorial = deps.editorialEvidence || require('./editorial-evidence');
+        const anchors = [
+          ...(context.approvedAt && context.approvedSha
+            ? [{ sha: context.approvedSha, kind: 'approved' }] : []),
+          ...(context.pinned && (!context.approvedAt || context.pinned !== context.approvedSha)
+            ? [{ sha: context.pinned, kind: 'publisher' }] : []),
+        ];
+        let verifiedKind = null;
+        for (const anchor of anchors) {
+          if (await editorial.verifyEvidenceOnlyAdvance({
+            pinnedSha: anchor.sha, headSha,
+          }, { gh })) {
+            verifiedKind = anchor.kind;
+            break;
+          }
+        }
+        if (verifiedKind) {
+          const rechecked = await readParentContext();
+          // Poller supplies its fresh queue/claim check. Evidence recovery is
+          // never allowed to start a round after that authorization moved.
+          const contextUnchanged = sameParentContext(context, rechecked);
+          const queueStillParked = contextUnchanged && typeof deps.prePushCheck === 'function'
+            && await deps.prePushCheck() === true;
+          if (queueStillParked) {
+            parentOk = true;
+            expectedParentSha = headSha;
+          }
+        }
+      }
     } catch (_) { return { skipped: true, transient: true, reason: 'publisher pin lookup unavailable' }; }
     if (!parentOk) {
       return { skipped: true, reason: 'pr head is not a publisher-pinned or human-approved commit — remediation withheld (foreign parent needs a human decision)' };

@@ -1981,6 +1981,138 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
+  test('a verified evidence-only child of the publisher pin can request review from its exact head', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin }) }],
+    });
+    const gh = makeGh({ reviewComments: [], issueComments: [], reviews: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const verifyEvidenceOnlyAdvance = jest.fn().mockResolvedValue(true);
+    const prePushCheck = jest.fn().mockResolvedValue(true);
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck,
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(verifyEvidenceOnlyAdvance).toHaveBeenCalledWith(
+      { pinnedSha: publisherPin, headSha: HEAD }, { gh },
+    );
+    expect(prePushCheck).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe('requested codex review (no request found for current head)');
+    expect(gh._calls.comments[0].body).toContain(HEAD);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('an evidence-only child of a manually approved article head can request review', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const approvedSha = '3'.repeat(40);
+    const db = makeDb({ autonomous_runs: [{
+      id: 'run-1', action_type: 'new_supporting_blog',
+      trust_build_approved_at: '2026-09-24T08:00:00Z',
+      draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin, trust_build_approved_head_sha: approvedSha }),
+    }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], reviews: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const verifyEvidenceOnlyAdvance = jest.fn(async ({ pinnedSha }) => pinnedSha === approvedSha);
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck: jest.fn().mockResolvedValue(true),
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(verifyEvidenceOnlyAdvance).toHaveBeenCalledTimes(1);
+    expect(verifyEvidenceOnlyAdvance).toHaveBeenCalledWith(
+      { pinnedSha: approvedSha, headSha: HEAD }, { gh },
+    );
+    expect(result.reason).toBe('requested codex review (no request found for current head)');
+    expect(gh._calls.comments[0].body).toContain(HEAD);
+  });
+
+  test('a publisher anchor still recovers when its equal approval SHA has no live approval timestamp', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const db = makeDb({ autonomous_runs: [{
+      id: 'run-1', action_type: 'new_supporting_blog', trust_build_approved_at: null,
+      draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin, trust_build_approved_head_sha: publisherPin }),
+    }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], reviews: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const verifyEvidenceOnlyAdvance = jest.fn().mockResolvedValue(true);
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck: jest.fn().mockResolvedValue(true),
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(verifyEvidenceOnlyAdvance).toHaveBeenCalledWith(
+      { pinnedSha: publisherPin, headSha: HEAD }, { gh },
+    );
+    expect(result.reason).toBe('requested codex review (no request found for current head)');
+  });
+
+  test('revoking human approval during its evidence-child proof withholds remediation', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const approvedSha = '3'.repeat(40);
+    const db = makeDb({ autonomous_runs: [{
+      id: 'run-1', action_type: 'new_supporting_blog',
+      trust_build_approved_at: '2026-09-24T08:00:00Z',
+      draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin, trust_build_approved_head_sha: approvedSha }),
+    }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    const prePushCheck = jest.fn().mockResolvedValue(true);
+    const verifyEvidenceOnlyAdvance = jest.fn(async () => {
+      db._tables.autonomous_runs[0].trust_build_approved_at = null;
+      const payload = JSON.parse(db._tables.autonomous_runs[0].draft_payload);
+      delete payload.trust_build_approved_head_sha;
+      db._tables.autonomous_runs[0].draft_payload = JSON.stringify(payload);
+      return true;
+    });
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck,
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(result.reason).toMatch(/foreign parent/);
+    expect(prePushCheck).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('a pin-mismatched head whose evidence-only proof fails is withheld before any review request or write', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin }) }],
+    });
+    const gh = makeGh({ reviewComments: [], issueComments: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    const verifyEvidenceOnlyAdvance = jest.fn().mockResolvedValue(false);
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck: jest.fn().mockResolvedValue(true),
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(result.reason).toMatch(/foreign parent/);
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
   test('a head that MOVES between the parent check and the refetch is withheld (TOCTOU, PR r16 P1)', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const db = makeDb({

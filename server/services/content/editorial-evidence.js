@@ -153,4 +153,45 @@ async function assertPrEvidence(pr) {
   }
 }
 
-module.exports = { enabled, applicable, prepareDraft, filesForDocument, assertPrEvidence, sourceUrls, reviewError };
+// A signing-only follow-up commit may advance an autonomous PR after the
+// publisher recorded its immutable content commit. Accept that descendant
+// only when the complete delta consists of fresh, valid evidence sidecars
+// for the exact article bytes at the descendant head. compareFiles returns
+// every renamed path and the merge base; requiring the publisher pin as the
+// merge base proves strict ancestry, while requiring every listed path to
+// exist at head rejects removals and renames.
+async function verifyEvidenceOnlyAdvance({ pinnedSha, headSha }, deps = {}) {
+  if (!enabled()) return false;
+  const pinned = String(pinnedSha || '').toLowerCase();
+  const head = String(headSha || '').toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(pinned) || !/^[0-9a-f]{40}$/.test(head) || pinned === head) return false;
+
+  const gh = deps.gh || require('../content-astro/github-client');
+  if (typeof gh.compareFiles !== 'function') return false;
+  const compared = await gh.compareFiles(head, pinned);
+  const changed = compared?.files;
+  // GitHub caps a compare response at 300 files. Reject the boundary too:
+  // exactly 300 gives no proof that the list was complete.
+  if (String(compared?.mergeBaseSha || '').toLowerCase() !== pinned
+      || !Array.isArray(changed) || changed.length === 0 || changed.length >= 300
+      || new Set(changed).size !== changed.length) return false;
+
+  const contract = require('../../../packages/editorial-evidence/index.cjs');
+  for (const evidencePath of changed) {
+    if (!/^content-ops\/editorial-evidence\/[0-9a-f]{64}\.json$/.test(String(evidencePath))) return false;
+    const evidence = await gh.getFile(evidencePath, head);
+    let manifest;
+    try { manifest = JSON.parse(evidence?.content); } catch { return false; }
+    const articlePath = manifest?.path;
+    if (!applicable(articlePath) || contract.evidencePath(articlePath) !== evidencePath) return false;
+    const article = await gh.getFile(articlePath, head);
+    if (typeof article?.content !== 'string') return false;
+    const verified = contract.verifyManifest({ document: article.content, path: articlePath,
+      domain: DOMAIN, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
+    if (!verified.pass) return false;
+  }
+  return true;
+}
+
+module.exports = { enabled, applicable, prepareDraft, filesForDocument, assertPrEvidence,
+  verifyEvidenceOnlyAdvance, sourceUrls, reviewError };

@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 jest.mock('../services/content/editorial-review', () => ({ review: jest.fn(), repair: jest.fn() }));
-jest.mock('../services/content-astro/github-client', () => ({ env: jest.fn(() => ({ owner: 'waves', repo: 'astro' })), ghFetchPaginated: jest.fn(), getFile: jest.fn() }));
+jest.mock('../services/content-astro/github-client', () => ({ env: jest.fn(() => ({ owner: 'waves', repo: 'astro' })), ghFetchPaginated: jest.fn(), getFile: jest.fn(), compareFiles: jest.fn() }));
 jest.mock('../services/content-astro/astro-publisher', () => ({ resolveExistingAstroFileForTarget: jest.fn() }));
 const reviewer = require('../services/content/editorial-review');
 const gh = require('../services/content-astro/github-client');
@@ -43,6 +43,82 @@ test('signs exact final bytes and rejects a later edit at immutable PR head', as
   gh.getFile.mockImplementation(async (name) => name === path ? { content: document + 'Unreviewed claim.' } : file);
   await expect(evidence.assertPrEvidence({ number: 7, head: { sha: 'exact-sha' } })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
   expect(gh.getFile).toHaveBeenCalledWith(path, 'exact-sha');
+});
+describe('publisher-pin evidence-only descendants', () => {
+  const pinnedSha = '1'.repeat(40);
+  const headSha = '2'.repeat(40);
+
+  async function signedSidecar() {
+    return (await evidence.filesForDocument({ document, path }))[0];
+  }
+
+  test('accepts a strict descendant containing only a canonical fresh sidecar for the exact head article', async () => {
+    const sidecar = await signedSidecar();
+    gh.compareFiles.mockResolvedValue({ mergeBaseSha: pinnedSha, files: [sidecar.path] });
+    gh.getFile.mockImplementation(async (name, ref) => {
+      expect(ref).toBe(headSha);
+      return name === path ? { content: document } : sidecar;
+    });
+
+    await expect(evidence.verifyEvidenceOnlyAdvance({ pinnedSha, headSha })).resolves.toBe(true);
+    expect(gh.compareFiles).toHaveBeenCalledWith(headSha, pinnedSha);
+  });
+
+  test('rejects an article edit beyond a human-approved anchor even when a valid sidecar is also present', async () => {
+    const approvedSha = '3'.repeat(40);
+    const sidecar = await signedSidecar();
+    gh.compareFiles.mockResolvedValue({ mergeBaseSha: approvedSha, files: [path, sidecar.path] });
+
+    await expect(evidence.verifyEvidenceOnlyAdvance({ pinnedSha: approvedSha, headSha })).resolves.toBe(false);
+    expect(gh.getFile).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['an article change', () => [path]],
+    ['an unrelated file', () => ['README.md']],
+    ['a deletion or rename source whose old path is absent', (sidecar) => [sidecar.path], { missingSidecar: true }],
+    ['a divergent branch', (sidecar) => [sidecar.path], { mergeBaseSha: '3'.repeat(40) }],
+    ['the compare API file cap', () => Array.from({ length: 300 }, (_, i) => `content-ops/editorial-evidence/${i.toString(16).padStart(64, '0')}.json`)],
+  ])('rejects %s', async (_label, filesFor, options = {}) => {
+    const sidecar = await signedSidecar();
+    gh.compareFiles.mockResolvedValue({
+      mergeBaseSha: options.mergeBaseSha || pinnedSha,
+      files: filesFor(sidecar),
+    });
+    gh.getFile.mockImplementation(async (name) => {
+      if (options.missingSidecar && name === sidecar.path) return null;
+      return name === path ? { content: document } : sidecar;
+    });
+    await expect(evidence.verifyEvidenceOnlyAdvance({ pinnedSha, headSha })).resolves.toBe(false);
+  });
+
+  test('rejects a sidecar with an invalid signature', async () => {
+    const sidecar = await signedSidecar();
+    const manifest = JSON.parse(sidecar.content);
+    manifest.signature.value = Buffer.alloc(64).toString('base64');
+    const tampered = { ...sidecar, content: `${JSON.stringify(manifest)}\n` };
+    gh.compareFiles.mockResolvedValue({ mergeBaseSha: pinnedSha, files: [sidecar.path] });
+    gh.getFile.mockImplementation(async (name) => name === path ? { content: document } : tampered);
+
+    await expect(evidence.verifyEvidenceOnlyAdvance({ pinnedSha, headSha })).resolves.toBe(false);
+  });
+
+  test('rejects a correctly signed but stale sidecar', async () => {
+    const staleManifest = contract.createManifest({ document, path, domain: 'wavespestcontrol.com',
+      checks: passing().checks, sources: [], reviewedAt: new Date(Date.now() - 8 * 86400000).toISOString(),
+      model: 'test-reviewer', privateKey: process.env.EDITORIAL_REVIEW_PRIVATE_KEY });
+    const sidecar = { path: contract.evidencePath(path), content: JSON.stringify(staleManifest) };
+    gh.compareFiles.mockResolvedValue({ mergeBaseSha: pinnedSha, files: [sidecar.path] });
+    gh.getFile.mockImplementation(async (name) => name === path ? { content: document } : sidecar);
+
+    await expect(evidence.verifyEvidenceOnlyAdvance({ pinnedSha, headSha })).resolves.toBe(false);
+  });
+
+  test('rejects a compare response without complete ancestry/file fields', async () => {
+    gh.compareFiles.mockResolvedValue({ files: [] });
+    await expect(evidence.verifyEvidenceOnlyAdvance({ pinnedSha, headSha })).resolves.toBe(false);
+    expect(gh.getFile).not.toHaveBeenCalled();
+  });
 });
 test('missing signing key cannot silently publish or spend model calls', async () => {
   delete process.env.EDITORIAL_REVIEW_PRIVATE_KEY;

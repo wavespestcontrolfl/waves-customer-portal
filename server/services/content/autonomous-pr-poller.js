@@ -327,7 +327,7 @@ async function headRefreshFileContent(run, pr) {
 // target file), or null/undefined (unreadable — fail closed). The approval is BOUND to the reviewed draft: every affiliate
 // product id on the head must be one the approved draft_payload body
 // referenced, so a branch push after approval cannot add products.
-async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
+async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null, { approvedEvidenceChild = false } = {}) {
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
   if (content === null) return { ok: false, transient: true, reason: 'head blog file unavailable for the affiliate belt' };
   // Frontmatter is parsed FIRST and every affiliate scan runs on the BODY:
@@ -367,13 +367,13 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
     const dp = parseJsonObject(run.draft_payload);
     // The approval is bound to the exact COMMIT the approved publish created
     // (draft_payload.trust_build_approved_head_sha, same binding the named-
-    // competitor merge gate uses). A head that moved afterwards is never
-    // auto-merged and there is deliberately no "re-approve" path (the run has
-    // left affiliate_review): like the named-competitor lane, the PR waits
-    // for a HUMAN merge after review (merged-by-human reconciliation
-    // finalizes it) or a dismiss. Absent SHA fails closed the same way.
+    // competitor merge gate uses). The only later head accepted here is the
+    // current tick's separately verified evidence-only child of that commit;
+    // any content-bearing push still waits for a HUMAN merge. Absent SHA
+    // fails closed the same way.
     const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
-    if (!approvedSha || !prHeadSha || approvedSha !== String(prHeadSha).toLowerCase()) {
+    if (!approvedSha || !prHeadSha
+        || (approvedSha !== String(prHeadSha).toLowerCase() && !approvedEvidenceChild)) {
       return { ok: false, reason: `affiliate approval is bound to head ${approvedSha ? approvedSha.slice(0, 7) : '(none)'} but the PR head is ${prHeadSha ? String(prHeadSha).slice(0, 7) : '(unknown)'} — auto-merge withheld; review the new head and merge by hand (or dismiss)` };
     }
     let ids;
@@ -1217,6 +1217,7 @@ async function maybeAutoMerge(run, pr) {
   const gh = require('../content-astro/github-client');
   const branch = pr.head?.ref;
   if (!branch) return { pending: true, reason: 'pr_head_branch_unknown' };
+  let verifiedApprovedEvidenceChild = false;
 
   // 1. Cloudflare preview build for the PR branch must be green.
   const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
@@ -1408,15 +1409,14 @@ async function maybeAutoMerge(run, pr) {
   //    (file sets, routes, frontmatter, freshness — an approach that could
   //    never provably equal the publisher), the gate enforces ONE
   //    invariant: an unattended merge on a named-competitor-governed run is
-  //    allowed only when pr.head.sha IS a commit the publisher produced —
-  //    the original publish commit (draft_payload.autopublish_head_sha,
-  //    stamped from the publisher's own commit response) or the head a
-  //    HUMAN approved (trust_build_approved_head_sha). Codex remediation
-  //    re-pins to its fix commit after its own gate pipeline vets it. Every
-  //    pinned head therefore already passed the runner's or remediation's
-  //    full gates (comparison gate + scoped eligibility included) on
-  //    EXACTLY this content; any foreign push — human or agent — waits for
-  //    a human merge. The kill switch stays live: for intercept-class runs
+  //    allowed only when pr.head.sha is the original publisher commit
+  //    (draft_payload.autopublish_head_sha), the head a HUMAN approved
+  //    (trust_build_approved_head_sha), or a cryptographically verified
+  //    evidence-only descendant of either. Codex remediation re-pins to its fix
+  //    commit after its own gate pipeline vets it. Every accepted head
+  //    therefore has the publisher article bytes and gates intact; any
+  //    other push — human or agent — waits for a human merge. The kill
+  //    switch stays live: for intercept-class runs
   //    the scoped eligibility (raw persisted brief marker + BOTH
   //    named-competitor gates) is re-checked at this last instant, so
   //    unsetting GATE_NAMED_COMPETITOR_AUTOPUBLISH (or
@@ -1430,23 +1430,83 @@ async function maybeAutoMerge(run, pr) {
     let approvedAt = null;
     let briefId = null;
     try {
-      const fresh = await db('autonomous_runs').where('id', run.id)
-        .first('comparison_table_result', 'draft_payload', 'trust_build_approved_at', 'brief_id');
-      if (fresh) {
+      const stableContextValue = (value) => {
+        if (Array.isArray(value)) return value.map(stableContextValue);
+        if (value && typeof value === 'object') return Object.fromEntries(
+          Object.keys(value).sort().map((key) => [key, stableContextValue(value[key])]),
+        );
+        return value;
+      };
+      const readPinContext = async () => {
+        const fresh = await db('autonomous_runs').where('id', run.id)
+          .first('comparison_table_result', 'draft_payload', 'trust_build_approved_at', 'brief_id');
+        if (!fresh) return null;
         let ctr = fresh.comparison_table_result;
         if (typeof ctr === 'string') { try { ctr = JSON.parse(ctr); } catch (_) { ctr = undefined; } }
         // A stored NULL verdict is a valid competitor-free read; missing
         // row/unparseable stays flagged (fail closed).
-        if (ctr !== undefined) verdictFlagged = Boolean(ctr && ctr.requiresHumanReview === true);
+        const flagged = ctr === undefined ? true : Boolean(ctr && ctr.requiresHumanReview === true);
         let dp = fresh.draft_payload;
         if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
-        const headSha = String(pr.head?.sha || '').toLowerCase();
         const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
-        pinnedShaOk = Boolean(pinned && headSha && pinned === headSha);
-        approvedAt = fresh.trust_build_approved_at || null;
+        const approved = fresh.trust_build_approved_at || null;
         const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
-        approvedShaOk = Boolean(approvedAt && approvedSha && headSha && approvedSha === headSha);
-        briefId = fresh.brief_id || null;
+        return { flagged, pinned, approvedAt: approved,
+          approvedAtKey: approved instanceof Date ? approved.toISOString() : String(approved || ''),
+          approvedSha, briefId: fresh.brief_id || null,
+          comparisonKey: JSON.stringify(stableContextValue(ctr)),
+          draftKey: JSON.stringify(stableContextValue(dp)) };
+      };
+      const samePinContext = (a, b) => Boolean(a && b
+        && a.flagged === b.flagged && a.pinned === b.pinned
+        && a.approvedAtKey === b.approvedAtKey && a.approvedSha === b.approvedSha
+        && String(a.briefId || '') === String(b.briefId || '')
+        && a.comparisonKey === b.comparisonKey && a.draftKey === b.draftKey);
+
+      const context = await readPinContext();
+      if (context) {
+        const headSha = String(pr.head?.sha || '').toLowerCase();
+        verdictFlagged = context.flagged;
+        pinnedShaOk = Boolean(context.pinned && headSha && context.pinned === headSha);
+        approvedAt = context.approvedAt;
+        approvedShaOk = Boolean(approvedAt && context.approvedSha && headSha && context.approvedSha === headSha);
+        briefId = context.briefId;
+
+        // The trusted editorial signer may add only authenticated evidence
+        // sidecars after either trusted content anchor. Prefer a live human
+        // approval so its eligibility override remains attached to the
+        // evidence child; otherwise fall back to the publisher commit.
+        if (!pinnedShaOk && !approvedShaOk && headSha) {
+          const anchors = [
+            ...(approvedAt && context.approvedSha
+              ? [{ sha: context.approvedSha, kind: 'approved' }] : []),
+            ...(context.pinned && (!approvedAt || context.pinned !== context.approvedSha)
+              ? [{ sha: context.pinned, kind: 'publisher' }] : []),
+          ];
+          let verifiedKind = null;
+          for (const anchor of anchors) {
+            if (await require('./editorial-evidence').verifyEvidenceOnlyAdvance({
+              pinnedSha: anchor.sha, headSha,
+            })) {
+              verifiedKind = anchor.kind;
+              break;
+            }
+          }
+          if (verifiedKind) {
+            const rechecked = await readPinContext();
+            if (!samePinContext(context, rechecked)) {
+              return { pending: true, reason: 'publisher_head_pin_failed' };
+            }
+            if (!(await queueRowStillParked(run))) {
+              return { pending: true, reason: 'queue_row_moved_during_gating' };
+            }
+            if (verifiedKind === 'approved') {
+              approvedShaOk = true;
+              verifiedApprovedEvidenceChild = true;
+            }
+            else pinnedShaOk = true;
+          }
+        }
       }
     } catch (_) {
       return { pending: true, transient: true, reason: 'publisher_head_pin_failed' };
@@ -1645,7 +1705,9 @@ async function maybeAutoMerge(run, pr) {
       let withheld = null;
       const { withTopicMergeLock } = require('./topic-targeting-gate');
       mergeRes = await withTopicMergeLock(db, async (trx) => {
-        const aff = await affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha, gh);
+        const aff = await affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha, gh, {
+          approvedEvidenceChild: verifiedApprovedEvidenceChild,
+        });
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
           withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}`, transient: aff.transient === true };
