@@ -5,6 +5,8 @@
  */
 let mockCollectedRow = null;
 let mockPaidMonthlyRow = null;
+let mockOrphanRow = null;
+let mockAmbiguousSiblingRow = null;
 let mockCalls = [];
 
 jest.mock('../models/db', () => {
@@ -19,6 +21,13 @@ jest.mock('../models/db', () => {
     b.insert = () => { throw new Error('verdict must not write'); };
     b.update = () => { throw new Error('verdict must not write'); };
     b.first = () => {
+      // hasUnresolvedSiblingStripeOutcome's two reads: an unresolved
+      // orphan (a different table) and a sibling row flagged
+      // ambiguous_outcome (a whereRaw mentioning it, distinct from every
+      // other 'payments' lookup below).
+      if (table === 'stripe_orphan_charges') return Promise.resolve(mockOrphanRow);
+      const ambiguousSiblingLookup = b._wheres.some(([m, a]) => m === 'whereRaw' && String(a).includes('ambiguous_outcome'));
+      if (ambiguousSiblingLookup) return Promise.resolve(mockAmbiguousSiblingRow);
       // The already-collected lookup carries whereIn(status paid/processing);
       // the paid-monthly lookup carries where({status:'paid'}).
       const collectedLookup = b._wheres.some(([m, a]) => m === 'whereIn' && a === 'status');
@@ -63,6 +72,8 @@ const classify = (payment, customer = { ...CUSTOMER }, ctx = loadRetryContext())
 beforeEach(() => {
   mockCollectedRow = null;
   mockPaidMonthlyRow = null;
+  mockOrphanRow = null;
+  mockAmbiguousSiblingRow = null;
   mockCalls = [];
   jest.clearAllMocks();
   prepay.getActivelyCoveredCustomerIds.mockResolvedValue(new Set());
@@ -172,9 +183,12 @@ describe('classifyFailedPaymentRetry — guard chain in the sweep order', () => 
     expect(prepay.getActivelyCoveredCustomerIds).not.toHaveBeenCalled();
   });
 
-  test('classification touches payments only — never payment_methods, never a write', async () => {
+  test('classification touches payments and stripe_orphan_charges only — never payment_methods, never a write', async () => {
     await classify(monthlyRow(), { ...CUSTOMER, billing_mode: 'per_application' });
-    expect(new Set(mockCalls)).toEqual(new Set(['payments']));
+    // stripe_orphan_charges: the sibling-unresolved-outcome read
+    // (hasUnresolvedSiblingStripeOutcome) — still read-only, still no
+    // payment_methods, still no write (insert/update throw in this mock).
+    expect(new Set(mockCalls)).toEqual(new Set(['payments', 'stripe_orphan_charges']));
   });
 });
 

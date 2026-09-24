@@ -10,6 +10,7 @@ const { etDateString, etParts } = require('../utils/datetime-et');
 const { isPaused, autopayActivePredicate } = require('../services/autopay-eligibility');
 const { MONTHLY_LANE_SQL, resolveBillingLane } = require('../services/billing-lane');
 const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+const { hasUnresolvedSiblingStripeOutcome, deriveMonthlyChargeIdempotencyKey } = require('../services/retry-collectibility');
 
 router.use(adminAuthenticate);
 router.use(requireAdmin);
@@ -246,48 +247,34 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           };
         }
 
-        // Attempt-scoped idempotency key (Codex round-1 P1): the bare
-        // autopay_monthly_<cid>_<date> key — shared with chargeMonthly()'s
-        // own default, for the genuine-race case — must NOT be reused
-        // after a TERMINAL failure that day, because charge-now's own
-        // description/metadata (manual_charge) never matches
-        // chargeMonthly's (monthly_autopay), so Stripe would reject the
-        // replay with a parameter-mismatch error instead of attempting a
-        // fresh charge — meaning a decline (from either the cron or a
-        // prior charge-now click) would make every same-day "Charge now"
-        // click fail, even after the customer's card is fixed. Look up the
-        // most recent failed attempt for this exact obligation (still
-        // inside the lock, so this read can't race a concurrent writer);
-        // its OWN metadata carries the idempotency key it used
-        // (services/stripe.js's failure-record insert), so the next
-        // attempt number is derived from THAT key rather than a separate
-        // count query — one read, not two, and immune to any gap between
-        // a count and the row it counted.
-        const latestFailedAttempt = await db('payments')
-          .where({ customer_id: customerId, status: 'failed' })
-          .where(function () {
-            this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
-              .orWhere(function () {
-                this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
-                  .andWhere('payment_date', '>=', monthStart)
-                  .andWhere('payment_date', '<=', monthEnd)
-                  .andWhere('description', 'like', '%WaveGuard Monthly%');
-              });
-          })
-          .orderBy('created_at', 'desc')
-          .first();
-        let attemptNumber = 0;
-        if (latestFailedAttempt) {
-          let priorMeta = {};
-          try {
-            const raw = latestFailedAttempt.metadata;
-            priorMeta = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
-          } catch (_) { /* unparseable legacy metadata — treat as attempt 0 */ }
-          const priorKeyMatch = /_r(\d+)$/.exec(String(priorMeta.idempotency_key || ''));
-          attemptNumber = priorKeyMatch ? parseInt(priorKeyMatch[1], 10) + 1 : 1;
+        // Codex round-2 P0: a SIBLING attempt for this SAME obligation (the
+        // cron, or an earlier charge-now click) left an unresolved Stripe
+        // outcome — Stripe accepted a charge but the ledger write failed
+        // (stripe_orphan_charges), or a no-PI failure came back ambiguous.
+        // Charging again with a fresh key risks a genuine double
+        // collection while the first outcome is still unverified.
+        const unresolvedOutcome = await hasUnresolvedSiblingStripeOutcome(customerId, monthKey, db);
+        if (unresolvedOutcome.blocked) {
+          return {
+            response: {
+              status: 409,
+              body: {
+                error: `A prior charge attempt for this customer has an unresolved Stripe outcome (${unresolvedOutcome.reason}) — reconcile it before charging again.`,
+                unresolved_outcome: unresolvedOutcome.reason,
+              },
+            },
+          };
         }
-        const baseIdempotencyKey = `autopay_monthly_${customerId}_${etDateString()}`;
-        const idempotencyKey = attemptNumber > 0 ? `${baseIdempotencyKey}_r${attemptNumber}` : baseIdempotencyKey;
+
+        // Attempt-scoped idempotency key (Codex round-1 P1): shared with
+        // chargeMonthly()'s own key derivation (retry-collectibility.js)
+        // so charge-now and the daily cron always agree on the SAME key
+        // for a customer's first attempt today (a genuine race still
+        // collapses under Stripe idempotency) and both correctly advance
+        // to a fresh _r<n> suffix once EITHER side's attempt has failed —
+        // never reusing a key recorded with the OTHER caller's
+        // description/metadata, which Stripe would reject as a mismatch.
+        const idempotencyKey = await deriveMonthlyChargeIdempotencyKey(customerId, monthKey, db);
 
         try {
           // Machine provenance (Codex #3598 r5 P1): an admin clicking Charge

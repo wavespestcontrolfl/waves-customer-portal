@@ -93,6 +93,9 @@ describe('AUDIT r1-races-1: concurrent charge-now must be serialized per custome
     db.mockImplementation((table) => {
       if (table === 'customers') return makeQB({ first: CUSTOMER });
       if (table === 'payments') return makeQB({ first: () => ledger[0] || null });
+      // The sibling-unresolved-outcome check (retry-collectibility.js)
+      // reads this table too — no fixtures here, so it always clears.
+      if (table === 'stripe_orphan_charges') return makeQB({ first: null });
       throw new Error(`unexpected table ${table}`);
     });
   });

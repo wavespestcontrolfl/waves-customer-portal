@@ -40,6 +40,83 @@ const REASONS = Object.freeze({
   AMBIGUOUS_OUTCOME_PARKED: 'ambiguous_outcome_parked',
 });
 
+/**
+ * Codex round-2 P0: does ANOTHER attempt for this SAME customer+month
+ * (never the row being classified — callers exclude it themselves) have an
+ * unresolved Stripe outcome? Two shapes:
+ *   - an unresolved stripe_orphan_charges row (Stripe accepted a charge but
+ *     the payments-ledger write failed — STRIPE_CHARGED_DB_FAILED) — money
+ *     may already be moving for this customer at all, not just this month;
+ *   - a 'failed' payments row for this exact obligation month stamped
+ *     metadata.ambiguous_outcome (a no-PI connection failure that may or
+ *     may not have reached Stripe).
+ * A collector that charges again here — a fresh idempotency key, since this
+ * is a distinct attempt — risks a genuine double collection while the
+ * FIRST outcome is still unverified. Every monthly collector (charge-now,
+ * the monthly cron, and this module's own classifier for the retry sweep)
+ * must check this before charging, not just before superseding.
+ */
+/**
+ * Codex round-1 P1: charge-now and the daily monthly cron both charge this
+ * SAME obligation and must derive the SAME idempotency key from the SAME
+ * canonical source, regardless of which one attempted (and possibly
+ * declined) FIRST that day — otherwise whichever goes second reuses a key
+ * whose recorded parameters (description/metadata) belong to the OTHER
+ * caller and Stripe rejects it as a mismatch instead of attempting a fresh
+ * charge. The bare `autopay_monthly_<cid>_<ET date>` key (chargeMonthly()'s
+ * own default) is used for a customer's FIRST attempt today — a genuine
+ * simultaneous race between the two callers still collapses under Stripe
+ * idempotency in that case. Once a failed attempt exists for this
+ * obligation month (from EITHER caller), every later attempt derives the
+ * next `_r<n>` suffix from THAT row's own recorded key, so it is always a
+ * key Stripe has never seen and a real charge is attempted.
+ */
+async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db) {
+  const [obYear, obMonth] = monthKey.split('-').map(Number);
+  const monthStart = `${monthKey}-01`;
+  const monthEnd = `${monthKey}-${String(new Date(Date.UTC(obYear, obMonth, 0)).getUTCDate()).padStart(2, '0')}`;
+  const latestFailedAttempt = await conn('payments')
+    .where({ customer_id: customerId, status: 'failed' })
+    .where(function () {
+      this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+        .orWhere(function () {
+          this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+            .andWhere('payment_date', '>=', monthStart)
+            .andWhere('payment_date', '<=', monthEnd)
+            .andWhere('description', 'like', `%${MONTHLY_MARKER}%`);
+        });
+    })
+    .orderBy('created_at', 'desc')
+    .first('metadata');
+  let attemptNumber = 0;
+  if (latestFailedAttempt) {
+    let priorMeta = {};
+    try {
+      const raw = latestFailedAttempt.metadata;
+      priorMeta = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
+    } catch (_) { /* unparseable legacy metadata — treat as attempt 0 */ }
+    const match = /_r(\d+)$/.exec(String(priorMeta.idempotency_key || ''));
+    attemptNumber = match ? parseInt(match[1], 10) + 1 : 1;
+  }
+  const base = `autopay_monthly_${customerId}_${etDateString()}`;
+  return attemptNumber > 0 ? `${base}_r${attemptNumber}` : base;
+}
+
+async function hasUnresolvedSiblingStripeOutcome(customerId, monthKey, conn = db) {
+  const orphan = await conn('stripe_orphan_charges')
+    .where({ customer_id: customerId, resolved: false })
+    .first('id', 'stripe_payment_intent_id');
+  if (orphan) return { blocked: true, reason: 'unresolved_orphan_charge', detail: orphan };
+  const ambiguous = await conn('payments')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['failed'])
+    .whereRaw("metadata->>'billed_month' = ?", [monthKey])
+    .whereRaw("COALESCE((metadata->>'ambiguous_outcome')::boolean, false) = true")
+    .first('id');
+  if (ambiguous) return { blocked: true, reason: 'ambiguous_stripe_outcome', detail: ambiguous };
+  return { blocked: false };
+}
+
 // What the sweep DOES with a row of each reason. `charge` is the only
 // disposition that moves money; the others map 1:1 to the sweep's existing
 // write/log blocks.
@@ -245,6 +322,19 @@ async function classifyFailedPaymentRetry({
         collectedByPaymentId: collected.id,
       });
     }
+    // RESOLUTION GUARD (Codex round-2 P0): a SIBLING attempt for this SAME
+    // obligation — a different row than this one — left an unresolved
+    // Stripe outcome. Checked here because an orphan/ambiguous row is
+    // never 'paid' or 'processing', so the ALREADY_COLLECTED scan above
+    // never sees it; parked exactly like this row's OWN ambiguous-outcome
+    // guard below (same reason/disposition) so the sweep's existing
+    // handling (self-supersede + health alert) applies unchanged.
+    const siblingOutcome = await hasUnresolvedSiblingStripeOutcome(payment.customer_id, obligationMonth, conn);
+    if (siblingOutcome.blocked) {
+      return verdict(REASONS.AMBIGUOUS_OUTCOME_PARKED, DISPOSITIONS.PARK, {
+        unresolvedSibling: siblingOutcome,
+      });
+    }
   }
 
   // RESOLUTION GUARD: an annual prepay covering the OBLIGATION date absorbs
@@ -316,5 +406,7 @@ module.exports = {
   loadRetryContext,
   armedRetryQuery,
   classifyFailedPaymentRetry,
+  hasUnresolvedSiblingStripeOutcome,
+  deriveMonthlyChargeIdempotencyKey,
   _private: { monthKeyOf, dateKeyOf, pausedOn, isMonthlyObligationRow, parseMeta },
 };

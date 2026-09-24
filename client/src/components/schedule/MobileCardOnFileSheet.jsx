@@ -94,9 +94,15 @@ export default function MobileCardOnFileSheet({
   // Set on unmount — handleCharge's continuation checks this after every
   // await so a sheet closed/unmounted mid-quote (Back is disabled while
   // charging, but this is the backstop for any other removal path) never
-  // fires the actual /charge-card POST from a closed sheet.
+  // fires the actual /charge-card POST from a closed sheet. Reset on
+  // (re)mount, not just declared false at init: React 18 StrictMode's dev
+  // double-invoke mounts, cleans up (setting this true), then mounts again
+  // for the SAME component instance — without resetting here, every
+  // charge on that second, genuinely-live mount would see a stale `true`
+  // and abort right after quoting.
   const abortedRef = useRef(false);
   useEffect(() => {
+    abortedRef.current = false;
     return () => {
       abortedRef.current = true;
     };

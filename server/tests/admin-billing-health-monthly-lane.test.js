@@ -119,6 +119,9 @@ describe('POST /customers/:id/charge-now fails closed off the monthly lane', () 
     db.mockImplementation((table) => {
       if (table === 'customers') return makeRecorder({ first: customer });
       if (table === 'payments') return makeRecorder({ first: null });
+      // The sibling-unresolved-outcome check (retry-collectibility.js)
+      // reads this table too — no fixtures here, so it always clears.
+      if (table === 'stripe_orphan_charges') return makeRecorder({ first: null });
       throw new Error(`unexpected table ${table}`);
     });
   });

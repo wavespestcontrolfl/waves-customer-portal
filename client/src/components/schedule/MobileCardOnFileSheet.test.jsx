@@ -148,6 +148,43 @@ describe.each(["legacy", "comfortable"])(
       expect(document.body.textContent).toMatch(/\$100\.00.*\$3\.00.*\$103\.00/);
     });
 
+    it("still charges successfully under React.StrictMode's dev double-invoked mount/cleanup", async () => {
+      // StrictMode mounts, cleans up (setting abortedRef true via the
+      // effect's cleanup), then mounts again for the SAME instance — the
+      // effect's setup must reset the ref, or every charge on this
+      // genuinely-live second mount silently aborts right after quoting.
+      // The card-load effect itself runs twice under StrictMode too, so
+      // the cards response must be reusable, not a one-shot mock.
+      fetch.mockImplementation((url) =>
+        String(url).includes("/cards") ? jsonResponse({ cards }) : jsonResponse({}),
+      );
+      render(
+        <React.StrictMode>
+          <UiSurface density={density}>
+            <MobileCardOnFileSheet
+              presentation={density === "comfortable" ? "admin" : "legacy"}
+              desktopVisible
+              invoiceId="inv-1"
+              customerId="cust-1"
+              customerName="Test Customer"
+            />
+          </UiSurface>
+        </React.StrictMode>,
+      );
+      await screen.findByText("Visa 1111");
+      queueQuoteThenCharge({ success: true, status: "paid" }, {});
+
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+
+      await waitFor(() => {
+        expect(
+          fetch.mock.calls.some(([u]) => String(u).endsWith("/charge-card")),
+        ).toBe(true);
+      });
+    });
+
     it("never posts /charge-card if the sheet unmounts while the quote is still in flight", async () => {
       let resolveQuote;
       const quotePromise = new Promise((resolve) => {

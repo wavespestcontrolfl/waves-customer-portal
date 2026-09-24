@@ -15,6 +15,8 @@ const {
   loadRetryContext,
   armedRetryQuery,
   classifyFailedPaymentRetry,
+  hasUnresolvedSiblingStripeOutcome,
+  deriveMonthlyChargeIdempotencyKey,
 } = require('./retry-collectibility');
 const { isEnabled } = require('../config/feature-gates');
 
@@ -322,8 +324,21 @@ const BillingCron = {
             .first();
           if (existingCharge) return { alreadyCollected: existingCharge };
 
+          // Codex round-2 P0: a SIBLING attempt for this SAME obligation
+          // (charge-now, or an earlier cron/retry attempt) left an
+          // unresolved Stripe outcome — do not charge again until it
+          // reconciles.
+          const unresolvedOutcome = await hasUnresolvedSiblingStripeOutcome(customer.id, monthKey, db);
+          if (unresolvedOutcome.blocked) return { unresolvedOutcome };
+
           const service = await require('./stripe');
-          const paymentResult = await service.chargeMonthly(customer.id);
+          // Codex round-1 P1: shared attempt-scoped key derivation
+          // (retry-collectibility.js) — the SAME source charge-now uses,
+          // so whichever of the two collectors attempts a customer's
+          // obligation SECOND today always advances past a FIRST attempt's
+          // key instead of reusing it with different parameters.
+          const idempotencyKey = await deriveMonthlyChargeIdempotencyKey(customer.id, monthKey, db);
+          const paymentResult = await service.chargeMonthly(customer.id, idempotencyKey);
           return { paymentResult };
         }, {
           // This loop IS the 'billing-monthly' job (scheduler.js wraps
@@ -351,6 +366,22 @@ const BillingCron = {
               lockOutcome = { claimHeldElsewhere: true };
             }
           }
+        }
+
+        if (lockOutcome.unresolvedOutcome) {
+          // Codex round-2 P0: a sibling attempt for this obligation left an
+          // unresolved Stripe outcome (an orphan charge, or an ambiguous
+          // no-PI failure) — charging again risks a genuine double
+          // collection while it's still unverified. No deferred retry row
+          // here: retrying won't resolve it, only reconciliation will, and
+          // the sibling row that caused this already carries its own
+          // failure/orphan record for an operator to act on.
+          logger.error(`[billing-cron] Monthly charge for customer ${customer.id} skipped — unresolved Stripe outcome from a sibling attempt (${lockOutcome.unresolvedOutcome.reason}); reconcile before any further collection this month`);
+          await logAutopay(customer.id, 'skipped_lock_contention', {
+            details: { source: 'autopay', billed_month: monthKey, reason: lockOutcome.unresolvedOutcome.reason },
+          });
+          skipped++;
+          continue;
         }
 
         if (lockOutcome.claimHeldElsewhere) {
@@ -975,6 +1006,20 @@ const BillingCron = {
               if (recheck.reason === RETRY_REASONS.ALREADY_COLLECTED) {
                 return { alreadyCollected: recheck.collectedByPaymentId };
               }
+              if (recheck.disposition !== RETRY_DISPOSITIONS.CHARGE) {
+                // Codex round-2 P0: the recheck's verdict changed to
+                // something other than collectible/already-collected since
+                // this sweep's initial classification — most notably a
+                // SIBLING attempt's unresolved Stripe outcome
+                // (AMBIGUOUS_OUTCOME_PARKED), which the ALREADY_COLLECTED
+                // check above never catches (an orphan/ambiguous row is
+                // never 'paid'/'processing'). Defer exactly like a
+                // held-elsewhere lock: leave this row untouched; the next
+                // tick reclassifies it from scratch and reaches the SAME
+                // verdict through the top-level switch below, which owns
+                // the full park/alert handling for every reason.
+                return { deferred: true, deferredReason: recheck.reason };
+              }
             }
             // Month-of-obligation stamp: this retry collects the ORIGINAL
             // failed attempt's month (obligationMonth, resolved above), not
@@ -999,7 +1044,9 @@ const BillingCron = {
             if (lockErr.code === 'BILLING_CLAIM_HELD_ELSEWHERE') return { claimHeldElsewhere: true };
             throw lockErr;
           });
-          if (lockOutcome.claimHeldElsewhere) {
+          if (lockOutcome.claimHeldElsewhere || lockOutcome.deferred) {
+            // Same "leave armed, reclassify next tick" handling either way
+            // — see deferredClaimHeldElsewhere's resolution below.
             deferredClaimHeldElsewhere = true;
           } else if (lockOutcome.alreadyCollected) {
             raceAlreadyCollectedId = lockOutcome.alreadyCollected;
@@ -1458,12 +1505,15 @@ const BillingCron = {
         continue;
       }
 
-      // ADMIN-BUG-R11: the cross-process collection claim is held elsewhere
-      // for this customer (a deploy overlap racing charge-now or the
-      // monthly cron) — no charge was attempted, so leave this row exactly
-      // as armed; the next sweep tick retries it normally.
+      // ADMIN-BUG-R11 / Codex round-2 P0: either the cross-process
+      // collection claim is held elsewhere for this customer (a deploy
+      // overlap racing charge-now or the monthly cron), or the in-lock
+      // recheck's verdict changed to something other than collectible
+      // (most notably a sibling attempt's unresolved Stripe outcome) — no
+      // charge was attempted either way, so leave this row exactly as
+      // armed; the next sweep tick reclassifies it from scratch.
       if (deferredClaimHeldElsewhere) {
-        logger.warn(`[billing-cron] Retry for payment ${payment.id} deferred — collection lock held elsewhere for customer ${payment.customer_id}; left armed for next tick`);
+        logger.warn(`[billing-cron] Retry for payment ${payment.id} deferred for customer ${payment.customer_id}; left armed for next tick`);
         continue;
       }
 
