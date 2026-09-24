@@ -3301,7 +3301,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // A carried draft block puts its structured audit back on the CURRENT
     // lead (own row, this run's insert/update above) so the lead card shows
     // the callback ask the draft still enforces (pre-push audit P1).
-    if (draftAddressBlockCarried && carriedAddressFlag && lead?.id) {
+    const carryFlagToLead = async () => {
+      if (!(draftAddressBlockCarried && carriedAddressFlag && lead?.id)) return;
       try {
         await db('leads').where({ id: lead.id }).update({
           extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: carriedAddressFlag })]),
@@ -3310,7 +3311,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       } catch (carryErr) {
         logger.warn(`[public-quote] carried address flag not written to the lead: ${carryErr.code || carryErr.name || 'error'}`);
       }
-    }
+    };
+    await carryFlagToLead();
 
     try {
       const NotificationService = require('../services/notification-service');
@@ -3351,6 +3353,35 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // link and no website publication: the price still shows, but the
     // visitor must not book (or publish) the bad address before the
     // callback confirms it — the exact incident path (codex #4667 r3 P1).
+    // Rechecked once more right before the handoff is minted (codex r24
+    // P1): a /property-lookup that committed a county flag AFTER this
+    // run's draft transaction released the contact-pair lock has already
+    // stamped the draft blocked, but this request's local verdict is stale
+    // and would still mint and send a /book URL that /booking/confirm then
+    // refuses with ADDRESS_UNVERIFIED. Under the same lock, the newest
+    // matching flag newer than this run's clean evidence withholds the
+    // handoff (and lands on the current lead). The persisted draft verdict
+    // is not rewritten at this point (fail closed; the next run clears it
+    // under the draft lock).
+    if (!addressUnverified && !draftAddressBlockCarried && contactEmail && contactPhone) {
+      try {
+        const late = await db.transaction(async (trx) => {
+          await draftVerdictLock(trx);
+          return reconcileUnderLock(trx);
+        });
+        if (late.newerFlag) {
+          draftAddressBlockCarried = true;
+          carriedAddressFlag = late.newerFlag;
+          logger.info('[public-quote] address flag committed after the draft write — handoff withheld');
+          await carryFlagToLead();
+        }
+      } catch (recheckErr) {
+        // FAIL CLOSED: without the recheck a link could go out to a number
+        // the roll has just refused; the visitor retries, nothing is lost.
+        logger.error(`[public-quote] pre-handoff address recheck failed — refusing the run: ${recheckErr.code || recheckErr.name || 'error'}`);
+        return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
+      }
+    }
     const selfBookBlockedByAddress = !!addressUnverified || draftAddressBlockCarried;
     if (selfBookBlockedByAddress) {
       logger.info('[public-quote] self-book link withheld — address flagged by the county-roll audit; office confirms on the callback');
