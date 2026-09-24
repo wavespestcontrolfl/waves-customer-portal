@@ -9821,6 +9821,43 @@ function parseAssessmentScores(row = {}) {
   return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
+// The AI's own read — used ONLY to decide which metrics stay editable, never
+// what's displayed (that's techScores/scoreSource, which may already hold a
+// technician's earlier fill of a genuinely blank metric from a prior partial
+// save). Run-backed: the run's immutable scores_adjusted snapshot
+// (visitAssessment.aiScores from the server), which a save never touches —
+// so a metric a technician already filled correctly stays editable instead
+// of looking "AI-known" just because it now has a value (Codex P1
+// 2026-09-24). Legacy (no run, visitAssessment null): the assessment row's
+// own RAW columns, mirroring the server's legacy /confirm rule exactly —
+// including that stress_damage is read raw, never parseAssessmentScores's
+// derived worst-of-fungus/thatch guess, which could already be non-null
+// while the server still considers Stress unknown.
+// Locked metrics always show the AI's own read. A row adjusted before the
+// read-only ruling can still carry an old technician value in its columns;
+// only AI-blank metrics keep the saved technician fill.
+function withAiScores(scores, aiScores) {
+  const out = { ...(scores || {}) };
+  for (const [key, value] of Object.entries(aiScores || {})) {
+    if (lawnScores.lawnScoreValue(value) != null) out[key] = value;
+  }
+  return out;
+}
+
+function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
+  if (visitAssessment?.aiScores) return visitAssessment.aiScores;
+  // Legacy rows: the reload route sends the server's own AI read.
+  if (serverAiScores) return serverAiScores;
+  const raw = (a, b) => lawnScores.lawnScoreValue(assessment[a] ?? assessment[b]);
+  return {
+    turf_density: raw("turf_density", "turfDensity"),
+    weed_suppression: raw("weed_suppression", "weedSuppression"),
+    color_health: raw("color_health", "colorHealth"),
+    fungus_control: raw("fungus_control", "fungusControl"),
+    thatch_level: raw("thatch_level", "thatchLevel"),
+    stress_damage: raw("stress_damage", "stressDamage"),
+  };
+}
 
 function LawnPreviousVisitCard({ service }) {
   const [state, setState] = useState({ loading: true, row: null, error: false });
@@ -9923,6 +9960,10 @@ function LawnAssessmentCompletionBlock({
   const [result, setResult] = useState(null);
   const [visitReview, setVisitReview] = useState(null);
   const [techScores, setTechScores] = useState(null);
+  // Keys the technician actually typed this session. Only these are posted:
+  // the server ignores AI-known keys anyway, and resending a server-derived
+  // value (e.g. Stress) would read as an explicit entry and freeze it.
+  const [typedKeys, setTypedKeys] = useState(() => new Set());
   const [confirmedId, setConfirmedId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -9935,6 +9976,7 @@ function LawnAssessmentCompletionBlock({
     setResult(null);
     setVisitReview(null);
     setTechScores(null);
+    setTypedKeys(new Set());
     setConfirmedId(null);
     setError("");
     onConfirmed?.(null);
@@ -9956,9 +9998,13 @@ function LawnAssessmentCompletionBlock({
           assessment,
           adjustedScores: scores,
           displayScores: scores,
+          aiScores: resolveAiScores(assessment, data.visitAssessment, data.aiScores),
           observations: assessment.observations || "",
         });
-        setTechScores(scores);
+        // A confirmed row shows exactly what was saved (and what the customer
+        // report uses); only a pending row shows the AI read for locked keys.
+        setTechScores(assessment.confirmed_by_tech ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment, data.aiScores)));
+        setTypedKeys(new Set());
         setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
         if (assessment.confirmed_by_tech) {
           setConfirmedId(assessment.id);
@@ -9995,6 +10041,7 @@ function LawnAssessmentCompletionBlock({
       setPhotos((prev) => [...prev, ...nextPhotos.map((photo) => ({ ...photo, zone: null }))].slice(0, 3));
       setResult(null);
       setTechScores(null);
+      setTypedKeys(new Set());
       setConfirmedId(null);
       onConfirmed?.(null);
     } catch (err) {
@@ -10020,11 +10067,19 @@ function LawnAssessmentCompletionBlock({
     });
   }
 
-  function adjustScore(key, delta) {
+  // Owner ruling 2026-09-24: lawn health scores are read-only from photos.
+  // The only manual entry allowed is filling a metric the AI left blank —
+  // this never touches a metric the AI already scored (the server enforces
+  // the same rule independently; this just keeps the tech from typing into
+  // a metric that won't take effect).
+  function fillScore(key, rawValue) {
+    setTypedKeys((prev) => new Set(prev).add(key));
     setTechScores((prev) => {
       if (!prev) return prev;
-      const current = Number(prev[key]) || 0;
-      return { ...prev, [key]: Math.max(0, Math.min(100, current + delta)) };
+      if (rawValue === "") return { ...prev, [key]: null };
+      const n = Number(rawValue);
+      if (!Number.isFinite(n)) return prev;
+      return { ...prev, [key]: Math.max(0, Math.min(100, Math.round(n))) };
     });
   }
 
@@ -10057,9 +10112,10 @@ function LawnAssessmentCompletionBlock({
         return;
       }
       const scores = response.adjustedScores || response.displayScores || {};
-      setResult(response);
+      setResult({ ...response, aiScores: resolveAiScores(response.assessment, response.visitAssessment) });
       setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations !== undefined ? response.assessment.observations : response.observations));
       setTechScores({ ...scores });
+      setTypedKeys(new Set());
       setConfirmedId(null);
       onConfirmed?.(null);
     } catch (err) {
@@ -10086,7 +10142,7 @@ function LawnAssessmentCompletionBlock({
         method: "POST",
         body: JSON.stringify({
           assessmentId: result.assessment.id,
-          adjustedScores: techScores || result.adjustedScores || result.displayScores,
+          adjustedScores: Object.fromEntries([...typedKeys].map((key) => [key, techScores?.[key] ?? null])),
           ...visitReviewPayload(visitReview),
         }),
       });
@@ -10095,6 +10151,12 @@ function LawnAssessmentCompletionBlock({
         assessment: savedAssessment || prev.assessment,
         visitAssessment: visitAssessment ?? prev.visitAssessment,
       }));
+      // Show what the server actually saved.
+      if (savedAssessment) {
+        const saved = parseAssessmentScores(savedAssessment);
+        setTechScores(savedAssessment.confirmed_by_tech ? saved : withAiScores(saved, result.aiScores));
+        setTypedKeys(new Set());
+      }
       if (visitAssessment) {
         setVisitReview(createVisitReview(visitAssessment, savedAssessment?.observations));
       }
@@ -10123,10 +10185,15 @@ function LawnAssessmentCompletionBlock({
   const confirmed = !!confirmedId;
   // Keep the usual four controls; expose underlying scores only when the
   // saved assessment lacks them. Keep them editable until the save completes.
+  // Same rule as the aiValue check below: whether an underlying signal is
+  // AI-blank comes from result.aiScores (the immutable read), never the
+  // mutable assessment row — otherwise a prior save's fill of a genuinely
+  // blank Fungus/Thatch would hide the tile entirely on reload instead of
+  // keeping it open for correction (Codex P1 2026-09-24).
   const metrics = [...LAWN_ASSESSMENT_METRICS, ...[
     { key: "fungus_control", label: "Fungus control" },
     { key: "thatch_level", label: "Thatch condition" },
-  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.assessment?.[metric.key]) == null)];
+  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]) == null)];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -10290,6 +10357,17 @@ function LawnAssessmentCompletionBlock({
           <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
             {metrics.map((metric) => {
               const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
+              // Whether the AI itself knew this metric — from result.aiScores
+              // (the run's immutable snapshot, or the assessment's raw
+              // columns for a legacy no-run row; see resolveAiScores), never
+              // from scoreSource or the mutable assessment row a reload
+              // reads back. A prior save's tech fill of a genuinely blank
+              // metric must not look "AI-known" just because it now has a
+              // value (Codex P1 2026-09-24) — and a fill-in input stays open
+              // (still editable, still shows what was typed) once the tech
+              // starts typing, instead of collapsing to read-only the moment
+              // it first has a value.
+              const aiValue = lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]);
               return (
                 <div
                   key={metric.key}
@@ -10306,15 +10384,33 @@ function LawnAssessmentCompletionBlock({
                     {value == null ? "—" : `${value}/100`}
                   </div>
                   <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
-                  {!confirmed && (
-                    <div style={{ display: "flex", justifyContent: "center", gap: 4, marginTop: 6 }}>
-                      <button type="button" aria-label={`Decrease ${metric.label}`} onClick={() => adjustScore(metric.key, -5)} style={scoreButtonStyle}>
-                        -
-                      </button>
-                      <button type="button" aria-label={`Increase ${metric.label}`} onClick={() => adjustScore(metric.key, 5)} style={scoreButtonStyle}>
-                        +
-                      </button>
-                    </div>
+                  {/* AI-known scores are read-only (owner ruling 2026-09-24).
+                      A metric the AI left blank (aiValue == null) is the one
+                      the tech can fill — the server enforces this too. */}
+                  {!confirmed && aiValue == null && (
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={100}
+                      value={techScores?.[metric.key] ?? ""}
+                      aria-label={`Enter ${metric.label}`}
+                      placeholder="0-100"
+                      onChange={(e) => fillScore(metric.key, e.target.value)}
+                      style={{
+                        width: "100%",
+                        marginTop: 6,
+                        height: 28,
+                        padding: "0 6px",
+                        borderRadius: 6,
+                        border: `1px solid ${D.border}`,
+                        background: D.white,
+                        color: D.heading,
+                        fontSize: 13,
+                        textAlign: "center",
+                        boxSizing: "border-box",
+                      }}
+                    />
                   )}
                 </div>
               );
@@ -10369,6 +10465,7 @@ function LawnAssessmentCompletionBlock({
                 setPhotos([]);
                 setResult(null);
                 setTechScores(null);
+                setTypedKeys(new Set());
                 setConfirmedId(null);
                 setError("");
                 onConfirmed?.(null);
@@ -10396,19 +10493,6 @@ function LawnAssessmentCompletionBlock({
     </div>
   );
 }
-
-const scoreButtonStyle = {
-  width: 24,
-  height: 24,
-  borderRadius: 6,
-  border: `1px solid ${D.border}`,
-  background: D.white,
-  color: D.heading,
-  fontSize: 14,
-  fontWeight: 500,
-  lineHeight: 1,
-  cursor: "pointer",
-};
 
 function serviceLineFromType(serviceType = "") {
   const text = String(serviceType || "").toLowerCase();

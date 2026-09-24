@@ -1,4 +1,4 @@
-const { billedUsage, runRowFor, replayContextForRun } = require('../services/lawn-visit-runs');
+const { billedUsage, runRowFor, replayContextForRun, responseForRun } = require('../services/lawn-visit-runs');
 
 test('failed billed legs contribute tokens even when neither provider returns an answer', () => {
   expect(billedUsage({ failures: [{ usage: { input_tokens: 5, output_tokens: 1 } }, { reason: 'timeout' }], usage: null }))
@@ -30,4 +30,23 @@ test('replay context never includes notes and omitted notes make an exact-input 
   expect(replayContextForRun({ vision_context: {}, technician_notes_present: false })).toMatchObject({ exactInputEligible: true });
   expect(replayContextForRun({ vision_context: {} })).toMatchObject({ exactInputEligible: false, omitted: [{ field: 'technicianNotes', reason: 'presence_unknown' }] });
   expect(replayContextForRun({ vision_context: '[]', technician_notes_present: false })).toMatchObject({ visionContext: null, exactInputEligible: false });
+});
+
+// Codex P1 2026-09-24: the client must decide which metrics stay editable
+// from the run's immutable read, never the mutable assessment row (which can
+// already hold a technician's earlier fill of a genuinely blank metric).
+test('responseForRun carries the immutable AI read alongside the review payload', () => {
+  const complete = {
+    status: 'complete',
+    scores_adjusted: JSON.stringify({ turf_density: 80, weed_suppression: null, color_health: 76, fungus_control: null, thatch_level: 90, stress_damage: null }),
+    reconciliation: JSON.stringify({ published_observations: null }),
+  };
+  expect(responseForRun(complete).aiScores).toEqual({
+    turf_density: 80, weed_suppression: null, color_health: 76, fungus_control: null, thatch_level: 90, stress_damage: null,
+  });
+  // No snapshot (incomplete run, or a complete run that never got one): no
+  // enforceable AI read, same as runAiScores on its own.
+  expect(responseForRun({ status: 'pending' }).aiScores).toEqual({});
+  expect(responseForRun({ status: 'complete', scores_adjusted: null }).aiScores).toEqual({});
+  expect(responseForRun(null)).toBeNull();
 });

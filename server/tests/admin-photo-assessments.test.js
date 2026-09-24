@@ -11,11 +11,17 @@ let mockMessagesById = {};
 let mockConversationsById = {};
 const inserts = {};
 const updates = {};
+// Captured .where(...) predicates per table — this mock never actually
+// filters mockRows (every existing test seeds exactly the rows it wants
+// back), so this is how a test proves the CODE issued a given predicate
+// (e.g. the prospect-mode scope) without changing that established shape.
+let whereCalls = [];
 
 function builder(table) {
   const state = { table, where: {} };
   const b = {
     where: (cond) => {
+      whereCalls.push({ table, cond });
       if (cond && typeof cond === 'object') Object.assign(state.where, cond);
       return b;
     },
@@ -191,6 +197,7 @@ beforeEach(() => {
   mockConversationsById = {};
   Object.keys(inserts).forEach((k) => delete inserts[k]);
   Object.keys(updates).forEach((k) => delete updates[k]);
+  whereCalls = [];
   mockSendEmail.mockResolvedValue({ ok: true, messageId: 'msg-1' });
   mockGetPhotoBuffer.mockResolvedValue({ buffer: Buffer.from('raw-mms-bytes'), contentType: 'image/jpeg' });
 });
@@ -210,6 +217,15 @@ describe('GET / (list)', () => {
       expect(assessments[1].type).toBe('lawn');
       expect(assessments[1].headline).toBe('Keep an eye on it');
       expect(assessments[1].contact.first_name).toBe('Dana');
+    });
+  });
+
+  test('scopes pest to prospect mode too (codex GH r1 P2) — a customer Photo ID row must not surface as a lead-magnet prospect', async () => {
+    mockRows.pest_identifications = [pestRow()];
+    await withServer(async (base) => {
+      await fetch(`${base}/api/admin/photo-assessments?type=pest`);
+      const pestCalls = whereCalls.filter((c) => c.table === 'pest_identifications');
+      expect(pestCalls.some((c) => c.cond && c.cond.mode === 'prospect')).toBe(true);
     });
   });
 });
@@ -242,6 +258,15 @@ describe('GET /:type/:id (detail)', () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/admin/photo-assessments/lawn/not-a-uuid`);
       expect(res.status).toBe(404);
+    });
+  });
+
+  test('loadRow scopes pest to prospect mode too (codex GH r1 P2)', async () => {
+    mockRows.pest_identifications = [pestRow()];
+    await withServer(async (base) => {
+      await fetch(`${base}/api/admin/photo-assessments/pest/${ROW_ID}`);
+      const pestCalls = whereCalls.filter((c) => c.table === 'pest_identifications');
+      expect(pestCalls.some((c) => c.cond && c.cond.mode === 'prospect')).toBe(true);
     });
   });
 });

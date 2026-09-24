@@ -282,7 +282,7 @@ describe('result rendering per type + next-step CTAs', () => {
       id, type, created_at: '2026-09-03T00:00:00Z',
       result: {
         plant_groups: [{ label: 'Hibiscus', status: 'stressed' }],
-        scores: { foliage_fullness: 60, leaf_color_vigor: 55, overall: 6 },
+        scores: { foliage_fullness: 60, leaf_color_vigor: 55, overall: 58 },
         signals: [{ key: 'pests', label: 'Pest pressure', level: 'low' }],
         summary: 'Tree/shrub summary here.',
       },
@@ -328,7 +328,7 @@ describe('result rendering per type + next-step CTAs', () => {
     fireEvent.click(await screen.findByText('Hibiscus'));
 
     expect(await screen.findByText('Tree/shrub summary here.')).toBeInTheDocument();
-    expect(screen.getByText('6/10')).toBeInTheDocument();
+    expect(screen.getByText('58/100')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send to the team' })).toBeInTheDocument();
   });
 
@@ -596,7 +596,7 @@ describe('request handoff falls back to live inputs (Codex r7 P2)', () => {
 
     api.createPhotoId.mockResolvedValueOnce({
       id: 'x2', type: 'tree_shrub', created_at: '2026-09-24T00:00:00Z',
-      result: { plant_groups: [], scores: { foliage_fullness: 50, leaf_color_vigor: 50, overall: 5 }, signals: [], summary: 's' },
+      result: { plant_groups: [], scores: { foliage_fullness: 50, leaf_color_vigor: 50, overall: 50 }, signals: [], summary: 's' },
       next_step: { kind: 'request', title: 'Send this in', body: 'y' }, // no request_prefill
     });
     fireEvent.click(screen.getByRole('button', { name: 'Identify' }));

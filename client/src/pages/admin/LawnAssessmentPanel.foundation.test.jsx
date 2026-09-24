@@ -94,9 +94,11 @@ it("keeps the photo analysis, score adjustment, and confirmation payload intact"
   });
   fireEvent.click(analyze);
   expect(await screen.findByText(/AI Scorecard/)).toBeInTheDocument();
-  fireEvent.click(
-    screen.getByRole("button", { name: "Decrease Turf Density" }),
-  );
+  // Owner ruling 2026-09-24: every score here is AI-known, so there is no
+  // +/- control left to adjust — Turf Density posts back unchanged.
+  expect(
+    screen.queryByRole("button", { name: "Decrease Turf Density" }),
+  ).toBeNull();
   fireEvent.change(screen.getByLabelText("Inches per week"), {
     target: { value: "1.25" },
   });
@@ -113,7 +115,7 @@ it("keeps the photo analysis, score adjustment, and confirmation payload intact"
     expect(JSON.parse(confirmCall[1].body)).toEqual({
       assessmentId: "assessment-1",
       adjustedScores: {
-        turf_density: 75,
+        turf_density: 80,
         weed_suppression: 70,
         color_health: 60,
         fungus_control: 50,

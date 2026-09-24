@@ -127,6 +127,28 @@ describe('buildTreeShrubTechFindings — exception-based closeout', () => {
     expect(text).toMatch(/pest-pressure signals/);
     expect(text).not.toMatch(/infestation|diseased|confirmed/);
   });
+
+  // codex GH r2 (cloud) P1 on PR #4752: a 'tracking' (null-score, never
+  // assessed) category is not a "finding" — it's neither watch nor
+  // needs_attention — so it never reached `findings`, and the summary fell
+  // through to the same "No urgent visible plant issues found" a genuinely
+  // clean, fully-assessed visit gets. That reassures the customer about
+  // dimensions (pest/disease/water-heat) that were never actually checked.
+  it('a tracking-only category (never assessed) is NOT a clean read — neutral copy, not "no urgent issues"', () => {
+    const out = buildTreeShrubTechFindings({ scores: { foliageFullness: 92, leafColorVigor: 90, pestActivity: null, diseaseLeafSpot: null, waterHeatStress: null } });
+    expect(out.findings).toHaveLength(0); // tracking is not a finding either
+    expect(out.trackingCount).toBe(3);
+    expect(out.aiSummary).not.toMatch(/No urgent visible plant issues/);
+    expect(out.aiSummary).toMatch(/couldn't get a clear enough read/i);
+    expect(out.suggestedCustomerAction).not.toBe('No action needed');
+  });
+
+  it('a genuinely clean visit (every category assessed and healthy) still gets the "no urgent issues" copy — the tracking fix does not regress the real clean case', () => {
+    const out = buildTreeShrubTechFindings({ scores: { foliageFullness: 92, leafColorVigor: 90, pestActivity: 95, diseaseLeafSpot: 95, waterHeatStress: 90 } });
+    expect(out.trackingCount).toBe(0);
+    expect(out.aiSummary).toMatch(/No urgent visible plant issues/);
+    expect(out.suggestedCustomerAction).toBe('No action needed');
+  });
 });
 
 describe('treeShrubReviewSignature — anti-tamper binding', () => {

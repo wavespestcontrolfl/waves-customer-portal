@@ -24,6 +24,15 @@ const SCORING = {
   }, 60000);
   afterAll(async () => { if (db) await db.dispose(); });
 
+  // The run's immutable scores_adjusted snapshot IS the AI's read (owner
+  // ruling 2026-09-24: lawn scores are read-only from photos) — it mirrors
+  // `scores` by default, exactly like the real /assess writer, which inserts
+  // the assessment row and the run's snapshot from the SAME AI output in the
+  // SAME transaction. A test that wants a genuinely AI-blank key (fillable /
+  // overridable) passes it as `null` in `scores`; a test that wants an
+  // AI-known key fixed passes its real value. `runFields.scores_adjusted`
+  // overrides this mirroring outright for a test that wants the two to
+  // diverge on purpose (a stale/incomplete-snapshot scenario).
   async function seed(scores = {}, runFields = {}, customer = null) {
     const f = customer || await fixture(db.knex);
     const visit = await f.visit();
@@ -34,9 +43,9 @@ const SCORING = {
     const [run] = await db.knex('lawn_assessment_runs').insert({
       assessment_id: assessment.id, customer_id: f.customerId, status: 'complete',
       prompt_version: 'confirm-fixture', context_hash: 'b'.repeat(64),
-      observations: MODEL_TEXT, scores_adjusted: JSON.stringify(COMPLETE),
+      observations: MODEL_TEXT, scores_adjusted: JSON.stringify({ ...UNKNOWN, ...scores }),
       findings: JSON.stringify(['F1', 'F2'].map((finding_id) => ({ finding_id, name: 'Weed pressure', label: 'weed pressure', confidence: 'moderate', severity: 'moderate', urgency: 'monitor' }))),
-      reconciliation: JSON.stringify({ published_observations: NO_OBSERVATIONS, stress_damage_override: null }),
+      reconciliation: JSON.stringify({ published_observations: NO_OBSERVATIONS }),
       ...runFields,
     }).returning('*');
     return { assessment, run, f };
@@ -54,14 +63,19 @@ const SCORING = {
   });
 
   test('the completing save freezes the adjusted AI comparison and final scores', async () => {
-    const { assessment } = await seed();
+    // Owner ruling 2026-09-24: only an AI-blank key is fillable. turf_density
+    // and color_health are the run's two genuinely AI-blank keys here, so the
+    // technician's fill of them is what completes the row across two saves;
+    // the rest of COMPLETE is already AI-known from the immutable snapshot.
+    const AI_PARTIAL = { ...COMPLETE, turf_density: null, color_health: null };
+    const { assessment } = await seed({}, { scores_adjusted: JSON.stringify(AI_PARTIAL) });
     await save(assessment.id, { adjustedScores: { turf_density: 68 } });
     const result = await save(assessment.id, { adjustedScores: { ...COMPLETE, turf_density: 68 }, review: { reviewedFindings: [] } });
     expect(result).toMatchObject({ confirmed: true, missingScores: [] });
     expect(result.assessment).toMatchObject({ confirmed_by_tech: true, is_baseline: true, turf_density: 68 });
     expect(result.run.reviewed_at).toBeInstanceOf(Date);
-    expect(result.run.reconciliation.confirmation).toEqual({ final_scores: { ...COMPLETE, turf_density: 68 }, ai_scores: COMPLETE, calibration_eligible: true, technician_id: null });
-    expect(result.run.scores_adjusted).toEqual(COMPLETE);
+    expect(result.run.reconciliation.confirmation).toEqual({ final_scores: { ...COMPLETE, turf_density: 68 }, ai_scores: AI_PARTIAL, calibration_eligible: true, technician_id: null });
+    expect(result.run.scores_adjusted).toEqual(AI_PARTIAL);
   });
 
   test.each([{ status: 'unavailable', scores_adjusted: null }, { scores_adjusted: null }])(
@@ -74,10 +88,14 @@ const SCORING = {
   );
 
   test('confirmation without a new score payload still captures the stored comparison', async () => {
-    const { assessment } = await seed({ ...COMPLETE, turf_density: 64 });
+    // turf_density is the one AI-blank key: the assessment row already holds
+    // 64 from an earlier legitimate fill of that blank, which sticks across
+    // this confirm even though nothing is resent.
+    const AI_TURF_BLANK = { ...COMPLETE, turf_density: null };
+    const { assessment } = await seed({ ...COMPLETE, turf_density: 64 }, { scores_adjusted: JSON.stringify(AI_TURF_BLANK) });
     const result = await save(assessment.id);
     expect(result.run.reconciliation.confirmation).toMatchObject({
-      ai_scores: COMPLETE, final_scores: { ...COMPLETE, turf_density: 64 }, calibration_eligible: true,
+      ai_scores: AI_TURF_BLANK, final_scores: { ...COMPLETE, turf_density: 64 }, calibration_eligible: true,
     });
   });
 
@@ -106,15 +124,31 @@ const SCORING = {
     expect(result.run.reconciliation.published_observations).toBeNull();
   });
 
-  test('stress overrides survive partial saves and clear when a component changes without an explicit stress edit', async () => {
+  // Owner ruling 2026-09-24: fungus_control/thatch_level are AI-known here
+  // (60/80), so they're fixed — a technician can't move them, and so can't
+  // use them to re-derive a fixed or already-filled stress_damage either.
+  // stress_damage itself is the run's one AI-blank key, so a direct fill of
+  // it is honored and then sticks across later partial saves that don't
+  // repeat it, even one that (harmlessly) attempts to edit fungus_control.
+  test('a technician can fill an AI-blank stress_damage, and it sticks; an AI-known component can\'t be moved to re-derive it', async () => {
     const { assessment } = await seed({ fungus_control: 60, thatch_level: 80 });
     await save(assessment.id, { adjustedScores: { stress_damage: 73 } });
     const second = await save(assessment.id, { adjustedScores: { turf_density: 66 } });
-    expect(second.assessment.stress_damage).toBe(73);
-    expect(second.run.reconciliation.stress_damage_override).toBe(73);
+    expect(second.assessment).toMatchObject({ fungus_control: 60, thatch_level: 80, stress_damage: 73, turf_density: 66 });
     const third = await save(assessment.id, { adjustedScores: { fungus_control: 88 } });
-    expect(third.assessment.stress_damage).toBe(80);
-    expect(third.run.reconciliation.stress_damage_override).toBeNull();
+    expect(third.assessment).toMatchObject({ fungus_control: 60, stress_damage: 73 });
+  });
+
+  test('an auto-derived (never explicit) stress_damage re-derives after a component correction, instead of freezing stale (Codex P1 2026-09-24)', async () => {
+    const { assessment } = await seed();
+    // Save 1: fill fungus=80 only — Stress auto-derives to 80 (the only
+    // known component), never an explicit entry.
+    const first = await save(assessment.id, { adjustedScores: { fungus_control: 80 } });
+    expect(first.assessment).toMatchObject({ fungus_control: 80, stress_damage: 80 });
+    // Save 2: correct fungus down to 40 and fill thatch=90 — Stress MUST
+    // re-derive to 40, not stay frozen at the earlier auto-derived 80.
+    const second = await save(assessment.id, { adjustedScores: { fungus_control: 40, thatch_level: 90 } });
+    expect(second.assessment).toMatchObject({ fungus_control: 40, thatch_level: 90, stress_damage: 40 });
   });
 
   test('retries return the frozen assessment and review without repeating protocol writes', async () => {
@@ -238,7 +272,12 @@ const SCORING = {
   });
 
   test.each([false, true])('a property writer can finish while protocol confirmation waits on its fence (history: %s)', async (propertyHistoryEnabled) => {
-    const { assessment, f } = await seed(COMPLETE);
+    // turf_density is the one AI-blank key here, so the confirm still reads
+    // it off the assessment row (rather than a fixed AI value) — preserving
+    // this test's actual probe: that the confirm transaction only proceeds
+    // (and sees the property writer's committed update) after waiting on the
+    // fence, not before.
+    const { assessment, f } = await seed(COMPLETE, { scores_adjusted: JSON.stringify({ ...COMPLETE, turf_density: null }) });
     const { withTurfProfileFence } = require('../services/customer-pricing-ai');
     const propertyWriter = await db.knex.transaction();
     const confirmConnection = await db.knex.transaction();
