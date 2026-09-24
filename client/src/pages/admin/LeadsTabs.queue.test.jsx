@@ -238,11 +238,15 @@ describe('Linked lead history preview', () => {
   });
   it('opens the exact linked record and preserves review mode', async () => {
     linkedFixture();
-    mount('/admin/pipeline?lead=lead-qa&leadReview=1');
+    mount('/admin/pipeline?lead=lead-qa&leadReview=1&leadStatus=estimate_viewed&leadSearch=QA&leadPage=3&source_name=Paid');
     expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Primary record: Original Example');
     fireEvent.click(screen.getByRole('button', { name: 'Review record' }));
     await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=primary-qa'));
     expect(screen.getByLabelText('Current route')).toHaveTextContent('leadReview=1');
-    await waitFor(() => expect(queueCalls().some(c => new URL(c.path, 'http://localhost').searchParams.get('id') === 'primary-qa')).toBe(true));
+    await waitFor(() => expect(queueCalls().some(c => {
+      const params = new URL(c.path, 'http://localhost').searchParams;
+      return params.get('id') === 'primary-qa' && params.get('page') === '1'
+        && !params.has('status') && !params.has('search') && !params.has('source_name');
+    })).toBe(true));
   });
 });

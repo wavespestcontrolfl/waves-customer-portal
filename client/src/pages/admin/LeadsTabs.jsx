@@ -1770,13 +1770,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           <Button
                                             variant="secondary"
                                             onClick={() =>
-                                              setSearchParams((current) => {
-                                                const next =
-                                                  new URLSearchParams(current);
-                                                next.set("lead", record.id);
-                                                next.delete("leadId");
-                                                next.delete("leadView");
-                                                return next;
+                                              setSearchParams({
+                                                tab: "leads",
+                                                leadReview: "1",
+                                                lead: record.id,
                                               })
                                             }
                                           >
