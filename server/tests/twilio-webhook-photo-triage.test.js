@@ -6,7 +6,7 @@
 const mockState = {};
 function resetState() {
   Object.assign(mockState, {
-    sms: [], drafts: [], sequence: 0, res: null, legacyGate: true, customer: null, techLookupFails: false, visionTaken: false,
+    sms: [], drafts: [], sequence: 0, res: null, legacyGate: true, customer: null, techLookupFails: false, visionTaken: false, messageUpdates: [],
   });
 }
 resetState();
@@ -22,6 +22,7 @@ function mockDb(table) {
   };
   q.update = async (patch) => {
     if (table !== 'messages') return 0;
+    mockState.messageUpdates.push(patch);
     // visionTaken: a concurrent text won this message's vision reservation.
     return mockState.visionTaken && patch.photo_triage_at ? [] : [{ id: 'synthetic-message' }];
   };
@@ -169,14 +170,38 @@ test('legacy gate off: the triage still drafts; legacyAiDraftsAllowed stays fals
   expect(triage.legacyAiDraftsAllowed({ candidate: true, messageId: 'm' })).toBe(false);
 });
 
-test('a triage run failure is logged, releases its slot, and never changes the response', async () => {
-  mockCreate.mockRejectedValue(new Error('vision exploded'));
+test('vision failure after paid analysis → one legacy fallback draft, no photo_triage draft, slot stays spent', async () => {
+  const err = new Error('vision exploded');
+  err.analysisStarted = true;
+  mockCreate.mockRejectedValue(err);
   const res = await receive('what is this in my lawn?');
   expect(res.body).toBe('<Response></Response>');
   expect(res.statusCode).toBeUndefined();
+  await settle(() => mockState.drafts.length > 0);
   expect(logger.error).toHaveBeenCalledWith(
-    '[photo-triage] assessment failed for message synthetic-message; vision slot released: vision exploded',
+    '[photo-triage] assessment failed for message synthetic-message; vision slot kept (analysis started): vision exploded',
   );
+  expect(mockState.drafts.map((d) => d.draft_response)).toEqual(['Legacy synthetic draft']);
+  expect(mockState.drafts.filter((d) => d.intent === 'photo_triage')).toHaveLength(0);
+  expect(mockState.messageUpdates).toEqual([{ photo_triage_at: 'NOW' }]);
+});
+
+test('failure before paid analysis → stamp released AND legacy fallback draft parked', async () => {
+  mockCreate.mockRejectedValue(new Error('S3 timeout'));
+  await receive('what is this in my lawn?');
+  await settle(() => mockState.drafts.length > 0);
+  expect(logger.error).toHaveBeenCalledWith(
+    '[photo-triage] assessment failed for message synthetic-message; vision slot released: S3 timeout',
+  );
+  expect(mockState.messageUpdates).toEqual([{ photo_triage_at: 'NOW' }, { photo_triage_at: null }]);
+  expect(mockState.drafts.map((d) => d.draft_response)).toEqual(['Legacy synthetic draft']);
+});
+
+test('legacy gate off: a failed triage parks nothing (the fallback honors the gate)', async () => {
+  mockState.legacyGate = false;
+  mockCreate.mockRejectedValue(new Error('S3 timeout'));
+  await receive('what is this in my lawn?');
+  await settle(() => logger.info.mock.calls.some(([m]) => String(m).includes('parking the legacy AI draft instead')));
   expect(mockState.drafts).toHaveLength(0);
 });
 

@@ -220,7 +220,10 @@ function buildDraftText({ firstName, findingLabel }) {
 // draft id, or null when a pending draft already exists.
 async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method }) {
   return db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', [CONTACT_LOCK_KEY, phoneKey(from)]);
+    // Keyed like hasPendingDraft's widest match: the customer when the text
+    // resolved to one (two stored numbers are one conversation), else the
+    // phone.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', [CONTACT_LOCK_KEY, customer?.id ? `customer:${customer.id}` : phoneKey(from)]);
     if (await hasPendingDraft(from, customer?.id, trx)) return null;
     const [draft] = await trx('message_drafts').insert({
       sms_log_id: smsLogId,
@@ -322,8 +325,21 @@ async function parkForAssessment({ intent, messageId, smsLogId, body, from, cust
 /**
  * @returns {Promise<{ status: 'skipped', reason: string } | { status: 'drafted', draftId, assessmentId, type }>}
  */
-async function runPhotoTriage(candidacy) {
+async function runPhotoTriage(candidacy, { legacyFallback = null } = {}) {
   if (!candidacy?.candidate) return { status: 'skipped', reason: candidacy?.reason || 'not_candidate' };
+  const result = await assessAndDraft(candidacy);
+  // A candidate suppressed the legacy AI draft; a terminal failure hands the
+  // text back to it so the customer still gets a reply draft to approve.
+  if (FALLBACK_REASONS.has(result.reason) && legacyFallback) {
+    logger.info(`[photo-triage] message ${candidacy.messageId} ${result.reason}; parking the legacy AI draft instead`);
+    await legacyFallback();
+  }
+  return result;
+}
+
+const FALLBACK_REASONS = new Set(['assessment_failed', 'draft_failed']);
+
+async function assessAndDraft(candidacy) {
   const { intent, messageId, images } = candidacy;
 
   // A failure BEFORE the paid analysis started (photo fetch / validation)

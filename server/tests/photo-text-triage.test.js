@@ -120,8 +120,9 @@ const triage = require('../services/photo-text-triage');
 
 // The webhook's two steps, in order (candidacy is awaited before the legacy
 // draft step; the run is detached after it).
+const mockLegacyFallback = jest.fn(async () => {});
 async function triageInboundPhotoText(args) {
-  return triage.runPhotoTriage(await triage.assessPhotoTriageCandidacy(args));
+  return triage.runPhotoTriage(await triage.assessPhotoTriageCandidacy(args), { legacyFallback: mockLegacyFallback });
 }
 const AMBIGUOUS = 'Look at this by the driveway';
 const { buildDraftText, dailyCap, imageMedia, teaserFindingLabel } = triage._test;
@@ -333,7 +334,8 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
     expect(mockState.updates).toEqual([{ table: 'messages', patch: { photo_triage_at: 'NOW' } }]);
     expect(mockState.raws.map(([, bindings]) => bindings)).toEqual([
       ['photo_triage_daily_cap'],
-      ['photo_triage_contact', '2025550101'],
+      // Keyed by customer when the text resolved to one (else the phone).
+      ['photo_triage_contact', `customer:${CUSTOMER.id}`],
     ]);
     // S3 fetch of THIS message's own key, then the lawn ladder.
     expect(mockGetPhotoBuffer).toHaveBeenCalledWith(INBOUND_KEY);
@@ -447,6 +449,31 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
     expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }]);
     await triage.runPhotoTriage(candidacy);
     expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }]);
+  });
+
+  test('terminal failures hand the text back to the legacy draft; success and pending-draft skips do not', async () => {
+    mockIdentifyPest.mockResolvedValueOnce({ ok: false, reason: 'vision_unavailable' });
+    await triageInboundPhotoText(input({ body: 'bugs everywhere' }));
+    expect(mockLegacyFallback).toHaveBeenCalledTimes(1);
+
+    mockGetPhotoBuffer.mockRejectedValueOnce(new Error('S3 timeout'));
+    await triageInboundPhotoText(input());
+    expect(mockLegacyFallback).toHaveBeenCalledTimes(2);
+
+    mockState.draftInsertFails = true;
+    await triageInboundPhotoText(input());
+    expect(mockLegacyFallback).toHaveBeenCalledTimes(3);
+    mockState.draftInsertFails = false;
+
+    await expect(triageInboundPhotoText(input())).resolves.toMatchObject({ status: 'drafted' });
+    mockState.pendingDraft = [null, { id: 'raced' }];
+    await expect(triageInboundPhotoText(input())).resolves.toMatchObject({ reason: 'pending_draft' });
+    expect(mockLegacyFallback).toHaveBeenCalledTimes(3);
+  });
+
+  test('an unlinked sender locks on the phone', async () => {
+    await triageInboundPhotoText(input({ customer: null }));
+    expect(mockState.raws.at(-1)[1]).toEqual(['photo_triage_contact', '2025550101']);
   });
 
   test('never logs the phone number or the message body', async () => {

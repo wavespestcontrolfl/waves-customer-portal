@@ -241,4 +241,24 @@ postgres('photo-text triage draft parking under concurrency', () => {
     // A third attempt after the fact is refused by the same check.
     await expect(park(anchors[0])).resolves.toBeNull();
   });
+
+  test('one customer texting from two stored numbers at once parks exactly one draft', async () => {
+    const customer = { id: randomUUID(), first_name: 'Synthetic' };
+    const phones = ['+12025550111', '+12025550122'];
+    const anchors = await pooled('sms_log').insert(phones.map((phone) => ({
+      id: randomUUID(), direction: 'inbound', from_phone: phone, to_phone: '+19415550000',
+    }))).returning(['id', 'from_phone']);
+    const results = await Promise.all(anchors.map((anchor) => triage.parkDraftUnlessPending({
+      from: anchor.from_phone,
+      smsLogId: anchor.id,
+      customer,
+      body: 'what is this',
+      text: 'Thanks for the photo.',
+      created: { type: 'lawn', id: randomUUID() },
+      messageId: randomUUID(),
+      method: 'regex',
+    })));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await pooled('message_drafts').where({ customer_id: customer.id, status: 'pending' })).toHaveLength(1);
+  });
 });

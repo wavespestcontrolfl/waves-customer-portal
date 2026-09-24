@@ -1490,100 +1490,22 @@ router.post('/sms', async (req, res) => {
       logger.info('[sms-intent] courtesy-only closer; skipping auto-reply');
     }
 
-    // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
-    if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
-      try {
-        const ContextAggregator = require('../services/context-aggregator');
-        const ResponseDrafter = require('../services/response-drafter');
-
-        const context = await ContextAggregator.getFullCustomerContext(From);
-
-        // Simple intent classification
-        const intentMap = [
-          { pattern: /when|next|schedule|appointment/i, intent: 'SCHEDULE_INQUIRY' },
-          { pattern: /cancel|stop|pause|quit/i, intent: 'CANCEL_REQUEST' },
-          { pattern: /bug|ant|roach|spider|pest|rat|mouse|termite|mosquito/i, intent: 'PEST_REPORT' },
-          { pattern: /bill|pay|charge|invoice|balance/i, intent: 'BILLING_INQUIRY' },
-          { pattern: /complain|unhappy|frustrated|not working|still seeing/i, intent: 'COMPLAINT' },
-          { pattern: /thank|great|awesome|perfect|love|excellent/i, intent: 'POSITIVE_FEEDBACK' },
-          { pattern: /yes|confirm|ok|sounds good/i, intent: 'CONFIRMATION' },
-        ];
-        const matched = intentMap.find(m => m.pattern.test(Body));
-        const intent = { intent: matched?.intent || 'GENERAL', confidence: matched ? 0.85 : 0.5 };
-
-        const draft = await ResponseDrafter.draftResponse(Body, context, intent);
-
-        // Store draft for approval — DO NOT send
-        await db('message_drafts').insert({
-          sms_log_id: smsLogEntry?.id || null,
-          customer_id: customer.id,
-          inbound_message: Body,
-          draft_response: draft.draft,
-          intent: intent.intent,
-          intent_confidence: intent.confidence,
-          context_summary: context.summary,
-          flags: JSON.stringify(context.flags),
-          status: 'pending',
-        });
-
-        // Auto-suggest appointment for schedule inquiries
-        if (intent.intent === 'SCHEDULE_INQUIRY' && customer) {
-          try {
-            // Find next available slot based on customer location
-            const zone = customer.city ? require('../config/locations').resolveLocation(customer.city) : null;
-            const tomorrow = new Date();
-            tomorrow.setDate(tomorrow.getDate() + 1);
-            const nextWeek = new Date();
-            nextWeek.setDate(nextWeek.getDate() + 7);
-
-            // Check scheduled service load for next 7 days
-            const dailyLoad = await db('scheduled_services')
-              .whereBetween('scheduled_date', [tomorrow.toISOString().split('T')[0], nextWeek.toISOString().split('T')[0]])
-              .whereNotIn('status', ['cancelled'])
-              .select('scheduled_date')
-              .count('* as count')
-              .groupBy('scheduled_date')
-              .orderBy('count', 'asc');
-
-            // Find the lightest day
-            const lightestDay = dailyLoad[0]?.scheduled_date || tomorrow.toISOString().split('T')[0];
-            const datePretty = new Date(lightestDay + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-
-            // Append suggestion to the draft
-            draft.draft += `\n\nI can get you scheduled for ${datePretty} — morning or afternoon works better for you?`;
-
-            logger.info(`[sms-intent] Schedule inquiry from ${customer.first_name} — suggesting ${datePretty}`);
-          } catch (schedErr) {
-            logger.error(`[sms-intent] Schedule suggestion failed: ${schedErr.message}`);
-          }
-        }
-
-        // Notify Adam for high-urgency
-        if (['COMPLAINT', 'CANCEL_REQUEST', 'SCHEDULE_INQUIRY'].includes(intent.intent)) {
-          try {
-            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-              `📱 ${customer.first_name}: "${Body.slice(0, 80)}"\n🤖 Draft: "${draft.draft.slice(0, 80)}..."\nApprove: ${publicPortalUrl()}/admin/communications`,
-              { messageType: 'internal_alert' }
-            );
-          } catch (e) { logger.error(`Draft alert failed: ${e.message}`); }
-        }
-
-        logger.info(`AI draft created for ${customer.first_name}: ${intent.intent}`);
-      } catch (e) { logger.error(`AI draft pipeline failed: ${e.message}`); }
-    } else if (customer && numberConfig.type === 'location' && Body && !legacyAiDraftsEnabled) {
-      logger.info('[sms-intent] legacy AI draft gate disabled; skipping draft creation');
-    } else if (customer && numberConfig.type === 'location' && Body && (schedulingIntent || rescheduleAsk)) {
-      logger.info('[sms-intent] scheduling-intent detected; skipping legacy AI draft');
-    } else if (customer && numberConfig.type === 'location' && Body && smsReaction) {
-      logger.info('[sms-intent] SMS reaction detected; skipping legacy AI draft');
-    }
+    // LEGACY AI DRAFT — still create drafts for admin review alongside the AI
+    // assistant. The same context feeds photo triage's fallback: a triage
+    // candidate skips this step, and gets this draft only if its triage fails.
+    const legacyDraftContext = {
+      customer, numberConfig, Body, From, smsLogEntry, schedulingIntent, rescheduleAsk, smsReaction, courtesyOnly,
+    };
+    await runLegacyAiDraft({ ...legacyDraftContext, enabled: legacyAiDraftsEnabled });
 
     // PHOTO-TEXT AUTO-TRIAGE, step 2: a candidate (step 1 above) runs the
     // admin photo assessment and parks ONE pending draft reply for owner
     // approval — never a send. A non-candidate is a no-op. Detached so the
     // vision call never holds this block.
-    void require('../services/photo-text-triage').runPhotoTriage(photoTriage)
-      .catch((err) => logger.error(`[photo-triage] inbound triage failed: ${err.message}`));
+    // A triage that fails terminally parks the legacy draft it displaced.
+    void require('../services/photo-text-triage').runPhotoTriage(photoTriage, {
+      legacyFallback: () => runLegacyAiDraft({ ...legacyDraftContext, enabled: isEnabled('legacyAiDrafts') }),
+    }).catch((err) => logger.error(`[photo-triage] inbound triage failed: ${err.message}`));
 
     // SMS SHADOW DRAFTER (brand-voice loop, Phase B) — silently record what
     // the house-voice AI would have replied. status='shadow' rows never send
@@ -2107,6 +2029,112 @@ router.post('/status', async (req, res) => {
  * (throws { alreadyRead }), re-check right before the push leaves, and
  * retire the SID-scoped bell if the thread was read while it was written.
  */
+// Why the legacy AI draft does NOT run for an inbound, or null when it does.
+// Skip reasons that were logged before keep their log line.
+function legacyAiDraftSkip({ customer, numberConfig, Body, enabled, schedulingIntent, rescheduleAsk, smsReaction, courtesyOnly }) {
+  if (!customer || numberConfig.type !== 'location' || !Body) return 'not_applicable';
+  if (!enabled) return 'gate_disabled';
+  if (schedulingIntent || rescheduleAsk) return 'scheduling_intent';
+  if (smsReaction) return 'sms_reaction';
+  if (courtesyOnly) return 'courtesy_only';
+  return null;
+}
+const LEGACY_AI_DRAFT_SKIP_LOGS = {
+  gate_disabled: '[sms-intent] legacy AI draft gate disabled; skipping draft creation',
+  scheduling_intent: '[sms-intent] scheduling-intent detected; skipping legacy AI draft',
+  sms_reaction: '[sms-intent] SMS reaction detected; skipping legacy AI draft',
+};
+
+// The legacy inbound AI draft (message_drafts, status 'pending' — never
+// sent from here). Called by the webhook's post-ack block and, as the
+// fallback, by a photo triage that failed terminally. Fail-soft.
+async function runLegacyAiDraft(ctx) {
+  const skip = legacyAiDraftSkip(ctx);
+  if (skip) {
+    if (LEGACY_AI_DRAFT_SKIP_LOGS[skip]) logger.info(LEGACY_AI_DRAFT_SKIP_LOGS[skip]);
+    return;
+  }
+  const { customer, Body, From, smsLogEntry } = ctx;
+  try {
+    const ContextAggregator = require('../services/context-aggregator');
+    const ResponseDrafter = require('../services/response-drafter');
+
+    const context = await ContextAggregator.getFullCustomerContext(From);
+
+    // Simple intent classification
+    const intentMap = [
+      { pattern: /when|next|schedule|appointment/i, intent: 'SCHEDULE_INQUIRY' },
+      { pattern: /cancel|stop|pause|quit/i, intent: 'CANCEL_REQUEST' },
+      { pattern: /bug|ant|roach|spider|pest|rat|mouse|termite|mosquito/i, intent: 'PEST_REPORT' },
+      { pattern: /bill|pay|charge|invoice|balance/i, intent: 'BILLING_INQUIRY' },
+      { pattern: /complain|unhappy|frustrated|not working|still seeing/i, intent: 'COMPLAINT' },
+      { pattern: /thank|great|awesome|perfect|love|excellent/i, intent: 'POSITIVE_FEEDBACK' },
+      { pattern: /yes|confirm|ok|sounds good/i, intent: 'CONFIRMATION' },
+    ];
+    const matched = intentMap.find(m => m.pattern.test(Body));
+    const intent = { intent: matched?.intent || 'GENERAL', confidence: matched ? 0.85 : 0.5 };
+
+    const draft = await ResponseDrafter.draftResponse(Body, context, intent);
+
+    // Store draft for approval — DO NOT send
+    await db('message_drafts').insert({
+      sms_log_id: smsLogEntry?.id || null,
+      customer_id: customer.id,
+      inbound_message: Body,
+      draft_response: draft.draft,
+      intent: intent.intent,
+      intent_confidence: intent.confidence,
+      context_summary: context.summary,
+      flags: JSON.stringify(context.flags),
+      status: 'pending',
+    });
+
+    // Auto-suggest appointment for schedule inquiries
+    if (intent.intent === 'SCHEDULE_INQUIRY' && customer) {
+      try {
+        // Find next available slot based on customer location
+        const zone = customer.city ? require('../config/locations').resolveLocation(customer.city) : null;
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const nextWeek = new Date();
+        nextWeek.setDate(nextWeek.getDate() + 7);
+
+        // Check scheduled service load for next 7 days
+        const dailyLoad = await db('scheduled_services')
+          .whereBetween('scheduled_date', [tomorrow.toISOString().split('T')[0], nextWeek.toISOString().split('T')[0]])
+          .whereNotIn('status', ['cancelled'])
+          .select('scheduled_date')
+          .count('* as count')
+          .groupBy('scheduled_date')
+          .orderBy('count', 'asc');
+
+        // Find the lightest day
+        const lightestDay = dailyLoad[0]?.scheduled_date || tomorrow.toISOString().split('T')[0];
+        const datePretty = new Date(lightestDay + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+
+        // Append suggestion to the draft
+        draft.draft += `\n\nI can get you scheduled for ${datePretty} — morning or afternoon works better for you?`;
+
+        logger.info(`[sms-intent] Schedule inquiry from ${customer.first_name} — suggesting ${datePretty}`);
+      } catch (schedErr) {
+        logger.error(`[sms-intent] Schedule suggestion failed: ${schedErr.message}`);
+      }
+    }
+
+    // Notify Adam for high-urgency
+    if (['COMPLAINT', 'CANCEL_REQUEST', 'SCHEDULE_INQUIRY'].includes(intent.intent)) {
+      try {
+        await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
+          `📱 ${customer.first_name}: "${Body.slice(0, 80)}"\n🤖 Draft: "${draft.draft.slice(0, 80)}..."\nApprove: ${publicPortalUrl()}/admin/communications`,
+          { messageType: 'internal_alert' }
+        );
+      } catch (e) { logger.error(`Draft alert failed: ${e.message}`); }
+    }
+
+    logger.info(`AI draft created for ${customer.first_name}: ${intent.intent}`);
+  } catch (e) { logger.error(`AI draft pipeline failed: ${e.message}`); }
+}
+
 async function ringSmsReplyBell(args) {
   return require('../services/sms-reply-alert-delivery').ringSmsReplyBell(args);
 }
