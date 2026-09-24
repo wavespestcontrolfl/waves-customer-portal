@@ -11266,10 +11266,20 @@ export function CompletionPanel({
     // the report map cannot render them this visit, so counting them as
     // checked would publish typed counts the customer-visible map can't
     // show. Re-pinning (a move) brings a stale station back into the counts.
+    // On inspection_only, a preloaded pin also needs an explicit tap or
+    // move to count — the zero-tap default is not itself an inspection
+    // (codex round-8 P1: the typed stations_checked count still claimed
+    // every visible station on a partial inspection, contradicting the
+    // filtered termiteStations payload and overriding the customer report's
+    // own mismatch guard with the inflated typed number). A newly placed
+    // pin is inherently explicit regardless of outcome.
+    const isInspectionOnly = visitOutcome === "inspection_only";
     const activeKeys = [
       ...stationPreloads
         .filter((station) => !stationRetired.includes(station.id)
-          && (station.shape || stationMoves[station.id]))
+          && (station.shape || stationMoves[station.id])
+          && (!isInspectionOnly || stationMoves[station.id]
+            || Object.prototype.hasOwnProperty.call(stationStatuses, station.id)))
         .map((station) => station.id),
       ...stationNew.map((station) => station.key),
     ];
@@ -11342,7 +11352,7 @@ export function CompletionPanel({
       });
     }
     stationAutoCountsRef.current = counts;
-  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired, generating]);
+  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired, generating, visitOutcome]);
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
