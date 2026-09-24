@@ -313,6 +313,51 @@ function resolveStoredDiscountCaps(parent, liveDiscountCaps) {
   };
 }
 
+// GitHub Codex round 16 P1 (#4657, :10128): resolveStoredDiscountCaps
+// merges a row's frozen caps.addons forward on EVERY restack but never
+// prunes an entry whose discount id is no longer in play on any current
+// line — so removing (or replacing) an add-on's catalog-backed discount
+// left that id's stale frozen cap sitting in the snapshot forever. A
+// LATER save that freshly re-picks the SAME preset resolves the live
+// (possibly since-changed) catalog cap for that pick, but the canonical
+// restack's own merge (frozen wins) then overwrote it right back with the
+// stale frozen figure — silently saving the wrong discount. Callers that
+// mutate a row's line/add-on discounts (today: the PUT /:id/update-details
+// path, via resolveUpdateDetailsAddonFinancials) call this BEFORE handing
+// the row's pricing_provenance.caps to resolveStoredDiscountCaps, so the
+// merge never sees an obsolete id to resurrect.
+//
+// Pure: `frozen` is a caps object shaped like frozenCapsFromRow's return
+// (`{ line, addons }`) or null/undefined (tolerated, returned as-is).
+// `liveAddonIds` is every add-on line's CURRENT discount id after this
+// save (any iterable; null/undefined entries ignored). `lineDiscountId` is
+// the primary line's CURRENT line_discount_id after this save. An id kept
+// on ANY current line — including the still-shared-with-the-primary-line
+// case resolveStoredDiscountCaps' own comment documents as supported — is
+// left untouched; only an id absent from every current line is dropped.
+function pruneObsoleteFrozenAddonCaps(frozen, liveAddonIds, lineDiscountId) {
+  const addons = frozen?.addons && typeof frozen.addons === 'object' && !Array.isArray(frozen.addons)
+    ? frozen.addons
+    : null;
+  if (!addons) return frozen ?? null;
+  const keepIds = new Set();
+  for (const id of (liveAddonIds || [])) {
+    if (id != null) keepIds.add(String(id));
+  }
+  if (lineDiscountId != null) keepIds.add(String(lineDiscountId));
+  const prunedAddons = {};
+  let changed = false;
+  for (const [id, cap] of Object.entries(addons)) {
+    if (keepIds.has(String(id))) {
+      prunedAddons[id] = cap;
+    } else {
+      changed = true;
+    }
+  }
+  if (!changed) return frozen;
+  return { ...frozen, addons: prunedAddons };
+}
+
 module.exports = {
   applyDiscount,
   copyLineDiscountFields,
@@ -328,4 +373,5 @@ module.exports = {
   clearPricingRegimeMarker,
   frozenCapsFromRow,
   resolveStoredDiscountCaps,
+  pruneObsoleteFrozenAddonCaps,
 };

@@ -64,6 +64,7 @@ const {
   stampFrozenCapsOnly,
   frozenCapsFromRow,
   resolveUpdateDetailsAddonFinancials,
+  pruneObsoleteFrozenAddonCaps,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -2234,12 +2235,61 @@ describe('resolveUpdateDetailsAddonFinancials — PUT /:id/update-details routes
       expect(result.canonicalRestackedAddonDollars[0].discountDollars).toBe(10);
       expect(result.canonicalRestackedAddonDollars[0].netPrice).toBe(90);
       // The re-frozen snapshot now carries the NEW id too, read fresh and
-      // correctly uncapped (never the OLD id's $5) — the OLD id's own
-      // entry persists (additive, never deleted — the same harmless-leftover
-      // convention every prior round's caps merge already follows), but
-      // nothing reads it once no addon carries that id any more.
+      // correctly uncapped (never the OLD id's $5). GitHub Codex round 16
+      // P1 (#4657, :10128): the OLD id's own entry is now PRUNED — it is
+      // no longer on any current line (no addon carries it, and there is
+      // no primary line_discount_id here either) — so a later fresh
+      // re-pick of that same preset can never resurrect this stale $5
+      // ceiling over its own live (possibly since-raised) catalog cap.
       expect(result.capsSnapshotToPersist.addons['new-addon-disc']).toBeNull();
-      expect(result.capsSnapshotToPersist.addons['old-addon-disc']).toBe(5);
+      expect(result.capsSnapshotToPersist.addons['old-addon-disc']).toBeUndefined();
+    });
+  });
+
+  // GitHub Codex round 16 P1 (#4657, :10128): pruneObsoleteFrozenAddonCaps
+  // itself — the pure helper resolveUpdateDetailsAddonFinancials calls
+  // before handing a row's frozen caps to resolveStoredDiscountCaps.
+  describe('pruneObsoleteFrozenAddonCaps (round 16 P1, #4657 :10128)', () => {
+    test('drops a frozen add-on cap entry whose discount id is on no current line and is not the primary line discount', () => {
+      const frozen = { line: { id: null, cap: null }, addons: { 'removed-disc': 10, 'kept-disc': 7 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, ['kept-disc'], null);
+      expect(result.addons).toEqual({ 'kept-disc': 7 });
+      expect(result.addons['removed-disc']).toBeUndefined();
+      // `line` is untouched — this helper only ever prunes `addons`.
+      expect(result.line).toEqual({ id: null, cap: null });
+    });
+
+    test('keeps an id still used on a current add-on line', () => {
+      const frozen = { line: { id: null, cap: null }, addons: { 'still-used': 5 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, ['still-used'], null);
+      expect(result.addons).toEqual({ 'still-used': 5 });
+    });
+
+    test('keeps an id that matches the primary line\'s CURRENT line_discount_id even if no add-on carries it (the shared-id shape resolveStoredDiscountCaps documents as supported)', () => {
+      const frozen = { line: { id: 'shared-disc', cap: 12 }, addons: { 'shared-disc': 12 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, [], 'shared-disc');
+      expect(result.addons).toEqual({ 'shared-disc': 12 });
+    });
+
+    test('tolerates undefined/null frozen and an empty/missing addons map without throwing', () => {
+      expect(pruneObsoleteFrozenAddonCaps(undefined, ['x'], null)).toBeNull();
+      expect(pruneObsoleteFrozenAddonCaps(null, ['x'], null)).toBeNull();
+      const noAddons = { line: { id: null, cap: null } };
+      expect(pruneObsoleteFrozenAddonCaps(noAddons, ['x'], null)).toBe(noAddons);
+      const emptyAddons = { line: { id: null, cap: null }, addons: {} };
+      expect(pruneObsoleteFrozenAddonCaps(emptyAddons, ['x'], null)).toBe(emptyAddons);
+    });
+
+    test('returns the SAME object reference when nothing needs pruning (no unnecessary copy)', () => {
+      const frozen = { line: { id: null, cap: null }, addons: { 'kept-disc': 3 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, ['kept-disc'], null);
+      expect(result).toBe(frozen);
+    });
+
+    test('a null/undefined entry in liveAddonIds is ignored, never coerced into a spurious "null" key match', () => {
+      const frozen = { line: { id: null, cap: null }, addons: { 'real-disc': 9 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, [null, undefined, 'real-disc'], null);
+      expect(result.addons).toEqual({ 'real-disc': 9 });
     });
   });
 });

@@ -1474,6 +1474,7 @@ const {
   clearPricingRegimeMarker,
   frozenCapsFromRow,
   resolveStoredDiscountCaps,
+  pruneObsoleteFrozenAddonCaps,
 } = require('../services/booking/visit-financial-stamps');
 const { anchorSoleProperty } = require('../services/customer-properties');
 
@@ -2822,6 +2823,27 @@ async function resolveUpdateDetailsAddonFinancials({
       discount_amount: l.discount?.discountAmount ?? null,
       discount_id: l.discount?.discountId ?? null,
     }));
+    // GitHub Codex round 16 P1 (#4657, :10128): THIS save's own line-up of
+    // discount ids still in play — every surviving add-on's current
+    // discount id, plus the primary line's (unchanged by this editor —
+    // see canonicalParent.line_discount_id's own comment above). Any id
+    // this row froze before that is absent from BOTH is a discount this
+    // save just removed or replaced; pruning it out of the frozen snapshot
+    // BEFORE restackStoredVisitFinancials/resolveStoredDiscountCaps reads
+    // it stops that id's stale cap from being merged forward and later
+    // resurrected over a fresh re-pick's live (possibly since-changed)
+    // catalog cap.
+    if (canonicalParent.pricing_provenance?.caps) {
+      const survivingAddonIds = canonicalAddonRows.map((a) => a.discount_id);
+      const prunedCaps = pruneObsoleteFrozenAddonCaps(
+        canonicalParent.pricing_provenance.caps,
+        survivingAddonIds,
+        canonicalParent.line_discount_id,
+      );
+      if (prunedCaps !== canonicalParent.pricing_provenance.caps) {
+        canonicalParent.pricing_provenance = { ...canonicalParent.pricing_provenance, caps: prunedCaps };
+      }
+    }
     // The union of every discount id this save could possibly touch — the
     // row's own frozen ids are already covered by resolveStoredDiscountCaps'
     // own merge (it prefers frozen over live for anything it already
@@ -21598,6 +21620,7 @@ router._test = {
   clearPricingRegimeMarker,
   frozenCapsFromRow,
   resolveStoredDiscountCaps,
+  pruneObsoleteFrozenAddonCaps,
   insertRecurringChildAddons,
   insertScheduledServiceAddons,
   loadStoredDiscountScope,

@@ -1299,6 +1299,105 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     }
   });
 
+  // GitHub Codex round 16 P1 (#4657, :10128): removing a line's
+  // catalog-backed discount must drop that discount id's cap from the
+  // row's frozen pricing_provenance.caps.addons — otherwise a LATER save
+  // that freshly re-picks the SAME preset sees resolveStoredDiscountCaps'
+  // own merge favor the untouched-looking (but stale) frozen entry over
+  // the live, since-changed catalog cap, and silently saves the wrong
+  // discount. Three real saves against the SAME row: (1) fresh pick of D
+  // (cap $10, frozen), (2) that add-on's discount removed (D must be
+  // pruned from the frozen snapshot), (3) D's catalog cap is raised to
+  // $20 and the SAME preset is picked again — the fresh pick must read
+  // the LIVE $20 cap, never the stale $10.
+  test('PUT /:id/update-details (planner, real rows): removing a catalog add-on discount prunes its frozen cap, so a later re-pick of the SAME preset reads the live (changed) catalog cap, never the stale one', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      const addonRowId = randomUUID();
+      const discountId = randomUUID();
+      await mockPg('discounts').insert({
+        id: discountId, discount_key: `fixture_r16_${discountId.slice(0, 8)}`, name: 'Fixture 20% (cap $10)',
+        discount_type: 'percentage', amount: 20, max_discount_dollars: 10, is_active: true, show_in_invoices: true,
+      });
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-19', service_type: 'Fixture Round-16 Prune', primary_line_price: 100, estimated_price: 200,
+      });
+      await mockPg('scheduled_service_addons').insert({
+        id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Prune Add-On', base_price: 100, estimated_price: 100,
+      });
+      const addonCols = await mockPg('scheduled_service_addons').columnInfo();
+      const noopEligibility = async () => {};
+
+      // SAVE 1 — fresh pick of D: 20% of $100 capped at $10 → net $90.
+      const updates1 = {};
+      const plan1 = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: updates1, primaryLinePrice: 100,
+        addons: [{
+          id: addonRowId, serviceName: 'Fixture Prune Add-On', basePrice: 100,
+          discountId, discountName: 'Fixture 20% (cap $10)', discountType: 'percentage', discountAmount: 20,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: noopEligibility,
+      });
+      expect(plan1.replaceAddons[0].price).toBe(90);
+      expect(plan1.replaceAddons[0].discount.discountDollars).toBe(10);
+      expect(hasPricingRegimeMarker(updates1)).toBe(true);
+      expect(frozenCapsFromRow(updates1).addons[discountId]).toBe(10);
+      await mockPg('scheduled_services').where({ id }).update(updates1);
+      await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).del();
+      await insertScheduledServiceAddons(mockPg, id, plan1.replaceAddons, addonCols, plan1.canonicalRestackedAddonDollars);
+      const addonAfterSave1 = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).first();
+      expect(Number(addonAfterSave1.estimated_price)).toBe(90);
+
+      // SAVE 2 — the SAME line's discount is REMOVED (posted with no
+      // discount fields at all): the row is already marked, so this
+      // restacks through the canonical branch, and the fix must prune
+      // discountId out of the frozen addons snapshot going forward.
+      const updates2 = {};
+      const plan2 = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: updates2, primaryLinePrice: 100,
+        addons: [{ id: addonAfterSave1.id, serviceName: 'Fixture Prune Add-On', basePrice: 100 }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: noopEligibility,
+      });
+      expect(plan2.replaceAddons[0].price).toBe(100); // discount gone
+      expect(hasPricingRegimeMarker(updates2)).toBe(true);
+      // THE FIX: discountId's stale $10 cap no longer rides along in the
+      // re-frozen snapshot once nothing on the row uses it any more.
+      expect(frozenCapsFromRow(updates2).addons[discountId]).toBeUndefined();
+      await mockPg('scheduled_services').where({ id }).update(updates2);
+      await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).del();
+      await insertScheduledServiceAddons(mockPg, id, plan2.replaceAddons, addonCols, plan2.canonicalRestackedAddonDollars);
+      const addonAfterSave2 = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).first();
+      expect(Number(addonAfterSave2.estimated_price)).toBe(100);
+
+      // The catalog cap is raised AFTER the removal — save 2 pruned the
+      // stale $10, so save 3's fresh pick must resolve this live $20.
+      await mockPg('discounts').where({ id: discountId }).update({ max_discount_dollars: 20 });
+
+      // SAVE 3 — the SAME preset is picked again (a genuinely fresh pick:
+      // the row's prior stored discount_id is null after save 2).
+      const updates3 = {};
+      const plan3 = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: updates3, primaryLinePrice: 100,
+        addons: [{
+          id: addonAfterSave2.id, serviceName: 'Fixture Prune Add-On', basePrice: 100,
+          discountId, discountName: 'Fixture 20% (cap $10)', discountType: 'percentage', discountAmount: 20,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: noopEligibility,
+      });
+      // 20% of $100 = $20, now capped at the LIVE $20 (never the stale
+      // $10) — net $80, discountDollars $20.
+      expect(plan3.replaceAddons[0].discount.discountDollars).toBe(20); // NEVER the stale-cap $10
+      expect(plan3.replaceAddons[0].price).toBe(80); // NEVER the stale-cap $90
+      expect(frozenCapsFromRow(updates3).addons[discountId]).toBe(20);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
   // Scope boundary of the round-9 fix: a PRICE-only edit on an unmarked
   // row changes no discount term, so it stays on the legacy live-recompute
   // path (#4405's own open product decision about repricing existing

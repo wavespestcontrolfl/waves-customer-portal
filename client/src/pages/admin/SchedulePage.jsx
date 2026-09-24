@@ -2091,6 +2091,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // whose pickLineDiscount already prompts inline for a variable preset's
   // amount, the same way Create/Invoices do.
   const [lineDiscountPresets, setLineDiscountPresets] = useState([]);
+  // GitHub Codex round 16 P2 (#4657, :2413): an UNFILTERED id -> row map from
+  // the same /admin/discounts response, kept only for resolving a STORED
+  // stamp's own catalog metadata (stack_group/is_stackable) when the preset
+  // behind it has since gone inactive — the active-list-only filters above
+  // must stay the sole source of what's OFFERED to the operator.
+  const [discountMetaById, setDiscountMetaById] = useState({});
   const [discountPresetId, setDiscountPresetId] = useState("");
   // GitHub Codex round 14 on #4657 (P2 @ :2494): the row's STORED
   // appointment discount used to sit behind an empty picker ("None") while
@@ -2166,6 +2172,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       try {
         const r = await adminFetch("/admin/discounts");
         const list = Array.isArray(r) ? r : [];
+        // GitHub Codex round 16 P2 (#4657, :2413): capture the UNFILTERED
+        // list by id, same response, before any active/visibility filtering
+        // below — the server's own loadDiscountStackMetaById is unfiltered
+        // too, so a visit carrying a now-retired preset's id must still
+        // resolve its stack_group/is_stackable here, or the pickers offer a
+        // same-group replacement the server then 400s.
+        const metaById = {};
+        for (const d of list) metaById[String(d.id)] = d;
+        setDiscountMetaById(metaById);
         // Same invoice-visibility contract as CreateAppointmentModal: the
         // save posts the preset id and the server loads it with
         // show_in_invoices=true, so an invoice-hidden preset must not be
@@ -2409,8 +2424,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
   // Catalog row for a line slot (stack group, cap) — a stored stamp only
   // carries id/type/amount until the presets load.
+  // GitHub Codex round 16 P2 (#4657, :2413): fall back to the unfiltered
+  // discountMetaById when the active/visible list has no match — a visit
+  // can carry a preset id that's since gone inactive (or been hidden from
+  // invoices), and this lookup backs every conflict-row builder below
+  // (storedAppointmentDiscountRow, storedPrimaryLineDiscountRow,
+  // lineDiscountCatalogRow for a stored add-on stamp), never the OFFERED
+  // option lists themselves — those still read the filtered lists only.
   const linePresetById = (id) =>
-    id ? lineDiscountPresets.find((d) => String(d.id) === String(id)) || null : null;
+    id
+      ? lineDiscountPresets.find((d) => String(d.id) === String(id)) ||
+        discountMetaById[String(id)] ||
+        null
+      : null;
   const lineDiscountCatalogRow = (ld) => (ld ? { ...(linePresetById(ld.id) || {}), ...ld } : null);
   const presetOptionLabel = (d) => {
     // GitHub Codex round 11 on #4657 (P2, :2381): the server resolves a
@@ -4240,9 +4266,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         never the alert-fg red reserved for genuine warnings
                         (AGENTS.md / CLAUDE.md). */}
                     <div style={{ fontSize: 14, color: D.muted }}>
-                      {lineDiscount.discount_type === "percentage" || lineDiscount.discount_type === "variable_percentage"
-                        ? `${Number(lineDiscount.amount)}%`
-                        : `$${Number(lineDiscount.amount || 0).toFixed(2)}`}
+                      {
+                        // GitHub Codex round 16 P2 (#4657, :4245): a chosen
+                        // free_service preset discounts the WHOLE line — read
+                        // "Free" here exactly like presetOptionLabel and the
+                        // stored-stamp summary do, never the dollar branch
+                        // ("$0.00" misstates a full-service credit).
+                        lineDiscount.discount_type === "free_service"
+                          ? "Free"
+                          : lineDiscount.discount_type === "percentage" || lineDiscount.discount_type === "variable_percentage"
+                          ? `${Number(lineDiscount.amount)}%`
+                          : `$${Number(lineDiscount.amount || 0).toFixed(2)}`
+                      }
                       {" · "}(${Number(lineDiscountDollars || 0).toFixed(2)})
                     </div>
                   </div>
@@ -5315,7 +5350,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       ? `$${appointmentTotal.toFixed(2)}`
                       : moneyPreview?.error
                         ? "—"
-                        : "Confirming…"}
+                        : // GitHub Codex round 16 P2 (#4657, :5318): a
+                          // CONFIRMED preview of a legitimately unpriced
+                          // visit also returns total null — that's not the
+                          // same state as "still waiting on the server".
+                          // Distinguish the two so Save (already enabled,
+                          // since this preview IS fresh) doesn't look stuck
+                          // behind a "Confirming…" that will never resolve.
+                          moneyPreviewFresh && !moneyPreviewLoading && moneyPreview?.total == null
+                          ? "Not priced"
+                          : "Confirming…"}
                   </strong>{" "}
                 </div>{" "}
               </div>{" "}

@@ -1918,3 +1918,88 @@ it('round 15 P1 (:3133/:3019): a save with no resolved preview total (r14 saveTo
   const body = JSON.parse(writes()[0][1].body);
   expect(body).not.toHaveProperty('expectedTotal');
 });
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 16 on #4657, three P2s against bd661ea8c5.
+// ---------------------------------------------------------------------
+
+// :2413 — the round-15 test above (:1855) covers an ACTIVE primary-line
+// catalog discount hiding its stack-group sibling. A stored stamp can
+// outlive its preset going inactive: linePresetById used to search only
+// the active/visible list, so a retired non-stackable preset resolved no
+// stack_group at all and its sibling tier stayed offered right up until
+// the server's own (unfiltered) stack-group check 400'd the save.
+it('round 16 P2 (:2413): a RETIRED primary-line catalog discount still hides its stack-group sibling (metadata falls back to the unfiltered catalog)', async () => {
+  const retiredSilver = { ...SILVER, is_active: false };
+  const service = {
+    ...baseService,
+    serviceAddons: [
+      // No discount of its own — the picker renders in "None" state.
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+    lineDiscountType: 'percentage', lineDiscountAmount: 10, lineDiscountId: 'disc-silver',
+    lineDiscountName: 'WaveGuard Silver', lineDiscountDollars: 10,
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: [MILITARY, retiredSilver, GOLD], service }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  const fertPicker = screen.getByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  const fertOptionNames = [...fertPicker.options].map((o) => o.textContent);
+  // GOLD shares the RETIRED Silver's 'waveguard' stack_group — still hidden,
+  // even though Silver itself is no longer active/offered anywhere.
+  expect(fertOptionNames.some((t) => t.includes('WaveGuard Gold'))).toBe(false);
+  // Military carries no group at all — still offered (a stackable preset
+  // remains available even with the retired stamp in play).
+  expect(fertOptionNames.some((t) => t.includes('Military Discount'))).toBe(true);
+  const apptOptionNames = [...apptDiscountSelect().options].map((o) => o.textContent);
+  expect(apptOptionNames.some((t) => t.includes('WaveGuard Gold'))).toBe(false);
+  expect(apptOptionNames.some((t) => t.includes('Military Discount'))).toBe(true);
+});
+
+// :4245 — the round-11 test above (:351) covers the free_service LABEL in
+// the picker's own option list. The chosen-line SUMMARY box (rendered once
+// a free_service preset is actually picked) fell through to the dollar
+// branch instead, showing "$0.00 · ($40.00)" — misstating a full-service
+// credit as a zero-dollar one.
+it('round 16 P2 (:4245): a chosen free_service line discount renders "Free" in the selected-line summary, never $0.00', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: [...DISCOUNTS, FREE_SERVICE] }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-free' } });
+  await waitFor(() => expect(screen.getAllByText('Free Service').length).toBeGreaterThan(0));
+  await waitForMoneyReady();
+  // free_service discounts the WHOLE $40 fert line — the summary must read
+  // "Free", never "$0.00".
+  expect(screen.getByText(/^Free · \(\$40\.00\)$/)).toBeInTheDocument();
+  expect(screen.queryByText(/^\$0\.00 ·/)).not.toBeInTheDocument();
+});
+
+// :5318 — the Total cell rendered "Confirming…" whenever appointmentTotal
+// was null and there was no preview error, but a successful preview of a
+// legitimately unpriced visit also returns total null with moneyPreviewFresh
+// true, so it read stuck even though Save was already enabled.
+function previewUnpricedFetch(service, discounts = DISCOUNTS) {
+  return vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => discounts };
+    if (url.includes('/update-details/preview')) {
+      // A CONFIRMED response — no error — that resolves to no priceable
+      // total at all (e.g. a visit the pricing engine can't quote yet).
+      return { ok: true, json: async () => ({ total: null, primaryLinePrice: null, appointmentDiscountDollars: 0, addons: [] }) };
+    }
+    if (url.includes('/update-details')) return { ok: true, json: async () => ({}) };
+    return { ok: true, json: async () => ({}) };
+  });
+}
+it('round 16 P2 (:5318): a CONFIRMED preview of a legitimately unpriced visit reads "Not priced", never a stuck "Confirming…"', async () => {
+  vi.stubGlobal('fetch', previewUnpricedFetch(undiscountedVisit));
+  render(<Harness service={undiscountedVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // The preview IS fresh/confirmed (no error) — Save is already enabled —
+  // even though it resolved to no total.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+  expect(totalText()).toBe('Not priced');
+  expect(screen.queryByText('Confirming…')).not.toBeInTheDocument();
+});
