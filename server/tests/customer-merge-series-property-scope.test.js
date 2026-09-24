@@ -290,4 +290,36 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
     expect(conflict).not.toBeNull();
     expect(conflict.code).toBe('duplicate_series_conflict');
   });
+
+  test('UNSTAMPED parents whose source estimates carry the same free-text secondary address and NO property link still conflict (round-5 GitHub Codex P1)', async () => {
+    const winnerId = await makeCustomer({ address_line1: '1 Alpha St', city: 'Sarasota', zip: '34231' });
+    const loserId = await makeCustomer({ address_line1: '5 Beta Ave', city: 'Sarasota', zip: '34232' });
+    const winnerEstimateId = randomUUID();
+    const loserEstimateId = randomUUID();
+    await db('estimates').insert([
+      { id: winnerEstimateId, customer_id: winnerId, property_id: null, address: '22 Sample Way, Sarasota, FL 34231', status: 'accepted' },
+      { id: loserEstimateId, customer_id: loserId, property_id: null, address: '22 Sample Way, Sarasota, FL 34231', status: 'accepted' },
+    ]);
+    await seedParent(winnerId, { sourceEstimateId: winnerEstimateId });
+    await seedParent(loserId, { sourceEstimateId: loserEstimateId });
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).not.toBeNull();
+    expect(conflict.code).toBe('duplicate_series_conflict');
+  });
+
+  test('a recurring-shaped CALLBACK on the winner is not a live plan — merge is not blocked (round-6 GitHub Codex P2)', async () => {
+    const winnerId = await makeCustomer({ address_line1: '17 Palm Ct', city: 'Bradenton', zip: '34205' });
+    const loserId = await makeCustomer({ address_line1: '17 Palm Ct', city: 'Bradenton', zip: '34205' });
+    const callbackId = await seedParent(winnerId, { seedChild: false });
+    await db('scheduled_services').where({ id: callbackId }).update({ is_callback: true });
+    await seedParent(loserId, {}); // loser: the real plan.
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).toBeNull();
+  });
 });

@@ -89,11 +89,15 @@ describe('DELETE /admin/customers/:id (archive)', () => {
     // payment_methods.autopay_enabled, payments.next_retry_at) on the trx
     // BEFORE deleted_at is stamped — every write is transactional.
     expect(mockState.updates).toEqual([
-      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ active: false, autopay_enabled: false, next_charge_date: null }) }),
+      // r6: archive never touches `active` (deleted_at already removes the
+      // row from every charge set; restore must hand it back as archived).
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
       expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
       expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
     ]);
+    // r6: no write on this path touches `active`.
+    expect(mockState.updates.filter((u) => u.table === 'customers').every((u) => !('active' in u.patch))).toBe(true);
     // By id: a subscriber whose stored email drifted from customer.email is
     // still found (it carries the archived customer_id) and moves to the twin
     // of its own email — the email-keyed helper would have missed it.
@@ -128,17 +132,16 @@ describe('PATCH /admin/customers/:id/restore', () => {
     });
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(mockState.updates).toEqual([
-      // ADMIN-BUG-R14 (round 3): restore disarms billing FIRST (a legacy
-      // row archived before the archive-time disarm existed may still be
-      // billing-armed), then re-establishes active=true — a restored
-      // customer must read active again while autopay_enabled/
-      // next_charge_date and the payment rails stay wound down; the office
-      // re-arms billing explicitly.
-      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ active: false, autopay_enabled: false, next_charge_date: null }) }),
+      // ADMIN-BUG-R14 (round 3 → r6): restore disarms billing FIRST
+      // (preserving `active` — a legacy row archived before the archive-
+      // time disarm existed may still be billing-armed), then clears ONLY
+      // deleted_at: the customer comes back exactly as archived.
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
       expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
       expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
-      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: null, active: true } }),
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: null } }),
     ]);
+    expect(mockState.updates.filter((u) => u.table === 'customers').every((u) => !('active' in u.patch))).toBe(true);
     expect(relinkSubscribersForEmail).toHaveBeenCalledWith(mockTrx, 'Household@Example.com');
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'customer.restore', resource_id: 'cust-1', critical: true, trx: mockTrx,

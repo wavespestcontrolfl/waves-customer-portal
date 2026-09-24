@@ -1365,9 +1365,21 @@ function parentRowIsPlanShaped(row, isOneTimeBookingSource) {
 async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
   const { findActiveRecurringSeries, duplicateGuardFamilyKey } = require('./recurring-appointment-seeder');
   const active = await findActiveRecurringSeries(database, { customerId, serviceId, serviceType });
-  const matches = Array.isArray(active) ? [...active] : [];
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
+  // The canonical lookup neither selects nor filters is_callback/source
+  // (its own callers never seed callbacks as recurring parents, but a
+  // recurring-shaped callback or one-time booking can exist), so its rows
+  // get the same plan-shape filter the cancelled-parent additions and the
+  // loser identities already pass through (GitHub Codex #4684 r6 P2).
+  let matches = Array.isArray(active) ? [...active] : [];
+  if (matches.length) {
+    const shapeRows = await database('scheduled_services')
+      .whereIn('id', matches.map((m) => m.id))
+      .select('id', 'is_callback', 'source');
+    const shapeById = new Map((Array.isArray(shapeRows) ? shapeRows : []).map((r) => [String(r.id), r]));
+    matches = matches.filter((m) => parentRowIsPlanShaped(shapeById.get(String(m.id)) || m, isOneTimeBookingSource));
+  }
   const rows = await database('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true, status: 'cancelled' })
     .whereNull('recurring_parent_id')
@@ -1390,12 +1402,28 @@ async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
 
 async function resolveUnstampedMatchProperties(database, matches) {
   const { sourceEstimateForScope } = require('./recurring-appointment-seeder');
+  const { parseEstimateAddress } = require('./estimate-property-linkage');
   for (const match of matches) {
     if (match.property_id || match.service_address_line1 || !match.source_estimate_id) continue;
     try {
-       
       const src = await sourceEstimateForScope(database, match.source_estimate_id);
-      if (src?.property_id) match.property_id = src.property_id;
+      if (!src) continue;
+      if (src.property_id) { match.property_id = src.property_id; continue; }
+      // Legacy shape (GitHub Codex #4684 r5 P1): an accepted estimate with
+      // a secondary service address but no property link. The seeder's
+      // scoped duplicate check recovers this from src.address through the
+      // SAME parser (parseEstimateAddress → normalizedEstimateStreet), so
+      // the parsed components are stamped onto the match as its service
+      // address and seriesEffectiveAddress compares them like any stamped
+      // row — the primary-home fallback only remains for an estimate with
+      // no usable address at all.
+      const parts = src.address ? parseEstimateAddress(src.address) : null;
+      if (parts?.address_line1) {
+        match.service_address_line1 = parts.address_line1;
+        match.service_address_line2 = parts.address_line2 || null;
+        match.service_address_city = parts.city || null;
+        match.service_address_zip = parts.zip || null;
+      }
     } catch { /* keep the primary-address fallback */ }
   }
 }
