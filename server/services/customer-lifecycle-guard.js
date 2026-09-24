@@ -66,8 +66,33 @@ const TERMINAL_TRACK_STATES = ['complete', 'cancelled'];
 // recurring_ongoing even on an already-completed anchor). Without the
 // second leg, an account between occurrences (last visit completed, next
 // one not yet seeded) would read as clean while its plan keeps running.
-async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
+// The tracker-aware "this visit row is live" clause, as a `.where()`
+// callback body — ONE definition shared by findLiveFutureVisit and the
+// merge guard's cancelled-parent child probe (customer-dedupe.js
+// cancelledParentStillLive; GitHub Codex #4684 r8 P1: its status-only copy
+// missed a tracker-live child with a stale status and blocked on a
+// tracker-terminal child with a stale live status). Also the canonical
+// series lookup's upcoming-row probe (recurring-appointment-seeder.js
+// findActiveRecurringSeries). `trackState: false` is for a schema without
+// the track_state column — status/date rule only.
+function whereVisitRowLive(qb, today, { trackState = true } = {}) {
   const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
+  const dateExemptStatuses = ['rescheduled', ...IN_PROGRESS_STATUSES];
+  const liveTrackStatesSql = LIVE_TRACK_STATES.map(() => '?').join(', ');
+  const terminalTrackStatesSql = TERMINAL_TRACK_STATES.map(() => '?').join(', ');
+  qb.where(function statusDateLive() {
+    this.where(function inCancellableStatus() {
+      for (const status of [...CANCELLABLE_STATUSES, ...IN_PROGRESS_STATUSES]) this.orWhere('status', status);
+    }).where(function activeBound() {
+      this.where('scheduled_date', '>=', today);
+      for (const status of dateExemptStatuses) this.orWhere('status', status);
+    });
+    if (trackState) this.whereRaw(`(track_state IS NULL OR track_state NOT IN (${terminalTrackStatesSql}))`, TERMINAL_TRACK_STATES);
+  });
+  if (trackState) qb.orWhereRaw(`track_state IN (${liveTrackStatesSql})`, LIVE_TRACK_STATES);
+}
+
+async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
   const today = todayIso || require('../utils/datetime-et').etDateString();
   // Built from `.where()` (incl. its function-callback OR/whereRaw form)
   // only — never whereIn/whereNot/whereNotIn — the smallest common
@@ -75,23 +100,10 @@ async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
   // doubles, which mock different subsets of knex's chain methods; none of
   // them actually invoke a callback passed to `.where()`, so this form is
   // inert (never crashes) under every one of them and correct under real knex.
-  const dateExemptStatuses = ['rescheduled', ...IN_PROGRESS_STATUSES];
-  const liveTrackStatesSql = LIVE_TRACK_STATES.map(() => '?').join(', ');
-  const terminalTrackStatesSql = TERMINAL_TRACK_STATES.map(() => '?').join(', ');
   const [upcoming, ongoingAnchor] = await Promise.all([
     dbh('scheduled_services')
       .where({ customer_id: customerId })
-      .where(function liveByStatusOrTrack() {
-        this.where(function statusDateLive() {
-          this.where(function inCancellableStatus() {
-            for (const status of [...CANCELLABLE_STATUSES, ...IN_PROGRESS_STATUSES]) this.orWhere('status', status);
-          }).where(function activeBound() {
-            this.where('scheduled_date', '>=', today);
-            for (const status of dateExemptStatuses) this.orWhere('status', status);
-          }).whereRaw(`(track_state IS NULL OR track_state NOT IN (${terminalTrackStatesSql}))`, TERMINAL_TRACK_STATES);
-        });
-        this.orWhereRaw(`track_state IN (${liveTrackStatesSql})`, LIVE_TRACK_STATES);
-      })
+      .where(function liveByStatusOrTrack() { whereVisitRowLive(this, today); })
       .first('id', 'scheduled_date', 'status'),
     dbh('scheduled_services')
       .where({ customer_id: customerId, recurring_ongoing: true })
@@ -242,6 +254,7 @@ function churnGuardApplies(row) {
 }
 
 module.exports = {
+  whereVisitRowLive,
   findLiveFutureVisit,
   describeLiveVisit,
   findActivePrepayTerm,

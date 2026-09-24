@@ -3836,6 +3836,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // field on this route — never let a payload's active=true ride over
       // the disarm in the same UPDATE.
       delete updates.active;
+      // autopay_enabled / next_charge_date are NOT in this route's field
+      // allowlist (see `fields` above), so a form payload cannot carry
+      // them — dropped anyway so the disarm can never be overridden by a
+      // future allowlist change (pre-push audit P1 on edda4f74b1).
+      delete updates.autopay_enabled;
+      delete updates.next_charge_date;
       suppressChurnMembershipEmail = true;
     }
     if (updates.pipeline_stage !== undefined && updates.pipeline_stage !== before.pipeline_stage) {
