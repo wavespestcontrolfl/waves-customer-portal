@@ -303,5 +303,9 @@ async function verifyEvidenceOnlyAdvance({ pinnedSha, headSha }, deps = {}) {
   return true;
 }
 
+// Hostname evidence for this article is signed under, or null when its
+// frontmatter domains are ambiguous or unknown (never verifiable).
+const evidenceDomain = (document) => domainContextFromDocument(document)?.hostname || null;
+
 module.exports = { enabled, applicable, prepareDraft, filesForDocument, assertPrEvidence,
-  verifyEvidenceOnlyAdvance, sourceUrls, reviewError };
+  verifyEvidenceOnlyAdvance, sourceUrls, reviewError, evidenceDomain };

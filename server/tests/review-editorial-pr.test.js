@@ -6,6 +6,7 @@ jest.mock('../services/content-astro/github-client', () => ({
 jest.mock('../services/content/editorial-evidence', () => ({
   enabled: () => true, applicable: (path) => path.startsWith('src/content/blog/'),
   filesForDocument: jest.fn(), prepareDraft: jest.fn(),
+  evidenceDomain: jest.fn(),
 }));
 jest.mock('../../packages/editorial-evidence/index.cjs', () => ({
   evidencePath: (path) => `${path}.json`, verifyManifest: jest.fn(),
@@ -24,6 +25,7 @@ beforeEach(() => {
   gh.ghFetchPaginated.mockResolvedValue([{ filename: path, status: 'modified' }]);
   gh.getFile.mockImplementation(async (name) => ({ content: name.endsWith('.json') ? '{}' : '---\ntitle: Test\n---\nTest body' }));
   contract.verifyManifest.mockReturnValue({ pass: false });
+  editorial.evidenceDomain.mockReturnValue('wavespestcontrol.com');
   editorial.filesForDocument.mockResolvedValue([{ path: `${path}.json`, content: '{}' }]);
   gh.commitFiles.mockResolvedValue({ commit: { sha: 'evidence-sha' } });
 });
@@ -206,4 +208,18 @@ test('an unreadable article consumes one slot without starving later PRs across 
   ]);
   expect(second.results.map((item) => item.pr)).toEqual([4, 5, 6]);
   expect(gh.commitFiles).toHaveBeenCalledTimes(5);
+});
+
+test('verifies spoke evidence under the article frontmatter domain, not the hub', async () => {
+  editorial.evidenceDomain.mockReturnValue('spoke.example');
+  contract.verifyManifest.mockReturnValue({ pass: true });
+  await expect(reviewPr(1)).resolves.toEqual({ pass: true, unchanged: true });
+  expect(contract.verifyManifest).toHaveBeenCalledWith(expect.objectContaining({ domain: 'spoke.example' }));
+});
+test('an unresolvable article domain never verifies and gets a fresh review', async () => {
+  editorial.evidenceDomain.mockReturnValue(null);
+  contract.verifyManifest.mockReturnValue({ pass: true });
+  await reviewPr(1);
+  expect(contract.verifyManifest).not.toHaveBeenCalled();
+  expect(editorial.filesForDocument).toHaveBeenCalled();
 });

@@ -286,6 +286,10 @@ function baseMovedError(number, baseRef, detail) {
 //   4. create a real merge commit from the verified tree
 //   5. fast-forward-only PATCH the base ref onto it — force:false makes
 //      this PATCH the atomic compare-and-swap: it 422s if base moved.
+// Trade-off: the merge endpoint's head pin is not reproduced — a push or close
+// landing between step 1 and step 5 does not stop the ref update. What lands
+// is still exactly the verified, signed head; a later push stays on the open
+// PR for its own review. Base atomicity is the property signed bytes need.
 // Any inconsistency throws the same retryable BLOG_BASE_MOVED code the old
 // pre-check used, so callers that already treat that code as "re-verify
 // next tick" need no changes.

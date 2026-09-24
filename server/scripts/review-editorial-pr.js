@@ -22,13 +22,16 @@ async function readArticles(pr) {
     const evidence = await gh.getFile(contract.evidencePath(file.filename), pr.head.sha);
     let manifest;
     try { manifest = JSON.parse(evidence?.content); } catch { /* fresh review required */ }
-    const input = { document: original.content, path: file.filename, domain: 'wavespestcontrol.com', manifest,
+    // Verify under the same frontmatter-derived domain the signer used; an
+    // unresolvable domain never verifies and falls through to a fresh review.
+    const domain = editorial.evidenceDomain(original.content);
+    const input = { document: original.content, path: file.filename, domain, manifest,
       publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY };
-    const fresh = contract.verifyManifest(input).pass;
+    const fresh = Boolean(domain) && contract.verifyManifest(input).pass;
     // Freshness is the only relaxed property: this second verification still
     // authenticates the signature, exact document bytes, path, domain, policy,
     // sources, and every required passing check.
-    const previouslyVerified = contract.verifyManifest({ ...input, requireFresh: false }).pass;
+    const previouslyVerified = Boolean(domain) && contract.verifyManifest({ ...input, requireFresh: false }).pass;
     files.push({ path: file.filename, previousPath: file.previous_filename || null,
       status: file.status, document: original.content,
       fresh, previouslyVerified });
