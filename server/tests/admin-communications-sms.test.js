@@ -17,6 +17,7 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
+  debug: jest.fn(),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -90,6 +91,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   ignoreParkedSuggestions: jest.fn(async () => 0),
   sweepStaleSuggestionsAfterReply: jest.fn(async () => undefined),
   lockSuggestThread: jest.fn(async () => {}),
+  suggestionAnchorIsStale: jest.fn(async () => false),
 }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous
 // reply under the park lock. Default to "none in flight" so the send tests
@@ -2686,4 +2688,240 @@ describe('Communications review ask serialization', () => {
       expect(locks.runExclusive).not.toHaveBeenCalled();
     });
   });
+});
+
+// Pre-push Codex P1: an earlier round rerouted a lead-only consultation
+// send to POST /admin/leads/:id/send-sms, bypassing THIS route's own
+// interlocks (the Agent Review draft's atomic claim, pending-suggestion
+// thread parking, the active auto-send check). The send stays on THIS
+// route; leadId rides in the body and the SAME audit trail
+// /admin/leads/:id/send-sms records (lead_activities row, first-response
+// stamp, new→contacted transition) is recorded here too, via the shared
+// server/services/lead-outreach.js.
+describe('leadId in the body (consultation lead-only fallback): the send stays on /sms, records the lead audit trail, interlocks still run', () => {
+  const send = (baseUrl, overrides = {}) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: '+15551234567', body: "Pick a time for us to stop by.", leadId: 'aaaaaaaa-1111-4111-8111-111111111111', ...overrides }),
+  });
+
+  // Codex #4709 r17 P2: outreach is recorded only for a lead the send check
+  // actually validated a consultation link for — stubbed here as validated.
+  let consultationSpy;
+  beforeEach(() => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-lead-outreach' });
+    consultationSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, consultationLeadId: 'aaaaaaaa-1111-4111-8111-111111111111' });
+  });
+  afterEach(() => { consultationSpy.mockRestore(); });
+
+  test('a leadId on a text with NO validated consultation link records nothing', async () => {
+    consultationSpy.mockResolvedValue({ ok: true });
+    const leadActivities = [];
+    let leadUpdated = null;
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'new' }));
+        b.update = jest.fn(async (patch) => { leadUpdated = patch; return 1; });
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'Running a bit late today.' });
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities.some((r) => r.activity_type === 'sms_sent')).toBe(false);
+    expect(leadUpdated?.status).not.toBe('contacted');
+  });
+
+  test('records the lead_activities row, first-response stamp, and new→contacted transition — same as POST /admin/leads/:id/send-sms', async () => {
+    const leadActivities = [];
+    let leadUpdated = null;
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'new', response_time_minutes: null, first_contact_at: new Date(Date.now() - 60000).toISOString() };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        b.update = jest.fn(async (patch) => { leadUpdated = patch; Object.assign(lead, patch); return 1; });
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    // logFirstResponse also writes its own lead_activities row (first_response)
+    // since response_time_minutes started null — both are expected.
+    expect(leadActivities).toContainEqual(expect.objectContaining({ lead_id: lead.id, activity_type: 'sms_sent' }));
+    expect(leadActivities).toContainEqual(expect.objectContaining({ lead_id: lead.id, activity_type: 'first_response' }));
+    expect(leadUpdated).toEqual(expect.objectContaining({ status: 'contacted' }));
+  });
+
+  // Pre-push Codex P1: trustedLeadId only passed a UUID-format check —
+  // nothing bound it to the actual destination. A changed recipient or a
+  // crafted request must not mark an unrelated lead contacted with a false
+  // audit row. Re-bound with the same rule resolveConsultationLeadOnly
+  // (the /customer-link lead-only path) applies: the lead's own phone must
+  // match the destination's last ten digits.
+  test('a leadId whose own phone does NOT match the destination records nothing — the send still goes through', async () => {
+    const leadActivities = [];
+    let leadUpdateCalled = false;
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+19995550000', status: 'new', response_time_minutes: null };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        b.update = jest.fn(async () => { leadUpdateCalled = true; return 1; });
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl); // to: '+15551234567' — different last 10 than the lead's own phone
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities).toEqual([]);
+    expect(leadUpdateCalled).toBe(false);
+  });
+
+  // Same binding rule, the other guarded predicate: a converted/closed lead
+  // (isOpenLeadRow false) records nothing even with a matching phone.
+  test('a leadId that matches the phone but has already converted records nothing', async () => {
+    const leadActivities = [];
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'won', converted_at: new Date('2026-01-01').toISOString() };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities).toEqual([]);
+  });
+
+  test('a resolved customerId takes priority — no lead outreach recorded even with leadId also present', async () => {
+    const leadActivities = [];
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ id: 'cust-A', phone: '+15551234567' }));
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { customerId: 'cust-A' });
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities).toEqual([]);
+  });
+
+  test('the Agent Review draft claim interlock still runs for a leadId send — not bypassed by rerouting', async () => {
+    const claimUpdates = [];
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'contacted', response_time_minutes: 5 };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async () => [1]);
+        return b;
+      }
+      // The verify query joins agent_decisions AS ad — a distinct table
+      // string from the plain 'agent_decisions' the claim/settle updates use.
+      if (table === 'agent_decisions as ad') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({
+          id: 'dec-1', customer_id: null, sms_log_id: null,
+          suggested_message: "Pick a time for us to stop by.",
+          inbound_created_at: null, sms_from_phone: '+15551234567', sms_to_phone: null, customer_phone: null,
+        }));
+        return b;
+      }
+      if (table === 'agent_decisions') {
+        const b = makeUniversalBuilder();
+        b.update = jest.fn(async (patch) => { claimUpdates.push(patch); return 1; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, {
+        agentDecisionId: 'dec-1',
+        agentDraft: "Pick a time for us to stop by.",
+      });
+      expect(res.status).toBe(200);
+    });
+    // The atomic claim (pending_review -> scheduled) ran BEFORE the
+    // provider call — proof the interlock was not skipped for this send.
+    expect(claimUpdates.some((u) => u.status === 'scheduled')).toBe(true);
+    // ...and settled (scheduled/pending_review -> accepted) after a real send.
+    expect(claimUpdates.some((u) => u.status === 'accepted')).toBe(true);
+  });
+});
+
+// Codex #4709 r3 P1: a lead-only consultation text to a number that is also
+// an active job applicant must not divert onto the recruiting rail, where
+// the consultation gate/expiry/lead checks and the lead audit never run.
+test('a consultation link to an active applicant phone is refused before the recruiting diversion', async () => {
+  const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+  isRecruitingPhone.mockResolvedValue(true);
+  sendCustomerMessage.mockClear();
+  db.mockImplementation((table) => {
+    const b = makeUniversalBuilder();
+    if (table === 'short_codes') {
+      b.select = jest.fn(async () => [{ code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'aaaaaaaa-1111-4111-8111-111111111111', target_url: `https://portal.wavespestcontrol.com/inspection/${require('../utils/lead-consultation-token').mintLeadConsultationToken('aaaaaaaa-1111-4111-8111-111111111111')}` }]);
+    }
+    return b;
+  });
+  try {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Pick a time: wavespest.co/l/cons1', leadId: 'aaaaaaaa-1111-4111-8111-111111111111' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/active job applicant/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  } finally {
+    isRecruitingPhone.mockResolvedValue(false);
+  }
 });

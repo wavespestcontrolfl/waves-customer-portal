@@ -29,7 +29,7 @@ beforeEach(() => {
   calls = [];
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
     const path = String(url); calls.push({ path, options });
-    const body = path.includes('/admin/leads?') ? { leads: [lead], total: 63 } : path.endsWith('/sources') ? { sources: [] } : {};
+    const body = path.includes('/admin/leads?') ? { leads: [lead], total: 63, consultationLinksEnabled: true } : path.endsWith('/sources') ? { sources: [] } : {};
     return { ok: true, json: async () => body };
   }));
 });
@@ -259,6 +259,75 @@ describe('Pipeline queue navigation', () => {
     expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadPage=');
     expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadSearch=');
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  // Pre-push Codex P2: CustomerSmsPanel's initialDraft only seeds an EMPTY
+  // draft — an existing per-lead draft in sessionStorage silently wins and
+  // the consultation text never lands. "Send consultation link" must pass
+  // appendDraft (joined onto whatever draft already exists) instead of
+  // initialDraft, and still carry leadId so the send gets the leads-page
+  // audit trail (lead_activities row, new→contacted transition).
+  // Pre-push Codex P2: row expand fetches AVAILABILITY only (GET) — never
+  // mints a short code; the actual mint (POST, a real DB insert handing
+  // out a live 14-day bearer token) fires only on the Send click.
+  it('row expand only checks availability (GET); Send consultation link mints (POST) on click, appends via appendDraft, and carries leadId', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      if (String(url).includes('/consultation-link')) {
+        calls.push({ path: String(url), options: opts });
+        if (opts?.method === 'POST') {
+          return { ok: true, json: async () => ({ url: 'https://waves.link/l/abc123', line: "Hi QA, it's Waves. Pick a time...\n\n", standalone: true }) };
+        }
+        return { ok: true, json: async () => ({ enabled: true, available: true }) };
+      }
+      return base(url, opts);
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    const sendLinkBtn = await screen.findByRole('button', { name: 'Send consultation link' });
+    await waitFor(() => expect(sendLinkBtn).not.toBeDisabled());
+    const consultationCalls = () => calls.filter(({ path }) => path.includes('/admin/leads/lead-qa/consultation-link'));
+    expect(consultationCalls()).toHaveLength(1);
+    expect(consultationCalls()[0].options?.method).not.toBe('POST');
+    fireEvent.click(sendLinkBtn);
+    await waitFor(() => expect(openMessages).toHaveBeenCalled());
+    const [, options] = openMessages.mock.calls.at(-1);
+    expect(options.leadId).toBe('lead-qa');
+    expect(options.appendDraft).toBe("Hi QA, it's Waves. Pick a time...\n\n");
+    expect(options.initialDraft).toBeUndefined();
+    // The mint (POST) fired exactly once, only after the click.
+    expect(consultationCalls().filter((c) => c.options?.method === 'POST')).toHaveLength(1);
+  });
+
+  // Codex #4709 r3 P1: with GATE_LEAD_INSPECTION_LINK dark the probe says
+  // enabled:false and the Leads page renders no consultation button at all.
+  // Codex #4709 r6 P1: the gate is read once from the lead list response;
+  // while it is off no row ever probes availability and no button renders.
+  it('omits Send consultation link and never probes per row while the gate is dark', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      const path = String(url);
+      if (path.includes('/admin/leads?')) {
+        calls.push({ path, options: opts });
+        return { ok: true, json: async () => ({ leads: [lead], total: 63, consultationLinksEnabled: false }) };
+      }
+      return base(url, opts);
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    await screen.findByRole('button', { name: 'Message' });
+    expect(screen.queryByRole('button', { name: 'Send consultation link' })).toBeNull();
+    expect(calls.some(({ path }) => path.includes('/consultation-link'))).toBe(false);
+  });
+
+  // Pre-push Codex P2: the ?lead= deep-link expansion path skipped the
+  // consultation loader that row-click expansion (expandLead) already runs
+  // — the Send consultation link button showed no link at all until the
+  // operator manually collapsed and re-expanded the row.
+  it('the ?lead= deep link runs the consultation loader too', async () => {
+    mount('/admin/pipeline?lead=lead-qa');
+    await screen.findByRole('button', { name: 'QA Prospect' });
+    await waitFor(() => expect(calls.some(({ path }) => path.includes('/admin/leads/lead-qa/consultation-link'))).toBe(true));
   });
 
 });
