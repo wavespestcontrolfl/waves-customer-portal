@@ -42,6 +42,32 @@ describe('TWILIO_NUMBERS.internalAlertCallerId', () => {
   });
 });
 
+describe('the env-backed alert line is registered with the fleet', () => {
+  test('unset → no extra fleet entry, findByNumber unchanged', () => {
+    const cfg = freshConfig(undefined);
+    expect(cfg.internalAlertLine()).toBeNull();
+    expect(cfg.allNumbers.some(n => n.type === 'internal_alert')).toBe(false);
+  });
+
+  test('an unregistered number appears in allNumbers and resolves via findByNumber', () => {
+    const cfg = freshConfig('+19415550123');
+    const line = cfg.internalAlertLine();
+    expect(line).toEqual(expect.objectContaining({ number: '+19415550123', formatted: '(941) 555-0123' }));
+    expect(cfg.allNumbers.filter(n => n.number === '+19415550123')).toHaveLength(1);
+    expect(cfg.allNumbers.find(n => n.number === '+19415550123').type).toBe('internal_alert');
+    // Office semantics so inbound SMS/voice to it routes like an unassigned line.
+    expect(cfg.findByNumber('+19415550123')).toEqual(expect.objectContaining({ type: 'location', locationId: 'bradenton' }));
+  });
+
+  test('a number already in the registry (the dark tech line) is not duplicated', () => {
+    const cfg = freshConfig('+19413529161');
+    expect(cfg.internalAlertCallerId()).toBe('+19413529161');
+    expect(cfg.internalAlertLine()).toBeNull();
+    expect(cfg.allNumbers.filter(n => n.number === '+19413529161')).toHaveLength(1);
+    expect(cfg.findByNumber('+19413529161')).not.toBeNull();
+  });
+});
+
 describe('lead-webhook uses the internal alert caller ID for the ring to Adam', () => {
   test('source wires the alert leg to internalAlertCallerId(), not mainLine', () => {
     const fs = require('fs');
