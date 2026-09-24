@@ -45,10 +45,15 @@ function normalizeRequestedSources(sourceUrls) {
       errors.push(`Invalid source URL: ${String(raw).slice(0, 200)}`);
       continue;
     }
-    if (!seen.has(normalized)) { seen.add(normalized); urls.push(normalized); }
+    if (seen.has(normalized)) continue;
+    if (urls.length === LIMITS.sourceUrls) {
+      errors.push(`Source URL count exceeds ${LIMITS.sourceUrls}; excess sources were not fetched.`);
+      break;
+    }
+    seen.add(normalized);
+    urls.push(normalized);
   }
-  if (urls.length > LIMITS.sourceUrls) errors.push(`Source URL count exceeds ${LIMITS.sourceUrls}; excess sources were not fetched.`);
-  return { urls: urls.slice(0, LIMITS.sourceUrls), errors };
+  return { urls, errors };
 }
 
 async function fetchSources(sourceUrls) {

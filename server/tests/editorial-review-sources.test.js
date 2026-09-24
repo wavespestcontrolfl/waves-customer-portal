@@ -3,6 +3,7 @@
 const mockFetchPage = jest.fn();
 jest.mock('../services/seo/contact-finder', () => ({ fetchPage: (...args) => mockFetchPage(...args) }));
 const { LIMITS } = require('../services/content/editorial-review-contracts');
+const { classifyPageBody } = require('../services/seo/page-body-classifier');
 const {
   fetchSources,
   htmlText,
@@ -17,6 +18,19 @@ test('deduplicates fragment variants before fetching source pages', () => {
     'https://example.gov/article#first',
     'https://example.gov/article#second',
   ])).toEqual({ urls: ['https://example.gov/article'], errors: [] });
+});
+
+test('stops normalizing after the first unique URL beyond the source cap', () => {
+  const afterCap = { toString: () => 'not a URL after the cap' };
+  const requested = [
+    ...Array.from({ length: LIMITS.sourceUrls + 1 }, (_, index) => `https://example.gov/${index}`),
+    afterCap,
+  ];
+
+  expect(normalizeRequestedSources(requested)).toEqual({
+    urls: requested.slice(0, LIMITS.sourceUrls),
+    errors: [`Source URL count exceeds ${LIMITS.sourceUrls}; excess sources were not fetched.`],
+  });
 });
 
 test('strips unterminated noise blocks through the end of truncated HTML', () => {
@@ -121,6 +135,26 @@ test.each([
   expect(result.errors).toEqual(['Source body is not reviewable HTML: https://example.gov/mislabeled']);
 });
 
+test('accepts semantic HTML documents without optional html or body tags', async () => {
+  mockFetchPage.mockResolvedValue({
+    status: 200,
+    finalUrl: 'https://example.gov/semantic',
+    contentType: 'text/html',
+    html: '<main><article><h1>Evidence heading</h1><section>Useful evidence.</section></article></main>',
+  });
+
+  const result = await fetchSources(['https://example.gov/semantic']);
+
+  expect(result.errors).toEqual([]);
+  expect(result.records[0].excerpt).toBe('Evidence heading\nUseful evidence.');
+});
+
+test('keeps legacy semantic-only body classification unchanged', () => {
+  const html = '<article><h2>Ordinary article</h2></article>';
+  expect(classifyPageBody(html, 'text/html')).toBe('non_html');
+  expect(classifyPageBody(html, 'text/html', { strictChallenge: true })).toBe('html');
+});
+
 test('preserves angle brackets in accepted plain-text evidence', async () => {
   mockFetchPage.mockResolvedValue({
     status: 200,
@@ -160,6 +194,41 @@ test('rejects HTML challenge interstitials as source evidence', async () => {
   expect(result.records).toEqual([]);
   expect(result.errors).toEqual(['Source returned a challenge page: https://example.gov/article']);
 });
+
+test.each([
+  '<title>Attention Required! | Cloudflare</title>',
+  '<h1><span>Verify you are human</span></h1>',
+  '<div id = "cf-chl-widget">Checking your browser</div>',
+])('rejects page-level challenge markup: %s', async (html) => {
+  mockFetchPage.mockResolvedValue({
+    status: 200,
+    finalUrl: 'https://example.gov/article',
+    contentType: 'text/html',
+    html,
+  });
+
+  const result = await fetchSources(['https://example.gov/article']);
+
+  expect(result.records).toEqual([]);
+  expect(result.errors).toEqual(['Source returned a challenge page: https://example.gov/article']);
+});
+
+test.each(['g-recaptcha', 'hcaptcha', 'turnstile'])(
+  'accepts an ordinary article that embeds a %s widget',
+  async (widgetClass) => {
+    mockFetchPage.mockResolvedValue({
+      status: 200,
+      finalUrl: 'https://example.gov/article',
+      contentType: 'text/html',
+      html: `<article><p>The article says “access denied” and “just a moment” in passing.</p><form><div class="${widgetClass}"></div></form></article>`,
+    });
+
+    const result = await fetchSources(['https://example.gov/article']);
+
+    expect(result.errors).toEqual([]);
+    expect(result.records).toHaveLength(1);
+  },
+);
 
 test('rejects plain-text challenge responses as source evidence', async () => {
   mockFetchPage.mockResolvedValue({
