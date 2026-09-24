@@ -2965,13 +2965,12 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
     // 'stopped' row here — resumeSequence has no status guard (the operator's
     // own /followup/resume route needs it to lift an admin stop on request),
     // so calling it unconditionally would silently re-arm a stop the office
-    // chose and erase who stopped it and why. Only lift a stop the settlement
-    // itself created.
+    // chose and erase who stopped it and why. resumeSequenceIfSystemResumable
+    // checks eligibility and resumes under one lock, so a concurrent admin
+    // stop can never land in the gap between the check and the write.
     try {
       const FollowUps = require('../services/invoice-followups');
-      if (await FollowUps.canSystemResumeInvoice(id)) {
-        await FollowUps.resumeSequence(id);
-      }
+      await FollowUps.resumeSequenceIfSystemResumable(id);
       await FollowUps.scheduleForInvoice(id);
     } catch (err) {
       logger.warn(`[admin-invoices:reverse-prepaid] follow-up re-arm failed: ${err.message}`);

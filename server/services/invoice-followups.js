@@ -1395,12 +1395,34 @@ function canSystemResume(seq) {
 // happens to still be in place — resumeSequence itself has no status guard
 // (by design: the operator's explicit POST /:id/followup/resume legitimately
 // lifts an admin stop) and would silently reactivate it and erase
-// stopped_reason/stopped_by_admin_id.
+// stopped_reason/stopped_by_admin_id. Exported mainly for direct testing of
+// the eligibility rule; callers should use resumeSequenceIfSystemResumable
+// below, which checks and acts under one lock.
 async function canSystemResumeInvoice(invoiceId, dbc = db) {
   const seq = await dbc('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
     .first('status', 'stopped_reason', 'stopped_by_admin_id');
   return canSystemResume(seq);
+}
+
+// Atomic check-and-act for the two AUTOMATIC re-arm callers: a separate
+// canSystemResumeInvoice read followed by a later resumeSequence call
+// leaves a window where an admin's stop can commit in between — this
+// FOR UPDATEs the row and resumes it, if eligible, inside the SAME
+// transaction, so a concurrent admin stop either lands first (seen here,
+// and correctly left alone) or waits behind this lock and applies its stop
+// after we commit (also correct — the admin's later action always wins).
+// Returns whether it resumed anything.
+async function resumeSequenceIfSystemResumable(invoiceId) {
+  return db.transaction(async (trx) => {
+    const seq = await trx('invoice_followup_sequences')
+      .where({ invoice_id: invoiceId })
+      .forUpdate()
+      .first('status', 'stopped_reason', 'stopped_by_admin_id');
+    if (!canSystemResume(seq)) return false;
+    await resumeSequence(invoiceId, trx);
+    return true;
+  });
 }
 
 async function resumeSequence(invoiceId, dbc = db) {
@@ -1771,6 +1793,7 @@ module.exports = {
   pauseSequence,
   resumeSequence,
   canSystemResumeInvoice,
+  resumeSequenceIfSystemResumable,
   rescheduleForInvoiceEdit,
   stopSequence,
   sendNextTouchNow,

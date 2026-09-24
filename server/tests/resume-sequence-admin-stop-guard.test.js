@@ -13,10 +13,12 @@
 // legitimate path where an operator explicitly asks to lift ANY stop
 // (admin or system), and resumeSequence must keep serving that unconditional
 // lift. Instead, the two AUTOMATIC re-arm callers (reverse-prepaid,
-// reopenAnnualPrepayCoveredInvoicesForTerm) must consult the new
-// FollowUps.canSystemResumeInvoice guard before ever calling resumeSequence,
-// so they only lift a stop the settlement itself created — never an admin's
-// or a payment-plan's stop that happens to still be in place.
+// reopenAnnualPrepayCoveredInvoicesForTerm) call the new
+// FollowUps.resumeSequenceIfSystemResumable, which checks eligibility and
+// resumes under one FOR UPDATE lock (a separate check-then-act would leave a
+// window for a concurrent admin stop to land in between), so they only lift
+// a stop the settlement itself created — never an admin's or a
+// payment-plan's stop that happens to still be in place.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice-helpers', () => ({
@@ -44,14 +46,14 @@ jest.mock('../services/pay-combined', () => ({
 }));
 
 const db = require('../models/db');
-const { resumeSequence, stopOnPayment, canSystemResumeInvoice } = require('../services/invoice-followups');
+const { resumeSequence, stopOnPayment, canSystemResumeInvoice, resumeSequenceIfSystemResumable } = require('../services/invoice-followups');
 
 function setupDb({ seq, invoice }) {
   const seqUpdate = jest.fn(async () => 1);
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.mockImplementation((table) => {
     if (table === 'invoice_followup_sequences') {
-      const q = { where: jest.fn(() => q), first: jest.fn(async () => seq), update: seqUpdate };
+      const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => seq), update: seqUpdate };
       return q;
     }
     if (table === 'invoices') {
@@ -64,6 +66,10 @@ function setupDb({ seq, invoice }) {
     }
     throw new Error(`unexpected table ${table}`);
   });
+  // resumeSequenceIfSystemResumable runs the check-and-act under
+  // db.transaction — dispatch the trx callback straight through db itself
+  // so the same table-mock above serves both the lock read and the update.
+  db.transaction = jest.fn(async (fn) => fn(db));
   return { seqUpdate };
 }
 
@@ -103,7 +109,7 @@ describe('resumeSequence vs an explicit stop (audit repro, corrected fix locatio
     expect(await canSystemResumeInvoice('inv-1')).toBe(true);
   });
 
-  test('an ADMIN-stopped row must not be re-armed to active BY THE SYSTEM RE-ARM PATH (only resumeSequence when canSystemResumeInvoice allows it)', async () => {
+  test('resumeSequenceIfSystemResumable does NOT re-arm an ADMIN-stopped row (the call shape both system re-arm callers now use)', async () => {
     const seq = {
       id: 'seq-1', customer_id: 'cust-1', status: 'stopped',
       stopped_reason: 'mailed check', stopped_by_admin_id: 'adm',
@@ -111,13 +117,21 @@ describe('resumeSequence vs an explicit stop (audit repro, corrected fix locatio
     };
     const { seqUpdate } = setupDb({ seq, invoice: sentInvoice });
 
-    // This is the guarded call shape both reverse-prepaid and the
-    // annual-prepay reopen now use.
-    if (await canSystemResumeInvoice('inv-1')) {
-      await resumeSequence('inv-1');
-    }
+    const resumed = await resumeSequenceIfSystemResumable('inv-1');
 
+    expect(resumed).toBe(false);
     expect(seqUpdate).not.toHaveBeenCalled();
+  });
+
+  test('resumeSequenceIfSystemResumable DOES re-arm a naturally completed row, under the same FOR UPDATE lock', async () => {
+    const seq = { id: 'seq-1', customer_id: 'cust-1', status: 'completed', stopped_reason: null, stopped_by_admin_id: null, is_autopay_held: false, step_index: 0, anchor_at: new Date().toISOString() };
+    const { seqUpdate } = setupDb({ seq, invoice: sentInvoice });
+
+    const resumed = await resumeSequenceIfSystemResumable('inv-1');
+
+    expect(resumed).toBe(true);
+    expect(seqUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: 'active' }));
+    expect(db.transaction).toHaveBeenCalledTimes(1);
   });
 
   test('resumeSequence itself stays UNCONDITIONAL — POST /:id/followup/resume still lifts an admin stop on explicit operator request', async () => {

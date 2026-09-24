@@ -11,14 +11,14 @@
  *
  * Runs only against a private waves_audit_* Postgres clone:
  *   DATABASE_URL=postgres://wavespestcontrol@localhost:5432/waves_audit_<slug>
+ * Skips cleanly (no throw) when no such database is configured — the full
+ * CI job runs with no DATABASE_URL at all.
  */
 const knex = require('knex');
 const crypto = require('crypto');
 
 const connection = process.env.DATABASE_URL;
-if (!connection || !/waves_audit_/.test(connection)) {
-  throw new Error('r1-leads-reviews-3 repro must run against a private waves_audit_* clone (DATABASE_URL)');
-}
+const hasAuditDb = !!connection && /waves_audit_/.test(connection);
 
 let mockPg;
 jest.mock('../models/db', () => {
@@ -55,7 +55,7 @@ async function cleanup(f) {
   await mockPg('customers').whereIn('id', [f.customerId, f.promoterCustomerId]).del();
 }
 
-describe('r1-leads-reviews-3: admin referral submit vs existing customer stored in domestic phone format', () => {
+(hasAuditDb ? describe : describe.skip)('r1-leads-reviews-3: admin referral submit vs existing customer stored in domestic phone format', () => {
   beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 4 } }); });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
   beforeEach(() => mockSend.mockClear());

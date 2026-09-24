@@ -4,10 +4,10 @@ jest.mock('../services/invoice-followups', () => ({
   stopSequence: jest.fn(async () => undefined),
   resumeSequence: jest.fn(async () => undefined),
   scheduleForInvoice: jest.fn(async () => undefined),
-  // ADMIN-BUG-R54: the coverage reopen now consults this guard before ever
-  // calling resumeSequence — this fixture's rows carry no admin stop, so
-  // the system re-arm is legitimately allowed.
-  canSystemResumeInvoice: jest.fn(async () => true),
+  // ADMIN-BUG-R54: the coverage reopen now calls this atomic check-and-act
+  // helper instead of resumeSequence directly — this fixture's rows carry
+  // no admin stop, so the system re-arm is legitimately allowed.
+  resumeSequenceIfSystemResumable: jest.fn(async () => true),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
 
@@ -190,8 +190,8 @@ describe('reopenAnnualPrepayCoveredInvoicesForTerm', () => {
     // Collectible again → dunning re-armed for the reopened invoice ONLY
     // (settlement stopped the sequence terminally; the cash-paid skip keeps its).
     const FollowUps = require('../services/invoice-followups');
-    expect(FollowUps.resumeSequence).toHaveBeenCalledTimes(1);
-    expect(FollowUps.resumeSequence).toHaveBeenCalledWith('i1');
+    expect(FollowUps.resumeSequenceIfSystemResumable).toHaveBeenCalledTimes(1);
+    expect(FollowUps.resumeSequenceIfSystemResumable).toHaveBeenCalledWith('i1');
     expect(FollowUps.scheduleForInvoice).toHaveBeenCalledWith('i1');
   });
 
@@ -206,7 +206,7 @@ describe('reopenAnnualPrepayCoveredInvoicesForTerm', () => {
     const n = await InvoiceService.reopenAnnualPrepayCoveredInvoicesForTerm('term-1', trx);
     expect(n).toBe(1);
     const FollowUps = require('../services/invoice-followups');
-    expect(FollowUps.resumeSequence).not.toHaveBeenCalled();
+    expect(FollowUps.resumeSequenceIfSystemResumable).not.toHaveBeenCalled();
     expect(FollowUps.scheduleForInvoice).not.toHaveBeenCalled();
   });
 });

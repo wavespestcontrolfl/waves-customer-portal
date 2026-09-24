@@ -9693,10 +9693,10 @@ const InvoiceService = {
           // no status guard (the operator's own /followup/resume route
           // needs it to lift an admin stop on request), so this reopen may
           // only lift the stop the settlement itself created, never an
-          // admin's.
-          if (await FollowUps.canSystemResumeInvoice(invId)) {
-            await FollowUps.resumeSequence(invId);
-          }
+          // admin's — resumeSequenceIfSystemResumable checks eligibility and
+          // resumes under one lock, closing the gap a separate check-then-act
+          // would leave for a concurrent admin stop.
+          await FollowUps.resumeSequenceIfSystemResumable(invId);
           await FollowUps.scheduleForInvoice(invId);
         } catch (err) {
           logger.warn(`[invoice] annual-prepay reopen follow-up re-arm failed for ${invId}: ${err.message}`);
