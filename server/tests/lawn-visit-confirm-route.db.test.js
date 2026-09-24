@@ -298,7 +298,15 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
   test('legacy sparse confirmation keeps unknown scores blank and derives Stress from known components only', async () => {
     const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null, thatch_level: 85, stress_damage: null }, { run: false });
     const result = await request(assessment.id, { adjustedScores: {} });
-    expect(result.body.assessment).toMatchObject({ color_health: null, fungus_control: null, thatch_level: 85, stress_damage: 85, overall_score: null });
+    // Blank scores keep a legacy assessment pending, like the run-backed path.
+    expect(result.body).toMatchObject({ success: true, confirmed: false, missingScores: ['color_health', 'fungus_control'] });
+    expect(result.body.assessment).toMatchObject({ confirmed_by_tech: false, color_health: null, fungus_control: null, thatch_level: 85, stress_damage: null, overall_score: null });
+    await drain();
+    expect(intel.emitHealthSignal).not.toHaveBeenCalled();
+
+    // Filling the blanks confirms it.
+    const done = await request(assessment.id, { adjustedScores: { color_health: 70, fungus_control: 60 } });
+    expect(done.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, fungus_control: 60, stress_damage: 60 });
   });
 
   test.each([false, true])('legacy confirmation works when the optional run table is missing: %s', async (missingTable) => {

@@ -1127,17 +1127,34 @@ router.post('/confirm', async (req, res, next) => {
     } else {
       const finalScores = legacyConfirmFinalScores(assessment, adjustedScores);
 
+      // Same rule as the run-backed path: a blank score keeps the assessment
+      // pending (scores saved, nothing confirmed or delivered) until the
+      // technician fills it, rather than confirming with a gap readers would
+      // count as 0.
+      const missing = visitScores.missingScores(finalScores);
+      if (missing.length) {
+        const [pending] = await db('lawn_assessments')
+          .where({ id: assessmentId })
+          // A derived Stress is not stored while pending: a stored value
+          // would read as AI-known on the next save and freeze.
+          .update({
+            ...finalScores,
+            stress_damage: assessment.stress_damage != null || Number.isFinite(Number(adjustedScores?.stress_damage ?? NaN))
+              ? finalScores.stress_damage
+              : null,
+            overall_score: null,
+            updated_at: new Date(),
+          })
+          .returning('*');
+        return res.json({ success: true, confirmed: false, missingScores: missing, assessment: pending });
+      }
+
       const updateData = {
         confirmed_by_tech: true,
         confirmed_at: new Date(),
         updated_at: new Date(),
         ...finalScores,
-        // No stored overall until every displayed score exists; readers then
-        // recompute it null-aware (calculateLawnOverallScore) instead of
-        // counting a blank as 0.
-        overall_score: ['turf_density', 'weed_suppression', 'color_health', 'stress_damage'].every((key) => finalScores[key] != null)
-          ? calculateOverallScore(finalScores)
-          : null,
+        overall_score: calculateOverallScore(finalScores),
       };
 
       // If tech provided adjusted scores, apply them
