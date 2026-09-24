@@ -110,20 +110,20 @@ function stripServiceSuffixes(raw) {
     .trim();
 }
 
+// Foam labels pass through UNMODIFIED — deliberately no SERVICE_TYPE_MAP
+// entry: collapsing them would drop the cadence the schedule shows
+// ("Recurring Termite Foam Service (Quarterly)"), and the 2026-08-25
+// renamed forms carry a termite token that would otherwise collapse to
+// the generic "Termite Service" (codex #3484 P2). Same token family as
+// detectServiceCategory's foamTermiteToken, plus the renamed forms.
+const FOAM_LABEL_RE = /foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*(?:termite[\s_-]*)?foam|foam[\s_-]*recurring|termite[\s_-]*foam|termidor[\s_-]*foam/i;
+
 function normalizeServiceType(raw) {
   if (!raw) return 'General Service';
 
   const cleaned = stripServiceSuffixes(raw);
 
-  // Foam labels pass through UNMODIFIED — deliberately no SERVICE_TYPE_MAP
-  // entry: collapsing them would drop the cadence the schedule shows
-  // ("Recurring Termite Foam Service (Quarterly)"), and the 2026-08-25
-  // renamed forms carry a termite token that would otherwise collapse to
-  // the generic "Termite Service" (codex #3484 P2). Same token family as
-  // detectServiceCategory's foamTermiteToken, plus the renamed forms.
-  if (/foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*(?:termite[\s_-]*)?foam|foam[\s_-]*recurring|termite[\s_-]*foam|termidor[\s_-]*foam/i.test(cleaned)) {
-    return cleaned;
-  }
+  if (FOAM_LABEL_RE.test(cleaned)) return cleaned;
 
   // A real catalog identity passes through verbatim (case-normalized). The
   // regex map below exists for legacy/raw imports and free-text labels; on a
@@ -140,6 +140,25 @@ function normalizeServiceType(raw) {
 
   // If nothing matched, return the cleaned string (capitalized)
   return cleaned || 'General Service';
+}
+
+/**
+ * True when normalizeServiceType(raw) resolves to something it actually
+ * RECOGNIZED — a real catalog identity, a mapped SERVICE_TYPE_MAP pattern, or
+ * the foam-label passthrough — false when it would fall through to the
+ * verbatim-text / "General Service" path. A display surface that must never
+ * show unrecognized free text (2026-09-25 P1 fix, server/services/review-reply
+ * /grounding.js: "Owner Custom Booking Label" and similar internal labels
+ * must never surface as a public-safe service name) checks this FIRST,
+ * before calling normalizeServiceType at all.
+ */
+function isRecognizedServiceType(raw) {
+  if (!raw) return false;
+  const cleaned = stripServiceSuffixes(raw);
+  if (!cleaned) return false;
+  if (FOAM_LABEL_RE.test(cleaned)) return true;
+  if (canonicalCatalogName(cleaned)) return true;
+  return SERVICE_TYPE_MAP.some((mapping) => mapping.match.test(cleaned));
 }
 
 /**
@@ -254,6 +273,7 @@ function safeDateLabel(d) {
 
 module.exports = {
   normalizeServiceType,
+  isRecognizedServiceType,
   stripServiceSuffixes,
   detectServiceCategory,
   serviceIcon,

@@ -29,6 +29,14 @@ jest.mock('../models/db', () => {
 });
 
 const G = require('../services/review-reply/grounding');
+// Real prod-live behavior primes this cache from the actual services table
+// (server/services/service-catalog-names.js's background refresh) — this
+// test file's raw fixtures include "Rodent Trapping Service", which the
+// static SERVICE_TYPE_MAP family map alone does not recognize (2026-09-25
+// round-4 P1 allowlist fix), so it is primed here as a real catalog identity
+// the same way production would have it, rather than working around the gap
+// with an unrealistic fixture.
+const { __setCatalogNamesForTest } = require('../services/service-catalog-names');
 
 const NOW = new Date('2026-08-27T12:00:00Z');
 
@@ -36,7 +44,9 @@ beforeEach(() => {
   mockState.technicians = [{ name: 'Marcus Reyes', active: true }, { name: 'Bob Ortiz', active: true }, { name: 'Al', active: true }];
   mockState.customers = [];
   mockState.scheduled_services = [];
+  __setCatalogNamesForTest(['Rodent Trapping Service']);
 });
+afterAll(() => __setCatalogNamesForTest([]));
 
 describe('review-derived facts', () => {
   test('reviewer first name: real names pass, handles and initials do not', () => {
@@ -107,14 +117,18 @@ describe('buildReplyGrounding', () => {
   test('linked review: derived account facts + provenance + allowlists', async () => {
     mockState.customers = [{ id: 'cust-1', city: 'Venice', member_since: '2025-01-15', created_at: '2025-01-15' }];
     mockState.scheduled_services = [
-      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-05-01' },
-      { customer_id: 'cust-1', status: 'completed', service_type: 'lawn_care', scheduled_date: '2026-07-01' },
+      // Space-separated, recognized labels (2026-09-25 round-4 allowlist
+      // fix): a raw snake_case value like the old 'pest_control' fixture
+      // does not match SERVICE_TYPE_MAP's `\s*`-joined patterns and is no
+      // longer admitted at all — this exercises the real recognized path.
+      { customer_id: 'cust-1', status: 'completed', service_type: 'Pest Control', scheduled_date: '2026-05-01' },
+      { customer_id: 'cust-1', status: 'completed', service_type: 'Lawn Care', scheduled_date: '2026-07-01' },
       { customer_id: 'cust-1', status: 'cancelled', service_type: 'mosquito', scheduled_date: '2026-08-01' },
     ];
     const g = await G.buildReplyGrounding(review);
     expect(g.review.firstName).toBe('Dana');
     expect(g.review.mentionedTechNames).toEqual(['Marcus']);
-    expect(g.account).toEqual({ relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control', 'lawn care'], servicesPerformed: ['Lawn_care', 'Pest_control'], city: 'Venice' });
+    expect(g.account).toEqual({ relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control', 'lawn care'], servicesPerformed: ['Lawn Care', 'Pest Control'], city: 'Venice' });
     expect(g.provenance.relationship).toBe('account');
     expect(g.provenance.servicesPerformed).toBe('account');
     expect(g.provenance.mentionedTechNames).toBe('review');
@@ -300,6 +314,24 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
     ])).toEqual([]);
     // A recognized label still yields its clean public name.
     expect(G.normalizeServiceName('Cockroach Treatment')).toBe('Cockroach Treatment');
+  });
+  test('admits only catalog-backed labels: free internal scheduling text is never a public service name (2026-09-25 round-4 P1 fix)', () => {
+    // Not products, not brands, not priced/duration-suffixed — the earlier
+    // backstops never caught these. Only a label the normalizer actually
+    // RECOGNIZED (a real catalog identity or a mapped family) is eligible.
+    expect(G.normalizeServiceName('Owner Custom Booking Label')).toBeNull();
+    expect(G.normalizeServiceName('Customer Complained Reservice')).toBeNull();
+    expect(G.normalizeServiceName('Dog In Home Call Before Arrival')).toBeNull();
+    expect(G.servicesPerformedFrom([
+      { service_type: 'Owner Custom Booking Label', scheduled_date: '2026-01-01' },
+      { service_type: 'Customer Complained Reservice', scheduled_date: '2026-01-02' },
+      { service_type: 'Dog In Home Call Before Arrival', scheduled_date: '2026-01-03' },
+    ])).toEqual([]);
+    // Recognized labels are unaffected.
+    expect(G.normalizeServiceName('Cockroach Treatment')).toBe('Cockroach Treatment');
+    expect(G.normalizeServiceName('Quarterly Pest Control Service')).toBe('Pest Control');
+    expect(G.normalizeServiceName('Monthly Pest Control')).toBe('Pest Control');
+    expect(G.normalizeServiceName('WDO Inspection Service')).toBe('WDO Inspection');
   });
 });
 

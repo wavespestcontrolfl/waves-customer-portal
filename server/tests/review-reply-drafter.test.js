@@ -825,6 +825,27 @@ describe('2026-09-25 pre-push round 2: subject-scoped outcome fallback / opener 
   });
 });
 
+describe('2026-09-25 pre-push round 4: results restored, explain/answered/communicat* back under EXPERIENCE_CLAIM_RE', () => {
+  test('"results" needs review provenance (P1)', () => {
+    const g = grounding({ text: 'Great company and friendly people.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you saw such positive results.'), g)).toBe('unlisted_service_claim');
+    const g2 = grounding({ text: 'Great results with the ant problem.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you saw such positive results.'), g2)).toBeNull();
+  });
+  test('explain/answered/communicat* now need review provenance the same way every other EXPERIENCE_CLAIM_RE term does (P1)', () => {
+    const generic = grounding({ text: 'Great company and friendly people.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nWe explained everything clearly.'), generic)).toBe('unlisted_experience_claim');
+    const g2 = grounding({ text: 'Adam explained everything.', mentionedTechNames: ['Adam'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad Adam explained it all.'), g2)).toBeNull();
+    const g3 = grounding({ text: 'He never explained anything.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad we explained it.'), g3)).toBe('negated_review_claim');
+  });
+  test('"visit" stays out of EXPERIENCE_CLAIM_RE — a text review still licenses ordinary visit language', () => {
+    const g = grounding({ text: 'Great company and friendly people.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went well.'), g)).toBeNull();
+  });
+});
+
 describe('draftReviewReply — fallback ladder', () => {
   test('accepts a clean first draft and reports mode/version', async () => {
     mockDispatch.mockResolvedValueOnce({ ok: true, text: CLEAN });

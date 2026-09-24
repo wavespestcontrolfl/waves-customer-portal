@@ -324,7 +324,7 @@ const DATE_CLAIM_RE = /\b(?:noon|midnight|\d{1,2}(?::\d{2})?\s?(?:am|pm|a\.m\.|p
 // Service / treatment / relationship claims. Each is a factual assertion
 // about what we did or who the customer is; it must come from the review
 // text or from an allowed account fact, never from the model.
-const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|membership|members?|programs?|waveguard)\b/gi;
+const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|membership|members?|programs?|waveguard)\b/gi;
 // Membership/plan-status terms within SERVICE_CLAIM_RE (2026-09-25 P1 fix,
 // pre-push round 2) — an identity/relationship claim, not an outcome, so
 // deliberately absent from OUTCOME_TERM_RE. Bare "plan" is NOT a claim
@@ -336,20 +336,22 @@ const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|(?:a )?thing of the past|i
 // Outcome / result phrases within SERVICE_CLAIM_RE — the ones a negation
 // in the review flips ("did not get rid of", "never eliminated", "not under
 // control"). Topic nouns (ants, treatment, lawn) are deliberately absent.
-const OUTCOME_TERM_RE = /^(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
+const OUTCOME_TERM_RE = /^(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
 // Staff credential / award modifiers: nothing in the grounding proves them,
 // so they need the reviewer's own words (codex r52).
 const CREDENTIAL_CLAIM_RE = /\b(?:certified|licen[cs]ed|insured|bonded|background[- ]checked|vetted|accredited|award[- ]winning|trained|state[- ]licen[cs]ed|screened|degreed|qualified|experts?|specialists?|master|veteran|senior|lead|head|top[- ]rated)\b/gi;
 // Visit-experience claims (timeliness, speed, communication) — only the
 // reviewer can vouch for these.
-const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|kept (?:you|them) (?:informed|updated|posted)|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
-// A narrow companion to EXPERIENCE_CLAIM_RE — NOT restored there globally
-// (codex pre-push P1 2026-09-25: "helpful"/"thorough" etc. stay checked
-// against the review, but "visit"/"explain"/"walked … through"/"answered"/
-// "communicat*" describe an INTERACTION happening at all, not a quality of
-// it). Checked only for a no-text, no-account review below, where nothing —
-// not the review, not an account fact — proves any interaction took place.
-const INTERACTION_TERM_RE = /\b(?:visit(?:ed|s|ing)?|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*)\b/gi;
+const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
+// A narrow companion to EXPERIENCE_CLAIM_RE — "visit" is deliberately the
+// only term left here (2026-09-25 round-4 fix: explain/answered/communicat*/
+// walked…through moved INTO EXPERIENCE_CLAIM_RE above, where the normal
+// root-matched, negation-aware provenance loop already covers them — this
+// regex no longer duplicates that check for them). A review implies a visit
+// happened, so "visit" itself stays out of EXPERIENCE_CLAIM_RE too; this is
+// checked only for a no-text, no-account review below, where nothing — not
+// the review, not an account fact — proves any interaction took place.
+const INTERACTION_TERM_RE = /\b(?:visit(?:ed|s|ing)?)\b/gi;
 // A duration with a number is a specific fact; tenure buckets prove only a
 // floor. "10 years" needs the whole phrase in the review.
 const QUANTIFIED_TENURE_RE = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|many|several|couple of|few|multiple|decades?)\s+(?:\+\s*)?(?:years?|months?|seasons?|decades?)\b/gi;
@@ -548,12 +550,236 @@ function splitReply(text, locationName) {
   return { body, signOff, full: `${body}\n\n${signOff}` };
 }
 
+// Words may be joined in the body by more than plain whitespace — real
+// service names carry "&", "/", "-", or a spelled-out "and" ("Flea & Tick
+// Treatment", "Tree & Shrub Care", "One-Time Pest Control"); the normalizer
+// strips those to bare words, so the span regex has to accept any of them
+// back between words, not just \s+ (2026-09-25 P2 fix).
+const PHRASE_WORD_JOIN_RE = '(?:\\s*(?:&|and|\\/|,|-)\\s*|\\s+)';
+
+// WHOLE-PHRASE spans in `body` where one of `phrases` (the account's
+// servicesPerformed names, lowercased/normalized) appears verbatim
+// (case-insensitive, a trailing "s" allowed on the last word). Module-level
+// (2026-09-25 round-4 complexity fix, AGENTS.md: don't grow an
+// already-over-threshold function) so it is a plain, independently testable
+// function of its inputs rather than a closure inside verifyReplyDetailed.
+function servicePhraseSpans(body, phrases) {
+  const spans = [];
+  for (const phrase of phrases || []) {
+    const words = String(phrase).trim().split(/\s+/).filter(Boolean);
+    if (!words.length) continue;
+    const parts = words.map((w, i) => escapeRe(w) + (i === words.length - 1 ? 's?' : ''));
+    const phraseRe = new RegExp(`\\b${parts.join(PHRASE_WORD_JOIN_RE)}\\b`, 'gi');
+    let pm;
+    while ((pm = phraseRe.exec(body)) !== null) spans.push([pm.index, pm.index + pm[0].length]);
+  }
+  return spans;
+}
+
+// Sentence spans of `body`, split on . ! ? — module-level (2026-09-24/25
+// complexity fix) so the subject-scoping helpers below are plain functions
+// of their inputs, not closures capturing verifyReplyDetailed's locals.
+function sentenceSpans(body) {
+  const spans = [];
+  let start = 0;
+  const breakRe = /[.!?]/g;
+  let bm;
+  while ((bm = breakRe.exec(body)) !== null) { spans.push([start, bm.index + 1]); start = bm.index + 1; }
+  if (start < body.length) spans.push([start, body.length]);
+  return spans;
+}
+function sentenceTextAt(body, spans, idx) {
+  const span = spans.find(([a, b]) => idx >= a && idx < b);
+  return span ? body.slice(span[0], span[1]) : body;
+}
+// The outcome fallback below (and the RESOLUTION_PARAPHRASE_RE branch) is
+// subject-scoped (2026-09-25 P1 fix, third time raised — made structural):
+// reviewStatesOutcome() alone proves only that the review states SOME
+// un-negated outcome ANYWHERE — not that it is about the thing the reply
+// names. "Glad the Cockroach Treatment worked" must not borrow "The ants
+// are gone"'s outcome for an unrelated subject. An outcome term
+// additionally needs, in its OWN body sentence, a pest/service noun the
+// reviewer actually wrote (root-matched, same as `rooted`) with an
+// un-negated occurrence in the review.
+function sentenceHasSourcedSubject(sentenceText, reviewWords, reviewLower, reviewNeg) {
+  for (const subjTerm of sentenceText.match(SERVICE_CLAIM_RE) || []) {
+    const subj = subjTerm.toLowerCase().replace(/\s+/g, ' ');
+    if (OUTCOME_TERM_RE.test(subj)) continue; // a pest/service NOUN, not another outcome verb
+    const subjStem = stemOf(subj);
+    const subjRooted = reviewWords.has(subj) || reviewWords.has(subjStem)
+      || (subjStem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(subjStem) || (subjStem.startsWith(ws) && ws.length >= 4); }));
+    if (!subjRooted) continue;
+    if (rootSupported(reviewLower, reviewWords, subjStem, subj, reviewNeg) === true) return true;
+  }
+  return false;
+}
+
+// span rejection helper shared by verifyReplyDetailed and the two claim
+// checkers below — a pure formatter, no captured state, so it is safe to
+// share across all three (2026-09-25 round-4 complexity fix).
+function reject(code, span) {
+  return { code, span: span == null ? null : String(span).trim().slice(0, 120) };
+}
+
+// Service / treatment claim provenance (SERVICE_CLAIM_RE): the reviewer's
+// own words, one of the account's public-safe service categories, a
+// whole-phrase-sourced servicesPerformed name, or (for an outcome term with
+// no direct source) a subject-scoped fallback onto some other un-negated
+// outcome the review states about the SAME pest/service noun in the same
+// reply sentence. Extracted out of verifyReplyDetailed (2026-09-24/25 fixes
+// built this loop up to where AGENTS.md's complexity rule required moving
+// it out, round-4 P2) — behavior is unchanged, only the location moved.
+// Returns a reject object, or null when every claim in the body is sourced.
+function checkServiceClaims(ctx) {
+  const {
+    body, reviewWords, reviewLower, canonReview, reviewNeg, canonNeg,
+    bodyLower, bodyNeg, categoryWords, genericServiceWords, spans,
+  } = ctx;
+  const inServicePhraseSpan = (idx) => spans.some(([a, b]) => idx >= a && idx < b);
+  const bodyNegates = (phrase) => allOccurrencesNegated(bodyLower, phrase, bodyNeg) === true;
+  const reviewSupports = (phrase, canon) => {
+    const lit = allOccurrencesNegated(reviewLower.replace(/\s+/g, ' '), phrase, reviewNeg);
+    const can = canon ? allOccurrencesNegated(canonReview, canon, canonNeg) : null;
+    if (lit === false || can === false) return true;
+    if (lit === true || can === true) return 'negated';
+    return false;
+  };
+  let reviewResolved = null;
+  const reviewStatesOutcome = () => {
+    if (reviewResolved !== null) return reviewResolved;
+    reviewResolved = false;
+    for (const term of reviewLower.match(SERVICE_CLAIM_RE) || []) {
+      const rt = term.toLowerCase().replace(/\s+/g, ' ');
+      if (!OUTCOME_TERM_RE.test(rt)) continue;
+      if (reviewSupports(rt, canonPhrase(rt)) === true) { reviewResolved = true; break; }
+    }
+    return reviewResolved;
+  };
+  const sSpans = sentenceSpans(body);
+  const hasSourcedSubject = (idx) => sentenceHasSourcedSubject(sentenceTextAt(body, sSpans, idx), reviewWords, reviewLower, reviewNeg);
+  for (const claimMatch of body.matchAll(SERVICE_CLAIM_RE)) {
+    const term = claimMatch[0];
+    const termIdx = claimMatch.index;
+    const t = term.toLowerCase().replace(/\s+/g, ' ');
+    if (RESOLUTION_PARAPHRASE_RE.test(t) && !bodyNegates(t)) {
+      const support = reviewSupports(t, canonPhrase(t));
+      if (support === true || (reviewStatesOutcome() && hasSourcedSubject(termIdx))) continue;
+      return reject(support === 'negated' ? 'negated_review_claim' : 'unlisted_service_claim', t);
+    }
+    // A phrase the reviewer wrote ("took care of" ↔ "take care of", "under
+    // control") is sourced — canonical-phrase check before token matching.
+    const support = reviewSupports(t, canonPhrase(t));
+    if (support === true) continue;
+    // Negation matters for OUTCOME phrases (got rid of, gone, solved …):
+    // "did not get rid of the ants" must not license "we got rid of the
+    // ants". A bare topic noun ("ants", "treatment") inside a negated clause
+    // is still a fine thing to name in the reply.
+    const outcome = OUTCOME_TERM_RE.test(t);
+    if (support === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
+    if (support === 'negated') continue;
+    const stem = stemOf(t);
+    if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
+    // Same root in the reviewer's words ("eliminate" ↔ "eliminated",
+    // "infestation" ↔ "infested") — an un-negated occurrence of that root.
+    const rooted = reviewWords.has(t) || reviewWords.has(stem)
+      || (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); }));
+    if (rooted) {
+      const rootSupport = rootSupported(reviewLower, reviewWords, stem, t, reviewNeg);
+      if (rootSupport === true) continue;
+      if (rootSupport === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
+      continue;
+    }
+    // Not sourced by a literal or root match, and (checked above) not
+    // something the review's own words directly negate. An outcome term the
+    // review never used in these words still passes if the review states
+    // SOME un-negated outcome in different words ("got much better", "under
+    // control" → "handled") AND the reply's own sentence names a
+    // pest/service subject the review actually wrote, un-negated: "Glad the
+    // Cockroach Treatment worked" (review: only ants) still rejects.
+    if (outcome && reviewStatesOutcome() && hasSourcedSubject(termIdx)) continue;
+    return reject('unlisted_service_claim', t);
+  }
+  return null;
+}
+
+// Visit-experience claim provenance (EXPERIENCE_CLAIM_RE, root-matched, the
+// reviewer's words only) plus the INTERACTION_TERM_RE ("visit") gate: a
+// no-text, no-account review has nothing proving any interaction happened
+// at all, and a TEXT review that NEGATES "visit" must not be answered with
+// the un-negated claim. Extracted out of verifyReplyDetailed for the same
+// complexity reason as checkServiceClaims (round-4 P2); returns a reject
+// object, or null when every experience claim (and the interaction gate) is
+// clear.
+function checkExperienceClaims(ctx) {
+  const {
+    body, grounding, reviewWords, reviewLower, canonReview, reviewNeg, canonNeg,
+    bodyLower, bodyNeg, categoryWords, spans,
+  } = ctx;
+  const inServicePhraseSpan = (idx) => spans.some(([a, b]) => idx >= a && idx < b);
+  const bodyNegates = (phrase) => allOccurrencesNegated(bodyLower, phrase, bodyNeg) === true;
+  for (const experienceMatch of body.matchAll(EXPERIENCE_CLAIM_RE)) {
+    const term = experienceMatch[0];
+    const termIdx = experienceMatch.index;
+    const t = term.toLowerCase().replace(/\s+/g, ' ');
+    const stem = stemOf(t.replace(/[- ]/g, ' '));
+    const flat = t.replace(/[- ]+/g, ' ');
+    const support = (() => {
+      const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
+      const can = allOccurrencesNegated(canonReview, canonPhrase(t), canonNeg);
+      if (lit === false || can === false) return true;
+      if (lit === true || can === true) return 'negated';
+      return false;
+    })();
+    if (support === true) continue;
+    if (support === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
+    if (support === 'negated') continue;
+    // An account service-category word sources an experience claim too; a
+    // servicesPerformed name sources it only inside its own whole-phrase
+    // span (e.g. "treatment" from "Cockroach Treatment" — 2026-09-25 P1 fix).
+    if (categoryWords.has(t) || categoryWords.has(flat) || categoryWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
+    if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) {
+      const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
+      if (rootSupport === true) continue;
+      if (rootSupport === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
+      continue;
+    }
+    return reject('unlisted_experience_claim', t);
+  }
+  // A no-text, no-account review has NOTHING — not the review, not an
+  // account fact — proving any interaction (a visit) happened at all: "the
+  // visit went smoothly" would invent one (2026-09-24/25 P1 fix; narrowed to
+  // "visit" only in round 4 — explain/answered/communicat* now go through
+  // EXPERIENCE_CLAIM_RE's own provenance check above instead).
+  if (!grounding.review.hasText && !grounding.account) {
+    const interactionMatch = body.match(INTERACTION_TERM_RE);
+    if (interactionMatch) return reject('unlisted_experience_claim', interactionMatch[0]);
+  }
+  // A TEXT review does not need to positively source "visit" ("the visit
+  // went well" is ordinary prose either way — a review implies a visit), but
+  // a review that NEGATES it — "we never got a visit" — must not be answered
+  // with the un-negated claim (2026-09-25 P1 fix, pre-push round 3).
+  // Root-matched the same way SERVICE_CLAIM_RE terms are, via rootSupported;
+  // a root the review never uses at all is left alone.
+  if (grounding.review.hasText) {
+    for (const term of body.match(INTERACTION_TERM_RE) || []) {
+      const t = term.toLowerCase().replace(/\s+/g, ' ');
+      const flat = t.replace(/[- ]+/g, ' ');
+      const stem = stemOf(flat);
+      const rooted = reviewWords.has(flat) || reviewWords.has(stem)
+        || (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); }));
+      if (!rooted) continue;
+      const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
+      if (rootSupport === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
+    }
+  }
+  return null;
+}
+
 /**
  * Deterministic verifier. Returns null when the reply is acceptable, else a
  * short reason code. Every rule the model is told is re-checked here.
  */
 function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {}) {
-  const reject = (code, span) => ({ code, span: span == null ? null : String(span).trim().slice(0, 120) });
   const locationName = grounding.locationName;
   const { body, signOff } = splitReply(text, locationName);
   const m = mode || classifyReplyMode(grounding);
@@ -623,29 +849,14 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   // has no provenance and is rejected. Served cities are judged above.
   const reviewWords = new Set(normalizeWords(grounding.review.text));
   // WHOLE-PHRASE spans in the body where one of the account's
-  // servicesPerformed names appears verbatim (case-insensitive, a trailing
-  // "s" allowed on the last word) — 2026-09-25 P1 fix: a claim term or
-  // capitalized word is sourced by the account ONLY when it falls inside one
-  // of these spans, never by a bare word alone. Without this, a review word
-  // ("ant") and an unrelated account-phrase word ("treatment" from
-  // "Cockroach Treatment") could compose into "ant treatment" — a claim
+  // servicesPerformed names appears verbatim — 2026-09-25 P1 fix: a claim
+  // term or capitalized word is sourced by the account ONLY when it falls
+  // inside one of these spans, never by a bare word alone. Without this, a
+  // review word ("ant") and an unrelated account-phrase word ("treatment"
+  // from "Cockroach Treatment") could compose into "ant treatment" — a claim
   // neither the review nor the account actually supports.
-  const servicePhraseSpans = [];
-  // Words may be joined in the body by more than plain whitespace — real
-  // service names carry "&", "/", "-", or a spelled-out "and" ("Flea & Tick
-  // Treatment", "Tree & Shrub Care", "One-Time Pest Control"); the
-  // normalizer strips those to bare words, so the span regex has to accept
-  // any of them back between words, not just \s+ (2026-09-25 P2 fix).
-  const PHRASE_WORD_JOIN_RE = '(?:\\s*(?:&|and|\\/|,|-)\\s*|\\s+)';
-  for (const phrase of grounding.allow?.servicePhrases || []) {
-    const words = String(phrase).trim().split(/\s+/).filter(Boolean);
-    if (!words.length) continue;
-    const parts = words.map((w, i) => escapeRe(w) + (i === words.length - 1 ? 's?' : ''));
-    const phraseRe = new RegExp(`\\b${parts.join(PHRASE_WORD_JOIN_RE)}\\b`, 'gi');
-    let pm;
-    while ((pm = phraseRe.exec(body)) !== null) servicePhraseSpans.push([pm.index, pm.index + pm[0].length]);
-  }
-  const inServicePhraseSpan = (idx) => servicePhraseSpans.some(([a, b]) => idx >= a && idx < b);
+  const spans = servicePhraseSpans(body, grounding.allow?.servicePhrases);
+  const inServicePhraseSpan = (idx) => spans.some(([a, b]) => idx >= a && idx < b);
   // Only THIS location's area words (and the account city) are sourced;
   // fragments of unrelated served cities are not ("Charlotte" from "Port
   // Charlotte" must not launder a name).
@@ -753,13 +964,12 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
       && !reviewLower.includes(city.toLowerCase())) return reject('unlisted_city', city);
   }
 
-  // Provenance for service / treatment claims: the reviewer's own words, or
-  // one of the account's public-safe service categories ("lawn care" →
-  // lawn, care). Generic identity words (pest, lawn, bugs, home) are fine.
-  // A servicesPerformed word alone is deliberately NOT merged in here
-  // (2026-09-25 P1 fix) — see servicePhraseSpans / inServicePhraseSpan
-  // above: a bare account word could otherwise compose with an unrelated
-  // review word into a claim neither one supports.
+  // Provenance for service / treatment claims (the reviewer's own words, an
+  // account service category, or a whole-phrase-sourced servicesPerformed
+  // name) and for visit-experience claims share this ctx — each is a
+  // sizeable decision tree that grew past AGENTS.md's complexity threshold
+  // (2026-09-24/25 fixes), so checkServiceClaims / checkExperienceClaims
+  // hold them now (round-4 P2 complexity fix; behavior unchanged).
   const categoryWords = new Set((grounding.account?.serviceCategories || []).flatMap((c) => normalizeWords(c)));
   const canonReview = canonPhrase(normalizeWords(grounding.review.text).join(' '));
   // Negation-aware provenance (codex r26): "they did not get rid of the
@@ -770,111 +980,14 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   const reviewNeg = negationIndex(reviewLower);
   const canonNeg = negationIndex(canonReview);
   const bodyNeg = negationIndex(bodyLower);
-  const bodyNegates = (phrase) => allOccurrencesNegated(bodyLower, phrase, bodyNeg) === true;
-  // true = sourced (an un-negated occurrence exists); 'negated' = every
-  // occurrence is negated; false = absent.
-  const reviewSupports = (phrase, canon) => {
-    const lit = allOccurrencesNegated(reviewLower.replace(/\s+/g, ' '), phrase, reviewNeg);
-    const can = canon ? allOccurrencesNegated(canonReview, canon, canonNeg) : null;
-    if (lit === false || can === false) return true;
-    if (lit === true || can === true) return 'negated';
-    return false;
-  };
   const genericServiceWords = new Set(['pest', 'pests', 'lawn', 'bug', 'bugs', 'home', 'house', 'property']);
-  let reviewResolved = null;
-  const reviewStatesOutcome = () => {
-    if (reviewResolved !== null) return reviewResolved;
-    reviewResolved = false;
-    for (const term of reviewLower.match(SERVICE_CLAIM_RE) || []) {
-      const rt = term.toLowerCase().replace(/\s+/g, ' ');
-      if (!OUTCOME_TERM_RE.test(rt)) continue;
-      if (reviewSupports(rt, canonPhrase(rt)) === true) { reviewResolved = true; break; }
-    }
-    return reviewResolved;
+  const claimCtx = {
+    body, grounding, reviewWords, reviewLower, canonReview, reviewNeg, canonNeg,
+    bodyLower, bodyNeg, categoryWords, genericServiceWords, spans,
   };
-  // Subject-scoped guard on the outcome fallback below (2026-09-25 P1 fix,
-  // third time raised — made structural): reviewStatesOutcome() alone proves
-  // only that the review states SOME un-negated outcome ANYWHERE — not that
-  // it is about the thing the reply names. "Glad the Cockroach Treatment
-  // worked" must not borrow "The ants are gone"'s outcome for an unrelated
-  // subject. An outcome term additionally needs, in its OWN body sentence, a
-  // pest/service noun the reviewer actually wrote (root-matched, same as
-  // `rooted` above) with an un-negated occurrence in the review.
-  const sentenceSpans = (() => {
-    const spans = [];
-    let start = 0;
-    const breakRe = /[.!?]/g;
-    let bm;
-    while ((bm = breakRe.exec(body)) !== null) { spans.push([start, bm.index + 1]); start = bm.index + 1; }
-    if (start < body.length) spans.push([start, body.length]);
-    return spans;
-  })();
-  const sentenceTextAt = (idx) => {
-    const span = sentenceSpans.find(([a, b]) => idx >= a && idx < b);
-    return span ? body.slice(span[0], span[1]) : body;
-  };
-  const sentenceHasSourcedSubject = (sentenceText) => {
-    for (const subjTerm of sentenceText.match(SERVICE_CLAIM_RE) || []) {
-      const subj = subjTerm.toLowerCase().replace(/\s+/g, ' ');
-      if (OUTCOME_TERM_RE.test(subj)) continue; // a pest/service NOUN, not another outcome verb
-      const subjStem = stemOf(subj);
-      const subjRooted = reviewWords.has(subj) || reviewWords.has(subjStem)
-        || (subjStem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(subjStem) || (subjStem.startsWith(ws) && ws.length >= 4); }));
-      if (!subjRooted) continue;
-      if (rootSupported(reviewLower, reviewWords, subjStem, subj, reviewNeg) === true) return true;
-    }
-    return false;
-  };
-  for (const claimMatch of body.matchAll(SERVICE_CLAIM_RE)) {
-    const term = claimMatch[0];
-    const termIdx = claimMatch.index;
-    const t = term.toLowerCase().replace(/\s+/g, ' ');
-    if (RESOLUTION_PARAPHRASE_RE.test(t) && !bodyNegates(t)) {
-      const support = reviewSupports(t, canonPhrase(t));
-      // Subject-scoped the same way the outcome-term fallback below is
-      // (2026-09-25 P1 fix): reviewStatesOutcome() alone only proves the
-      // review states SOME un-negated outcome somewhere — "Glad the
-      // Cockroach Treatment is history" must not borrow "The ants are
-      // gone"'s outcome for an account phrase the review never described.
-      if (support === true || (reviewStatesOutcome() && sentenceHasSourcedSubject(sentenceTextAt(termIdx)))) continue;
-      return reject(support === 'negated' ? 'negated_review_claim' : 'unlisted_service_claim', t);
-    }
-    // A phrase the reviewer wrote ("took care of" ↔ "take care of", "under
-    // control") is sourced — canonical-phrase check before token matching.
-    const support = reviewSupports(t, canonPhrase(t));
-    if (support === true) continue;
-    // Negation matters for OUTCOME phrases (got rid of, gone, solved …):
-    // "did not get rid of the ants" must not license "we got rid of the
-    // ants". A bare topic noun ("ants", "treatment") inside a negated clause
-    // is still a fine thing to name in the reply.
-    const outcome = OUTCOME_TERM_RE.test(t);
-    if (support === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
-    if (support === 'negated') continue;
-    const stem = stemOf(t);
-    if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
-    // Same root in the reviewer's words ("eliminate" ↔ "eliminated",
-    // "infestation" ↔ "infested") — an un-negated occurrence of that root.
-    const rooted = reviewWords.has(t) || reviewWords.has(stem)
-      || (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); }));
-    if (rooted) {
-      const rootSupport = rootSupported(reviewLower, reviewWords, stem, t, reviewNeg);
-      if (rootSupport === true) continue;
-      if (rootSupport === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
-      continue;
-    }
-    // Not sourced by a literal or root match, and (checked above) not
-    // something the review's own words directly negate. An outcome term the
-    // review never used in these words still passes if the review states
-    // SOME un-negated outcome in different words ("got much better", "under
-    // control" → "handled") — 2026-09-24 P1 fix: this fallback never fires
-    // for a term the review directly negates (that path returns above), so
-    // "did not work" still blocks "Glad the treatment worked." — AND
-    // (2026-09-25 P1 fix) the reply's own sentence must name a pest/service
-    // subject the review actually wrote, un-negated: "Glad the Cockroach
-    // Treatment worked" (review: only ants) still rejects.
-    if (outcome && reviewStatesOutcome() && sentenceHasSourcedSubject(sentenceTextAt(termIdx))) continue;
-    return reject('unlisted_service_claim', t);
-  }
+  const serviceClaimReject = checkServiceClaims(claimCtx);
+  if (serviceClaimReject) return serviceClaimReject;
+
   // Provenance for relationship / tenure claims: the reviewer's words or the
   // account's derived facts (recurring → "again"/"regular"; long_term → "years").
   const rel = grounding.account?.relationship;
@@ -898,62 +1011,8 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     if (hasPhrase(reviewLower, t) || reviewWords.has(t) || reviewWords.has(stemOf(t))) continue;
     return reject('unlisted_credential_claim', t);
   }
-  // Visit-experience claims: the reviewer's words only (root-matched).
-  for (const experienceMatch of body.matchAll(EXPERIENCE_CLAIM_RE)) {
-    const term = experienceMatch[0];
-    const termIdx = experienceMatch.index;
-    const t = term.toLowerCase().replace(/\s+/g, ' ');
-    const stem = stemOf(t.replace(/[- ]/g, ' '));
-    const flat = t.replace(/[- ]+/g, ' ');
-    const support = (() => {
-      const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
-      const can = allOccurrencesNegated(canonReview, canonPhrase(t), canonNeg);
-      if (lit === false || can === false) return true;
-      if (lit === true || can === true) return 'negated';
-      return false;
-    })();
-    if (support === true) continue;
-    if (support === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
-    if (support === 'negated') continue;
-    // An account service-category word sources an experience claim too; a
-    // servicesPerformed name sources it only inside its own whole-phrase
-    // span (e.g. "treatment" from "Cockroach Treatment" — 2026-09-25 P1 fix).
-    if (categoryWords.has(t) || categoryWords.has(flat) || categoryWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
-    if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) {
-      const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
-      if (rootSupport === true) continue;
-      if (rootSupport === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
-      continue;
-    }
-    return reject('unlisted_experience_claim', t);
-  }
-  // A no-text, no-account review has NOTHING — not the review, not an
-  // account fact — proving any interaction happened at all: "the visit went
-  // smoothly" / "we explained everything" / "we answered your questions"
-  // would invent one (2026-09-24/25 P1 fix).
-  if (!grounding.review.hasText && !grounding.account) {
-    const interactionMatch = body.match(INTERACTION_TERM_RE);
-    if (interactionMatch) return reject('unlisted_experience_claim', interactionMatch[0]);
-  }
-  // A TEXT review does not need to positively source an interaction term
-  // ("the visit went well" is ordinary prose either way), but a review that
-  // NEGATES the same root — "he never explained anything", "did not answer
-  // my questions" — must not be answered with the un-negated claim: "Glad we
-  // explained everything and answered your questions" (2026-09-25 P1 fix,
-  // pre-push round 3). Root-matched the same way SERVICE_CLAIM_RE terms are,
-  // via rootSupported; a root the review never uses at all is left alone.
-  if (grounding.review.hasText) {
-    for (const term of body.match(INTERACTION_TERM_RE) || []) {
-      const t = term.toLowerCase().replace(/\s+/g, ' ');
-      const flat = t.replace(/[- ]+/g, ' ');
-      const stem = stemOf(flat);
-      const rooted = reviewWords.has(flat) || reviewWords.has(stem)
-        || (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); }));
-      if (!rooted) continue;
-      const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
-      if (rootSupport === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
-    }
-  }
+  const experienceClaimReject = checkExperienceClaims(claimCtx);
+  if (experienceClaimReject) return experienceClaimReject;
 
   // The mandated greeting, deterministically: "Hi <reviewer first name>,"
   // or "Hello there," — nothing else may open a public reply.

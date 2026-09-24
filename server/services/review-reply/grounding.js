@@ -25,7 +25,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { etCalendarDayOf } = require('../../utils/datetime-et');
-const { normalizeServiceType } = require('../../utils/service-normalizer');
+const { normalizeServiceType, isRecognizedServiceType } = require('../../utils/service-normalizer');
 
 const GROUNDING_VERSION = 'grounding-v1';
 
@@ -183,6 +183,16 @@ function titleCase(s) {
 function normalizeServiceName(serviceType) {
   const raw = String(serviceType || '').trim();
   if (!raw) return null;
+  // Allowlist, not a blacklist (2026-09-25 round-4 P1 fix): free internal
+  // labels ("Owner Custom Booking Label", "Customer Complained Reservice",
+  // "Dog In Home Call Before Arrival") are not products or brands, so the
+  // earlier digit/duration/dash/brand backstops never caught them — they
+  // reached servicesPerformed as raw scheduling text. Only a label the
+  // normalizer actually RECOGNIZED (a real catalog identity, a mapped
+  // family, or the foam passthrough) is even eligible to become a public
+  // service name; anything normalizeServiceType would return verbatim
+  // (unmatched) or as the "General Service" fallback is dropped here first.
+  if (!isRecognizedServiceType(raw)) return null;
   const normalized = normalizeServiceType(raw);
   if (!normalized || normalized === 'General Service') return null;
   if (SERVICE_PRODUCT_WORD_RE.test(normalized)) return null;
