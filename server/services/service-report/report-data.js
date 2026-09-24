@@ -2585,11 +2585,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // PAIRABLE_ZONES excludes 'close_up'/'trouble' — a non-pairable zone value
     // is treated the same as no zone at all, both for finding a match and for
     // the "both sides zoned but disjoint" check below.
+    // Close-up / trouble photos are never progress evidence: they are
+    // excluded from the best-vs-best fallback too, so a visit whose only
+    // photos are close-ups shows no comparison rather than a false one.
     const PAIRABLE_ZONES = new Set(['front', 'back', 'side']);
-    const zoneKey = (p) => {
-      const zone = String(p?.zone || '').trim().toLowerCase();
-      return PAIRABLE_ZONES.has(zone) ? zone : '';
-    };
+    const NON_PAIRABLE_ZONES = new Set(['close_up', 'trouble']);
+    const rawZone = (p) => String(p?.zone || '').trim().toLowerCase();
+    const zoneKey = (p) => (PAIRABLE_ZONES.has(rawZone(p)) ? rawZone(p) : '');
+    const fallbackEligible = (p) => !NON_PAIRABLE_ZONES.has(rawZone(p));
     let beforePhoto = null;
     let afterPhoto = null;
     for (const candidate of beforeCandidates) {
@@ -2605,9 +2608,12 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     if (!beforePhoto) {
       const bothSidesZoned = beforeCandidates.some((p) => zoneKey(p))
         && afterCandidates.some((p) => zoneKey(p));
-      beforePhoto = beforeCandidates[0] || null;
+      const beforeFallback = beforeCandidates.find(fallbackEligible) || null;
+      const afterFallback = afterCandidates.find(fallbackEligible) || null;
       // Zones recorded on both sides but disjoint → no honest pair exists.
-      afterPhoto = bothSidesZoned ? null : (afterCandidates[0] || null);
+      // A side with only close-up/trouble photos has nothing to compare.
+      beforePhoto = beforeFallback;
+      afterPhoto = !bothSidesZoned && beforeFallback ? afterFallback : null;
     }
     beforeAfter = {
       before: {

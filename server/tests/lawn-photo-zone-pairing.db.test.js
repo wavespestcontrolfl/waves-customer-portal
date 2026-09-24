@@ -46,29 +46,36 @@ describeDb('lawn before/after photo pairing by zone', () => {
     expect(report.beforeAfter.after.photoUrl).toBe('after-front');
   });
 
-  test('close_up never pairs across visits, even when both sides record it — falls back to best-vs-best', async () => {
+  test('close_up never pairs across visits, and is not used as a best-vs-best fallback either', async () => {
     const f = await fixture(knex);
     const { before, after, service } = await twoVisitFixture(f);
     await addPhoto(before.id, f.customerId, 'close_up', 'before-close-up');
     await addPhoto(after.id, f.customerId, 'close_up', 'after-close-up');
     const report = await buildLawnAssessmentReportData(service, 'lawn', knex, { propertyHistoryEnabled: false });
-    // Only-non-front zones on both sides: not a false pair, and not treated
-    // as "zoned but disjoint" either — falls back to best-vs-best like an
-    // unzoned photo would.
-    expect(report.beforeAfter.before.photoUrl).toBe('before-close-up');
-    expect(report.beforeAfter.after.photoUrl).toBe('after-close-up');
+    // Two close-ups are different spots: no comparison at all.
+    expect(report.beforeAfter.before.photoUrl).toBeNull();
+    expect(report.beforeAfter.after.photoUrl).toBeNull();
   });
 
-  test('trouble on one side and front on the other: neither is a pairable-zone match, so the front side isn\'t starved of an after photo', async () => {
+  test('a trouble photo is never shown as the "before" of a front photo', async () => {
     const f = await fixture(knex);
     const { before, after, service } = await twoVisitFixture(f);
     await addPhoto(before.id, f.customerId, 'trouble', 'before-trouble');
     await addPhoto(after.id, f.customerId, 'front', 'after-front');
     const report = await buildLawnAssessmentReportData(service, 'lawn', knex, { propertyHistoryEnabled: false });
-    // 'trouble' never counts as a pairable zone, so this reads as unzoned on
-    // both sides — best-vs-best, not "zoned but disjoint".
-    expect(report.beforeAfter.before.photoUrl).toBe('before-trouble');
-    expect(report.beforeAfter.after.photoUrl).toBe('after-front');
+    expect(report.beforeAfter.before.photoUrl).toBeNull();
+    expect(report.beforeAfter.after.photoUrl).toBeNull();
+  });
+
+  test('unlabeled photos still fall back to best-vs-best, skipping close-ups', async () => {
+    const f = await fixture(knex);
+    const { before, after, service } = await twoVisitFixture(f);
+    await addPhoto(before.id, f.customerId, null, 'before-unlabeled');
+    await addPhoto(after.id, f.customerId, 'close_up', 'after-close-up');
+    await addPhoto(after.id, f.customerId, null, 'after-unlabeled');
+    const report = await buildLawnAssessmentReportData(service, 'lawn', knex, { propertyHistoryEnabled: false });
+    expect(report.beforeAfter.before.photoUrl).toBe('before-unlabeled');
+    expect(report.beforeAfter.after.photoUrl).toBe('after-unlabeled');
   });
 
   test('legacy back/side rows still pair with each other from history', async () => {
