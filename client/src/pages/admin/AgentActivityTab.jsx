@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { Badge, Button, Card, Select, cn } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { etDateString, formatETDate, formatETTime } from "../../lib/timezone";
 
 // Agents → Activity: one timeline of agent runs, parked drafts and cron
@@ -246,6 +247,8 @@ export default function AgentActivityTab() {
     load();
   }, [load]);
 
+  useVisiblePageRefresh(load, { intervalMs: 30_000, enabled: !loading });
+
   const items = useMemo(() => {
     const all = feed?.items || [];
     return all.filter(
@@ -291,11 +294,16 @@ export default function AgentActivityTab() {
             ))}
           </Select>
         </label>
-        <Button size="sm" variant="secondary" onClick={load} disabled={loading} className="gap-2">
-          <RefreshCw size={13} strokeWidth={2} className={loading ? "animate-spin" : undefined} aria-hidden />
-          {loading ? "Refreshing" : "Refresh"}
-        </Button>
       </div>
+
+      {error && (
+        <div className="flex flex-wrap items-center justify-between gap-3 text-13 text-alert-fg" role="alert">
+          <span>{error}</span>
+          <Button size="sm" variant="secondary" onClick={load} disabled={loading}>
+            {loading ? "Retrying…" : "Retry"}
+          </Button>
+        </div>
+      )}
 
       {feed?.unavailableSources?.length > 0 && (
         <div className="text-12 text-alert-fg" role="alert">
@@ -325,10 +333,8 @@ export default function AgentActivityTab() {
           <div className="p-5 text-13 text-ink-secondary" role="status">
             Loading activity…
           </div>
-        ) : error ? (
-          <div className="p-5 text-13 text-alert-fg" role="alert">
-            {error}
-          </div>
+        ) : !feed ? (
+          null
         ) : feed && feed.available === false ? (
           <div className="p-5 text-13 text-ink-secondary">
             The Activity feed is not enabled on this deployment. Set{" "}

@@ -17,7 +17,10 @@ const {
   draftReplyToMessageIdSql,
   inboundSmsReceiptProjectionSql,
   loadPriorOutboundBodies,
+  canonicalSmsLegacyLinkSql,
+  canonicalSmsAddressProjectionSql,
 } = require('../services/sms-response-policy');
+const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -221,7 +224,7 @@ async function resolveSmsLogCustomerFallbacks(rows) {
   const phones = new Map();
   for (const row of rows || []) {
     if (row.customer_id || row.first_name) continue;
-    const contactPhone = row.contact_phone || row.customer_phone;
+    const contactPhone = row.effective_contact_phone || row.contact_phone || row.customer_phone;
     // phoneIdentityKey (utils/phone.js) — NOT normalizePhoneLast10 — so an
     // international contact never buckets under the same key as a US
     // customer sharing its last ten digits; see findSingleCustomerForPhone.
@@ -1668,21 +1671,30 @@ router.post('/call', async (req, res, next) => {
 // table since PR 2; sms_log still gets dual-written for legacy consumers).
 router.get('/log', async (req, res, next) => {
   try {
-    const { customerId, direction, messageType, page, limit, search } = req.query;
+    const { customerId, direction, messageType, page, limit, search, needsResponse } = req.query;
+    if (![undefined, 'true', 'false'].includes(needsResponse)) {
+      return res.status(400).json({ error: 'Invalid needs-response filter' });
+    }
     const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', messages.metadata->>'draft_id')");
     const responseReplyToMessageId = draftReplyToMessageIdSql('mdx.sms_log_id');
     const receiptProjection = inboundSmsReceiptProjectionSql({
       messageAlias: 'messages', legacyAlias: 'sms_response', receiptAlias: 'sms_optout_receipt',
     });
+    const legacyLinkSql = canonicalSmsLegacyLinkSql({
+      messageAlias: 'messages', conversationAlias: 'conversations',
+    });
+    const addressProjection = canonicalSmsAddressProjectionSql({
+      messageAlias: 'messages', conversationAlias: 'conversations',
+      customerAlias: 'customers', legacyAlias: 'sms_response',
+    });
+    let pendingIds = [];
+    let pendingPeers = [];
 
     let query = db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .leftJoin('customers', 'conversations.customer_id', 'customers.id')
       .joinRaw(`LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status, sl.metadata, sl.created_at
-        FROM sms_log sl
-        WHERE sl.twilio_sid = messages.twilio_sid AND sl.direction = messages.direction
-        ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
+        ${legacyLinkSql}
       ) sms_response ON true`)
       .joinRaw(receiptProjection.joinSql)
       .joinRaw(`LEFT JOIN LATERAL (
@@ -1716,8 +1728,9 @@ router.get('/log', async (req, res, next) => {
         'sms_answer.is_click_followup as response_is_click_followup',
         'sms_answer.reply_to_message_id as response_reply_to_message_id',
         db.raw(`${receiptProjection.effectiveCreatedAtSql} as effective_created_at`),
-      )
-      .orderBy('messages.created_at', 'desc');
+        db.raw(`${addressProjection.contactPhoneSql} as effective_contact_phone`),
+        db.raw(`${addressProjection.endpointSql} as effective_our_endpoint_id`),
+      );
 
     // Recruiting threads (applicant texts carry a bearer interview link) are
     // owner-only — see utils/recruiting-thread-scope.js.
@@ -1738,25 +1751,49 @@ router.get('/log', async (req, res, next) => {
     if (req.query.phone !== undefined) {
       const phones = phoneMatchDigits(req.query.phone);
       if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
-      query = query.whereRaw("regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [phones]);
+      query = query.whereRaw(`regexp_replace(${addressProjection.contactPhoneSql}, '[^0-9]', '', 'g') = ANY (?::text[])`, [phones]);
     }
     if (customerId) query = query.where('conversations.customer_id', customerId);
     if (direction) query = query.where('messages.direction', direction);
     if (messageType) query = query.where('messages.message_type', messageType);
+    if (needsResponse === 'true') {
+      const pending = await loadPendingSmsConversations({
+        excludePhones: ADMIN_PHONES,
+        customerId,
+      });
+      pendingIds = pending.filter((row) => row.source === 'canonical').map((row) => row.id);
+      pendingPeers = [...new Set(pending.map((row) => row.peer).filter(Boolean))];
+      // Shared-reader peers are derived from immutable event evidence. The
+      // ordinary route scopes still govern which history rows are visible.
+      query = query.whereRaw(`${addressProjection.peerSql} = ANY (?::text[])`, [pendingPeers]);
+      // Put one exact pending row per endpoint ahead of its history so old
+      // work is immediately visible even when the peer has a long thread.
+      query = query.orderByRaw('CASE WHEN messages.id = ANY (?::uuid[]) THEN 0 ELSE 1 END', [pendingIds]);
+    }
 
     const searchTerm = typeof search === 'string' ? search.trim() : '';
     if (searchTerm) {
       const like = `%${searchTerm}%`;
-      query = query.where(b => b
+      const matchingMessages = (needsResponse === 'true' ? query.clone().clearSelect().clearOrder() : query).where(b => b
         .where('customers.first_name', 'ilike', like)
         .orWhere('customers.last_name', 'ilike', like)
         .orWhereRaw("(customers.first_name || ' ' || customers.last_name) ILIKE ?", [like])
-        .orWhere('conversations.contact_phone', 'ilike', like)
-        .orWhere('conversations.our_endpoint_id', 'ilike', like)
+        .orWhereRaw(`${addressProjection.contactPhoneSql} ILIKE ?`, [like])
+        .orWhereRaw(`${addressProjection.endpointSql} ILIKE ?`, [like])
         .orWhere('customers.phone', 'ilike', like)
         .orWhere('messages.body', 'ilike', like)
       );
+      if (needsResponse === 'true') {
+        // Reuse every visibility/filter constraint when selecting peers. Return
+        // their history, including pending rows whose body did not match search.
+        query = query.whereIn(
+          db.raw(addressProjection.peerSql),
+          matchingMessages.select(db.raw(addressProjection.peerSql)),
+        );
+      }
     }
+
+    query = query.orderBy('messages.created_at', 'desc').orderBy('messages.id', 'desc');
 
     const requestedPage = parsePositiveInt(page) || 1;
     const requestedLimit = parsePositiveInt(limit) || DEFAULT_SMS_LOG_LIMIT;
@@ -1774,17 +1811,23 @@ router.get('/log', async (req, res, next) => {
     }
 
     const fallbackCustomers = await resolveSmsLogCustomerFallbacks(rows);
+    const pendingIdSet = new Set(pendingIds.map(String));
 
     const messages = await Promise.all(rows.map(async (m) => {
-      const initialContact = m.contact_phone || m.customer_phone;
+      const initialContact = m.effective_contact_phone || m.contact_phone || m.customer_phone;
       const fallbackCustomer = !m.customer_id && initialContact
         ? fallbackCustomers.get(phoneIdentityKey(initialContact))
         : null;
       const customerName = m.first_name
         ? `${m.first_name} ${m.last_name || ''}`.trim()
         : customerDisplayName(fallbackCustomer);
-      const ours = m.our_endpoint_id;
-      const contact = m.contact_phone || m.customer_phone || fallbackCustomer?.phone;
+      const ours = m.effective_our_endpoint_id || m.our_endpoint_id;
+      const contact = m.effective_contact_phone || m.contact_phone || m.customer_phone || fallbackCustomer?.phone;
+      const contactKey = phoneIdentityKey(contact);
+      const currentCustomerKey = phoneIdentityKey(m.customer_phone);
+      const recipientCustomerId = m.customer_id
+        ? (contactKey && currentCustomerKey && contactKey === currentCustomerKey ? m.customer_id : null)
+        : (fallbackCustomer?.id || null);
       const from = m.direction === 'inbound' ? contact : ours;
       const to = m.direction === 'inbound' ? ours : contact;
       const { courtesyOnly, spamEnforced } = require('../services/sms-response-policy').responseFlags({
@@ -1806,9 +1849,12 @@ router.get('/log', async (req, res, next) => {
         responseMessageType,
         responseStatus,
         responseIsAnswer,
+        ...(needsResponse === 'true'
+          ? { responseNeedsResponse: pendingIdSet.has(String(m.id)) }
+          : {}),
         responseReplyToMessageId: m.response_reply_to_message_id || null,
         responseCreatedAt: m.response_created_at || m.created_at,
-        customerId: m.customer_id || fallbackCustomer?.id || null, customerName,
+        customerId: recipientCustomerId, customerName,
         createdAt: m.effective_created_at || m.created_at,
         isRead: !!m.is_read,
         readAt: m.read_at,

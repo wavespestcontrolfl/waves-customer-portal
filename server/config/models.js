@@ -309,6 +309,18 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
+  photoCaptions: Object.freeze({
+    name: 'photoCaptions',
+    // Completion-photo captions (admin-dispatch.js, laneId 'photo_scoring').
+    // Owner directive 2026-09-24: this lane runs on Gemini, not Claude/OpenAI —
+    // GEMINI_VISION_BEST is the primary, Claude VISION is the fallback (only
+    // when Gemini returns nothing), matching the waves-llm skill's rule that
+    // every cross-provider call site keeps an automatic Claude fallback.
+    // Honors the shared GEMINI_VISION_MODEL override the other photo lanes
+    // read, so one env var moves (or rolls back) every Gemini photo lane.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
+  }),
   lawnVisitAssessment: Object.freeze({
     name: 'lawnVisitAssessment',
     // One multimodal call per lawn visit (services/lawn-visit-assessment.js,

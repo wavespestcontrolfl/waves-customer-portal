@@ -415,6 +415,13 @@ async function appendMessage(opts) {
   if (!opts.authorType) throw new Error('appendMessage: authorType required');
 
   const createdAt = opts.createdAt || new Date();
+  const metadata = { ...(opts.metadata || {}) };
+  if (opts.channel === 'sms') {
+    Object.assign(metadata, {
+      sms_contact_phone: opts.contactPhone,
+      sms_our_endpoint_id: opts.ourEndpointId,
+    });
+  }
   const row = {
     conversation_id: opts.conversationId,
     channel: opts.channel,
@@ -437,7 +444,7 @@ async function appendMessage(opts) {
     is_read: opts.isRead === true,
     read_at: opts.isRead === true ? (opts.readAt || new Date()) : null,
     read_by_admin_user_id: opts.readByAdminUserId || null,
-    metadata: opts.metadata ? JSON.stringify(opts.metadata) : '{}',
+    metadata: JSON.stringify(metadata),
     created_at: createdAt,
     updated_at: new Date(),
   };
@@ -493,7 +500,19 @@ async function appendMessage(opts) {
       patch.read_at = opts.readAt || new Date();
       patch.read_by_admin_user_id = opts.readByAdminUserId || null;
     }
-    if (opts.metadata) patch.metadata = JSON.stringify(opts.metadata);
+    if (opts.metadata) {
+      const nextMetadata = { ...opts.metadata };
+      if (opts.channel === 'sms') {
+        const persisted = typeof existing.metadata === 'string'
+          ? JSON.parse(existing.metadata)
+          : existing.metadata;
+        Object.assign(nextMetadata, {
+          sms_contact_phone: persisted?.sms_contact_phone,
+          sms_our_endpoint_id: persisted?.sms_our_endpoint_id,
+        });
+      }
+      patch.metadata = JSON.stringify(nextMetadata);
+    }
 
     const [updated] = await trx('messages')
       .where({ id: existing.id })

@@ -1,12 +1,20 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const adminFetch = vi.fn();
+const { adminFetch, refresh } = vi.hoisted(() => ({
+  adminFetch: vi.fn(),
+  refresh: { callback: null },
+}));
 vi.mock("../../utils/admin-fetch", () => ({
   adminFetch: (...args) => adminFetch(...args),
+}));
+vi.mock("../../hooks/useVisiblePageRefresh", () => ({
+  default: (callback) => {
+    refresh.callback = callback;
+  },
 }));
 
 import PendingDraftsTab from "./PendingDraftsTab";
@@ -48,6 +56,7 @@ describe("PendingDraftsTab", () => {
   beforeEach(() => {
     adminFetch.mockReset();
     adminFetch.mockResolvedValue(DRAFTS);
+    refresh.callback = null;
   });
 
   afterEach(() => {
@@ -70,23 +79,49 @@ describe("PendingDraftsTab", () => {
     expect(adminFetch).toHaveBeenCalledWith("/admin/drafts?status=pending");
   });
 
-  it("locks every card and Refresh while one mutation is in flight", async () => {
+  it.each([false, true])("unlocks drafts when a refresh supersedes Retry (failure=%s)", async (fails) => {
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+    adminFetch.mockRejectedValueOnce(new Error("Temporary failure"));
+    await act(async () => refresh.callback());
+    const retry = screen.getByRole("button", { name: "Retry" });
+    let finishRetry;
+    let finishRefresh;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { finishRetry = resolve; }));
+    adminFetch.mockReturnValueOnce(new Promise((resolve, reject) => {
+      finishRefresh = () => fails ? reject(new Error("Refresh failed")) : resolve(DRAFTS);
+    }));
+    let refreshPromise;
+    act(() => {
+      retry.click();
+      refreshPromise = refresh.callback();
+    });
+    await act(async () => finishRetry({ drafts: [], pendingCount: 0 }));
+    expect(screen.getAllByText("Reject")[0]).toBeDisabled();
+    await act(async () => { finishRefresh(); await refreshPromise; });
+    expect(screen.getByText("Pat Customer")).toBeInTheDocument();
+    expect(screen.getAllByText("Reject")[0]).not.toBeDisabled();
+    if (fails) expect(screen.getByRole("button", { name: "Retry" })).not.toBeDisabled();
+    await act(async () => refresh.callback());
+    expect(adminFetch).toHaveBeenCalledTimes(5);
+  });
+
+  it("locks every card while one mutation is in flight", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<PendingDraftsTab embedded />);
     await screen.findByText("Pat Customer");
     let finish;
     adminFetch.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     fireEvent.click(screen.getAllByText("Approve & send")[0]);
-    // busyId names only d1, but d2's actions and Refresh must lock too:
+    // busyId names only d1, but d2's actions must lock too:
     // a second action would overwrite busyId and the first to finish
     // would re-enable everything with the other still pending.
     await waitFor(() => expect(screen.getAllByText("Approve & send")[1]).toBeDisabled());
     expect(screen.getAllByText("Reject")[1]).toBeDisabled();
-    expect(screen.getByText("Refresh")).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
     finish({ success: true });
     await waitFor(() => expect(screen.queryByText("Pat Customer")).not.toBeInTheDocument());
     expect(screen.getAllByText("Approve & send")[0]).not.toBeDisabled();
-    expect(screen.getByText("Refresh")).not.toBeDisabled();
   });
 
   it("approve confirms, PUTs, and removes the card", async () => {
@@ -184,5 +219,102 @@ describe("PendingDraftsTab", () => {
     await waitFor(() => expect(screen.getByText("Old Draft")).toBeInTheDocument());
     expect(screen.getAllByText("Sam Owner")).toHaveLength(1); // dedup by id
     expect(screen.queryByText("Load older drafts")).not.toBeInTheDocument(); // cursor exhausted
+  });
+
+  it("keeps an older page when an earlier background refresh resolves last", async () => {
+    const firstPage = { drafts: DRAFTS.drafts, pendingCount: 3, nextCursor: "d2" };
+    adminFetch.mockResolvedValueOnce(firstPage);
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+
+    let finishRefresh;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { finishRefresh = resolve; }));
+    act(() => { void refresh.callback(); });
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(2));
+
+    const oldDraft = { ...DRAFTS.drafts[0], id: "d3", customerName: "Old Draft" };
+    adminFetch.mockResolvedValueOnce({ drafts: [oldDraft], pendingCount: 3, nextCursor: null });
+    fireEvent.click(screen.getByText("Load older drafts"));
+    expect(await screen.findByText("Old Draft")).toBeInTheDocument();
+
+    await act(async () => { finishRefresh(firstPage); });
+    expect(screen.getByText("Old Draft")).toBeInTheDocument();
+    expect(screen.queryByText("Load older drafts")).not.toBeInTheDocument();
+  });
+
+  it("keeps loaded older drafts when a background refresh runs", async () => {
+    adminFetch.mockResolvedValueOnce({ drafts: DRAFTS.drafts, pendingCount: 3, nextCursor: "d2" });
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+    const oldDraft = { ...DRAFTS.drafts[0], id: "d3", customerName: "Old Draft" };
+    adminFetch.mockResolvedValueOnce({ drafts: [oldDraft], pendingCount: 3, nextCursor: null });
+    fireEvent.click(screen.getByText("Load older drafts"));
+    expect(await screen.findByText("Old Draft")).toBeInTheDocument();
+
+    adminFetch
+      .mockResolvedValueOnce({ drafts: DRAFTS.drafts, pendingCount: 3, nextCursor: "d2" })
+      .mockResolvedValueOnce({ drafts: [oldDraft], pendingCount: 3, nextCursor: null });
+    await act(async () => refresh.callback());
+
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([url]) =>
+      url === "/admin/drafts?status=pending&before=d2"
+    )).toHaveLength(2));
+    expect(screen.getByText("Old Draft")).toBeInTheDocument();
+  });
+
+  it("does not poll while a draft revision is open and dirty", async () => {
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+
+    fireEvent.click(screen.getAllByText("Revise")[0]);
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "Unsaved revised message" } });
+
+    await act(async () => refresh.callback());
+    expect(adminFetch).toHaveBeenCalledTimes(1);
+    expect(textarea).toHaveValue("Unsaved revised message");
+  });
+
+  it("discards a pending refresh when revision editing starts", async () => {
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+
+    let finishRefresh;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { finishRefresh = resolve; }));
+    let refreshPromise;
+    act(() => { refreshPromise = refresh.callback(); });
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getAllByText("Revise")[0]);
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "Keep this pending revision" } });
+
+    await act(async () => {
+      finishRefresh({
+        drafts: [{ ...DRAFTS.drafts[1], id: "d3", customerName: "New Draft" }],
+        pendingCount: 2,
+      });
+      await refreshPromise;
+    });
+
+    expect(screen.getByText("Pat Customer")).toBeInTheDocument();
+    expect(screen.queryByText("New Draft")).not.toBeInTheDocument();
+    expect(textarea).toHaveValue("Keep this pending revision");
+  });
+
+  it("resumes polling after a revised draft is sent and unmounted", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+
+    fireEvent.click(screen.getAllByText("Revise")[0]);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Send this revision" } });
+    adminFetch.mockResolvedValueOnce({ success: true });
+    fireEvent.click(screen.getByText("Send revised"));
+    await waitFor(() => expect(screen.queryByText("Pat Customer")).not.toBeInTheDocument());
+
+    adminFetch.mockResolvedValueOnce({ drafts: [DRAFTS.drafts[1]], pendingCount: 1 });
+    await act(async () => refresh.callback());
+    expect(adminFetch.mock.calls.filter(([url]) => url === "/admin/drafts?status=pending")).toHaveLength(2);
   });
 });

@@ -14,6 +14,50 @@ const message = (direction, createdAt, overrides = {}) => ({
 });
 
 describe("needsSmsReply", () => {
+  it("uses the server's pending anchor when filtered history is incomplete", () => {
+    const pending = message("inbound", "2026-09-21T13:00:00Z", {
+      id: "server-pending",
+      to: "+19415550199",
+      courtesyOnly: true,
+      responseNeedsResponse: true,
+    });
+    const misleadingReply = message("outbound", "2026-09-21T13:01:00Z", {
+      from: "+19415550199",
+      status: "delivered",
+      responseNeedsResponse: false,
+    });
+
+    expect(unansweredSmsReply([pending, misleadingReply])).toEqual({
+      businessLine: "+19415550199",
+      messageId: "server-pending",
+      messageType: "inbound",
+    });
+  });
+
+  it("does not invent a pending reply when authoritative rows are all false", () => {
+    expect(unansweredSmsReply([
+      message("inbound", "2026-09-21T13:00:00Z", { responseNeedsResponse: false }),
+    ])).toBeNull();
+  });
+
+  it("selects the newest authoritative inbound across business lines", () => {
+    expect(unansweredSmsReply([
+      message("inbound", "2026-09-21T13:00:00Z", {
+        id: "older-pending",
+        to: "+19413187612",
+        responseNeedsResponse: true,
+      }),
+      message("inbound", "2026-09-21T13:02:00Z", {
+        id: "newer-pending",
+        to: "+19415550199",
+        responseNeedsResponse: true,
+      }),
+    ])).toMatchObject({
+      businessLine: "+19415550199",
+      messageId: "newer-pending",
+    });
+  });
+
   it("returns false when there is no inbound message to answer", () => {
     expect(needsSmsReply([])).toBe(false);
     expect(needsSmsReply([
