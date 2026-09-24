@@ -559,7 +559,7 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     const claim = pub.slice(pub.indexOf('const autoClaimed = await db(\'estimates\')'), pub.indexOf('extension_auto_granted_at: db.fn.now()'));
     expect(claim).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
     const ext = fs.readFileSync(path.join(__dirname, '../services/estimate-extension.js'), 'utf8');
-    expect(ext).toContain("const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');");
+    expect(ext).toContain("const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL } = require('../utils/estimate-claim-sql');");
     expect(ext.split('.whereRaw(REPRICE_PENDING_ABSENT_SQL)').length - 1).toBe(2);
     const guarded = ext.slice(ext.indexOf('const updated = await trx(\'estimates\')'), ext.indexOf('.update(updates);'));
     expect(guarded).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
@@ -695,7 +695,8 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // The accept preflight answers the documented re-price 409 BEFORE the generic accept-active refusal (codex r6 P0).
     const acceptRepriceAt = pub.indexOf("return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });");
     expect(acceptRepriceAt).toBeGreaterThan(-1);
-    expect(pub.indexOf("if (!isEstimateAcceptActive(estimate)) {\n      return res.status(409).json({ error: 'Estimate is no longer active' });", acceptRepriceAt)).toBeGreaterThan(acceptRepriceAt);
+    // …since #4667 r37 the accept-active refusal re-reads the row and answers the generic 404 when it is off-surface, else its 409.
+    expect(pub.indexOf("if (!isEstimateAcceptActive(estimate)) {\n      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);", acceptRepriceAt)).toBeGreaterThan(acceptRepriceAt);
     // Every operator send surface (incl. the follow-up nudge) refuses a held row through the shared assertion (codex r6 P2).
     expect(route).toContain("if (siblingRepricePending(estimate)) {\n    const err = new Error('This estimate is held for a re-price");
     // The SSR gate reads the ONE shared verdict (linkage markers + hold) since r7.

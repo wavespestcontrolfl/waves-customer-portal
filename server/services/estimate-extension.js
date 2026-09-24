@@ -20,7 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
-const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
@@ -326,7 +326,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       // have preceded the hold. Zero rows → the same 409 as any other
       // concurrent change; the public route releases its burn on it.
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
-      .whereRaw("NOT COALESCE(estimate_data->'addressUnverified' = 'true'::jsonb, false)")
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .update(updates);
     if (!updated) {
       const err = new Error('Estimate changed while extending — retry.');
@@ -365,7 +365,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         // A sibling under the county-roll address block stays as it is —
         // the group renderer drops it as off-surface (codex r23 P2).
-        .whereRaw("NOT COALESCE(estimate_data->'addressUnverified' = 'true'::jsonb, false)")
+        .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
         .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
         // Atomic belt to the pre-mutation verdict (uncapped codex P0 r20):
         // while the gate is on a sibling that fails the authority predicate
