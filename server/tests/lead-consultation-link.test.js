@@ -165,6 +165,32 @@ describe('buildLeadConsultationLink — gate on', () => {
     expect(createShortCode).not.toHaveBeenCalled();
   });
 
+  // Codex #4709 r18 P2: non-US numbers are refused before minting.
+  test('a lead with a non-US phone mints nothing', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+447700900123', status: 'new', converted_at: null } }) };
+    const result = await buildLeadConsultationLink(LEAD_ID);
+    expect(result.url).toBeNull();
+    expect(result.reason).toMatch(/US numbers/);
+    expect(createShortCode).not.toHaveBeenCalled();
+  });
+
+  // Codex #4709 r18 P2: the availability probe shares the same rules, so
+  // the Leads button shows the reason before the click.
+  test.each([
+    ['archived customer', { customer_id: 'cust-1' }, null, /archived/],
+    ['customer on a different phone', { customer_id: 'cust-1' }, { phone: '+19415559999' }, /different phone/],
+    ['non-US phone', { phone: '+447700900123' }, null, /US numbers/],
+  ])('the availability probe reports %s as unavailable', async (_label, leadPatch, ownerRow, reason) => {
+    const { consultationLinkAvailable } = require('../services/lead-consultation-link');
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null, ...leadPatch } }),
+      customers: chainBuilder({ firstRow: ownerRow }),
+    };
+    const result = await consultationLinkAvailable(LEAD_ID);
+    expect(result).toMatchObject({ enabled: true, available: false });
+    expect(result.reason).toMatch(reason);
+  });
+
   test('no signing secret configured fails closed with a reason', async () => {
     delete process.env.LEAD_PREFILL_SECRET;
     delete process.env.JWT_SECRET;

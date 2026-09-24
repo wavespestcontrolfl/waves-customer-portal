@@ -50,6 +50,36 @@ function consultationUrlForLead(leadId) {
   return `${publicPortalUrl()}/inspection/${token}`;
 }
 
+// A US destination for the consultation bearer rule: 10 digits, or 11
+// starting with 1 — any other explicit +country code is not. Shared with
+// admin-leads.js's send route so mint, probe and send agree.
+function isUsPhone(phone) {
+  const raw = String(phone || '').trim();
+  const digits = raw.replace(/\D/g, '');
+  if (raw.startsWith('+')) return digits.length === 11 && digits.startsWith('1');
+  return digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
+}
+
+// Why a lead cannot get a consultation link, or null — the ONE rule set the
+// builder and the availability probe share, mirroring the send check
+// (Codex #4709 r17 + r18 P2s): open lead, a US phone, and a linked customer
+// (if any) that is live and still on the lead's phone. Nothing is minted
+// that the send would refuse.
+async function leadLinkRefusal(lead) {
+  if (!lead) return 'Lead not found';
+  if (!isOpenLeadRow(lead)) return 'That lead has already converted or closed';
+  if (!lead.phone) return 'Lead has no phone number';
+  if (!isUsPhone(lead.phone)) return 'Consultation links go to US numbers only';
+  if (!lead.customer_id) return null;
+  const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
+  if (!owner) return "This lead's customer record is archived — update the lead first";
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  if (last10(owner.phone) !== last10(lead.phone)) {
+    return "This lead's customer has a different phone on file now — update the lead first";
+  }
+  return null;
+}
+
 async function buildLeadConsultationLink(leadOrId) {
   try {
     if (!leadInspectionLinkLive()) {
@@ -65,20 +95,8 @@ async function buildLeadConsultationLink(leadOrId) {
     // (pre-push Codex P1): a won/lost/closed lead must never mint a
     // free-consultation invitation, however its id reached this function.
     const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at', 'customer_id');
-    if (!lead) return { url: null, line: '', reason: 'Lead not found' };
-    if (!isOpenLeadRow(lead)) return { url: null, line: '', reason: 'That lead has already converted or closed' };
-    if (!lead.phone) return { url: null, line: '', reason: 'Lead has no phone number' };
-    // The send check's linked-customer rule, applied BEFORE minting (Codex
-    // #4709 r17 P2): a lead whose linked customer is archived or now on a
-    // different phone would get a live 14-day code the send then refuses.
-    if (lead.customer_id) {
-      const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
-      if (!owner) return { url: null, line: '', reason: "This lead's customer record is archived — update the lead first" };
-      const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      if (last10(owner.phone) !== last10(lead.phone)) {
-        return { url: null, line: '', reason: "This lead's customer has a different phone on file now — update the lead first" };
-      }
-    }
+    const refusal = await leadLinkRefusal(lead);
+    if (refusal) return { url: null, line: '', reason: refusal };
 
     const longUrl = consultationUrlForLead(lead.id);
     if (!longUrl) return { url: null, line: '', reason: 'Could not build a consultation link (no signing secret configured)' };
@@ -142,10 +160,9 @@ async function consultationLinkAvailable(leadOrId) {
 async function probeLeadConsultationLink(leadOrId) {
   const leadId = typeof leadOrId === 'string' ? leadOrId : leadOrId?.id;
   if (!leadId) return { available: false, reason: 'No lead to build a consultation link for' };
-  const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
-  if (!lead) return { available: false, reason: 'Lead not found' };
-  if (!isOpenLeadRow(lead)) return { available: false, reason: 'That lead has already converted or closed' };
-  if (!lead.phone) return { available: false, reason: 'Lead has no phone number' };
+  const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at', 'customer_id');
+  const refusal = await leadLinkRefusal(lead);
+  if (refusal) return { available: false, reason: refusal };
   if (!consultationUrlForLead(lead.id)) {
     return { available: false, reason: 'Could not build a consultation link (no signing secret configured)' };
   }
@@ -257,4 +274,6 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
   }
 }
 
-module.exports = { buildLeadConsultationLink, buildLeadConsultationSmsLine, consultationUrlForLead, consultationSmsLineFor, consultationLinkAvailable };
+module.exports = {
+  isUsPhone,
+  buildLeadConsultationLink, buildLeadConsultationSmsLine, consultationUrlForLead, consultationSmsLineFor, consultationLinkAvailable };
