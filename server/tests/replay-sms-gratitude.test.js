@@ -56,7 +56,7 @@ describe('offline gratitude replay', () => {
     expect(report.exclusions[0].reason).toBe('no_recent_outbound');
   });
 
-  test.each(['queued', 'scheduled', 'sending'])('a prior %s outbound blocks an older delivered closure', status => {
+  test.each(['accepted', 'queued', 'scheduled', 'sending'])('a prior %s outbound blocks an older delivered closure', status => {
     const report = replayRows(normalized(withWarmup([
       exportRow({ id: 'SM-report', at: '2026-09-01T14:00:00Z', direction: 'outbound-api',
         body: 'Your report: https://portal.invalid/report' }),
@@ -68,7 +68,8 @@ describe('offline gratitude replay', () => {
     expect(report.exclusions.at(-1).reason).toBe('pending_work');
   });
 
-  test('a post-inbound queued outbound cancels within the evaluation window but not beyond it', () => {
+  test.each(['accepted', 'queued'])(
+    'a post-inbound %s outbound cancels within the evaluation window but not beyond it', status => {
     const rows = [
       exportRow({ id: 'SM-report', at: '2026-09-01T14:00:00Z', direction: 'outbound-api',
         body: 'Your report: https://portal.invalid/report' }),
@@ -76,8 +77,8 @@ describe('offline gratitude replay', () => {
     ];
     const withinWindow = replayRows(normalized(withWarmup([
       ...rows,
-      exportRow({ id: 'SM-queued', at: new Date(Date.parse(rows[1].at) + QUIET_WINDOW_MS).toISOString(),
-        direction: 'outbound-api', body: 'Queued follow-up.', status: 'queued' }),
+      exportRow({ id: `SM-${status}`, at: new Date(Date.parse(rows[1].at) + QUIET_WINDOW_MS).toISOString(),
+        direction: 'outbound-api', body: 'Pending follow-up.', status }),
     ])));
     expect(withinWindow.exclusions).toContainEqual(
       expect.objectContaining({ id: 'SM-thanks', reason: 'thread_advanced' }),
@@ -85,8 +86,9 @@ describe('offline gratitude replay', () => {
 
     const afterWindow = replayRows(normalized(withWarmup([
       ...rows,
-      exportRow({ id: 'SM-queued-later', at: new Date(Date.parse(rows[1].at) + QUIET_WINDOW_MS + 1).toISOString(),
-        direction: 'outbound-api', body: 'Later queued follow-up.', status: 'queued' }),
+      exportRow({ id: `SM-${status}-later`,
+        at: new Date(Date.parse(rows[1].at) + QUIET_WINDOW_MS + 1).toISOString(),
+        direction: 'outbound-api', body: 'Later pending follow-up.', status }),
     ])));
     expect(afterWindow.ids.candidates).toContain('SM-thanks');
   });

@@ -22,7 +22,7 @@ const {
 } = require('../services/sms-gratitude');
 
 const OUTBOUND_DIRECTIONS = new Set(['outbound-api', 'outbound-reply']);
-const PENDING_OUTBOUND_STATUSES = new Set(['queued', 'scheduled', 'sending']);
+const PENDING_OUTBOUND_STATUSES = new Set(['accepted', 'queued', 'scheduled', 'sending']);
 
 function usage() {
   return 'Usage: node server/scripts/replay-sms-gratitude.js --input <private.jsonl> --output <private.json>';
