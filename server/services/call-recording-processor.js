@@ -6729,13 +6729,20 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
 // this pass's GENERATION. Sends NOTHING to the customer. Dark behind
 // GATE_CALL_RESCHEDULE_APPLY; never blocks the call.
 // A disposition minted by decideDisposition BEFORE this move applied that
-// only made sense while the move was still outstanding — the reschedule
-// itself is real work either way, so both stay listed even though the
+// only made sense while the move was still outstanding — the
 // scheduling-model path leaves the callback standing on purpose (see
-// call-disposition.js step 2). Only these two are ever revised; anything
-// else (including a human's own PUT /calls/:id/disposition tag) is left
-// alone by the compare-and-swap in writeCallDisposition.
-const STALE_AFTER_APPLIED_MOVE = new Set(['callback_task_created', 'cancellation_processed']);
+// call-disposition.js step 2). cancellation_processed was originally listed
+// here too, but decideDisposition's own reschedule guard (step 2 and step
+// 4) already converts it to existing_customer_routed for every
+// reschedule_requested call, so it can never reach this function in the
+// first place — keeping it would have been dead code with a real downside:
+// a genuinely separate STALE cancellation_processed value (from an older,
+// different extraction pass) could get silently erased by an unrelated
+// later reschedule on the same call (Codex #4721 r2 P2). Dropped. Only
+// callback_task_created is ever revised; anything else (including a
+// human's own PUT /calls/:id/disposition tag) is left alone by the
+// compare-and-swap in writeCallDisposition.
+const STALE_AFTER_APPLIED_MOVE = new Set(['callback_task_created']);
 
 // callback_task_created is the one disposition value a multi-intent call
 // can still deserve after the move landed: the model's recommendation is a
@@ -6790,28 +6797,25 @@ async function hasIndependentCallbackObligation(callId, v2) {
 }
 
 // Owner follow-up from #4708 r2 P2: when the apply step actually lands the
-// move, a callback (or a deterministic-path cancellation read) minted for
-// the SAME call before the move landed is no longer outstanding work — left
-// alone, unworked-comms-watcher.js keeps selecting it and can page someone
-// to call a customer who is already handled. Re-reads the live value and
-// swaps it under a CAS so nothing but that exact pre-move value is ever
-// touched. `procGeneration`, when passed, fences BOTH the reread and the
-// write to this pass's processing_generation (Codex #4721 r1 P2): the token
-// that fenced this pass is already cleared by finalization, so without this
-// a stale, slow pass could revise a disposition a newer reprocess generation
-// already re-decided for itself.
+// move, a callback minted for the SAME call before the move landed is no
+// longer outstanding work — left alone, unworked-comms-watcher.js keeps
+// selecting it and can page someone to call a customer who is already
+// handled. Re-reads the live value and swaps it under a CAS so nothing but
+// that exact pre-move value is ever touched. `procGeneration`, when passed,
+// fences BOTH the reread and the write to this pass's processing_generation
+// (Codex #4721 r1 P2): the token that fenced this pass is already cleared
+// by finalization, so without this a stale, slow pass could revise a
+// disposition a newer reprocess generation already re-decided for itself.
 async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration = null }) {
   const query = db('call_log').where({ id: call.id });
   if (procGeneration != null) query.where({ processing_generation: procGeneration });
   const fresh = await query.first('disposition', 'processing_generation', 'v2_extraction_status', 'ai_extraction_enriched');
   if (!fresh || !STALE_AFTER_APPLIED_MOVE.has(fresh.disposition)) return;
-  if (fresh.disposition === 'callback_task_created') {
-    const v2 = fresh.v2_extraction_status === 'valid' ? fresh.ai_extraction_enriched : null;
-    const { independent, reason } = await hasIndependentCallbackObligation(call.id, v2);
-    if (independent) {
-      logger.info(`[call-proc] Leaving callback_task_created standing for ${maskSid(callSid)} after applied move: ${reason}`);
-      return;
-    }
+  const v2 = fresh.v2_extraction_status === 'valid' ? fresh.ai_extraction_enriched : null;
+  const { independent, reason } = await hasIndependentCallbackObligation(call.id, v2);
+  if (independent) {
+    logger.info(`[call-proc] Leaving callback_task_created standing for ${maskSid(callSid)} after applied move: ${reason}`);
+    return;
   }
   await writeCallDisposition({
     callId: call.id,
@@ -6823,28 +6827,62 @@ async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration
   });
 }
 
-// The three bookkeeping passes an APPLIED move owes, in one place so the step
-// above states the move and this states what follows from it (codex P2) —
-// all three share the same precondition and all three are non-blocking by
-// design.
-//
-// The disposition revision also runs on a RETRY that lands on
-// `skipped`/`already_applied` (Codex #4721 r1 P2): if the process died after
-// applyCallReschedule committed the move (and its call_reschedule_applied
-// activity row) but before this function ran, the move itself is durably
-// proved — the retry's own applyCallReschedule call reads that activity row
-// back and returns already_applied — so the guard below widens to it rather
-// than skipping the revision forever. Chosen over moving the write inside
-// call-reschedule-apply.js's own transaction (the smaller diff: the move
-// stays ignorant of call_log.disposition, and this already-idempotent
-// re-read/CAS handles being re-run safely). The other two follow-ups stay
-// scoped to a genuinely NEW apply — fulfillment refresh and the promised-
-// window note are about what the move JUST did, and already_applied means
-// it did nothing this pass.
+// Durable proof that THIS call's reschedule was applied at some point,
+// independent of what the apply step's OWN outcome/reason string says on a
+// retry (Codex #4721 r2 P2). call-reschedule-apply.js's `prior` branch only
+// returns `already_applied` when the LIVE call_log row still matches the
+// activity row's own processing_generation/source_hash snapshot exactly
+// (`sameDecision`) — but processing_generation bumps on every claim, so a
+// genuine crash-then-retry (a new pass, a new generation) almost always
+// returns `prior_application_requires_review` instead, and the recovery
+// path this function exists for would never fire if it trusted that reason
+// string alone. The activity_log row itself — written in the SAME
+// transaction as the move, per call-reschedule-apply.js's own module
+// comment — is the actual durable fact: it existing at all proves this
+// call's move landed at some point, regardless of whether the row's
+// snapshot still matches the CURRENT live state.
+async function rescheduleWasDurablyApplied(callId) {
+  const { ACTIVITY_ACTION } = require('./call-reschedule-apply');
+  const row = await db('activity_log').where({ action: ACTIVITY_ACTION })
+    .whereRaw("metadata->>'call_log_id' = ?", [String(callId)]).first('id');
+  return !!row;
+}
+
+// Which of applyCallReschedule's results mean "this call's reschedule ask
+// is resolved" for disposition-revision purposes (Codex #4721 r2 P2):
+//   - `applied`               — the move landed this pass.
+//   - `noop`/`already_at_requested_time` — the visit was already exactly
+//     where the call asked for it; call-reschedule-apply.js's own
+//     writeDecision still records the SAME activity_log row and resolves
+//     the cards for this case, so it is resolved work, not a no-op to
+//     disposition.
+//   - `skipped`/`already_applied` or `skipped`/`prior_application_requires_review`
+//     — both are the apply step's own "a prior activity_log row for this
+//     call already exists" path; which reason string comes back depends on
+//     whether the live call_log row still matches that row's own snapshot,
+//     not on whether the move itself happened — so both need the SAME
+//     durable check (rescheduleWasDurablyApplied) rather than trusting
+//     either string.
+function resolvesRescheduleAsk(result) {
+  if (result?.outcome === 'applied') return true;
+  if (result?.outcome === 'noop' && result?.reason === 'already_at_requested_time') return true;
+  if (result?.outcome === 'skipped' && (result?.reason === 'already_applied' || result?.reason === 'prior_application_requires_review')) return true;
+  return false;
+}
+
+// The bookkeeping passes a RESOLVED reschedule ask owes, in one place so the
+// step above states the move and this states what follows from it (codex
+// P2) — non-blocking by design. Only a genuinely NEW apply this pass
+// (`result.outcome === 'applied'`) gets the fulfillment refresh and the
+// promised-window note — they are about what the move JUST did. The
+// disposition revision runs on every resolved outcome (see
+// resolvesRescheduleAsk), gated behind an explicit durable-proof check for
+// the two retry-shaped outcomes so a call whose reschedule genuinely never
+// applied is never touched.
 async function applyRescheduleFollowUps({ call, callSid, result, procGeneration = null }) {
-  const appliedNow = result?.outcome === 'applied';
-  const alreadyApplied = result?.outcome === 'skipped' && result?.reason === 'already_applied';
-  if (!appliedNow && !alreadyApplied) return;
+  if (!resolvesRescheduleAsk(result)) return;
+  const appliedNow = result.outcome === 'applied';
+  const retryShaped = result.outcome === 'skipped';
   if (appliedNow) {
     // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
     // the move just kept was written open and its proof did not exist yet.
@@ -6862,10 +6900,13 @@ async function applyRescheduleFollowUps({ call, callSid, result, procGeneration 
     // finalized — and every move applied before that feature existed reads the
     // same way (codex P1, PR #4403 rounds 8 and 10).
   }
-  if (isEnabled('callDispositionV1')) {
-    await reviseDispositionAfterAppliedMove({ call, callSid, procGeneration })
-      .catch((err) => logger.warn(`[call-proc] post-reschedule disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
-  }
+  if (!isEnabled('callDispositionV1')) return;
+  if (retryShaped && !(await rescheduleWasDurablyApplied(call.id).catch((err) => {
+    logger.warn(`[call-proc] durable-applied check failed for ${maskSid(callSid)}: ${err.message}`);
+    return false;
+  }))) return;
+  await reviseDispositionAfterAppliedMove({ call, callSid, procGeneration })
+    .catch((err) => logger.warn(`[call-proc] post-reschedule disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
 }
 
 async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
@@ -17760,6 +17801,8 @@ CallRecordingProcessor._test = {
   applyRescheduleFollowUps,
   reviseDispositionAfterAppliedMove,
   hasIndependentCallbackObligation,
+  rescheduleWasDurablyApplied,
+  resolvesRescheduleAsk,
   writeCallDisposition,
   recordedPartOfComposite,
   summarizeBatch,
