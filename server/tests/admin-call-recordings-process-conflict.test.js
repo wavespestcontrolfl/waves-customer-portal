@@ -404,3 +404,19 @@ describe('claim ceiling is derived from the provider budgets', () => {
 
 
 });
+
+// The legacy dispute snapshot's service intent follows the resolved
+// service NAME: an inspection ask is answered only by an inspection
+// booking, so settlement neither ignores the exact WDO / Waves Assessment
+// appointment nor files a duplicate-booking task (codex #4666 r25 P1).
+describe('legacyDisputeServiceIntent', () => {
+  const { legacyDisputeServiceIntent } = jest.requireActual('../services/call-recording-processor')._test;
+  test('inspection services take the inspection intent; treatments keep the treatment intent', () => {
+    expect(legacyDisputeServiceIntent({ matched_service: 'WDO Inspection' })).toBe('inspection_only');
+    expect(legacyDisputeServiceIntent({ matched_service: 'Waves Assessment', requested_service: 'come look at the lawn' })).toBe('inspection_only');
+    expect(legacyDisputeServiceIntent({ requested_service: 'termite inspection' })).toBe('inspection_only');
+    expect(legacyDisputeServiceIntent({ matched_service: 'General Pest Control', specific_service_name: 'Bi-Monthly Pest Control' })).toBe('active_infestation_treatment');
+    expect(legacyDisputeServiceIntent({})).toBe('active_infestation_treatment');
+    expect(legacyDisputeServiceIntent(null)).toBe('active_infestation_treatment');
+  });
+});

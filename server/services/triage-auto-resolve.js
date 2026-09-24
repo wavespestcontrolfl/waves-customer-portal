@@ -2130,6 +2130,7 @@ async function sweep({ now = new Date() } = {}) {
 }
 
 module.exports = {
+  isInspection,
   unambiguousDictationTarget,
   loadUnambiguousEmailEvidence,
   runTriageAutoResolve,

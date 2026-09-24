@@ -416,6 +416,17 @@ export default function TriageInboxTabV2() {
       })
       .catch((err) => {
         setActioning(null);
+        // The card's evidence was refreshed since it rendered (a force
+        // reprocess on a house-number conflict): reload so the operator
+        // answers the CURRENT evidence, instead of resubmitting the same
+        // stale version forever (codex #4666 r25 P2).
+        if (err?.status === 409) {
+          setDenyFor(null);
+          setDenyFields([]);
+          load(mode, status, autoOnly);
+          setError("This card's evidence changed since it loaded — review the refreshed card before answering.");
+          return;
+        }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };

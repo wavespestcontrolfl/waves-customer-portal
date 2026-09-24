@@ -10008,7 +10008,11 @@ const CallRecordingProcessor = {
               // snapshot takes the intent that admits EITHER cadence; the
               // service-category, window and hour checks still bind
               // (pre-push audit P1: a null intent rejected every booking).
-              service_intent: 'active_infestation_treatment',
+              // An inspection ask (WDO, Waves Assessment) takes the
+              // inspection intent, or settlement would ignore the exact
+              // inspection booking and file a duplicate-booking task
+              // (codex #4666 r25 P1).
+              service_intent: legacyDisputeServiceIntent(extracted),
             },
             property: {
               service_address: {
@@ -18214,7 +18218,20 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 // Place tail budget: leaves ≥ 255 − 100 (unit) − 80 − separators ≈ 70 chars of street.
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
+// The legacy (pre-V2-routing) dispute snapshot's service intent, read from
+// the resolved service NAME with the one inspection vocabulary the
+// settlement's cadence rule reads (triage-auto-resolve.isInspection):
+// an inspection ask is answered only by an inspection booking, a
+// treatment ask only by a treatment (codex #4666 r25 P1).
+function legacyDisputeServiceIntent(extracted) {
+  const { isInspection } = require('./triage-auto-resolve');
+  const words = [extracted?.matched_service, extracted?.specific_service_name, extracted?.requested_service]
+    .filter(Boolean).join(' ');
+  return isInspection(words) ? 'inspection_only' : 'active_infestation_treatment';
+}
+
 CallRecordingProcessor._test = {
+  legacyDisputeServiceIntent,
   backfillLinkedCustomerFromExtraction,
   prelinkedBackfillGate,
   thirdPartyCallNatureFromV2,
