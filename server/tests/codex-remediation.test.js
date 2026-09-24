@@ -328,6 +328,26 @@ describe('runRemediationForPr', () => {
     }]);
   });
 
+  test('an incomplete fact check retries on the same head with retained budget instead of parking', async () => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const onPark = jest.fn();
+    const validate = jest.fn()
+      .mockResolvedValueOnce({ ok: false, reason: 'factcheck did not complete', transient: true })
+      .mockImplementation(PASS);
+    const editorialEvidence = { filesForDocument: jest.fn(async () => []) };
+    const ctx = { ...CTX, expectedParentSha: HEAD, prePushCheck: jest.fn(async () => true), onPark };
+    const deps = { db, gh, editorialEvidence, callAnthropic: jest.fn(makeCall('FIXED BODY')), validateFixedBlogFile: validate };
+
+    const first = await runRemediationForPr(ctx, deps);
+    expect(first).toEqual(expect.objectContaining({ skipped: true, transient: true, reason: expect.stringContaining('will retry') }));
+    expect(onPark).not.toHaveBeenCalled();
+    expect(db._tables.codex_remediation_state[0]).toEqual(expect.objectContaining({ status: 'active', rounds: 1 }));
+
+    const second = await runRemediationForPr(ctx, deps);
+    expect(second).toEqual(expect.objectContaining({ remediated: true, round: 2 }));
+  });
+
   test('an editorial provider outage retries on the same head with retained budget, then atomically commits after recovery', async () => {
     const db = makeDb();
     const gh = makeGh({ preHead: HEAD });
@@ -1330,7 +1350,7 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
 
   test('mandatory editorial fact checking rejects an unchecked pass', async () => {
     const result = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true, requireFactCheck: true }, gateDeps);
-    expect(result).toEqual({ ok: false, reason: 'factcheck did not complete' });
+    expect(result).toEqual({ ok: false, reason: 'factcheck did not complete', transient: true });
   });
 
   test('the editorial evidence gate requires a completed fact check without the caller flag', async () => {
@@ -1338,7 +1358,7 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     process.env.GATE_EDITORIAL_EVIDENCE = 'true';
     try {
       const result = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true }, gateDeps);
-      expect(result).toEqual({ ok: false, reason: 'factcheck did not complete' });
+      expect(result).toEqual({ ok: false, reason: 'factcheck did not complete', transient: true });
     } finally {
       if (prior === undefined) delete process.env.GATE_EDITORIAL_EVIDENCE;
       else process.env.GATE_EDITORIAL_EVIDENCE = prior;

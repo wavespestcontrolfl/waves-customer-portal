@@ -759,7 +759,7 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
   // remediation path requires one while that gate is on — not only callers
   // that pass requireFactCheck.
   const requireFactCheck = opts.requireFactCheck || require('./editorial-evidence').enabled();
-  if (requireFactCheck && factResult?.checked !== true) return { ok: false, reason: 'factcheck did not complete' };
+  if (requireFactCheck && factResult?.checked !== true) return { ok: false, reason: 'factcheck did not complete', transient: true };
   if (factResult && !factResult.pass) {
     const p0 = (factResult.findings || []).filter((f) => f.severity === 'P0');
     if (p0.length) return { ok: false, reason: `factcheck ${p0.map((f) => f.message).slice(0, 2).join('; ')}` };
@@ -1935,6 +1935,15 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   let originalMetaDescription;
   try { originalMetaDescription = ((fm.parse(file.content) || {}).data || {}).meta_description; } catch (_) { originalMetaDescription = undefined; }
   const gate = await validate(fixed, { service, factContext, operatorFaqException, guardContext, originalMetaDescription }, deps);
+  if (gate?.transient === true) {
+    // An incomplete fact check is a provider outage, not a verdict: spend a
+    // round and retry on the same bounded budget as editorial evidence.
+    const attempt = (state.rounds || 0) + 1;
+    await saveState(db, prNumber, { branch, status: 'active', rounds: attempt });
+    const reason = `fix content gates temporarily unavailable: ${gate.reason}`;
+    if (atRoundLimit(attempt)) return park(db, prNumber, `${reason} (exhausted ${MAX_ROUNDS} remediation rounds)`, onPark, headSha, PARK_PRE_PUSH);
+    return { skipped: true, transient: true, reason: `${reason} (will retry)` };
+  }
   if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha, PARK_PRE_PUSH);
   // A passing fix that carries named-competitor content still needs a human:
   // the merge stamps enforcing that sign-off (astro_requires_human_merge /
