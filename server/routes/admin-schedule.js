@@ -10704,6 +10704,33 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           arrivalRouteFenceKeys = new Set(await lockTechDays(trx, preFence));
         }
       }
+      // Save-time eligibility for the FINAL technician on the FINAL date
+      // this save lands on (tech-out P1 pre-push audit): assignScheduleJobs
+      // below only runs when the technician itself is changing, so a
+      // date-only edit that keeps the current technician used to skip
+      // eligibility entirely — the receiving day was never checked against
+      // technician_absences. And when assignScheduleJobs DOES run, its
+      // write to updates.scheduled_date hasn't happened yet, so without this
+      // it would validate the row's OLD date instead of the date this same
+      // transaction is about to write (assignDispatchJob's noticeSnapshot
+      // override, threaded below, fixes that half; this check covers the
+      // other). One check, on the tech-day fence already taken above, before
+      // any write in this transaction — refuse before the first write, same
+      // as the create-appointment path.
+      if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
+        const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
+          .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+        const finalTechnicianId = hasTechnicianIdUpdate
+          ? requestedTechnicianId
+          : (eligibilityRow?.technician_id || null);
+        const finalTechChanging = hasTechnicianIdUpdate
+          && (eligibilityRow?.technician_id || null) !== finalTechnicianId;
+        const finalDateChanging = updates.scheduled_date !== undefined;
+        if (finalTechnicianId && (finalDateChanging || finalTechChanging)) {
+          const finalDate = finalDateChanging ? dateOnly(updates.scheduled_date) : (eligibilityRow?.day || null);
+          await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
+        }
+      }
       // Match customer editors and grouping: maintenance/comms, customer row,
       // then stop locks. Tech-day fences remain ahead of all three.
       const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan

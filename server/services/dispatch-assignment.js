@@ -177,7 +177,14 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // taking that before the tech-day fence below inverts tech-out's mark-out
   // order (fence, then FOR UPDATE) — a deadlock window. The authoritative,
   // locked re-check runs after the fence inside applyAssignment.
-  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn: db, date: dateOnly(job.scheduled_date) }) : null;
+  //
+  // `noticeSnapshot?.date`: a caller whose SAME transaction is about to move
+  // the visit to a new date (the edit modal: tech + date in one save) passes
+  // that destination date here, so eligibility is checked against the day
+  // the tech will actually be on, not the row's stale stored date. Falls
+  // back to the row's own date when no snapshot date is given.
+  const eligibilityDate = dateOnly(noticeSnapshot?.date) || dateOnly(job.scheduled_date);
+  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn: db, date: eligibilityDate }) : null;
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -217,7 +224,12 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     // between the pre-transaction read above and this commit, and the lock
     // order (tech-day fence, then technician row) matches tech-out's
     // mark-out (fence, then FOR UPDATE) so the two never deadlock.
-    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx, date: dayRow?.day });
+    //
+    // Same noticeSnapshot?.date override as the pre-check above: the locked
+    // re-check must agree with the pre-check on which day is authoritative,
+    // or a caller moving the date could pass the pre-check against the new
+    // day and then get silently re-checked against the old one here.
+    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx, date: dateOnly(noticeSnapshot?.date) || dayRow?.day });
     // CAS on the PRE-LOCK tech + day (uncapped audit r29 P1): job and
     // fromTechId were read before the advisory locks, so a writer that
     // committed while we waited may have already assigned this job (its

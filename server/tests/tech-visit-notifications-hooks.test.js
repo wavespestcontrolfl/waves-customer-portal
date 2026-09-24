@@ -54,13 +54,14 @@ function assignmentTrx() {
 
 describe('assignDispatchJob → tech notice', () => {
   let assignDispatchJob;
+  let absenceChain;
   beforeEach(() => {
     jest.clearAllMocks();
     const jobChain = { where: jest.fn(() => jobChain), first: jest.fn(async () => JOB) };
     const techChain = { where: jest.fn(() => techChain), first: jest.fn(async () => ASSIGNABLE) };
     // assertAssignableTechnician now also reads technician_absences for the
     // job's date (GATE_TECH_OUT_REDISTRIBUTE) — no absence here.
-    const absenceChain = { where: jest.fn(() => absenceChain), whereNull: jest.fn(() => absenceChain), first: jest.fn(async () => null) };
+    absenceChain = { where: jest.fn(() => absenceChain), whereNull: jest.fn(() => absenceChain), first: jest.fn(async () => null) };
     db.mockImplementation((table) => (table === 'scheduled_services' ? jobChain : table === 'technician_absences' ? absenceChain : techChain));
     db.transaction = jest.fn(async (cb) => cb(assignmentTrx()));
     ({ assignDispatchJob } = require('../services/dispatch-assignment'));
@@ -97,6 +98,36 @@ describe('assignDispatchJob → tech notice', () => {
     expect(mockNotifyAssignmentChange).toHaveBeenCalledWith(expect.objectContaining({
       snapshot: { date: '2026-09-14', windowStart: '13:00', windowEnd: undefined },
     }));
+  });
+
+  test('with noticeSnapshot.date, BOTH eligibility reads (the pre-check and the locked re-check) query technician_absences with the SNAPSHOT date, not the row\'s stored date (tech-out P1: a caller that is about to move the visit — the edit modal, tech + date in one save — must check the destination day)', async () => {
+    const trx = assignmentTrx();
+    await assignDispatchJob({
+      jobId: 'job-1', technicianId: 't-new', actorId: 'adam', trx,
+      noticeSnapshot: { date: '2026-09-20' },
+    });
+
+    // Pre-check: always runs on the plain `db` connection, even with a
+    // caller trx (see the pre-transaction-read comment in the source).
+    expect(absenceChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: '2026-09-20' });
+    expect(absenceChain.where).not.toHaveBeenCalledWith(expect.objectContaining({ absence_date: JOB.scheduled_date }));
+
+    // Locked re-check: runs on the caller's trx, after the tech-day fence.
+    const taCallIdx = trx.mock.calls.findIndex(([table]) => table === 'technician_absences');
+    expect(taCallIdx).toBeGreaterThanOrEqual(0);
+    const taChain = trx.mock.results[taCallIdx].value;
+    expect(taChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: '2026-09-20' });
+    expect(taChain.where).not.toHaveBeenCalledWith(expect.objectContaining({ absence_date: JOB.scheduled_date }));
+  });
+
+  test('without a noticeSnapshot date, both eligibility reads fall back to the row\'s own date (byte-identical to before the override existed)', async () => {
+    const trx = assignmentTrx();
+    await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: 'adam', trx });
+
+    expect(absenceChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: JOB.scheduled_date });
+    const taCallIdx = trx.mock.calls.findIndex(([table]) => table === 'technician_absences');
+    const taChain = trx.mock.results[taCallIdx].value;
+    expect(taChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: JOB.scheduled_date });
   });
 
   test('a caller-owned trx is passed through so the notice waits for THAT commit', async () => {
