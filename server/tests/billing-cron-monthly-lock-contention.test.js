@@ -22,6 +22,8 @@ let mockCustomers = [];
 let mockTermRows = [];
 let mockPaymentsInserts = [];
 let mockHealthAlertInserts = [];
+// The post-contention already-collected recheck's read of `payments`.
+let mockCollectedRow = null;
 
 jest.mock('../models/db', () => {
   function thenableFor(resultFn) {
@@ -40,6 +42,7 @@ jest.mock('../models/db', () => {
     if (String(table).startsWith('annual_prepay_terms')) return thenableFor(() => mockTermRows);
     if (table === 'payments') {
       const b = thenableFor(() => []);
+      b.first = () => Promise.resolve(mockCollectedRow);
       b.insert = jest.fn((row) => { mockPaymentsInserts.push(row); return Promise.resolve([1]); });
       return b;
     }
@@ -95,8 +98,26 @@ beforeEach(() => {
   mockTermRows = [];
   mockPaymentsInserts = [];
   mockHealthAlertInserts = [];
+  mockCollectedRow = null;
   jest.clearAllMocks();
 });
+
+// Codex #4682 r3 P1: the collector holding the lock past the retry window
+// is usually mid-charge for THIS month. If its paid row has landed by the
+// time the retries are exhausted, this customer is collected — no deferred
+// 'failed' row may be written (it would show a balance the winner already
+// took), and no alert.
+test('when the competing collector has already landed this month\'s payment, nothing is deferred', async () => {
+  mockCollectedRow = { id: 'pay-winner', status: 'paid' };
+
+  const result = await BillingCron.processMonthlyBilling();
+
+  expect(result.skipped).toBe(1);
+  expect(mockPaymentsInserts).toHaveLength(0);
+  expect(mockHealthAlertInserts).toHaveLength(0);
+  expect(logAutopay).toHaveBeenCalledWith('cust-locked', 'skipped_already_paid', { paymentId: 'pay-winner' });
+  expect(logAutopay).not.toHaveBeenCalledWith('cust-locked', 'skipped_lock_contention', expect.anything());
+}, 15000);
 
 test('a customer whose collection lock stays held elsewhere ends up with a durable next_retry_at work item and an alert', async () => {
   const result = await BillingCron.processMonthlyBilling();
@@ -117,6 +138,8 @@ test('a customer whose collection lock stays held elsewhere ends up with a durab
   expect(meta.type).toBe('monthly_autopay');
   expect(meta.billed_month).toMatch(/^\d{4}-\d{2}$/);
   expect(meta.deferred_reason).toBe('lock_contention');
+  // Never-attempted shape GET /api/billing/balance keys its exclusion on.
+  expect(row.stripe_payment_intent_id).toBeUndefined();
 
   expect(mockHealthAlertInserts).toHaveLength(1);
   expect(mockHealthAlertInserts[0].customer_id).toBe('cust-locked');

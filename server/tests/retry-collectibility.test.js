@@ -25,7 +25,14 @@ jest.mock('../models/db', () => {
       // orphan (a different table) and a sibling row flagged
       // ambiguous_outcome (a whereRaw mentioning it, distinct from every
       // other 'payments' lookup below).
-      if (table === 'stripe_orphan_charges') return Promise.resolve(mockOrphanRow);
+      // The orphan fence is scoped to INVOICE-LESS orphans (whereNull
+      // 'invoice_id'): honour that filter so an invoice-linked fixture is
+      // invisible to it, exactly as Postgres would make it.
+      if (table === 'stripe_orphan_charges') {
+        const scopedToNoInvoice = b._wheres.some(([m, a]) => m === 'whereNull' && a === 'invoice_id');
+        if (mockOrphanRow && scopedToNoInvoice && mockOrphanRow.invoice_id) return Promise.resolve(null);
+        return Promise.resolve(mockOrphanRow);
+      }
       const ambiguousSiblingLookup = b._wheres.some(([m, a]) => m === 'whereRaw' && String(a).includes('ambiguous_outcome'));
       if (ambiguousSiblingLookup) return Promise.resolve(mockAmbiguousSiblingRow);
       // The already-collected lookup carries whereIn(status paid/processing);
@@ -158,6 +165,28 @@ describe('classifyFailedPaymentRetry — guard chain in the sweep order', () => 
     expect(await classify(amb)).toMatchObject({ reason: REASONS.AMBIGUOUS_OUTCOME_PARKED, disposition: DISPOSITIONS.PARK });
     const det = monthlyRow({ stripe_payment_intent_id: null, metadata: JSON.stringify({ billed_month: '2026-06', ambiguous_outcome: false }) });
     expect((await classify(det)).collectible).toBe(true);
+  });
+
+  // Codex round-3 P1: the orphan fence is customer-scoped (an orphan row
+  // carries no obligation month), so it must never PARK (self-supersede)
+  // a monthly row — an unrelated orphan would write the month off for good.
+  test('an unresolved invoice-less orphan for the customer fences the row as SKIP_ARMED — never a park', async () => {
+    mockOrphanRow = { id: 'orphan-1', stripe_payment_intent_id: 'pi_orphan', invoice_id: null };
+    const v = await classify(monthlyRow());
+    expect(v).toMatchObject({
+      collectible: false, reason: REASONS.SIBLING_ORPHAN_UNRESOLVED, disposition: DISPOSITIONS.SKIP_ARMED,
+    });
+    expect(v.unresolvedSibling).toMatchObject({ reason: 'unresolved_orphan_charge' });
+  });
+
+  test('an unresolved orphan that belongs to an INVOICE (invoice_card_on_file) does not fence monthly dues at all', async () => {
+    mockOrphanRow = { id: 'orphan-inv', stripe_payment_intent_id: 'pi_inv', invoice_id: 'inv-1' };
+    expect((await classify(monthlyRow())).collectible).toBe(true);
+  });
+
+  test('a month-stamped ambiguous SIBLING attempt (provably this obligation) still parks', async () => {
+    mockAmbiguousSiblingRow = { id: 'pay-ambiguous-sibling' };
+    expect(await classify(monthlyRow())).toMatchObject({ reason: REASONS.AMBIGUOUS_OUTCOME_PARKED, disposition: DISPOSITIONS.PARK });
   });
 
   test('ORDER: resolution guards beat state guards (collected + disabled → supersede; absorbed + paused → self-supersede)', async () => {

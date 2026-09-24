@@ -96,6 +96,39 @@ describe('withCustomerBillingLock — rollout-compatibility (held shared job-loc
     expect(keysTried).not.toContain('cron:billing-monthly');
   });
 
+  // Codex round-3 P1: a raw DB error from the lock INFRASTRUCTURE before
+  // fn() starts must become the same BILLING_CLAIM_HELD_ELSEWHERE refusal a
+  // confirmed holder produces — every caller maps that to "defer, no charge
+  // attempted", whereas a raw error falls into their charge-failure ladder
+  // (retry_count bumped, service possibly paused) though Stripe was never
+  // called. fn()'s OWN rejection must still propagate unchanged.
+  test('a throw from the rollout-compat shared-lock query (before fn runs) surfaces as BILLING_CLAIM_HELD_ELSEWHERE, not a raw DB error', async () => {
+    mockConn = makeConn([]);
+    const dbBlip = new Error('connection terminated unexpectedly');
+    mockConn.query.mockImplementationOnce(async () => { throw dbBlip; });
+    const fn = jest.fn(async () => 'ran');
+    await expect(withCustomerBillingLock('cust-t', fn))
+      .rejects.toMatchObject({ code: 'BILLING_CLAIM_HELD_ELSEWHERE', cause: dbBlip });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  test('a throw from the customer advisory-lock acquisition (runExclusive rejects before fn) surfaces as BILLING_CLAIM_HELD_ELSEWHERE', async () => {
+    mockConn = makeConn([]);
+    const tryLockBlip = new Error('could not serialize access');
+    runExclusive.mockImplementationOnce(async () => { throw tryLockBlip; });
+    const fn = jest.fn(async () => 'ran');
+    await expect(withCustomerBillingLock('cust-u', fn))
+      .rejects.toMatchObject({ code: 'BILLING_CLAIM_HELD_ELSEWHERE', cause: tryLockBlip });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  test('fn()\'s own rejection still propagates unchanged (never disguised as contention)', async () => {
+    mockConn = makeConn([]);
+    const declined = Object.assign(new Error('card_declined'), { code: 'STRIPE_DECLINED' });
+    await expect(withCustomerBillingLock('cust-z', async () => { throw declined; }))
+      .rejects.toBe(declined);
+  });
+
   test('excluding billing-retries when it is the only compatibility lock means no job lock is taken at all', async () => {
     mockConn = makeConn(['cron:billing-retries']);
     const result = await withCustomerBillingLock('cust-v', async () => 'ok', { excludeJobLocks: ['billing-retries'] });

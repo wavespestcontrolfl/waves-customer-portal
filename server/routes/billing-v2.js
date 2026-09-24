@@ -1010,10 +1010,28 @@ router.get('/balance', async (req, res, next) => {
     // unpaidInvoices only sums sent/viewed/overdue, so dropping the row too
     // would show $0 owed after a failed completion autopay whose draft
     // invoice/pay-link is still collectible (Codex P2 on this PR).
+    // NEVER-ATTEMPTED deferred rows are excluded too (Codex #4682 r3 P1):
+    // the monthly cron writes a 'failed' row with next_retry_at armed when
+    // another collector held the customer's billing lock for the whole
+    // retry window (metadata.deferred_reason = 'lock_contention', no PI,
+    // retry_count 0). Nothing failed and no money moved — the competing
+    // collector may be landing this very month's charge — so showing it
+    // as a payable balance invites paying dues the winner already took.
+    // The 10 AM sweep either supersedes it against the winner or actually
+    // attempts it; a real decline bumps retry_count and it counts again.
+    const isNeverAttemptedDeferral = (p) => {
+      if (p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0) return false;
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        return !!(m && m.deferred_reason === 'lock_contention');
+      } catch {
+        return false;
+      }
+    };
     const failedRows = await db('payments')
       .where({ customer_id: req.customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
-      .select('amount', 'metadata');
+      .select('amount', 'metadata', 'stripe_payment_intent_id', 'retry_count');
     const failedInvoiceIds = [...new Set(failedRows.map(metadataInvoiceId).filter(Boolean))];
     const balanceCarryingInvoiceIds = new Set(
       failedInvoiceIds.length
@@ -1026,6 +1044,7 @@ router.get('/balance', async (req, res, next) => {
     );
     const failedTotal = failedRows
       .filter((p) => !isPayerPayment(p))
+      .filter((p) => !isNeverAttemptedDeferral(p))
       .filter((p) => {
         const invId = metadataInvoiceId(p);
         return !invId || !balanceCarryingInvoiceIds.has(invId);
@@ -1065,25 +1084,26 @@ router.get('/balance', async (req, res, next) => {
     // completed attempt failed — not when there's any failed row in history.
     // Skip payer-linked attempts so an AP failure doesn't flip the homeowner's
     // banner.
-    // Bounded scan: with no payer rows to skip, the most-recent attempt is just
-    // the first row (the pre-payer-filter behavior). Only when payer rows exist
-    // do we look past them — page in small batches (capped) so this billing-page
-    // load never scales with the customer's full ledger.
+    // Bounded scan: page in small batches (capped) past payer rows and
+    // never-attempted deferrals so this billing-page load never scales with
+    // the customer's full ledger — the common case still resolves on the
+    // first page.
+    // A never-attempted deferral (see isNeverAttemptedDeferral) is not an
+    // attempt either — it must not raise the "last payment failed" banner.
+    const isRealAttempt = (p) => !isPayerPayment(p) && !isNeverAttemptedDeferral(p);
     const recentAttemptsQuery = () => db('payments')
       .where({ customer_id: req.customerId })
       .whereIn('status', ['paid', 'failed', 'refunded'])
       .whereNull('superseded_by_payment_id')
       .orderBy('payment_date', 'desc')
-      .select('status', 'metadata');
+      .select('status', 'metadata', 'stripe_payment_intent_id', 'retry_count');
     let mostRecentAttempt = null;
-    if (payerInvoiceIds.size === 0) {
-      mostRecentAttempt = await recentAttemptsQuery().first();
-    } else {
+    {
       const PAGE = 50;
       for (let offset = 0; offset < 500; offset += PAGE) {
         const batch = await recentAttemptsQuery().limit(PAGE).offset(offset);
         if (!batch.length) break;
-        mostRecentAttempt = batch.find((p) => !isPayerPayment(p)) || null;
+        mostRecentAttempt = batch.find(isRealAttempt) || null;
         if (mostRecentAttempt || batch.length < PAGE) break;
       }
     }

@@ -397,7 +397,10 @@ export default function MobileCardOnFileSheet({
                       // always fully visible.
                       <span
                         className="text-ink-secondary block whitespace-normal break-words"
-                        style={{ fontSize: 13 }}
+                        // 14px: the repo's readable-text floor (Codex
+                        // round-3 P2) — this is the exact amount that
+                        // will move, read by field staff on a phone.
+                        style={{ fontSize: 14 }}
                       >
                         {quoteAmountLabel(quotes[c.id])}
                       </span>

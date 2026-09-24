@@ -21,6 +21,7 @@
 let mockFailedPayments = [];
 let mockCustomer = null;
 let mockCollectedRow = null;
+let mockOrphanRow = null;
 let mockPaymentUpdates = [];
 
 jest.mock('../models/db', () => {
@@ -39,6 +40,7 @@ jest.mock('../models/db', () => {
     b.first = () => {
       if (table === 'customers') return Promise.resolve(mockCustomer);
       if (table === 'payments') return Promise.resolve(mockCollectedRow);
+      if (table === 'stripe_orphan_charges') return Promise.resolve(mockOrphanRow);
       return Promise.resolve(null);
     };
     b.then = (resolve, reject) => {
@@ -112,6 +114,7 @@ beforeEach(() => {
   mockFailedPayments = [];
   mockCustomer = { ...CUSTOMER };
   mockCollectedRow = null;
+  mockOrphanRow = null;
   mockPaymentUpdates = [];
   jest.clearAllMocks();
   StripeService.charge.mockReset();
@@ -452,6 +455,24 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
     for (const call of logAutopay.mock.calls) {
       expect(call[1]).not.toMatch(/^skipped_/);
     }
+  });
+
+  test('an unresolved orphan charge for the customer leaves the monthly row ARMED — no charge, no write, no park (Codex #4682 r3 P1)', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    mockOrphanRow = { id: 'orphan-1', stripe_payment_intent_id: 'pi_orphan' };
+    const db = require('../models/db');
+
+    await BillingCron.processPaymentRetries();
+
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    // Nothing written: no disarm, no self-supersede, no alert.
+    expect(mockPaymentUpdates).toHaveLength(0);
+    expect(db).not.toHaveBeenCalledWith('customer_health_alerts');
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_lock_contention', expect.objectContaining({
+      paymentId: 'pay-failed-1',
+      details: expect.objectContaining({ source: 'autopay_retry', reason: 'unresolved_orphan_charge' }),
+    }));
   });
 
   test('deterministic no-PI failure (not flagged ambiguous) still retries normally', async () => {

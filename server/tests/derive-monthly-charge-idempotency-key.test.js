@@ -28,21 +28,34 @@ function makeConn(rows) {
     if (table !== 'payments') throw new Error(`unexpected table ${table}`);
     let filtered = rows.slice();
     const qb = {
-      where(cond) {
+      where(cond, op, val) {
         if (typeof cond === 'object' && cond) {
           filtered = filtered.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
+        } else if (typeof cond === 'string' && op === '=') {
+          filtered = filtered.filter((r) => r[cond] === val);
         }
         // The grouped billed_month/legacy OR clause is a function — the
         // fixtures below are pre-shaped to already satisfy it, so it's a
         // no-op here (this mock's job is the monthly-family key filter).
         return qb;
       },
+      whereIn(col, vals) {
+        filtered = filtered.filter((r) => vals.includes(r[col]));
+        return qb;
+      },
       whereRaw(sql) {
-        if (String(sql).includes('idempotency_key') && String(sql).includes('LIKE')) {
+        const text = String(sql);
+        if (text.includes('idempotency_key') && text.includes('LIKE')) {
           filtered = filtered.filter((r) => {
             let meta = {};
             try { meta = r.metadata ? JSON.parse(r.metadata) : {}; } catch (_) { /* ignore */ }
             return String(meta.idempotency_key || '').startsWith('autopay_monthly_');
+          });
+        } else if (text.includes('idempotency_key') && text.includes('IS NULL')) {
+          filtered = filtered.filter((r) => {
+            let meta = {};
+            try { meta = r.metadata ? JSON.parse(r.metadata) : {}; } catch (_) { /* ignore */ }
+            return meta.idempotency_key == null;
           });
         }
         return qb;
@@ -60,10 +73,12 @@ function makeConn(rows) {
   };
 }
 
-const monthlyRow = (id, createdAt, idempotencyKey) => ({
+const monthlyRow = (id, createdAt, idempotencyKey, extra = {}) => ({
   id, customer_id: 'cust-1', status: 'failed', created_at: createdAt,
   metadata: JSON.stringify({ billed_month: '2026-09', idempotency_key: idempotencyKey }),
+  ...extra,
 });
+const { etDateString } = require('../utils/datetime-et');
 
 describe('deriveMonthlyChargeIdempotencyKey', () => {
   test('a more-recently-inserted retry-sweep failure is skipped — the monthly family\'s own latest key still advances correctly', async () => {
@@ -89,6 +104,45 @@ describe('deriveMonthlyChargeIdempotencyKey', () => {
     ]);
     const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
     expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r2$/);
+  });
+
+  // Codex round-3 P1: a SUCCEEDED-then-refunded attempt consumed its key
+  // at Stripe just as surely as a decline did. Deriving from failures only
+  // handed a same-day recollection the spent key back, and Stripe replayed
+  // the refunded PaymentIntent instead of moving new funds.
+  test('a succeeded-then-fully-refunded monthly attempt (bare key) advances a same-day recollection to _r1', async () => {
+    const conn = makeConn([
+      monthlyRow('p-refunded', '2026-09-23T08:00:00Z', 'autopay_monthly_cust-1_2026-09-23', { status: 'refunded', payment_date: etDateString() }),
+    ]);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r1$/);
+  });
+
+  test('a refunded attempt that had already advanced to _r1 pushes the next recollection to _r2', async () => {
+    const conn = makeConn([
+      monthlyRow('p-declined', '2026-09-23T08:00:00Z', 'autopay_monthly_cust-1_2026-09-23'),
+      monthlyRow('p-refunded', '2026-09-23T09:00:00Z', 'autopay_monthly_cust-1_2026-09-23_r1', { status: 'refunded', payment_date: etDateString() }),
+    ]);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r2$/);
+  });
+
+  test('a LEGACY refunded row from today with no recorded key (paid rows predate key stamping) still advances past the bare key', async () => {
+    const conn = makeConn([
+      { id: 'p-legacy-refunded', customer_id: 'cust-1', status: 'refunded', created_at: '2026-09-23T08:00:00Z',
+        payment_date: etDateString(), metadata: JSON.stringify({ billed_month: '2026-09' }) },
+    ]);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r1$/);
+  });
+
+  test('a keyless refunded row from ANOTHER day cannot collide (the key embeds the ET date) — bare key', async () => {
+    const conn = makeConn([
+      { id: 'p-old-refunded', customer_id: 'cust-1', status: 'refunded', created_at: '2026-09-02T08:00:00Z',
+        payment_date: '2026-09-02', metadata: JSON.stringify({ billed_month: '2026-09' }) },
+    ]);
+    const key = await deriveMonthlyChargeIdempotencyKey('cust-1', '2026-09', conn);
+    expect(key).toMatch(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}$/);
   });
 
   test('no prior failure at all → the bare key (shared with chargeMonthly\'s own default)', async () => {

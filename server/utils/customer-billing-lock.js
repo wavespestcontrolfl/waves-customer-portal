@@ -204,11 +204,38 @@ async function runCrossProcessGuarded(customerId, fn, excludeJobLocks) {
     // still fences the case that matters most on this deployment shape.
     return fn();
   }
-  const result = await runExclusive(
-    crossProcessLockName(customerId),
-    () => runUnderRolloutCompatJobLocks(customerId, fn, excludeJobLocks),
-    { recordHealth: false, waitForSlot: false },
-  );
+  // Codex round-3 P1: an error thrown by the lock INFRASTRUCTURE before
+  // fn() ever starts — the customer advisory try-lock query, or the
+  // rollout-compat shared-lock query — must surface as the SAME
+  // BILLING_CLAIM_HELD_ELSEWHERE refusal a confirmed holder produces, not
+  // as a raw DB error. Every caller already maps that code to "defer, no
+  // charge was attempted"; a raw error instead falls into their ordinary
+  // charge-FAILURE ladder (retry_count bumped, service possibly paused,
+  // "your card failed" copy) even though Stripe was never called. Only
+  // fn()'s OWN rejection may propagate unchanged — it is tagged here so
+  // the two are never confused.
+  let fnRejected = false;
+  const tagged = async () => {
+    try {
+      return await fn();
+    } catch (err) {
+      fnRejected = true;
+      throw err;
+    }
+  };
+  let result;
+  try {
+    result = await runExclusive(
+      crossProcessLockName(customerId),
+      () => runUnderRolloutCompatJobLocks(customerId, tagged, excludeJobLocks),
+      { recordHealth: false, waitForSlot: false },
+    );
+  } catch (err) {
+    if (fnRejected) throw err;
+    const held = claimHeldElsewhereError(customerId, `lock acquisition failed before the operation ran: ${err && err.message}`);
+    held.cause = err;
+    throw held;
+  }
   if (result && result.skipped === true) {
     // Capable of the technique but could not confirm exclusivity —
     // whether a confirmed other-process holder (lease_held) or an
