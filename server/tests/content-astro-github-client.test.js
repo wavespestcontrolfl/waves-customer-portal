@@ -127,14 +127,18 @@ describe('content-astro github-client pagination', () => {
         .mockResolvedValueOnce(openPr())
         .mockResolvedValueOnce(testMergeCommit())
         .mockResolvedValueOnce(newCommit())
-        .mockResolvedValueOnce(refPatchOk());
+        .mockResolvedValueOnce(refPatchOk())
+        .mockResolvedValueOnce(openPr());
 
       const res = await gh.mergePr(42, {
         sha: 'head-sha', title: 'Blog: Title', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
       });
 
       expect(res).toEqual({ sha: 'new-merge-commit-sha', merged: true });
-      expect(global.fetch).toHaveBeenCalledTimes(4);
+      // post-merge PR re-read only; an unchanged head is left for GitHub to mark merged
+      expect(global.fetch).toHaveBeenCalledTimes(5);
+      expect(global.fetch.mock.calls[4][0]).toContain('/pulls/42');
+      expect(global.fetch.mock.calls[4][1]?.method || 'GET').toBe('GET');
       expect(global.fetch.mock.calls[0][0]).toContain('/pulls/42');
       expect(global.fetch.mock.calls[1][0]).toContain('/git/commits/test-merge-sha');
       expect(global.fetch.mock.calls[2][0]).toContain('/git/commits');
@@ -236,12 +240,32 @@ describe('content-astro github-client pagination', () => {
         .mockResolvedValueOnce(testMergeCommit())
         .mockResolvedValueOnce(newCommit())
         .mockResolvedValueOnce({ ok: false, status: 422, headers: { get: () => 'application/json' }, text: async () => 'Update is not a fast forward' })
-        .mockResolvedValueOnce(jsonResponse({ object: { sha: 'new-merge-commit-sha' } }));
+        .mockResolvedValueOnce(jsonResponse({ object: { sha: 'new-merge-commit-sha' } }))
+        .mockResolvedValueOnce(openPr());
 
       await expect(gh.mergePr(42, {
         sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
       })).resolves.toEqual({ sha: 'new-merge-commit-sha', merged: true });
-      expect(global.fetch).toHaveBeenCalledTimes(5);
+      expect(global.fetch).toHaveBeenCalledTimes(6);
+    });
+
+    test('a push that lands during the merge: reports the verified merge and closes the PR as superseded', async () => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(openPr())
+        .mockResolvedValueOnce(testMergeCommit())
+        .mockResolvedValueOnce(newCommit())
+        .mockResolvedValueOnce(refPatchOk())
+        .mockResolvedValueOnce(openPr({ head: { sha: 'newer-head-sha' } }))
+        .mockResolvedValueOnce(jsonResponse({ id: 1 }))
+        .mockResolvedValueOnce(jsonResponse({ state: 'closed' }));
+
+      await expect(gh.mergePr(42, {
+        sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
+      })).resolves.toEqual({ sha: 'new-merge-commit-sha', merged: true, headAdvanced: 'newer-head-sha' });
+      expect(global.fetch.mock.calls[5][0]).toContain('/issues/42/comments');
+      expect(JSON.parse(global.fetch.mock.calls[5][1].body).body).toContain('newer-he');
+      expect(global.fetch.mock.calls[6][0]).toContain('/pulls/42');
+      expect(JSON.parse(global.fetch.mock.calls[6][1].body)).toEqual({ state: 'closed' });
     });
   });
 });

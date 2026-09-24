@@ -286,10 +286,10 @@ function baseMovedError(number, baseRef, detail) {
 //   4. create a real merge commit from the verified tree
 //   5. fast-forward-only PATCH the base ref onto it — force:false makes
 //      this PATCH the atomic compare-and-swap: it 422s if base moved.
-// Trade-off: the merge endpoint's head pin is not reproduced — a push or close
-// landing between step 1 and step 5 does not stop the ref update. What lands
-// is still exactly the verified, signed head; a later push stays on the open
-// PR for its own review. Base atomicity is the property signed bytes need.
+// Trade-off: the merge endpoint's head pin is not reproduced — a push landing
+// between step 1 and step 5 does not stop the ref update. What lands is still
+// exactly the verified, signed head, and settleAdvancedHead closes the PR as
+// superseded so the unpublished commit is not left looking merge-pending.
 // Any inconsistency throws the same retryable BLOG_BASE_MOVED code the old
 // pre-check used, so callers that already treat that code as "re-verify
 // next tick" need no changes.
@@ -353,13 +353,34 @@ async function mergePrAtomic(number, { title, message, sha, expectBaseSha, baseR
       // the ref before concluding base moved: if it's already our commit,
       // the merge went through and this is a false alarm, not base drift.
       const refNow = await getBranchSha(baseRef);
-      if (refNow === newSha) return { sha: newSha, merged: true };
+      if (refNow === newSha) return settleAdvancedHead(number, headSha, newSha);
       throw baseMovedError(number, baseRef, 'main moved during merge (ref update rejected)');
     }
     throw err;
   }
 
-  return { sha: newSha, merged: true };
+  return settleAdvancedHead(number, headSha, newSha);
+}
+
+// The ref update published exactly the verified head. If the PR received a
+// push in the meantime, GitHub leaves it open with commits nothing reviewed
+// or published — close it as superseded so no open PR implies they will ship.
+// Best effort: the merge already happened and must still be reported.
+async function settleAdvancedHead(number, headSha, newSha) {
+  const result = { sha: newSha, merged: true };
+  try {
+    const after = await getPr(number);
+    const afterHead = String(after?.head?.sha || '').toLowerCase();
+    if (after?.state === 'open' && afterHead && afterHead !== headSha.toLowerCase()) {
+      result.headAdvanced = afterHead;
+      logger.warn(`[github] PR #${number}: head advanced to ${afterHead.slice(0, 9)} during merge; published verified head ${headSha.slice(0, 9)}`);
+      await createIssueComment(number, `Merged the verified head ${headSha.slice(0, 9)} as ${newSha.slice(0, 9)}. Commit ${afterHead.slice(0, 9)} arrived during the merge and was not published; closing this PR. Open a new PR for that change.`);
+      await closePr(number);
+    }
+  } catch (err) {
+    logger.warn(`[github] PR #${number}: post-merge head check failed: ${err.message}`);
+  }
+  return result;
 }
 
 async function mergePr(number, { method = 'squash', title, message, sha, expectBaseSha, expectBaseRef, verifyPaths } = {}) {
