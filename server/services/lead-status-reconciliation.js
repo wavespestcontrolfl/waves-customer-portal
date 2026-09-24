@@ -1,8 +1,6 @@
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { isContactEvidenceType } = require('./lead-estimate-link');
-const {
-  scopeToAssessmentBookings,
-} = require('./assessment-booking');
+const { scopeToAssessmentBookings } = require('./assessment-booking');
 const ASSESSMENT_RESULT_LIMIT = 6;
 const IGNORED_APPOINTMENT_STATUSES = ['cancelled', 'skipped'];
 function metadataOf(activity) {
@@ -19,13 +17,16 @@ function atOrAfter(value, floor) {
   const floorMs = new Date(floor).getTime();
   return Number.isFinite(valueMs) && Number.isFinite(floorMs) && valueMs >= floorMs;
 }
+const lifecycleFloor = (lead) => lead?.first_contact_at || lead?.created_at || null;
 function exactContactActivities(lead, activities) {
+  const floor = lifecycleFloor(lead);
+  if (!floor) return [];
   return activities.filter((activity) => {
     const metadata = metadataOf(activity);
     return activity.activity_type === 'status_change'
       && activity.description === 'Status: new → contacted'
       && isContactEvidenceType(metadata.evidenceType)
-      && atOrAfter(activity.created_at, lead.first_contact_at);
+      && atOrAfter(activity.created_at, floor);
   });
 }
 function assessmentQuery(database, lead, association) {
@@ -34,7 +35,8 @@ function assessmentQuery(database, lead, association) {
     .where((builder) => builder
       .whereNotIn('ss.status', IGNORED_APPOINTMENT_STATUSES)
       .orWhereNull('ss.status'))
-    .where('ss.created_at', '>=', lead.first_contact_at)
+    .where('ss.created_at', '>=', lifecycleFloor(lead))
+    .whereNull('ss.reservation_expires_at')
     .modify((builder) => scopeToAssessmentBookings(builder, 'ss', 'svc'))
     .orderBy('ss.created_at', 'desc')
     .limit(ASSESSMENT_RESULT_LIMIT + 1)
@@ -50,7 +52,7 @@ function assessmentQuery(database, lead, association) {
   return query;
 }
 async function resolveAssessmentEvidence(database, lead) {
-  if (!lead?.first_contact_at) return { association: 'unavailable', candidates: [], reason: 'missing_first_contact' };
+  if (!lifecycleFloor(lead)) return { association: 'unavailable', candidates: [], reason: 'missing_lifecycle_start' };
   if (lead.estimate_id) {
     const rows = await assessmentQuery(database, lead, 'exact_estimate');
     const candidates = rows.filter((row) => String(row.customer_id ?? '') === String(lead.customer_id ?? ''));
@@ -91,6 +93,12 @@ function buildLeadStatusReconciliation({
   const findings = [];
   const exactActivities = exactContactActivities(lead, activities);
   if (lead.status === 'new') {
+    if (assessmentResolution.reason === 'missing_lifecycle_start') {
+      findings.push({
+        code: 'lifecycle_start_unavailable', confidence: 'advisory',
+        message: 'This lead has no lifecycle start time, so recent assessment and call evidence cannot be bounded safely. Review the timeline manually.',
+      });
+    }
     exactActivities.slice(0, 3).forEach((activity) => {
       const metadata = metadataOf(activity);
       findings.push({

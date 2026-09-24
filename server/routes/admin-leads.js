@@ -1045,11 +1045,16 @@ router.get('/:id', async (req, res, next) => {
     const response = { lead, activities, calls };
     if (req.query.leadReview === '1') {
       try {
+        const lifecycleStartMs = new Date(lead.first_contact_at || lead.created_at).getTime();
+        const lifecycleCallCount = calls.filter((call) => {
+          const callAt = new Date(call.created_at).getTime();
+          return Number.isFinite(lifecycleStartMs) && Number.isFinite(callAt) && callAt >= lifecycleStartMs;
+        }).length;
         response.reconciliation = await getLeadStatusReconciliation({
           database: db,
           lead,
           activities,
-          associatedCallCount: calls.length,
+          associatedCallCount: lifecycleCallCount,
           associatedCallsAvailable,
         });
       } catch {

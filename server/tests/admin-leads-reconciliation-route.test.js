@@ -1,18 +1,14 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
-  adminAuthenticate: (_req, _res, next) => next(),
-  requireAdmin: (_req, _res, next) => next(),
+  adminAuthenticate: (_req, _res, next) => next(), requireAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../routes/admin-customers', () => ({ ensureCustomerAccount: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest.fn() }));
 jest.mock('../services/lead-attribution', () => ({
-  ...jest.requireActual('../services/lead-attribution'),
-  settleWonFunnelRow: jest.fn(),
+  ...jest.requireActual('../services/lead-attribution'), settleWonFunnelRow: jest.fn(),
 }));
-jest.mock('../services/lead-status-reconciliation', () => ({
-  getLeadStatusReconciliation: jest.fn(),
-}));
+jest.mock('../services/lead-status-reconciliation', () => ({ getLeadStatusReconciliation: jest.fn() }));
 const knex = require('knex')({ client: 'pg' });
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -21,12 +17,13 @@ const router = require('../routes/admin-leads');
 const handler = router.stack.find((layer) => layer.route?.path === '/:id' && layer.route.methods.get).route.stack.at(-1).handle;
 const lead = { id: 'lead-1', status: 'new', first_contact_at: '2026-09-01T12:00:00.000Z' };
 const activities = [{ id: 'activity-1', activity_type: 'note' }];
-let failCalls;
+let failCalls, calls;
 knex.client.runner = (builder) => ({ run: async () => {
   const compiled = builder.toSQL();
   if (compiled.sql.includes('from "leads"')) return lead;
   if (compiled.sql.includes('from "lead_activities"')) return activities;
   if (compiled.sql.includes('from "call_log"') && failCalls) throw new Error('synthetic call lookup failure');
+  if (compiled.sql.includes('from "call_log"')) return calls;
   return [];
 } });
 async function request(query = {}) {
@@ -37,7 +34,7 @@ async function request(query = {}) {
 }
 beforeEach(() => {
   jest.clearAllMocks();
-  failCalls = false;
+  failCalls = false; calls = [];
   db.mockImplementation((table) => knex(table));
   db.raw = knex.raw.bind(knex);
   getLeadStatusReconciliation.mockResolvedValue({
@@ -79,4 +76,9 @@ test('keeps detail usable with an unavailable preview if reconciliation fails', 
     '[leads] status reconciliation preview unavailable',
     { leadId: lead.id },
   );
+});
+test('counts only calls from the current lead lifecycle in the preview', async () => {
+  calls = [{ id: 'old', created_at: '2026-08-01T12:00:00.000Z', transcription: 'old' }, { id: 'new', created_at: '2026-09-02T12:00:00.000Z', transcription: 'new' }];
+  await request({ leadReview: '1' });
+  expect(getLeadStatusReconciliation).toHaveBeenCalledWith(expect.objectContaining({ associatedCallCount: 1 }));
 });

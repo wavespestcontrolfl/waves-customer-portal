@@ -1,21 +1,9 @@
 jest.mock('../services/lead-estimate-link', () => ({
-  isContactEvidenceType: (value) => new Set([
-    'live_conversation', 'assessment_booked', 'assessment_completed',
-  ]).has(value),
+  isContactEvidenceType: (value) => new Set(['live_conversation', 'assessment_booked', 'assessment_completed']).has(value),
 }));
 const knex = require('knex')({ client: 'pg' });
-const {
-  buildLeadStatusReconciliation,
-  getLeadStatusReconciliation,
-  resolveAssessmentEvidence,
-} = require('../services/lead-status-reconciliation');
-const lead = {
-  id: 'lead-1',
-  status: 'new',
-  customer_id: 'customer-1',
-  estimate_id: null,
-  first_contact_at: '2026-09-01T12:00:00.000Z',
-};
+const { buildLeadStatusReconciliation, getLeadStatusReconciliation, resolveAssessmentEvidence } = require('../services/lead-status-reconciliation');
+const lead = { id: 'lead-1', status: 'new', customer_id: 'customer-1', estimate_id: null, first_contact_at: '2026-09-01T12:00:00.000Z' };
 function contactActivity(overrides = {}) {
   return {
     activity_type: 'status_change',
@@ -81,6 +69,7 @@ test('matches a non-cancelled assessment by exact source estimate after first co
   expect(queries[0].sql).toContain('"ss"."source_estimate_id" = ?');
   expect(queries[0].sql).toContain('"ss"."created_at" >= ?');
   expect(queries[0].sql).toContain('"ss"."status" is null');
+  expect(queries[0].sql).toContain('"ss"."reservation_expires_at" is null');
   expect(queries[0].sql.toLowerCase()).toContain('lower(trim("ss"."service_type"))');
   expect(queries[0].sql.toLowerCase()).toContain('lower(trim("svc"."name"))');
   expect(queries[0].bindings).toContain('estimate-1');
@@ -137,4 +126,11 @@ test('requires review when the associated call source is unavailable', () => {
     code: 'associated_calls_unavailable', confidence: 'advisory',
   })]);
   expect(result.scope.calls_available).toBe(false);
+});
+test('uses created_at as the lifecycle floor and reports a missing floor as unavailable', async () => {
+  const fallback = databaseResults({ assessments: [] });
+  await resolveAssessmentEvidence(fallback.database, { ...lead, estimate_id: 'estimate-1', first_contact_at: null, created_at: lead.first_contact_at });
+  expect(fallback.queries[0].bindings).toContain(lead.first_contact_at);
+  await expect(getLeadStatusReconciliation({ database: jest.fn(), lead: { ...lead, first_contact_at: null } }))
+    .resolves.toMatchObject({ status: 'review', findings: [{ code: 'lifecycle_start_unavailable' }] });
 });
