@@ -276,6 +276,15 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
   });
 
+  test('a delayed legacy STOP twin does not suppress a later canonical question', async () => {
+    await seedEvent({ body: 'Can you call me?' });
+    const stop = await seedEvent({ body: 'STOP', messageType: 'opt_out' });
+    await seedEvent({ body: 'Actually, can you come tomorrow?' });
+    await mockPg('sms_log').where({ twilio_sid: stop.sid }).update({ created_at: tick });
+
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+  });
+
   test('preserves customer, blocked sender, and internal-phone scope', async () => {
     const owned = await seedEvent({ customerId: 'new' });
     await seedEvent({ phone: '+19415550101' });

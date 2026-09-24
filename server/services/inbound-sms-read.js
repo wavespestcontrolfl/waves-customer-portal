@@ -438,7 +438,7 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null, in
         AND os.draft_intent IS DISTINCT FROM 'click_followup'
     ), all_stop_events AS MATERIALIZED (
       SELECT ${stopPeer} AS peer,
-             COALESCE(stop_legacy.created_at, stop_message.created_at) AS created_at
+             stop_message.created_at AS created_at
       FROM messages stop_message
       JOIN conversations stop_conversation ON stop_conversation.id = stop_message.conversation_id
       LEFT JOIN customers stop_customer ON stop_customer.id = stop_conversation.customer_id
