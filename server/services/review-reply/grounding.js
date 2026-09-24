@@ -25,7 +25,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { etCalendarDayOf } = require('../../utils/datetime-et');
-const { normalizeServiceType, isRecognizedServiceType } = require('../../utils/service-normalizer');
+const { mappedServiceLabel } = require('../../utils/service-normalizer');
 
 const GROUNDING_VERSION = 'grounding-v1';
 
@@ -169,48 +169,37 @@ function titleCase(s) {
 }
 
 // One completed service_type → a public-safe display name, or null when it
-// carries no safe public name (too short, or names a product/brand).
+// carries no safe public name (too short, names a product/brand, or matches
+// no known service family).
 //
-// Runs the raw label through the repo's canonical normalizer FIRST
-// (server/utils/service-normalizer.js) rather than a hand-rolled strip: that
-// is the one place price/duration suffixes ("Pest Control Service - 1 hour -
-// $117"), legacy free-text labels, and real catalog identities are already
-// reconciled, and it is what every other display surface uses — a local
-// re-implementation here would silently diverge and re-leak raw labels
-// (2026-09-25 P1 fix). Only after that do we drop the "no service matched"
-// fallback value and anything still naming a product/brand, then apply the
-// same trailing-suffix / parenthetical cleanup as before.
+// servicesPerformed is drawn ONLY from mappedServiceLabel's finite set of
+// FIXED public labels (server/utils/service-normalizer.js's SERVICE_TYPE_MAP
+// `type` strings) — never normalizeServiceType's catalog or foam branches
+// (2026-09-25 round-5 P1 fix). Both of those can return arbitrary text: the
+// catalog cache is populated from historical scheduled_services labels, so a
+// hand-edited free-text label ("Dog In Home Call Before Arrival") can enter
+// it and pass through verbatim, and the foam branch returns any larger
+// string merely CONTAINING a foam token ("Foam Drill Customer Complained
+// Reservice"). A fixed label the map itself wrote can never leak free text.
 function normalizeServiceName(serviceType) {
   const raw = String(serviceType || '').trim();
   if (!raw) return null;
-  // Allowlist, not a blacklist (2026-09-25 round-4 P1 fix): free internal
-  // labels ("Owner Custom Booking Label", "Customer Complained Reservice",
-  // "Dog In Home Call Before Arrival") are not products or brands, so the
-  // earlier digit/duration/dash/brand backstops never caught them — they
-  // reached servicesPerformed as raw scheduling text. Only a label the
-  // normalizer actually RECOGNIZED (a real catalog identity, a mapped
-  // family, or the foam passthrough) is even eligible to become a public
-  // service name; anything normalizeServiceType would return verbatim
-  // (unmatched) or as the "General Service" fallback is dropped here first.
-  if (!isRecognizedServiceType(raw)) return null;
-  const normalized = normalizeServiceType(raw);
-  if (!normalized || normalized === 'General Service') return null;
-  if (SERVICE_PRODUCT_WORD_RE.test(normalized)) return null;
+  const label = mappedServiceLabel(raw);
+  if (!label) return null;
+  if (SERVICE_PRODUCT_WORD_RE.test(label)) return null;
   // Strip a trailing generic suffix ("… Service", "… Visit", "… Appointment
   // Service") before a trailing parenthesised qualifier ("(Quarterly)").
-  let s = normalized.replace(/\s+(?:Appointment\s+Service|Visit|Service)$/i, '').trim();
+  let s = label.replace(/\s+(?:Appointment\s+Service|Visit|Service)$/i, '').trim();
   s = s.replace(/\s*\([^)]*\)\s*$/, '').trim();
   s = s.replace(/\s+/g, ' ').trim();
   if (!s) return null;
   s = titleCase(s);
   if (s.length < 4) return null;
-  // Fail closed on anything the canonical normalizer left unmatched
-  // (2026-09-25 P1 fix): normalizeServiceType returns unrecognized free text
-  // VERBATIM, and its own suffix stripper only strips INTEGER durations/
-  // prices — "Custom Lawn Service - 1.5 hours - $117" loses the price but
-  // keeps "- 1.5 hours" (the decimal breaks the \d+ match). A digit, a "$",
-  // a duration word, or a " - " / " – " separator surviving to here means
-  // nothing recognized this label; drop it rather than surface raw text.
+  // Belt-and-suspenders (2026-09-25 P1 fix): mappedServiceLabel only ever
+  // returns one of SERVICE_TYPE_MAP's own fixed `type` strings, none of
+  // which carry a digit, "$", a duration word, or a " - " / " – " separator
+  // today — but if a future map entry ever did, this still fails closed
+  // rather than surface it.
   if (/\d|\$|\b(?:hours?|hrs?|mins?|minutes?|days?|weeks?)\b|\s[-–]\s/i.test(s)) return null;
   return s;
 }

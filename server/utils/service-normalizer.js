@@ -143,22 +143,27 @@ function normalizeServiceType(raw) {
 }
 
 /**
- * True when normalizeServiceType(raw) resolves to something it actually
- * RECOGNIZED — a real catalog identity, a mapped SERVICE_TYPE_MAP pattern, or
- * the foam-label passthrough — false when it would fall through to the
- * verbatim-text / "General Service" path. A display surface that must never
- * show unrecognized free text (2026-09-25 P1 fix, server/services/review-reply
- * /grounding.js: "Owner Custom Booking Label" and similar internal labels
- * must never surface as a public-safe service name) checks this FIRST,
- * before calling normalizeServiceType at all.
+ * The FIXED public label a raw service_type maps to under SERVICE_TYPE_MAP,
+ * or null when nothing matched. Deliberately narrower than
+ * normalizeServiceType: NO catalog branch and NO foam passthrough, because
+ * both of those can return arbitrary text a display surface must never show
+ * (2026-09-25 round-5 P1 fix). canonicalCatalogName is populated from
+ * historical scheduled_services labels — a hand-edited free-text label like
+ * "Dog In Home Call Before Arrival" can enter that cache and would then pass
+ * through verbatim; the foam branch returns any larger string merely
+ * CONTAINING a foam token ("Foam Drill Customer Complained Reservice"). A
+ * display surface that must only ever show one of a finite set of known
+ * public names (server/services/review-reply/grounding.js's
+ * servicesPerformed) calls this instead of normalizeServiceType.
  */
-function isRecognizedServiceType(raw) {
-  if (!raw) return false;
+function mappedServiceLabel(raw) {
+  if (!raw) return null;
   const cleaned = stripServiceSuffixes(raw);
-  if (!cleaned) return false;
-  if (FOAM_LABEL_RE.test(cleaned)) return true;
-  if (canonicalCatalogName(cleaned)) return true;
-  return SERVICE_TYPE_MAP.some((mapping) => mapping.match.test(cleaned));
+  if (!cleaned) return null;
+  for (const mapping of SERVICE_TYPE_MAP) {
+    if (mapping.match.test(cleaned)) return mapping.type;
+  }
+  return null;
 }
 
 /**
@@ -273,7 +278,7 @@ function safeDateLabel(d) {
 
 module.exports = {
   normalizeServiceType,
-  isRecognizedServiceType,
+  mappedServiceLabel,
   stripServiceSuffixes,
   detectServiceCategory,
   serviceIcon,

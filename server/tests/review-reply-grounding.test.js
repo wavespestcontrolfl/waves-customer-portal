@@ -29,14 +29,6 @@ jest.mock('../models/db', () => {
 });
 
 const G = require('../services/review-reply/grounding');
-// Real prod-live behavior primes this cache from the actual services table
-// (server/services/service-catalog-names.js's background refresh) — this
-// test file's raw fixtures include "Rodent Trapping Service", which the
-// static SERVICE_TYPE_MAP family map alone does not recognize (2026-09-25
-// round-4 P1 allowlist fix), so it is primed here as a real catalog identity
-// the same way production would have it, rather than working around the gap
-// with an unrealistic fixture.
-const { __setCatalogNamesForTest } = require('../services/service-catalog-names');
 
 const NOW = new Date('2026-08-27T12:00:00Z');
 
@@ -44,9 +36,7 @@ beforeEach(() => {
   mockState.technicians = [{ name: 'Marcus Reyes', active: true }, { name: 'Bob Ortiz', active: true }, { name: 'Al', active: true }];
   mockState.customers = [];
   mockState.scheduled_services = [];
-  __setCatalogNamesForTest(['Rodent Trapping Service']);
 });
-afterAll(() => __setCatalogNamesForTest([]));
 
 describe('review-derived facts', () => {
   test('reviewer first name: real names pass, handles and initials do not', () => {
@@ -231,13 +221,16 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
       { service_type: 'General Pest Control (Quarterly)', scheduled_date: '2026-02-01' },
       { service_type: 'cockroach treatment', scheduled_date: '2026-01-01' },
     ];
-    // Cap at 4 stops before WDO Inspection is ever reached. "Quarterly Pest
-    // Control Service" and "Monthly Pest Control" both collapse to the
-    // canonical normalizer's family label "Pest Control" (2026-09-25: routed
-    // through the repo's shared normalizeServiceType, which trades cadence
-    // detail for never leaking a raw/legacy label) and so dedupe together —
-    // "Monthly Pest Control" never gets its own slot.
-    expect(G.servicesPerformedFrom(visits)).toEqual(['Cockroach Treatment', 'Pest Control', 'Rodent Trapping', 'WDO Inspection']);
+    // "Quarterly Pest Control Service" and "Monthly Pest Control" both
+    // collapse to mappedServiceLabel's fixed family label "Pest Control" and
+    // so dedupe together — "Monthly Pest Control" never gets its own slot.
+    // "Rodent Trapping Service" matches no SERVICE_TYPE_MAP family
+    // (2026-09-25 round-5 P1 fix: mappedServiceLabel is map-only now, no
+    // catalog branch) and is skipped entirely — so the cap-at-4 selection
+    // reaches one row further down than before, to "Pre-Slab Termidor",
+    // which the map still genericizes to "Termite Treatment" (the brand
+    // name itself never survives, whether via the map or the backstop).
+    expect(G.servicesPerformedFrom(visits)).toEqual(['Cockroach Treatment', 'Pest Control', 'WDO Inspection', 'Termite Treatment']);
   });
   test('a legacy label with price/duration never leaks a digit or a dollar sign (2026-09-25 P1 fix)', () => {
     const visits = [{ service_type: 'Pest Control Service - 1 hour - $117', scheduled_date: '2026-01-01' }];
@@ -249,7 +242,7 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
       expect(name.toLowerCase()).not.toContain('hour');
     }
   });
-  test('a product/brand name the canonical normalizer cannot rescue, or only short/blank entries, yields nothing', () => {
+  test('a product/brand name mappedServiceLabel cannot rescue, or only short/blank entries, yields nothing', () => {
     const visits = [
       // Unlike "Pre-Slab Termidor" (below), nothing in service-normalizer's
       // SERVICE_TYPE_MAP recognizes "Taurus" — it falls through unmapped and
@@ -263,26 +256,33 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
     expect(G.servicesPerformedFrom(visits)).toEqual([]);
   });
   test('two rows scheduled the same date sort deterministically by normalized name, regardless of input order', () => {
-    const a = { service_type: 'Rodent Trapping Service', scheduled_date: '2026-01-01' };
+    // "Rodent Trapping Service" matches no SERVICE_TYPE_MAP family and is
+    // dropped (see the cap-at-4 test above), so this fixture uses two labels
+    // mappedServiceLabel does recognize to keep testing the sort itself.
+    const a = { service_type: 'Bed Bug Treatment', scheduled_date: '2026-01-01' };
     const b = { service_type: 'WDO Inspection Service', scheduled_date: '2026-01-01' };
     expect(G.servicesPerformedFrom([a, b])).toEqual(G.servicesPerformedFrom([b, a]));
-    expect(G.servicesPerformedFrom([a, b])).toEqual(['Rodent Trapping', 'WDO Inspection']);
+    expect(G.servicesPerformedFrom([a, b])).toEqual(['Bed Bug Treatment', 'WDO Inspection']);
   });
-  test('normalizeServiceName: canonical normalizer first, then suffix/parenthetical strip and the product backstop', () => {
-    // The canonical normalizer's family-label mapping wins over the local
+  test('normalizeServiceName: mappedServiceLabel first, then suffix/parenthetical strip and the product backstop', () => {
+    // mappedServiceLabel's fixed family-label mapping wins over the local
     // cadence-preserving strip that used to run alone (2026-09-25 P1 fix):
     // "Quarterly Pest Control Service" collapses through its own
     // "pest control.*service" mapping to "Pest Control Service", then the
     // trailing " Service" is stripped as before.
     expect(G.normalizeServiceName('Quarterly Pest Control Service')).toBe('Pest Control');
-    expect(G.normalizeServiceName('Rodent Trapping Service')).toBe('Rodent Trapping');
+    // "Rodent Trapping Service" matches no SERVICE_TYPE_MAP family
+    // (2026-09-25 round-5 P1 fix: mappedServiceLabel is map-only now, no
+    // catalog branch) and is dropped entirely — acceptable, since the
+    // alternative is trusting an unmapped raw label.
+    expect(G.normalizeServiceName('Rodent Trapping Service')).toBeNull();
     expect(G.normalizeServiceName('WDO Inspection Service')).toBe('WDO Inspection');
     // "pest control … quarterly" (in that order) is its own, earlier
     // SERVICE_TYPE_MAP entry, so this one keeps its cadence.
     expect(G.normalizeServiceName('General Pest Control (Quarterly)')).toBe('Quarterly Pest Control');
     expect(G.normalizeServiceName('Cockroach Treatment')).toBe('Cockroach Treatment');
     expect(G.normalizeServiceName('Pest Control Service - 1 hour - $117')).toBe('Pest Control');
-    // "Pre-Slab Termidor" now genericizes through the canonical normalizer's
+    // "Pre-Slab Termidor" now genericizes through mappedServiceLabel's
     // own termidor→"Termite Treatment" mapping rather than being dropped —
     // the brand name itself never survives either way.
     expect(G.normalizeServiceName('Pre-Slab Termidor')).toBe('Termite Treatment');
@@ -291,7 +291,7 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
     expect(G.normalizeServiceName('Taurus SC Treatment')).toBeNull();
     expect(G.normalizeServiceName('')).toBeNull();
   });
-  test('brand names the canonical normalizer itself emits are still dropped (2026-09-25 P1 fix)', () => {
+  test('brand names mappedServiceLabel itself emits are still dropped (2026-09-25 P1 fix)', () => {
     // service-normalizer's own SERVICE_TYPE_MAP maps these raw labels to
     // types that carry a brand name — Bora-Care, Arborjet — so the
     // product-word backstop has to catch the NORMALIZER's output, not just
@@ -303,7 +303,7 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
       { service_type: 'Arborjet Treatment', scheduled_date: '2026-01-02' },
     ])).toEqual([]);
   });
-  test('fails closed on anything the canonical normalizer leaves unmatched: digits, "$", duration words, or a " - " separator (2026-09-25 round-3 P1 fix)', () => {
+  test('fails closed on anything mappedServiceLabel leaves unmatched: digits, "$", duration words, or a " - " separator (2026-09-25 round-3 P1 fix)', () => {
     // normalizeServiceType returns unrecognized free text VERBATIM, and its
     // own suffix stripper only strips INTEGER durations/prices — the decimal
     // in "1.5 hours" survives, so "Custom Lawn Service - 1.5 hours - $117"

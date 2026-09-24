@@ -1,84 +1,113 @@
 /**
- * isRecognizedServiceType — the allowlist predicate a display surface that
- * must never show unrecognized free text (server/services/review-reply/
- * grounding.js's public-safe servicesPerformed) checks BEFORE calling
- * normalizeServiceType at all (2026-09-25 round-4 P1 fix). Free internal
- * scheduling labels — "Owner Custom Booking Label", "Customer Complained
- * Reservice", "Dog In Home Call Before Arrival" — are not products or
- * brands, so a blacklist never caught them; normalizeServiceType returned
- * them VERBATIM (its documented fallback), and that free text reached
- * servicesPerformed. isRecognizedServiceType returns true only for the
- * three paths normalizeServiceType itself recognizes: a real catalog
- * identity, a mapped SERVICE_TYPE_MAP family, or the foam-label passthrough.
+ * mappedServiceLabel — the allowlist function a display surface that must
+ * never show unrecognized free text (server/services/review-reply/
+ * grounding.js's public-safe servicesPerformed) calls INSTEAD of
+ * normalizeServiceType (2026-09-25 round-5 P1 fix, replacing round-4's
+ * isRecognizedServiceType predicate). It returns the FIRST matching
+ * SERVICE_TYPE_MAP entry's fixed `type` string, or null — deliberately
+ * narrower than normalizeServiceType: no catalog branch and no foam
+ * passthrough, because both of those can return arbitrary text:
+ *
+ *   - canonicalCatalogName is populated from historical scheduled_services
+ *     labels, so a hand-edited free-text label like "Dog In Home Call
+ *     Before Arrival" can enter that cache and would pass through verbatim
+ *     under the old isRecognizedServiceType (which trusted any catalog
+ *     hit). mappedServiceLabel has no catalog branch at all, so priming the
+ *     cache with a garbage label has zero effect on it.
+ *   - the foam branch returned any larger string merely CONTAINING a foam
+ *     token, e.g. "Foam Drill Customer Complained Reservice".
+ *
+ * The tests below check mappedServiceLabel's own raw return value — the
+ * SERVICE_TYPE_MAP entry's `type` string exactly as written (e.g.
+ * "Cockroach Treatment Service", not "Cockroach Treatment") — since the
+ * trailing-suffix strip and brand exclusion are grounding.js's
+ * normalizeServiceName's job, covered in review-reply-grounding.test.js.
  */
 
-const { isRecognizedServiceType, normalizeServiceType } = require('../utils/service-normalizer');
+const { mappedServiceLabel } = require('../utils/service-normalizer');
 const { __setCatalogNamesForTest } = require('../services/service-catalog-names');
 
 afterEach(() => __setCatalogNamesForTest([]));
 
-describe('isRecognizedServiceType — unmatched free text', () => {
-  test('internal scheduling labels that name no known service are not recognized', () => {
-    expect(isRecognizedServiceType('Owner Custom Booking Label')).toBe(false);
-    expect(isRecognizedServiceType('Customer Complained Reservice')).toBe(false);
-    expect(isRecognizedServiceType('Dog In Home Call Before Arrival')).toBe(false);
+describe('mappedServiceLabel — unmatched free text is never trusted', () => {
+  test('internal scheduling labels that name no known service map to null', () => {
+    expect(mappedServiceLabel('Owner Custom Booking Label')).toBeNull();
+    expect(mappedServiceLabel('Customer Complained Reservice')).toBeNull();
+    expect(mappedServiceLabel('Dog In Home Call Before Arrival')).toBeNull();
   });
 
-  test('blank/empty/null input is not recognized', () => {
-    expect(isRecognizedServiceType('')).toBe(false);
-    expect(isRecognizedServiceType(null)).toBe(false);
-    expect(isRecognizedServiceType(undefined)).toBe(false);
-    expect(isRecognizedServiceType('   ')).toBe(false);
+  test('"Dog In Home Call Before Arrival" stays null even when primed into the catalog cache', () => {
+    // The old isRecognizedServiceType trusted any canonicalCatalogName hit,
+    // so a hand-edited free-text label entering that cache would leak
+    // through. mappedServiceLabel has no catalog branch — priming the cache
+    // has no effect on it at all.
+    __setCatalogNamesForTest(['Dog In Home Call Before Arrival']);
+    expect(mappedServiceLabel('Dog In Home Call Before Arrival')).toBeNull();
+    expect(mappedServiceLabel('dog in home call before arrival')).toBeNull();
   });
 
-  // Confirms these really do fall through to normalizeServiceType's verbatim
-  // path — the exact leak isRecognizedServiceType exists to gate.
-  test('the same free-text labels normalizeServiceType returns verbatim', () => {
-    expect(normalizeServiceType('Owner Custom Booking Label')).toBe('Owner Custom Booking Label');
-    expect(normalizeServiceType('Customer Complained Reservice')).toBe('Customer Complained Reservice');
-  });
-});
-
-describe('isRecognizedServiceType — SERVICE_TYPE_MAP family matches', () => {
-  test('common prod labels are recognized', () => {
-    expect(isRecognizedServiceType('Cockroach Treatment')).toBe(true);
-    expect(isRecognizedServiceType('Quarterly Pest Control Service')).toBe(true);
-    expect(isRecognizedServiceType('Monthly Pest Control')).toBe(true);
-    expect(isRecognizedServiceType('WDO Inspection Service')).toBe(true);
-    expect(isRecognizedServiceType('General Pest Control (Quarterly)')).toBe(true);
+  test('a foam-token-carrying garbage label is not recognized (no foam passthrough)', () => {
+    // The old foam branch matched FOAM_LABEL_RE against the WHOLE string
+    // and returned it VERBATIM, so any larger string merely containing a
+    // foam token leaked through unmodified. mappedServiceLabel has no such
+    // branch: "foam", "drill", "customer", "complained", and "reservice"
+    // match no SERVICE_TYPE_MAP entry, so pure noise text is null.
+    expect(mappedServiceLabel('Foam Drill Customer Complained Reservice')).toBeNull();
   });
 
-  test('a price/duration suffix does not block recognition when the base label matches', () => {
-    expect(isRecognizedServiceType('Pest Control Service - 1 hour - $117')).toBe(true);
-    expect(normalizeServiceType('Pest Control Service - 1 hour - $117')).toBe('Pest Control Service');
+  test('a foam label that also carries a recognized family word still only ever yields that family\'s fixed label, never the raw foam text', () => {
+    // "Recurring Termite Foam Service (Quarterly)" used to pass through
+    // VERBATIM, cadence and all, under the old foam branch. mappedServiceLabel
+    // has no foam branch, so the generic /termite/i family entry is what
+    // matches here — the fixed label "Termite Service", never the raw string.
+    expect(mappedServiceLabel('Recurring Termite Foam Service (Quarterly)')).toBe('Termite Service');
   });
 
-  test('a family match on a brand-carrying label is still "recognized" — the brand exclusion is a separate, later concern', () => {
-    // service-normalizer's own map emits a brand name for these two; whether
-    // that brand name is then dropped is grounding.js's SERVICE_PRODUCT_WORD_RE
-    // backstop, not this predicate.
-    expect(isRecognizedServiceType('Bora-Care Wood Treatment Service')).toBe(true);
-    expect(isRecognizedServiceType('Arborjet Treatment')).toBe(true);
+  test('blank/empty/null input maps to null', () => {
+    expect(mappedServiceLabel('')).toBeNull();
+    expect(mappedServiceLabel(null)).toBeNull();
+    expect(mappedServiceLabel(undefined)).toBeNull();
+    expect(mappedServiceLabel('   ')).toBeNull();
   });
 });
 
-describe('isRecognizedServiceType — foam-label passthrough', () => {
-  test('a foam-family label is recognized without any SERVICE_TYPE_MAP entry', () => {
-    expect(isRecognizedServiceType('Recurring Termite Foam Service (Quarterly)')).toBe(true);
-    expect(isRecognizedServiceType('Foam Drill Treatment')).toBe(true);
+describe('mappedServiceLabel — SERVICE_TYPE_MAP family matches return the fixed type string', () => {
+  test('common prod labels map to their family\'s exact fixed label', () => {
+    expect(mappedServiceLabel('Cockroach Treatment')).toBe('Cockroach Treatment Service');
+    // "Quarterly" appears BEFORE "Pest Control" here, so the
+    // pest-control-then-quarterly entry (which needs that word order) does
+    // not match; it falls through to the more general "pest control…service"
+    // entry instead.
+    expect(mappedServiceLabel('Quarterly Pest Control Service')).toBe('Pest Control Service');
+    expect(mappedServiceLabel('Monthly Pest Control Service')).toBe('Pest Control Service');
+    expect(mappedServiceLabel('Monthly Pest Control')).toBe('Pest Control');
+    expect(mappedServiceLabel('WDO Inspection Service')).toBe('WDO Inspection');
+    // Here "Pest Control" comes before "(Quarterly)", so the
+    // pest-control-then-quarterly entry — checked first in the map — does
+    // match, and wins over the more general "pest control" entry below it.
+    expect(mappedServiceLabel('General Pest Control (Quarterly)')).toBe('Quarterly Pest Control');
+  });
+
+  test('a price/duration suffix is stripped before matching, and does not block recognition', () => {
+    // stripServiceSuffixes removes " - 1 hour" and " - $117" first, so the
+    // match runs against "Pest Control Service".
+    expect(mappedServiceLabel('Pest Control Service - 1 hour - $117')).toBe('Pest Control Service');
+  });
+
+  test('a family match on a brand-carrying label still returns that family\'s type string — brand exclusion is grounding.js\'s later, separate concern', () => {
+    // mappedServiceLabel has no brand filtering; SERVICE_TYPE_MAP itself
+    // emits a brand name for these two. grounding.js's
+    // SERVICE_PRODUCT_WORD_RE backstop is what turns them into null for
+    // display, not this function.
+    expect(mappedServiceLabel('Bora-Care Wood Treatment Service')).toBe('Bora-Care Wood Treatment Service');
+    expect(mappedServiceLabel('Arborjet Treatment')).toBe('Arborjet Treatment');
   });
 });
 
-describe('isRecognizedServiceType — catalog identities', () => {
-  test('unrecognized without a matching catalog row', () => {
-    expect(isRecognizedServiceType('Rodent Trapping Service')).toBe(false);
-  });
-
-  test('recognized once the live catalog cache (service-catalog-names.js) carries the row — the production path', () => {
+describe('mappedServiceLabel — no catalog branch at all', () => {
+  test('a real catalog identity with no SERVICE_TYPE_MAP family still maps to null, primed or not', () => {
+    expect(mappedServiceLabel('Rodent Trapping Service')).toBeNull();
     __setCatalogNamesForTest(['Rodent Trapping Service']);
-    expect(isRecognizedServiceType('Rodent Trapping Service')).toBe(true);
-    expect(isRecognizedServiceType('rodent trapping service')).toBe(true);
-    // Still false for a name the primed catalog does not carry.
-    expect(isRecognizedServiceType('Owner Custom Booking Label')).toBe(false);
+    expect(mappedServiceLabel('Rodent Trapping Service')).toBeNull();
   });
 });
