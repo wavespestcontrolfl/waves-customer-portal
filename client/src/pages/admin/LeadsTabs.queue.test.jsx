@@ -219,13 +219,13 @@ describe('Pipeline queue navigation', () => {
 });
 
 describe('Linked lead history preview', () => {
-  function linkedFixture() {
+  function linkedFixture(status = 'won') {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation(async (url, options) => {
       if (String(url).includes('/admin/leads/lead-qa?leadReview=1')) {
         calls.push({ path: String(url), options });
         return { ok: true, json: async () => ({ activities: [], calls: [], linkedHistory: {
-          canonical: { id: 'primary-qa', first_name: 'Original', last_name: 'Example', status: 'won', service_interest: 'Lawn' },
+          canonical: { id: 'primary-qa', first_name: 'Original', last_name: 'Example', status, service_interest: 'Lawn' },
           original: null, linked: [], unresolved: false, hasMore: false,
         } }) };
       }
@@ -238,6 +238,12 @@ describe('Linked lead history preview', () => {
     await screen.findByText('No activities logged');
     expect(screen.queryByRole('region', { name: 'Linked lead history' })).not.toBeInTheDocument();
     expect(calls.some(c => c.path.includes('leadReview=1'))).toBe(false);
+  });
+  it('keeps historical links with a missing status readable', async () => {
+    linkedFixture(null);
+    mount('/admin/pipeline?lead=lead-qa&leadReview=1');
+    expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Unknown status');
+    expect(screen.getByRole('button', { name: 'Review record' })).toBeEnabled();
   });
   it('opens the exact linked record and preserves review mode', async () => {
     linkedFixture();

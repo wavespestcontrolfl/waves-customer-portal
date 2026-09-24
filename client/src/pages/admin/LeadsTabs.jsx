@@ -1762,7 +1762,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             {record.relationship}:{" "}
                                             {record.first_name}{" "}
                                             {record.last_name} ·{" "}
-                                            {record.status.replace(/_/g, " ")}
+                                            {record.status
+                                              ? record.status.replace(/_/g, " ")
+                                              : "Unknown status"}
                                             {record.service_interest
                                               ? ` · ${record.service_interest}`
                                               : ""}
