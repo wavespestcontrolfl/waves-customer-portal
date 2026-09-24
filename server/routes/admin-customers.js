@@ -3960,7 +3960,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // TRANSACTION, under the row lock, so any later refusal (the
           // catch below maps this one to its 409) rolls the disarm back
           // with everything else.
-          if (updates.pipeline_stage === 'churned') {
+          if (updates.pipeline_stage === 'churned' && LifecycleGuard.churnGuardApplies(lockedBefore)) {
             const decision = await LifecycleGuard.churnGuardForRow(trx, req.params.id);
             if (decision.blocked) {
               const err = new Error('customer_still_billing_or_scheduled');
@@ -4404,11 +4404,12 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
     if (!isValidStage(stage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    const oldStage = customer.pipeline_stage;
-    const stageUpdates = {
-      pipeline_stage: stage,
-      ...stageLifecycleStamps(oldStage, stage, customer, { today: etDateString(), churnReason: req.body.churnReason }),
-    };
+    // oldStage/stageUpdates are derived from the LOCKED row inside the
+    // transaction below (GitHub Codex #4684 r5 P2): computed from this
+    // unlocked read, a request that waited at the lock behind a Churned
+    // transition would re-apply stamps for a stale same-stage no-op and
+    // relabel the row active_customer over the committed active=false.
+    let oldStage = customer.pipeline_stage;
     // ADMIN-BUG-R10 (round 3): runs on EVERY write of stage='churned' —
     // including a re-save on an already-churned row — not only an actual
     // transition, so a pre-fix residue row self-heals the next time anyone
@@ -4427,8 +4428,13 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
     // state, and must not be able to undo a committed churn.
     try {
       await db.transaction(async (trx) => {
-        await trx('customers').where({ id: req.params.id }).forUpdate().first();
-        if (stage === 'churned') {
+        const locked = await trx('customers').where({ id: req.params.id }).forUpdate().first() || customer;
+        oldStage = locked.pipeline_stage;
+        const stageUpdates = {
+          pipeline_stage: stage,
+          ...stageLifecycleStamps(oldStage, stage, locked, { today: etDateString(), churnReason: req.body.churnReason }),
+        };
+        if (stage === 'churned' && LifecycleGuard.churnGuardApplies(locked)) {
           const decision = await LifecycleGuard.churnGuardForRow(trx, req.params.id);
           if (decision.blocked) {
             const err = new Error('customer_still_billing_or_scheduled');
@@ -4723,12 +4729,23 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
       // back into the dues cron's charge set. The canonical
       // cancellation-processor.js disarm is idempotent, so a row this
       // change DID archive is a no-op here.
+      //
+      // `active` is derived from the LOCKED row, re-checked as still
+      // archived (pre-push audit P1 on 6059a880b2): a Churned stage save
+      // committing between the unlocked read above and this transaction
+      // would otherwise be re-armed active=true under a churned label.
+      const locked = await trx('customers').where({ id: req.params.id }).forUpdate().first() || customer;
+      if (!locked.deleted_at) {
+        const err = new Error('Customer not found or not deleted');
+        err.restoreNotDeleted = true;
+        throw err;
+      }
       const { disarmCustomerBillingFields, disarmPaymentRails } = require('../services/cancellation-processor');
       await disarmCustomerBillingFields(trx, req.params.id);
       await disarmPaymentRails(trx, req.params.id);
       await trx('customers').where({ id: req.params.id }).update({
         deleted_at: null,
-        active: customer.pipeline_stage !== 'churned',
+        active: locked.pipeline_stage !== 'churned',
       });
       const result = await relinkSubscribersForEmail(trx, customer.email);
       await auditCustomerMutation(req, 'customer.restore', req.params.id, {
@@ -4740,7 +4757,10 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
     });
     logger.info(`[customers] Restored customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err && err.restoreNotDeleted) return res.status(404).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/customers/:id/deposit-credit — the customer's open

@@ -1257,7 +1257,8 @@ async function updateCustomer(customerId, updates, expectedVersion) {
       // transaction, after the version check above — a refusal rolls the
       // whole thing back, and the disarm's updated_at bump can never
       // invalidate the version this same action was prepared against.
-      if (clean.pipeline_stage === 'churned') {
+      const { churnGuardApplies } = require('../customer-lifecycle-guard');
+      if (clean.pipeline_stage === 'churned' && churnGuardApplies(lockedBefore)) {
         const { churnGuardForRow, describeLiveVisit } = require('../customer-lifecycle-guard');
         const decision = await churnGuardForRow(trx, customerId);
         if (decision.blocked) {
@@ -1540,7 +1541,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .whereIn('id', customerIds)
         .forUpdate()
         .whereNull('deleted_at')
-        .select('id', 'first_name', 'last_name', 'pipeline_stage');
+        .select('id', 'first_name', 'last_name', 'pipeline_stage', 'active', 'autopay_enabled', 'next_charge_date');
       const liveIds = new Set(liveRows.map((r) => String(r.id)));
       const skipped = customerIds
         .filter((cid) => !liveIds.has(String(cid)))
@@ -1558,10 +1559,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // rest down itself through the canonical cancellation-processor.js
       // write as it checks them — no separate post-update pass needed.
       if (clean.pipeline_stage === 'churned') {
-        const { churnGuardForRow } = require('../customer-lifecycle-guard');
+        const { churnGuardForRow, churnGuardApplies } = require('../customer-lifecycle-guard');
+        const liveRowById = new Map(liveRows.map((r) => [String(r.id), r]));
         const blocked = [];
         for (const cid of targetIds) {
-           
+          // Already-churned rows with billing already wound down are left
+          // alone (see churnGuardApplies) — a bulk re-label must not 409
+          // customers who already followed the "Cancel plan…" advice.
+          if (!churnGuardApplies(liveRowById.get(String(cid)))) continue;
           const decision = await churnGuardForRow(trx, cid);
           if (decision.blocked) {
             blocked.push({ customer_id: cid, error: decision.error });
@@ -1689,7 +1694,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
         // Churned combined with an address/email edit self-heals a pre-fix
         // residue row too. churnGuardForRow winds billing down itself
         // through the canonical cancellation-processor.js write.
-        if (clean.pipeline_stage === 'churned') {
+        const { churnGuardApplies } = require('../customer-lifecycle-guard');
+        if (clean.pipeline_stage === 'churned' && churnGuardApplies(lockedBefore)) {
           const { churnGuardForRow } = require('../customer-lifecycle-guard');
           const decision = await churnGuardForRow(trx, customerId);
           if (decision.blocked) {

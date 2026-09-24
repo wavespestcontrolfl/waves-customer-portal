@@ -205,9 +205,27 @@ async function churnGuardForRow(dbh, customerId) {
   return { blocked: false };
 }
 
+// Does a write of pipeline_stage='churned' need churnGuardForRow at all?
+// Yes on an actual TRANSITION into churned (the fix's core case), and yes
+// on an ALREADY-churned row whose customer-level billing fields are still
+// live (the pre-fix residue shape the re-save self-heal exists for). No on
+// an already-churned row whose billing is already wound down: Customer 360
+// submits the whole form on every save, so gating unrelated edits (a phone
+// or note change) on a churned customer whose paid prepay term is still
+// riding out its window would 409 with "mark Churned" advice they already
+// followed (pre-push fallback audit P1 on d5e0ad00a4). The payment rails
+// (payment_methods/payments) are not probed here — the customer-level
+// flags are the signal the dues cron and the residue audit key on.
+function churnGuardApplies(row) {
+  if (!row) return true;
+  if (row.pipeline_stage !== 'churned') return true;
+  return row.active === true || row.autopay_enabled === true || row.next_charge_date != null;
+}
+
 module.exports = {
   findLiveFutureVisit,
   describeLiveVisit,
   findActivePrepayTerm,
+  churnGuardApplies,
   churnGuardForRow,
 };

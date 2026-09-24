@@ -1390,12 +1390,28 @@ async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
 
 async function resolveUnstampedMatchProperties(database, matches) {
   const { sourceEstimateForScope } = require('./recurring-appointment-seeder');
+  const { parseEstimateAddress } = require('./estimate-property-linkage');
   for (const match of matches) {
     if (match.property_id || match.service_address_line1 || !match.source_estimate_id) continue;
     try {
-       
       const src = await sourceEstimateForScope(database, match.source_estimate_id);
-      if (src?.property_id) match.property_id = src.property_id;
+      if (!src) continue;
+      if (src.property_id) { match.property_id = src.property_id; continue; }
+      // Legacy shape (GitHub Codex #4684 r5 P1): an accepted estimate with
+      // a secondary service address but no property link. The seeder's
+      // scoped duplicate check recovers this from src.address through the
+      // SAME parser (parseEstimateAddress → normalizedEstimateStreet), so
+      // the parsed components are stamped onto the match as its service
+      // address and seriesEffectiveAddress compares them like any stamped
+      // row — the primary-home fallback only remains for an estimate with
+      // no usable address at all.
+      const parts = src.address ? parseEstimateAddress(src.address) : null;
+      if (parts?.address_line1) {
+        match.service_address_line1 = parts.address_line1;
+        match.service_address_line2 = parts.address_line2 || null;
+        match.service_address_city = parts.city || null;
+        match.service_address_zip = parts.zip || null;
+      }
     } catch { /* keep the primary-address fallback */ }
   }
 }

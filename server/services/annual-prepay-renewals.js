@@ -47,7 +47,7 @@ function whereCallbackRow(cols) {
     if (cols.service_key_snapshot) this.orWhereIn('service_key_snapshot', Array.from(RE_SERVICE_SERVICE_KEYS));
   };
 }
-const INVOICE_CANCELLED_STATUSES = new Set(['void', 'cancelled', 'canceled', 'refunded']);
+const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
 const COVERAGE_EXCLUDED_STATUSES = new Set(['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']);
 const PREPAID_UPDATE_EXCLUDED_STATUSES = new Set([...COVERAGE_EXCLUDED_STATUSES, 'completed']);
 

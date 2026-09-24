@@ -129,4 +129,62 @@ const isoDaysAhead = (n) => new Date(Date.now() + n * 24 * 3600 * 1000).toISOStr
     const customer = await db('customers').where({ id: customerId }).first('pipeline_stage');
     expect(customer.pipeline_stage).toBe('active_customer');
   });
+
+  test('a payment_pending term whose invoice is already refunded/cancelled does NOT refuse churn (round-5 GitHub Codex P2)', async () => {
+    for (const terminalStatus of ['refunded', 'cancelled']) {
+      const customerId = randomUUID();
+      await db('customers').insert({
+        id: customerId, first_name: 'TerminalInvoiceRepro', last_name: 'Customer',
+        phone: '9415550303', email: `terminal-invoice-repro-${customerId}@example.com`,
+        pipeline_stage: 'active_customer', active: true, monthly_rate: 0,
+      });
+      const invoiceId = randomUUID();
+      await db('invoices').insert({
+        id: invoiceId, token: `tok-${invoiceId}`, invoice_number: `INV-${invoiceId.slice(0, 8)}`,
+        customer_id: customerId, status: terminalStatus,
+      });
+      await db('annual_prepay_terms').insert({
+        id: randomUUID(), customer_id: customerId, status: 'payment_pending',
+        prepay_invoice_id: invoiceId, term_start: isoDaysAhead(1), term_end: isoDaysAhead(366),
+      });
+      const status = await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/customers/${customerId}/stage`, {
+          method: 'PUT', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ stage: 'churned' }),
+        });
+        return res.status;
+      });
+      expect([200, 500]).toContain(status); // 500 = harness non-UUID admin id on the note insert (see above)
+      const customer = await db('customers').where({ id: customerId }).first('pipeline_stage', 'active');
+      expect(customer.pipeline_stage).toBe('churned');
+      expect(customer.active).toBe(false);
+    }
+  });
+
+  test('an already-churned, already-wound-down row with a prepay term still riding out is NOT re-guarded on a same-stage re-save (fallback audit P1)', async () => {
+    const customerId = randomUUID();
+    await db('customers').insert({
+      id: customerId, first_name: 'CleanChurnRepro', last_name: 'Customer',
+      phone: '9415550304', email: `clean-churn-repro-${customerId}@example.com`,
+      pipeline_stage: 'churned', churned_at: isoDaysAhead(-30), churn_reason: 'moved',
+      active: false, autopay_enabled: false, next_charge_date: null, monthly_rate: 0,
+    });
+    // A paid prepay term still inside its window — a live blocker for a
+    // TRANSITION into churned, but this row already churned cleanly.
+    await db('annual_prepay_terms').insert({
+      id: randomUUID(), customer_id: customerId, status: 'active',
+      term_start: isoDaysAhead(-200), term_end: isoDaysAhead(100),
+    });
+    const status = await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/customers/${customerId}/stage`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ stage: 'churned', churnReason: 'moved away' }),
+      });
+      return res.status;
+    });
+    expect([200, 500]).toContain(status); // never 409
+    const customer = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churn_reason');
+    expect(customer.pipeline_stage).toBe('churned');
+    expect(customer.churn_reason).toBe('moved away');
+  });
 });
