@@ -55,11 +55,15 @@ async function classifyUniform({ buffer, mimeType }) {
 // valid-JSON answer missing `uniform_ok` must never read as compliant.
 const ROLES = new Set(['technician', 'homeowner', 'other', 'none']);
 const HEADS = new Set(['capped', 'bare', 'hidden']);
+const LOGOS = new Set(['cap+chest', 'cap', 'chest', 'none', 'hidden']);
 function classifierShapeProblem(p) {
   if (typeof p.person !== 'boolean') return 'person is not a boolean';
   if (!ROLES.has(p.role)) return `role "${p.role}" not in ${[...ROLES].join('|')}`;
   if (typeof p.uniform_ok !== 'boolean') return 'uniform_ok is not a boolean';
   if (p.person && p.role === 'technician' && !HEADS.has(String(p.head || '').toLowerCase())) return `head "${p.head}" not in ${[...HEADS].join('|')}`;
+  // A technician answer without the logo verdict is incomplete, never
+  // compliant (Codex r1 P2 on #4761).
+  if (p.person && p.role === 'technician' && !LOGOS.has(String(p.logo || '').toLowerCase())) return `logo "${p.logo}" not in ${[...LOGOS].join('|')}`;
   return null;
 }
 // A technician who is out of uniform — the only case the sweep regenerates. A

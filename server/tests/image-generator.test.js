@@ -574,6 +574,20 @@ describe('uniform logo reference (owner directive 2026-09-24: logo on cap + righ
     expect(r.attempts.map((a) => `${a.provider}:${a.logoReference}`)).toEqual(['gpt-image-2:true', 'gpt-image-2:false']);
   });
 
+  test('an auth/model failure or an empty response with the reference is NOT retried logo-free — only a 400/413/415/422 is (Codex r1 P2 on #4761)', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    for (const first of [err(404, 'model_not_found'), err(401, 'bad key'), ok({ data: [{}] })]) {
+      const mockFetch = jest.fn().mockReturnValueOnce(first).mockReturnValueOnce(ok(OPENAI_OK_BODY));
+      const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5', fetchFn: mockFetch, uniformLogo: LOGO });
+      const r = await gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true });
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch.mock.calls.map((c) => c[0].split('/').pop())).toEqual(['edits', 'edits']);
+      expect(r.model).toBe('gpt-image-1.5');
+      expect(r.logoReference).toBe(true);
+    }
+    expect([..._internals.REFERENCE_REJECT_STATUSES].sort()).toEqual([400, 413, 415, 422]);
+  });
+
   test('a rejected reference on one leg does not strip it from the next leg', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     const mockFetch = jest.fn()

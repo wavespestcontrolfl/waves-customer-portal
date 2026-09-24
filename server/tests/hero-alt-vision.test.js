@@ -92,30 +92,75 @@ describe('sanitizeAlt', () => {
   });
 });
 
-describe('screenGeneratedImage: uniform logo allowance (owner directive 2026-09-24)', () => {
+describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — required on cap + right chest, forbidden elsewhere)', () => {
   const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
   const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
+  const branded = (extra = {}) => answer({ readable_text: [], logos_or_brand_marks: [], waves_logo_placements: ['cap', 'right chest'], technician_visible: true, forbidden_scenes: [], notes: '', ...extra });
   beforeEach(() => mockDispatch.mockReset());
 
-  test('the screen prompt names the exception only when the caller allows it', () => {
-    expect(buildScreenPrompt({})).not.toMatch(/EXCEPTION/);
+  test('the screen prompt asks for placements and names the exception only when the caller allows it', () => {
+    const plain = buildScreenPrompt({});
+    expect(plain).not.toMatch(/EXCEPTION|waves_logo_placements/);
     const p = buildScreenPrompt({ allowUniformLogo: true });
-    expect(p).toMatch(/EXCEPTION: the Waves company logo .* is ALLOWED on a technician's cap or shirt chest/);
-    expect(p).toMatch(/ONLY if it appears anywhere else/);
+    expect(p).toMatch(/"waves_logo_placements": string\[\], "technician_visible": boolean/);
+    expect(p).toMatch(/"right chest" \(the wearer's right side/);
+    expect(p).toMatch(/EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected/);
   });
 
-  test('the Waves logo on the cap/chest and its lettering pass; the same logo on the van still fails', async () => {
-    mockDispatch.mockResolvedValue(answer({ readable_text: ['WAVES', 'LAWN & PEST'], logos_or_brand_marks: ['Waves logo on the technician\'s cap', 'Waves logo on shirt chest'], forbidden_scenes: [], notes: '' }));
-    const ok = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
-    expect(ok.ok).toBe(true);
-    expect(ok.logos).toEqual([]);
-    expect(ok.readableText).toEqual([]);
-    expect(mockDispatch.mock.calls[0][1].text).toMatch(/EXCEPTION/);
+  test('logo on the cap AND right chest, nothing else → clean; placements are reported', async () => {
+    mockDispatch.mockResolvedValue(branded());
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(r).toMatchObject({ ok: true, checked: true, reasons: [], violations: 0, placements: ['cap', 'right chest'] });
+    expect(mockDispatch.mock.calls[0][1].text).toMatch(/waves_logo_placements/);
+  });
 
-    mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: ['Waves logo on the van door'], forbidden_scenes: [], notes: '' }));
-    const bad = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
-    expect(bad.ok).toBe(false);
-    expect(bad.reasons[0]).toMatch(/logo or brand mark: Waves logo on the van door/);
+  test('a technician in frame with the logo missing, on one garment only, or on the LEFT chest fails (Codex r1 P1 on #4761)', async () => {
+    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: [] }));
+    expect((await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).reasons).toEqual(['uniform logo missing on the cap', 'uniform logo missing on the chest']);
+    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: ['cap'] }));
+    expect((await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).reasons).toEqual(['uniform logo missing on the chest']);
+    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: ['cap', 'left chest'] }));
+    const left = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(left.ok).toBe(false);
+    expect(left.reasons).toEqual(['uniform logo on the left chest, not the right']);
+    expect(left.violations).toBe(1);
+  });
+
+  test('no technician garment to judge → no placement demand (a close-up of a bait station is fine)', async () => {
+    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: [], technician_visible: false }));
+    expect((await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).ok).toBe(true);
+  });
+
+  test('the Waves logo anywhere else is still a brand-mark violation, even beside a correct uniform', async () => {
+    mockDispatch.mockResolvedValue(branded({ waves_logo_placements: ['cap', 'right chest', 'elsewhere: van door'] }));
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toEqual(['logo or brand mark: Waves logo elsewhere: van door']);
+    mockDispatch.mockResolvedValue(branded({ logos_or_brand_marks: ['Waves logo on the van door'] }));
+    expect((await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).reasons).toEqual(['logo or brand mark: Waves logo on the van door']);
+  });
+
+  test('a model that still lists the uniform logo under logos_or_brand_marks is not failed for it', async () => {
+    mockDispatch.mockResolvedValue(branded({ logos_or_brand_marks: ["Waves logo on the technician's cap", 'Waves logo on shirt chest'] }));
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(r.ok).toBe(true);
+    expect(r.logos).toEqual([]);
+  });
+
+  test('readable text is never filtered: a WAVES string that comes back is standalone lettering (Codex r1 P2 on #4761)', async () => {
+    mockDispatch.mockResolvedValue(branded({ readable_text: ['WAVES'] }));
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toEqual(['readable text: WAVES']);
+  });
+
+  test('an answer without the placement list or technician_visible is unusable → unchecked (fail-open), never clean', async () => {
+    mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }));
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(r).toMatchObject({ ok: true, checked: false });
+    // the same answer is a perfectly good verdict without the allowance
+    const plain = await screenGeneratedImage({ buffer: PNG_BUFFER });
+    expect(plain).toMatchObject({ ok: true, checked: true });
   });
 
   test('without the allowance the uniform logo is still a violation (a logo-free generation must not carry one)', async () => {
@@ -126,15 +171,10 @@ describe('screenGeneratedImage: uniform logo allowance (owner directive 2026-09-
     expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/EXCEPTION/);
   });
 
-  test('standalone WAVES lettering with no cap/chest logo detected stays readable text (a sign or van door)', async () => {
-    mockDispatch.mockResolvedValue(answer({ readable_text: ['WAVES'], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }));
-    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
-    expect(r.ok).toBe(false);
-    expect(r.reasons).toEqual(['readable text: WAVES']);
-  });
-
-  test('helpers: only a Waves mark on a garment surface with no other surface named is allowed', () => {
-    const { isAllowedUniformLogo, isLogoLettering } = _internals;
+  test('helpers: placement classification and the allowlist', () => {
+    const { isAllowedUniformLogo, classifyPlacement } = _internals;
+    expect(['cap', 'Cap front', 'on the hat'].map(classifyPlacement)).toEqual(['cap', 'cap', 'cap']);
+    expect(['right chest', 'chest', 'Left chest', 'elsewhere: mailbox', 'van door'].map(classifyPlacement)).toEqual(['right chest', 'right chest', 'left chest', 'elsewhere', 'elsewhere']);
     expect(isAllowedUniformLogo('Waves logo on the cap')).toBe(true);
     expect(isAllowedUniformLogo('Waves badge on the polo chest')).toBe(true);
     expect(isAllowedUniformLogo('Waves logo on the cap and on the van')).toBe(false);
@@ -145,8 +185,5 @@ describe('screenGeneratedImage: uniform logo allowance (owner directive 2026-09-
     expect(isAllowedUniformLogo('Waves badge on the uniform')).toBe(false);
     expect(isAllowedUniformLogo('wave pattern on the shirt')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo on the glove and cap')).toBe(false);
-    expect(isLogoLettering('WAVES')).toBe(true);
-    expect(isLogoLettering('Lawn & Pest')).toBe(true);
-    expect(isLogoLettering('Waves Pest Control')).toBe(false);
   });
 });

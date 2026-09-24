@@ -252,7 +252,10 @@ async function generateFeaturedImage({ title, topic, keyword, slug }) {
     if (hero.screen?.checked && !hero.screen.ok) {
       logger.warn(`[content] Featured image for "${title}" still failed the text/logo screen after a retry (${hero.screen.reasons.join('; ')}) — operator review`);
     }
-    return hero.dataUrl;
+    // The row keeps only the data URL: stamp the logo-reference marker on it
+    // so the publish-time re-screen allows the uniform logo (see
+    // astro-publisher stampLogoReference).
+    return hero.logoReference ? AstroPublisher._internals.stampLogoReference(hero.dataUrl) : hero.dataUrl;
   } catch (err) {
     // Match the legacy throw contract — single-line Error the
     // /blog/:id/regenerate-image handler stores against the post.

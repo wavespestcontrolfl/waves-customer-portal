@@ -134,6 +134,11 @@ const MODE_ASPECTS = {
 };
 
 const RETRYABLE_OPENAI_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+// Statuses under which an /v1/images/edits request may have been refused
+// BECAUSE of the attached reference (bad request / payload / media type /
+// unprocessable). A 401/403/404 or an empty 200 is the model or account, not
+// the reference — removing the logo cannot fix it (Codex r1 P2 on #4761).
+const REFERENCE_REJECT_STATUSES = new Set([400, 413, 415, 422]);
 
 // ── pure helpers (test-friendly) ─────────────────────────────────────
 
@@ -664,12 +669,13 @@ class ImageGenerator {
       } else if (cfg.api === 'openai') {
         const referenceImages = legLogo ? [{ buffer: logoBuffer, mimeType: 'image/png', filename: 'waves-logo.png' }] : [];
         result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: legLogo ? logoPrompt : prompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
-        if (legLogo && result.fatal) {
+        if (legLogo && result.fatal && REFERENCE_REJECT_STATUSES.has(result.status)) {
           // The request itself was refused with the reference attached (a
-          // non-retryable 4xx): the same leg once more, logo-free, inside the
-          // same deadline. A retryable failure falls through to the next
-          // provider as before — never a second call on the same leg
-          // (pre-push fallback P1 on ae29283fcc).
+          // 400/413/415/422): the same leg once more, logo-free, inside the
+          // same deadline. A retryable failure, an auth/model failure or an
+          // empty response falls through to the next provider as before —
+          // never a second call on the same leg (pre-push fallback P1 on
+          // ae29283fcc; Codex r1 P2 on #4761).
           attempts.push({ provider: slug, logoReference: true, result });
           logger.warn(`[image-generator] ${slug} rejected the request with the logo reference (${result.status} ${result.body || ''}) — retrying this leg without it`);
           legLogo = false;
@@ -800,6 +806,7 @@ module.exports._internals = {
   PIXEL_WATERMARK_OVERRIDE_ENV,
   WATERMARK_ALLOWED_DEFAULT_CHAIN,
   isFatalOpenAIError,
+  REFERENCE_REJECT_STATUSES,
   sizeFor,
   buildPrompt,
   buildAltText,

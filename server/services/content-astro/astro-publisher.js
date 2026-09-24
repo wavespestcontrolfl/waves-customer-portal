@@ -769,15 +769,29 @@ function imageExtFromSource(url) {
 // "Maximum call stack size exceeded" hero failure. Split at the first comma
 // and regex ONLY the bounded header; Buffer.from(base64) tolerates embedded
 // whitespace, so wrapped payloads now decode instead of erroring.
+// An admin-generated hero is stored as a bare data: URL (no row for its
+// provenance), so the one fact the publish-time re-screen needs — was the
+// Waves logo reference attached? — rides as an RFC 2397 media-type parameter
+// (`data:image/png;waves-logo=1;base64,…`; browsers render it unchanged).
+// stampLogoReference adds it; parseImageDataUrl reads it back as
+// logoReference (Codex r1 P2 on #4761).
+const LOGO_REFERENCE_PARAM = 'waves-logo=1';
+function stampLogoReference(dataUrl) {
+  const s = String(dataUrl || '');
+  const m = s.match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
+  if (!m) return s;
+  return `data:${m[1]};${LOGO_REFERENCE_PARAM};base64,${s.slice(m[0].length)}`;
+}
 function parseImageDataUrl(url) {
   const s = String(url || '');
   if (!s.toLowerCase().startsWith('data:')) return null;
   const comma = s.indexOf(',');
   if (comma === -1) return null;
   const header = s.slice(0, comma); // bounded — never the multi-MB payload
-  const m = header.match(/^data:(image\/[a-z0-9.+-]+);base64$/i);
+  const m = header.match(/^data:(image\/[a-z0-9.+-]+)((?:;[a-z0-9-]+=[a-z0-9-]+)*);base64$/i);
   if (!m) return null;
-  return { mime: m[1].toLowerCase(), base64: s.slice(comma + 1) };
+  const params = (m[2] || '').split(';').filter(Boolean).map((p) => p.toLowerCase());
+  return { mime: m[1].toLowerCase(), base64: s.slice(comma + 1), logoReference: params.includes(LOGO_REFERENCE_PARAM) };
 }
 
 async function fetchImageBuffer(url) {
@@ -1274,7 +1288,11 @@ async function publishAstro(postId) {
         if (heroImage?.buffer && dataUrl) {
           const { screenGeneratedImage } = require('../content/hero-alt-vision');
           heroImage.model = 'admin pre-generated';
-          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png' });
+          // The stored URL says whether the logo reference was attached, so
+          // a correctly branded cap/chest is not re-reported as a forbidden
+          // logo (Codex r1 P2 on #4761).
+          heroImage.logoReference = dataUrl.logoReference === true;
+          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png', allowUniformLogo: heroImage.logoReference });
         }
       } catch (mediaErr) {
         const e = new Error(`featured image could not be fetched for Astro publish: ${mediaErr.message}`);
@@ -5143,6 +5161,7 @@ module.exports = {
     supersededBodyImages,
     fetchImageBuffer,
     parseImageDataUrl,
+    stampLogoReference,
     defaultHeroForCategory,
     describeHeroFailure,
     inferServiceAreas,

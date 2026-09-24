@@ -107,16 +107,25 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 // a vision miss returns { ok: true, checked: false } — a screen must never
 // park a publish on its own outage.
 // allowUniformLogo: the image was generated WITH the Waves logo reference
-// (owner directive 2026-09-24) — the mark on the technician's cap and chest
-// is the point, not a violation; the same mark anywhere else still is.
+// (owner directive 2026-09-24). The mark is then REQUIRED on the technician's
+// cap and right chest (a technician in frame with it missing, on one garment
+// only, or on the left chest fails — Codex r1 P1 on #4761) and still
+// forbidden anywhere else. The model reports where it sees the mark under
+// waves_logo_placements; its own lettering is never readable_text there.
 const UNIFORM_LOGO_DESCRIPTION = 'the Waves company logo (a smiling blue wave mascot in a red-and-blue shield, lettered "WAVES" and "LAWN & PEST")';
 function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniformLogo = false } = {}) {
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
   const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
+  const shape = allowUniformLogo
+    ? '{"readable_text": string[], "logos_or_brand_marks": string[], "waves_logo_placements": string[], "technician_visible": boolean, "forbidden_scenes": number[], "notes": string}'
+    : '{"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": number[], "notes": string}';
   const uniformLogoRule = allowUniformLogo
-    ? ` EXCEPTION: ${UNIFORM_LOGO_DESCRIPTION} is ALLOWED on a technician's cap or shirt chest — do not list it there, and do not list its own lettering under readable_text. List it under logos_or_brand_marks ONLY if it appears anywhere else (a vehicle, wall, sign, equipment, packaging, or floating on its own), naming where.`
+    ? `
+- waves_logo_placements: every place ${UNIFORM_LOGO_DESCRIPTION} appears, each as one of exactly "cap", "right chest" (the wearer's right side, i.e. the side of their right arm), "left chest", or "elsewhere: <where>" (a vehicle, wall, sign, equipment, packaging, floating on its own). Empty array if it appears nowhere.
+- technician_visible: true if a uniformed technician's cap front or shirt chest is in frame and can be judged.
+EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — do not list it under logos_or_brand_marks, and do not list its own lettering ("WAVES", "LAWN & PEST") under readable_text. Any OTHER lettering, and the Waves logo anywhere other than the cap or chest, must still be listed.`
     : '';
-  return `Inspect this generated blog image and answer as strict JSON only, shape {"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": number[], "notes": string}.
+  return `Inspect this generated blog image and answer as strict JSON only, shape ${shape}.
 - readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.
 - logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.${uniformLogoRule}
 - forbidden_scenes: the NUMBERS of the FORBIDDEN items below the image clearly depicts (e.g. [1]). Empty array if none${forbidden.length ? '' : ' (there are none to check)'}.
@@ -124,7 +133,7 @@ function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniform
 ${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}
 ${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t, i) => `${i + 1}. "${t}"`).join('; ')}.` : ''}`;
 }
-function parseScreen(text, { requireForbidden = false } = {}) {
+function parseScreen(text, { requireForbidden = false, requirePlacements = false } = {}) {
   try {
     const raw = String(text || '').replace(/```[a-z]*|```/gi, '').trim();
     const start = raw.indexOf('{');
@@ -138,7 +147,12 @@ function parseScreen(text, { requireForbidden = false } = {}) {
     // — and then it is held to the same bar: a scalar or missing field is an
     // unusable answer, never a clean verdict (Codex r9 P2 on #3964).
     if (requireForbidden && !Array.isArray(obj.forbidden_scenes)) return null;
+    // With the logo reference the placement list is the verdict: missing or
+    // malformed → unusable answer (fail-open as unchecked), never clean.
+    if (requirePlacements && (!Array.isArray(obj.waves_logo_placements) || typeof obj.technician_visible !== 'boolean')) return null;
     return {
+      placements: Array.isArray(obj.waves_logo_placements) ? obj.waves_logo_placements.map((t) => String(t || '').trim()).filter(Boolean) : [],
+      technicianVisible: obj.technician_visible === true,
       readableText: obj.readable_text.map((t) => String(t || '').trim()).filter(Boolean),
       logos: obj.logos_or_brand_marks.map((t) => String(t || '').trim()).filter(Boolean),
       // Numbers (the ids the prompt asks for) or strings (a model that quotes
@@ -171,21 +185,42 @@ function matchExclusion(detection, exclusions) {
  *   ok=false when the image carries a logo / brand mark, or readable text
  *   beyond the captions the caller allowed (an infographic's own labels).
  */
-// Belt to the prompt's braces: a model that lists the uniform logo anyway.
-// Dropped only when the detection names "Waves" (never the generic "wave")
-// AND a positive garment surface (cap / hat / chest / polo / shirt — not
-// "technician" or "uniform" alone, which would pass a clipboard or a glove)
-// AND no other surface — "Waves logo on the van door" stays a violation
-// (pre-push fallback P1 on 440cc8b947).
+// Belt to the prompt's braces: a model that lists the uniform logo under
+// logos_or_brand_marks anyway. Dropped only when the detection names "Waves"
+// (never the generic "wave") AND a positive garment surface (cap / hat /
+// chest / polo / shirt — not "technician" or "uniform" alone, which would
+// pass a clipboard or a glove) AND no other surface — "Waves logo on the van
+// door" stays a violation (pre-push fallback P1 on 440cc8b947). Readable
+// text is NOT filtered: the prompt keeps the uniform logo's own lettering
+// out of readable_text, so any "WAVES" string that does come back is
+// standalone lettering somewhere else (Codex r1 P2 on #4761).
 const UNIFORM_LOGO_WORDS = /\bwaves\b/i;
 const UNIFORM_LOCATION = /\b(cap|hat|chest|polo|shirt)\b/i;
 const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|sprayer|tank|packaging|bottle|box|background|floating|standalone|sky|ground|clipboard|tablet|backpack|bag|glove|gloves|tool|tools|mailbox|fence)\b/i;
 const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t);
-// The logo's own lettering ("WAVES", "LAWN & PEST") read back as text —
-// dropped only alongside a detected cap/chest logo it can belong to; a
-// standalone "WAVES" string (a sign, a van door) stays readable text.
-const LOGO_LETTERING = new Set(['waves', 'lawn', 'pest', 'lawn pest', 'waves lawn pest', 'waves lawn and pest', 'lawn and pest']);
-const isLogoLettering = (t) => LOGO_LETTERING.has(normalizeText(t));
+// A reported placement → cap | right chest | left chest | elsewhere.
+function classifyPlacement(t) {
+  const n = normalizeText(t);
+  if (/^elsewhere\b/.test(n)) return 'elsewhere';
+  if (/\b(cap|hat)\b/.test(n)) return 'cap';
+  if (/\bchest\b/.test(n) && /\bleft\b/.test(n)) return 'left chest';
+  if (/\bchest\b/.test(n)) return 'right chest';
+  return 'elsewhere';
+}
+// The reasons a uniform-logo image fails on placement alone: the logo must
+// be on the cap AND the right chest whenever a technician's garments can be
+// judged; anywhere else is a brand-mark violation.
+function uniformLogoReasons({ placements, technicianVisible }) {
+  const where = new Set(placements.map(classifyPlacement));
+  const reasons = [];
+  const elsewhere = placements.filter((t) => classifyPlacement(t) === 'elsewhere');
+  if (elsewhere.length) reasons.push(`logo or brand mark: Waves logo ${elsewhere.slice(0, 3).join(', ')}`);
+  if (technicianVisible) {
+    if (!where.has('cap')) reasons.push('uniform logo missing on the cap');
+    if (!where.has('right chest')) reasons.push(where.has('left chest') ? 'uniform logo on the left chest, not the right' : 'uniform logo missing on the chest');
+  }
+  return reasons;
+}
 
 async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], avoidDepicting = [], allowUniformLogo = false, timeoutMs = null } = {}) {
   const open = { ok: true, checked: false, readableText: [], logos: [], forbidden: [], reasons: [], violations: 0 };
@@ -209,16 +244,13 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       logger.warn(`[hero-alt-vision] image screen failed (${res.reason}) — accepting image (fail-open)`);
       return open;
     }
-    const parsed = parseScreen(res.text, { requireForbidden: avoidDepicting.some((t) => String(t || '').trim()) });
+    const parsed = parseScreen(res.text, { requireForbidden: avoidDepicting.some((t) => String(t || '').trim()), requirePlacements: allowUniformLogo });
     if (!parsed) {
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
       return open;
     }
-    if (allowUniformLogo) {
-      const sawUniformLogo = parsed.logos.some(isAllowedUniformLogo);
-      parsed.logos = parsed.logos.filter((t) => !isAllowedUniformLogo(t));
-      if (sawUniformLogo) parsed.readableText = parsed.readableText.filter((t) => !isLogoLettering(t));
-    }
+    const logoReasons = allowUniformLogo ? uniformLogoReasons(parsed) : [];
+    if (allowUniformLogo) parsed.logos = parsed.logos.filter((t) => !isAllowedUniformLogo(t));
     // An allowed caption may come back split ("1", "OFF") or joined. A
     // detected string is the caption's only when it is a contiguous, in-order
     // run of ONE allowed caption — never a superset ("1 OFF SALE"), never a
@@ -253,7 +285,7 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     });
     const incomplete = allowedSeqs.map((seq, c) => (covered[c].size && covered[c].size < seq.length ? allowedText[c] : null)).filter(Boolean);
     const missing = allowedSeqs.map((seq, c) => (covered[c].size === 0 ? allowedText[c] : null)).filter(Boolean);
-    const reasons = [];
+    const reasons = [...logoReasons];
     if (parsed.logos.length) reasons.push(`logo or brand mark: ${parsed.logos.slice(0, 3).join(', ')}`);
     if (strayText.length) reasons.push(`readable text: ${strayText.slice(0, 3).join(', ')}`);
     if (incomplete.length) reasons.push(`incomplete caption: ${incomplete.slice(0, 3).map((c) => `"${c}"`).join(', ')}`);
@@ -270,8 +302,8 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     // incomplete captions, logos, forbidden scenes — never an allowed
     // caption the image rendered correctly; the caller ranks two failed
     // candidates on it (Codex r11 P2 on #3964).
-    const violations = parsed.logos.length + strayText.length + incomplete.length + missing.length + forbidden.length;
-    return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: parsed.logos, forbidden, reasons, violations };
+    const violations = logoReasons.length + parsed.logos.length + strayText.length + incomplete.length + missing.length + forbidden.length;
+    return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: parsed.logos, forbidden, reasons, violations, placements: parsed.placements };
   } catch (err) {
     logger.warn(`[hero-alt-vision] image screen threw — accepting image (fail-open): ${err.message}`);
     return open;
@@ -279,4 +311,4 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
 }
 
 module.exports = { describeHeroForAlt, sanitizeAlt, buildAltPrompt, screenGeneratedImage, buildScreenPrompt, parseScreen };
-module.exports._internals = { isAllowedUniformLogo, isLogoLettering, UNIFORM_LOGO_DESCRIPTION };
+module.exports._internals = { isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, UNIFORM_LOGO_DESCRIPTION };
