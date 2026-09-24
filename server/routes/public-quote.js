@@ -1348,8 +1348,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, contactPhone)]);
       }
     };
-    const newerFlagUnderLock = async (trx) => {
-      if (addressUnverified || !contactEmail || !contactPhone) return null;
+    // Two-way (codex r23 P1): returns { newerFlag } when a matching flag
+    // committed after this run's clean evidence, { newerClean } when a
+    // clean verdict committed after every matching flag (and after this
+    // run's own flag), else {}.
+    const reconcileUnderLock = async (trx) => {
+      if (!contactEmail || !contactPhone) return {};
       const cleanAt = Math.max(
         Date.parse(cleanEvidenceAt || '') || 0,
         rollAnsweredThisRun ? (Date.parse(trustedProfileCachedAt || '') || 0) : 0,
@@ -1358,12 +1362,24 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .whereNull('deleted_at')
         .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
-        .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
-        .select('extracted_data');
-      return rows
-        .map((row) => recoverAddressUnverified(typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data))
-        .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress) && (Date.parse(flag.flagged_at || '') || 0) > cleanAt)
-        .sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0] || null;
+        .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+        .select('id', 'extracted_data');
+      const parseRow = (row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data);
+      const flags = rows
+        .map((row) => recoverAddressUnverified(parseRow(row)))
+        .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress));
+      if (addressUnverified) flags.push(addressUnverified);
+      const newestFlag = flags.sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0] || null;
+      const newestFlagAt = newestFlag ? (Date.parse(newestFlag.flagged_at || '') || 0) : 0;
+      const newestClean = rows
+        .map((row) => ({ own: String(row.id) === String(lead?.id || ''), snap: parseRow(row) }))
+        .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, normalizedAddress, { requireLocality: !own }))
+        .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
+        .reduce((max, at) => Math.max(max, at), 0);
+      const effectiveCleanAt = Math.max(cleanAt, newestClean);
+      if (!addressUnverified && newestFlag && newestFlagAt > effectiveCleanAt) return { newerFlag: newestFlag };
+      if (addressUnverified && newestClean > newestFlagAt) return { newerClean: new Date(newestClean).toISOString() };
+      return {};
     };
     if (addressUnverified) {
       // Stamp the judged address on a freshly derived flag (a recovered
@@ -3179,14 +3195,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           }
           await applySetupFeeQuote(trx);
           let carried = carryDraftAddressBlock(lockedEst);
-          if (!carried) {
-            const newer = await newerFlagUnderLock(trx);
-            if (newer) { carried = true; carriedAddressFlag = newer; }
+          let clearedUnderLock = false;
+          {
+            const rec = await reconcileUnderLock(trx);
+            if (!carried && rec.newerFlag) { carried = true; carriedAddressFlag = rec.newerFlag; }
+            if (rec.newerClean) { carried = false; clearedUnderLock = true; addressUnverified = null; cleanEvidenceAt = rec.newerClean; }
           }
           if (carried) draftAddressBlockCarried = true;
           await trx('estimates').where({ id: existingEst.id }).update({
             ...estFields,
             ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag } } : {}),
+            ...(clearedUnderLock ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
             ...(wizardAddressChanged(lockedEst) ? { property_id: null } : {}),
             archived_at: null,
             updated_at: new Date(),
@@ -3226,9 +3245,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 && lockedDup.status === 'draft' && !lockedDup.archived_at) {
                 await applySetupFeeQuote(trx);
                 let carried = carryDraftAddressBlock(lockedDup);
-                if (!carried) {
-                  const newer = await newerFlagUnderLock(trx);
-                  if (newer) { carried = true; carriedAddressFlag = newer; }
+                let clearedUnderLock = false;
+                {
+                  const rec = await reconcileUnderLock(trx);
+                  if (!carried && rec.newerFlag) { carried = true; carriedAddressFlag = rec.newerFlag; }
+                  if (rec.newerClean) { carried = false; clearedUnderLock = true; addressUnverified = null; cleanEvidenceAt = rec.newerClean; }
                 }
                 if (carried) draftAddressBlockCarried = true;
                 const refreshed = await trx('estimates')
@@ -3236,6 +3257,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                   .update({
                     ...estFields,
                     ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag } } : {}),
+                    ...(clearedUnderLock ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
                     ...(wizardAddressChanged(lockedDup) ? { property_id: null } : {}),
                     updated_at: new Date(),
                   });
@@ -3258,11 +3280,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // released its lock rides onto the inserted draft (codex r22
             // P1).
             await draftVerdictLock(trx);
-            const newerForInsert = await newerFlagUnderLock(trx);
+            const recInsert = await reconcileUnderLock(trx);
+            const newerForInsert = recInsert.newerFlag || null;
             if (newerForInsert) { draftAddressBlockCarried = true; carriedAddressFlag = newerForInsert; }
+            if (recInsert.newerClean) { addressUnverified = null; cleanEvidenceAt = recInsert.newerClean; }
             const [inserted] = await trx('estimates').insert({
               ...estFields,
               ...(newerForInsert ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: newerForInsert } } : {}),
+              ...(recInsert.newerClean ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
               status: 'draft',
               source: 'quote_wizard',
             }).returning('id');

@@ -31,6 +31,10 @@ const LINKAGE_INVALIDATION_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngin
 // or address are about to be corrected is not publishable — anchor OR
 // grouped sibling (codex r1 P1 on #3804).
 const REPRICE_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') = ''";
+// The quote intake's county-roll address block (public-quote addressUnverified)
+// as a SQL predicate, reasserted on every atomic write that could otherwise
+// overwrite the marker from a stale snapshot (codex #4667 r23 P1).
+const ADDRESS_UNVERIFIED_ABSENT_SQL = "NOT COALESCE(estimate_data->'addressUnverified' = 'true'::jsonb, false)";
 const INVALIDATION_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''";
 
 // The ONE in-flight verdict for a call's processing state — lives here
@@ -309,6 +313,7 @@ module.exports = {
   LINKAGE_INVALIDATION_ABSENT_SQL,
   INVALIDATION_PENDING_ABSENT_SQL,
   REPRICE_PENDING_ABSENT_SQL,
+  ADDRESS_UNVERIFIED_ABSENT_SQL,
   callReprocessInFlight,
   callPassStillOwned,
   callSideBlockForEstimateData,

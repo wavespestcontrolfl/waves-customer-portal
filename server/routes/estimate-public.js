@@ -8,7 +8,7 @@ const { createDefaultCustomerRows } = require('../services/customer-default-rows
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL, callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -14207,6 +14207,8 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       // marker off) a held row — the ms-truncated CAS below does not exclude
       // a same-millisecond hold stamp (pre-push codex P0 on #3804).
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -14504,6 +14506,8 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       // marker off) a held row — the ms-truncated CAS below does not exclude
       // a same-millisecond hold stamp (pre-push codex P0 on #3804).
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
       // write — an accept, a preference toggle, another bond switch — makes
       // this update 0-row and the caller reloads server truth. Millisecond
@@ -14770,6 +14774,8 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
       // marker off) a held row — the ms-truncated CAS below does not exclude
       // a same-millisecond hold stamp (pre-push codex P0 on #3804).
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -15563,6 +15569,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         // marker off) a held row — the ms-truncated CAS below does not exclude
         // a same-millisecond hold stamp (pre-push codex P0 on #3804).
         .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+        // …and the county-roll address block (codex #4667 r23 P1).
+        .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
         // Same ms-truncated CAS as the bond/interior writes: any concurrent
         // write — an accept, a preference toggle, another opt-out — makes this
         // a zero-row update and the caller reloads server truth.
@@ -15792,6 +15800,8 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       // marker off) a held row — the ms-truncated CAS below does not exclude
       // a same-millisecond hold stamp (pre-push codex P0 on #3804).
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -16210,6 +16220,8 @@ async function claimNotifyOnlyExtensionRequest(estimateId, dedupeOpen) {
     const claimed = await query
       .where(dedupeOpen)
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .update({ extension_requested_at: trx.fn.now() });
     return { claimed, blocked: false };
   });
@@ -16277,6 +16289,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       // falls through to the notify-office path — a human hears, no link
       // goes out.
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .update({
         extension_requested_at: db.fn.now(),
         extension_auto_granted_at: db.fn.now(),
@@ -16557,6 +16571,8 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
         // stamped between the pre-read and this write parks the decline
         // on the guard's 409 via the re-read below.
         .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+        // …and the county-roll address block (codex #4667 r23 P1).
+        .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update({
           status: 'declined',

@@ -359,6 +359,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         // …nor a HELD sibling (clarify re-price): it cannot render either.
         .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+        // A sibling under the county-roll address block stays as it is —
+        // the group renderer drops it as off-surface (codex r23 P2).
+        .whereRaw("NOT COALESCE(estimate_data->'addressUnverified' = 'true'::jsonb, false)")
         .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
         // Atomic belt to the pre-mutation verdict (uncapped codex P0 r20):
         // while the gate is on a sibling that fails the authority predicate

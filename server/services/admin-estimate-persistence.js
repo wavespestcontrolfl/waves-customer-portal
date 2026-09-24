@@ -3066,9 +3066,17 @@ async function reviseAdminEstimate({
     // this row during withdrawal / supersession; the reverse order here
     // would deadlock a staff save against them (codex #4667 r20 P2).
     {
+      // BOTH contact pairs a revision can touch (the row's current pair and
+      // the revised pair), in deterministic key order, before the row lock
+      // (codex r23 P2).
       const { contactPairLockKey } = require('./lead-address-unverified');
-      if (estimate?.customer_email && estimate?.customer_phone) {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(estimate.customer_email, estimate.customer_phone)]);
+      const pairKeys = new Set();
+      if (estimate?.customer_email && estimate?.customer_phone) pairKeys.add(contactPairLockKey(estimate.customer_email, estimate.customer_phone));
+      const nextEmail = writeFields?.customer_email ?? estimate?.customer_email;
+      const nextPhone = writeFields?.customer_phone ?? estimate?.customer_phone;
+      if (nextEmail && nextPhone) pairKeys.add(contactPairLockKey(nextEmail, nextPhone));
+      for (const key of [...pairKeys].sort()) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
       }
     }
     const lockedPrior = await trx('estimates')
@@ -3269,7 +3277,11 @@ async function reviseAdminEstimate({
       // …with the COMPLETE locality on both sides, like the customer branch
       // (codex r22 P1): a street-only estimate must not rewrite a lead a
       // prefill lookup moved to the same number in another town.
-      const leadStillPrior = !!leadRow && leadSameDoor && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address, { requireLocality: true }));
+      // A CORRECTION keeps the strict locality rule (it rewrites the lead's
+      // address); an explicit CONFIRMATION of a street-only intake only
+      // clears the flag and stamps the verdict, so the same-door premise
+      // check suffices (codex r23 P1).
+      const leadStillPrior = !!leadRow && leadSameDoor && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address, { requireLocality: corrected }));
       if (leadStillPrior) await trx('leads').where({ id: writtenData.lead_id }).update({
         extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
         ...(corrected && parsed.line1 ? {

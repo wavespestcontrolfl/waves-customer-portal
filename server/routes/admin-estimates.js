@@ -2186,7 +2186,7 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
 // unparseable estimate_data proceeds, matching the verdict read.
 // SQL form of the county-roll address block (estimate_data.addressUnverified
 // === true): every atomic send claim carries it (codex #4667 r13 P1).
-const ADDRESS_UNVERIFIED_ABSENT_SQL = "NOT COALESCE(estimate_data->'addressUnverified' = 'true'::jsonb, false)";
+const { ADDRESS_UNVERIFIED_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
   const row = await db('estimates').where({ id: estimateId }).first('id', 'estimate_group_id', 'archived_at', 'estimate_data');
