@@ -1168,6 +1168,28 @@ async function updateCustomer(customerId, updates, expectedVersion) {
   if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
     return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
   }
+  // ADMIN-BUG-R10: same wind-down as the admin Customers route — a Stage=
+  // Churned write used to stamp only churned_at and leave active/autopay/
+  // next_charge_date live, so the dues cron kept charging and the visit
+  // kept dispatching. Refuse (naming what's still live) rather than
+  // silently repointing the account into a still-billing churn label;
+  // otherwise wind the billing fields down in the same write.
+  if (clean.pipeline_stage === 'churned' && before.pipeline_stage !== 'churned') {
+    const { findLiveFutureVisit, findActivePrepayTerm, billingWindDownStamps } = require('../customer-lifecycle-guard');
+    const [liveVisit, liveTerm] = await Promise.all([
+      findLiveFutureVisit(db, customerId),
+      findActivePrepayTerm(db, customerId),
+    ]);
+    if (liveVisit || liveTerm) {
+      return {
+        error: liveVisit
+          ? `Cannot mark Churned — this customer still has a scheduled visit on ${liveVisit.scheduled_date instanceof Date ? liveVisit.scheduled_date.toISOString().slice(0, 10) : liveVisit.scheduled_date}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+          : 'Cannot mark Churned — this customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.',
+        preview_changed: true,
+      };
+    }
+    Object.assign(clean, billingWindDownStamps());
+  }
   if (clean.pipeline_stage) {
     Object.assign(clean, stageLifecycleStamps(
       before.pipeline_stage, clean.pipeline_stage, before, { today: etDateString() },
@@ -1502,12 +1524,49 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .whereIn('id', customerIds)
         .forUpdate()
         .whereNull('deleted_at')
-        .select('id', 'first_name', 'last_name');
+        .select('id', 'first_name', 'last_name', 'pipeline_stage');
       const liveIds = new Set(liveRows.map((r) => String(r.id)));
       const skipped = customerIds
         .filter((cid) => !liveIds.has(String(cid)))
         .map((cid) => ({ customer_id: String(cid) }));
-      const targetIds = [...liveIds];
+      let targetIds = [...liveIds];
+      // ADMIN-BUG-R10: a bulk stage move into Churned used to CASE-stamp
+      // only churned_at/churn_reason for every targeted row, leaving
+      // active/autopay/next_charge_date live — the same money leak as the
+      // single-customer writers. Rows still entering churned (not an
+      // already-churned re-save) with a live future visit or active prepay
+      // term are excluded here and reported back (same contract as a
+      // deleted/merged row above); the rest get the billing wind-down.
+      let churnWindDownIds = [];
+      if (clean.pipeline_stage === 'churned') {
+        const enteringChurnRows = liveRows.filter((r) => r.pipeline_stage !== 'churned');
+        const enteringChurnIds = enteringChurnRows.map((r) => String(r.id));
+        if (enteringChurnIds.length) {
+          const { findLiveFutureVisit, findActivePrepayTerm } = require('../customer-lifecycle-guard');
+          const blocked = [];
+          for (const cid of enteringChurnIds) {
+            const [liveVisit, liveTerm] = await Promise.all([
+              findLiveFutureVisit(trx, cid),
+              findActivePrepayTerm(trx, cid),
+            ]);
+            if (liveVisit || liveTerm) {
+              blocked.push({
+                customer_id: cid,
+                error: liveVisit
+                  ? 'still has a scheduled visit — use "Cancel plan…" first'
+                  : 'still has an active prepay term — use "Cancel plan…" first',
+              });
+            } else {
+              churnWindDownIds.push(cid);
+            }
+          }
+          if (blocked.length) {
+            const blockedIds = new Set(blocked.map((b) => b.customer_id));
+            targetIds = targetIds.filter((id) => !blockedIds.has(String(id)));
+            skipped.push(...blocked);
+          }
+        }
+      }
       if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped };
       if (laneStampRelevant) {
         const beforeRows = await trx('customers')
@@ -1526,6 +1585,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
           .map((row) => row.id);
       }
       const updated = await trx('customers').whereIn('id', targetIds).update({ ...clean, ...stageStamp });
+      if (churnWindDownIds.length) {
+        const { billingWindDownStamps } = require('../customer-lifecycle-guard');
+        await trx('customers').whereIn('id', churnWindDownIds).update(billingWindDownStamps());
+      }
       if (stampIds.length) {
         await trx('customers').whereIn('id', stampIds).update({ billing_mode: 'monthly_membership' });
       }
@@ -1540,7 +1603,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
     if (!count && skippedRows.length) {
-      return { error: 'None of the approved customers are still live (deleted or merged while the card was pending) — nothing was updated.', skipped_customers: skippedRows };
+      return { error: 'None of the approved customers could be updated (deleted/merged since the card was pending, or still billing/scheduled for a churn move) — nothing was updated.', skipped_customers: skippedRows };
     }
     return {
       success: true,
@@ -1548,10 +1611,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
       fields_updated: Object.keys(updates),
       ...bulkLaneStampResult(laneStampIds),
       // Skipped rows surface on the card, never a silent Done (same
-      // contract as the per-row address/email path; GH r9 P1).
+      // contract as the per-row address/email path; GH r9 P1). Each skipped
+      // row's own `error` (when present) says why — no longer live, or (for
+      // a churn move) still billing/scheduled.
       ...(skippedRows.length ? {
         skipped_customers: skippedRows,
-        warning: `${skippedRows.length} approved customer(s) were NOT updated — no longer live (deleted or merged while the card was pending).`,
+        warning: `${skippedRows.length} approved customer(s) were NOT updated — see skipped_customers for why.`,
       } : {}),
     };
   }

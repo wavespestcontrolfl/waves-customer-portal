@@ -1219,7 +1219,55 @@ async function dbLevelMergeConflict(database, winner, loser) {
       };
     }
   }
+  // ADMIN-BUG-R15: the generic FK sweep has no per-table business check, so
+  // it used to repoint the loser's live recurring parent (and its future
+  // children) onto the winner wholesale even when the winner already has a
+  // live series of the same family — the winner ends up with two live
+  // "Monthly Pest Control"-style series that both dispatch and (on
+  // per-visit billing) both bill. Refuse here, under the same rule the
+  // booking path already applies (findActiveRecurringSeries + a 409 unless
+  // the operator explicitly chooses a surviving series) — shared with the
+  // IB preview via this same function, so an operator never sees a
+  // confirmation card for a merge the executor would refuse anyway.
+  const seriesConflict = await duplicateSeriesMergeConflict(database, winner.id, loser.id);
+  if (seriesConflict) {
+    return {
+      code: 'duplicate_series_conflict',
+      message: `both customers have a live recurring series of the same family (${seriesConflict.family}) — cancel or reassign one series before merging, or the merge would leave two live series`,
+    };
+  }
   return null;
+}
+
+// A live (not cancelled) recurring PARENT of the same service family on
+// both the winner and the loser — the shape a plain merge must never
+// produce. `serviceKeyFor` is the same family classifier the recurring
+// booking-duplicate guard uses (recurring-appointment-seeder.js), so a
+// merge and a booking agree on what counts as "the same series".
+async function duplicateSeriesMergeConflict(database, winnerId, loserId) {
+  const [winnerParents, loserParents] = await Promise.all([
+    database('scheduled_services')
+      .where({ customer_id: winnerId, is_recurring: true })
+      .whereNull('recurring_parent_id')
+      .whereNotIn('status', ['cancelled'])
+      .select('id', 'service_type'),
+    database('scheduled_services')
+      .where({ customer_id: loserId, is_recurring: true })
+      .whereNull('recurring_parent_id')
+      .whereNotIn('status', ['cancelled'])
+      .select('id', 'service_type'),
+  ]);
+  if (!Array.isArray(winnerParents) || !Array.isArray(loserParents) || !winnerParents.length || !loserParents.length) return null;
+  let familyKeyOf;
+  try {
+    ({ serviceKeyFor: familyKeyOf } = require('./recurring-appointment-seeder'));
+  } catch { familyKeyOf = null; }
+  const keyOf = (row) => (familyKeyOf
+    ? familyKeyOf({ service_type: row.service_type })
+    : String(row.service_type || '').trim().toLowerCase());
+  const winnerFamilies = new Set(winnerParents.map(keyOf));
+  const collision = loserParents.find((row) => winnerFamilies.has(keyOf(row)));
+  return collision ? { family: collision.service_type } : null;
 }
 
 /**

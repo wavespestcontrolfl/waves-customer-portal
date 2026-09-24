@@ -9,6 +9,7 @@ const LeadScorer = require('../services/lead-scorer');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
+const LifecycleGuard = require('../services/customer-lifecycle-guard');
 const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
 const { invoiceOverdueSql } = require('../services/collections/account-anchor');
@@ -3775,6 +3776,33 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     if (updates.has_left_google_review !== undefined) {
       updates.review_marked_at = updates.has_left_google_review ? new Date() : null;
     }
+    // ADMIN-BUG-R10: Customer 360's Stage=Churned save used to stamp only
+    // churned_at — active/autopay/next_charge_date stayed live so the dues
+    // cron kept charging and the tech kept getting dispatched. Set BEFORE
+    // stageLifecycleStamps() so a refusal here never runs that (unrelated,
+    // unchanged) helper's side effects, and so the churn wind-down suppresses
+    // the automatic membership.canceled email below — this is a stage-flip,
+    // not an operator-initiated cancellation, and no customer comm may fire
+    // as a side effect of it (owner standing rule).
+    let suppressChurnMembershipEmail = false;
+    if (updates.pipeline_stage === 'churned' && before.pipeline_stage !== 'churned') {
+      const [liveVisit, liveTerm] = await Promise.all([
+        LifecycleGuard.findLiveFutureVisit(db, req.params.id),
+        LifecycleGuard.findActivePrepayTerm(db, req.params.id),
+      ]);
+      if (liveVisit || liveTerm) {
+        return res.status(409).json({
+          error: 'customer_still_billing_or_scheduled',
+          message: liveVisit
+            ? `This customer still has a scheduled visit on ${liveVisit.scheduled_date instanceof Date ? liveVisit.scheduled_date.toISOString().slice(0, 10) : liveVisit.scheduled_date}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+            : 'This customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.',
+          liveVisit: liveVisit || null,
+          liveTerm: liveTerm || null,
+        });
+      }
+      Object.assign(updates, LifecycleGuard.billingWindDownStamps());
+      suppressChurnMembershipEmail = true;
+    }
     if (updates.pipeline_stage !== undefined && updates.pipeline_stage !== before.pipeline_stage) {
       // Same lifecycle stamps as PUT /:id/stage — Customers 360 saves stage
       // edits through this endpoint, so member_since/churned_at must be kept here
@@ -4114,7 +4142,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       const afterHasMembership = hasMembership(committedAfter) && !isAutoDerivedTierLabelRow(committedAfter);
       const membershipFieldChanged = membershipDetailsChanged(committedBefore, committedAfter);
       const membershipEventAt = new Date();
-      if (updates.active === false && committedBefore.active !== false && beforeHasMembership) {
+      if (updates.active === false && committedBefore.active !== false && beforeHasMembership && !suppressChurnMembershipEmail) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -4274,6 +4302,29 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
       pipeline_stage: stage,
       ...stageLifecycleStamps(oldStage, stage, customer, { today: etDateString(), churnReason: req.body.churnReason }),
     };
+    // ADMIN-BUG-R10: a stage flip to Churned used to stamp only churned_at —
+    // active/autopay/next_charge_date stayed live, so the account kept being
+    // charged and visited. Refuse while a future visit or an active prepay
+    // term is still on file (the operator uses "Cancel plan…", which winds
+    // those down); otherwise wind the billing fields down here so a churn
+    // label can never coexist with a row the dues cron would still select.
+    if (stage === 'churned' && oldStage !== 'churned') {
+      const [liveVisit, liveTerm] = await Promise.all([
+        LifecycleGuard.findLiveFutureVisit(db, req.params.id),
+        LifecycleGuard.findActivePrepayTerm(db, req.params.id),
+      ]);
+      if (liveVisit || liveTerm) {
+        return res.status(409).json({
+          error: 'customer_still_billing_or_scheduled',
+          message: liveVisit
+            ? `This customer still has a scheduled visit on ${liveVisit.scheduled_date instanceof Date ? liveVisit.scheduled_date.toISOString().slice(0, 10) : liveVisit.scheduled_date}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+            : 'This customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.',
+          liveVisit: liveVisit || null,
+          liveTerm: liveTerm || null,
+        });
+      }
+      Object.assign(stageUpdates, LifecycleGuard.billingWindDownStamps());
+    }
     await db('customers').where({ id: req.params.id }).update(stageUpdates);
     await db('customer_interactions').insert({
       customer_id: req.params.id, interaction_type: 'note',
@@ -4445,6 +4496,27 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // ADMIN-BUG-R14: archiving used to stamp only deleted_at — the future
+    // visit, the active prepay term and autopay all stayed live, so a
+    // "deleted" customer still got dispatched to, invoiced, autopay-charged
+    // and texted a completion receipt. Refuse and name what is still live so
+    // the operator cancels the plan first, rather than silently soft-deleting
+    // a still-billing/still-scheduled account.
+    const [liveVisit, liveTerm] = await Promise.all([
+      LifecycleGuard.findLiveFutureVisit(db, req.params.id),
+      LifecycleGuard.findActivePrepayTerm(db, req.params.id),
+    ]);
+    if (liveVisit || liveTerm) {
+      return res.status(409).json({
+        error: 'customer_still_billing_or_scheduled',
+        message: liveVisit
+          ? `This customer still has a scheduled visit on ${liveVisit.scheduled_date instanceof Date ? liveVisit.scheduled_date.toISOString().slice(0, 10) : liveVisit.scheduled_date}. Cancel the plan (visits, prepay term and autopay) before archiving.`
+          : 'This customer still has an active prepay term. Cancel the plan before archiving.',
+        liveVisit: liveVisit || null,
+        liveTerm: liveTerm || null,
+      });
+    }
 
     // Archive + newsletter relink + critical audit are one transaction: the
     // subscriber link must move to the live same-email twin (if any) in the

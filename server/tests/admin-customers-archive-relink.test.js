@@ -28,6 +28,13 @@ jest.mock('../models/db', () => {
     q.where = (c) => { Object.assign(q._where, c); return q; };
     q.whereNull = () => q;
     q.whereNotNull = () => q;
+    // ADMIN-BUG-R14 guard (customer-lifecycle-guard.js): the DELETE route
+    // now pre-checks for a live future visit / active prepay term before
+    // archiving. This fixture's customer has neither, so every non-customers
+    // table read must keep resolving null/no-row through these no-op chains.
+    q.whereNot = () => q;
+    q.whereNotIn = () => q;
+    q.whereRaw = () => q;
     q.first = async () => (table === 'customers' ? mockState.customer : null);
     q.update = async (patch) => { mockState.updates.push({ table, viaTrx, where: { ...q._where }, patch }); return 1; };
     return q;

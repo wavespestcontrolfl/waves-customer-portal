@@ -7432,7 +7432,7 @@ function CustomerProfileEditor({
                   setEditOpen(false);
                   onClose?.();
                 } catch (e) {
-                  setEditErr(e.message || "Delete failed");
+                  setEditErr(e.details?.message || e.message || "Delete failed");
                 }
                 setDeletingCustomer(false);
               }}
@@ -7490,7 +7490,7 @@ function CustomerProfileEditor({
                     await reloadCustomer();
                     setEditOpen(false);
                   } catch (e) {
-                    setEditErr(e.body?.message || e.message || "Save failed");
+                    setEditErr(e.details?.message || e.message || "Save failed");
                   }
                   setSavingEdit(false);
                 }}
