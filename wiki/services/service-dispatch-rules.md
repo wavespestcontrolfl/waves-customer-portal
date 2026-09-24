@@ -44,8 +44,17 @@
 - **License required:** Pest control
 - **Estimated time:** 20–30 min per property
 - **Recurring:** Monthly or bi-monthly
-- **Upsell flags:** WaveGuard Gold/Platinum upgrade, automatic misting quote, tick/flea add-on
+- **Upsell flags:** WaveGuard Gold/Platinum upgrade, automatic misting system design visit (see Mosquito Misting Systems below), tick/flea add-on
 - **Seasonality:** High demand April–October in SWFL — push promos starting March
+
+## Mosquito Misting Systems
+- **What it is:** Permanent automatic misting system (pump unit + tubing + nozzles) that Waves designs, installs, and maintains. Separate from the 21-day barrier program above. Catalog key `mosquito_misting_system` (lead-only).
+- **Who:** Licensed tech with GHP or Lawn & Ornamental certification (FDACS requires one for installing/servicing misting devices for customers). Design visit: Adam or a senior tech.
+- **Estimated time:** Design visit 45–60 min. Install: 2 techs, 1–2 days for ~30–40 nozzles (longer for pools, stone walls, second zones). Monthly service stop 20–30 min; quarterly full service 45–60 min.
+- **Pricing:** No calculator price. Quoted after the on-site design visit; pricing is owner-pending. Never quote a number on the phone.
+- **Booking:** Not self-bookable. Web leads arrive as "Mosquito Misting System"; schedule a design visit.
+- **Upsell flags:** Standing-water/larvicide service, barrier treatment for areas the system doesn't cover.
+- **Protocol:** See `wiki/protocols/mosquito-misting-systems.md`.
 
 ## Tree & Shrub Care
 - **Who:** Adam (Arborjet-certified) for injection; Tech 2 for foliar spray only
