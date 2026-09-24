@@ -1762,9 +1762,6 @@ const StripeService = {
           surcharge_policy_version: policyVersion,
           card_funding: card.card_funding || null,
           card_brand: card.card_brand || null,
-          // Snapshot survives the method's removal (payment_method_id is
-          // ON DELETE SET NULL) — history falls back to it.
-          card_last_four: card.last_four || null,
           status,
           description: surchargeAmount > 0
             ? `${description} (includes $${surchargeAmount.toFixed(2)} credit card surcharge)`
@@ -2602,9 +2599,6 @@ const StripeService = {
           surcharge_policy_version: invPolicyVersion,
           card_funding: card.card_funding || null,
           card_brand: card.card_brand || null,
-          // Snapshot survives the method's removal (payment_method_id is
-          // ON DELETE SET NULL) — history falls back to it.
-          card_last_four: card.last_four || null,
           status,
           description: surcharge > 0
             ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} credit card surcharge)`
