@@ -171,9 +171,9 @@ function excludeUnresolvedSendReservations(query, table = 'sms_log') {
 // An accepted reply reservation is itself the durable provider receipt when
 // Twilio's ordinary sms_log insert failed. A cleanup may remove it only after
 // a different, non-reservation row proves the same provider handoff. Prefer
-// exact SID identity; the manual wrapper currently promotes without passing
-// its SID, so its conservative fallback is the same endpoints/body at or after
-// the reservation began. Every candidate needs a real SID.
+// exact SID identity. Older callers that promoted without passing a SID retain
+// a narrow fallback: the same endpoints/body, created between reservation
+// creation and promotion. Every candidate needs a real SID.
 function preserveSoleAcceptedReplyReceipts(query) {
   const nonReservation = SEND_RESERVATION_MARKERS
     .map(marker => `COALESCE(receipt.metadata->>'${marker}', 'false') <> 'true'`)
@@ -197,6 +197,7 @@ function preserveSoleAcceptedReplyReceipts(query) {
             AND receipt.to_phone = sms_log.to_phone
             AND receipt.message_body IS NOT DISTINCT FROM sms_log.message_body
             AND receipt.created_at >= sms_log.created_at
+            AND receipt.created_at <= sms_log.updated_at
           )
         )
     )
