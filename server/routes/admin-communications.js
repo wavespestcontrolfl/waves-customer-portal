@@ -12,7 +12,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
-const { phoneIdentitySql } = require('../services/sms-response-policy');
+const { draftIdSql, phoneIdentitySql } = require('../services/sms-response-policy');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -1668,6 +1668,7 @@ router.get('/log', async (req, res, next) => {
     const currentEndpoint = phoneIdentitySql("COALESCE(conversations.our_endpoint_id, '')");
     const priorPeer = phoneIdentitySql("COALESCE(NULLIF(prior_conversation.contact_phone, ''), prior_customer.phone, '')");
     const priorEndpoint = phoneIdentitySql("COALESCE(prior_conversation.our_endpoint_id, '')");
+    const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', messages.metadata->>'draft_id')");
 
     let query = db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
@@ -1687,7 +1688,7 @@ router.get('/log', async (req, res, next) => {
       .joinRaw(`LEFT JOIN LATERAL (
         SELECT EXISTS (
           SELECT 1 FROM message_drafts mdx
-          WHERE mdx.id::text = COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', messages.metadata->>'draft_id')
+          WHERE mdx.id = ${responseDraftId}
             AND mdx.intent = 'click_followup'
         ) AS is_click_followup
       ) sms_answer ON true`)

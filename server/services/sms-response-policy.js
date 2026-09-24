@@ -28,6 +28,12 @@ function phoneIdentitySql(column) {
     ELSE '+' || ${digits} END)`;
 }
 
+function draftIdSql(metadataExpression) {
+  const value = `(${metadataExpression})`;
+  return `(CASE WHEN ${value} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    THEN ${value}::uuid ELSE NULL END)`;
+}
+
 function jsonObject(value) {
   if (!value) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -97,6 +103,7 @@ module.exports = {
   HUMAN_REPLY_TYPES,
   NON_ACTIONABLE_INBOUND_TYPES,
   phoneIdentitySql,
+  draftIdSql,
   responseFlags,
   inboundNeedsResponse,
   outboundIsAnswer,
