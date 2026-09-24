@@ -1219,6 +1219,283 @@ async function dbLevelMergeConflict(database, winner, loser) {
       };
     }
   }
+  // ADMIN-BUG-R15: the generic FK sweep has no per-table business check, so
+  // it used to repoint the loser's live recurring parent (and its future
+  // children) onto the winner wholesale even when the winner already has a
+  // live series of the same family AT THE SAME PROPERTY — the winner ends up
+  // with two live "Monthly Pest Control"-style series that both dispatch and
+  // (on per-visit billing) both bill. Refuse here, under the same rule the
+  // booking path already applies (findActiveRecurringSeries + a 409 unless
+  // the operator explicitly chooses a surviving series) — shared with the
+  // IB preview via this same function, so an operator never sees a
+  // confirmation card for a merge the executor would refuse anyway.
+  //
+  // Run unconditionally — NOT gated on the customers' account-level
+  // addresses matching. Different (or missing) primary addresses do not
+  // prove different service properties: a multi-property winner can already
+  // have a series at the loser's saved secondary property (this is exactly
+  // what /link-as-property merges), and duplicateSeriesMergeConflict itself
+  // decides same-property by each colliding series' OWN resolved location
+  // (property_id, else stamped service_address_*, else that row's owning
+  // customer's primary address as fallback) — never the account-level
+  // compat status.
+  const seriesConflict = await duplicateSeriesMergeConflict(database, winner, loser);
+  if (seriesConflict) {
+    return {
+      code: 'duplicate_series_conflict',
+      message: `both customers have a live recurring series of the same family (${seriesConflict.family}) at the same property — cancel or reassign one series before merging, or the merge would leave two live series`,
+    };
+  }
+  return null;
+}
+
+// The effective address for a findActiveRecurringSeries match, resolved as
+// ONE whole record from exactly one source — never mixing fields from two
+// sources (e.g. a stamped line1 with the OWNER's line2 would silently
+// inherit the owner's home apartment number onto an unrelated, unitless
+// secondary property): (1) the match's OWN property_id's row in
+// customer_properties, when resolvable — two DIFFERENT customers can each
+// own a customer_properties row for the SAME real-world address under
+// different UUIDs, so property_id equality/inequality alone proves nothing
+// across customers; resolving to the row's own address is what actually
+// decides sameness; (2) else the match's own stamped service_address_*
+// fields, taken together; (3) else the OWNING customer's primary address,
+// taken together (legacy/unstamped rows implicitly serve the customer's
+// home — the same fallback the schedule board's day view applies via
+// COALESCE(scheduled_services.service_address_line1, customers.address_line1)).
+function seriesEffectiveAddress(match, ownerCustomer, propertiesById) {
+  const resolvedProperty = match.property_id ? propertiesById.get(String(match.property_id)) : null;
+  if (resolvedProperty) return resolvedProperty;
+  if (match.service_address_line1) {
+    return {
+      address_line1: match.service_address_line1,
+      address_line2: match.service_address_line2,
+      city: match.service_address_city,
+      zip: match.service_address_zip,
+    };
+  }
+  return {
+    address_line1: ownerCustomer.address_line1,
+    address_line2: ownerCustomer.address_line2,
+    city: ownerCustomer.city,
+    zip: ownerCustomer.zip,
+  };
+}
+
+// Do two findActiveRecurringSeries matches (one per side) serve the SAME
+// property? Reuses addressCompat (the SAME street/unit/ZIP/city compatibility
+// rule the account-level pre-filter above and the auto-merge address gate
+// already apply) over each side's resolved address (see
+// seriesEffectiveAddress) — NOT a composite string key: an exact-key compare
+// would read a missing optional field (no ZIP stamped on one side, say) as a
+// mismatch, when addressCompat's own rule is to compare an optional
+// component (unit, ZIP, city) ONLY when BOTH sides provide it, and still
+// reject a genuine mismatch (different ZIPs, different units) when they do.
+// There is no separate property_id fast path, because a bare id compare
+// cannot tell "two different customers' own rows for the same address"
+// (should match) apart from "two different addresses" (should not);
+// resolving property_id to its row's address (seriesEffectiveAddress) folds
+// both correctly into the one comparison.
+function seriesSameProperty(matchA, ownerA, matchB, ownerB, propertiesById) {
+  const addressA = seriesEffectiveAddress(matchA, ownerA, propertiesById);
+  const addressB = seriesEffectiveAddress(matchB, ownerB, propertiesById);
+  return ADDRESS_COMPATIBLE.has(addressCompat(addressA, addressB).status);
+}
+
+// A genuinely ACTIVE (not lapsed) recurring series of the same identity AT
+// THE SAME PROPERTY on both the winner and the loser — the shape a plain
+// merge must never produce. Liveness AND identity both reuse
+// findActiveRecurringSeries (recurring-appointment-seeder.js) — the SAME
+// "ongoing OR an upcoming/rescheduled/in-progress occurrence" rule and the
+// SAME service_id-OR-family-label matching the booking-duplicate guard
+// applies — rather than a parallel predicate: a fixed-length series that
+// already ran its course (no outstanding children, recurring_ongoing=false)
+// is lapsed, not a live duplicate, and a catalog rename that changed a
+// series' service_type text but kept its service_id must still be caught
+// (passing BOTH serviceId and serviceType lets findActiveRecurringSeries'
+// id-match path carry a renamed label). Property comparison is by each
+// match's OWN resolved location (see seriesSameProperty), not the
+// customers' account-level addresses.
+// findActiveRecurringSeries' own candidate set excludes every CANCELLED
+// parent — but a this_only cancellation of a recurring PARENT stamps
+// status='cancelled' while the family it anchors stays live in one of two
+// shapes: an ongoing series keeps recurring_ongoing=true by design
+// (admin-dispatch.js's single-occurrence cancel: "Single-occurrence cancels
+// (scope 'this_only') never enter [the recurring_ongoing clear] branch and
+// leave the flag intact"), and a FIXED-LENGTH series (recurring_ongoing=
+// false) keeps its outstanding children on the books. Both are invisible
+// to the canonical lookup. This returns the UNION of the canonical matches
+// and those cancelled-parent shapes — decided by cancelledParentStillLive,
+// which mirrors the seeder's own liveness rule (ongoing flag OR an
+// outstanding child, same statuses and date bound) — matched on the same
+// service-id-or-family rule (duplicateGuardFamilyKey), deduplicated by id.
+// Always a union, never a fallback: a winner with a normal series at
+// property A and a cancelled-but-live anchor at property B must still
+// collide with a loser series at B. And ONLY those shapes: a lapsed
+// parent (flag off, nothing outstanding) is a historical series the
+// canonical lookup already judged lapsed and must not resurrect as a merge
+// conflict. recurringServiceAddress (booking/visit-financial-stamps.js)
+// mirrors findActiveRecurringSeries' own address normalization onto the
+// extra rows, so seriesSameProperty compares like shapes either way.
+async function cancelledParentStillLive(database, row, columns) {
+  if (row.recurring_ongoing === true) return true;
+  const { etDateString } = require('../utils/datetime-et');
+  // Tracker-aware, via the lifecycle guard's shared clause (GitHub Codex
+  // #4684 r8 P1): track_state can lead a best-effort status sync in both
+  // directions, so a status-only probe missed a tracker-live child and
+  // blocked on a tracker-finished one.
+  const { whereVisitRowLive } = require('./customer-lifecycle-guard');
+  const today = etDateString();
+  const upcoming = await database('scheduled_services')
+    .where({ recurring_parent_id: row.id, is_recurring: true })
+    .where(function liveChild() { whereVisitRowLive(this, today, { trackState: !!columns?.track_state }); })
+    .first('id');
+  return !!upcoming;
+}
+
+// Never plan evidence, cancelled or not: one-time bookings and callbacks
+// (the same two exclusions cancellation-resolution/facts.js's
+// rowIsCancellationFamilyEvidence starts with).
+function parentRowIsPlanShaped(row, isOneTimeBookingSource) {
+  if (isOneTimeBookingSource(row.source)) return false;
+  if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
+  return true;
+}
+
+async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
+  const { findActiveRecurringSeries, duplicateGuardFamilyKey, scheduledServiceColumns } = require('./recurring-appointment-seeder');
+  // Same schema guard the canonical lookup applies before it reads any
+  // recurring column: without is_recurring/recurring_parent_id/
+  // recurring_ongoing there is no series to find (and no supplemental
+  // cancelled-parent probe to run).
+  const columns = await scheduledServiceColumns(database);
+  if (!columns || !columns.is_recurring || !columns.recurring_parent_id || !columns.recurring_ongoing) return [];
+  const active = await findActiveRecurringSeries(database, { customerId, serviceId, serviceType });
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
+  // The canonical lookup neither selects nor filters is_callback/source
+  // (its own callers never seed callbacks as recurring parents, but a
+  // recurring-shaped callback or one-time booking can exist), so its rows
+  // get the same plan-shape filter the cancelled-parent additions and the
+  // loser identities already pass through (GitHub Codex #4684 r6 P2).
+  let matches = Array.isArray(active) ? [...active] : [];
+  if (matches.length) {
+    const shapeRows = await database('scheduled_services')
+      .whereIn('id', matches.map((m) => m.id))
+      .select('id', 'is_callback', 'source');
+    const shapeById = new Map((Array.isArray(shapeRows) ? shapeRows : []).map((r) => [String(r.id), r]));
+    matches = matches.filter((m) => parentRowIsPlanShaped(shapeById.get(String(m.id)) || m, isOneTimeBookingSource));
+  }
+  const rows = await database('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true, status: 'cancelled' })
+    .whereNull('recurring_parent_id')
+    .select('*');
+  const targetKey = serviceType ? duplicateGuardFamilyKey(serviceType) : null;
+  const seen = new Set(matches.map((m) => String(m.id)));
+  for (const row of (Array.isArray(rows) ? rows : [])) {
+    if (seen.has(String(row.id))) continue;
+    if (!parentRowIsPlanShaped(row, isOneTimeBookingSource)) continue;
+    const idMatch = serviceId != null && row.service_id != null && String(row.service_id) === String(serviceId);
+    const keyMatch = targetKey != null && row.service_type && duplicateGuardFamilyKey(row.service_type) === targetKey;
+    if (!idMatch && !keyMatch) continue;
+     
+    if (!(await cancelledParentStillLive(database, row, columns))) continue;
+    seen.add(String(row.id));
+    matches.push({ ...row, ...recurringServiceAddress(row) });
+  }
+  return matches;
+}
+
+async function resolveUnstampedMatchProperties(database, matches) {
+  const { sourceEstimateForScope } = require('./recurring-appointment-seeder');
+  const { parseEstimateAddress } = require('./estimate-property-linkage');
+  for (const match of matches) {
+    if (match.property_id || match.service_address_line1 || !match.source_estimate_id) continue;
+    try {
+      const src = await sourceEstimateForScope(database, match.source_estimate_id);
+      if (!src) continue;
+      if (src.property_id) { match.property_id = src.property_id; continue; }
+      // Legacy shape (GitHub Codex #4684 r5 P1): an accepted estimate with
+      // a secondary service address but no property link. The seeder's
+      // scoped duplicate check recovers this from src.address through the
+      // SAME parser (parseEstimateAddress → normalizedEstimateStreet), so
+      // the parsed components are stamped onto the match as its service
+      // address and seriesEffectiveAddress compares them like any stamped
+      // row — the primary-home fallback only remains for an estimate with
+      // no usable address at all.
+      const parts = src.address ? parseEstimateAddress(src.address) : null;
+      if (parts?.address_line1) {
+        match.service_address_line1 = parts.address_line1;
+        match.service_address_line2 = parts.address_line2 || null;
+        match.service_address_city = parts.city || null;
+        match.service_address_zip = parts.zip || null;
+      }
+    } catch { /* keep the primary-address fallback */ }
+  }
+}
+
+async function duplicateSeriesMergeConflict(database, winner, loser) {
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  // IDENTITY collection only (which service_id/service_type families the
+  // loser has ever anchored) — liveness is decided per identity by
+  // liveFamilyMatches below, so this is deliberately permissive: fetched
+  // WITHOUT a status filter (a cancelled parent's family can still be live
+  // — see cancelledParentStillLive), dropping only one-time bookings and
+  // callbacks, which are never plan evidence.
+  const loserParentRowsRaw = await database('scheduled_services')
+    .where({ customer_id: loser.id, is_recurring: true })
+    .whereNull('recurring_parent_id')
+    .select('*');
+  const loserParentRows = (Array.isArray(loserParentRowsRaw) ? loserParentRowsRaw : [])
+    .filter((row) => parentRowIsPlanShaped(row, isOneTimeBookingSource));
+  if (!loserParentRows.length) return null;
+  // Distinct (service_id, service_type) identities — usually one per
+  // family, but a loser can carry more than one parent whose service_type
+  // TEXT collides while service_id differs, or vice versa after a catalog
+  // rename; each identity gets its own liveness/collision check.
+  const seen = new Set();
+  const identities = [];
+  for (const row of loserParentRows) {
+    const identityKey = `${row.service_id || ''}::${row.service_type || ''}`;
+    if (seen.has(identityKey)) continue;
+    seen.add(identityKey);
+    identities.push({ serviceId: row.service_id || null, serviceType: row.service_type || null });
+  }
+  for (const { serviceId, serviceType } of identities) {
+    if (serviceId == null && !serviceType) continue;
+    const [loserActive, winnerActive] = await Promise.all([
+      liveFamilyMatches(database, loser.id, serviceId, serviceType),
+      liveFamilyMatches(database, winner.id, serviceId, serviceType),
+    ]);
+    if (!Array.isArray(loserActive) || !loserActive.length || !Array.isArray(winnerActive) || !winnerActive.length) continue;
+    // An UNSTAMPED parent (no property_id, no service_address_*) can still
+    // serve its creating estimate's SECONDARY property — the seeder's own
+    // scoped duplicate check recovers that from source_estimate_id
+    // (sourceEstimateForScope) before it ever falls back to the customer's
+    // primary street, and so does this: without it two customers with
+    // different homes whose unstamped series both serve the same secondary
+    // property read as different premises and merge without a conflict.
+    // Only the estimate's authoritative property_id is adopted (a bare
+    // free-text estimate address has no unit/ZIP structure addressCompat
+    // can compare); rows that resolve to nothing keep the primary fallback.
+    await resolveUnstampedMatchProperties(database, [...loserActive, ...winnerActive]);
+    const propertyIds = [...new Set(
+      [...loserActive, ...winnerActive].map((m) => m.property_id).filter(Boolean).map(String),
+    )];
+    let propertiesById = new Map();
+    if (propertyIds.length) {
+      const propertyRows = await database('customer_properties')
+        .whereIn('id', propertyIds)
+        .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+      propertiesById = new Map((propertyRows || []).map((row) => [String(row.id), row]));
+    }
+    const samePropertyCollision = loserActive.some(
+      (lm) => winnerActive.some((wm) => seriesSameProperty(lm, loser, wm, winner, propertiesById)),
+    );
+    if (samePropertyCollision) {
+      return { family: serviceType || `service ${serviceId}` };
+    }
+  }
   return null;
 }
 

@@ -67,10 +67,23 @@ const FIELD_GROUPS = {
     'price_amount_max_usd',
     'price_unit',
     'price_accepted',
+    // caller_response (schema 1.13.0, #4707 follow-up) — the explicit signal
+    // accepted is derived from. An enum string; normalizeField needs no
+    // special case, the default normalizeString comparison is fine.
+    'price_caller_response',
     'price_prepay_term',
     'price_tier_mentioned',
     'price_stated_by',
     'price_has_evidence',
+    // prices[] count (schema 1.13.0, #4707 follow-up) — a v9 extractor that
+    // starts dropping every price but the primary one into `price` (instead
+    // of also listing them in `prices`) should show up here.
+    'price_count',
+    // prices[] content signature (codex #4722 r1 P1) — price_count alone
+    // collapses two extractions that both return 2 prices but disagree on
+    // the SECONDARY entry's contents (e.g. its unit). A plain deterministic
+    // string; normalizeField needs no special case.
+    'prices_signature',
   ],
   low: [
     'lead_quality',

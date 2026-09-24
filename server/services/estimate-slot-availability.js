@@ -28,7 +28,7 @@
  */
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
-const { applyAssignable } = require('./technician-eligibility');
+const { applyAssignable, absentTechDays } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { capacityEnabled } = require('./scheduling/policy');
@@ -1233,6 +1233,12 @@ function buildAsapCapacitySlotsForTechs({
   now = new Date(),
   // Enumerate the bounded date horizon before collision filtering and selection.
   excludeDates = null,
+  // A tech marked out on a date (technician_absences, via
+  // technician-eligibility.js absentTechDays) — Set of `${techId}:${date}`,
+  // or null/omitted for byte-identical legacy behavior (every direct test
+  // call of this pure function). buildAsapCapacitySlots below is the one
+  // caller that loads and passes it.
+  absentDays = null,
 } = {}) {
   if (!techs.length) return [];
 
@@ -1253,6 +1259,7 @@ function buildAsapCapacitySlotsForTechs({
       if (!slotWindowFitsDay(windowStart, windowEnd)) continue;
       const group = [];
       for (const tech of techs) {
+        if (absentDays && absentDays.has(`${tech.id}:${date}`)) continue;
         group.push({
           slotId: dateWithTimeSlotId(date, windowStart, tech.id),
           date,
@@ -1283,12 +1290,20 @@ async function buildAsapCapacitySlots(options = {}) {
   // route-aware find-time path), so owner blackout days are excluded here —
   // selection happens after all dates have been checked. Fail-open helper.
   let excludeDates = null;
+  let absentDays = null;
   if (options.dateFrom && options.dateTo) {
     const { getBlackoutDates } = require('./scheduling/blackout-dates');
     const blackout = await getBlackoutDates(options.dateFrom, options.dateTo);
     if (blackout.size) excludeDates = blackout;
+    // Same enumerate-its-own-dates reasoning as blackout above: this ASAP
+    // generator never goes through find-time, so it needs its own read of
+    // absent tech-days (technician-eligibility.js) rather than inheriting
+    // one from a shared find-time context.
+    absentDays = techs.length
+      ? await absentTechDays(db, { dateFrom: options.dateFrom, dateTo: options.dateTo, technicianIds: techs.map((tech) => tech.id) })
+      : new Set();
   }
-  return buildAsapCapacitySlotsForTechs({ ...options, techs, excludeDates });
+  return buildAsapCapacitySlotsForTechs({ ...options, techs, excludeDates, absentDays });
 }
 
 // Reorder a date-sorted slot pool so customers see a spread of distinct

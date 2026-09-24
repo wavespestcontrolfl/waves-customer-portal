@@ -1678,7 +1678,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
       // ---- end slot-overlap guard part 2
 
-      await assertAssignableTechnician(technicianId || null, { conn: trx });
+      await assertAssignableTechnician(technicianId || null, { conn: trx, date: String(date).slice(0, 10) });
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,

@@ -1154,7 +1154,8 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
           noAiImage: true,
         });
         const status = r?.skipped ? `skipped (${r.skipped})`
-          : r?.dryRun ? 'dry_run' : (r?.success ? 'published' : 'failed');
+          : r?.skippedByDailyCap ? 'skipped (daily_cap)'
+            : r?.dryRun ? 'dry_run' : (r?.success ? 'published' : 'failed');
         logger.info(`[autonomous-pr-poller] social share for ${target.url}: ${status}`);
       }
     } catch (err) {

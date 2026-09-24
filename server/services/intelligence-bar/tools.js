@@ -1168,6 +1168,17 @@ async function updateCustomer(customerId, updates, expectedVersion) {
   if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
     return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
   }
+  // `active` is an IB-updatable field: a churn write must never let a
+  // payload's active=true ride over churnGuardForRow's disarm in the same
+  // UPDATE (pre-push audit P1 on 1e776e385e) — cancelled-account admission
+  // (auth.js isCancelledCustomerRow) is keyed on active=false + churned.
+  if (clean.pipeline_stage === 'churned') delete clean.active;
+  // ADMIN-BUG-R10 (round 3): the churn guard + billing wind-down run INSIDE
+  // the transaction below, after the row lock and the expectedVersion
+  // check — churnGuardForRow's own disarm write bumps customers.updated_at,
+  // so running it here (before the version compare) would disarm billing
+  // and then reject the churn as stale against its own write (pre-push
+  // audit P1). See the guard block in the transaction.
   if (clean.pipeline_stage) {
     Object.assign(clean, stageLifecycleStamps(
       before.pipeline_stage, clean.pipeline_stage, before, { today: etDateString() },
@@ -1233,6 +1244,28 @@ async function updateCustomer(customerId, updates, expectedVersion) {
         const current = await trx('customers').where('id', customerId).first(trx.raw('updated_at::text AS version'));
         if (current.version !== expectedVersion) {
           const err = new Error('Customer changed since this action was prepared. Review a fresh proposal.');
+          err.previewChanged = true;
+          throw err;
+        }
+      }
+      // ADMIN-BUG-R10 (round 3): runs on EVERY write of pipeline_stage=
+      // 'churned' — including a re-save on an already-churned row — so a
+      // pre-fix residue row self-heals. Refuses (naming what's still live)
+      // rather than silently repointing the account into a still-billing
+      // churn label; otherwise churnGuardForRow winds billing down itself
+      // through the canonical cancellation-processor.js write, on THIS
+      // transaction, after the version check above — a refusal rolls the
+      // whole thing back, and the disarm's updated_at bump can never
+      // invalidate the version this same action was prepared against.
+      if (clean.pipeline_stage === 'churned') {
+        const { churnGuardOrRepair, describeLiveVisit } = require('../customer-lifecycle-guard');
+        const decision = await churnGuardOrRepair(trx, customerId, lockedBefore);
+        if (decision.blocked) {
+          const err = new Error(decision.liveVisit
+            ? `Cannot mark Churned: ${describeLiveVisit(decision.liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+            : decision.liveTerm
+              ? 'Cannot mark Churned: this customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.'
+              : `Cannot mark Churned: this customer ${decision.error}.`);
           err.previewChanged = true;
           throw err;
         }
@@ -1430,6 +1463,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
   if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
     return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
   }
+  // `active` is an IB-updatable field: a churn write must never let a
+  // payload's active=true ride over churnGuardForRow's disarm in the same
+  // UPDATE (pre-push audit P1 on 1e776e385e) — cancelled-account admission
+  // (auth.js isCancelledCustomerRow) is keyed on active=false + churned.
+  if (clean.pipeline_stage === 'churned') delete clean.active;
   if (clean.pipeline_stage) {
     // IS DISTINCT FROM, not <>: legacy NULL-stage rows must still get the
     // audit stamp (NULL <> x is NULL in Postgres, silently skipping them).
@@ -1502,12 +1540,43 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .whereIn('id', customerIds)
         .forUpdate()
         .whereNull('deleted_at')
-        .select('id', 'first_name', 'last_name');
+        .select('id', 'first_name', 'last_name', 'pipeline_stage', 'active', 'autopay_enabled', 'next_charge_date');
       const liveIds = new Set(liveRows.map((r) => String(r.id)));
       const skipped = customerIds
         .filter((cid) => !liveIds.has(String(cid)))
         .map((cid) => ({ customer_id: String(cid) }));
-      const targetIds = [...liveIds];
+      let targetIds = [...liveIds];
+      // ADMIN-BUG-R10 (round 3): a bulk stage move into Churned used to
+      // CASE-stamp only churned_at/churn_reason for every targeted row,
+      // leaving active/autopay/next_charge_date live — the same money leak
+      // as the single-customer writers. Runs on EVERY targeted row,
+      // including one ALREADY churned (not gated on a stage transition), so
+      // a bulk re-save of Churned self-heals pre-fix residue rows too. Rows
+      // with a live future visit, an active prepay term, or an unpaid
+      // pending prepay invoice are excluded here and reported back (same
+      // contract as a deleted/merged row above); churnGuardForRow winds the
+      // rest down itself through the canonical cancellation-processor.js
+      // write as it checks them — no separate post-update pass needed.
+      if (clean.pipeline_stage === 'churned') {
+        const { churnGuardOrRepair } = require('../customer-lifecycle-guard');
+        const liveRowById = new Map(liveRows.map((r) => [String(r.id), r]));
+        const blocked = [];
+        for (const cid of targetIds) {
+          // Already-churned rows with customer-level billing already wound
+          // down get the rail-only repair (see churnGuardOrRepair) — a bulk
+          // re-label must not 409 customers who already followed the
+          // "Cancel plan…" advice.
+          const decision = await churnGuardOrRepair(trx, cid, liveRowById.get(String(cid)));
+          if (decision.blocked) {
+            blocked.push({ customer_id: cid, error: decision.error });
+          }
+        }
+        if (blocked.length) {
+          const blockedIds = new Set(blocked.map((b) => b.customer_id));
+          targetIds = targetIds.filter((id) => !blockedIds.has(String(id)));
+          skipped.push(...blocked);
+        }
+      }
       if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped };
       if (laneStampRelevant) {
         const beforeRows = await trx('customers')
@@ -1540,7 +1609,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
     if (!count && skippedRows.length) {
-      return { error: 'None of the approved customers are still live (deleted or merged while the card was pending) — nothing was updated.', skipped_customers: skippedRows };
+      return { error: 'None of the approved customers could be updated (deleted/merged since the card was pending, or still billing/scheduled for a churn move) — nothing was updated.', skipped_customers: skippedRows };
     }
     return {
       success: true,
@@ -1548,10 +1617,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
       fields_updated: Object.keys(updates),
       ...bulkLaneStampResult(laneStampIds),
       // Skipped rows surface on the card, never a silent Done (same
-      // contract as the per-row address/email path; GH r9 P1).
+      // contract as the per-row address/email path; GH r9 P1). Each skipped
+      // row's own `error` (when present) says why — no longer live, or (for
+      // a churn move) still billing/scheduled.
       ...(skippedRows.length ? {
         skipped_customers: skippedRows,
-        warning: `${skippedRows.length} approved customer(s) were NOT updated — no longer live (deleted or merged while the card was pending).`,
+        warning: `${skippedRows.length} approved customer(s) were NOT updated — see skipped_customers for why.`,
       } : {}),
     };
   }
@@ -1612,6 +1683,25 @@ async function bulkUpdateCustomers(customerIds, updates) {
           throw err;
         }
         const lockedMerged = { ...lockedBefore, ...clean };
+        // ADMIN-BUG-R10 (round 3): a bulk edit that combines a churn move
+        // with an address/email field takes THIS per-row branch instead of
+        // the fast CASE path above, and this branch has its own per-row
+        // before-state (lockedBefore) — so it gets the identical guard, via
+        // the same shared helper, rather than silently skipping it. Runs on
+        // EVERY write of pipeline_stage='churned' (not gated on
+        // lockedBefore.pipeline_stage !== 'churned'), so a re-save of
+        // Churned combined with an address/email edit self-heals a pre-fix
+        // residue row too. churnGuardForRow winds billing down itself
+        // through the canonical cancellation-processor.js write.
+        if (clean.pipeline_stage === 'churned') {
+          const { churnGuardOrRepair } = require('../customer-lifecycle-guard');
+          const decision = await churnGuardOrRepair(trx, customerId, lockedBefore);
+          if (decision.blocked) {
+            const err = new Error(decision.error);
+            err.churnBlocked = true;
+            throw err;
+          }
+        }
         await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
         if (emailSubmitted && clean.email) {
           // Serialization ONLY — no claimant refusal (r23): shared
@@ -1649,6 +1739,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
     } catch (e) {
       if (e && e.customerNoLongerLive) {
         errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
+        continue;
+      }
+      if (e && e.churnBlocked) {
+        errors.push({ customer_id: customerId, error: e.message, churn_blocked: true });
         continue;
       }
       if (e && e.code === '23505') {
@@ -1692,7 +1786,17 @@ async function bulkUpdateCustomers(customerIds, updates) {
       errors,
       // The confirm card renders `warning` — a partial bulk update must never
       // read as a clean Done (W0B).
-      warning: `${errors.length} of ${count + errors.length} customers were NOT updated (${errors.length === 1 ? 'it' : 'they'} no longer resolved at commit); ${count} updated.`,
+      // Churn refusals carry their own actionable reason (GitHub Codex
+      // #4684 r6 P2) — the card renders only `warning`, so "no longer
+      // resolved" must not paper over a "use Cancel plan…" instruction.
+      warning: (() => {
+        const churnBlocked = errors.filter((e) => e.churn_blocked);
+        const other = errors.length - churnBlocked.length;
+        const parts = [];
+        if (churnBlocked.length) parts.push(`${churnBlocked.length} refused (${churnBlocked.map((e) => e.error).join('; ')})`);
+        if (other) parts.push(`${other} no longer resolved at commit`);
+        return `${errors.length} of ${count + errors.length} customers were NOT updated — ${parts.join('; ')}; ${count} updated.`;
+      })(),
     } : {}),
   };
 }
@@ -2182,7 +2286,7 @@ async function createAppointment(input, actionContext = {}) {
     }
     // Re-asserted FOR SHARE on the writing trx: the name/id resolution above
     // ran before this transaction opened.
-    await assertAssignableTechnician(technician_id, { conn: trx });
+    await assertAssignableTechnician(technician_id, { conn: trx, date: dateStr });
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       // Sole-active-property anchor for the visit-group stamp below —

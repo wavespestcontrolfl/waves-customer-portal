@@ -353,9 +353,12 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
     : '';
+  const editorial = mode === 'blog-hero' || mode === 'blog-body'
+    ? 'Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.'
+    : '';
   const uniform = WAVES_UNIFORM_LINE;
   const van = plan && plan.van && !isInfographic ? VAN_LINE : '';
-  return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct].filter(Boolean).join(' ');
+  return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
