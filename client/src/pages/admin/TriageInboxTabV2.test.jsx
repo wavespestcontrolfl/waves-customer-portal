@@ -133,6 +133,41 @@ describe('verdict version binding', () => {
   });
 });
 
+describe('follow-up card Resolve path', () => {
+  it('"Follow-up booked" sends the card version and reloads on STALE_CARD_VERSION', async () => {
+    const stale = { ...ordinary, id: 'fu', first_name: 'Follow', last_name: 'Up', feedback_verdict: null,
+      reason_code: 'attached_booking_followup_unbooked', payload: JSON.stringify({ follow_up_plan: { scheduled_date: '2026-10-09', window_start: '10:00:00' } }) };
+    const refreshed = { ...stale, first_name: 'Fresh', updated_at: '2026-09-13T04:01:00.000Z' };
+    let listLoads = 0;
+    let resolveAttempts = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) {
+        listLoads += 1;
+        return { items: [listLoads === 1 ? stale : refreshed], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      }
+      if (url === '/admin/triage/fu/resolve') {
+        resolveAttempts += 1;
+        if (resolveAttempts === 1) throw Object.assign(new Error('Card changed since it was displayed — reload and review the latest'), { status: 409, code: 'STALE_CARD_VERSION' });
+        return { ok: true };
+      }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 />);
+    const card = (await screen.findByText('Follow Up')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /follow-up booked/i }));
+    await waitFor(() => expect(listLoads).toBe(2));
+    expect(adminFetch).toHaveBeenCalledWith('/admin/triage/fu/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: stale.updated_at }),
+    });
+    const fresh = (await screen.findByText('Fresh Up')).closest('.py-4');
+    fireEvent.click(within(fresh).getByRole('button', { name: /follow-up booked/i }));
+    await waitFor(() => expect(resolveAttempts).toBe(2));
+    expect(adminFetch).toHaveBeenCalledWith('/admin/triage/fu/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: refreshed.updated_at }),
+    });
+  });
+});
+
 describe('verdict 409 with its own instruction', () => {
   it('shows the server message for a relinked call instead of reloading and looping', async () => {
     const card = { ...ordinary, id: 'relinked', first_name: 'Relinked', last_name: 'Card', feedback_verdict: null };

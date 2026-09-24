@@ -15622,7 +15622,9 @@ const CallRecordingProcessor = {
                     summary: ttrx.raw('EXCLUDED.summary'),
                     updated_at: new Date(),
                   });
-                }).catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+                // Code/name only: a knex message embeds the bound payload,
+                // which carries the call's address (pre-push audit P1).
+                }).catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`));
               }
               }
               if (followUpCreated) {
