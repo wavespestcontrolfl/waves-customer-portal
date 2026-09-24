@@ -1444,20 +1444,46 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').outcome).toBe('warm');
   });
 
-  test('skips an already-won row (idempotent — not selected at all, since the query only reads warm/cold)', async () => {
+  test('skips an already-won row whose evidence still stands (idempotent — the win pass reads only open rows)', async () => {
+    // Real evidence behind the win (Codex #4710 r10 pre-push P1: the reopen
+    // pass re-judges every win against its evidence).
     const fakeDb = install({
       scheduled_services: [
-        { id: 'visit-1', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-1', service_type: 'Waves Assessment' },
+        { id: 'visit-1', status: 'completed', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-1', service_type: 'Waves Assessment' },
       ],
+      estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-09-11T00:00:00Z') }],
       consultation_outcomes: [
-        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'closeout_booking', won_at: new Date('2026-09-11T00:00:00Z') },
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'estimate_accept', won_at: new Date('2026-09-11T00:00:00Z'), won_evidence_booking_id: null },
       ],
     });
 
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
 
     expect(result).toEqual({ scanned: 0, won: 0, errors: 0, no_show_repaired: 0, reopened: 0 });
-    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking'); // untouched
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1')).toMatchObject({ outcome: 'won', won_via: 'estimate_accept' });
+  });
+
+  test('an estimate win whose acceptance no longer qualifies is re-pointed to the later acceptance that does', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        // Moved to 09-14 after the win; the 09-11 acceptance now precedes it.
+        { id: 'visit-1', status: 'completed', scheduled_date: '2026-09-14', customer_id: 'cust-1', service_type: 'Waves Assessment' },
+      ],
+      estimates: [
+        { id: 'est-old', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-09-11T00:00:00Z') },
+        { id: 'est-new', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-09-16T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'estimate_accept', won_at: new Date('2026-09-11T00:00:00Z'), won_evidence_booking_id: null },
+      ],
+    });
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+
+    expect(result.reopened).toBe(1);
+    const row = fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1');
+    expect(row.outcome).toBe('won');
+    expect(new Date(row.won_at).toISOString()).toBe('2026-09-16T15:00:00.000Z');
   });
 
   test('continues past a row whose reconciliation throws — the rest of the sweep still runs', async () => {
@@ -2181,7 +2207,7 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
         ...live,
       ],
       consultation_outcomes: [
-        ...live.map((b, i) => ({ id: `co-live-${i}`, scheduled_service_id: 'visit-1', customer_id: `cust-${i}`, outcome: 'won', won_at: new Date(`2026-09-1${i}T15:00:00Z`), won_evidence_booking_id: b.id })),
+        ...live.map((b, i) => ({ id: `co-live-${i}`, scheduled_service_id: 'visit-1', customer_id: `cust-${i}`, outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: b.id })),
         { id: 'co-dead', scheduled_service_id: 'visit-1', customer_id: 'cust-x', outcome: 'won', won_at: new Date('2026-09-19T15:00:00Z'), won_evidence_booking_id: 'sale-dead', pre_win_outcome: 'warm' },
       ],
     });
@@ -2279,8 +2305,8 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
       ],
       estimates: [{ id: 'est-2', customer_id: 'cust-2', status: 'accepted', accepted_at: new Date('2026-09-14T15:00:00Z') }],
       consultation_outcomes: [
-        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' },
-        { id: 'co-2', scheduled_service_id: 'visit-2', customer_id: 'cust-2', outcome: 'won', won_via: 'estimate_accept', won_evidence_booking_id: null },
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' },
+        { id: 'co-2', scheduled_service_id: 'visit-2', customer_id: 'cust-2', outcome: 'won', won_via: 'estimate_accept', won_at: new Date('2026-09-14T15:00:00Z'), won_evidence_booking_id: null },
       ],
     });
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });

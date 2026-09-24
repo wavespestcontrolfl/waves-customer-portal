@@ -1279,7 +1279,7 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
       .where('co.outcome', 'won')
       .orderBy([{ column: 'co.last_reconciled_at', order: 'asc', nulls: 'first' }, { column: 'co.won_at', order: 'asc' }])
       .limit(limit)
-      .select('co.id', 'co.customer_id', 'co.scheduled_service_id', 'co.won_evidence_booking_id', 'co.pre_win_outcome');
+      .select('co.id', 'co.customer_id', 'co.scheduled_service_id', 'co.won_evidence_booking_id', 'co.pre_win_outcome', 'co.won_at', 'co.won_via');
   } catch (err) {
     logger.error(`[consultation-outcomes] dead-evidence query failed: ${err.message}`);
     result.errors += 1;
@@ -1335,7 +1335,14 @@ async function rejudgeLiveWin(locked, row, consultation, { now, stampOnly, clear
     windowStart: consultation.window_start,
     now,
   });
-  if (evidence && (evidence.booking_id || null) === (row.won_evidence_booking_id || null)) return stampOnly();
+  // Same evidence = same booking AND same instant AND same source (Codex
+  // #4710 r10 pre-push P1): every estimate win has a null booking id, so a
+  // different qualifying acceptance must still refresh won_at / won_via.
+  const sameEvidence = evidence
+    && (evidence.booking_id || null) === (row.won_evidence_booking_id || null)
+    && new Date(evidence.won_at).getTime() === new Date(row.won_at).getTime()
+    && evidence.won_via === row.won_via;
+  if (sameEvidence) return stampOnly();
   const guard = { id: row.id, outcome: 'won', won_evidence_booking_id: row.won_evidence_booking_id || null };
   return locked('consultation_outcomes').where(guard).update(evidence
     ? { won_at: evidence.won_at, won_via: evidence.won_via, won_evidence_booking_id: evidence.booking_id || null, last_reconciled_at: now, updated_at: now }
