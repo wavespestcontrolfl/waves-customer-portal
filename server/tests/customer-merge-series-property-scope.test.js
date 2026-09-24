@@ -236,4 +236,24 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
     expect(conflict).not.toBeNull();
     expect(conflict.code).toBe('duplicate_series_conflict');
   });
+
+  test('a this_only-cancelled FIXED-LENGTH parent (recurring_ongoing=false) with a future child still scheduled is a live duplicate, on either side (pre-push audit P1)', async () => {
+    for (const cancelledSide of ['loser', 'winner']) {
+      const winnerId = await makeCustomer({ address_line1: '15 Palm Ct', city: 'Bradenton', zip: '34205' });
+      const loserId = await makeCustomer({ address_line1: '15 Palm Ct', city: 'Bradenton', zip: '34205' });
+      const cancelledOwner = cancelledSide === 'loser' ? loserId : winnerId;
+      const liveOwner = cancelledSide === 'loser' ? winnerId : loserId;
+      await seedParent(liveOwner, {});
+      // Fixed-length series: parent cancelled this_only, ongoing flag OFF,
+      // but its next occurrence is still on the books.
+      const parentId = await seedParent(cancelledOwner, { parentStatus: 'cancelled', seedChild: true });
+      await db('scheduled_services').where({ id: parentId }).update({ recurring_ongoing: false });
+
+      const winner = await db('customers').where({ id: winnerId }).first();
+      const loser = await db('customers').where({ id: loserId }).first();
+      const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+      expect(conflict).not.toBeNull();
+      expect(conflict.code).toBe('duplicate_series_conflict');
+    }
+  });
 });

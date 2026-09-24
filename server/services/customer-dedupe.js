@@ -1318,44 +1318,70 @@ function seriesSameProperty(matchA, ownerA, matchB, ownerB, propertiesById) {
 // customers' account-level addresses.
 // findActiveRecurringSeries' own candidate set excludes every CANCELLED
 // parent — but a this_only cancellation of a recurring PARENT stamps
-// status='cancelled' while deliberately leaving recurring_ongoing=true
+// status='cancelled' while the family it anchors stays live in one of two
+// shapes: an ongoing series keeps recurring_ongoing=true by design
 // (admin-dispatch.js's single-occurrence cancel: "Single-occurrence cancels
 // (scope 'this_only') never enter [the recurring_ongoing clear] branch and
-// leave the flag intact"), so the anchor for a family that is STILL
-// ongoing is invisible to it. This returns the UNION of the canonical
-// matches and exactly that excluded shape — cancelled AND
-// recurring_ongoing=true, decided by rowIsCancellationFamilyEvidence
-// (cancellation-resolution/facts.js), the canonical "does this row still
-// carry live family evidence" predicate — matched on the same
-// service-id-or-family rule (duplicateGuardFamilyKey) the canonical lookup
-// uses, deduplicated by id. Always a union, never a fallback: a winner
-// with a normal series at property A and a this_only-cancelled ongoing
-// anchor at property B must still collide with a loser series at B. And
-// ONLY that shape: a completed/lapsed parent (recurring_ongoing=false, no
-// upcoming child) is a historical series the canonical lookup already
-// judged lapsed, and must not resurrect as a merge conflict.
-// recurringServiceAddress (booking/visit-financial-stamps.js) mirrors
-// findActiveRecurringSeries' own address normalization onto the extra
-// rows, so seriesSameProperty compares like shapes either way.
+// leave the flag intact"), and a FIXED-LENGTH series (recurring_ongoing=
+// false) keeps its outstanding children on the books. Both are invisible
+// to the canonical lookup. This returns the UNION of the canonical matches
+// and those cancelled-parent shapes — decided by cancelledParentStillLive,
+// which mirrors the seeder's own liveness rule (ongoing flag OR an
+// outstanding child, same statuses and date bound) — matched on the same
+// service-id-or-family rule (duplicateGuardFamilyKey), deduplicated by id.
+// Always a union, never a fallback: a winner with a normal series at
+// property A and a cancelled-but-live anchor at property B must still
+// collide with a loser series at B. And ONLY those shapes: a lapsed
+// parent (flag off, nothing outstanding) is a historical series the
+// canonical lookup already judged lapsed and must not resurrect as a merge
+// conflict. recurringServiceAddress (booking/visit-financial-stamps.js)
+// mirrors findActiveRecurringSeries' own address normalization onto the
+// extra rows, so seriesSameProperty compares like shapes either way.
+async function cancelledParentStillLive(database, row) {
+  if (row.recurring_ongoing === true) return true;
+  const { etDateString } = require('../utils/datetime-et');
+  const upcoming = await database('scheduled_services')
+    .where({ recurring_parent_id: row.id, is_recurring: true })
+    .whereIn('status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
+    .where(function activeBound() {
+      this.where('scheduled_date', '>=', etDateString())
+        .orWhere('status', 'rescheduled')
+        .orWhere('status', 'en_route')
+        .orWhere('status', 'on_site');
+    })
+    .first('id');
+  return !!upcoming;
+}
+
+// Never plan evidence, cancelled or not: one-time bookings and callbacks
+// (the same two exclusions cancellation-resolution/facts.js's
+// rowIsCancellationFamilyEvidence starts with).
+function parentRowIsPlanShaped(row, isOneTimeBookingSource) {
+  if (isOneTimeBookingSource(row.source)) return false;
+  if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
+  return true;
+}
+
 async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
   const { findActiveRecurringSeries, duplicateGuardFamilyKey } = require('./recurring-appointment-seeder');
   const active = await findActiveRecurringSeries(database, { customerId, serviceId, serviceType });
   const matches = Array.isArray(active) ? [...active] : [];
-  const { rowIsCancellationFamilyEvidence } = require('./cancellation-resolution/facts');
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
   const rows = await database('scheduled_services')
-    .where({ customer_id: customerId, is_recurring: true, status: 'cancelled', recurring_ongoing: true })
+    .where({ customer_id: customerId, is_recurring: true, status: 'cancelled' })
     .whereNull('recurring_parent_id')
     .select('*');
   const targetKey = serviceType ? duplicateGuardFamilyKey(serviceType) : null;
   const seen = new Set(matches.map((m) => String(m.id)));
   for (const row of (Array.isArray(rows) ? rows : [])) {
     if (seen.has(String(row.id))) continue;
-    if (!rowIsCancellationFamilyEvidence(row, { isOneTimeBookingSource })) continue;
+    if (!parentRowIsPlanShaped(row, isOneTimeBookingSource)) continue;
     const idMatch = serviceId != null && row.service_id != null && String(row.service_id) === String(serviceId);
     const keyMatch = targetKey != null && row.service_type && duplicateGuardFamilyKey(row.service_type) === targetKey;
     if (!idMatch && !keyMatch) continue;
+     
+    if (!(await cancelledParentStillLive(database, row))) continue;
     seen.add(String(row.id));
     matches.push({ ...row, ...recurringServiceAddress(row) });
   }
@@ -1363,20 +1389,19 @@ async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
 }
 
 async function duplicateSeriesMergeConflict(database, winner, loser) {
-  const { rowIsCancellationFamilyEvidence } = require('./cancellation-resolution/facts');
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   // IDENTITY collection only (which service_id/service_type families the
   // loser has ever anchored) — liveness is decided per identity by
-  // liveFamilyMatches below. Fetched WITHOUT a status filter so a
-  // this_only-cancelled parent whose recurring_ongoing flag says the
-  // family is still live contributes its identity; the canonical
-  // predicate drops cancelled one-offs, callbacks and one-time bookings.
+  // liveFamilyMatches below, so this is deliberately permissive: fetched
+  // WITHOUT a status filter (a cancelled parent's family can still be live
+  // — see cancelledParentStillLive), dropping only one-time bookings and
+  // callbacks, which are never plan evidence.
   const loserParentRowsRaw = await database('scheduled_services')
     .where({ customer_id: loser.id, is_recurring: true })
     .whereNull('recurring_parent_id')
     .select('*');
   const loserParentRows = (Array.isArray(loserParentRowsRaw) ? loserParentRowsRaw : [])
-    .filter((row) => rowIsCancellationFamilyEvidence(row, { isOneTimeBookingSource }));
+    .filter((row) => parentRowIsPlanShaped(row, isOneTimeBookingSource));
   if (!loserParentRows.length) return null;
   // Distinct (service_id, service_type) identities — usually one per
   // family, but a loser can carry more than one parent whose service_type
