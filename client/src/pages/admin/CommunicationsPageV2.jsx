@@ -1549,6 +1549,25 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     }
   };
 
+  const leaveApprovalDraft = () => {
+    approvalDraftRequestRef.current += 1;
+    const { cleared, persisted } = clearDraft(draftRevision);
+    if (!cleared) return;
+    for (const attachment of attachments) {
+      if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete("draftId");
+    url.searchParams.delete("draft");
+    window.history.replaceState(window.history.state, "", url);
+    setSendResult({
+      ok: persisted,
+      text: persisted
+        ? "Approval draft closed."
+        : "Approval draft closed here, but recovery storage could not be updated. It may return after a reload.",
+    });
+  };
+
   // Upload one-or-more image files → S3 → mediaUrls. Called from the hidden
   // <input type="file">triggered by the + button.
   const handleUpload = async (fileList) => {
@@ -3058,6 +3077,16 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             {aiDrafting ? "Drafting…" : "AI Draft"}
           </Button>{" "}
         </div>
+        {loadedMessageDraft?.id && (
+          <Button
+            variant="secondary"
+            className="mt-3"
+            disabled={sending || uploading || listening || rewritingSms || aiDrafting || insertingResched || insertingReservice || !!insertingCustomerLink}
+            onClick={leaveApprovalDraft}
+          >
+            Leave approval draft
+          </Button>
+        )}
         <InsertLinkSheet
           open={active && showLinkSheet}
           onClose={() => setShowLinkSheet(false)}

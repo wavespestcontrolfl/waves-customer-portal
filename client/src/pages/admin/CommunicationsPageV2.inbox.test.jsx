@@ -443,6 +443,44 @@ it("drops an unverifiable recovered agent selection while retaining the editable
 });
 
 
+it("leaves a recovered approval and clears its metadata before composing a fresh message", async () => {
+  const owner = "discard-approval-owner";
+  saveDraft(owner, { ...savedApproval, attachments: [attachment], replyContext: { messageId: "old-reply", phone: "9415550100", customerId: "customer-a" }, sendTiming: "tomorrow", insertedCustomerLinks: { contract: { url: "https://example.invalid/contract", contractId: "old-contract" } } });
+  window.history.replaceState({}, "", "/?phone=9415550100&draftId=approval-a");
+  const view = setupWithOwner(owner); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Leave approval draft" })); await tick();
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("");
+  expect(screen.queryByRole("button", { name: "Remove gate.png" })).not.toBeInTheDocument();
+  expect(window.location.search).not.toContain("draftId");
+  view.unmount();
+  setupWithOwner(owner); await tick();
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("");
+  fireEvent.change(screen.getByRole("combobox", { name: "Send from" }), { target: { value: line } });
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Fresh reply" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: "Fresh reply" });
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("replyToMessageId");
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("contractId");
+  expect(fetch.mock.calls.some(([url]) => /drafts\/approval-a\/(approve|revise)/.test(String(url)))).toBe(false);
+});
+
+
+it("does not restore a left approval when its pending lookup finishes", async () => {
+  const owner = "discard-pending-approval-owner";
+  saveDraft(owner, savedApproval);
+  window.history.replaceState({}, "", "/?phone=9415550100&draftId=approval-a");
+  let resolveDraft;
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).endsWith("/drafts/approval-a")
+    ? new Promise((resolve) => { resolveDraft = resolve; }) : originalFetch(url, options));
+  setupWithOwner(owner); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Leave approval draft" }));
+  await act(async () => resolveDraft(response({ id: "approval-a", draftResponse: "Late approval", recipientPhone: "+19415550100", resolvedFromNumber: "+19415550199" })));
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("");
+});
+
+
 it.each([null, { id: "another-approval", draftResponse: "Earlier approval", recipientPhone: "+19415550100", fromNumber: line }])("keeps an occupied draft intact when a different approval link opens (%s)", async (loadedMessageDraft) => {
   const owner = `occupied-approval-${loadedMessageDraft?.id || "manual"}`;
   saveDraft(owner, { msgBody: "Keep my work", fromNumber: line, selectedCustomerId: "customer-a", loadedMessageDraft, attachments: [attachment], replyContext: { messageId: "original-reply", phone: "9415550100", customerId: "customer-a" } });
