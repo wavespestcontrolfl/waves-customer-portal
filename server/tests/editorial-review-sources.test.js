@@ -83,6 +83,23 @@ test('rejects non-text media types even when a parameter contains text', async (
   expect(result.errors).toEqual(['Source content type is not reviewable text: https://example.gov/download']);
 });
 
+test.each([
+  ['', '{"ok":true}'],
+  ['text/html', '%PDF-1.4 binary payload'],
+])('rejects non-HTML bodies reported with %s content type', async (contentType, html) => {
+  mockFetchPage.mockResolvedValue({
+    status: 200,
+    finalUrl: 'https://example.gov/mislabeled',
+    contentType,
+    html,
+  });
+
+  const result = await fetchSources(['https://example.gov/mislabeled']);
+
+  expect(result.records).toEqual([]);
+  expect(result.errors).toEqual(['Source body is not reviewable HTML: https://example.gov/mislabeled']);
+});
+
 test('preserves angle brackets in accepted plain-text evidence', async () => {
   mockFetchPage.mockResolvedValue({
     status: 200,

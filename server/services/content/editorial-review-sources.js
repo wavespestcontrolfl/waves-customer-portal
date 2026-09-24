@@ -65,8 +65,13 @@ async function fetchSources(sourceUrls) {
       errors.push(`Source content type is not reviewable text: ${url}`);
       continue;
     }
-    if (classifyPageBody(page.html, mediaType, { strictChallenge: true }) === 'challenge') {
+    const bodyType = classifyPageBody(page.html, mediaType, { strictChallenge: true });
+    if (bodyType === 'challenge') {
       errors.push(`Source returned a challenge page: ${url}`);
+      continue;
+    }
+    if (mediaType !== 'text/plain' && bodyType !== 'html') {
+      errors.push(`Source body is not reviewable HTML: ${url}`);
       continue;
     }
     const finalUrl = page.finalUrl || url;
