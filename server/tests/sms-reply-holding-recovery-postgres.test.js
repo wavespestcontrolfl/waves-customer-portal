@@ -75,6 +75,29 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     });
   }
 
+  async function noCardManualReservation({ ageMinutes, wrapper }) {
+    const id = await suggest.createReplyHoldingReservation(trx, {
+      to: '+12025550101', fromNumber: '+19413529161', body: 'No linked suggestion.',
+      reservationKind: 'manual', uncertain: true, manualWrapperReservation: wrapper,
+    });
+    const agedAt = new Date(Date.now() - ageMinutes * 60 * 1000);
+    await trx('sms_log').where({ id }).update({ created_at: agedAt, updated_at: agedAt });
+    return id;
+  }
+
+  test.each([
+    ['ordinary unmarked uncertainty keeps the old 30-minute cleanup behavior', 31, false, 1, false],
+    ['wrapper uncertainty survives cleanup inside the 24-hour retry hold', 31, true, 0, true],
+    ['wrapper uncertainty is released after the 24-hour retry hold', 25 * 60, true, 1, false],
+  ])('%s', async (_label, ageMinutes, wrapper, reservationsCleared, survives) => {
+    const reservationId = await noCardManualReservation({ ageMinutes, wrapper });
+
+    expect(await autoSend.reconcileAutoSendClaims({ orphanMinutes: 30 }))
+      .toMatchObject({ reservationsCleared });
+    const row = await trx('sms_log').where({ id: reservationId }).first('id');
+    expect(Boolean(row)).toBe(survives);
+  });
+
   test('manual returned/thrown uncertainty survives both sweeps, then sent evidence settles used and parked decisions', async () => {
     const used = await decision();
     const parked = await decision({ message: 'A different suggestion.' });

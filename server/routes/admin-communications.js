@@ -2964,8 +2964,14 @@ router.post('/link-library/sync', requireAdmin, async (req, res) => {
   }
 });
 
+// Admin-only (ADMIN-BUG-R38): a system-wide switch that turns automated
+// AI-composed customer SMS replies on or off company-wide is owner-only,
+// consistent with every other owner-only route in this file
+// (/reschedule-link, /customer-link, /link-library*, /collections-cases/:id/dial).
+// A technician login must get 403, not silently flip customer-facing
+// automation with no audit trail (system_config has no actor column).
 // GET /api/admin/communications/ai-auto-reply-status
-router.get('/ai-auto-reply-status', async (req, res) => {
+router.get('/ai-auto-reply-status', requireAdmin, async (req, res) => {
   try {
     const row = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
     res.json({ enabled: row?.value === 'true' });
@@ -2979,7 +2985,7 @@ router.get('/ai-auto-reply-status', async (req, res) => {
 });
 
 // POST /api/admin/communications/ai-auto-reply — toggle
-router.post('/ai-auto-reply', async (req, res) => {
+router.post('/ai-auto-reply', requireAdmin, async (req, res) => {
   try {
     const { enabled } = req.body;
     const value = enabled ? 'true' : 'false';
