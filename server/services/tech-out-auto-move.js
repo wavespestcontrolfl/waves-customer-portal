@@ -71,16 +71,31 @@ function minutesToTime(minutes) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
+/** A non-available tech_schedule_blocks row (this tech's, or crew-wide) overlapping the window. */
+async function blockedBySchedule(techId, date, startMin, endMin) {
+  const blocks = await db('tech_schedule_blocks')
+    .where({ date })
+    .whereNot('block_type', 'available')
+    .where((q) => q.where('technician_id', techId).orWhereNull('technician_id'))
+    .select('start_time', 'end_time');
+  return blocks.some((b) => {
+    const bStart = timeToMinutes(b.start_time);
+    const bEnd = timeToMinutes(b.end_time);
+    if (bStart == null || bEnd == null) return false;
+    return windowsOverlap(startMin, endMin, bStart, bEnd);
+  });
+}
+
 /**
- * Fit test for one (stop, candidate tech) pair, keeping the stop's own
- * window. Prefers the same arrival-route placement check the rebooker's own
- * probeMoveConflicts runs at commit time (checkArrivalPlacement, gated on
- * arrivalWindowRoutingEnabled) over a hand-rolled overlap query; falls back
- * to a plain overlap + tech_schedule_blocks read when that routing model is
- * off (the plain occupancy probe — scheduling/occupancy.js — is deliberately
- * tech-blind by design, so it cannot answer "does THIS candidate have room",
- * only "is this window occupied at all"; tech_schedule_blocks is per-tech
- * and outside its model either way).
+ * Per-candidate fit for one (stop, candidate tech) pair at the stop's own
+ * window. The mover's commit-time occupancy probe is checked ONCE per stop
+ * in autoAssignParkedAlert (it is tech-blind, so it is the same answer for
+ * every candidate); this adds what that probe does not model per tech —
+ * the candidate's own route (arrival placement when that routing model is
+ * on, else a plain overlap read of the candidate's day) and, on EVERY path,
+ * the candidate's tech_schedule_blocks. Everything here is stricter than
+ * the commit, never looser, so a certified candidate is not refused for a
+ * reason selection skipped.
  */
 async function fitsWindow(stop, tech, date) {
   if (!stop.window_start) return { fits: false, conflict_reason: 'no_window' };
@@ -100,39 +115,29 @@ async function fitsWindow(stop, tech, date) {
       windowStart,
       windowEnd,
       durationMinutes,
-      // The stop being placed is still sitting on the ABSENT tech (possibly
-      // en_route) — its own current live-route membership must not gate a
-      // DIFFERENT candidate's placement.
+      // The stop being placed is still sitting on the ABSENT tech — its own
+      // current live-route membership must not gate a DIFFERENT candidate.
       treatTargetAsPending: true,
     });
-    return fit.feasible ? { fits: true } : { fits: false, conflict_reason: fit.reason };
+    if (!fit.feasible) return { fits: false, conflict_reason: fit.reason };
+  } else {
+    const others = await db('scheduled_services')
+      .where({ scheduled_date: date, technician_id: tech.id })
+      .whereNot('id', stop.id)
+      .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
+      .select('window_start', 'window_end', 'estimated_duration_minutes');
+    const conflict = others.some((row) => {
+      const oStart = timeToMinutes(row.window_start);
+      if (oStart == null) return false;
+      const oEnd = timeToMinutes(row.window_end) ?? (oStart + (Number(row.estimated_duration_minutes) || 60));
+      return windowsOverlap(startMin, endMin, oStart, oEnd);
+    });
+    if (conflict) return { fits: false, conflict_reason: 'overlap' };
   }
 
-  const others = await db('scheduled_services')
-    .where({ scheduled_date: date, technician_id: tech.id })
-    .whereNot('id', stop.id)
-    .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
-    .select('window_start', 'window_end', 'estimated_duration_minutes');
-  const conflict = others.some((row) => {
-    const oStart = timeToMinutes(row.window_start);
-    if (oStart == null) return false;
-    const oEnd = timeToMinutes(row.window_end) ?? (oStart + (Number(row.estimated_duration_minutes) || 60));
-    return windowsOverlap(startMin, endMin, oStart, oEnd);
-  });
-  if (conflict) return { fits: false, conflict_reason: 'overlap' };
-
-  const blocks = await db('tech_schedule_blocks')
-    .where({ date })
-    .whereNot('block_type', 'available')
-    .where((q) => q.where('technician_id', tech.id).orWhereNull('technician_id'))
-    .select('start_time', 'end_time');
-  const blocked = blocks.some((b) => {
-    const bStart = timeToMinutes(b.start_time);
-    const bEnd = timeToMinutes(b.end_time);
-    if (bStart == null || bEnd == null) return false;
-    return windowsOverlap(startMin, endMin, bStart, bEnd);
-  });
-  return blocked ? { fits: false, conflict_reason: 'schedule_block' } : { fits: true };
+  return (await blockedBySchedule(tech.id, date, startMin, endMin))
+    ? { fits: false, conflict_reason: 'schedule_block' }
+    : { fits: true };
 }
 
 /** Marginal detour + stop count a tech's day would take on if it absorbed `stop`. */
@@ -359,6 +364,15 @@ async function loadMovableStop(alertId) {
  * "also absent on this date") — called per candidate here, right before
  * ranking, so a race between the crew read and this check is still caught.
  */
+/** Open stops still on the absent tech that day (the batch the mover may pass over). */
+async function absentDayStopIds(absentTechId, date) {
+  const rows = await db('scheduled_services')
+    .where({ technician_id: absentTechId, scheduled_date: date })
+    .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
+    .select('id');
+  return rows.map((r) => String(r.id));
+}
+
 async function eligibleRankedCandidates(stop, absentTechId, date) {
   const crew = await applyAssignable(db('technicians'))
     .whereNot('technicians.id', absentTechId)
@@ -395,6 +409,21 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
   if (loaded.done) return loaded.done;
   const { stop, date, absentTechId } = loaded;
 
+  // The mover's commit probe, read-only and with the SAME options the move
+  // passes below: selection never certifies a move the commit would refuse.
+  // That probe is tech-blind by design (one active field tech; see
+  // scheduling/occupancy.js), so a stop whose window any other live stop
+  // overlaps stays parked for a human. The absent tech's own open stops that
+  // day are excluded, the same batch-mover convention rain-out uses: they are
+  // leaving that route, so they must not block each other's rescue.
+  const excludeServiceIds = await absentDayStopIds(absentTechId, date);
+  const window = { start: stop.window_start, end: stop.window_end };
+  const conflicts = await SmartRebooker.previewMoveConflicts(stop.id, date, window, { excludeServiceIds });
+  if (conflicts.length) {
+    await annotateAttempt(alertId, 'window_occupied');
+    return { moved: false, alert_id: alertId, reason: 'window_occupied' };
+  }
+
   const ranked = await eligibleRankedCandidates(stop, absentTechId, date);
   if (!ranked.length) {
     await annotateAttempt(alertId, 'no_eligible_candidate');
@@ -405,9 +434,10 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
   for (const candidate of ranked.slice(0, MAX_MOVE_ATTEMPTS)) {
     try {
       await SmartRebooker.reschedule(
-        stop.id, date, { start: stop.window_start, end: stop.window_end }, 'tech_out_auto_move', 'system',
+        stop.id, date, window, 'tech_out_auto_move', 'system',
         {
           technicianId: candidate.tech.id,
+          excludeServiceIds,
           keepStatus: true,
           seriesPolicy: 'single',
           // Never the whole-visit mover: with visitPolicy 'single' the unit
