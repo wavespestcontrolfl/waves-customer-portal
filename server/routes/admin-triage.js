@@ -34,6 +34,13 @@ const ADDRESS_CONFIRMATION_REASONS = [
 // auto-routed review list; nothing here changes routing automatically.
 const VERDICTS = ['accept', 'deny'];
 const WRONG_FIELDS = ['name', 'address', 'service', 'scheduling', 'consent', 'spam_status', 'routing'];
+// The skipped_reason values a house-number conflict's settlement / hold
+// stamps on its recovery task — the subtype whose Accept must not overwrite
+// the call's calibration row.
+const CONFLICT_RECOVERY_REASONS = new Set([
+  'address_confirmed_on_file_after_house_number_dispute', 'house_number_dispute_denied_appointment_unbooked',
+  'address_correction_needed_on_retained_visit', 'retained_visit_review_after_denial', 'house_number_dispute_card_unfiled',
+]);
 // History-spanning review queue: rows from BOTH decision versions must stay
 // visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
 const { V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
@@ -1259,7 +1266,14 @@ router.post('/:id/verdict', async (req, res) => {
     // its Accept must not overwrite the call's calibration row (the
     // conflict card's `deny · address`) — route_feedback is unique per
     // call (codex r36 P1).
-    if (item.reason_code !== 'auto_booking_skipped_after_approval') await upsertFeedback({
+    // …gated on the CONFLICT-recovery subtype (its payload marker), never on
+    // the reason code alone: the generic skipped-booking cards (a missing
+    // customer, an invalid time, an insert failure) keep recording the
+    // call's routing feedback (codex r37 P2).
+    const recoveryPayload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+    const conflictRecoveryTask = item.reason_code === 'auto_booking_skipped_after_approval'
+      && (!!recoveryPayload?.dispute_customer_id || CONFLICT_RECOVERY_REASONS.has(String(recoveryPayload?.skipped_reason || '')));
+    if (!conflictRecoveryTask) await upsertFeedback({
       callLogId: item.call_log_id,
       triageItemId: id,
       decisionKind: 'triaged',

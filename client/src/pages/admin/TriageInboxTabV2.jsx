@@ -223,9 +223,13 @@ export function ConfirmEvidence({ payload }) {
     },
     // A same-call visit the dispute retained on the caller's number: the
     // work is to correct THAT appointment's address, not to book another.
+    // …after a DENIED call the visit is to be cancelled or reviewed, never
+    // corrected and kept (the server's own summary says so).
     p.retained_service_id && {
       label: "Retained visit",
-      value: `Visit ${p.retained_service_id}${p.retained_scheduled_date ? ` on ${String(p.retained_scheduled_date).slice(0, 10)}` : ""} was kept on the caller-stated number — correct its address; do not book a second appointment.`,
+      value: p.skipped_reason === "retained_visit_review_after_denial"
+        ? `Visit ${p.retained_service_id}${p.retained_scheduled_date ? ` on ${String(p.retained_scheduled_date).slice(0, 10)}` : ""} is still scheduled on the caller-stated number after the call was denied — cancel it or review it; do not correct its address.`
+        : `Visit ${p.retained_service_id}${p.retained_scheduled_date ? ` on ${String(p.retained_scheduled_date).slice(0, 10)}` : ""} was kept on the caller-stated number — correct its address; do not book a second appointment.`,
     },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },

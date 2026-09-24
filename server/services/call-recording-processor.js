@@ -10399,27 +10399,29 @@ const CallRecordingProcessor = {
                   // without vouching for the on-file number, so the original
                   // ask stands (codex r35 P1).
                   const validatedLine = String(avNormalized?.street_line_1 || '');
-                  const onFileValidated = !!validatedLine && sameHouseNumberStreet(validatedLine, String(onFileAddress.address_line1 || ''))
+                  // (Null-safe: an UNLINKED call reaches this kept path with no
+                  // on-file address at all — codex r37 P2.)
+                  const onFileValidated = !!validatedLine && !!onFileAddress?.address_line1 && sameHouseNumberStreet(validatedLine, String(onFileAddress.address_line1 || ''))
                     && (() => {
                       // The shared any-position canonical unit key ("Apt 2" ==
                       // "Unit 2", unit-first or street-first) — codex r36 P1.
                       const { unitKey: ovUnitKey } = require('./customer-properties');
                       const { splitStreetLineUnit: ovSplit, splitUnitFirstLine: ovUnitFirst } = require('../utils/address-normalizer');
                       const ovUnitOf = (l1, l2) => ovUnitKey(l2) || ovUnitKey(ovUnitFirst(String(l1 || ''))?.unit) || ovUnitKey(ovSplit(String(l1 || '')).unit) || '';
-                      if (ovUnitOf(validatedLine, avNormalized?.street_line_2) !== ovUnitOf(onFileAddress.address_line1, onFileAddress.address_line2)) return false;
+                      if (ovUnitOf(validatedLine, avNormalized?.street_line_2) !== ovUnitOf(onFileAddress?.address_line1, onFileAddress?.address_line2)) return false;
                       const vz = (String(avNormalized?.postal_code || '').match(/\d{5}/) || [''])[0];
-                      const oz = (String(onFileAddress.zip || '').match(/\d{5}/) || [''])[0];
+                      const oz = (String(onFileAddress?.zip || '').match(/\d{5}/) || [''])[0];
                       if (vz && oz) return vz === oz;
                       const vc = String(avNormalized?.city || '').toLowerCase().replace(/[^a-z]/g, '');
-                      const oc = String(onFileAddress.city || '').toLowerCase().replace(/[^a-z]/g, '');
+                      const oc = String(onFileAddress?.city || '').toLowerCase().replace(/[^a-z]/g, '');
                       return !vc || !oc || vc === oc;
                     })();
                   if (!onFileAddress?.address_line1 || knownIndependentProperty || !onFileValidated) return trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [merged]);
                   const resolvedAddress = JSON.stringify({
-                    street_line_1: onFileAddress.address_line1,
-                    street_line_2: onFileAddress.address_line2 || null,
-                    city: onFileAddress.city || null,
-                    postal_code: onFileAddress.zip || null,
+                    street_line_1: onFileAddress?.address_line1 || null,
+                    street_line_2: onFileAddress?.address_line2 || null,
+                    city: onFileAddress?.city || null,
+                    postal_code: onFileAddress?.zip || null,
                     raw_text: null,
                   });
                   return trx.raw(
@@ -10891,7 +10893,15 @@ const CallRecordingProcessor = {
               .where({ customer_id: customerId, source: 'call_pipeline', active: true })
               .select('id', 'address_line1', 'address_line2', 'city', 'zip');
             const staleIds = priorRows.filter(disputedPremise).map((r) => r.id);
-            if (staleIds.length) await db('customer_properties').whereIn('id', staleIds).update({ active: false, updated_at: new Date() });
+            // Atomic with the LIVE processing claim (codex r37 P1): a stale
+            // pass whose token a force-reprocess replaced must not retire a
+            // row the winning pass validated and kept.
+            if (staleIds.length) {
+              await db('customer_properties')
+                .whereIn('id', staleIds)
+                .whereExists(db('call_log').where({ id: call.id, processing_token: procToken }).select(db.raw('1')))
+                .update({ active: false, updated_at: new Date() });
+            }
           } catch (retireErr) {
             logger.warn(`[call-proc] disputed call-pipeline property not retired for ${maskSid(callSid)}: ${retireErr.code || retireErr.name || 'db_error'}`);
           }
