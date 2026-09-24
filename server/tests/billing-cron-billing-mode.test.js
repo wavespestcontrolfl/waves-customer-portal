@@ -133,7 +133,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
     await BillingCron.processMonthlyBilling();
 
     expect(logAutopay).not.toHaveBeenCalledWith('cust-AP', 'skipped_billing_mode', expect.anything());
-    expect(chargeMonthly).toHaveBeenCalledWith('cust-AP');
+    expect(chargeMonthly).toHaveBeenCalledWith('cust-AP', expect.stringMatching(/^autopay_monthly_cust-AP_\d{4}-\d{2}-\d{2}$/));
   });
 
   test('annual_prepay mode WITH a live covering term is skipped by the mode guard before the term guard is even consulted', async () => {
@@ -155,7 +155,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
     await BillingCron.processMonthlyBilling();
 
     expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(1);
-    expect(chargeMonthly).toHaveBeenCalledWith('cust-L');
+    expect(chargeMonthly).toHaveBeenCalledWith('cust-L', expect.stringMatching(/^autopay_monthly_cust-L_\d{4}-\d{2}-\d{2}$/));
   });
 
   test("explicit 'monthly_membership' charges like legacy", async () => {
@@ -164,7 +164,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
 
     await BillingCron.processMonthlyBilling();
 
-    expect(chargeMonthly).toHaveBeenCalledWith('cust-MM');
+    expect(chargeMonthly).toHaveBeenCalledWith('cust-MM', expect.stringMatching(/^autopay_monthly_cust-MM_\d{4}-\d{2}-\d{2}$/));
   });
 
   test('GUARD 3c: a tier-less NULL-mode row resolves per_visit and is never dues-charged (Codex r7 P1)', async () => {
@@ -196,7 +196,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
 
     await BillingCron.processMonthlyBilling();
 
-    expect(chargeMonthly).toHaveBeenCalledWith('cust-EM');
+    expect(chargeMonthly).toHaveBeenCalledWith('cust-EM', expect.stringMatching(/^autopay_monthly_cust-EM_\d{4}-\d{2}-\d{2}$/));
   });
 });
 

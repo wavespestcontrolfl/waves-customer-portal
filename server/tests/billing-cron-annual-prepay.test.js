@@ -120,7 +120,7 @@ describe('processMonthlyBilling — annual-prepay suppression', () => {
     await BillingCron.processMonthlyBilling();
 
     expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(1);
-    expect(chargeMonthly).toHaveBeenCalledWith('cust-Z');
+    expect(chargeMonthly).toHaveBeenCalledWith('cust-Z', expect.stringMatching(/^autopay_monthly_cust-Z_\d{4}-\d{2}-\d{2}$/));
   });
 
   test('skips payment-pending annual-prepay customers until the invoice is resolved', async () => {
