@@ -4,9 +4,11 @@
  * The external watchdog proves it is alive by polling
  * GET /api/integrations/watchdog-worker/status; each served poll finalizes a
  * seo_link_worker_requests row as endpoint='watchdog', result='observed'. This
- * cron asks "when did the watchdog last watch?" and rings ONE admin bell per ET
- * day when the answer is never / too long ago — otherwise a dead Hermes cron
- * would look exactly like a quiet, healthy portal.
+ * cron asks "when did the watchdog last watch?" and rings ONE standing admin
+ * bell per silence EPISODE (keyed to the last successful poll, not the
+ * calendar day) when the answer is never / too long ago — otherwise a dead
+ * Hermes cron would look exactly like a quiet, healthy portal, and a
+ * multi-day outage would ring a fresh unread row every ET day.
  *
  * Dark behind GATE_HERMES_WATCHDOG (call-time read) AND the shared
  * GATE_HERMES_WORKER the endpoint's auth requires. Kill = unset either.
@@ -19,7 +21,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { gateEnvValue, isEnabled } = require('../config/feature-gates');
-const { etDateString } = require('../utils/datetime-et');
 
 const DEFAULT_STALE_MINUTES = 45;
 
@@ -46,7 +47,6 @@ async function runWatchdogLivenessCheck({ now = new Date() } = {}) {
   const limit = staleMinutes();
   if (last && ageMinutes <= limit) return { skipped: false, alerted: 0, ageMinutes, limit };
 
-  const today = etDateString(now);
   const detail = last
     ? `Last successful poll ${ageMinutes} min ago (${last.toISOString()}); the limit is ${limit} min.`
     : 'It has never polled since the lane was enabled.';
@@ -57,7 +57,12 @@ async function runWatchdogLivenessCheck({ now = new Date() } = {}) {
     + 'Check the Hermes cron on Hostinger and the LINK_WORKER_SECRET_HERMES_WATCHDOG secret file.',
     {
       link: '/admin/agents?tab=queue',
-      dedupeKey: `hermes-watchdog-silent:${today}`,
+      // Keyed per silence EPISODE (the last successful poll's timestamp),
+      // not per calendar day: the old `:${today}` key rang a fresh bell
+      // every ET day the watchdog stayed silent (7 days running for one
+      // outage). The key only changes when `last` changes — i.e. once the
+      // watchdog resumes polling and then goes silent again.
+      dedupeKey: `hermes-watchdog-silent:${last ? last.toISOString() : 'never'}`,
       bell: true,
       metadata: { last_observed_at: last ? last.toISOString() : null, age_minutes: ageMinutes, limit_minutes: limit },
     },

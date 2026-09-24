@@ -1822,12 +1822,16 @@ class GoogleBusinessService {
           .whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) > ?::timestamptz", [observedAt])
           .first('id');
         if (newer) return { stale: true };
-        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        // Dedupe against ANY unresolved same-title marker, not just rows
+        // younger than 24h: the old dayAgo bound let the same signature ring
+        // a fresh 'review' marker every day the sync stayed broken, in
+        // addition to the ops_digest bell. retireIfClean's alsoRetire marks
+        // these rows resolved on the clean run, so a genuinely new episode
+        // (after a clean run) still finds no unresolved row and rings.
         const recent = await trx('notifications')
           .where({ recipient_type: 'admin', category: 'review', title })
           .whereRaw("metadata->>'source' IS NULL")
           .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
-          .where('created_at', '>', dayAgo)
           .first();
         if (recent) {
           // Same-signature failures are still NEW observations. Advance both
@@ -1874,6 +1878,9 @@ class GoogleBusinessService {
               link: '/admin/reviews',
               metadata: { observedAt },
               trx: savepoint,
+              dedupeKey: 'ops-digest:gbp-sync-health',
+              dedupeWindowMs: 7 * 24 * 60 * 60 * 1000,
+              refreshOnDedupe: true,
               sendEmail: async () => ({ ok: true }),
             });
             if (sent.channel !== 'in_app') throw new Error('Review sync health email deferred');

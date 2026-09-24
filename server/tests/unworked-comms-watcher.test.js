@@ -173,7 +173,7 @@ describe('runUnworkedCommsWatcher', () => {
     const result = await runUnworkedCommsWatcher(loaders());
     expect(result).toEqual({ skipped: 'nothing_found' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(retireIfClean).toHaveBeenCalledWith('unworked-comms');
+    expect(retireIfClean).toHaveBeenCalledWith('unworked-comms', { lockKey: 'ops-digest:unworked-comms' });
   });
 
   test('an aged-out callback prevents false recovery of the standing digest', async () => {
@@ -240,7 +240,7 @@ describe('runUnworkedCommsWatcher', () => {
   test('a proven empty backlog retires the alert during the send cooldown', async () => {
     const result = await runUnworkedCommsWatcher(loaders({ sentRecently: async () => true }));
     expect(result).toEqual({ skipped: 'nothing_found' });
-    expect(retireIfClean).toHaveBeenCalledWith('unworked-comms');
+    expect(retireIfClean).toHaveBeenCalledWith('unworked-comms', { lockKey: 'ops-digest:unworked-comms' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 

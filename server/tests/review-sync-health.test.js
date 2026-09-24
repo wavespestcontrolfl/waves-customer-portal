@@ -117,11 +117,13 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
 describe('_assessReviewSyncHealth (escalation)', () => {
   function installDb({ aggregates = [], stats = [], recentNotification = null, cleanAt = null } = {}) {
     const updates = [];
+    const whereCalls = [];
     db.mockImplementation((table) => {
       const q = {
         select: jest.fn(function () { return this; }),
         groupBy: jest.fn(async function () { return aggregates; }),
-        where: jest.fn(function (a) {
+        where: jest.fn(function (a, ...rest) {
+          whereCalls.push([table, a, ...rest]);
           if (typeof a === 'function') a(this);
           else if (a && typeof a === 'object') {
             this._statsQuery = a.reviewer_name === '_stats';
@@ -160,6 +162,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
       });
       return q;
     });
+    updates.whereCalls = whereCalls;
     return updates;
   }
 
@@ -233,11 +236,19 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(mockEmailSend.mock.calls[0][0].subject).toMatch(/^FIX: Google review sync/);
   });
 
-  test('24h dedupe: a recent notification row suppresses the resend', async () => {
-    installDb({ aggregates: [], stats: [], recentNotification: { id: 'n1' } });
+  test('unresolved-marker dedupe: ANY unresolved same-title row suppresses the resend, not just one younger than 24h', async () => {
+    // Same signature stayed broken for a week: the old `created_at > dayAgo`
+    // bound let a fresh 'review' marker ring every day in addition to the
+    // ops_digest bell (codex/audit finding). The dedupe now has no age
+    // bound — only "unresolved" gates it — so a week-old unresolved marker
+    // still suppresses the resend.
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: { id: 'n1', created_at: new Date(NOW - 8 * 86400000).toISOString() } });
     const out = await gbp._assessReviewSyncHealth({ venice: 'gbp' });
     expect(out).toEqual({ deduped: true });
     expect(mockEmailSend).not.toHaveBeenCalled();
+    // The 'review' marker query must never filter on created_at any more.
+    const reviewMarkerWhereCalls = updates.whereCalls.filter(([table]) => table === 'notifications');
+    expect(reviewMarkerWhereCalls.some(([, field]) => field === 'created_at')).toBe(false);
   });
 
   test('same-signature failures advance marker/digest observation and reject older failure repeats', async () => {

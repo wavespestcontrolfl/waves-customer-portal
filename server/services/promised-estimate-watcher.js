@@ -270,7 +270,7 @@ async function runPromisedEstimateWatcher(opts = {}) {
 
   const composed = composePromisedEstimateDigest(rows);
   if (!composed) {
-    await retireIfClean('promised-estimate'); // fall-off: no promised quote outstanding
+    await retireIfClean('promised-estimate', { lockKey: 'ops-digest:promised-estimate' }); // fall-off: no promised quote outstanding
     return { skipped: 'nothing_found' };
   }
 
@@ -302,6 +302,9 @@ async function runPromisedEstimateWatcher(opts = {}) {
       html: composed.html,
       text: composed.text,
       link: '/admin/pipeline',
+      dedupeKey: 'ops-digest:promised-estimate',
+      dedupeWindowMs: 7 * 24 * 60 * 60 * 1000,
+      refreshOnDedupe: true,
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),
