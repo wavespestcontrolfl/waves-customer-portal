@@ -726,9 +726,20 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   // refused. An UNLINKED call (customer_id set to null — a supported
   // operator action in admin-call-recordings) is an identity change too:
   // its recovery task would hang off no account (codex r25 P2).
-  if (heldConflictPayload?.dispute_customer_id
-    && String(heldConflictPayload.dispute_customer_id) !== String(callRowForAddress?.customer_id || '')) {
-    throw Object.assign(new Error('This call was relinked to another customer since the card was filed — reprocess the call to refresh the card, then review it.'), { statusCode: 409, code: 'CONFLICT_CUSTOMER_RELINKED' });
+  const relinked = !!heldConflictPayload?.dispute_customer_id
+    && String(heldConflictPayload.dispute_customer_id) !== String(callRowForAddress?.customer_id || '');
+  if (relinked) {
+    // Only an ACCEPT is refused (it would file the recovery task under the
+    // new account with the original account's approved window). A Deny
+    // or Dismiss files nothing, so the operator can still close a card
+    // whose call was relinked or unlinked — the guard must not become a
+    // dead end (pre-push audit P1 after r27). A reprocess re-stamps
+    // dispute_customer_id when it keeps the card.
+    if (verdict === 'accept') {
+      throw Object.assign(new Error('This call was relinked to another customer since the card was filed — reprocess the call to refresh the card, then review it.'), { statusCode: 409, code: 'CONFLICT_CUSTOMER_RELINKED' });
+    }
+    logger.info(`[admin-triage] house-number card ${item.id} settled by ${verdict} after a relink — no recovery task filed`);
+    return;
   }
   const liveCustomer = callRowForAddress?.customer_id
     ? await trx('customers').where({ id: callRowForAddress.customer_id }).whereNull('deleted_at').first('address_line1', 'address_line2', 'city', 'zip')

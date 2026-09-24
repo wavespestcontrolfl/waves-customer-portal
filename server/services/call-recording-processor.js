@@ -10298,7 +10298,11 @@ const CallRecordingProcessor = {
             await trx('triage_items')
               .where({ id: kept.id })
               .update({
-                payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_dispute_cleared_at: new Date().toISOString(), cleared_on_file_street: onFileAddress?.address_line1 || null })]),
+                // …and the card is re-bound to the call's CURRENT customer:
+                // after a relink the settlement refuses a card filed against
+                // another account until a reprocess refreshes it — this is
+                // that refresh (pre-push audit P1 after r27).
+                payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_dispute_cleared_at: new Date().toISOString(), cleared_on_file_street: onFileAddress?.address_line1 || null, dispute_customer_id: customerId ? String(customerId) : null })]),
                 updated_at: new Date(),
               });
           }

@@ -304,6 +304,16 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(d.approvedPayload.heard_address.street_line_1).toBe('1260 Example St');
   });
 
+  test('a relinked card refuses only Accept; Deny / Dismiss close it, and a reprocess re-binds its customer (pre-push audit P1 after r27)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    const guard = src.slice(src.indexOf('const relinked = '), src.indexOf('const liveCustomer = '));
+    expect(guard).toContain("if (verdict === 'accept') {");
+    expect(guard).toContain("code: 'CONFLICT_CUSTOMER_RELINKED'");
+    expect(guard).toContain('no recovery task filed');
+    const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(processor).toContain("cleared_on_file_street: onFileAddress?.address_line1 || null, dispute_customer_id: customerId ? String(customerId) : null");
+  });
+
   test('a denial of the call\'s scheduling evidence is exposed so the promised follow-up files nothing either (pre-push audit P1 after r25)', () => {
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: [], heldConflictPayload: held }).scheduleDenied).toBe(true);
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held }).scheduleDenied).toBe(true);
