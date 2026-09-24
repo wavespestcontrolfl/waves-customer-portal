@@ -3245,7 +3245,16 @@ async function reviseAdminEstimate({
       }
       const leadRow = await trx('leads').where({ id: writtenData.lead_id }).forUpdate().first('address', 'city', 'zip');
       const leadDisplay = leadRow ? [leadRow.address, leadRow.city, leadRow.zip].filter(Boolean).join(', ') : '';
-      const leadStillPrior = !!leadRow && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address));
+      // …and the SAME DOOR (unit): a lead a prefill lookup moved to Apt 5
+      // must not be rewritten by the Apt 4 estimate's correction (codex
+      // r19 P1) — the same guard the customer fan-out applies.
+      const { unitKey: doorUnitKey } = require('./customer-properties');
+      const { splitStreetLineUnit: splitDoor } = require('../utils/address-normalizer');
+      const doorUnit = (line1, line2) => doorUnitKey(line2) || doorUnitKey(splitDoor(String(line1 || '')).unit) || '';
+      const priorParsed = parseDisplayAddress(lockedPrior?.address);
+      const leadSameDoor = !leadRow || !String(leadRow.address || '').trim()
+        || doorUnit(leadRow.address, null) === doorUnit(priorParsed.line1, priorParsed.unit);
+      const leadStillPrior = !!leadRow && leadSameDoor && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address));
       if (leadStillPrior) await trx('leads').where({ id: writtenData.lead_id }).update({
         extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
         ...(corrected && parsed.line1 ? {
@@ -3265,10 +3274,6 @@ async function reviseAdminEstimate({
         // …and the SAME DOOR: the premise comparison strips units by design,
         // but a customer at Apt 4 linked to an Apt 5 estimate must not be
         // moved by that estimate's correction (codex r18 P1).
-        const { unitKey } = require('./customer-properties');
-        const { splitStreetLineUnit } = require('../utils/address-normalizer');
-        const doorUnit = (line1, line2) => unitKey(line2) || unitKey(splitStreetLineUnit(String(line1 || '')).unit) || '';
-        const priorParsed = parseDisplayAddress(lockedPrior?.address);
         const sameDoor = !!before && doorUnit(before.address_line1, before.address_line2) === doorUnit(priorParsed.line1, priorParsed.unit);
         if (before && custDisplay && sameDoor && samePremiseDisplay(custDisplay, lockedPrior?.address)) {
           // The repository's established address-change path, not a bare
@@ -3281,6 +3286,8 @@ async function reviseAdminEstimate({
             address_line1: parsed.line1,
             address_line2: parsed.unit,
             ...(parsed.city ? { city: parsed.city } : {}),
+            // The corrected STATE fans out with the rest (codex r19 P1).
+            ...(parsed.state ? { state: parsed.state } : {}),
             ...(parsed.zip ? { zip: parsed.zip } : {}),
             latitude: null,
             longitude: null,

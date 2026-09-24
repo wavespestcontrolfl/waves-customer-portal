@@ -2798,6 +2798,17 @@ async function createSelfBooking(payload = {}) {
             statusCode: 409, isOperational: true, code: 'ADDRESS_UNVERIFIED',
           });
         };
+        // The contact-pair advisory lock is taken BEFORE any estimate row
+        // lock — the same order the lookup stage and /calculate use
+        // (advisory lock, then estimate rows), so a flagged lookup
+        // withdrawing this draft and this confirm cannot deadlock (codex
+        // r19 P2).
+        {
+          const { contactPairLockKey } = require('../services/lead-address-unverified');
+          if (new_customer?.email && phoneDigits) {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(new_customer.email, phoneDigits)]);
+          }
+        }
         if (pricing_estimate_id && estimate_token) {
           const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
           if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
@@ -2828,10 +2839,7 @@ async function createSelfBooking(payload = {}) {
         // contact pair (codex r11 P1): a flag being persisted for this
         // email + phone lands before or after this whole recheck, never
         // as a phantom row in between.
-        const { cleanVerdictCovers, contactPairLockKey } = require('../services/lead-address-unverified');
-        if (new_customer?.email && phoneDigits) {
-          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(new_customer.email, phoneDigits)]);
-        }
+        const { cleanVerdictCovers } = require('../services/lead-address-unverified');
         // Newest clean verdict for this premise across the contact pair —
         // computed FIRST so the lead-named flag below can be superseded by
         // it too (codex r11 P2).

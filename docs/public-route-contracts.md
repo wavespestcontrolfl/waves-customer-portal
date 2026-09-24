@@ -995,6 +995,9 @@ send_failed) and stamps the block on matching legacy quote-wizard rows
 (any of those states or draft) without archiving them; a clean verdict that
 supersedes the warning also lifts the block on those unarchived legacy
 rows; the lookup stage
+re-reconciles the contact pair under the lock before publishing (a newer
+clean verdict outranks a cached audit) and takes the advisory lock before
+any estimate row lock, the same order the booking confirm uses; it
 applies the same quarantine when it persists a flagged verdict
 (`services/website-quote-withdrawal.js`). A premise correction on the
 estimate moves the linked customer through the established address-change

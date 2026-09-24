@@ -447,10 +447,15 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     // a repeat lookup re-derives the flag staff already overruled and the
     // next /calculate blocks the booking again (pre-push audit P1). A
     // live lookup is fresh evidence and always stands.
-    let staffCleanAt = null;
-    if (result?.meta?.cache === 'hit' && result?.enriched && email && normPhone) {
+    // Newest staff / lookup CLEAN verdict for this premise across the
+    // contact pair, newer than every matching flag — read pre-lock for the
+    // derivation and AGAIN under the contact-pair lock below, so a
+    // confirmation that commits while this lookup runs is honoured rather
+    // than merely ordered before a stale overwrite (codex r19 P1).
+    const resolveStaffCleanAt = async (conn) => {
+      if (!email || !normPhone) return null;
       try {
-        const rows = await db('leads')
+        const rows = await conn('leads')
           .whereNull('deleted_at')
           .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
           .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(normPhone).replace(/\D/g, '').slice(-10)])
@@ -471,15 +476,17 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
           .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress))
           .map((flag) => Date.parse(flag.flagged_at || '') || 0)
           .reduce((max, at) => Math.max(max, at), 0);
-        if (newestClean && newestClean > newestFlag) staffCleanAt = new Date(newestClean).toISOString();
+        return newestClean && newestClean > newestFlag ? new Date(newestClean).toISOString() : null;
       } catch (cleanErr) {
         logger.warn(`[public-property-lookup] contact-pair clean verdict re-read failed: ${cleanErr.code || cleanErr.name || 'error'}`);
+        return null;
       }
-    }
-    const cachedAuditStale = cachedAuditSuperseded({
+    };
+    let staffCleanAt = (result?.meta?.cache === 'hit' && result?.enriched) ? await resolveStaffCleanAt(db) : null;
+    let cachedAuditStale = cachedAuditSuperseded({
       leadCleanVerdict: !!staffCleanAt, profileFound: !!result?.enriched, cachedAt: auditEvidenceAt(result), cleanEvidenceAt: staffCleanAt,
     });
-    const addressUnverified = cachedAuditStale
+    let addressUnverified = cachedAuditStale
       ? null
       : nextAddressUnverified({ enriched: result.enriched, profileFound: !!result?.enriched, prior: priorAddressUnverified });
     if (addressUnverified && !addressUnverified.address_line1) {
@@ -526,6 +533,18 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       // (pre-push audit P1).
       await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(email, normPhone)]);
+        // Re-reconciled UNDER the lock (codex r19 P1): a clean verdict that
+        // committed since the pre-lock read outranks this run's audit when
+        // it is newer than the audit's own evidence time (a live audit is
+        // stamped now and always stands).
+        if (addressUnverified && result?.enriched) {
+          const lockedCleanAt = await resolveStaffCleanAt(trx);
+          if (lockedCleanAt && cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt: auditEvidenceAt(result), cleanEvidenceAt: lockedCleanAt })) {
+            addressUnverified = null;
+            staffCleanAt = lockedCleanAt;
+            cachedAuditStale = true;
+          }
+        }
         // A FLAGGED verdict quarantines the visitor's earlier publications
         // for this premise right here — a visitor who abandons before
         // /calculate must not keep an acceptable link from a clean run
