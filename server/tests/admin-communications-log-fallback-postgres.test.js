@@ -92,7 +92,7 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
         media jsonb DEFAULT '[]', author_type text, delivery_status text, message_type text, is_read boolean, read_at timestamptz,
         metadata jsonb DEFAULT '{}', twilio_sid text, created_at timestamptz DEFAULT now());
       CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), twilio_sid text, direction text,
-        message_type text, status text, customer_id uuid, from_phone text, to_phone text,
+        message_type text, status text, customer_id uuid, from_phone text, to_phone text, message_body text,
         metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
       CREATE TEMP TABLE messaging_audit_log (id bigserial PRIMARY KEY, provider_message_id text, channel text,
         metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
