@@ -70,6 +70,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 jest.mock('../services/recurring-appointment-seeder', () => ({
   ...jest.requireActual('../services/recurring-appointment-seeder'),
   findActiveRecurringSeries: jest.fn(),
+  sourceEstimateForScope: jest.fn(),
 }));
 // buildSeriesAddressScope (estimate-converter.js) resolves the canonical
 // serviceAddressScope shape the SAME way the booking/estimate callers do.
@@ -93,7 +94,7 @@ const { familyOfServiceRow } = require('../services/cancellation-processor');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { PAYMENT_PENDING_STATUS } = AnnualPrepayRenewals;
 const { ANNUAL_PREPAY_METHOD } = require('../services/prepaid-series');
-const { findActiveRecurringSeries } = require('../services/recurring-appointment-seeder');
+const { findActiveRecurringSeries, sourceEstimateForScope } = require('../services/recurring-appointment-seeder');
 const { buildSeriesAddressScope } = require('../services/estimate-converter');
 
 // A minimal chainable stand-in for coveredTermsAsOf's real knex query
@@ -118,6 +119,7 @@ beforeEach(() => {
   // resolved — every OTHER describe block's fixtures are unaffected by the
   // duplicate-series guard unless a test opts in.
   findActiveRecurringSeries.mockReset().mockResolvedValue([]);
+  sourceEstimateForScope.mockReset().mockResolvedValue(null);
   buildSeriesAddressScope.mockReset().mockResolvedValue(null);
 });
 const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
@@ -854,6 +856,18 @@ describe('topUpRecurringSeriesLocked — duplicate active series (Codex GitHub #
       // has its own dedicated tests).
       serviceAddressScope: null,
     });
+  });
+
+  test('an unstamped series with a source estimate scopes on that estimate property before the primary-address fallback (Codex r7 P1)', async () => {
+    sourceEstimateForScope.mockResolvedValueOnce({ property_id: 'prop-secondary', address: '9 Lake Dr, Parrish, FL 34219' });
+    const { conn } = topupScenario({
+      parentOverrides: { service_address_line1: null, property_id: null, source_estimate_id: 'est-2' },
+      customerOverrides: { address_line1: '7 Home Rd', city: 'Parrish', state: 'FL', zip: '34219' },
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(sourceEstimateForScope).toHaveBeenCalledWith(expect.anything(), 'est-2');
+    const call = buildSeriesAddressScope.mock.calls[0];
+    expect(call[1]).toEqual({ property_id: 'prop-secondary', address: '9 Lake Dr, Parrish, FL 34219' });
   });
 
   test('an unstamped legacy series scopes on the customer primary address, never the property-blind guard (Codex pre-push P1)', async () => {

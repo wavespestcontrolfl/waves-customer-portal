@@ -17431,27 +17431,30 @@ async function isFamilyOnPlanHold(conn, parent, parentId) {
 // the visits it already has — it only withholds NEW top-up inserts on
 // both series until the owner clears the stale one (recurring_ongoing) or
 // a future change adds a durable, queryable marker for an approval.
-// Shared by the eligibility rule below (isDuplicateActiveSeries, which
-// only needs the boolean) and topUpRecurringSeriesLocked's own reporting
-// path (which needs the actual sibling ids for the ops script's "Duplicate
-// series for review" list) — one resolver, never two definitions of "what
-// counts as an active duplicate" that could disagree.
-async function resolveDuplicateActiveSeries(conn, parent, parentId) {
-  const { findActiveRecurringSeries } = require('../services/recurring-appointment-seeder');
-  const { buildSeriesAddressScope } = require('../services/estimate-converter');
-  // The canonical override-aware address resolver (visit-financial-
-  // stamps' recurringServiceAddress) — a moved series
-  // (recurring_template_overrides.appointment_address) scopes on its OWN
-  // current address, never a stale stamped one, exactly as
-  // findActiveRecurringSeries itself already resolves every CANDIDATE
-  // parent's address internally (the same function, same call).
+// The address this series occupies for duplicate scoping, resolved the same
+// way findActiveRecurringSeries reads its CANDIDATE parents:
+//   1. the override-aware recurringServiceAddress (a moved series scopes on
+//      its current address, via recurring_template_overrides);
+//   2. an unstamped root (no street, no property) with an immutable source
+//      estimate scopes on that estimate's property/address
+//      (sourceEstimateForScope) — a secondary-property series must not read
+//      as the primary address (Codex r7 P1);
+//   3. otherwise an unstamped root lives at the customer's primary address
+//      (customerPrimaryStreet), never the property-blind legacy guard
+//      (Codex pre-push P1).
+// Street and unit are comma-separated segments so the canonical parser stays
+// unit-aware (Codex r6 P1).
+async function topUpScopeInput(conn, parent) {
+  const { sourceEstimateForScope } = require('../services/recurring-appointment-seeder');
   let addr = recurringServiceAddress(parent);
-  // An unstamped legacy series (no street, no property link) lives at the
-  // customer's primary address — the same reading findActiveRecurringSeries
-  // gives unstamped CANDIDATE parents (customerPrimaryStreet). Without this
-  // its scope collapses to the property-blind legacy guard and a legitimate
-  // series at the customer's other property blocks it (Codex pre-push P1).
-  if (!String(addr.service_address_line1 || '').trim() && !addr.property_id) {
+  const unstamped = !String(addr.service_address_line1 || '').trim() && !addr.property_id;
+  if (unstamped && parent.source_estimate_id) {
+    const src = await sourceEstimateForScope(conn, parent.source_estimate_id).catch(() => null);
+    if (src && (src.property_id || String(src.address || '').trim())) {
+      return { property_id: src.property_id || null, address: src.address || null };
+    }
+  }
+  if (unstamped) {
     const cust = await conn('customers').where({ id: parent.customer_id })
       .first('address_line1', 'address_line2', 'city', 'state', 'zip');
     if (cust && String(cust.address_line1 || '').trim()) {
@@ -17466,28 +17469,31 @@ async function resolveDuplicateActiveSeries(conn, parent, parentId) {
     }
   }
   const address = [
-    // Comma-join street + unit so the canonical parser (makeEstimateScopeKeys)
-    // sees the unit as address_line2 and stays unit-aware — a space-joined
-    // "100 Main St Apt 5" reads as unitless and can collide with the
-    // customer's other unit at the same street (Codex r6 P1).
     addr.service_address_line1,
     addr.service_address_line2,
     addr.service_address_city,
     `${addr.service_address_state || ''} ${addr.service_address_zip || ''}`.trim(),
   ].filter(Boolean).join(', ');
-  let serviceAddressScope = null;
-  try {
-    serviceAddressScope = await buildSeriesAddressScope(
-      conn,
-      { property_id: addr.property_id || null, address },
-      parent.customer_id,
-    );
-  } catch {
-    // Fail OPEN on the scope only, never on the guard itself — the
-    // canonical function's own documented fallback (serviceAddressScope:
-    // null) is exact legacy customer+family behavior: still a correct,
-    // just property-blind, duplicate check for this one series this run.
-  }
+  return { property_id: addr.property_id || null, address };
+}
+
+// Shared by the eligibility rule below (isDuplicateActiveSeries, which
+// only needs the boolean) and topUpRecurringSeriesLocked's own reporting
+// path (which needs the actual sibling ids for the ops script's "Duplicate
+// series for review" list) — one resolver, never two definitions of "what
+// counts as an active duplicate" that could disagree.
+async function resolveDuplicateActiveSeries(conn, parent, parentId) {
+  const { findActiveRecurringSeries } = require('../services/recurring-appointment-seeder');
+  const { buildSeriesAddressScope } = require('../services/estimate-converter');
+  // Fail OPEN on the scope only, never on the guard itself — the canonical
+  // function's own documented fallback (serviceAddressScope: null) is exact
+  // legacy customer+family behavior: still a correct, just property-blind,
+  // duplicate check for this one series this run.
+  const serviceAddressScope = await buildSeriesAddressScope(
+    conn,
+    await topUpScopeInput(conn, parent),
+    parent.customer_id,
+  ).catch(() => null);
   return findActiveRecurringSeries(conn, {
     customerId: parent.customer_id,
     serviceId: parent.service_id || null,
