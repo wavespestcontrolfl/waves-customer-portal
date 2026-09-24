@@ -2947,6 +2947,10 @@ async function resolveConsultationLeadOnly(last10, leadId) {
       }
       return { lead: byId };
     }
+    // A stale explicit selection (deleted or nonexistent lead) is refused,
+    // never treated as permission to pick another lead on this number
+    // (Codex #4709 r10 P1) — that could be a different household member.
+    return { status: 404, error: 'That lead no longer exists — reopen the lead and try again' };
   }
   const matches = await applyOpenLeadPredicate(
     db('leads')
@@ -2956,7 +2960,7 @@ async function resolveConsultationLeadOnly(last10, leadId) {
     .orderBy('created_at', 'desc')
     .limit(2)
     .select('id', 'first_name', 'phone');
-  if (!leadId && matches.length > 1) {
+  if (matches.length > 1) {
     return { status: 409, error: 'multiple leads share this number; pick the lead' };
   }
   return matches.length ? { lead: matches[0] } : null;

@@ -1500,9 +1500,18 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLea
     if (!row.lead_id) {
       return refuseSend('This consultation link no longer resolves to a lead — remove it and insert a fresh one.');
     }
-    const lead = await db('leads').where({ id: row.lead_id }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
+    const lead = await db('leads').where({ id: row.lead_id }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at', 'customer_id');
     if (!lead || !isOpenLeadRow(lead)) {
       return refuseSend('This lead has already converted or closed — remove the consultation link before sending.');
+    }
+    // A lead linked to a customer must still be reachable at that customer's
+    // CURRENT phone (Codex #4709 r10 P1): a stale or reassigned intake
+    // number must never carry this lead's bearer to whoever owns it now.
+    if (lead.customer_id) {
+      const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
+      if (owner && digitsLast10(owner.phone) !== String(toLast10 || '')) {
+        return refuseSend("This lead's customer has a different phone on file now — update the lead before sending the consultation link.");
+      }
     }
     if (digitsLast10(lead.phone) !== String(toLast10 || '')) {
       return refuseSend('This consultation link belongs to a different lead — remove it before sending.');

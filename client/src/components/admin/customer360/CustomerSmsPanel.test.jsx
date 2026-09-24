@@ -255,6 +255,21 @@ describe("CustomerSmsPanel", () => {
     expect(box.value).not.toContain("old111");
   });
 
+  // Codex #4709 r10 P2: rewording the invite (no "consultation" left) must
+  // still replace the old link on re-insert — matched by its own URL.
+  it("an edited invite without the word consultation is still replaced by its remembered link", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem("c360:sms-consult-line:staff-a:cust-a", "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old111");
+    sessionStorage.setItem("c360:sms-draft:staff-a:cust-a", "Hi Avery! Book your free inspection: wavespest.co/l/old111\n\nReply STOP to opt out.");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/new222\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old111");
+  });
+
   it("sends once per click through the canonical route, pinned to the customer, and keeps the draft on failure", async () => {
     const send = deferred();
     adminFetch.mockImplementation(async (path, options = {}) => {

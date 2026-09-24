@@ -2773,6 +2773,16 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(expired.error).toMatch(/expired/);
   });
 
+  // Codex #4709 r10 P1: a lead linked to a customer whose phone changed
+  // must not carry its bearer to the stale intake number.
+  test('a linked lead whose customer now has a different phone → refused', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-1' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415559999' } });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different phone/);
+  });
+
   test('the gate went off since the insert → refused', async () => {
     wireConsultation();
     leadInspectionLinkLive.mockReturnValue(false);

@@ -233,9 +233,17 @@ function combineAppendedDraft(existing, addition, remembered) {
     // memory stale, and exact matching would then keep the old invite. Fall
     // back to the wording + host heuristic in that case.
     const rememberedPresent = remembered && base.split("\n").includes(remembered);
-    const isPriorClauseLine = (line) => (rememberedPresent
-      ? line === remembered
-      : urlHost(firstUrlIn(line)) === newHost && CONSULTATION_WORDING_RE.test(line));
+    // An EDITED remembered line is still found by its own link (Codex #4709
+    // r10 P2) — the URL the operator did not change — so rewording the
+    // invite ("inspection" for "consultation") never leaves the old bearer
+    // behind. The wording + host heuristic is only for when nothing is
+    // remembered at all.
+    const rememberedUrl = remembered ? firstUrlIn(remembered) : null;
+    const isPriorClauseLine = (line) => {
+      if (rememberedPresent) return line === remembered;
+      if (rememberedUrl) return line.includes(rememberedUrl);
+      return urlHost(firstUrlIn(line)) === newHost && CONSULTATION_WORDING_RE.test(line);
+    };
     const withoutPriorClause = base
       .split("\n")
       .filter((line) => !isPriorClauseLine(line))

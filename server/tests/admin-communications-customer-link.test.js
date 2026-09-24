@@ -391,24 +391,21 @@ describe('POST /admin/communications/customer-link', () => {
         });
       });
 
-      test('a stale/deleted leadId (resolves to no lead) falls through to the phone-based lookup', async () => {
+      // Codex #4709 r10 P1: a stale explicit selection is refused — never
+      // permission to pick some other open lead on this number.
+      test('a stale/deleted leadId (resolves to no lead) is refused with 404, never swapped for another lead', async () => {
         wireDb({
           customers: makeCustomersBuilder(),
           leads: makeLeadsBuilder([null, { id: 'lead-3', first_name: 'Sam', phone: '+15551234567' }]),
         });
-        buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/lead3', line: 'line\n\n', standalone: true });
         await withServer(async (baseUrl) => {
           const res = await post(baseUrl, 'customer-link', {
             phone: '+15551234567',
             kind: 'consultation',
             leadId: LEAD_UUID_3,
           });
-          expect(res.status).toBe(200);
-          expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-3', 'Sam');
-          // Rides back so the composer's eventual send can route through
-          // the leads-page send route and get its audit trail (pre-push
-          // Codex P2).
-          expect((await res.json()).leadId).toBe('lead-3');
+          expect(res.status).toBe(404);
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
         });
       });
 
