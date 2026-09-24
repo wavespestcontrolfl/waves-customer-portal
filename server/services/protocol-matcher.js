@@ -350,11 +350,17 @@ function findVisit(program, visitNumber) {
   return (program?.visits || []).find((visit) => Number(visit.visit) === Number(visitNumber)) || null;
 }
 
-function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}) {
-  // Consultation/equipment service, not a treatment — no program, no visit,
-  // by design. Every caller already treats a null program as "no protocol"
-  // (admin-protocols.js's /match and /completion-actions 404; job-card.js's
-  // resolveProtocolLines only when it does not itself force a programKey).
+// Consultation/equipment service, not a treatment — no program, no visit,
+// by design. Every caller already treats a null program as "no protocol"
+// (admin-protocols.js's /match and /completion-actions 404; job-card.js's
+// resolveProtocolLines only when it does not itself force a programKey). A
+// keyless row that names a different, not-yet-built phase of the product
+// (install/maintenance/refill) is neither this consultation nor a barrier
+// match — no live program exists for it (pricing and the install product
+// set are owner-pending), so it gets its own explicit "no match" reason
+// instead of falling through to the barrier program. Returns null when
+// neither applies, so the caller proceeds with ordinary matching.
+function mistingSystemMatchOverride(serviceType, serviceKey) {
   if (isMistingDesignConsultation({ serviceKey, name: serviceType })) {
     return {
       programKey: null,
@@ -364,11 +370,6 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}
       reason: 'misting_system_consultation',
     };
   }
-  // A keyless row that names a different, not-yet-built phase of the
-  // product (install/maintenance/refill) — not this consultation, and not a
-  // barrier match either. No live program exists for it (pricing and the
-  // install product set are owner-pending), so it gets its own explicit
-  // "no match" reason instead of falling through to the barrier program.
   if (isMistingSystemServiceUnconfigured({ serviceKey, name: serviceType })) {
     return {
       programKey: null,
@@ -378,6 +379,12 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}
       reason: 'misting_system_service_unconfigured',
     };
   }
+  return null;
+}
+
+function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}) {
+  const override = mistingSystemMatchOverride(serviceType, serviceKey);
+  if (override) return override;
   const normalized = normalize(serviceType);
   // The catalog service key outranks the name: a rule that claims the key
   // is the match, and the program is that rule's.
