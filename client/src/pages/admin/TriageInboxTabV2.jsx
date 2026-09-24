@@ -257,12 +257,12 @@ export function ConfirmEvidence({ payload }) {
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
       <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before dispatch</div>
       {rows.map((r) => (
-        <div key={`${r.label}-${r.value}`} className="text-12 text-ink-secondary">
+        <div key={`${r.label}-${r.value}`} className="text-14 text-ink-secondary">
           <span className="text-ink-tertiary">{r.label}:</span> {r.value}
         </div>
       ))}
       {p.confirmation_question && (
-        <div className="text-12 text-zinc-900 mt-1">Ask: “{p.confirmation_question}”</div>
+        <div className="text-14 text-zinc-900 mt-1">Ask: “{p.confirmation_question}”</div>
       )}
     </div>
   );

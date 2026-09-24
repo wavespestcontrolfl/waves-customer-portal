@@ -939,6 +939,12 @@ const filled = (v) => String(v || '').trim() !== '';
 // '120 Example St' (pre-push audit P1).
 function recordCarriesStatedStreet(item) {
   const payload = parseMaybeJson(item.payload);
+  // The card is settled only for the customer it was FILED against: after
+  // a relink the newly linked customer's columns say nothing about the
+  // original dispute — the human path refuses until a reprocess refreshes
+  // the card, and the sweep must not settle it either (codex r27 P1).
+  if (payload?.dispute_customer_id && item.call_customer_id !== undefined
+    && String(payload.dispute_customer_id) !== String(item.call_customer_id || '')) return false;
   // The detector's own street key, so N / North and St / Street resolve
   // exactly as they were detected (codex #4666 P2).
   // …including the suffix-less equivalence the detector applies ("1250

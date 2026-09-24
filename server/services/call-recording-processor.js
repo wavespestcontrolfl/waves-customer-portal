@@ -15591,8 +15591,17 @@ const CallRecordingProcessor = {
                         : {}),
                     },
                   }))
+                  // A standing (open OR claimed) card is refreshed with the
+                  // CURRENT promised plan rather than left stale: a
+                  // force-reprocess that moved visit 2's date or window
+                  // must reach the staff who book it by hand (codex r27
+                  // P1). Payload merged, so nothing it recorded is lost.
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                  .ignore()
+                  .merge({
+                    payload: db.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                    summary: db.raw('EXCLUDED.summary'),
+                    updated_at: new Date(),
+                  })
                   .catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
               }
               }

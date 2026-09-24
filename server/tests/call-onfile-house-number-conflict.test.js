@@ -170,6 +170,16 @@ describe('triage auto-resolve: house_number_adopted', () => {
     expect(classifyTriageItem(item({ created_at: '2026-01-01T00:00:00Z' }), {}, { now: NOW })).toBeNull();
   });
 
+  test('a card filed against another customer is not settled by the relinked customer\'s record (codex r27 P1)', () => {
+    const relinked = item({
+      customer_address_line1: '1250 Example Street', call_customer_id: 'cust-new',
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null, dispute_customer_id: 'cust-orig' },
+    });
+    expect(classifyTriageItem(relinked, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem({ ...relinked, call_customer_id: 'cust-orig' }, {}, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
   test('a confirmed call held on this card stays open until a booking lands', () => {
     const confirmed = item({
       customer_address_line1: '1250 Example Street',
