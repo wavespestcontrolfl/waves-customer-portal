@@ -8,8 +8,13 @@
  *   GET /api/admin/dispatch/jobs/:id on open. Cached per id only via
  *   the parent's selectedJobId state — re-opens fetch fresh because
  *   broadcasts may have moved the world while the drawer was closed.
- *   Active-tech list (GET /api/admin/dispatch/technicians) fetched
- *   once on first open and cached across opens.
+ *   Active-tech list (GET /api/admin/dispatch/technicians?date=) is
+ *   date-aware: it's keyed on the OPEN JOB'S scheduled_date (not fetched
+ *   until the job itself has loaded) and excludes a technician marked out
+ *   for that date, same as the server's own commit-time refusal
+ *   (assertAssignableTechnician) on the PUT below — the picker no longer
+ *   offers a tech the save would 409 on (tech-out audit P2). Cached per
+ *   date so two jobs on the same day share one fetch.
  *
  *   refetchSignal prop: parent bumps a monotonic counter when an
  *   external action (drag-to-reassign on the map, etc.) changes the
@@ -205,12 +210,12 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
   const [busyAction, setBusyAction] = useState(null);
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
 
-  // Active-tech list for the assignment dropdown. Fetched once on
-  // mount; same list applies regardless of which job the drawer
-  // shows. Cached in state to avoid refetching on every open. Empty
-  // on the first render — the dropdown gracefully shows just the
-  // current assignment until the list lands.
+  // Active-tech list for the assignment dropdown, keyed on the open job's
+  // scheduled_date (see header). Empty until the job (and so its date) has
+  // loaded — the dropdown gracefully shows just the current assignment
+  // until the list lands.
   const [availableTechs, setAvailableTechs] = useState([]);
+  const fetchedTechsForDateRef = useRef(null);
   // Pending-but-unsaved assignment selection. null means "Unassigned",
   // a UUID string means a specific tech. We track this separately so
   // the user can change the dropdown and click Save (rather than
@@ -333,28 +338,31 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
     return () => { cancelled = true; };
   }, [jobId]);
 
-  // Fetch active techs once on first open. The list rarely changes
-  // mid-session, so caching it across opens is fine. The current
-  // assignment dropdown gracefully falls back to "(Unassigned)" +
-  // the saved tech_full_name if this hasn't loaded yet.
+  // Fetch active techs for the OPEN JOB'S date (see header) — waits for
+  // `job` to load (scheduled_date isn't known from jobId alone), then keyed
+  // on that date so two jobs on the same day reuse one fetch. The current
+  // assignment dropdown gracefully falls back to "(Unassigned)" + the saved
+  // tech_full_name if this hasn't loaded yet.
   useEffect(() => {
-    if (!jobId || availableTechs.length > 0) return;
+    const date = job?.scheduled_date ? String(job.scheduled_date).slice(0, 10) : null;
+    if (!date || fetchedTechsForDateRef.current === date) return;
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/admin/dispatch/technicians`, {
+        const res = await fetch(`${API_BASE}/admin/dispatch/technicians?date=${encodeURIComponent(date)}`, {
           headers: adminAuthHeaders(),
         });
         if (!res.ok) return; // best-effort; dropdown still shows current assignment
         const data = await res.json();
         if (cancelled) return;
+        fetchedTechsForDateRef.current = date;
         setAvailableTechs(Array.isArray(data.technicians) ? data.technicians : []);
       } catch {
         /* swallow — dropdown degrades gracefully */
       }
     })();
     return () => { cancelled = true; };
-  }, [jobId, availableTechs.length]);
+  }, [job?.scheduled_date]);
 
   const handleAssign = useCallback(async () => {
     if (!job || pendingTechId === undefined || savingAssign) return;

@@ -73,13 +73,17 @@ function gpsAgeTone(updatedAt, now) {
 // their last reported status/address/ETA (which can be stale from
 // before they went out) would mislead a dispatcher at a glance: idle
 // dot + "Out" status text + "—" address, same idea as the existing
-// idle-dot rule for dotColor/statusTextColor. ETA is backend-computed
-// via haversine when status is en_route/driving + tech has a
-// current_job + both have lat/lng — null in every other case, and
-// never shown for an out tech even if a stale en_route/driving status
-// and eta_minutes are still sitting on the row.
+// idle-dot rule for dotColor/statusTextColor. The ONE exception is
+// on_site (tech-out audit P2): a tech physically at a stop when marked
+// out is still there right now, not stale — the address/current-job
+// line stays live so the dispatcher can see what they're finishing.
+// ETA is backend-computed via haversine when status is en_route/driving
+// + tech has a current_job + both have lat/lng — still never shown for
+// an out tech (on_site never has an ETA anyway) even if a stale
+// en_route/driving status and eta_minutes are sitting on the row.
 function deriveTechDisplay(tech, jobs) {
-  const currentJob = !tech.out_today && tech.current_job_id ? jobs.get(tech.current_job_id) : null;
+  const showCurrentJob = (!tech.out_today || tech.status === 'on_site') && tech.current_job_id;
+  const currentJob = showCurrentJob ? jobs.get(tech.current_job_id) : null;
   const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
   const dotColor = tech.out_today ? STATUS_DOT.idle : (STATUS_DOT[tech.status] || STATUS_DOT.idle);
   const statusTextColor = tech.out_today ? STATUS_TEXT.idle : (STATUS_TEXT[tech.status] || STATUS_TEXT.idle);
