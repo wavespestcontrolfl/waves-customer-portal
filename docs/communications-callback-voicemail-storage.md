@@ -31,7 +31,10 @@ Required env:
 
 - `WAVES_FALLBACK_FORWARD_NUMBERS=+19415993489,+17206334021`
 - `WAVES_GREETING_URL=<approved disclosure greeting MP3>`
-- `WAVES_VOICEMAIL_URL=<Waves voicemail greeting MP3>`
+- `WAVES_VOICEMAIL_GREETING=short|recorded` (default `short`: an ~8s spoken
+  `<Say>` greeting; `recorded` plays `WAVES_VOICEMAIL_URL` instead)
+- `WAVES_VOICEMAIL_URL=<Waves voicemail greeting MP3>` (used only when
+  `WAVES_VOICEMAIL_GREETING=recorded`)
 - `SERVER_DOMAIN=portal.wavespestcontrol.com`
 
 If `WAVES_FALLBACK_FORWARD_NUMBERS` is not set, the app falls back to existing

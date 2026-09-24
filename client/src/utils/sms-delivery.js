@@ -46,7 +46,7 @@ function messageTime(message) {
 
 function isActionableInbound(message) {
   if (message?.direction !== "inbound") return false;
-  const messageType = message.messageType || "";
+  const messageType = message.responseMessageType || message.messageType || "";
   return !NON_ACTIONABLE_INBOUND_TYPES.has(messageType) && !messageType.startsWith("job_");
 }
 
@@ -59,7 +59,7 @@ export function unansweredSmsReply(messages) {
   messages.forEach((message) => {
     const createdAt = messageTime(message);
     if (Number.isNaN(createdAt)) return;
-    if (message?.direction === "inbound" && message.messageType === "opt_out") {
+    if (message?.direction === "inbound" && (message.responseMessageType || message.messageType) === "opt_out") {
       latestOptOutAt = Math.max(latestOptOutAt, createdAt);
     }
     if (!isActionableInbound(message)) return;
@@ -77,11 +77,18 @@ export function unansweredSmsReply(messages) {
   latestInboundByLine.forEach(({ createdAt: latestInboundAt, businessLine, message: inbound }, line) => {
     // STOP applies to the contact, not one endpoint, and closes any older ask.
     if (latestOptOutAt > latestInboundAt) return;
+    // The server classifies historical and new courtesy messages with the
+    // same policy used by the badge. Apply AFTER latest-inbound selection:
+    // a closer retires the older question instead of exposing it again.
+    if (!inbound.media?.length && (inbound.courtesyOnly === true || inbound.spamEnforced === true)) return;
     const answered = messages.some((message) => {
       if (message?.direction !== "outbound") return false;
       if (businessLineKey(message) !== line) return false;
-      if (!HUMAN_REPLY_TYPES.has(message.messageType)) return false;
-      if (!ANSWERED_STATUSES.has(message.status)) return false;
+      // Proactive draft nudges can carry a human-approved message type.
+      // Only the server can resolve their exact draft intent.
+      if (message.responseIsAnswer === false) return false;
+      if (!HUMAN_REPLY_TYPES.has(message.responseMessageType || message.messageType)) return false;
+      if (!ANSWERED_STATUSES.has(message.responseStatus || message.status)) return false;
       const createdAt = messageTime(message);
       return !Number.isNaN(createdAt) && createdAt > latestInboundAt;
     });

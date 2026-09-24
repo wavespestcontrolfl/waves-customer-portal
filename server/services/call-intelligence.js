@@ -256,6 +256,7 @@ function buildCallIntelligence({ call, commitments = [], outcomes = null }) {
     },
     prices: {
       quoted_price_usd: sr.quoted_price_usd ?? null,
+      price: sr.price || null,
       quote_type: quoteType,
       quote_requested: sr.quote_requested ?? null,
       quote_promised: sr.quote_promised ?? null,

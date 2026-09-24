@@ -165,11 +165,32 @@ describe('Spanish voicemail failover', () => {
     expect(relayCompleteLanguage({})).toBeNull();
     expect(relayCompleteLanguage(null)).toBeNull();
   });
-  test('English path unchanged', () => {
-    const twiml = new VoiceResponse();
-    appendVoicemailRecording(twiml);
-    expect(twiml.toString()).toContain('Your message will be recorded and transcribed.');
-    expect(twiml.toString()).toContain('<Record ');
+  test('English path: a short spoken greeting by default (audit 2026-09-23), the recorded asset only when WAVES_VOICEMAIL_GREETING=recorded', () => {
+    const prevMode = process.env.WAVES_VOICEMAIL_GREETING;
+    const prevUrl = process.env.WAVES_VOICEMAIL_URL;
+    try {
+      delete process.env.WAVES_VOICEMAIL_GREETING;
+      process.env.WAVES_VOICEMAIL_URL = 'https://assets.example/vm-long.mp3';
+      const twiml = new VoiceResponse();
+      appendVoicemailRecording(twiml);
+      const xml = twiml.toString();
+      expect(xml).toMatch(/<Say [^>]*>Thanks for calling Waves Pest Control\. We're with another customer right now\. After the tone, leave your name, number, and a quick message/);
+      expect(xml).not.toContain('<Play>');
+      expect(xml).not.toContain('Your message will be recorded');
+      expect(xml).toContain('<Record ');
+      expect(xml.indexOf('<Say')).toBeLessThan(xml.indexOf('<Record'));
+      // The spoken greeting stays short: the whole point is the wait before the beep.
+      expect(xml.match(/<Say[^>]*>([^<]*)<\/Say>/)[1].split(/\s+/).length).toBeLessThanOrEqual(45);
+      process.env.WAVES_VOICEMAIL_GREETING = 'recorded';
+      const rec = new VoiceResponse();
+      appendVoicemailRecording(rec);
+      expect(rec.toString()).toContain('<Play>https://assets.example/vm-long.mp3</Play>');
+      expect(rec.toString()).not.toContain('<Say');   // the redundant trailing sentence is gone
+      expect(rec.toString()).toContain('<Record ');
+    } finally {
+      if (prevMode === undefined) delete process.env.WAVES_VOICEMAIL_GREETING; else process.env.WAVES_VOICEMAIL_GREETING = prevMode;
+      if (prevUrl === undefined) delete process.env.WAVES_VOICEMAIL_URL; else process.env.WAVES_VOICEMAIL_URL = prevUrl;
+    }
   });
   test('es ⇒ Spanish <Say> before the same recorder; optional Spanish asset only when configured', () => {
     const a = new VoiceResponse();

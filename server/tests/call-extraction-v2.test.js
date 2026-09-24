@@ -136,8 +136,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.11.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.11.0');
+  test('schema version is 1.12.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.12.0');
   });
 
   describe('model-output schema', () => {
@@ -337,6 +337,103 @@ describe('schema validation', () => {
       data.caller.phone_e164 = null;
       const { valid } = validateModelOutput(data);
       expect(valid).toBe(true);
+    });
+
+    // service_request.price (call-agent audit 2026-09-23): captures any
+    // price the agent states, accepted or not — distinct from
+    // quoted_price_usd, which stays accepted-total-only.
+    describe('service_request.price', () => {
+      test('a full price object with every field set validates', () => {
+        const data = validModelOutput();
+        data.service_request.price = {
+          amount_usd: 90,
+          amount_max_usd: 100,
+          unit: 'per_quarter',
+          accepted: false,
+          stated_by: 'agent',
+          prepay_term: 'annual',
+          tier_mentioned: 'gold',
+          evidence_quote: 'that runs ninety to a hundred a quarter',
+        };
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('omitting price entirely is valid (backward compatible with older prompts)', () => {
+        const data = validModelOutput();
+        delete data.service_request.price;
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('a price object with every field null is valid', () => {
+        const data = validModelOutput();
+        data.service_request.price = {
+          amount_usd: null,
+          amount_max_usd: null,
+          unit: null,
+          accepted: null,
+          stated_by: null,
+          prepay_term: null,
+          tier_mentioned: null,
+          evidence_quote: null,
+        };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('a range with only amount_usd/amount_max_usd set is valid', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 350, amount_max_usd: null, unit: 'one_time', accepted: null, stated_by: 'agent', prepay_term: null, tier_mentioned: null, evidence_quote: '$350 to set the traps' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('an invalid unit value fails', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, unit: 'weekly' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an invalid tier_mentioned value fails', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, tier_mentioned: 'diamond' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an invalid prepay_term value fails', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, prepay_term: 'monthly' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an invalid stated_by value fails', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, stated_by: 'office' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an unknown field on price fails (additionalProperties: false)', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, extra: 'nope' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('a price object survives persisted validation alongside the unchanged quoted_price_usd', () => {
+        const data = validPersisted();
+        data.meta.schema_version = SCHEMA_VERSION;
+        data.service_request.quoted_price_usd = null;
+        data.service_request.price = { amount_usd: 65, amount_max_usd: null, unit: 'per_application', accepted: null, stated_by: 'agent', prepay_term: null, tier_mentioned: null, evidence_quote: '$65 per application' };
+        const { valid, errors } = validatePersisted(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
     });
   });
 
