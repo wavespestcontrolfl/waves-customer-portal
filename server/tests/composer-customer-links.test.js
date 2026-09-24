@@ -2757,6 +2757,16 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect((await checkConsultationLinkSend(`Pick a time: ${codeWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
     expect(await immediateOnlyLinkSendCheck(codeWrapped)).toEqual({ present: true, label: 'Consultation link' });
 
+    // ...and in the URL authority: a subdomain label or the userinfo (r16).
+    for (const wrapper of ['https://cons1.tracker.example/', 'https://cons1@tracker.example/x']) {
+      mockBuilders = {
+        short_codes: chainBuilder({ rows: [{ code: 'cons1', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+        leads: chainBuilder({ firstRow: LEAD_ROW }),
+        sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+      };
+      expect((await checkConsultationLinkSend(`Pick a time: ${wrapper} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+      expect(await immediateOnlyLinkSendCheck(wrapper)).toEqual({ present: true, label: 'Consultation link' });
+    }
     // An ordinary foreign link with no credential is left alone.
     mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
     expect(await immediateOnlyLinkSendCheck('https://maps.example/place?id=abcde12345')).toEqual({ present: false });

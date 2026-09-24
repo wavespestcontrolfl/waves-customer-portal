@@ -537,7 +537,10 @@ async function foreignConsultationCredentialPresent(runs, hosts) {
     let url;
     try { url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`); } catch { continue; }
     if (owned.includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
-    const pieces = fullyDecoded(`${url.pathname}${url.search}${url.hash}`).split(/[^A-Za-z0-9._-]+/).filter(Boolean);
+    // The authority too (Codex #4709 r16 P1): a credential can ride in a
+    // subdomain label or the userinfo (https://<code>.tracker.example/).
+    const authority = [url.username, url.password, ...url.hostname.split('.')].join('/');
+    const pieces = fullyDecoded(`${authority}/${url.pathname}${url.search}${url.hash}`).split(/[^A-Za-z0-9._-]+/).filter(Boolean);
     for (const piece of pieces) {
       if (piece.includes('.') && verifyLeadConsultationToken(piece, 0)) return true;
       if (/^[A-Za-z0-9_-]{5,40}$/.test(piece) && codes.size < 100) codes.add(piece.toLowerCase());
