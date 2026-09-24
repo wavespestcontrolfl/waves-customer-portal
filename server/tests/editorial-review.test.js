@@ -261,6 +261,31 @@ Vague filler about {{brandName}}.
     mockDispatch.mockResolvedValue({ ok: true, json: { sectionPlan: [], body: revised }, model: 'test-model' });
     await expect(editorial.repair({ document: repairDocument, findings: [] })).rejects.toThrow(/editorial repair rejected/);
   });
+
+  test('preserves original source indexes after rejecting invalid repair evidence', async () => {
+    const body = inventory.splitFrontmatter(repairDocument).body;
+    const excerpt = 'Empty standing water from containers once a week.';
+    mockDispatch.mockResolvedValue({ ok: true, json: { sectionPlan: [], body }, model: 'test-model' });
+    await editorial.repair({
+      document: repairDocument,
+      findings: [],
+      sources: [
+        { url: 'invalid', excerpt: 'Do not use.', contentHash: 'invalid' },
+        { url: 'https://health.example.gov/mosquitoes', excerpt, contentHash: crypto.createHash('sha256').update(excerpt).digest('hex') },
+      ],
+    });
+    const prompt = mockDispatch.mock.calls[0][1].messages[0].content;
+    expect(prompt).toContain('"index":1');
+    expect(prompt).not.toContain('"index":0');
+  });
+
+  test('rejects frontmatter-only findings before body-only repair', async () => {
+    await expect(editorial.repair({
+      document: repairDocument,
+      findings: [{ passage: 'title: Guide', action: 'Change the title.' }],
+    })).rejects.toThrow(/Frontmatter findings require retry/);
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
 });
 
 describe('editorial section-answer plan review', () => {

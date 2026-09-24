@@ -177,7 +177,10 @@ function prepareRepair(document, sources) {
   if (!document.trim()) throw new Error('repair requires a non-empty document');
   const split = splitFrontmatter(document);
   if (/^---\r?\n/.test(document) && !split.frontmatter) throw new Error('repair requires valid closed frontmatter');
-  return { split, safeSources: Array.isArray(sources) ? sources.filter(validRepairSource) : [] };
+  const safeSources = Array.isArray(sources)
+    ? sources.map((source, index) => ({ ...source, index })).filter(validRepairSource)
+    : [];
+  return { split, safeSources };
 }
 
 function composeRepairDocument(frontmatter, body, original) {
@@ -189,7 +192,11 @@ async function repair({ document, findings = [], sources = [], title = '', domai
   if (findings.some((item) => item?.repairable === false)) throw new Error('Source retrieval errors require retry, not prose repair');
   document = typeof document === 'string' ? document : '';
   const { split, safeSources } = prepareRepair(document, sources);
-  const text = `DOMAIN CONTEXT:\n${domainContext(domain)}\n\nTITLE (immutable external field):\n${String(title || '')}\n\nCOMPLETE FINDINGS TO REPAIR:\n${completeJson(findings)}\n\nCOMPLETE FETCHED SOURCE EVIDENCE (the only factual evidence):\n${completeJson(safeSources.map((source, index) => ({ index, ...source })))}\n\nSUPPLEMENTAL FACTS PACK (orientation, not proof):\n${boundedJson(factsPack, LIMITS.factsPackChars)}\n\nORIGINAL BODY:\n${split.body}`;
+  if (findings.some((item) => {
+    const passage = String(item?.passage || '');
+    return passage && split.frontmatter.includes(passage) && !split.body.includes(passage);
+  })) throw new Error('Frontmatter findings require retry outside body-only repair');
+  const text = `DOMAIN CONTEXT:\n${domainContext(domain)}\n\nTITLE (immutable external field):\n${String(title || '')}\n\nCOMPLETE FINDINGS TO REPAIR:\n${completeJson(findings)}\n\nCOMPLETE FETCHED SOURCE EVIDENCE (the only factual evidence):\n${completeJson(safeSources)}\n\nSUPPLEMENTAL FACTS PACK (orientation, not proof):\n${boundedJson(factsPack, LIMITS.factsPackChars)}\n\nORIGINAL BODY:\n${split.body}`;
   const response = await createDeepMessage(null, {
     laneId: 'editorial_repair',
     max_tokens: 12000,
