@@ -223,7 +223,9 @@ describe('assertEstimateSendable refuses a flagged address', () => {
 
 describe('parseDisplayAddress', () => {
   test('unit segments and the state/ZIP tail are read correctly', () => {
-    expect(parseDisplayAddress('1260 Example St, Apt 4, Parrish, FL 34219')).toMatchObject({ streetLine: '1260 Example St', city: 'Parrish', state: 'FL', zip: '34219' });
+    expect(parseDisplayAddress('1260 Example St, Apt 4, Parrish, FL 34219')).toMatchObject({ streetLine: '1260 Example St', line1: '1260 Example St', unit: 'Apt 4', city: 'Parrish', state: 'FL', zip: '34219' });
+    expect(parseDisplayAddress('1260 Example St Apt 5, Parrish, FL 34219')).toMatchObject({ line1: '1260 Example St', unit: 'Apt 5' });
+    expect(parseDisplayAddress('1260 Example St, Parrish, FL 34219')).toMatchObject({ line1: '1260 Example St', unit: null });
     expect(parseDisplayAddress('12345 Example St, Parrish, FL 34219-1234')).toMatchObject({ city: 'Parrish', zip: '34219' });
     expect(parseDisplayAddress('')).toMatchObject({ streetLine: '', city: '', zip: '' });
   });

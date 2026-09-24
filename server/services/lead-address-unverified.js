@@ -135,7 +135,17 @@ function parseDisplayAddress(text) {
   const city = parts.slice(1).find((part) => !UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part)) || '';
   const tail = parts.slice(1).find((part) => STATE_ZIP_SEGMENT.test(part) || /^\d{5}(?:-\d{4})?$/.test(part)) || '';
   const state = (tail.match(/^([a-z]{2})\s*\d{5}/i) || [null, null])[1];
-  return { streetLine, street: streetKeyNoUnit(streetLine), city, state: state ? state.toUpperCase() : null, zip: zip5(tail) };
+  // The complete corrected door for record fan-out: the street line with
+  // any inline unit peeled, plus the unit from either the line or its own
+  // comma segment (codex #4667 r14 P1).
+  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const split = splitStreetLineUnit(streetLine);
+  // "FL 34219" starts with the floor designator — the state/ZIP tail is
+  // never a unit segment.
+  const unitSegment = parts.slice(1).find((part) => UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part)) || '';
+  const line1 = String(split.street || streetLine).trim();
+  const unit = String(split.unit || unitSegment || '').trim() || null;
+  return { streetLine, line1, unit, street: streetKeyNoUnit(streetLine), city, state: state ? state.toUpperCase() : null, zip: zip5(tail) };
 }
 
 function samePremiseDisplay(a, b, { requireLocality = false } = {}) {

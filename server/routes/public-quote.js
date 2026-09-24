@@ -3249,25 +3249,42 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // run (codex r8 P2). The marker on the row is the durable guard
         // (estimateOffCustomerSurface) if this transaction fails.
         const withdrawn = await db.transaction(async (trx) => {
+          // Website publications AND legacy (websiteFlow:false) quote-wizard
+          // rows: a legacy draft staff already scheduled cannot be
+          // refreshed by the draft upsert, and without the marker its
+          // scheduled send would deliver a live token for the rejected
+          // address (codex r14 P1). Website rows are archived; legacy rows
+          // only carry the block (the send claim refuses them).
           const candidates = await trx('estimates')
             .where({ source: 'quote_wizard' })
-            .whereIn('status', WITHDRAWABLE_PUBLICATION_STATES)
+            .whereIn('status', [...WITHDRAWABLE_PUBLICATION_STATES, 'draft'])
             .whereNull('archived_at')
-            .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
             .where((q) => q
               .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
               .orWhere((own) => own
                 .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
                 .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])))
-            .select('id', 'address', trx.raw("estimate_data->>'lead_id' as lead_id"));
+            .select('id', 'address', trx.raw("estimate_data->>'lead_id' as lead_id"), trx.raw("(estimate_data->'websiteSelfService' IS NOT NULL) as website"));
           // Premise-matched in BOTH arms: this lead's own rows match on
           // identity plus the (loose) premise — a lead's publication for a
           // different property must not be archived by a flag on this one;
           // cross-lead rows need the complete locality.
-          const toWithdraw = candidates
+          const matched = candidates
             .filter((row) => (String(row.lead_id || '') === String(lead.id) && samePremiseDisplay(row.address, quoteFullAddress))
-              || samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
-            .map((row) => row.id);
+              || samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }));
+          const toWithdraw = matched.filter((row) => row.website === true).map((row) => row.id);
+          const toBlock = matched.filter((row) => row.website !== true).map((row) => row.id);
+          if (toBlock.length) {
+            await trx('estimates')
+              .whereIn('id', toBlock)
+              .where({ source: 'quote_wizard' })
+              .whereNull('archived_at')
+              .whereNull('price_locked_at')
+              .update({
+                updated_at: new Date(),
+                estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: addressUnverified || carriedAddressFlag || null })]),
+              });
+          }
           if (!toWithdraw.length) return [];
           // The eligibility predicates are repeated on the UPDATE: an
           // acceptance that commits between the SELECT and here promotes

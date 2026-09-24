@@ -3231,8 +3231,9 @@ async function reviseAdminEstimate({
       const corrected = writtenData.addressUnverifiedClearedBy === 'address_corrected';
       await trx('leads').where({ id: writtenData.lead_id }).update({
         extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
-        ...(corrected && parsed.streetLine ? {
-          address: parsed.streetLine,
+        ...(corrected && parsed.line1 ? {
+          // The lead's single address column carries the whole door.
+          address: parsed.unit ? `${parsed.line1} ${parsed.unit}` : parsed.line1,
           ...(parsed.city ? { city: parsed.city } : {}),
           ...(parsed.zip ? { zip: parsed.zip } : {}),
         } : {}),
@@ -3240,13 +3241,16 @@ async function reviseAdminEstimate({
       });
       // The linked customer whose on-file premise IS the rejected one moves
       // too — never a customer already living somewhere else.
-      if (corrected && parsed.streetLine && row.customer_id) {
+      if (corrected && parsed.line1 && row.customer_id) {
         const { samePremiseDisplay } = require('./lead-address-unverified');
-        const cust = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').first('id', 'address_line1', 'city', 'zip');
-        const custDisplay = cust ? [cust.address_line1, cust.city, cust.zip].filter(Boolean).join(', ') : '';
+        const cust = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').first('id', 'address_line1', 'address_line2', 'city', 'zip');
+        const custDisplay = cust ? [cust.address_line1, cust.address_line2, cust.city, cust.zip].filter(Boolean).join(', ') : '';
         if (cust && custDisplay && samePremiseDisplay(custDisplay, lockedPrior?.address)) {
+          // The COMPLETE corrected door replaces the old one — line 2 is
+          // replaced too, never left as the previous unit (codex r14 P1).
           await trx('customers').where({ id: cust.id }).update({
-            address_line1: parsed.streetLine,
+            address_line1: parsed.line1,
+            address_line2: parsed.unit,
             ...(parsed.city ? { city: parsed.city } : {}),
             ...(parsed.zip ? { zip: parsed.zip } : {}),
             updated_at: now(),
