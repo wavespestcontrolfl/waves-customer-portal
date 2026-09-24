@@ -247,6 +247,12 @@ describe('pre-push audit after r45: linked-draft reuse keeps the county hold', (
     expect(block).toContain('addressChanged: premiseChanged(existingEstimate.address, writeFields.address),');
     expect(block).toContain("explicitConfirm: body?.confirmAddress === true,");
     expect(block.indexOf('writeFields.estimate_data = JSON.stringify(reuseData);')).toBeLessThan(block.indexOf("const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };"));
+    // The contact-pair lock opens the transaction, ahead of the group locks;
+    // a lifted hold stamps the contact-matched leads clean.
+    const whole = src.slice(start, src.indexOf('await recordPreSendRevision({ priorEstimate: existingEstimate, trx });', start));
+    expect(whole.indexOf("['address-verdict', contactPairLockKey(writeFields.customer_email, writeFields.customer_phone)]")).toBeLessThan(whole.indexOf('lockScheduledGroupGuardGroups(trx'));
+    expect(whole).toContain('if (reuseClearedHold) {');
+    expect(whole).toContain('await stampContactMatchedLeadsClean(trx, { row: updated, clearedBy, now });');
   });
   test('the carry helper keeps a hold on a same-premise reuse and lifts it only on correction or confirmation', () => {
     const { carryAddressBlockAcrossRevise } = require('../services/admin-estimate-persistence')._private || {};

@@ -2093,6 +2093,14 @@ async function createOrReuseAdminEstimate({
     pricingFallbackReason: pricingOut.fallbackReason || null };
 
   return database.transaction(async (trx) => {
+    // The county-roll ADDRESS-VERDICT contact-pair lock FIRST — before the
+    // group and row locks, the order every other verdict writer uses
+    // (pre-push audit P1 after r45 on #4667): a linked-draft reuse that
+    // lifts the hold below stamps the leads' verdicts under it.
+    if (writeFields.customer_email && writeFields.customer_phone) {
+      const { contactPairLockKey } = require('./lead-address-unverified');
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(writeFields.customer_email, writeFields.customer_phone)]);
+    }
     // Reuse the estimate's primary identity for a retried create. The lock
     // serializes double submissions before the existing lead/group writers.
     if (clientDraftId) {
@@ -2202,10 +2210,11 @@ async function createOrReuseAdminEstimate({
           // r45 on #4667): a POST save that reuses the lead's draft at the
           // same premise keeps the hold; only a premise correction or an
           // explicit confirmAddress lifts it.
+          let reuseClearedHold = false;
           {
             const reuseData = parseStoredEstimateData(writeFields.estimate_data) || {};
             const lockedReuseData = parseStoredEstimateData(existingEstimate.estimate_data) || {};
-            carryAddressBlockAcrossRevise(reuseData, lockedReuseData, {
+            reuseClearedHold = carryAddressBlockAcrossRevise(reuseData, lockedReuseData, {
               addressChanged: premiseChanged(existingEstimate.address, writeFields.address),
               explicitConfirm: body?.confirmAddress === true,
             });
@@ -2227,6 +2236,17 @@ async function createOrReuseAdminEstimate({
             .returning('*');
           if (!updated) {
             throw errorWithStatus('Estimate draft changed; refresh and try again.', 409);
+          }
+          // A reuse that LIFTED the hold reconciles the leads' verdicts too,
+          // under the contact-pair lock taken at the top (pre-push audit P1
+          // after r45): the linked lead and every contact-matched flagged
+          // lead at this premise take the clean verdict, or booking keeps
+          // answering ADDRESS_UNVERIFIED and the next calculation restores
+          // the hold. (A premise CORRECTION's customer / property fan-out
+          // stays the revision path's — the reuse keeps the base row.)
+          if (reuseClearedHold) {
+            const clearedBy = parseStoredEstimateData(updated.estimate_data)?.addressUnverifiedClearedBy || 'staff_confirmed';
+            await stampContactMatchedLeadsClean(trx, { row: updated, clearedBy, now });
           }
           // The builder just wholesale-replaced whatever composition this
           // linked draft held, and `source` is not part of the write payload
