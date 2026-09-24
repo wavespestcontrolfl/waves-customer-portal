@@ -1316,14 +1316,51 @@ function seriesSameProperty(matchA, ownerA, matchB, ownerB, propertiesById) {
 // id-match path carry a renamed label). Property comparison is by each
 // match's OWN resolved location (see seriesSameProperty), not the
 // customers' account-level addresses.
-async function duplicateSeriesMergeConflict(database, winner, loser) {
+// findActiveRecurringSeries' own candidate set excludes every CANCELLED
+// parent — but a this_only cancellation of a recurring PARENT stamps
+// status='cancelled' while deliberately leaving recurring_ongoing=true
+// (admin-dispatch.js's single-occurrence cancel: "Single-occurrence cancels
+// (scope 'this_only') never enter [the recurring_ongoing clear] branch and
+// leave the flag intact"), so the anchor for a family that is STILL
+// ongoing can be invisible to findActiveRecurringSeries. Falls back to the
+// row itself via rowIsCancellationFamilyEvidence — the canonical "does this
+// row still carry live family evidence" predicate for exactly this shape
+// (cancellation-resolution/facts.js, already applied to this same
+// cancelled-but-ongoing case by hasCancellableWork's reach) — reused here
+// rather than re-deriving the rule. recurringServiceAddress
+// (booking/visit-financial-stamps.js) mirrors findActiveRecurringSeries' own
+// address normalization onto the fallback row, so seriesSameProperty
+// compares like shapes either way.
+async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
   const { findActiveRecurringSeries } = require('./recurring-appointment-seeder');
-  const loserParentRows = await database('scheduled_services')
+  const active = await findActiveRecurringSeries(database, { customerId, serviceId, serviceType });
+  if (Array.isArray(active) && active.length) return active;
+  const { rowIsCancellationFamilyEvidence } = require('./cancellation-resolution/facts');
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
+  let query = database('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true })
+    .whereNull('recurring_parent_id');
+  query = serviceId != null ? query.where('service_id', serviceId) : query.where('service_type', serviceType);
+  const rows = await query.select('*');
+  const anchors = (Array.isArray(rows) ? rows : []).filter((row) => rowIsCancellationFamilyEvidence(row, { isOneTimeBookingSource }));
+  return anchors.map((row) => ({ ...row, ...recurringServiceAddress(row) }));
+}
+
+async function duplicateSeriesMergeConflict(database, winner, loser) {
+  const { rowIsCancellationFamilyEvidence } = require('./cancellation-resolution/facts');
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  // Fetched WITHOUT a status filter (see liveFamilyMatches above) — the
+  // canonical predicate itself decides which rows still carry family
+  // evidence, including a this_only-cancelled parent whose
+  // recurring_ongoing flag says the family is still live.
+  const loserParentRowsRaw = await database('scheduled_services')
     .where({ customer_id: loser.id, is_recurring: true })
     .whereNull('recurring_parent_id')
-    .whereNotIn('status', ['cancelled'])
-    .select('id', 'service_type', 'service_id');
-  if (!Array.isArray(loserParentRows) || !loserParentRows.length) return null;
+    .select('*');
+  const loserParentRows = (Array.isArray(loserParentRowsRaw) ? loserParentRowsRaw : [])
+    .filter((row) => rowIsCancellationFamilyEvidence(row, { isOneTimeBookingSource }));
+  if (!loserParentRows.length) return null;
   // Distinct (service_id, service_type) identities — usually one per
   // family, but a loser can carry more than one parent whose service_type
   // TEXT collides while service_id differs, or vice versa after a catalog
@@ -1339,8 +1376,8 @@ async function duplicateSeriesMergeConflict(database, winner, loser) {
   for (const { serviceId, serviceType } of identities) {
     if (serviceId == null && !serviceType) continue;
     const [loserActive, winnerActive] = await Promise.all([
-      findActiveRecurringSeries(database, { customerId: loser.id, serviceId, serviceType }),
-      findActiveRecurringSeries(database, { customerId: winner.id, serviceId, serviceType }),
+      liveFamilyMatches(database, loser.id, serviceId, serviceType),
+      liveFamilyMatches(database, winner.id, serviceId, serviceType),
     ]);
     if (!Array.isArray(loserActive) || !loserActive.length || !Array.isArray(winnerActive) || !winnerActive.length) continue;
     const propertyIds = [...new Set(

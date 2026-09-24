@@ -139,47 +139,72 @@ async function findActivePrepayTerm(dbh, customerId) {
     .first('t.id as id', 't.term_end as term_end', 't.status as status');
 }
 
-// Byte-identical to the billing fields cancellation-processor.js's churn
-// write applies (active/autopay_enabled/next_charge_date) — deliberately NOT
-// the gated tier/rate clear (GATE_CANCEL_FLOW_V2), which is a policy choice
-// about win-back pricing this narrower stage-flip guard doesn't own.
-function billingWindDownStamps() {
-  return { active: false, autopay_enabled: false, next_charge_date: null };
+// A payment_pending annual-prepay term with a still-payable (not void)
+// invoice — reuses admin-cancellation.js's findPendingPrepayInvoice, the
+// SAME guard "Cancel plan…" itself refuses on (refusePendingPrepayInvoices).
+// coveredTermsAsOf (findActivePrepayTerm above) deliberately does NOT treat
+// an unpaid payment_pending term as live coverage — nothing has been paid
+// yet — but that invoice being paid LATER, after this customer is churned/
+// archived, re-activates the term (annual-prepay-renewals.js's
+// syncTermForInvoicePayment) with no live guard left to catch it. Refusing
+// here (rather than voiding it ourselves) matches the same engine's own
+// posture: the invoice tools own the void, this guard only surfaces it.
+async function findPendingPrepayInvoiceConflict(customerId) {
+  const { findPendingPrepayInvoice } = require('./admin-cancellation');
+  return findPendingPrepayInvoice(customerId);
 }
 
-// One-shot per-row decision for a write entering pipeline_stage='churned':
-// refuse (naming what's still live) or return the wind-down stamps to merge
-// into that row's own update. The SINGLE canonical helper every churn writer
-// calls — the admin routes (PUT /:id, PUT /:id/stage), IB's updateCustomer,
-// AND both of bulkUpdateCustomers' branches (the fast CASE path for a plain
+// One-shot per-row decision for a write entering (or re-saving)
+// pipeline_stage='churned', or an archive: refuse (naming what's still
+// live) or WIND BILLING DOWN THROUGH THE CANONICAL OPERATION —
+// cancellation-processor.js's own disarmCustomerBillingFields (customer-
+// level active/autopay_enabled/next_charge_date) + disarmPaymentRails
+// (payment_methods.autopay_enabled, payments.next_retry_at) — the exact
+// write this processor's own churn always has, not a parallel hand-rolled
+// subset. Both are unconditional/idempotent, so calling this on an
+// ALREADY-churned or already-disarmed row is a safe no-op-if-clean,
+// harmless-if-dirty repair — which is what lets a re-save of Churned on a
+// pre-fix residue row (or a repeated archive click) self-heal it: the
+// caller decides WHETHER to call this from the row's PERSISTED billing
+// state (is pipeline_stage being set to 'churned', or is this an archive?),
+// never from whether the stage is actually changing.
+//
+// The SINGLE canonical helper every churn/archive writer calls — the admin
+// routes (PUT /:id, PUT /:id/stage, DELETE /:id), IB's updateCustomer, AND
+// both of bulkUpdateCustomers' branches (the fast CASE path for a plain
 // stage move, and the per-row path a combined stage+address/email edit
 // takes) — so a bulk edit that combines a churn move with an address/email
-// change gets the exact same guard the plain bulk path already had, instead
-// of silently skipping it (the bug the per-row branch had until this fix).
+// change gets the exact same guard the plain bulk path already had.
 async function churnGuardForRow(dbh, customerId) {
-  const [liveVisit, liveTerm] = await Promise.all([
+  const [liveVisit, liveTerm, pendingPrepayInvoice] = await Promise.all([
     findLiveFutureVisit(dbh, customerId),
     findActivePrepayTerm(dbh, customerId),
+    findPendingPrepayInvoiceConflict(customerId),
   ]);
-  if (liveVisit || liveTerm) {
+  if (liveVisit || liveTerm || pendingPrepayInvoice) {
     return {
       blocked: true,
       liveVisit: liveVisit || null,
       liveTerm: liveTerm || null,
+      pendingPrepayInvoice: pendingPrepayInvoice || null,
       // Short, generic wording — callers that want the fuller
       // describeLiveVisit() sentence build it themselves from liveVisit.
       error: liveVisit
         ? 'still has a scheduled visit — use "Cancel plan…" first'
-        : 'still has an active prepay term — use "Cancel plan…" first',
+        : liveTerm
+          ? 'still has an active prepay term — use "Cancel plan…" first'
+          : `has an unpaid annual-prepay invoice (${pendingPrepayInvoice.invoice.invoice_number || pendingPrepayInvoice.invoice.id}) that would re-activate coverage if paid — void it from the invoice tools first`,
     };
   }
-  return { blocked: false, stamps: billingWindDownStamps() };
+  const { disarmCustomerBillingFields, disarmPaymentRails } = require('./cancellation-processor');
+  await disarmCustomerBillingFields(dbh, customerId);
+  await disarmPaymentRails(dbh, customerId);
+  return { blocked: false };
 }
 
 module.exports = {
   findLiveFutureVisit,
   describeLiveVisit,
   findActivePrepayTerm,
-  billingWindDownStamps,
   churnGuardForRow,
 };

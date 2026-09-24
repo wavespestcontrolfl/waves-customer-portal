@@ -490,4 +490,4 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
   };
 }
 
-module.exports = { loadCancellationFacts, laneForServiceLine };
+module.exports = { loadCancellationFacts, laneForServiceLine, rowIsCancellationFamilyEvidence };

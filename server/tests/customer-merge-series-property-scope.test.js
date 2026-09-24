@@ -43,19 +43,21 @@ async function makeCustomer(overrides) {
   return id;
 }
 
-async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly Pest Control', propertyId = null, addressStamp = null } = {}) {
+async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly Pest Control', propertyId = null, addressStamp = null, parentStatus = 'confirmed', seedChild = true } = {}) {
   const parentId = randomUUID();
   await db('scheduled_services').insert({
     id: parentId, customer_id: customerId, service_type: serviceType, service_id: serviceId,
-    scheduled_date: '2026-10-05', status: 'confirmed', is_recurring: true, recurring_parent_id: null,
+    scheduled_date: '2026-10-05', status: parentStatus, is_recurring: true, recurring_parent_id: null,
     recurring_pattern: 'monthly', recurring_ongoing: true, property_id: propertyId,
     ...(addressStamp || {}),
   });
-  await db('scheduled_services').insert({
-    id: randomUUID(), customer_id: customerId, service_type: serviceType, service_id: serviceId,
-    scheduled_date: '2026-11-05', status: 'pending', is_recurring: true, recurring_parent_id: parentId,
-    recurring_pattern: 'monthly', property_id: propertyId, ...(addressStamp || {}),
-  });
+  if (seedChild) {
+    await db('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: serviceType, service_id: serviceId,
+      scheduled_date: '2026-11-05', status: 'pending', is_recurring: true, recurring_parent_id: parentId,
+      recurring_pattern: 'monthly', property_id: propertyId, ...(addressStamp || {}),
+    });
+  }
   return parentId;
 }
 
@@ -182,5 +184,25 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
     const loser = await db('customers').where({ id: loserId }).first();
     const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
     expect(conflict).toBeNull();
+  });
+
+  test('a this_only-cancelled recurring PARENT with recurring_ongoing=true is still a live duplicate (round-3 GitHub Codex P1)', async () => {
+    // admin-dispatch.js's single-occurrence ('this_only') cancel stamps the
+    // PARENT row status='cancelled' while deliberately leaving
+    // recurring_ongoing=true — findActiveRecurringSeries' own candidate set
+    // (and the old pre-filter here) excludes every cancelled parent, so this
+    // shape used to be invisible to the merge guard on either side.
+    const winnerId = await makeCustomer({ address_line1: '9 Palm Ct', city: 'Bradenton', zip: '34205' });
+    const loserId = await makeCustomer({ address_line1: '9 Palm Ct', city: 'Bradenton', zip: '34205' });
+    await seedParent(winnerId, {}); // winner: a normal live (confirmed) parent.
+    // loser: this_only-cancelled anchor, still recurring_ongoing, no child
+    // seeded yet (mirrors the real shape: the next occurrence isn't due).
+    await seedParent(loserId, { parentStatus: 'cancelled', seedChild: false });
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).not.toBeNull();
+    expect(conflict.code).toBe('duplicate_series_conflict');
   });
 });

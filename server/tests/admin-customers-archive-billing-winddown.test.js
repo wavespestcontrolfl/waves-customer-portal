@@ -38,13 +38,24 @@ async function withServer(fn) {
 
 const isoDaysAhead = (n) => new Date(Date.now() + n * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
-// Mirror of billing-cron.js processMonthlyBilling's candidate select.
-function billingCronSelectsRow(customerId) {
+// Mirror of billing-cron.js processMonthlyBilling's candidate select PLUS
+// its GUARD 1 (autopay_enabled !== false skips the actual charge) — the
+// full "would this row actually get charged" predicate, not just the raw
+// candidate SELECT. Restore (round 3) deliberately re-arms active=true
+// (the row must read as a live customer_stage row again — the candidate
+// select alone can't distinguish that from billing-live), so the row is
+// legitimately a raw SELECT candidate post-restore; what must never re-arm
+// is autopay_enabled, which GUARD 1 reads to actually skip the charge.
+function wouldActuallyBeCharged(customerId) {
   return db('customers')
     .where({ active: true })
     .where('monthly_rate', '>', 0)
     .whereNull('service_paused_at')
     .whereNull('deleted_at')
+    // GUARD 1 skips only autopay_enabled === false (NULL/true still charge)
+    // — mirror that exactly with IS DISTINCT FROM, not a plain !=, which
+    // Postgres would (wrongly, for this mirror) also exclude on NULL.
+    .whereRaw('autopay_enabled IS DISTINCT FROM false')
     .where({ id: customerId })
     .first('id');
 }
@@ -85,8 +96,10 @@ function billingCronSelectsRow(customerId) {
     expect(refused || woundDown).toBe(true);
 
     if (woundDown) {
-      // Restore only clears deleted_at — confirm the billing fields this fix
-      // wound down stay wound down, so the row does not silently re-arm.
+      // Restore (round 3) re-establishes active=true (the row must read as
+      // a live customer_stage row again) but must NOT re-arm autopay_enabled
+      // or next_charge_date — confirm the row would still never actually be
+      // charged post-restore, even though it is once again a raw candidate.
       const restoreStatus = await withServer(async (baseUrl) => {
         const res = await fetch(`${baseUrl}/admin/customers/${customerId}/restore`, { method: 'PATCH' });
         return res.status;
@@ -94,11 +107,14 @@ function billingCronSelectsRow(customerId) {
       expect(restoreStatus).toBe(200);
       const afterRestore = await db('customers').where({ id: customerId })
         .first('deleted_at', 'active', 'autopay_enabled', 'next_charge_date');
-      const stillSelectedByDuesCron = !!(await billingCronSelectsRow(customerId));
+      const wouldCharge = !!(await wouldActuallyBeCharged(customerId));
 
-      console.log('[repro archive-billing-winddown] afterRestore=%j stillSelectedByDuesCron=%s', afterRestore, stillSelectedByDuesCron);
+      console.log('[repro archive-billing-winddown] afterRestore=%j wouldActuallyBeCharged=%s', afterRestore, wouldCharge);
       expect(afterRestore.deleted_at).toBeNull();
-      expect(stillSelectedByDuesCron).toBe(false);
+      expect(afterRestore.active).toBe(true);
+      expect(afterRestore.autopay_enabled).toBe(false);
+      expect(afterRestore.next_charge_date).toBeNull();
+      expect(wouldCharge).toBe(false);
     }
   });
 });
