@@ -173,3 +173,13 @@ describe('family matches must also end a word (2026-09-24 round-9 P1)', () => {
     expect(mappedServiceLabel(raw)).toBe(expected);
   });
 });
+
+describe('palmetto bugs are pests, not palms (2026-09-24 round-10 P1)', () => {
+  test.each([
+    ['Palmetto Roach Knockdown', 'Cockroach Treatment Service'],
+    ['Palmetto Bug Pest Control', 'Pest Control'],
+    ['Palm Fertilization', 'Tree & Shrub Care'],
+  ])('%s → %s', (raw, expected) => {
+    expect(mappedServiceLabel(raw)).toBe(expected);
+  });
+});

@@ -172,13 +172,16 @@ function mappedServiceLabel(raw) {
   // mappings apply, so an inspection never publishes as a removal or
   // treatment (round-8 P1).
   const family = matchesAtWordStart(INSPECTION_LABEL_RE, cleaned) ? INSPECTION_FAMILY
-    : detectServiceCategory(cleaned) === 'tree_shrub' ? TREE_SHRUB_FAMILY : null;
+    : detectServiceCategory(cleaned) === 'tree_shrub' && TREE_SHRUB_WORD_RE.test(cleaned) ? TREE_SHRUB_FAMILY : null;
   for (const mapping of SERVICE_TYPE_MAP) {
     if (family && !family.types.has(mapping.type)) continue;
     if (matchesAtWordStart(mapping.match, cleaned)) return mapping.type;
   }
   return family ? family.fallback : null;
 }
+// detectServiceCategory's substring tokens read "Palmetto Roach Knockdown"
+// as palm care (round-10 P1); the public-label family needs a whole word.
+const TREE_SHRUB_WORD_RE = /\b(?:trees?|shrubs?|ornamentals?|palms?|arborjet)\b/i;
 const INSPECTION_LABEL_RE = /inspect|assessment|estimat|consultation/i;
 const INSPECTION_FAMILY = { types: new Set(['WDO Inspection', 'Termite Inspection', 'Waves Assessment', 'Inspection']), fallback: 'Inspection' };
 const TREE_SHRUB_FAMILY = { types: new Set(['Tree & Shrub Care', 'Palm Injection', 'Arborjet Treatment']), fallback: 'Tree & Shrub Care' };

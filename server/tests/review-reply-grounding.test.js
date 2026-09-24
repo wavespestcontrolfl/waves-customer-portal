@@ -335,6 +335,12 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
   });
 });
 
+describe('appointment placeholders are not services (2026-09-24 round-10 P1)', () => {
+  test.each(['Waves Pest Control Appointment', 'Waves Pest Control Appointment Service'])('%s yields nothing', (label) => {
+    expect(G.servicesPerformedFrom([{ service_type: label, scheduled_date: '2026-08-01' }])).toEqual([]);
+  });
+});
+
 describe('accountFingerprint — servicesPerformed', () => {
   test('changes when servicesPerformed changes, and is order-independent', () => {
     const base = { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control'], servicesPerformed: ['Cockroach Treatment'], city: 'Venice' };

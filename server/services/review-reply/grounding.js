@@ -184,6 +184,12 @@ function titleCase(s) {
 function normalizeServiceName(serviceType) {
   const raw = String(serviceType || '').trim();
   if (!raw) return null;
+  // "Waves Pest Control Appointment (Service)" is the catalog's generic
+  // unknown-service placeholder; the map would collapse it to "Pest
+  // Control" before the label check below could see "appointment" (round-10
+  // P1). Only the placeholder word is checked on the raw label — brand names
+  // there still genericize through the map ("Pre-Slab Termidor").
+  if (/\bappointment\b/i.test(raw)) return null;
   const label = mappedServiceLabel(raw);
   if (!label) return null;
   if (SERVICE_PRODUCT_WORD_RE.test(label)) return null;
