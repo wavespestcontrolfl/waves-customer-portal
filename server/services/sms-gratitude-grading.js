@@ -68,6 +68,7 @@ function pairPasses({ fixture, leg, result, pins }) {
   const pinSet = Object(pins);
   const route = Object(Object(pinSet.routes)[leg]);
   const verifier = Object(pinSet.verifier);
+  const verifierModels = Array.isArray(output.verifierModels) ? output.verifierModels : [];
   const replyMatches = fixture.expectedEligible
     ? parsed.reply === policy.reply
     : parsed.reply === '';
@@ -78,6 +79,10 @@ function pairPasses({ fixture, leg, result, pins }) {
       && Array.isArray(parsed.intendedActions)
       && parsed.intendedActions.every(action => Object(action).type === 'none'),
     verifierEnabled: verifier.enabled === true,
+    verifierRouteCurrent: !fixture.expectedEligible
+      || (typeof verifier.model === 'string' && verifier.model.trim().length > 0
+        && verifierModels.length > 0
+        && verifierModels.every(model => model === verifier.model)),
     converged: output.converged === true && Number(output.passes) >= 1,
     currentModel: typeof route.model === 'string' && route.model.trim().length > 0
       && output.model === route.model,

@@ -96,6 +96,7 @@ async function readCurrent({ dbi }) {
   const voiceProfile = await drafter.resolveEffectiveVoiceProfile({ dbi });
   const renderedPrompt = drafter.buildSystemPromptWithProfile(voiceProfile?.profile_text || '');
   if (!renderedPrompt?.system) throw new Error('invalid_gratitude_system_prompt');
+  const appliedVoiceProfile = renderedPrompt.applied === true ? voiceProfile : null;
   const routes = Object.fromEntries(LIVE_EXAM_LEGS.map((leg) => {
     const route = EXAM_LEG_ROUTES[leg];
     if (!route?.provider || !route.model) throw new Error('invalid_gratitude_route');
@@ -113,15 +114,16 @@ async function readCurrent({ dbi }) {
       fallbackModel: verifierFallbackModel,
     },
     systemPromptSha256: sha256(renderedPrompt.system),
-    voiceProfileVersion: voiceProfile?.version ?? null,
-    voiceProfileTextSha256: voiceProfile ? sha256(String(voiceProfile.profile_text || '')) : null,
+    voiceProfileVersion: appliedVoiceProfile?.version ?? null,
+    voiceProfileTextSha256: appliedVoiceProfile
+      ? sha256(String(appliedVoiceProfile.profile_text || '')) : null,
     sourceSha256: sourceSha256(),
     sourceFiles: [...SOURCE_FILES],
   };
   return {
     pins,
-    voiceProfile: voiceProfile
-      ? { version: voiceProfile.version, profile_text: String(voiceProfile.profile_text || '') }
+    voiceProfile: appliedVoiceProfile
+      ? { version: appliedVoiceProfile.version, profile_text: String(appliedVoiceProfile.profile_text || '') }
       : null,
   };
 }
@@ -137,6 +139,7 @@ function outputShape(output) {
     passes: output.passes,
     converged: output.converged === true,
     model: output.model,
+    verifierModels: Array.isArray(output.verifierModels) ? [...output.verifierModels] : [],
     voiceProfileVersion: output.voiceProfileVersion ?? null,
   };
 }

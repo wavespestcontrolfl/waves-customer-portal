@@ -112,6 +112,7 @@ function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lock
     };
   });
   const createDeepMessage = jest.fn(async () => ({
+    model: require('../config/models').DEEP,
     content: [{ type: 'text', text: JSON.stringify({ supported: true, violations: [] }) }],
   }));
   jest.doMock('../models/db', () => dbi.dbi);
@@ -143,6 +144,7 @@ function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lock
     createDeepMessage,
     Anthropic,
     runExclusive,
+    drafter,
     profile: dbi.profile,
   };
 }
@@ -191,7 +193,11 @@ describe('sms gratitude qualification', () => {
     const negativeResults = completed.results.filter(result => result.fixtureId.startsWith('negative_'));
     expect(negativeResults).toHaveLength(24);
     expect(negativeResults.every(result => result.output.parsed.reply === ''
-      && result.output.passes === 1 && result.output.converged === true)).toBe(true);
+      && result.output.passes === 1 && result.output.converged === true
+      && result.output.verifierModels.length === 0)).toBe(true);
+    expect(completed.results.filter(result => result.fixtureId.startsWith('positive_'))
+      .every(result => result.output.verifierModels.length === 1
+        && result.output.verifierModels[0] === completed.pins.verifier.model)).toBe(true);
     expect(completed.summary).toMatchObject({ qualified: true, positives: 8, negatives: 24 });
     expect(store.rows[0]).toMatchObject({ status: 'shadow', correction_note: null });
 
@@ -199,6 +205,26 @@ describe('sms gratitude qualification', () => {
       dbi: store.dbi,
       voiceProfileVersion: 'synthetic-profile-v1',
     })).resolves.toEqual(expect.objectContaining({ eligible: true, blockers: [], qualified: true, positives: 8, negatives: 24 }));
+  });
+
+  test('pins and freezes only a voice profile that was applied to the system prompt', async () => {
+    const store = memoryDb();
+    const { qualification, drafter } = loadQualification({ dbi: store });
+    jest.spyOn(drafter, 'buildSystemPromptWithProfile').mockReturnValue({
+      system: 'Synthetic base system prompt without a voice profile.',
+      applied: false,
+    });
+
+    const run = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    expect(run.pins).toMatchObject({
+      voiceProfileVersion: null,
+      voiceProfileTextSha256: null,
+    });
+    expect(snapshot(store.rows[0]).frozenVoiceProfile).toBeNull();
+
+    await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id }))
+      .resolves.toMatchObject({ state: 'complete', qualified: true });
+    expect(snapshot(store.rows[0]).results.every(result => result.output.voiceProfileVersion === null)).toBe(true);
   });
 
   test('atomically refuses a live duplicate and recovers a stale running row', async () => {

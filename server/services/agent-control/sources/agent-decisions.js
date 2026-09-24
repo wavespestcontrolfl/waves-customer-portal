@@ -87,6 +87,7 @@ const LIVE_STATUSES = Object.freeze(Object.entries(STATUS_MAP).filter(([, m]) =>
 const WORKFLOW_MAP = Object.freeze({
   sms_house_voice_suggest: { laneId: 'sms_suggest', area: 'sms' }, // sms-suggest-mode SUGGEST_WORKFLOW
   sms_house_voice_auto_send: { laneId: 'sms_draft', area: 'sms' }, // sms-auto-send AUTOSEND_WORKFLOW (sends the drafter's draft)
+  sms_gratitude_qualification: { laneId: 'sms_draft', area: 'sms' }, // sms-gratitude-qualification WORKFLOW
   comms_guards: { laneId: null, area: 'sms' }, // reschedule-intent-flagger / completion-comms-guard
   contact_correction: { laneId: 'contact_correction', area: null }, // contact-correction
   estimate_conversion_sms: { laneId: 'estimate_followup', area: null }, // estimate-conversion-agent
