@@ -372,6 +372,12 @@ router.post('/assess', async (req, res, next) => {
     // technician shot (front / close_up / trouble) — the only source of a zone claim.
     const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos) : null;
     if (visitPhotos?.error) return res.status(400).json({ error: visitPhotos.error });
+    // Gate off still records a chosen slot (photoFieldsAt below), so the
+    // one-Front rule is enforced on this path too.
+    if (!visitAssessmentEnabled && Array.isArray(photos)
+      && photos.filter((photo) => visitInput.normalizePhotoZone(photo?.zone) === 'front').length > 1) {
+      return res.status(400).json({ error: 'Only one photo can be the Front photo' });
+    }
 
     // Verify customer exists. The premise AND the move stamp are read in one
     // transaction under the prefs advisory lock — a move committing between

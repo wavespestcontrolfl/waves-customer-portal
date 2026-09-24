@@ -176,6 +176,15 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     expect(photoRows.map((row) => row.photo_type)).toEqual(['front_yard', 'close_up', 'trouble_spot']);
   });
 
+  test('gate off still rejects two Front photos', async () => {
+    const customerId = await customer();
+    process.env.GATE_LAWN_VISIT_ASSESSMENT = 'false';
+    const twoFronts = photos.map((photo) => ({ ...photo, zone: 'front' }));
+    const { status, body } = await request({ customerId, photos: twoFronts });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/only one photo can be the front/i);
+  });
+
   test('the optional run table read leaves a caller transaction usable during migration lag', async () => {
     const legacy = await createLawnVisitDb(false);
     try {
