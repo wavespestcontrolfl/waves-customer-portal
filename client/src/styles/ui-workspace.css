@@ -99,7 +99,15 @@
 .ui-tab { height: 44px; padding: 0 4px; font-size: 14px; font-weight: 500; text-transform: none; letter-spacing: 0; }
 @media (max-width: 767px) { .ui-section-list { gap: 23px; padding: 0 17px; } }
 .ui-workspace-command { border: 0; background: transparent; }
-.ui-workspace-command-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0 18px; }
+.ui-workspace-command-heading { gap: 12px; padding: 8px 0 18px; }
+.ui-command-heading { display: flex; flex-wrap: wrap; justify-content: space-between; flex-direction: column; align-items: stretch; }
+.ui-command-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; width: 100%; margin-left: auto; }
+.ui-control.ui-command-action { min-height: 44px; max-width: 100%; gap: 8px; padding: 8px 16px; font-size: 14px; line-height: 1.5; text-transform: uppercase; letter-spacing: .06em; }
+.ui-command-action > svg { flex-shrink: 0; }
+@media (min-width: 768px) {
+  .ui-command-heading { flex-direction: row; align-items: center; }
+  .ui-command-actions { width: auto; max-width: 100%; flex-direction: row-reverse; flex-wrap: wrap; justify-content: flex-start; }
+}
 .ui-workspace-nav { display: inline-flex; gap: 3px; max-width: 100%; overflow-x: auto; padding: 4px; border: 1px solid #e4e4e7; border-radius: 7px; background: #fafafa; }
 .ui-workspace-nav-action { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 6px; min-height: 44px; padding: 0 12px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #71717a; font-size: 14px; font-weight: 500; text-transform: none; letter-spacing: 0; white-space: nowrap; }
 .ui-workspace-nav-action[aria-current="page"] { border-color: #e4e4e7; background: #fff; color: #18181b; }

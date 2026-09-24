@@ -1,0 +1,46 @@
+// @vitest-environment jsdom
+import { act, cleanup, renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import useVisiblePageRefresh from "./useVisiblePageRefresh";
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+it("refreshes visible pages on the interval, resume, focus, and reconnect", () => {
+  const refresh = vi.fn();
+  renderHook(() => useVisiblePageRefresh(refresh));
+
+  act(() => vi.advanceTimersByTime(30_000));
+  expect(refresh).toHaveBeenCalledTimes(1);
+
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+  act(() => vi.advanceTimersByTime(30_000));
+  expect(refresh).toHaveBeenCalledTimes(1);
+
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  act(() => document.dispatchEvent(new Event("visibilitychange")));
+  act(() => window.dispatchEvent(new Event("focus")));
+  act(() => window.dispatchEvent(new Event("online")));
+  expect(refresh).toHaveBeenCalledTimes(4);
+});
+
+it("removes lifecycle listeners and polling on unmount", () => {
+  const refresh = vi.fn();
+  const view = renderHook(() => useVisiblePageRefresh(refresh));
+  view.unmount();
+
+  act(() => {
+    vi.advanceTimersByTime(30_000);
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("online"));
+  });
+  expect(refresh).not.toHaveBeenCalled();
+});

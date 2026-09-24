@@ -6,7 +6,6 @@ import {
   FileText,
   Link2,
   Plus,
-  RefreshCw,
   Save,
   Send,
   UserRound,
@@ -14,6 +13,7 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, ActionFeedback, Badge, Button, Card, CardBody, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { adminFetch as rawAdminFetch } from "../../lib/adminFetch";
 
 const CATEGORY_TABS = [
@@ -190,6 +190,8 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   const [newMode, setNewMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [listError, setListError] = useState("");
+  const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [previewContext, setPreviewContext] = useState(JSON.stringify(DEFAULT_PREVIEW_CONTEXT, null, 2));
@@ -215,6 +217,10 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   const [bulkResult, setBulkResult] = useState(null);
   const [bulkLoading, setBulkLoading] = useState(false);
   const editorRef = useRef(null);
+  const listRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
+  const newModeRef = useRef(newMode);
+  newModeRef.current = newMode;
 
   // On the single-column mobile layout the editor renders below the template
   // list, so selecting a template or starting a new one updates content that
@@ -228,30 +234,40 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
     });
   }, []);
 
-  const loadTemplates = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const loadTemplates = useCallback(async ({ background = false, preserveSelection = background } = {}) => {
+    const request = ++listRequestRef.current;
+    if (!background) {
+      setLoading(true);
+      setListError("");
+    }
     try {
       const params = new URLSearchParams();
       if (category !== "all") params.set("category", category);
       const data = await api(`/admin/document-templates?${params.toString()}`);
+      if (request !== listRequestRef.current) return;
       setTemplates(data.templates || []);
       setSelectedKey((current) => {
+        if (preserveSelection && (current || newModeRef.current)) return current;
         if (current && (data.templates || []).some((template) => template.templateKey === current)) return current;
         return data.templates?.[0]?.templateKey || "";
       });
+      setListError("");
     } catch (err) {
-      setError(err.message || "Could not load document templates");
+      if (request === listRequestRef.current) {
+        setListError(err.message || "Could not load document templates");
+      }
     } finally {
-      setLoading(false);
+      if (request === listRequestRef.current) setLoading(false);
     }
   }, [category]);
 
   const loadDetail = useCallback(async (key) => {
     if (!key || newMode) return;
-    setError("");
+    const request = ++detailRequestRef.current;
+    setDetailError("");
     try {
       const data = await api(`/admin/document-templates/${encodeURIComponent(key)}`);
+      if (request !== detailRequestRef.current) return;
       setDetail(data);
       const nextTemplate = templateFromApi(data.template);
       const nextVersion = versionFromApi(data.template?.activeVersion || data.versions?.[0], data.template);
@@ -268,18 +284,29 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         setBulkGuideType("pest");
         setBulkAudience("active_pest");
       }
+      setDetailError("");
     } catch (err) {
-      setError(err.message || "Could not load document template");
+      if (request === detailRequestRef.current) {
+        setDetailError(err.message || "Could not load document template");
+      }
     }
   }, [newMode]);
 
   useEffect(() => {
     loadTemplates();
+    return () => {
+      listRequestRef.current += 1;
+    };
   }, [loadTemplates]);
 
   useEffect(() => {
     if (selectedKey) loadDetail(selectedKey);
+    return () => {
+      detailRequestRef.current += 1;
+    };
   }, [selectedKey, loadDetail]);
+
+  useVisiblePageRefresh(() => loadTemplates({ background: true }));
 
   useEffect(() => {
     const term = customerQuery.trim();
@@ -345,6 +372,9 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   };
 
   const startNew = () => {
+    listRequestRef.current += 1;
+    detailRequestRef.current += 1;
+    setLoading(false);
     setNewMode(true);
     setSelectedKey("");
     setDetail(null);
@@ -359,6 +389,8 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
     setBulkPreview(null);
     setBulkResult(null);
     setToast("");
+    setListError("");
+    setDetailError("");
     setError("");
     focusEditor();
   };
@@ -541,7 +573,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   };
 
   const hubNavRef = useRef({});
-  hubNavRef.current = { setCategory, loadTemplates, startNew };
+  hubNavRef.current = { setCategory, startNew };
   useEffect(() => {
     if (!embedded || !onSecondaryNav) return undefined;
     onSecondaryNav({
@@ -551,12 +583,11 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
       ariaLabel: "Template category",
       navGridClassName: "grid-cols-2 md:grid-cols-6",
       actions: [
-        { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: () => hubNavRef.current.loadTemplates(), disabled: loading },
         { label: "New template", icon: Plus, onClick: () => hubNavRef.current.startNew() },
       ],
     });
     return () => onSecondaryNav(null);
-  }, [embedded, onSecondaryNav, category, loading]);
+  }, [embedded, onSecondaryNav, category]);
 
   return (
     <UiSurface density="comfortable" className="mx-auto min-w-0 max-w-[1500px] text-ui-body">
@@ -570,12 +601,17 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         onSectionChange={setCategory}
         navGridClassName="grid-cols-2 md:grid-cols-6"
         actions={[
-          { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: loadTemplates, disabled: loading },
           { label: "New template", icon: Plus, onClick: startNew },
         ]}
       />
       )}
 
+      {listError && (
+        <ActionFeedback error onRetry={() => loadTemplates({ preserveSelection: true })} className="mb-3">{listError}</ActionFeedback>
+      )}
+      {detailError && (
+        <ActionFeedback error onRetry={() => loadDetail(selectedKey)} className="mb-3">{detailError}</ActionFeedback>
+      )}
       {error && (
         <ActionFeedback error className="mb-3">{error}</ActionFeedback>
       )}
@@ -624,7 +660,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                 </div>
               </Button>
             ))}
-            {!loading && !error && !templates.length && (
+            {!loading && !listError && !error && !templates.length && (
               <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">
                 No templates for this filter.
               </div>
