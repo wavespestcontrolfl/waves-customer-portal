@@ -80,6 +80,11 @@ function emailPinFingerprint(email) {
   return sha([
     String(email.id), email.from_address || null, email.subject || null, email.gmail_thread_id || null,
     email.customer_id ? String(email.customer_id) : null,
+    // ADMIN-BUG-R22 (codex round on this fix): send_email_reply now targets
+    // reply_to || from_address, so a Reply-To that changes between proposal
+    // and confirmation must drift the pin too — otherwise confirmation
+    // passes and the send goes to an address the operator never approved.
+    email.reply_to || null,
   ]);
 }
 

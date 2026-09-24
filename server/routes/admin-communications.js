@@ -2978,7 +2978,13 @@ router.get('/ai-auto-reply-status', async (req, res) => {
   try {
     const row = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
     res.json({ enabled: row?.value === 'true' });
-  } catch { res.json({ enabled: false }); }
+  } catch (err) {
+    // ADMIN-BUG-R29: a read failure must never come back as a confident 200
+    // {enabled:false} — that reads as "AI auto-reply is off" when the true
+    // value is unknown. Answer non-2xx so the client leaves the switch at
+    // its last confirmed state instead of adopting a guess.
+    res.status(503).json({ error: err.message });
+  }
 });
 
 // POST /api/admin/communications/ai-auto-reply — toggle
@@ -2993,7 +2999,13 @@ router.post('/ai-auto-reply', async (req, res) => {
       await db('system_config').insert({ key: 'ai_sms_auto_reply', value });
     }
     res.json({ enabled: value === 'true' });
-  } catch (err) { res.json({ enabled: false, error: err.message }); }
+  } catch (err) {
+    // ADMIN-BUG-R29: never answer a failed write with HTTP 200 {enabled:false}
+    // — the operator's client would adopt that as the real (now-off) state
+    // although nothing was written and the server may still have it on.
+    // Non-2xx forces the client to treat this as a failed toggle instead.
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Marketing/retention purposes require a real stored consent record per
