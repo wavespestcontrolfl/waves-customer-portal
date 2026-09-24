@@ -1593,20 +1593,30 @@ async function leadWideEligibility(lead, custRow, profileIds) {
     const other = profile ? await resolveEligibility(db, lead, profile) : null;
     if (other && other.state !== 'ok') return other;
   }
-  return own;
+  // The booking refused ALREADY_BOOKED, but none of the profiles this token
+  // is trusted for shows why: already booked, with no visit details.
+  return { state: 'already_booked', visit: null, rescheduleUrl: null };
 }
 
-// The lead's property profiles: every customer its consultation_prospect
-// provenance names, its current link, and the profile being booked.
-async function leadProfileIds(leadId, custId) {
-  const [activities, lead] = await Promise.all([
-    db('lead_activities').where({ lead_id: leadId, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata'),
-    db('leads').where({ id: leadId }).first('customer_id'),
-  ]);
-  const ids = new Set([custId, lead?.customer_id].filter(Boolean).map(String));
-  for (const row of activities || []) {
+// The lead's property profiles this token is TRUSTED for (Codex #4737 r9
+// pre-push P0 — the same rules as loadTrustedCustomer): the profile being
+// booked, the lead's verified link, every flow-created prospect in its
+// provenance, and a requires_verification provenance profile only under
+// the verified-phone proof. Reads on `dbConn` so the booking transaction
+// can re-run it inside its lead lock (Codex #4737 r9 pre-push P1).
+async function trustedLeadProfileIds(dbConn, leadId, token, custId) {
+  const lead = await loadLead(dbConn, leadId);
+  const ids = new Set([custId].filter(Boolean).map(String));
+  if (!lead) return [...ids];
+  const linked = await verifiedLinkedCustomer(dbConn, lead, token);
+  if (linked) ids.add(String(linked.id));
+  const rows = await dbConn('lead_activities').where({ lead_id: leadId, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata');
+  for (const row of rows || []) {
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-    if (meta?.customer_id) ids.add(String(meta.customer_id));
+    if (!meta?.customer_id || ids.has(String(meta.customer_id))) continue;
+    if (!meta.requires_verification) { ids.add(String(meta.customer_id)); continue; }
+    const profile = await loadCustomer(dbConn, meta.customer_id);
+    if (profile && await verifiedForCustomer(lead, profile, token, dbConn)) ids.add(String(profile.id));
   }
   return [...ids];
 }
@@ -1793,15 +1803,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // A duplicate throws ALREADY_BOOKED, caught below and mapped to the
     // same `{ state: 'already_booked', visit, rescheduleUrl }` shape GET
     // returns, resolved against whichever visit survived.
-    // Every property profile of this lead (Codex #4737 r9 P1): the booking
-    // transaction dedupes the assessment across all of them under a lead
-    // lock, so two commits with different addresses never both book. Read
-    // after phase 1, whose per-lead lock serialized every earlier commit's
-    // provenance / link writes before this one.
-    const profileIds = await leadProfileIds(lead.id, custRow.id);
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, customerIds: profileIds } });
+    // Every trusted property profile of this lead (Codex #4737 r9 P1 + its
+    // pre-push P0/P1): the booking transaction re-reads the set INSIDE its
+    // lead lock (resolveCustomerIds on its own trx) and dedupes the
+    // assessment across all of them, so two commits with different
+    // addresses never both book.
+    const resolveCustomerIds = (conn) => trustedLeadProfileIds(conn, lead.id, verified, custRow.id);
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds } });
 
     if (!result.ok) {
+      const profileIds = result.code === 'ALREADY_BOOKED' ? await resolveCustomerIds(db) : [custRow.id];
       return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, profileIds });
     }
 

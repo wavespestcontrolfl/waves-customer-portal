@@ -542,7 +542,10 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(laneLock).toBeGreaterThan(-1);
     expect(leadLock).toBeGreaterThan(laneLock);
     expect(leadLock).toBeLessThan(replay);
-    const loop = src.indexOf('for (const profileId of callbackVisit.leadDedupe.customerIds || [])');
+    // The set is resolved on the transaction, after the lead lock (pre-push P1).
+    const resolve = src.indexOf('await callbackVisit.leadDedupe.resolveCustomerIds(trx)');
+    expect(resolve).toBeGreaterThan(leadLock);
+    const loop = src.indexOf('for (const profileId of profileIds)', resolve);
     expect(loop).toBeGreaterThan(replay);
     const body = src.slice(loop, loop + 600);
     expect(body).toMatch(/openCallbackExistsForLane\(trx, profileId, lane\)/);

@@ -470,7 +470,39 @@ describe('Codex #4737 r9: lead-scoped dedupe, trusted-customer change to null, c
     expect(res.statusCode).toBe(200);
     const { leadDedupe } = mockCreateSelfBooking.mock.calls[0][0].callbackVisit;
     expect(leadDedupe.leadId).toBe(LEAD_ID);
-    expect([...leadDedupe.customerIds].sort()).toEqual(['cust-1', 'cust-other']);
+    // Resolved on whatever connection the booking transaction passes.
+    expect((await leadDedupe.resolveCustomerIds(db)).sort()).toEqual(['cust-1', 'cust-other']);
+  });
+
+  // Pre-push P0: an existing account's property (requires_verification)
+  // joins the set only under the verified-phone proof.
+  test('P0: a requires_verification provenance profile is left out of the set for an unverified token', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: null };
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
+    firstResults.customers = { id: 'cust-prospect', phone: '9415550101', address_line1: '123 Any St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    listResults.lead_activities = [
+      { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) },
+      { metadata: JSON.stringify({ customer_id: 'cust-foreign', requires_verification: true }) },
+    ];
+    mockBuildAvailability.mockResolvedValueOnce(slotDay());
+    firstResults.call_log = null; // no caller-ID proof: unverified
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(200);
+    const { leadDedupe } = mockCreateSelfBooking.mock.calls[0][0].callbackVisit;
+    expect(await leadDedupe.resolveCustomerIds(db)).toEqual(['cust-prospect']);
+  });
+
+  // Pre-push P0: an ALREADY_BOOKED that no trusted profile explains reveals
+  // no visit and no reschedule link.
+  test('P0: ALREADY_BOOKED with no trusted profile holding the visit answers already_booked with no details', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce(slotDay());
+    mockCreateSelfBooking.mockResolvedValueOnce({ ok: false, status: 409, error: 'You already have a consultation on the books.', code: 'ALREADY_BOOKED' });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.body).toMatchObject({ state: 'already_booked', visit: null, rescheduleUrl: null });
   });
 
   test('P1: a trusted customer that changed to null under the lead lock is a retry — nothing linked, created or booked', async () => {

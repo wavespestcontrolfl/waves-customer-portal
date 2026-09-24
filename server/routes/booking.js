@@ -2838,7 +2838,11 @@ async function createSelfBooking(payload = {}) {
       if (callbackVisit?.leadDedupe?.leadId) {
         const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');
         const lane = laneForCallbackRow({ serviceKey: callbackVisit.serviceKey });
-        for (const profileId of callbackVisit.leadDedupe.customerIds || []) {
+        // The profile set is read HERE, inside the lead lock (Codex #4737 r9
+        // pre-push P1) — a caller-captured list could miss a profile another
+        // commit created and booked in between.
+        const profileIds = await callbackVisit.leadDedupe.resolveCustomerIds(trx);
+        for (const profileId of profileIds) {
           if (String(profileId) === String(custId)) continue;
           if (await openCallbackExistsForLane(trx, profileId, lane)) {
             throw Object.assign(new Error('You already have a consultation on the books.'), {
