@@ -2402,7 +2402,13 @@ it('round 23 (:4994): gate ON, the legacy visit lock also disables Remove on an 
   expect(screen.getByText(/Discount can't be changed on this legacy line/)).toBeInTheDocument();
 });
 
-it('round 23 (:4994): the same lock leaves Remove ENABLED on an add-on with no stored discount (deleting it is not a term change)', async () => {
+// GitHub Codex round 26 P2 (#4657, :5095): since round 26's :11100 the
+// server refuses ANY non-preserved reprice of a null-primary legacy visit
+// that carries a stored discount anywhere — removing an UNDISCOUNTED
+// sibling changes the composition, preservation fails, and the PUT
+// deterministically 422s LEGACY_PRIMARY_GROSS_UNKNOWN. Round 23 locked
+// Remove only on the discounted row itself; every line's Remove locks now.
+it('round 26 P2 (:5095): under the legacy visit lock Remove is disabled on EVERY add-on, the undiscounted sibling included', async () => {
   const lockedWithPlainAddon = {
     ...legacyAddonDiscountVisit,
     serviceAddons: [
@@ -2417,7 +2423,11 @@ it('round 23 (:4994): the same lock leaves Remove ENABLED on an add-on with no s
   const removes = screen.getAllByRole('button', { name: 'Remove' });
   expect(removes).toHaveLength(2);
   expect(removes[0]).toBeDisabled();
-  expect(removes[1]).toBeEnabled();
+  expect(removes[1]).toBeDisabled();
+  expect(removes[1]).toHaveAttribute('title', expect.stringContaining('original price was never recorded'));
+  fireEvent.click(removes[1]);
+  // Both rows are still there — nothing could queue a refused removal.
+  expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
 });
 
 it('round 23 (:4994) gate-off parity: Remove stays enabled on the discounted legacy add-on', async () => {
@@ -2426,6 +2436,63 @@ it('round 23 (:4994) gate-off parity: Remove stays enabled on the discounted leg
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
   await waitForMoneyReady();
   expect(screen.getByRole('button', { name: 'Remove' })).toBeEnabled();
+});
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 26 P1 (#4657, SchedulePage.jsx:3942): on a MARKED
+// visit (pricingProvenance carries the canonical regime marker) a null
+// primaryLinePrice is a KNOWN $0 primary — an add-on-only booking the
+// canonical engine priced itself — never an unknown legacy gross. The
+// server's own legacyPrimaryGrossUnknownFor is scoped to unmarked rows and
+// restackStoredVisitFinancials restacks a marked null primary as $0, so
+// the modal must not lock such a visit's discount edits.
+// ---------------------------------------------------------------------
+
+const markedAddonOnlyVisit = {
+  ...baseService,
+  primaryLinePrice: null,
+  estimatedPrice: 55,
+  serviceAddons: [baseService.serviceAddons[0]],
+  pricingProvenance: {
+    pricing_regime: 'discount_stack_v1', engine_version: 1,
+    caps: { line: null, addons: { 'disc-military': null } },
+  },
+};
+
+it('round 26 P1 (:3942): gate ON, a MARKED add-on-only visit (null primary, stored add-on discount) keeps every discount control and Remove enabled', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: markedAddonOnlyVisit }));
+  render(<Harness service={markedAddonOnlyVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  expect(apptDiscountSelect()).toBeEnabled();
+  // The stamped line's control is WIRED (its "Remove line discount" button
+  // renders only when onLineDiscount is supplied) — under the legacy lock
+  // it is replaced by the "can't be changed" notice instead.
+  expect(screen.getByRole('button', { name: 'Remove line discount' })).toBeInTheDocument();
+  expect(screen.queryByText(/Discounts can't be changed on this legacy visit/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Discount can't be changed on this legacy line/)).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Remove' })).toBeEnabled();
+});
+
+it('round 26 P1 (:3942): the marker is read through the shared reader — a JSON-string pricingProvenance (text column / serialized payload) still counts as marked', async () => {
+  const stringMarked = { ...markedAddonOnlyVisit, pricingProvenance: JSON.stringify(markedAddonOnlyVisit.pricingProvenance) };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: stringMarked }));
+  render(<Harness service={stringMarked} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect()).toBeEnabled());
+  expect(screen.getByRole('button', { name: 'Remove line discount' })).toBeInTheDocument();
+  expect(screen.queryByText(/Discount can't be changed on this legacy line/)).not.toBeInTheDocument();
+});
+
+it('round 26 P1 (:3942) control: the SAME shape with caps-only provenance (no regime marker) is still a legacy visit and stays locked', async () => {
+  const capsOnly = { ...markedAddonOnlyVisit, pricingProvenance: { caps: { line: null, addons: { 'disc-military': null } } } };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: capsOnly }));
+  render(<Harness service={capsOnly} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect()).toBeDisabled());
+  expect(screen.queryByRole('button', { name: 'Remove line discount' })).not.toBeInTheDocument();
+  expect(screen.getByText(/Discount can't be changed on this legacy line/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled();
 });
 
 // ---------------------------------------------------------------------

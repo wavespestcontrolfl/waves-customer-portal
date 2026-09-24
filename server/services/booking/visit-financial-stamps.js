@@ -169,15 +169,16 @@ function copyStampedServiceAddressFields(target, source, cols) {
 // restacks a marked row from THIS frozen snapshot, never the live catalog
 // value (see resolveStoredDiscountCaps, below).
 const PRICING_REGIME_COLUMN = 'pricing_provenance';
-const PRICING_REGIME_VALUE = 'discount_stack_v1';
+// The marker value and its reader live in shared/pricing-regime-marker.cjs
+// so the Edit appointment modal reads a marked row with the SAME code
+// (GitHub Codex round 26 on #4657, SchedulePage.jsx:3942).
+const {
+  PRICING_REGIME_VALUE, parsePricingProvenanceValue, isCanonicallyMarkedProvenance,
+} = require('../../../shared/pricing-regime-marker.cjs');
 const PRICING_ENGINE_VERSION = 1;
 
 function parsePricingProvenance(row) {
-  let prov = row?.[PRICING_REGIME_COLUMN];
-  if (typeof prov === 'string') {
-    try { prov = JSON.parse(prov); } catch { return null; }
-  }
-  return prov && typeof prov === 'object' && !Array.isArray(prov) ? prov : null;
+  return parsePricingProvenanceValue(row?.[PRICING_REGIME_COLUMN]);
 }
 
 function stampPricingRegimeMarker(target, cols, caps = null) {
@@ -192,8 +193,7 @@ function stampPricingRegimeMarker(target, cols, caps = null) {
 }
 
 function hasPricingRegimeMarker(row) {
-  const prov = parsePricingProvenance(row);
-  return !!prov && prov.pricing_regime === PRICING_REGIME_VALUE;
+  return isCanonicallyMarkedProvenance(row?.[PRICING_REGIME_COLUMN]);
 }
 
 // GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5J, P0): `caps` is

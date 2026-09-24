@@ -3078,6 +3078,16 @@ async function resolveUpdateDetailsAddonFinancials({
       line_discount_type: existing?.line_discount_type ?? null,
       line_discount_amount: existing?.line_discount_amount ?? null,
       service_key_snapshot: primaryServiceKeySnapshot,
+      // GitHub Codex round 26 P0 (#4657, :3074): the effective CATEGORY
+      // snapshot too — loadStoredDiscountScope (below) refuses to replay a
+      // category-scoped appointment discount for any service-linked line
+      // whose category snapshot is missing, so an unmarked visit adopting
+      // canonical pricing while it keeps (or picks) a category-scoped
+      // discount threw "service identity snapshot is missing" on preview
+      // and save alike instead of pricing the edit. A marked row with a
+      // service-linked add-on hit the same throw through canonicalAddonRows
+      // (their category was never carried either — fixed alongside).
+      service_category_snapshot: primaryServiceCategorySnapshot,
       service_id: updates.service_id ?? existing?.service_id ?? null,
       discount_type: effDiscountType,
       discount_amount: effDiscountAmount,
@@ -3094,6 +3104,8 @@ async function resolveUpdateDetailsAddonFinancials({
       estimated_price: l.price,
       service_id: l.serviceId,
       service_key_snapshot: l.serviceKey,
+      // Round 26 P0 (:3074) — see canonicalParent.service_category_snapshot.
+      service_category_snapshot: l.serviceCategory ?? null,
       discount_type: l.discount?.discountType ?? null,
       discount_amount: l.discount?.discountAmount ?? null,
       discount_id: l.discount?.discountId ?? null,

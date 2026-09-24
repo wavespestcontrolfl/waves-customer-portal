@@ -1,6 +1,7 @@
 import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
 import lawnScores from '@lawn-scores';
 import { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } from '@legacy-visit-money-submission';
+import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 // client/src/pages/admin/SchedulePage.jsx
 //
 // Shared-utility module for the V2 dispatch surface. The V1 page
@@ -2449,7 +2450,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // in this slice — see :3620's own note) has the identical shape: a
   // pre-base_price-column row carries the discount type/amount but no
   // recorded gross (service.primaryLinePrice null).
-  const primaryGrossUnknownClient = !!service.lineDiscountType && service.primaryLinePrice == null;
+  // GitHub Codex round 26 P1 (#4657, :3942): a MARKED row (priced by the
+  // canonical engine — pricingProvenance carries the regime marker) with a
+  // null primaryLinePrice is an add-on-only visit whose primary is a KNOWN
+  // $0, exactly as the server's restackStoredVisitFinancials reads it —
+  // never an unknown legacy gross. The same shared reader the server uses
+  // (shared/pricing-regime-marker.cjs), so the two can't disagree.
+  const visitCanonicallyMarked = isCanonicallyMarkedProvenance(service?.pricingProvenance);
+  const primaryGrossUnknownClient =
+    !visitCanonicallyMarked && !!service.lineDiscountType && service.primaryLinePrice == null;
   // A line's own GROSS for the preview/subtotal: the true stored gross for
   // an untouched, price-unedited stamped line (never the seeded NET `price`
   // — recomputing a discount against a net figure would double-discount
@@ -3934,8 +3943,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // discount picker) locks for that shape — never a confirmed-looking
   // edit that only fails at the PUT. Client shape first (works before any
   // preview response), the server's own flag as the backstop.
+  // GitHub Codex round 26 P1 (#4657, :3942): a MARKED add-on-only visit is
+  // excluded — its null primary is a known $0 (see visitCanonicallyMarked),
+  // the server never refuses it (legacyPrimaryGrossUnknownFor is scoped to
+  // unmarked rows), and it restacks safely from its add-on grosses; locking
+  // it disabled every discount edit on a visit that can take them.
   const visitGrossUnknownClient =
-    service.primaryLinePrice == null
+    !visitCanonicallyMarked
+    && service.primaryLinePrice == null
     && (
       !!service.lineDiscountType
       || (!!service.discountType && service.discountAmount != null)
@@ -4135,7 +4150,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 onClick={onRemove}
                 disabled={removeLocked}
                 title={removeLocked
-                  ? "This line carries a legacy discount on a visit whose original price was never recorded. Set the primary service's price and save first, then remove it."
+                  ? "This visit carries a legacy discount and its original price was never recorded, so lines can't be removed here. Set the primary service's price and save first, then remove it."
                   : undefined}
                 className="font-medium"
                 style={{
@@ -5089,10 +5104,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     // visit lock, deleting a row that carries a stored
                     // discount is a term change too (the server's
                     // discountedAddonRowDeleted requests canonical
-                    // adoption, which LEGACY_PRIMARY_GROSS_UNKNOWN refuses)
-                    // — so Remove locks for exactly those rows, alongside
-                    // the pickers the same lock already disables.
-                    removeLocked: visitDiscountsLocked && !!line._origDiscountType,
+                    // adoption, which LEGACY_PRIMARY_GROSS_UNKNOWN refuses).
+                    // GitHub Codex round 26 P2 (#4657, :5095): since round
+                    // 26's :11100, the server refuses ANY non-preserved
+                    // reprice of this shape — removing an UNDISCOUNTED
+                    // sibling changes the composition, preservation fails,
+                    // and the PUT deterministically 422s — so every Remove
+                    // locks under the visit lock, not only discounted rows.
+                    // The unlock is the same two-step the title spells out:
+                    // set the primary price, save, then remove.
+                    removeLocked: visitDiscountsLocked,
                   })}
                 </div>,
               )}

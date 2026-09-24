@@ -2249,6 +2249,80 @@ describe('resolveUpdateDetailsAddonFinancials — PUT /:id/update-details routes
   // GitHub Codex round 16 P1 (#4657, :10128): pruneObsoleteFrozenAddonCaps
   // itself — the pure helper resolveUpdateDetailsAddonFinancials calls
   // before handing a row's frozen caps to resolveStoredDiscountCaps.
+  // GitHub Codex round 26 P0 (#4657, :3074): loadStoredDiscountScope refuses
+  // to replay a CATEGORY-scoped appointment discount for any service-linked
+  // line whose service_category_snapshot is missing — and the canonical
+  // branch built its parent (and add-on rows) with service_id + key snapshot
+  // only, so an unmarked visit adopting canonical pricing while it kept or
+  // picked a category-scoped discount threw "service identity snapshot is
+  // missing" on preview and save alike. A marked row with a service-linked
+  // add-on hit the same throw through the add-on rows.
+  describe('category-scoped appointment discount — every canonical line carries its category snapshot (round 26 P0, #4657 :3074)', () => {
+    const PEST_10 = 'appt-pest-10pct';
+    const scoped = ({ existing, updates = {}, adoptCanonicalPricing = false, addons }) => resolveUpdateDetailsAddonFinancials({
+      db: makeDb([{ id: PEST_10, max_discount_dollars: null }]),
+      existing, updates, primaryGross: 100,
+      normalizedAddons: addons ?? [{
+        base: 50, price: 50, serviceId: 'svc-mosquito', serviceKey: 'mosquito_monthly', serviceCategory: 'mosquito', discount: null,
+      }],
+      effDiscountType: 'percentage', effDiscountAmount: 10, effMaxDiscountDollars: null,
+      effServiceKeyFilter: null, effServiceCategoryFilter: 'pest', appointmentDiscountId: PEST_10,
+      adoptCanonicalPricing,
+    });
+    const pestPrimary = {
+      service_id: 'svc-pest', service_key_snapshot: 'pest_quarterly', service_category_snapshot: 'pest',
+      line_discount_id: null, line_discount_type: null, line_discount_amount: null, line_discount_dollars: null,
+    };
+
+    test('an UNMARKED visit adopting canonical pricing while it keeps a pest-only 10% discount prices ($90 + $50 = $140) instead of throwing', async () => {
+      await withGateLive(async () => {
+        const result = await scoped({ existing: { ...pestPrimary, pricing_provenance: null }, adoptCanonicalPricing: true });
+        expect(result.canonicalPricingApplied).toBe(true);
+        expect(result.financials.appointmentDiscountDollars).toBe(10); // 10% of the $100 pest primary only
+        expect(result.financials.price).toBe(140); // the mosquito add-on is out of scope
+        expect(result.capsSnapshotToPersist).not.toBeNull(); // the row gets its first full regime stamp
+      });
+    });
+
+    test('a MARKED visit with a service-linked add-on under the same scoped discount restacks (the add-on rows carry their category too)', async () => {
+      await withGateLive(async () => {
+        const existing = {
+          ...pestPrimary,
+          pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: { id: null, cap: null }, addons: {} } },
+        };
+        const result = await scoped({ existing });
+        expect(result.canonicalPricingApplied).toBe(true);
+        expect(result.financials.price).toBe(140);
+      });
+    });
+
+    test('a primary-service switch this save scopes by the NEW category snapshot (updates win over the stored row)', async () => {
+      await withGateLive(async () => {
+        const result = await scoped({
+          existing: { ...pestPrimary, pricing_provenance: null },
+          updates: { service_id: 'svc-lawn', service_key_snapshot: 'lawn_program', service_category_snapshot: 'lawn' },
+          adoptCanonicalPricing: true,
+        });
+        expect(result.canonicalPricingApplied).toBe(true);
+        expect(result.financials.appointmentDiscountDollars ?? 0).toBe(0); // nothing on the visit is pest any more (the engine reports null)
+        expect(result.financials.price).toBe(150);
+      });
+    });
+
+    test('a category-scoped discount on a marked visit whose service-linked ADD-ON has no category snapshot still refuses (the guard itself is unchanged)', async () => {
+      await withGateLive(async () => {
+        const existing = {
+          ...pestPrimary,
+          pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: { id: null, cap: null }, addons: {} } },
+        };
+        await expect(scoped({
+          existing,
+          addons: [{ base: 50, price: 50, serviceId: 'svc-mystery', serviceKey: null, serviceCategory: null, discount: null }],
+        })).rejects.toThrow(/service identity snapshot is missing/);
+      });
+    });
+  });
+
   describe('pruneObsoleteFrozenAddonCaps (round 16 P1, #4657 :10128)', () => {
     test('drops a frozen add-on cap entry whose discount id is on no current line and is not the primary line discount', () => {
       const frozen = { line: { id: null, cap: null }, addons: { 'removed-disc': 10, 'kept-disc': 7 } };
