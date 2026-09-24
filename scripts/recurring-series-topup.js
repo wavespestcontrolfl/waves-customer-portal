@@ -210,7 +210,10 @@ async function main() {
     { outcome: 'errors', count: summary.errors },
   ]);
   if (duplicatesForReview.length) {
-    console.log('\nDuplicate series for review — clear the stale recurring_ongoing flag by hand:');
+    // findActiveRecurringSeries treats a root as active when its ongoing flag
+    // is set OR it still has an upcoming live visit, so clearing the flag
+    // alone leaves the pair blocked until those visits pass (Codex r4 P2).
+    console.log('\nDuplicate series for review — for each STALE series: clear recurring_ongoing on its root AND cancel its remaining upcoming pending/confirmed visits (the guard counts either as active); the series you keep then tops up on the next run:');
     console.table(duplicatesForReview);
   }
   if (!APPLY) {
