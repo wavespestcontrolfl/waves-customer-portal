@@ -62,8 +62,17 @@ function receiptState(receipt) {
 // the same alert styling as a genuine `warning`/`error`. Neutral ONLY when
 // nothing ahead of `message` in the priority chain (body-level warning,
 // result.warning, result.error) is present; any of those wins and stays red.
-function detailIsNeutral(body) {
-  return !(body?.warning || body?.result?.warning || body?.result?.error) && Boolean(body?.result?.message);
+// Codex #4715 r4 P2: that presence check alone missed a receipt that marks
+// itself failed WITHOUT a warning/error string — e.g. `{ blocked: true,
+// message: 'Duplicate request' }` (schedule-tools.js and others return
+// exactly this shape). receiptState's own verdict is the single source of
+// truth for success/failure (RECEIPT_STATES maps outcome 'blocked'/'failed'
+// to 'failed'), so `state` is REQUIRED here — reused from the caller's
+// already-computed receiptState(...) call, never re-derived — and only a
+// successful/completed receipt ('confirmed') can use the neutral token.
+function detailIsNeutral(body, state) {
+  return state === 'confirmed'
+    && !(body?.warning || body?.result?.warning || body?.result?.error) && Boolean(body?.result?.message);
 }
 
 function groupEffects(effects) {
@@ -208,7 +217,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     const message = body.warning || body.result?.warning || body.result?.error || body.result?.message
       || (state === "unknown" ? "The outcome is not established. Check status before taking further action."
         : state === "failed" ? "The action could not be completed" : null);
-    setStatus(action.id, state, message, detailIsNeutral(body));
+    setStatus(action.id, state, message, detailIsNeutral(body, state));
     return state;
   };
 
@@ -291,7 +300,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         // a resolvedWarning always wins and is never neutral.
         const detailNeutral = errorById[action.id] != null
           ? Boolean(neutralById[action.id])
-          : !action.resolvedWarning && detailIsNeutral(receiptBody);
+          : !action.resolvedWarning && detailIsNeutral(receiptBody, status);
         const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown"].includes(status);
         const busy = status === "confirming" || status === "cancelling";
         const remaining = msLeft(action);

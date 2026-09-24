@@ -1204,6 +1204,12 @@ async function updateCustomer(customerId, updates, expectedVersion) {
     .some((f) => clean[f] !== undefined);
   let emailSync = null;
   let impliedLaneStamp = null;
+  // Codex #4715 r4 P2: captured from the guard call inside the transaction
+  // below so the RESULT built after commit can tell a full wind-down apart
+  // from a rail-only repair (railsRepairedOnly) — declared outside the
+  // transaction's arrow function since its own `decision` const is local to
+  // that scope.
+  let churnRepairDecision = null;
   try {
     await db.transaction(async (trx) => {
       // Membership-affecting writes join the customer-comms serialization
@@ -1260,6 +1266,7 @@ async function updateCustomer(customerId, updates, expectedVersion) {
       if (clean.pipeline_stage === 'churned') {
         const { churnGuardOrRepair, describeLiveVisit } = require('../customer-lifecycle-guard');
         const decision = await churnGuardOrRepair(trx, customerId, lockedBefore);
+        churnRepairDecision = decision;
         if (decision.blocked) {
           const err = new Error(decision.liveVisit
             ? `Cannot mark Churned: ${describeLiveVisit(decision.liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
@@ -1441,11 +1448,27 @@ async function updateCustomer(customerId, updates, expectedVersion) {
     // `message` is what the completed card actually renders (Codex #4715
     // r1 P2 — PendingActionsCard reads warning/error/message on an ordinary
     // result; the structured fields above are invisible without it).
-    ...(clean.pipeline_stage === 'churned' ? {
+    // Codex #4715 r4 P2: churnGuardOrRepair's `railsRepairedOnly` means the
+    // row was ALREADY churned with customer-level billing already off — it
+    // skipped disarmCustomerBillingFields entirely and only repaired the
+    // independent saved-method Auto Pay / armed-retry rails. Reporting
+    // `billing_wound_down: true` there is a false positive (customers.active/
+    // autopay_enabled/next_charge_date were never touched this write) —
+    // split the two effects so the receipt matches what actually ran, and
+    // keep the copy consistent with the confirmation card's own repeat-save
+    // sentence (authorization-contract.js: "an already-churned customer
+    // whose billing is already off is not re-checked — only saved-method
+    // Auto Pay and armed retries are repaired").
+    ...(clean.pipeline_stage === 'churned' ? (churnRepairDecision?.railsRepairedOnly ? {
+      billing_wound_down: false,
+      rails_repaired: true,
+      billing_wound_down_fields: ['payment_methods.autopay_enabled', 'payments.next_retry_at'],
+      message: 'Already churned — customer billing was already off, so only saved-method Auto Pay and armed retries were repaired.',
+    } : {
       billing_wound_down: true,
       billing_wound_down_fields: ['active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at'],
       message: 'Billing wound down: Auto Pay off (customer + saved methods), next charge date and armed retries cleared.',
-    } : {}),
+    }) : {}),
   };
 }
 
@@ -1527,7 +1550,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // explicitly in the same transaction. Per-row decision, since each
     // row's before-state differs under one shared update payload.
     const laneStampRelevant = clean.monthly_rate !== undefined || clean.waveguard_tier !== undefined;
-    const { count, laneStampIds, skippedRows, churnWoundDownCount } = await db.transaction(async (trx) => {
+    const { count, laneStampIds, skippedRows, churnWoundDownCount, railsRepairedCount } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
       let stampIds = [];
       if (laneStampRelevant) {
@@ -1571,6 +1594,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // contract as a deleted/merged row above); churnGuardForRow winds the
       // rest down itself through the canonical cancellation-processor.js
       // write as it checks them — no separate post-update pass needed.
+      // Codex #4715 r4 P2: rows where churnGuardOrRepair reports
+      // railsRepairedOnly (already churned, customer-level billing already
+      // off) — counted separately from a real wind-down below, since they
+      // never touched active/autopay_enabled/next_charge_date this write.
+      const railsRepairedOnlyIds = [];
       if (clean.pipeline_stage === 'churned') {
         const { churnGuardOrRepair } = require('../customer-lifecycle-guard');
         const liveRowById = new Map(liveRows.map((r) => [String(r.id), r]));
@@ -1582,7 +1610,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
           // "Cancel plan…" advice.
           const decision = await churnGuardOrRepair(trx, cid, liveRowById.get(String(cid)));
           if (decision.blocked) {
-            blocked.push({ customer_id: cid, error: decision.error });
+            // Tagged (pre-push audit P1) so the RESULT can tell a churn
+            // refusal apart from a deleted/merged skip — the per-row bulk
+            // branch below already carries this same tag on its `errors`.
+            blocked.push({ customer_id: cid, error: decision.error, churn_blocked: true });
+          } else if (decision.railsRepairedOnly) {
+            railsRepairedOnlyIds.push(cid);
           }
         }
         if (blocked.length) {
@@ -1595,8 +1628,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // remaining targetId before either return below — its own disarm is
       // unconditional-if-not-blocked, independent of the stage UPDATE that
       // follows — so the count is fixed here, not derived from `updated`.
-      const churnWoundDownCount = clean.pipeline_stage === 'churned' ? targetIds.length : 0;
-      if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped, churnWoundDownCount };
+      // railsRepairedOnlyIds rows are excluded from churnWoundDownCount
+      // (Codex #4715 r4 P2): they never had customer-level billing touched
+      // this write, only the independent saved-method rails.
+      const railsRepairedCount = clean.pipeline_stage === 'churned' ? railsRepairedOnlyIds.length : 0;
+      const churnWoundDownCount = clean.pipeline_stage === 'churned' ? targetIds.length - railsRepairedCount : 0;
+      if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped, churnWoundDownCount, railsRepairedCount };
       if (laneStampRelevant) {
         const beforeRows = await trx('customers')
           .whereIn('id', targetIds)
@@ -1623,7 +1660,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
-      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount };
+      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount, railsRepairedCount };
     });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
@@ -1636,9 +1673,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // `message` would silently disappear whenever skipped rows are also
     // present. Built once and appended to `warning` below (as well as kept
     // in `message`) so the operator sees it either way.
-    const woundDownMessage = churnWoundDownCount
-      ? `Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`
-      : null;
+    // Codex #4715 r4 P2: a rail-only repair (already-churned rows whose
+    // customer-level billing was already off) is a different effect than a
+    // real wind-down — reported as its own sentence, never folded into the
+    // wound-down count.
+    const woundDownParts = [];
+    if (churnWoundDownCount) woundDownParts.push(`Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`);
+    if (railsRepairedCount) woundDownParts.push(`${railsRepairedCount} customer(s) were already churned — only saved-method Auto Pay and armed retries were repaired.`);
+    const woundDownMessage = woundDownParts.length ? woundDownParts.join(' ') : null;
     return {
       success: true,
       updated_count: count,
@@ -1648,15 +1690,28 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // contract as the per-row address/email path; GH r9 P1). Each skipped
       // row's own `error` (when present) says why — no longer live, or (for
       // a churn move) still billing/scheduled.
+      // Codex #4715 pre-push audit P1: the card renders only `warning`, so a
+      // churn refusal's actionable reason (the "use Cancel plan…" instruction
+      // from churnGuardOrRepair's `error`) must ride in `warning` too — not
+      // just in skipped_customers, which the card never reads. Mirrors the
+      // per-row bulk branch's own warning below.
       ...(skippedRows.length ? {
         skipped_customers: skippedRows,
-        warning: `${skippedRows.length} approved customer(s) were NOT updated — see skipped_customers for why.${woundDownMessage ? ` ${woundDownMessage}` : ''}`,
+        warning: (() => {
+          const churnBlocked = skippedRows.filter((r) => r.churn_blocked);
+          const other = skippedRows.length - churnBlocked.length;
+          const parts = [];
+          if (churnBlocked.length) parts.push(`${churnBlocked.length} refused (${churnBlocked.map((r) => r.error).join('; ')})`);
+          if (other) parts.push(`${other} no longer live`);
+          return `${skippedRows.length} approved customer(s) were NOT updated — ${parts.join('; ')}.${woundDownMessage ? ` ${woundDownMessage}` : ''}`;
+        })(),
       } : {}),
       // Churn billing disarm disclosure (GitHub Codex #4684 r4) — how many
       // of the approved rows actually went through churnGuardForRow's
       // wind-down (a blocked row lands in skipped_customers instead).
       ...(woundDownMessage ? {
         billing_wound_down_count: churnWoundDownCount,
+        rails_repaired_count: railsRepairedCount,
         message: woundDownMessage,
       } : {}),
     };
@@ -1679,6 +1734,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
   const errors = [];
   const perRowLaneStampIds = [];
   let churnWoundDownCount = 0;
+  // Codex #4715 r4 P2: rows where churnGuardOrRepair only repaired the
+  // saved-method rails (already churned, customer-level billing already
+  // off) — reported separately from churnWoundDownCount below.
+  let railsRepairedCount = 0;
   for (const customerId of customerIds) {
     const before = await db('customers').where('id', customerId).first();
     if (!before) {
@@ -1694,6 +1753,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     }
     let emailSync = null;
     let rowLaneStamp = null;
+    let rowRailsRepairedOnly = false;
     try {
       await db.transaction(async (trx) => {
         // Membership-affecting writes join the customer-comms serialization
@@ -1737,6 +1797,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
             err.churnBlocked = true;
             throw err;
           }
+          rowRailsRepairedOnly = !!decision.railsRepairedOnly;
         }
         await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
         if (emailSubmitted && clean.email) {
@@ -1810,9 +1871,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
     if (rowLaneStamp) perRowLaneStampIds.push(customerId);
     // Reaching here means the per-row transaction committed — a blocked
     // churnGuardForRow throws churnBlocked above and lands in `errors`
-    // instead, so every row counted here that carries a churn move actually
-    // had its billing wound down inside that same transaction.
-    if (clean.pipeline_stage === 'churned') churnWoundDownCount += 1;
+    // instead. Codex #4715 r4 P2: a railsRepairedOnly row (already churned,
+    // customer-level billing already off) never touched active/
+    // autopay_enabled/next_charge_date this write — counted separately from
+    // a real wind-down.
+    if (clean.pipeline_stage === 'churned') {
+      if (rowRailsRepairedOnly) railsRepairedCount += 1;
+      else churnWoundDownCount += 1;
+    }
     count += 1;
   }
   logger.info(`[intelligence-bar] Bulk updated ${count} customers (address path):`, logUpdates);
@@ -1822,9 +1888,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // P2: on a PARTIAL update the card renders `warning` FIRST and hides
   // `message` entirely — appended to `warning` below (as well as kept in
   // `message`) so the operator sees it either way.
-  const woundDownMessage = churnWoundDownCount
-    ? `Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`
-    : null;
+  const woundDownParts = [];
+  if (churnWoundDownCount) woundDownParts.push(`Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`);
+  if (railsRepairedCount) woundDownParts.push(`${railsRepairedCount} customer(s) were already churned — only saved-method Auto Pay and armed retries were repaired.`);
+  const woundDownMessage = woundDownParts.length ? woundDownParts.join(' ') : null;
   return {
     success: true,
     updated_count: count,
@@ -1852,6 +1919,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // contract as the fast CASE path above.
     ...(woundDownMessage ? {
       billing_wound_down_count: churnWoundDownCount,
+      rails_repaired_count: railsRepairedCount,
       message: woundDownMessage,
     } : {}),
   };
