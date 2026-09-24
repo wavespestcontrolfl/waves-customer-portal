@@ -3417,8 +3417,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
       }
     }
-    const selfBookBlockedByAddress = !!addressUnverified || draftAddressBlockCarried || draftReconcileFailed;
-    if (selfBookBlockedByAddress) {
+    // Two different reasons withhold the link: an ADDRESS verdict (this
+    // run's flag or a carried draft hold) also quarantines earlier
+    // publications below; a failed draft reconciliation only withholds —
+    // an unrelated upsert error must never archive valid publications or
+    // stamp legacy rows blocked with no flag (pre-push audit P1 after r27).
+    const addressVerdictBlocks = !!addressUnverified || draftAddressBlockCarried;
+    const selfBookBlockedByAddress = addressVerdictBlocks || draftReconcileFailed;
+    if (draftReconcileFailed && !addressVerdictBlocks) {
+      logger.info('[public-quote] self-book link withheld — the draft reconciliation did not complete; the visitor retries');
+    }
+    if (addressVerdictBlocks) {
       logger.info('[public-quote] self-book link withheld — address flagged by the county-roll audit; office confirms on the callback');
       // A website estimate an EARLIER run already published for this lead
       // (publication promotes the row to `sent`, past the draft predicate)
