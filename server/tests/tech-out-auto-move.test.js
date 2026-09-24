@@ -235,7 +235,7 @@ describe('autoAssignParkedAlert', () => {
 
   test('no eligible candidate: every tech fails the dated eligibility check', async () => {
     assertAssignableTechnician.mockRejectedValue(Object.assign(new Error('out'), { code: NOT_ASSIGNABLE }));
-    const queue = [query(baseAlert()), query(baseStop()), query([]), query([CANDIDATE])];
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE])];
     db.mockImplementation(() => queue.shift());
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
@@ -250,7 +250,6 @@ describe('autoAssignParkedAlert', () => {
     const queue = [
       query(baseAlert()),        // dispatch_alerts by id
       stopQuery,                 // scheduled_services by id
-      query([]),                 // the absent tech's open stops that day (excludeServiceIds)
       query([CANDIDATE]),        // technicians crew list
       query([]),                 // fitsWindow fallback: other visits that day
       query([]),                 // fitsWindow fallback: tech_schedule_blocks
@@ -309,7 +308,6 @@ describe('autoAssignParkedAlert', () => {
     const queue = [
       query(baseAlert()),
       query(baseStop()),
-      query([]),
       query([CANDIDATE]),
       query([]),
       query([]),
@@ -328,7 +326,7 @@ describe('autoAssignParkedAlert', () => {
 
   test('a membership-change CAS miss reports the grouped-visit reason, not a generic failure', async () => {
     SmartRebooker.reschedule.mockRejectedValue(Object.assign(new Error('grouped concurrently'), { code: 'VISIT_MEMBERSHIP_CHANGED' }));
-    const queue = [query(baseAlert()), query(baseStop()), query([]), query([CANDIDATE]), query([]), query([]), query({})];
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([]), query({})];
     db.mockImplementation(() => queue.shift());
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
@@ -339,42 +337,27 @@ describe('autoAssignParkedAlert', () => {
 describe('selection matches the commit policy', () => {
   test('the mover\'s own commit probe finds the window occupied: parked as window_occupied, no candidate tried', async () => {
     SmartRebooker.previewMoveConflicts.mockResolvedValue([{ id: 'other-stop' }]);
-    const queue = [query(baseAlert()), query(baseStop()), query([{ id: JOB_ID }, { id: 'job-sib' }]), query({})];
+    const queue = [query(baseAlert()), query(baseStop()), query({})];
     db.mockImplementation(() => queue.shift());
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
     expect(res).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'window_occupied' });
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
-    // Probe and commit carry the same exclusion: the absent tech's own stops that day.
-    expect(SmartRebooker.previewMoveConflicts).toHaveBeenCalledWith(
-      JOB_ID, DATE, { start: '09:00', end: '11:00' }, { excludeServiceIds: [JOB_ID, 'job-sib'] },
-    );
+    // No exclusions: every live stop — the absent tech's others too — occupies its window.
+    expect(SmartRebooker.previewMoveConflicts).toHaveBeenCalledWith(JOB_ID, DATE, { start: '09:00', end: '11:00' });
   });
 
-  test('the move passes the same excludeServiceIds the probe used', async () => {
+  test('the move passes no excludeServiceIds and pins the duration it fitted', async () => {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
-    const queue = [query(baseAlert()), query(baseStop()), query([{ id: JOB_ID }]), query([CANDIDATE]), query([]), query([])];
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([])];
     db.mockImplementation(() => queue.shift());
 
     await autoAssignParkedAlert({ alertId: ALERT_ID });
 
-    expect(SmartRebooker.reschedule.mock.calls[0][5].excludeServiceIds).toEqual([JOB_ID]);
-  });
-
-  test('only stops this run could move are skipped by the probe; parked-for-a-human work keeps its window', async () => {
-    SmartRebooker.previewMoveConflicts.mockResolvedValue([{ id: 'x' }]);
-    const exclusion = query([]);
-    const queue = [query(baseAlert()), query(baseStop()), exclusion, query({})];
-    db.mockImplementation(() => queue.shift());
-
-    await autoAssignParkedAlert({ alertId: ALERT_ID });
-
-    // Same rule as stopMoveRefusal: plain confirmed + ungrouped (+ tracker /
-    // office-review predicates applied as grouped where-callbacks).
-    expect(exclusion.where).toHaveBeenCalledWith({ technician_id: ABSENT_TECH, scheduled_date: DATE, status: 'confirmed' });
-    expect(exclusion.whereNull).toHaveBeenCalledWith('visit_id');
-    expect(exclusion.where.mock.calls.filter(([arg]) => typeof arg === 'function')).toHaveLength(2);
+    const options = SmartRebooker.reschedule.mock.calls[0][5];
+    expect(options).not.toHaveProperty('excludeServiceIds');
+    expect(options.expect.estimated_duration_minutes).toBe(60);
   });
 
   test('a lapsed estimate hold on the candidate\'s day does not count as a conflict', async () => {
@@ -426,7 +409,7 @@ describe('selection matches the commit policy', () => {
 describe('in-transaction fit recheck (moveGuard)', () => {
   async function capturedMoveGuard() {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
-    const queue = [query(baseAlert()), query(baseStop()), query([]), query([CANDIDATE]), query([]), query([])];
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([])];
     db.mockImplementation(() => queue.shift());
     await autoAssignParkedAlert({ alertId: ALERT_ID });
     return SmartRebooker.reschedule.mock.calls[0][5].moveGuard;
@@ -454,7 +437,7 @@ describe('in-transaction fit recheck (moveGuard)', () => {
 describe('in-transaction still-parked recheck (beforeMove)', () => {
   async function capturedGuard() {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
-    const queue = [query(baseAlert()), query(baseStop()), query([]), query([CANDIDATE]), query([]), query([])];
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([])];
     db.mockImplementation(() => queue.shift());
     await autoAssignParkedAlert({ alertId: ALERT_ID });
     return SmartRebooker.reschedule.mock.calls[0][5].beforeMove;
@@ -467,30 +450,6 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
     const rows = [absence, alert, {}];
     return asTrx(jest.fn(() => query(rows.shift())));
   }
-
-  async function capturedGuardWithSiblings() {
-    SmartRebooker.reschedule.mockResolvedValue({ success: true });
-    const queue = [query(baseAlert()), query(baseStop()), query([{ id: JOB_ID }, { id: 'job-sib' }]), query([CANDIDATE]), query([]), query([])];
-    db.mockImplementation(() => queue.shift());
-    await autoAssignParkedAlert({ alertId: ALERT_ID });
-    return SmartRebooker.reschedule.mock.calls[0][5].beforeMove;
-  }
-
-  test('an excluded sibling left the absent day before the move: refuses as stale', async () => {
-    const guard = await capturedGuardWithSiblings();
-    const rows = [[], { id: 'abs-1' }, { id: ALERT_ID }];
-    await expect(guard(asTrx(jest.fn(() => query(rows.shift()))))).rejects.toMatchObject({ code: 'TECH_OUT_EXCLUSION_STALE' });
-    expect(resolveAlert).not.toHaveBeenCalled();
-  });
-
-  test('excluded siblings still on the absent day: locked FOR SHARE and the move proceeds', async () => {
-    const guard = await capturedGuardWithSiblings();
-    const siblingRead = query([{ id: 'job-sib' }]);
-    const rows = [siblingRead, query({ id: 'abs-1' }), query({ id: ALERT_ID }), query({})];
-    await expect(guard(asTrx(jest.fn(() => rows.shift())))).resolves.toBeUndefined();
-    expect(siblingRead.whereIn).toHaveBeenCalledWith('id', ['job-sib']);
-    expect(siblingRead.forShare).toHaveBeenCalled();
-  });
 
   test('absence cleared ("Tech is back") after the read: refuses inside the move transaction', async () => {
     const guard = await capturedGuard();
@@ -514,7 +473,7 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
   test('a stale refusal from the mover is a quiet no-op: no further candidates, no annotation', async () => {
     SmartRebooker.reschedule.mockRejectedValue(Object.assign(new Error('cleared'), { code: 'TECH_OUT_CLEARED' }));
     const second = { id: 'tech-3', name: 'Tech Three' };
-    const queue = [query(baseAlert()), query(baseStop()), query([]), query([CANDIDATE, second]), query([]), query([]), query([]), query([])];
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE, second]), query([]), query([]), query([]), query([])];
     db.mockImplementation(() => queue.shift());
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
@@ -542,17 +501,15 @@ describe('autoAssignTechDay', () => {
     const alertsList = query([{ id: 'alert-a' }, { id: 'alert-b' }]);
     const queue = [
       alertsList, // the open-alerts read, ordered by bump_order DESC
-      // alert-a: dispatch_alerts by id, scheduled_services, absent-day ids, technicians, others, blocks
+      // alert-a: dispatch_alerts by id, scheduled_services, technicians, others, blocks
       query(baseAlert({ id: 'alert-a', job_id: 'job-a' })),
       query(baseStop({ id: 'job-a' })),
-      query([]),
       query([CANDIDATE]),
       query([]),
       query([]),
       // alert-b: no eligible candidate
       query(baseAlert({ id: 'alert-b', job_id: 'job-b' })),
       query(baseStop({ id: 'job-b' })),
-      query([]),
       query([]),
     ];
     db.mockImplementation(() => queue.shift());

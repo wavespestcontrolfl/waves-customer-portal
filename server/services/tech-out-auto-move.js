@@ -280,10 +280,6 @@ function makeMoveGuard(stop, date) {
 // it. Either way there is nothing left to do — a no-op, never a retry on
 // the next candidate.
 const STALE_CODES = new Set(['TECH_OUT_CLEARED', 'TECH_OUT_ALERT_RESOLVED']);
-// The excluded batch changed between the read and the move (a sibling left
-// the absent tech's day): the probe's exclusion is no longer true, so the
-// move refuses and the alert stays parked for the next run to re-read.
-const EXCLUSION_STALE = 'TECH_OUT_EXCLUSION_STALE';
 
 /**
  * Runs inside the mover's own transaction (options.beforeMove — after its
@@ -295,23 +291,8 @@ const EXCLUSION_STALE = 'TECH_OUT_EXCLUSION_STALE';
  * only other lock is the ABSENT tech-day fence, which the mover does not
  * take), so the wait cannot cycle.
  */
-function makeStillParkedGuard({ alertId, absentTechId, date, stopId, excludeServiceIds, toTechId, actorId }) {
+function makeStillParkedGuard({ alertId, absentTechId, date, toTechId, actorId }) {
   return async (trx) => {
-    // The commit probe skips excludeServiceIds; that is only sound while
-    // each of them is still a movable stop on the absent tech's day. Re-read them
-    // here, FOR SHARE, so none can leave that day until this move commits.
-    // Other rebooker moves on this date already wait on the date-occupancy
-    // lock the mover took before calling us, so this cannot cycle with one.
-    const siblings = excludeServiceIds.filter((id) => id !== String(stopId));
-    if (siblings.length) {
-      const still = await movableOnAbsentDay(trx('scheduled_services').whereIn('id', siblings), absentTechId, date)
-        .orderBy('id')
-        .forShare()
-        .select('id');
-      if (still.length !== siblings.length) {
-        throw Object.assign(new Error('The absent technician\'s day changed during the move'), { statusCode: 409, code: EXCLUSION_STALE });
-      }
-    }
     const absence = await trx('technician_absences')
       .where({ technician_id: absentTechId, absence_date: date })
       .whereNull('cleared_at')
@@ -452,29 +433,6 @@ async function resolveStaleAlert(alertId) {
 }
 
 /** Open stops still on the absent tech that day (the batch the mover may pass over). */
-/**
- * Stops on the absent tech's day that THIS run could move — the same rule
- * stopMoveRefusal applies: plain 'confirmed', tracker not live, ungrouped,
- * not awaiting office review. Only these may be skipped by the occupancy
- * probe; pending, live, grouped and review-held work stays parked and so
- * keeps occupying its window (Codex r4 P1).
- */
-function movableOnAbsentDay(q, absentTechId, date) {
-  return q
-    .where({ technician_id: absentTechId, scheduled_date: date, status: 'confirmed' })
-    .whereNull('visit_id')
-    .where((w) => w.whereNull('track_state').orWhereNotIn('track_state', LIVE_TRACK_STATES))
-    .where((w) => w.whereNull('source_action')
-      .orWhereNotIn('source_action', OFFICE_REVIEW_PENDING_SOURCE_ACTIONS)
-      .orWhere('customer_confirmed', true));
-}
-
-/** Movable open stops still on the absent tech that day (the batch the probe may pass over). */
-async function absentDayStopIds(absentTechId, date) {
-  const rows = await movableOnAbsentDay(db('scheduled_services'), absentTechId, date).select('id');
-  return rows.map((r) => String(r.id));
-}
-
 async function eligibleRankedCandidates(stop, absentTechId, date) {
   const crew = await applyAssignable(db('technicians'))
     .whereNot('technicians.id', absentTechId)
@@ -498,7 +456,6 @@ function refusalReason(lastErr) {
   // Grouped into a visit between our read and the move: the same
   // manual-decision rule as the up-front visit_id check.
   if (lastErr.code === 'VISIT_MEMBERSHIP_CHANGED') return 'grouped_visit_manual';
-  if (lastErr.code === EXCLUSION_STALE) return 'schedule_changed';
   if (lastErr.code === NO_FIT) return 'no_eligible_candidate';
   return `move_failed: ${lastErr.message}`;
 }
@@ -508,7 +465,7 @@ function refusalReason(lastErr) {
  * alert resolves inside the successful move's own transaction (beforeMove),
  * so anything thrown here means nothing committed for that candidate.
  */
-async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window, excludeServiceIds, candidates, qualityDates }) {
+async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window, candidates, qualityDates }) {
   let lastErr = null;
   for (const candidate of candidates) {
     try {
@@ -520,7 +477,6 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
         stop.id, date, window, 'tech_out_auto_move', 'admin',
         {
           technicianId: candidate.tech.id,
-          excludeServiceIds,
           keepStatus: true,
           seriesPolicy: 'single',
           // Never the whole-visit mover: with visitPolicy 'single' the unit
@@ -549,10 +505,13 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
             track_state: stop.track_state ?? null,
             // Pinned so a row cannot slip into office review mid-move.
             customer_confirmed: stop.customer_confirmed ?? null,
+            // The span the in-transaction fit (moveGuard) derives an
+            // open-ended window from — an edit after ranking misses the CAS.
+            estimated_duration_minutes: stop.estimated_duration_minutes ?? null,
           },
           moveGuard: makeMoveGuard(stop, date),
           beforeMove: makeStillParkedGuard({
-            alertId, absentTechId, date, stopId: stop.id, excludeServiceIds, toTechId: candidate.tech.id, actorId,
+            alertId, absentTechId, date, toTechId: candidate.tech.id, actorId,
           }),
         },
       );
@@ -560,7 +519,7 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
       if (err && STALE_CODES.has(err.code)) return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
       lastErr = err;
       // Same answer for every candidate: stop and let the next run re-read.
-      if (err && (err.code === EXCLUSION_STALE || err.code === 'VISIT_MEMBERSHIP_CHANGED')) break;
+      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED') break;
       continue;
     }
     // Committed (stop + alert). The board broadcast is best-effort.
@@ -605,13 +564,12 @@ async function autoAssignParkedAlert({ alertId, actorId, qualityDates = null } =
   // The mover's commit probe, read-only and with the SAME options the move
   // passes below: selection never certifies a move the commit would refuse.
   // That probe is tech-blind by design (one active field tech; see
-  // scheduling/occupancy.js), so a stop whose window any other live stop
-  // overlaps stays parked for a human. The absent tech's own open stops that
-  // day are excluded, the same batch-mover convention rain-out uses: they are
-  // leaving that route, so they must not block each other's rescue.
-  const excludeServiceIds = await absentDayStopIds(absentTechId, date);
+  // scheduling/occupancy.js) and sees EVERY live stop — the absent tech's
+  // other stops included, deliberately: no exclusion list can tell which of
+  // them will really leave that window (Codex r3–r5 on #4759), so a window
+  // any other live stop overlaps stays parked for a human.
   const window = { start: stop.window_start, end: stop.window_end };
-  const conflicts = await SmartRebooker.previewMoveConflicts(stop.id, date, window, { excludeServiceIds });
+  const conflicts = await SmartRebooker.previewMoveConflicts(stop.id, date, window);
   if (conflicts.length) {
     await annotateAttempt(alertId, 'window_occupied');
     return { moved: false, alert_id: alertId, reason: 'window_occupied' };
@@ -624,7 +582,7 @@ async function autoAssignParkedAlert({ alertId, actorId, qualityDates = null } =
   }
 
   const outcome = await attemptMoves({
-    alertId, actorId, stop, date, absentTechId, window, excludeServiceIds, qualityDates,
+    alertId, actorId, stop, date, absentTechId, window, qualityDates,
     candidates: ranked.slice(0, MAX_MOVE_ATTEMPTS),
   });
   if (outcome.moved || outcome.skipped) return outcome;
