@@ -344,7 +344,22 @@ function lastCompletedWeekEndingET(now = new Date()) {
   return etDateString(addETDays(now, -back));
 }
 
+/**
+ * Normalize a Postgres DATE value read back through pg (a JS Date at UTC
+ * midnight) — or a string already in YYYY-MM-DD / ISO form — to YYYY-MM-DD.
+ * Null/undefined pass through. The ONE normalizer for technician_absences
+ * .absence_date (tech-out sweep keys and technician-eligibility slot keys
+ * are the two halves of one invariant and must never disagree — Codex r6
+ * P1 on #4678).
+ */
+function dateOnlyString(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
 module.exports = {
+  dateOnlyString,
   lastCompletedWeekEndingET,
   TZ, parseETDateTime, parseQuotedETDeadline, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, addETDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,

@@ -81,6 +81,42 @@ describe("CallIntelligencePanel", () => {
     expect(screen.getByText("$149 (estimate to follow)")).toBeInTheDocument();
   });
 
+  it("renders every price only when the call stated more than one, labeled Agent/Caller from stated_by (schema 1.13.0, codex #4722 r1 P2 + r2 P2)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      calls.push({ url: String(url), method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+      if (String(url).includes("/intelligence")) {
+        const view = intelligence();
+        view.prices = {
+          quoted_price_usd: null,
+          quote_type: null,
+          quote_promised: false,
+          quote_requested: false,
+          list: [
+            // stated_by absent -> defaults to the "Agent" label.
+            { amount_usd: 300, unit: "one_time", caller_response: "accepted", accepted: true },
+            // A competitor's price the CALLER mentioned — must read "Caller",
+            // never mistaken for a Waves quote.
+            { amount_usd: 40, amount_max_usd: null, unit: "per_month", caller_response: "not_at_issue", accepted: null, tier_mentioned: "gold", stated_by: "caller" },
+          ],
+        };
+        return { ok: true, status: 200, json: async () => ({ intelligence: view, features: { commitments: true, admin: true } }) };
+      }
+      if (String(url).includes("/commitments/")) return { ok: true, status: 200, json: async () => ({ commitment: {} }) };
+      return { ok: true, status: 200, json: async () => ({}) };
+    }));
+    render(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    await waitFor(() => expect(screen.getByText("Complete")).toBeInTheDocument());
+    expect(screen.getByText("Agent: $300 · one time · accepted; Caller: $40 · per month · not at issue · gold")).toBeInTheDocument();
+  });
+
+  it("does not render the all-prices row for a single price", async () => {
+    render(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    await waitFor(() => expect(screen.getByText("Complete")).toBeInTheDocument());
+    expect(screen.queryByText(/All prices/)).not.toBeInTheDocument();
+  });
+
   it("hands the verbatim quote to the transcript on Jump", async () => {
     const onJump = vi.fn();
     render(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={onJump} />);

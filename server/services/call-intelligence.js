@@ -257,6 +257,10 @@ function buildCallIntelligence({ call, commitments = [], outcomes = null }) {
     prices: {
       quoted_price_usd: sr.quoted_price_usd ?? null,
       price: sr.price || null,
+      // Every distinct price stated on the call (schema 1.13.0, codex #4722
+      // r1 P2) — `price` above stays the single primary entry for existing
+      // readers; `list` is additive, for a call that quoted more than one.
+      list: Array.isArray(sr.prices) ? sr.prices : [],
       quote_type: quoteType,
       quote_requested: sr.quote_requested ?? null,
       quote_promised: sr.quote_promised ?? null,

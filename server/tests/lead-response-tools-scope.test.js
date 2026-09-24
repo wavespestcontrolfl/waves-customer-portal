@@ -2,10 +2,12 @@ const mockSend = jest.fn();
 const mockContext = jest.fn(async customer => ({ customerId: customer.id }));
 const mockPipeline = jest.fn();
 const mockMessage = jest.fn();
+const mockBridge = jest.fn();
 jest.mock('../services/twilio', () => ({ sendSMS: mockSend }));
 jest.mock('../services/context-aggregator', () => ({ getContextForCustomer: mockContext }));
 jest.mock('../services/pipeline-manager', () => ({ onEvent: mockPipeline }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: mockMessage }));
+jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: mockBridge }));
 jest.mock('../services/short-url', () => ({}));
 jest.mock('../services/pricing-authority-gate', () => ({}));
 jest.mock('../services/estimate-automation-duplicates', () => ({
@@ -16,11 +18,17 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
 const mockState = {};
 const mockDb = jest.fn(table => {
   const filters = {};
+  const clauses = [];
   let invocation;
   const builder = {
-    where: jest.fn((key, value) => { Object.assign(filters, typeof key === 'object' ? key : { [key]: value }); return builder; }),
-    whereIn: jest.fn(() => builder),
-    whereNull: jest.fn(key => { filters[key] = null; return builder; }),
+    where: jest.fn((key, value) => {
+      if (typeof key === 'function') key(builder);
+      else Object.assign(filters, typeof key === 'object' ? key : { [key]: value });
+      return builder;
+    }),
+    whereIn: jest.fn((key, values) => { clauses.push(['whereIn', key, values]); return builder; }),
+    whereNull: jest.fn(key => { filters[key] = null; clauses.push(['whereNull', key]); return builder; }),
+    orWhereNull: jest.fn(key => { clauses.push(['orWhereNull', key]); return builder; }),
     whereRaw: jest.fn((_sql, bindings) => { invocation = bindings; return builder; }),
     forUpdate: jest.fn(() => builder),
     forNoKeyUpdate: jest.fn(() => builder),
@@ -35,9 +43,21 @@ const mockDb = jest.fn(table => {
     insert: jest.fn(value => {
       if (mockState.insertFails) throw new Error('storage unavailable');
       mockState.activity = { id: `activity-${++mockState.inserts}`, ...value };
-      return { returning: async () => [mockState.activity] };
+      const promise = Promise.resolve([mockState.activity]);
+      return { returning: async () => [mockState.activity], then: promise.then.bind(promise), catch: promise.catch.bind(promise) };
     }),
     update: jest.fn(async value => {
+      mockState.updates.push({ table, value, clauses: [...clauses] });
+      if (table === 'leads') {
+        const guardedStatus = clauses.find(([method, key]) => method === 'whereIn' && key === 'status')?.[2];
+        if (!guardedStatus || guardedStatus.includes(mockState.lead.status) || mockState.lead.status == null) {
+          const patch = { ...value };
+          if (patch.response_time_minutes?.sql === 'COALESCE(response_time_minutes, ?)') {
+            patch.response_time_minutes = mockState.lead.response_time_minutes ?? patch.response_time_minutes.bindings[0];
+          }
+          Object.assign(mockState.lead, patch);
+        }
+      }
       if (table === 'lead_activities' && mockState.activity) {
         const metadata = JSON.parse(mockState.activity.metadata);
         if (typeof value.metadata === 'string') mockState.activity.metadata = value.metadata;
@@ -62,9 +82,11 @@ beforeEach(() => {
   mockState.customer = { id: context.customerId, phone: '+19415550100' };
   mockState.activity = null;
   mockState.inserts = 0;
+  mockState.updates = [];
   mockState.insertFails = false;
   process.env.ADAM_PHONE = '+19415550101';
   mockSend.mockResolvedValue({ success: true, sid: 'SM_fixture' });
+  mockMessage.mockReset().mockResolvedValue({ sent: false, blocked: true, code: 'QA_BLOCKED' });
 });
 afterAll(() => { delete process.env.ADAM_PHONE; });
 test('requires server context before database lookup', async () => {
@@ -89,6 +111,57 @@ test.each(['deleted', 'repointed', 'customer_deleted'])('refuses %s subject', as
 test('uses resolved customer without shared-phone lookup', async () => {
   expect(await executeLeadTool('get_customer_context', { phone: '(941) 555-0100' }, context)).toEqual({ customerId: context.customerId });
   expect(mockContext).toHaveBeenCalledWith(mockState.customer);
+});
+test.each([
+  ['advanced status', { status: 'estimated', response_time_minutes: null }],
+])('a sent auto-response preserves %s while recording delivery', async (_label, leadState) => {
+  Object.assign(mockState.lead, { first_contact_at: new Date(Date.now() - 60000), ...leadState });
+  mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
+
+  expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context))
+    .toMatchObject({ sent: true });
+
+  expect(mockState.lead.status).toBe(leadState.status);
+  expect(mockState.lead.response_time_minutes).toBe(leadState.response_time_minutes);
+  const guardedUpdate = mockState.updates.find(({ table, clauses }) => table === 'leads'
+    && clauses.some(([method, key]) => method === 'whereIn' && key === 'status'));
+  expect(guardedUpdate.clauses).toEqual(expect.arrayContaining([
+    ['whereIn', 'status', ['new', 'pending', 'started']],
+    ['orWhereNull', 'status'],
+  ]));
+  expect(guardedUpdate.clauses).not.toContainEqual(['whereNull', 'response_time_minutes']);
+  expect(guardedUpdate.value.response_time_minutes).toEqual({
+    sql: 'COALESCE(response_time_minutes, ?)', bindings: [1],
+  });
+  expect(mockBridge).toHaveBeenCalledWith(context.leadId, 'contacted', mockDb);
+});
+test('a sent auto-response advances a pre-contact lead without replacing its existing SLA', async () => {
+  Object.assign(mockState.lead, { status: 'new', response_time_minutes: 7, first_contact_at: new Date(Date.now() - 60000) });
+  mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
+
+  expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context))
+    .toMatchObject({ sent: true });
+
+  expect(mockState.lead.status).toBe('contacted');
+  expect(mockState.lead.response_time_minutes).toBe(7);
+});
+test('a sent auto-response still stamps the first SLA on a pre-contact lead', async () => {
+  Object.assign(mockState.lead, { status: 'new', response_time_minutes: null, first_contact_at: new Date(Date.now() - 60000) });
+  mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
+
+  expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context))
+    .toMatchObject({ sent: true });
+
+  expect(mockState.lead.status).toBe('contacted');
+  expect(mockState.lead.response_time_minutes).toBe(1);
+});
+test('deferred settlement advances a pre-contact lead without replacing its existing SLA', async () => {
+  Object.assign(mockState.lead, { status: 'pending', response_time_minutes: 7, first_contact_at: new Date(Date.now() - 60000) });
+
+  await require('../services/lead-response-tools').recordLeadAutoReplyDelivered({ leadId: context.leadId });
+
+  expect(mockState.lead.status).toBe('contacted');
+  expect(mockState.lead.response_time_minutes).toBe(7);
 });
 test.each(['new_lead', 'service_completed', 'subscription_cancelled', '__proto__'])('rejects unsupported lead stage %s', async stage => {
   expect(await executeLeadTool('update_lead_pipeline', { stage }, context)).toHaveProperty('error');

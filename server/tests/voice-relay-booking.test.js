@@ -215,7 +215,15 @@ function primeDb({
     first: jest.fn(() => Promise.resolve({ id: 't-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true })),
   };
   techTrx.where = jest.fn(() => techTrx);
-  trxBuilders = { scheduled_services: ssTrx, triage_items: triageTrx, technicians: techTrx };
+  // Save-time out-for-the-day check (technician-eligibility.js, finding 7):
+  // assertAssignableTechnician's date param reads this table too — no open
+  // absence for the offered tech in any of these fixtures.
+  const absenceTrx = { first: jest.fn(() => Promise.resolve(null)) };
+  absenceTrx.where = jest.fn(() => absenceTrx);
+  absenceTrx.whereNull = jest.fn(() => absenceTrx);
+  trxBuilders = {
+    scheduled_services: ssTrx, triage_items: triageTrx, technicians: techTrx, technician_absences: absenceTrx,
+  };
   trx = (table) => trxBuilders[table];
   trx.raw = jest.fn((sql) => sql);
   db.transaction.mockImplementation(async (cb) => cb(trx));
