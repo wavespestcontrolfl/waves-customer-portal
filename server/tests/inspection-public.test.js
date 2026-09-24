@@ -1588,6 +1588,23 @@ describe('POST /:token commit', () => {
       expect(updateCalls.find((c) => c.table === 'customers').payload.address_line1).toBe('2 Corrected Ave');
     });
 
+    // Codex #4737 r11 pre-push P1: a LEAD-address fallback (the stored one
+    // failed to geocode) never overwrites an established property either.
+    test('a lead-address fallback on a linked profile with visits books another property, not an overwrite', async () => {
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1', address: '9 Lead Rd', city: 'Bradenton', zip: '34209' };
+      firstResults.customers = { id: 'cust-1', account_id: 'acct-1', phone: '9415550101', address_line1: '1 Unmappable Way', city: 'Nowhere', state: 'FL', zip: '00000', latitude: null, longitude: null };
+      listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-old' }] : []);
+      listResults.customers = [firstResults.customers];
+      mockGeocode.mockImplementation(async (addr) => (String(addr).includes('Unmappable') ? { location: null } : { location: { lat: 27.5, lng: -82.6 } }));
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+      expect(res.statusCode).toBe(200);
+      expect(updateCalls.some((c) => c.table === 'customers' && c.payload.address_line1)).toBe(false);
+      expect(insertCalls.find((c) => c.table === 'customers').payload).toMatchObject({ account_id: 'acct-1' });
+    });
+
     // Codex #4737 r7 P2: a linked customer's validated property with no
     // visits yet (not this flow's prospect) is still preserved.
     test('a visitless linked property with validated coordinates is preserved — the new address is another profile', async () => {
@@ -1718,7 +1735,7 @@ describe('POST /:token commit', () => {
       const profile = { id: 'new-cust-1', phone: '9415550101' };
       const dbConn = (table) => ({
         where() { return this; }, whereNull() { return this; }, orderBy() { return this; },
-        first: async () => (table === 'lead_activities' ? { metadata: JSON.stringify(meta) } : profile),
+        first: async () => (table === 'lead_activities' ? { metadata: JSON.stringify(meta) } : table === 'customer_merge_journal' ? null : profile),
       });
       expect(await loadTrustedCustomer(dbConn, { ...LEAD_ROW }, null)).toEqual(profile);
     });
@@ -2710,6 +2727,34 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
     // An SMS-delivered token to this phone: trusted.
     const smsToken = { channel: require('../utils/lead-consultation-token').smsChannelFor('9415551234') };
     expect(await provenanceCustomer(fakeDb, lead, smsToken)).toEqual(expect.objectContaining({ id: 'winner-1' }));
+  });
+
+  // Codex #4737 r11 pre-push P0: a prospect that ABSORBED another customer
+  // (merge winner) loses outright trust too.
+  test('a flow-created prospect that won a merge needs the verified-phone proof', async () => {
+    const fakeDb = makeMergeFakeDb({
+      customers: { 'prospect-1': { id: 'prospect-1', phone: '9415551234', account_id: null } },
+      journal: {},
+      activityRows: [{ metadata: JSON.stringify({ customer_id: 'prospect-1' }) }],
+    });
+    const base = fakeDb;
+    const withWin = (table) => {
+      const chain = base(table);
+      if (table !== 'customer_merge_journal') return chain;
+      const state = {};
+      const wrapped = Object.create(chain);
+      wrapped.where = (cond) => { Object.assign(state, cond); return wrapped; };
+      wrapped.whereNull = () => wrapped;
+      wrapped.orderBy = () => wrapped;
+      wrapped.first = async () => (state.winner_customer_id === 'prospect-1' ? { winner_customer_id: 'prospect-1' } : null);
+      return wrapped;
+    };
+    const lead = { id: 'lead-1', phone: '9415551234', customer_id: null };
+    expect(await provenanceCustomer(withWin, lead, null)).toBeNull();
+    const smsToken = { channel: require('../utils/lead-consultation-token').smsChannelFor('9415551234') };
+    expect(await provenanceCustomer(withWin, lead, smsToken)).toEqual(expect.objectContaining({ id: 'prospect-1' }));
+    // Never merged: outright trust as before.
+    expect(await provenanceCustomer(base, lead, null)).toEqual(expect.objectContaining({ id: 'prospect-1' }));
   });
 
   test('trustedLeadProfileIds: a merged prospect\'s winner joins the DEDUPE set; response sets stay strict', async () => {

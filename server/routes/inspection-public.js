@@ -351,6 +351,17 @@ async function loadTrustedCustomer(dbConn, lead, token) {
 // decision; the winner keeps whatever trust level the caller was already
 // applying to the original id.
 const MAX_MERGE_CHAIN_HOPS = 8;
+// Whether a customer ABSORBED another in a (not undone) merge (Codex #4737
+// r11 pre-push P0): a flow-created prospect that won a merge now carries
+// the loser's appointments, so its outright trust ends there too.
+async function wonAMerge(dbConn, customerId) {
+  const row = await dbConn('customer_merge_journal')
+    .where({ winner_customer_id: customerId })
+    .whereNull('undone_at')
+    .first('winner_customer_id');
+  return Boolean(row);
+}
+
 async function mergedWinnerId(dbConn, customerId) {
   let id = customerId;
   let resolved = null;
@@ -382,7 +393,9 @@ async function provenanceCustomer(dbConn, lead, token) {
   // A merge establishes record identity, not the token holder's authority
   // (Codex #4737 r10 pre-push P0): a merged-away prospect's winner is
   // trusted only under the verified-phone proof, whatever the flag said.
-  if (!meta.requires_verification && !winnerId) return prospect;
+  // Outright trust only for a flow-created prospect untouched by any merge
+  // — neither merged away (winnerId) nor absorbing another (wonAMerge).
+  if (!meta.requires_verification && !winnerId && !(await wonAMerge(dbConn, prospect.id))) return prospect;
   return (await verifiedForCustomer(lead, prospect, token, dbConn)) ? prospect : null;
 }
 
@@ -1432,7 +1445,10 @@ async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, 
   // visits yet that is either this flow's OWN outright-trusted prospect
   // (server-owned provenance — Codex #4737 r7 P2) or holds an address that
   // never geocoded (no coordinates: nothing validated to lose).
-  const anotherProperty = resolved.source === 'supplied'
+  // A lead-address fallback is held to the same rule as a typed one
+  // (Codex #4737 r11 pre-push P1): neither overwrites an established
+  // property.
+  const anotherProperty = (resolved.source === 'supplied' || resolved.source === 'lead')
     && Boolean(freshCustRow.address_line1)
     && !profileMatchesAddress(freshCustRow, resolved.address, resolved.location)
     && !(await correctableInPlace(trx, freshLead, freshCustRow));
@@ -1762,7 +1778,8 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId, { includeMer
     const winnerId = await mergedWinnerId(dbConn, meta.customer_id);
     const targetId = winnerId || meta.customer_id;
     if (ids.has(String(targetId))) continue;
-    if (!meta.requires_verification && (!winnerId || includeMergedWinners)) { ids.add(String(targetId)); continue; }
+    const outright = !meta.requires_verification && (includeMergedWinners || (!winnerId && !(await wonAMerge(dbConn, targetId))));
+    if (outright) { ids.add(String(targetId)); continue; }
     const profile = await loadCustomer(dbConn, targetId);
     if (profile && await verifiedForCustomer(lead, profile, token, dbConn)) ids.add(String(profile.id));
   }
