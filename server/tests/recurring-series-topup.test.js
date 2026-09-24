@@ -229,7 +229,11 @@ function topupScenario({
   // schema doesn't have can never contribute a match, and prepaid_method
   // only counts when it's the annual writer's OWN method — an ordinary
   // cash/Zelle stamp must not (Codex GitHub r6 P1).
-  const seriesHasAnnualStamp = (!!cols.annual_prepay_term_id && stampedAnnualTermId)
+  // A bare annual_prepay_term_id counts only on a schema WITHOUT
+  // prepaid_method: clearPrepaidStampsForTerm keeps the term link on cleared
+  // rows for audit, so where prepaid_method exists it is the live signal
+  // (Codex GitHub r9 P1).
+  const seriesHasAnnualStamp = (!!cols.annual_prepay_term_id && !cols.prepaid_method && stampedAnnualTermId)
     || (!!cols.prepaid_method && stampedPrepaidMethod === ANNUAL_PREPAY_METHOD);
   const seriesDates = new Set(initialDates);
   const inserted = [];
@@ -455,6 +459,41 @@ describe('topUpRecurringSeriesLocked — annual-prepay scope cut v1 (Codex GitHu
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
     expect(result.skipped).toBe('annual_prepay_series');
     expect(inserted).toHaveLength(0);
+  });
+
+  test('does NOT exclude on a retained audit term link whose prepaid_method was cleared (Codex GitHub r9 P1)', async () => {
+    // clearPrepaidStampsForTerm keeps annual_prepay_term_id on cleared rows
+    // for audit; with the prepaid_method column present, that bare link is
+    // not live coverage, so a plan back on ordinary billing still tops up.
+    const { conn, inserted } = topupScenario({
+      colsOverrides: { annual_prepay_term_id: {}, prepaid_method: {} },
+      stampedAnnualTermId: true,
+      stampedPrepaidMethod: null,
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+  });
+
+  test('the stamped-row probe only looks at UPCOMING live rows, never completed/historical ones (Codex GitHub r9 P1)', async () => {
+    const probeCalls = [];
+    const { customer, parent } = topupScenario();
+    const conn = makeConn(({ table, calls, op }) => {
+      if (table === 'scheduled_services' && op === 'columnInfo') return { ...BASE_COLS, prepaid_method: {}, annual_prepay_term_id: {} };
+      if (table === 'scheduled_services' && op === 'first') {
+        const firstCall = calls.find((c) => c[0] === 'first');
+        if (firstCall[1] === 'id' && calls.some((c) => c[0] === 'whereFn')) { probeCalls.push(calls); return undefined; }
+        return firstCall[1] ? null : parent;
+      }
+      if (table === 'customers' && op === 'first') return customer;
+      return null;
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(probeCalls.length).toBeGreaterThan(0);
+    const probe = probeCalls[0];
+    const notIn = probe.find((c) => c[0] === 'whereNotIn' && c[1] === 'status');
+    expect(notIn[2]).toEqual(expect.arrayContaining(['completed', 'cancelled']));
+    expect(probe).toContainEqual(['where', 'scheduled_date', '>=', etDateString()]);
   });
 
   test('does NOT exclude on an ordinary cash/Zelle prepaid_method stamp — only the annual writer\'s own method counts (Codex GitHub r6 P1)', async () => {

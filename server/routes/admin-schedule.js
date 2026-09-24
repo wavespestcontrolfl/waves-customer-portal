@@ -15295,13 +15295,21 @@ async function isCustomerPrepayLive(conn, customerId) {
 }
 async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
   if (cols.annual_prepay_term_id || cols.prepaid_method) {
+    // Only UPCOMING live rows are evidence. Completed rows keep their
+    // stamps, and clearPrepaidStampsForTerm deliberately retains the term
+    // link on cleared rows for audit, so historical/audit links must not
+    // mark a plan that has returned to ordinary billing as prepaid forever
+    // (Codex GitHub r9 P1). A live term is still caught by
+    // isCustomerPrepayLive below via the canonical coveredTermsAsOf.
     const stampedRow = await conn('scheduled_services')
       .where(function seriesRows() {
         this.where('recurring_parent_id', parentId).orWhere('id', parentId);
       })
+      .whereNotIn('status', ASSIGNMENT_TERMINAL_STATUSES)
+      .where('scheduled_date', '>=', etDateString())
       .where(function stamped() {
-        if (cols.annual_prepay_term_id) this.orWhereNotNull('annual_prepay_term_id');
         if (cols.prepaid_method) this.orWhere('prepaid_method', ANNUAL_PREPAY_METHOD);
+        if (cols.annual_prepay_term_id && !cols.prepaid_method) this.orWhereNotNull('annual_prepay_term_id');
       })
       .first('id');
     if (stampedRow) return true;
