@@ -258,7 +258,13 @@ export function useDispatchBoard() {
   // hydration supersedes it — an older initial response settling last
   // cannot roll back the fresher roster — and socket events that arrive
   // mid-hydration are buffered and replayed exactly like any other.
-  const loadBoard = useCallback(async ({ initial = false } = {}) => {
+  // Whether the board has ever applied a successful read — a property of
+  // the BOARD, not of any one request: a refresh that supersedes a still-
+  // pending hydration and then fails must settle loading/error itself, or
+  // the board stays "loading" forever (auditor P1, round 5).
+  const hydratedRef = useRef(false);
+
+  const loadBoard = useCallback(async () => {
     const seq = ++refreshSeqRef.current;
     latestRefreshPendingRef.current = true;
     pendingSocketRef.current = [];
@@ -277,14 +283,17 @@ export function useDispatchBoard() {
         return next;
       });
       setJobs(data.jobs || []);
+      hydratedRef.current = true;
+      setError(null);
       setLoading(false);
     } catch (err) {
-      // `error` is reserved for the initial board load failing outright
-      // (and only while it is still the latest load — a refresh that
-      // superseded it owns the outcome). A failed refresh after a
-      // mutation or broadcast just leaves the roster as it was; the next
-      // broadcast or manual reopen catches it up.
-      if (initial && seq === refreshSeqRef.current) {
+      // `error` is reserved for the board never having loaded: whichever
+      // request is the LATEST when the board is still unhydrated owns
+      // that outcome, whether it was the initial fetch or a refresh that
+      // superseded it. A failed refresh on a hydrated board just leaves
+      // the roster as it was; the next broadcast or manual reopen catches
+      // it up, and a later success clears any earlier error.
+      if (!hydratedRef.current && seq === refreshSeqRef.current) {
         setError(err.message || 'Failed to load dispatch board');
         setLoading(false);
       }
@@ -299,11 +308,11 @@ export function useDispatchBoard() {
     }
   }, [replayPendingSocket]);
 
-  const refreshTechs = useCallback(() => loadBoard(), [loadBoard]);
+  const refreshTechs = loadBoard;
 
   // ---- initial hydration (load #1 of the sequence above) ----
   useEffect(() => {
-    loadBoard({ initial: true });
+    loadBoard();
   }, [loadBoard]);
 
   // ---- socket subscription ----

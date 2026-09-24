@@ -351,3 +351,48 @@ describe('initial hydration is load #1 of the same sequence (pre-push auditor P1
     expect(result.current.techs[0].name).toBe('Tech One');
   });
 });
+
+describe('a failed refresh that superseded hydration settles the board (pre-push auditor P1 on PR #4678, round 5)', () => {
+  it('sets error and ends loading, and a later successful refresh clears the error', async () => {
+    let releaseInitial;
+    fetch.mockReturnValueOnce(new Promise((resolve) => { releaseInitial = resolve; }));
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(typeof socketHandlers['dispatch:tech_absence']).toBe('function'));
+    expect(result.current.loading).toBe(true);
+
+    // The broadcast refresh supersedes hydration and then fails.
+    fetch.mockRejectedValueOnce(new Error('network down'));
+    await act(async () => {
+      socketHandlers['dispatch:tech_absence']({ tech_id: 'tech-1', date: '2026-09-30', out: true, absence_id: 'a-1' });
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBe('network down');
+
+    // The superseded initial response is still dropped even now.
+    await act(async () => {
+      releaseInitial({ ok: true, json: async () => initialBoard });
+      await Promise.resolve(); await Promise.resolve();
+    });
+    expect(result.current.techs).toHaveLength(0);
+    expect(result.current.error).toBe('network down');
+
+    // A later refresh that succeeds hydrates the board and clears the error.
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
+    await act(async () => {
+      socketHandlers['dispatch:tech_absence']({ tech_id: 'tech-1', date: '2026-09-30', out: false, absence_id: 'a-1' });
+    });
+    await waitFor(() => expect(result.current.techs).toHaveLength(1));
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('a failed refresh on an already-hydrated board does not set error', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    fetch.mockRejectedValueOnce(new Error('network down'));
+    await act(async () => { await result.current.refreshTechs(); });
+    expect(result.current.error).toBeNull();
+    expect(result.current.techs).toHaveLength(1);
+  });
+});
