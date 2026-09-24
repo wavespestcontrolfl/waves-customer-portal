@@ -8381,6 +8381,18 @@ const LAWN_ASSESSMENT_METRICS = [
   { key: "stress_damage", label: "Condition" },
 ];
 
+// Owner ruling 2026-09-24: an optional per-photo slot label. All optional —
+// no count requirement, no blocking. 'front' is the only slot the report's
+// before/after slider pairs across visits (server/services/lawn-visit-input.js
+// PHOTO_ZONES); close_up/trouble are a different spot every visit and never
+// pair. Kept in parity with PHOTO_ZONE_LABELS in
+// client/src/components/lawn/LawnVisitReview.jsx.
+const LAWN_PHOTO_ZONES = [
+  { value: "front", label: "Front" },
+  { value: "close_up", label: "Close-up" },
+  { value: "trouble", label: "Trouble / watch area" },
+];
+
 // Stress flags and the "Protocol field checks" inputs (thatch, chinch pair,
 // nematode/large-patch pills, Soil K, protocol notes) were removed from this
 // sheet entirely (owner trim 2026-08-07) — nearly all were captured on every
@@ -8627,7 +8639,7 @@ function LawnAssessmentCompletionBlock({
       const nextPhotos = await Promise.all(
         files.slice(0, remaining).map(readLawnAssessmentPhoto),
       );
-      setPhotos((prev) => [...prev, ...nextPhotos].slice(0, 3));
+      setPhotos((prev) => [...prev, ...nextPhotos.map((photo) => ({ ...photo, zone: null }))].slice(0, 3));
       setResult(null);
       setTechScores(null);
       setConfirmedId(null);
@@ -8637,6 +8649,22 @@ function LawnAssessmentCompletionBlock({
     } finally {
       if (fileRef.current) fileRef.current.value = "";
     }
+  }
+
+  // Only one photo may carry the "front" slot at a time — the before/after
+  // slider pairs on it, so picking Front on another photo clears the prior
+  // one. Picking the same slot again clears it (every slot, including none,
+  // is a valid choice).
+  function setPhotoZone(index, zone) {
+    setPhotos((prev) => {
+      const current = prev[index]?.zone || null;
+      const next = current === zone ? null : zone;
+      return prev.map((photo, i) => {
+        if (i === index) return { ...photo, zone: next };
+        if (next === "front" && photo.zone === "front") return { ...photo, zone: null };
+        return photo;
+      });
+    });
   }
 
   function adjustScore(key, delta) {
@@ -8664,6 +8692,7 @@ function LawnAssessmentCompletionBlock({
           photos: photos.map((photo) => ({
             data: photo.data.split(",")[1],
             mimeType: photo.mimeType || "image/jpeg",
+            ...(photo.zone ? { zone: photo.zone } : {}),
           })),
           // Extra context for the vision model (see buildVisionPrompt server-side).
           turfHeightIn: gaugeHeightIn,
@@ -8757,6 +8786,7 @@ function LawnAssessmentCompletionBlock({
       <input
         ref={fileRef}
         type="file"
+        aria-label="Add turf photos"
         accept="image/*"
         multiple
         onChange={addPhotos}
@@ -8820,12 +8850,13 @@ function LawnAssessmentCompletionBlock({
           {photos.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {photos.map((photo, index) => (
-                <div key={`${photo.name}-${index}`} style={{ position: "relative", width: 78, height: 78 }}>
+                <div key={`${photo.name}-${index}`} style={{ position: "relative", width: 96 }}>
                   <img
                     src={photo.preview}
                     alt=""
                     style={{
-                      width: 78,
+                      display: "block",
+                      width: 96,
                       height: 78,
                       objectFit: "cover",
                       borderRadius: 8,
@@ -8852,6 +8883,31 @@ function LawnAssessmentCompletionBlock({
                   >
                     x
                   </button>
+                  {/* Optional slot label — all optional, no count requirement.
+                      Only one photo may hold "front" at a time (setPhotoZone). */}
+                  <select
+                    value={photo.zone || ""}
+                    disabled={disabled}
+                    onChange={(e) => setPhotoZone(index, e.target.value || null)}
+                    aria-label={`Slot for photo ${index + 1}`}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      marginTop: 4,
+                      height: 30,
+                      borderRadius: 6,
+                      border: `1px solid ${D.border}`,
+                      background: D.white,
+                      color: D.heading,
+                      fontSize: 11,
+                      padding: "0 2px",
+                    }}
+                  >
+                    <option value="">No slot</option>
+                    {LAWN_PHOTO_ZONES.map((zone) => (
+                      <option key={zone.value} value={zone.value}>{zone.label}</option>
+                    ))}
+                  </select>
                 </div>
               ))}
             </div>
