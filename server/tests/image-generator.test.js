@@ -107,6 +107,17 @@ describe('buildPrompt', () => {
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).toMatch(/Subject: k\./);
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).not.toMatch(/Framing:/);
   });
+  test('every scene mode pins the real Waves uniform (owner directive 2026-09-23); infographics skip it', () => {
+    const uniform = /red work shirt or polo, a light-blue baseball cap, and dark navy or black work pants/;
+    expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(uniform);
+    expect(buildPrompt({ keyword: 'k', topic: 'lead', mode: 'blog-body', shot: 'action' })).toMatch(uniform);
+    expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(uniform);
+    expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/never a blue shirt, never khaki or tan pants/);
+    const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' } });
+    expect(info).not.toMatch(uniform);
+    expect(info).toMatch(/plain light background/);
+  });
+
   test('blog-body framing rotates by shot and names the hero subject it must differ from (variation, not three of the same picture)', () => {
     const closeUp = buildPrompt({ keyword: 'Reading the pellets', topic: 'lead', mode: 'blog-body', shot: 'close-up', avoid: 'drywood termite frass' });
     const action = buildPrompt({ keyword: 'Reading the pellets', topic: 'lead', mode: 'blog-body', shot: 'action', avoid: 'drywood termite frass' });

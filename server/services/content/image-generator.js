@@ -282,9 +282,17 @@ function retryStyleFor({ slug, mode = 'blog-hero', index = 0, captions = [] } = 
 // depict" lines (a brief's rules — e.g. no repair scenes on a post that says
 // Waves does not repair irrigation; no competitor vehicles on a comparison).
 const STANDARD_GUARDS = [
-  'no company logos, brand names, or brand marks of any kind — equipment, vehicles and uniforms are generic and unbranded',
+  'no company logos, brand names, or brand marks of any kind — equipment, vehicles and uniforms carry no logo or lettering (uniform COLORS follow the Waves uniform line above)',
   'no invented control-panel labels, dials with fake words, or gibberish lettering',
 ];
+// Owner directive 2026-09-23 (Adam, after the Bradenton WDO hero showed a tech in
+// a blue long-sleeve and khakis): any Waves technician in a generated image wears
+// the REAL uniform. Every scene mode carries the line — a hero, body slot or social
+// tile can all put a person in frame — only the plain-background infographic
+// skips it. The logo itself stays OFF the shirt/cap: generators render marks as
+// gibberish and the post-generation text/logo screen would reject the image.
+const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red work shirt or polo, a light-blue baseball cap, and dark navy or black work pants — never a blue shirt, never khaki or tan pants; shirt and cap are plain, with no readable logo or lettering.';
+
 function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [] }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
@@ -329,7 +337,8 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
     : '';
-  return [base, focus, local, framing, composition, styleLine, textRule, guards, distinct].filter(Boolean).join(' ');
+  const uniform = isInfographic ? '' : WAVES_UNIFORM_LINE;
+  return [base, focus, local, framing, uniform, composition, styleLine, textRule, guards, distinct].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
