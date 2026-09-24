@@ -7,7 +7,7 @@ jest.mock('../services/lead-attribution', () => ({ ...jest.requireActual('../ser
 const db = require('../models/db');
 const knex = require('knex')({ client: 'pg' });
 const router = require('../routes/admin-leads');
-const { logFirstResponse } = require('../services/lead-attribution');
+const { logFirstResponse, settleWonFunnelRow } = require('../services/lead-attribution');
 const queries = [];
 let lead, activities, failActivity, lockDeletes;
 // Compile real PostgreSQL queries; replace execution with a synthetic runner.
@@ -70,10 +70,12 @@ test.each([['01:30', '2027-03-14T06:30:00.000Z'], ['03:30', '2027-03-14T07:30:00
   expect(lead.next_follow_up_at.toISOString()).toBe(expected);
 });
 test('manual win preserves first win and response, records operator and before/after', async () => {
+  lead.customer_id = 'customer-1';
   const { data, error } = await request('put', '/:id', { status: 'won' });
   expect(error).toBeUndefined();
   expect(data.lead).toMatchObject({ status: 'won', is_qualified: true, response_time_minutes: 7 });
   expect(data.lead.converted_at).toBeInstanceOf(Date);
+  expect(settleWonFunnelRow).toHaveBeenCalledWith('lead-1', 'customer-1');
   expect(activities[0]).toMatchObject({ activity_type: 'status_change', performed_by: 'Test Admin' });
   expect(JSON.parse(activities[0].metadata)).toMatchObject({ previous_status: 'new', status: 'won' });
   const firstWin = lead.converted_at;
