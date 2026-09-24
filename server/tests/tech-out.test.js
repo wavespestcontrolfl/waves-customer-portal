@@ -100,14 +100,17 @@ jest.mock('../models/db', () => {
         const dateFilter = wantsPayload
           ? c._whereRaws.find((w) => /payload->>'date'/.test(w.sql))?.bindings?.[0]
           : undefined;
+        // resolved_at is filtered only when the caller asked for it
+        // (whereNull) — the sweep reads resolved rows too, to honor a
+        // human's dismissal for the same absence.
         const rows = state.alerts.filter((a) => (
           a.type === c._cond.type
           && a.tech_id === c._cond.tech_id
-          && !a.resolved_at
+          && (c.whereNull.mock.calls.length === 0 || !a.resolved_at)
           && (dateFilter === undefined || (a.payload && a.payload.date === dateFilter))
         ));
         const shaped = wantsPayload
-          ? rows.map((a) => ({ job_id: a.job_id, payload: a.payload }))
+          ? rows.map((a) => ({ job_id: a.job_id, payload: a.payload, resolved_at: a.resolved_at || null }))
           : rows.map((a) => ({ id: a.id }));
         return Promise.resolve(shaped).then(res, rej);
       };
@@ -507,6 +510,66 @@ describe('sweepAbsentTechDays', () => {
 
     expect(result).toEqual({ absences: 1, parked: 0 });
     expect(createAlert).not.toHaveBeenCalled();
+  });
+
+  test('a card a dispatcher dismissed BY HAND for this absence stays dismissed: not re-parked (auditor P1)', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    // Resolved by a person: no superseded_at stamp (resolveAlert auto:false).
+    db.__state.alerts.push({
+      id: 'alert-dismissed', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'still-there', resolved_at: 'earlier',
+      payload: { date: DATE, absence_id: 'absence-1' },
+    });
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'still-there' })]));
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(createAlert).not.toHaveBeenCalled();
+  });
+
+  test('a SYSTEM auto-resolve (payload.superseded_at) does not cover — the stop is parked afresh', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    db.__state.alerts.push({
+      id: 'alert-auto', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'back-again', resolved_at: 'earlier',
+      payload: { date: DATE, absence_id: 'absence-1', superseded_at: 'earlier' },
+    });
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'back-again' })]));
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 1 });
+    expect(createAlert).toHaveBeenCalledTimes(1);
+    expect(createAlert.mock.calls[0][0].payload).toMatchObject({ absence_id: 'absence-1', late_arrival: true });
+  });
+
+  test('a manual dismissal from a PREVIOUS absence (tech back, then out again) does not cover the new absence', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-2'] = {
+      id: 'absence-2', technician_id: TECH.id, absence_date: DATE, reason: 'emergency', cleared_at: null,
+    };
+    db.__state.alerts.push({
+      id: 'alert-old-dismissed', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'stop-x', resolved_at: 'earlier',
+      payload: { date: DATE, absence_id: 'absence-1' },
+    });
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'stop-x' })]));
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 1 });
+    expect(createAlert.mock.calls[0][0].payload).toMatchObject({ absence_id: 'absence-2' });
+  });
+
+  test('markTechOut stamps payload.absence_id on every alert it parks', async () => {
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'a' })]));
+    const { absence } = await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    expect(createAlert).toHaveBeenCalledTimes(1);
+    expect(createAlert.mock.calls[0][0].payload).toMatchObject({ absence_id: absence.id, date: DATE });
   });
 
   test('a stop covered only via an open alert\'s visit_member_ids (grouped visit) is not re-parked', async () => {
