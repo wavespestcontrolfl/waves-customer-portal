@@ -267,7 +267,8 @@ async function loadPublicServicesMenu(conn = db) {
 // NEW customer may choose; null otherwise. Callers derive the lead's display
 // label from `name` so key and label can never disagree (pre-push codex P1:
 // serviceKey and serviceInterest are independently attacker-controlled).
-// Keys the menu advertised until migration 20260903000020 hid them. A visitor
+// Keys the menu advertised until migration 20260903000020 (and, for
+// lawn_care_recurring, 20260924000003 — 6x lawn retired) hid them. A visitor
 // on a cached quote page, or on the astro fallback snapshot until it is
 // refreshed, can still post one; it must keep resolving (AGENTS.md: astro
 // form posts are an external contract, breaking them is P0) — as a
@@ -282,6 +283,7 @@ const FORMERLY_PUBLIC_KEYS = new Set([
   'rodent_exclusion_only', 'rodent_trapping_exclusion', 'rodent_trapping_sanitation',
   'rodent_trapping_exclusion_sanitation', 'rodent_wire_mesh', 'rodent_bird_box', 'rodent_general_one_time',
   'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
+  'lawn_care_recurring',
 ]);
 
 async function publicSelectableService(serviceKey, conn = db) {
