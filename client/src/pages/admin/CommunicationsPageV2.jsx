@@ -820,7 +820,7 @@ const ANALYZE_PHOTOS_ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/w
 // closure) so it is unit-testable on its own and SmsTab's own body gains
 // only the one useMemo call site below, not this function's branching.
 // Shared by the general inbox (activeThread.messages) and the Customer
-// 360-embedded composer (customerMessages) — see analyzablePhotos below.
+// 360-embedded composer (customerMessages) — see AnalyzePhotosAction below.
 export function collectAnalyzablePhotos(messages, allowedMime) {
   if (!Array.isArray(messages)) return [];
   const items = [];
@@ -845,7 +845,7 @@ export function collectAnalyzablePhotos(messages, allowedMime) {
 // item, not per message, since one MMS can carry several photos.
 // `fixedCustomerId`/`fixedCustomerName` are set ONLY for the Customer 360-
 // embedded composer, where the customer is the mount's own prop, not a
-// thread-derived guess — see the general-inbox note on analyzablePhotos.
+// thread-derived guess — see the general-inbox note on AnalyzePhotosAction.
 function AnalyzePhotosDialog({ open, onClose, photos, fixedCustomerId, fixedCustomerName, onCreated, layer }) {
   const [type, setType] = useState("lawn");
   // Selections are keyed by the photo's own S3 key (globally unique), NOT
@@ -1004,6 +1004,51 @@ function AnalyzePhotosDialog({ open, onClose, photos, fixedCustomerId, fixedCust
   );
 }
 
+// Analyze photos — the toolbar affordance + its dialog, owned together so
+// SmsTab carries none of the feature's decisions: this component derives the
+// open thread's inbound MMS photos (general inbox → activeThread.messages;
+// Customer 360-embedded composer → customerMessages), renders nothing for a
+// technician (the endpoint is requireAdmin — a tech would get a 403) or a
+// photo-less thread, and otherwise renders the button and the (portaled)
+// dialog. Only the Customer 360 mount has a trustworthy fixed customer (its
+// own prop) — the general inbox's activeThread is keyed by phone, which a
+// shared/reassigned number can hold messages from more than one customer
+// under, so the dialog derives the customer per-selection there instead.
+// Customer 360's overlay is z-[1000] (CustomerOverlayPresentation), so the
+// dialog is raised to 1120 there, same as CancelPlanDialog and its siblings.
+function AnalyzePhotosAction({ active, isAdmin, activeThread, customerMessages, customer, onCreated }) {
+  const [open, setOpen] = useState(false);
+  const photos = useMemo(
+    () => collectAnalyzablePhotos(customer ? customerMessages : activeThread?.messages, ANALYZE_PHOTOS_ALLOWED_MIME),
+    [customer, customerMessages, activeThread],
+  );
+  if (!isAdmin || photos.length === 0) return null;
+  return (
+    <>
+      <Button
+        variant="secondary"
+        onClick={() => setOpen(true)}
+        title="Run a lawn or pest assessment on photos from this thread"
+        aria-label="Analyze photos"
+        className="sms-writing-tool ui-icon-action"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+      >
+        <ScanSearch size={16} strokeWidth={2.2} aria-hidden />
+      </Button>
+      <AnalyzePhotosDialog
+        open={active && open}
+        onClose={() => setOpen(false)}
+        photos={photos}
+        fixedCustomerId={customer?.id || null}
+        fixedCustomerName={customer ? getCustomerOptionName(customer) : null}
+        layer={customer ? 1120 : undefined}
+        onCreated={onCreated}
+      />
+    </>
+  );
+}
+
 // With a customer, render the same composer used by Messages, locked to that
 // profile. The caller keys it by customer id/phone to discard another person's
 // draft, attachments, and minted links when the selected record changes.
@@ -1090,9 +1135,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
-  // Analyze photos — the lawn/pest photo-assessment dialog fed from this
-  // thread's inbound MMS media (see analyzablePhotos below).
-  const [showAnalyzeDialog, setShowAnalyzeDialog] = useState(false);
   // Insert Link sheet — the searchable link library (customer links +
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
@@ -1111,44 +1153,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // Threading
   const [smsView, setSmsView] = useState("threads");
   const [activeThread, setActiveThread] = useState(null);
-  // Flat, newest-first list of every inbound MMS PHOTO in the OPEN thread —
-  // see collectAnalyzablePhotos above for the shape and MIME filtering.
-  // Sourced from activeThread.messages in the general inbox view; a
-  // customer-profile mount (Customer360) never populates activeThread, so it
-  // reads customerMessages instead — same message shape. Each entry keeps
-  // the message's own customerId — the general inbox never trusts the
-  // thread-level one (see the AnalyzePhotosDialog submit guard).
-  const analyzablePhotos = useMemo(
-    () => collectAnalyzablePhotos(customer ? customerMessages : activeThread?.messages, ANALYZE_PHOTOS_ALLOWED_MIME),
-    [customer, customerMessages, activeThread],
-  );
-  // Admin-only (the endpoint is requireAdmin) AND there is something to
-  // act on — a single boolean the button's render decides on. Memoized (its
-  // own && lives in the callback, a separate function ESLint scores on its
-  // own) so the JSX's `{canAnalyzePhotos && (...)}` is the only decision
-  // this whole feature adds directly to SmsTab's own body.
-  const canAnalyzePhotos = useMemo(
-    () => smsIsAdminRole && analyzablePhotos.length > 0,
-    [smsIsAdminRole, analyzablePhotos],
-  );
-  // Same reasoning for AnalyzePhotosDialog's props — computed once here
-  // (inside this memo's own callback) instead of as inline ternaries in
-  // the JSX below.
-  const analyzeDialogProps = useMemo(() => ({
-    open: active && showAnalyzeDialog,
-    // Only the Customer 360-embedded mount has a trustworthy fixed customer
-    // (its own prop) — the general inbox's activeThread is keyed by phone,
-    // which a shared/reassigned number can hold messages from more than one
-    // customer under, so it is never passed here (the dialog derives it
-    // per-selection instead).
-    fixedCustomerId: customer?.id || null,
-    fixedCustomerName: customer ? getCustomerOptionName(customer) : null,
-    // This composer opens inside Customer 360's own z-[1000] overlay
-    // (CustomerOverlayPresentation) — Dialog's default layer (120) would
-    // paint beneath it, same reason CancelPlanDialog etc. raise theirs to
-    // 1120 from that surface.
-    layer: customer ? 1120 : undefined,
-  }), [active, showAnalyzeDialog, customer]);
   const [smsSearch, setSmsSearch] = useState("");
   // Blocked senders (blocked_numbers). /log does not exclude them, so a
   // just-blocked thread would otherwise be rebuilt on reload and keep
@@ -3147,26 +3151,16 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 <Link2 size={16} strokeWidth={2.2} aria-hidden />
               )}
             </Button>{" "}
-            {/* Analyze photos — run the inbound MMS photos in this thread
-                through the lawn/pest photo-assessment pipeline. Admin-only
-                (the endpoint is requireAdmin, admin-photo-assessments.js —
-                a technician gets a 403) AND only when there is a photo to
-                act on: canAnalyzePhotos folds both into one render decision,
-                so a technician or a photo-less thread gets no affordance at
-                all rather than a disabled one. */}
-            {canAnalyzePhotos && (
-              <Button
-                variant="secondary"
-                onClick={() => setShowAnalyzeDialog(true)}
-                title="Run a lawn or pest assessment on photos from this thread"
-                aria-label="Analyze photos"
-                className="sms-writing-tool ui-icon-action"
-                aria-haspopup="dialog"
-                aria-expanded={showAnalyzeDialog}
-              >
-                <ScanSearch size={16} strokeWidth={2.2} aria-hidden />
-              </Button>
-            )}{" "}
+            {/* Analyze photos — button + dialog live in AnalyzePhotosAction,
+                which renders nothing for a technician or a photo-less thread. */}
+            <AnalyzePhotosAction
+              active={active}
+              isAdmin={smsIsAdminRole}
+              activeThread={activeThread}
+              customerMessages={customerMessages}
+              customer={customer}
+              onCreated={(type, id) => navigate(`/admin/lawn-assessments?open=${type}:${id}`)}
+            />{" "}
             {/* Plus — attachment menu */}
             <div className="relative">
               {" "}
@@ -3399,12 +3393,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             customer: "Personal links — each one is looked up for this recipient",
             website: "Every wavespestcontrol.com page, synced nightly from the sitemap",
           }}
-        />
-        <AnalyzePhotosDialog
-          {...analyzeDialogProps}
-          onClose={() => setShowAnalyzeDialog(false)}
-          photos={analyzablePhotos}
-          onCreated={(type, id) => navigate(`/admin/lawn-assessments?open=${type}:${id}`)}
         />
         {sendResult && (
           <div

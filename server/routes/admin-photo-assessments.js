@@ -803,10 +803,25 @@ async function lookupAssociation(field, id) {
   if (!UUID_RE.test(String(id))) return { error: `invalid ${field}`, status: 400 };
   const row = await db(spec.table).where({ id }).first();
   if (!row) return { error: `${spec.notFoundLabel} not found`, status: 404 };
-  return { id: row.id };
+  return { id: row.id, row };
 }
 
-// Resolves lead_id/customer_id into { leadId, customerId }, or an
+// The linked customer's own contact fields, shaped like a contact_snapshot,
+// so an assessment created without an explicit contact (Customer 360 or an
+// inbound-thread pick) still lists a name/email/phone instead of "No
+// contact yet" while its Linked column says Customer.
+function customerContactSnapshot(customer) {
+  if (!customer) return null;
+  return {
+    first_name: cleanString(customer.first_name, 80),
+    last_name: cleanString(customer.last_name, 80),
+    email: cleanString(customer.email, 254),
+    phone: cleanString(customer.phone, 20),
+  };
+}
+
+// Resolves lead_id/customer_id into { leadId, customerId, customerContact }
+// (customerContact = the linked customer's contact fields, or null), or an
 // { error, status }. customerId prefers an explicit body value, otherwise
 // defaults from the inbound message thread (messageCustomerId, from
 // resolveRequestPhotos) — same existence check either way, so a
@@ -818,6 +833,7 @@ async function lookupAssociation(field, id) {
 async function resolveAssociations(body, messageCustomerId) {
   let leadId = null;
   let customerId = null;
+  let customerContact = null;
 
   if (body.lead_id) {
     const lead = await lookupAssociation('lead_id', body.lead_id);
@@ -833,19 +849,24 @@ async function resolveAssociations(body, messageCustomerId) {
     const customer = await lookupAssociation('customer_id', requestedCustomerId);
     if (customer.error) return customer;
     customerId = customer.id;
+    customerContact = customerContactSnapshot(customer.row);
   }
 
-  return { leadId, customerId };
+  return { leadId, customerId, customerContact };
 }
 
-function buildSnapshots(body) {
+// An explicit body.contact wins; otherwise the linked customer's own
+// contact fields (customerContact, from resolveAssociations) stand in so
+// the row is never "No contact yet" while linked to a customer.
+function buildSnapshots(body, customerContact = null) {
   const contact = body.contact && typeof body.contact === 'object' && !Array.isArray(body.contact) ? body.contact : {};
-  const contactSnapshot = {
+  const explicitContact = {
     first_name: cleanString(contact.first_name, 80),
     last_name: cleanString(contact.last_name, 80),
     email: cleanString(contact.email, 254),
     phone: cleanString(contact.phone, 20),
   };
+  const contactSnapshot = Object.values(explicitContact).some(Boolean) ? explicitContact : (customerContact || {});
   const address = body.address && typeof body.address === 'object' && !Array.isArray(body.address) ? body.address : {};
   const addressSnapshot = {
     line1: cleanString(address.line1),
@@ -876,9 +897,9 @@ router.post('/:type', async (req, res, next) => {
 
     const associations = await resolveAssociations(body, messageCustomerId);
     if (associations.error) return res.status(associations.status || 400).json({ error: associations.error });
-    const { leadId, customerId } = associations;
+    const { leadId, customerId, customerContact } = associations;
 
-    const { contactSnapshot, addressSnapshot, prospectNote } = buildSnapshots(body);
+    const { contactSnapshot, addressSnapshot, prospectNote } = buildSnapshots(body, customerContact);
 
     const analysis = req.params.type === 'lawn'
       ? await runLawnAnalysis(photos, prospectNote)
@@ -919,4 +940,5 @@ module.exports._test = {
   resolveRequestPhotos,
   resolveAssociations,
   lookupAssociation,
+  buildSnapshots,
 };

@@ -939,11 +939,11 @@ describe('resolveRequestPhotos / resolveAssociations / lookupAssociation (unit)'
 
   test('lookupAssociation: a found row resolves its id', async () => {
     mockCustomerRow = { id: CUSTOMER_ID };
-    expect(await lookupAssociation('customer_id', CUSTOMER_ID)).toEqual({ id: CUSTOMER_ID });
+    expect(await lookupAssociation('customer_id', CUSTOMER_ID)).toEqual({ id: CUSTOMER_ID, row: { id: CUSTOMER_ID } });
   });
 
   test('resolveAssociations: neither lead_id, customer_id, nor a message customer resolves both null', async () => {
-    expect(await resolveAssociations({}, null)).toEqual({ leadId: null, customerId: null });
+    expect(await resolveAssociations({}, null)).toEqual({ leadId: null, customerId: null, customerContact: null });
   });
 
   test('resolveAssociations: an explicit customer_id that CONTRADICTS the message thread customer is refused', async () => {
@@ -953,8 +953,21 @@ describe('resolveRequestPhotos / resolveAssociations / lookupAssociation (unit)'
   });
 
   test('resolveAssociations: customer_id defaults from the message thread and is validated', async () => {
-    mockCustomerRow = { id: CUSTOMER_ID };
-    expect(await resolveAssociations({}, CUSTOMER_ID)).toEqual({ leadId: null, customerId: CUSTOMER_ID });
+    mockCustomerRow = { id: CUSTOMER_ID, first_name: 'Dana', last_name: 'Reed', email: 'dana@example.com', phone: '+12395550100' };
+    expect(await resolveAssociations({}, CUSTOMER_ID)).toEqual({
+      leadId: null,
+      customerId: CUSTOMER_ID,
+      customerContact: { first_name: 'Dana', last_name: 'Reed', email: 'dana@example.com', phone: '+12395550100' },
+    });
+  });
+
+  test('buildSnapshots: falls back to the linked customer contact when the body has none, explicit contact wins', () => {
+    const { buildSnapshots } = adminRouter._test;
+    const customerContact = { first_name: 'Dana', last_name: 'Reed', email: 'dana@example.com', phone: '+12395550100' };
+    expect(buildSnapshots({}, customerContact).contactSnapshot).toEqual(customerContact);
+    expect(buildSnapshots({}, null).contactSnapshot).toBeNull();
+    expect(buildSnapshots({ contact: { email: 'other@example.com' } }, customerContact).contactSnapshot)
+      .toEqual({ first_name: null, last_name: null, email: 'other@example.com', phone: null });
   });
 
   test('resolveAssociations: an explicit lead_id and matching customer_id both resolve', async () => {
@@ -962,6 +975,10 @@ describe('resolveRequestPhotos / resolveAssociations / lookupAssociation (unit)'
     mockLeadRow = { id: LEAD_ID };
     mockCustomerRow = { id: CUSTOMER_ID };
     expect(await resolveAssociations({ lead_id: LEAD_ID, customer_id: CUSTOMER_ID }, CUSTOMER_ID))
-      .toEqual({ leadId: LEAD_ID, customerId: CUSTOMER_ID });
+      .toEqual({
+        leadId: LEAD_ID,
+        customerId: CUSTOMER_ID,
+        customerContact: { first_name: null, last_name: null, email: null, phone: null },
+      });
   });
 });
