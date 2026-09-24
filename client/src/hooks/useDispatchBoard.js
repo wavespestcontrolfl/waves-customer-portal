@@ -153,14 +153,139 @@ export function useDispatchBoard() {
     };
   }, []);
 
+  // ---- socket-update appliers (shared by the live handlers and the
+  // post-refresh replay below) ----
+  const applyTechStatus = useCallback((payload) => {
+    if (!payload || !payload.tech_id) return;
+    // Patch in place via a fresh Map (React notices via reference
+    // change). The tech object itself is replaced so React.memo on
+    // the matching <TechCard> sees a new prop reference.
+    setTechsMap((prev) => {
+      const existing = prev.get(payload.tech_id);
+      if (!existing) {
+        if (!hasFreshDispatchLocation(payload)) return prev;
+        // First broadcast for a tech we didn't see at hydration
+        // (e.g. tech started a shift after page load). Add a stub
+        // row; the next /board fetch on remount will fill in name /
+        // avatar / today_total.
+        const next = new Map(prev);
+        next.set(payload.tech_id, {
+          id: payload.tech_id,
+          name: '(unknown)',
+          avatar_url: null,
+          role: 'technician',
+          status: payload.status,
+          lat: payload.lat == null ? null : Number(payload.lat),
+          lng: payload.lng == null ? null : Number(payload.lng),
+          current_job_id: payload.current_job_id || null,
+          eta_minutes: payload.eta_minutes ?? null,
+          updated_at: payload.updated_at,
+          location_updated_at: payload.location_updated_at || null,
+          today_total: 0,
+          today_completed: 0,
+        });
+        return next;
+      }
+      const next = new Map(prev);
+      next.set(payload.tech_id, {
+        ...existing,
+        status: payload.status,
+        lat: payload.lat == null ? null : Number(payload.lat),
+        lng: payload.lng == null ? null : Number(payload.lng),
+        current_job_id: payload.current_job_id || null,
+        eta_minutes: payload.eta_minutes ?? null,
+        updated_at: payload.updated_at,
+        location_updated_at: payload.location_updated_at || existing.location_updated_at || null,
+      });
+      return next;
+    });
+  }, []);
+
+  const applyJobUpdate = useCallback((payload) => {
+    if (!payload || !payload.job_id) return;
+    if (BOARD_HIDDEN_STATUSES.has(payload.status) || payload.board_visible === false) {
+      setJobs((prev) => prev.filter((j) => j.id !== payload.job_id));
+      return;
+    }
+    setJobs((prev) => {
+      const idx = prev.findIndex((j) => j.id === payload.job_id);
+      if (idx === -1) {
+        const created = boardJobFromPayload(payload);
+        return created ? [...prev, created] : prev;
+      }
+      const next = prev.slice();
+      // Property-presence merge for nullable fields. `??` would drop
+      // an explicit `null` from the broadcast (e.g., a window
+      // intentionally cleared to "anytime") and keep the stale
+      // value — the in-check distinguishes "field absent" from
+      // "field present and null." Codex P2 on PR #322. The
+      // broadcast emitters in services/job-status.js and the
+      // assign route always include these keys, so the in-check is
+      // mostly a forward-compat guard, but it's the correct
+      // semantic.
+      function pick(field) {
+        return field in payload ? payload[field] : prev[idx][field];
+      }
+      next[idx] = {
+        ...prev[idx],
+        // tech_id (broadcast) → technician_id (board row shape).
+        // Always present in the broadcast; coerce undefined-as-null
+        // for safety even though it shouldn't happen.
+        technician_id: 'tech_id' in payload ? (payload.tech_id || null) : prev[idx].technician_id,
+        status: pick('status'),
+        service_type: pick('service_type'),
+        scheduled_date: pick('scheduled_date'),
+        window_start: pick('window_start'),
+        window_end: pick('window_end'),
+        customer_name: pick('customer_name'),
+        address: pick('address'),
+        lat: pick('lat'),
+        lng: pick('lng'),
+        customer_id: pick('customer_id'),
+      };
+      return next;
+    });
+  }, []);
+
   // ---- on-demand tech refresh (see header comment) ----
+  //
+  // Two races the pre-push auditor named on #4678, both real once a
+  // refresh can be triggered by a broadcast from another tab:
+  // (1) overlapping refreshes (mark-out, then "tech is back") can settle
+  //     in reverse order, so an older response would re-mark the tech
+  //     Out after the clear — each refresh takes a sequence number and
+  //     only the LATEST one started may apply its response;
+  // (2) a refresh replaces techs/jobs wholesale, so a tech_status or
+  //     job_update that arrived while the request was pending (and may
+  //     post-date the server's read) would be clobbered — those payloads
+  //     are buffered while any refresh is in flight and replayed after
+  //     the latest response applies. They are ALSO applied live, so the
+  //     board never lags; the replay is idempotent (merge by id).
+  const refreshSeqRef = useRef(0);
+  const refreshInFlightRef = useRef(0);
+  const pendingSocketRef = useRef([]);
+
+  const replayPendingSocket = useCallback(() => {
+    const pending = pendingSocketRef.current;
+    pendingSocketRef.current = [];
+    for (const { type, payload } of pending) {
+      if (type === 'tech_status') applyTechStatus(payload);
+      else if (type === 'job_update') applyJobUpdate(payload);
+    }
+  }, [applyTechStatus, applyJobUpdate]);
+
   const refreshTechs = useCallback(async () => {
+    const seq = ++refreshSeqRef.current;
+    refreshInFlightRef.current += 1;
     try {
       const res = await fetch(`${API_BASE}/admin/dispatch/board`, {
         headers: adminAuthHeaders(),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      // A newer refresh started while this one was pending: its response
+      // is the fresher server reading, so this one applies nothing.
+      if (seq !== refreshSeqRef.current) return;
       setTechsMap((prev) => {
         const next = new Map(prev);
         for (const t of data.techs || []) next.set(t.id, t);
@@ -169,12 +294,18 @@ export function useDispatchBoard() {
       setJobs(data.jobs || []);
     } catch {
       // Best-effort: this follows a mutation that already succeeded
-      // (mark out / tech is back). `error` is reserved for the initial
-      // board load failing outright, so a failed refresh here just
-      // leaves the roster as it was — the next broadcast or manual
-      // reopen catches it up.
+      // (mark out / tech is back) or a broadcast. `error` is reserved
+      // for the initial board load failing outright, so a failed
+      // refresh here just leaves the roster as it was — the next
+      // broadcast or manual reopen catches it up.
+    } finally {
+      refreshInFlightRef.current -= 1;
+      // Only the latest refresh drains the buffer (success or failure):
+      // an older one returning last must not replay over a newer read,
+      // and the buffer must not outlive the request it was held for.
+      if (seq === refreshSeqRef.current) replayPendingSocket();
     }
-  }, []);
+  }, [replayPendingSocket]);
 
   // ---- socket subscription ----
   useEffect(() => {
@@ -197,98 +328,18 @@ export function useDispatchBoard() {
           reconnection: true,
         });
 
+    // Buffer while a refresh is pending (see refreshTechs) AND apply
+    // live — the replay after the refresh re-applies the same payload.
     function handleTechStatus(payload) {
-      if (!payload || !payload.tech_id) return;
-      // Patch in place via a fresh Map (React notices via reference
-      // change). The tech object itself is replaced so React.memo on
-      // the matching <TechCard> sees a new prop reference.
-      setTechsMap((prev) => {
-        const existing = prev.get(payload.tech_id);
-        if (!existing) {
-          if (!hasFreshDispatchLocation(payload)) return prev;
-          // First broadcast for a tech we didn't see at hydration
-          // (e.g. tech started a shift after page load). Add a stub
-          // row; the next /board fetch on remount will fill in name /
-          // avatar / today_total.
-          const next = new Map(prev);
-          next.set(payload.tech_id, {
-            id: payload.tech_id,
-            name: '(unknown)',
-            avatar_url: null,
-            role: 'technician',
-            status: payload.status,
-            lat: payload.lat == null ? null : Number(payload.lat),
-            lng: payload.lng == null ? null : Number(payload.lng),
-            current_job_id: payload.current_job_id || null,
-            eta_minutes: payload.eta_minutes ?? null,
-            updated_at: payload.updated_at,
-            location_updated_at: payload.location_updated_at || null,
-            today_total: 0,
-            today_completed: 0,
-          });
-          return next;
-        }
-        const next = new Map(prev);
-        next.set(payload.tech_id, {
-          ...existing,
-          status: payload.status,
-          lat: payload.lat == null ? null : Number(payload.lat),
-          lng: payload.lng == null ? null : Number(payload.lng),
-          current_job_id: payload.current_job_id || null,
-          eta_minutes: payload.eta_minutes ?? null,
-          updated_at: payload.updated_at,
-          location_updated_at: payload.location_updated_at || existing.location_updated_at || null,
-        });
-        return next;
-      });
+      if (refreshInFlightRef.current > 0) pendingSocketRef.current.push({ type: 'tech_status', payload });
+      applyTechStatus(payload);
     }
 
     socket.on('dispatch:tech_status', handleTechStatus);
 
     function handleJobUpdate(payload) {
-      if (!payload || !payload.job_id) return;
-      if (BOARD_HIDDEN_STATUSES.has(payload.status) || payload.board_visible === false) {
-        setJobs((prev) => prev.filter((j) => j.id !== payload.job_id));
-        return;
-      }
-      setJobs((prev) => {
-        const idx = prev.findIndex((j) => j.id === payload.job_id);
-        if (idx === -1) {
-          const created = boardJobFromPayload(payload);
-          return created ? [...prev, created] : prev;
-        }
-        const next = prev.slice();
-        // Property-presence merge for nullable fields. `??` would drop
-        // an explicit `null` from the broadcast (e.g., a window
-        // intentionally cleared to "anytime") and keep the stale
-        // value — the in-check distinguishes "field absent" from
-        // "field present and null." Codex P2 on PR #322. The
-        // broadcast emitters in services/job-status.js and the
-        // assign route always include these keys, so the in-check is
-        // mostly a forward-compat guard, but it's the correct
-        // semantic.
-        function pick(field) {
-          return field in payload ? payload[field] : prev[idx][field];
-        }
-        next[idx] = {
-          ...prev[idx],
-          // tech_id (broadcast) → technician_id (board row shape).
-          // Always present in the broadcast; coerce undefined-as-null
-          // for safety even though it shouldn't happen.
-          technician_id: 'tech_id' in payload ? (payload.tech_id || null) : prev[idx].technician_id,
-          status: pick('status'),
-          service_type: pick('service_type'),
-          scheduled_date: pick('scheduled_date'),
-          window_start: pick('window_start'),
-          window_end: pick('window_end'),
-          customer_name: pick('customer_name'),
-          address: pick('address'),
-          lat: pick('lat'),
-          lng: pick('lng'),
-          customer_id: pick('customer_id'),
-        };
-        return next;
-      });
+      if (refreshInFlightRef.current > 0) pendingSocketRef.current.push({ type: 'job_update', payload });
+      applyJobUpdate(payload);
     }
 
     socket.on('dispatch:job_update', handleJobUpdate);
@@ -313,7 +364,7 @@ export function useDispatchBoard() {
       socket.off('dispatch:tech_absence', handleTechAbsence);
       socket.disconnect();
     };
-  }, [refreshTechs]);
+  }, [refreshTechs, applyTechStatus, applyJobUpdate]);
 
   // Derived: stable array snapshot for consumers. Sorted by name to
   // match the API endpoint's ORDER BY so the roster doesn't reshuffle
