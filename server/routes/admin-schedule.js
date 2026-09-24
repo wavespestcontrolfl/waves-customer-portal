@@ -10300,7 +10300,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const basePrice = Number(estimatedPrice);
         const existingPrice = await db('scheduled_services')
           .where({ id: req.params.id })
-          .first('estimated_price', 'discount_type', 'discount_amount',
+          .first('estimated_price', 'primary_line_price', 'discount_type', 'discount_amount',
             ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []))
@@ -10314,9 +10314,35 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const legacyPrimaryCategory = updates.service_category_snapshot !== undefined
           ? (updates.service_category_snapshot || null)
           : (existingPrice?.service_category_snapshot || null);
-        const existingEstimatedPrice = Number(existingPrice?.estimated_price);
-        const priceChanged = !Number.isFinite(existingEstimatedPrice)
-          || Math.abs(existingEstimatedPrice - basePrice) >= 0.005;
+        // Existing add-on rows, loaded up front: the no-op comparison below
+        // needs them to re-derive the stored row's own GROSS the same way
+        // `deriveLegacyPrimarySubmission` derives it (shared with the
+        // client's Price-field seed), and the rest of this branch already
+        // needed them for `addonBaseTotal`/`legacyLines`.
+        const addonRows = cols.primary_line_price
+          ? await db('scheduled_service_addons')
+              .where({ scheduled_service_id: req.params.id })
+              .catch(() => [])
+          : [];
+        // ADMIN-BUG-R01 (P0) fix: the posted `estimatedPrice` is the Edit
+        // modal's Price field, which for a no-add-on row is seeded via this
+        // SAME shared function against the DTO — i.e. it is the row's GROSS
+        // (`primaryLinePrice`), never the stored NET `estimated_price`,
+        // whenever add-ons are "known" (SchedulePage.jsx:1708-1719). Diffing
+        // that posted gross against the stored net treated every discounted,
+        // add-on-less save as a price change and silently stripped the
+        // discount. Re-derive the stored row's own gross the identical way
+        // and diff against THAT, so an echoed, untouched Price field is a
+        // true no-op.
+        const existingGrossPrice = deriveLegacyPrimarySubmission({
+          primaryLinePrice: existingPrice?.primary_line_price,
+          estimatedPrice: existingPrice?.estimated_price,
+          addons: addonRows.map((addon) => ({
+            basePrice: addon.base_price != null ? addon.base_price : addon.estimated_price,
+          })),
+        });
+        const priceChanged = !Number.isFinite(existingGrossPrice)
+          || Math.abs(existingGrossPrice - basePrice) >= 0.005;
         const discountTypeChanged = discountType !== undefined
           && (discountType || null) !== (existingPrice?.discount_type || null);
         const nextDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
@@ -10331,18 +10357,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // filters persist (Codex #3531 r6 P1).
         const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
         if (!shouldRebaseStoredDiscounts) {
-          if (cols.estimated_price) updates.estimated_price = basePrice;
+          // Genuinely unchanged: leave the stored economics — the NET
+          // `estimated_price` AND the discount stamp — exactly as they are.
+          // Writing the posted GROSS into `estimated_price` here (as this
+          // branch once did unconditionally) would overwrite a discounted
+          // row's net price with its gross on every no-op save.
           throw new Error('noop-price-save');
         }
         let finalPrice = basePrice;
         if (discountType && discountAmount != null && discountAmount !== '') {
           finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
         }
-        const addonRows = cols.primary_line_price
-          ? await db('scheduled_service_addons')
-              .where({ scheduled_service_id: req.params.id })
-              .catch(() => [])
-          : [];
         const addonBaseTotal = addonRows.reduce((sum, addon) => {
           const value = Number(addon.base_price != null ? addon.base_price : addon.estimated_price);
           return Number.isFinite(value) && value > 0 ? sum + value : sum;
