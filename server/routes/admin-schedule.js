@@ -15143,6 +15143,8 @@ const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-gua
 // dispatch completion mint shares it — see that module's header). Re-imported
 // here for the local callers and the _test export.
 const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
+const { activityScaleNames } = require('../services/pest-pressure/label');
+const { loadActiveConfig: loadPestPressureActiveConfig } = require('../services/pest-pressure/store');
 
 // Mint-or-reuse the invoice for a scheduled visit at the visit's standard price
 // (no operator extras — that's the Charge-now sheet's job, which is why that
@@ -20586,8 +20588,12 @@ router.post('/generate-report', async (req, res) => {
       });
     }
 
-    // Same scale as the report's Pest Pressure labels (owner ruling 2026-09-24).
-    const PEST_ACTIVITY_LABELS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4: 'elevated', 5: 'high' };
+    // Same names as the report gauge: the ACTIVE Pest Pressure labels
+    // (owner ruling 2026-09-24), default six-band scale as fallback.
+    const pestActivityScale = activityScaleNames(
+      (await loadPestPressureActiveConfig(db).catch(() => null))?.labels,
+    );
+    const PEST_ACTIVITY_LABELS = Object.fromEntries(pestActivityScale.map((name, n) => [n, name]));
 
     const primaryModel = MODELS.TEXT_POLICIES.report.primary.model;
     const backupModel = MODELS.TEXT_POLICIES.report.fallback.model;
@@ -20638,7 +20644,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 9. **Active ingredients come only from Products applied.** Never infer an active ingredient or product from an action label or area (e.g. "Exterior perimeter band" does not imply bifenthrin). If Products applied is empty, use functional descriptions only.
 
-10. **Pest activity rating** is 0–5 (0 = none … 5 = high). Reflect it honestly in WHAT WE FOUND when present; a 0 means no visible activity noted — do not imply a problem. Never invent a rating that wasn't provided. **Describe the rating in words only ("light activity", "no visible activity") — never quote the number ("2/5").** The customer report already shows the rating on its pest-pressure gauge, and a second number in the copy reads as repetition.
+10. **Pest activity rating** is 0–5 (0 = ${pestActivityScale[0]} … 5 = ${pestActivityScale[5]}). Reflect it honestly in WHAT WE FOUND when present; a 0 means no visible activity noted — do not imply a problem. Never invent a rating that wasn't provided. **Describe the rating in words only ("light activity", "no visible activity") — never quote the number ("2/5").** The customer report already shows the rating on its pest-pressure gauge, and a second number in the copy reads as repetition.
 
 11. **No invented tenure or timeframes.** Never state how long someone has been a customer, how many visits they've had, or "X years/seasons" unless that number is explicitly provided. Do not default to stock recovery windows like "7–14 days" or "10–14 days" — give a timeframe only when a specific product or the grounding context justifies one, and make it fit the situation.
 

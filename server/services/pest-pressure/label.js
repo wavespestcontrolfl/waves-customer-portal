@@ -31,4 +31,17 @@ function resolveLabel(score, labels) {
   return { key: row.key, name: row.name, description: row.description };
 }
 
-module.exports = { resolveLabel };
+// Lower-case label names for the integer ratings 0..5 against a label set
+// (active config), e.g. ['none', 'very low', …, 'high'] — what AI copy
+// prompts call each rating so they match the gauge. Missing labels fall back
+// to the caller-supplied default names.
+const DEFAULT_ACTIVITY_SCALE = Object.freeze(['none', 'very low', 'low', 'moderate', 'elevated', 'high']);
+
+function activityScaleNames(labels) {
+  return [0, 1, 2, 3, 4, 5].map((n) => {
+    const name = resolveLabel(n, labels)?.name;
+    return typeof name === 'string' && name.trim() ? name.trim().toLowerCase() : DEFAULT_ACTIVITY_SCALE[n];
+  });
+}
+
+module.exports = { resolveLabel, activityScaleNames, DEFAULT_ACTIVITY_SCALE };
