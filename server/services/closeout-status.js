@@ -1251,4 +1251,8 @@ module.exports = {
   summarizeCloseout,
   FACT_STATES,
   FACT_NAMES,
+  // The canonical "was this invoice actually shown to the customer" status
+  // set — other modules (project-completion.js's closeout billing guard)
+  // import this instead of maintaining a second, driftable copy.
+  INVOICE_DELIVERED_STATUSES,
 };

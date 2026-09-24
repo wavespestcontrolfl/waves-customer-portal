@@ -1643,6 +1643,78 @@ function isEmptyValue(v) {
     || normName(v) === '';
 }
 
+// Serializes the merge against the 'recurring-series-create' advisory locks
+// the three series creators (estimate-converter, booking.js self-book,
+// admin POST /admin/schedule) take via checkActiveSeriesLocked/
+// acquireSeriesCreateLocks before they insert a new parent (GitHub Codex
+// round-4 P1 #4684). Without this, a creator for the winner's identity can
+// pass its own duplicate-series guard while the loser still owns the
+// matching series, and insert a second live series right after the merge
+// moves the loser's series onto the winner — landing two live parents in
+// the same family.
+//
+// Called by executeMerge AFTER its `customers` row lock (pre-push audit on
+// 4c3ff61175, P1) — NOT before it. Every one of the three creators takes
+// its OWN customer row lock FIRST and only waits on this advisory lock
+// SECOND (admin-schedule.js ~7186/7202, booking.js ~2933, both commented
+// "customer → series-advisory order"), so this merge has to match that
+// same order: row lock, then advisory lock. Taking the advisory lock
+// before the row lock (the original round-4 shape) is a classic ABBA — a
+// concurrent creator holding the customer row while this merge held the
+// series lock would deadlock, and checkActiveSeriesLocked is fail-open on
+// a guard error, so the deadlocked creator's OWN duplicate-series check
+// would silently pass and it would seed anyway, defeating the very lock
+// meant to stop it. Being called after the row lock also means the
+// identity read below runs under that lock: no new parent for either
+// customer can commit between the read and the acquisition.
+//
+// Both customer ids are keyed for EVERY identity either party anchors,
+// not just their own: the winner must be locked for every family the
+// loser carries, because that is exactly the family the merge is about to
+// move onto the winner, and a creator racing the winner's OWN identity
+// needs to be blocked too. Any status is read (not just active/live) —
+// a cancelled parent's family can still be "live" via cancelledParentStillLive
+// (see liveFamilyMatches), so a creator's guard can still match it; the lock
+// namespace is about serializing WHICH creators may run, not about deciding
+// liveness.
+//
+// Locks are collected as a deduped, sorted union — the same discipline
+// acquireSeriesCreateLocks uses for its own multi-unit pre-pass — so any
+// two callers taking a set of these keys in the same total order can never
+// hold-and-wait on each other.
+async function lockSeriesCreateForMerge(trx, winnerId, loserId) {
+  const { seriesCreateLockKeys } = require('./recurring-appointment-seeder');
+  const parentRowsRaw = await trx('scheduled_services')
+    .whereIn('customer_id', [winnerId, loserId])
+    .where({ is_recurring: true })
+    .whereNull('recurring_parent_id')
+    .select('customer_id', 'service_id', 'service_type');
+  const parentRows = Array.isArray(parentRowsRaw) ? parentRowsRaw : [];
+  const seenIdentity = new Set();
+  const identities = [];
+  for (const row of parentRows) {
+    const identityKey = `${row.service_id || ''}::${row.service_type || ''}`;
+    if (seenIdentity.has(identityKey)) continue;
+    seenIdentity.add(identityKey);
+    identities.push({ serviceId: row.service_id || null, serviceType: row.service_type || null });
+  }
+  const keys = [...new Set(
+    identities.flatMap(({ serviceId, serviceType }) => {
+      if (serviceId == null && !serviceType) return [];
+      return [winnerId, loserId].flatMap(
+        (customerId) => seriesCreateLockKeys({ customerId, serviceId, serviceType }),
+      );
+    }),
+  )].sort();
+  for (const lockKey of keys) {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['recurring-series-create', lockKey],
+    );
+  }
+  return keys;
+}
+
 /**
  * Merge `loserId` into `winnerId`. Everything runs in one transaction; any
  * conflict aborts the whole merge (the pair stays in the review queue).
@@ -1737,6 +1809,26 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     mergeLockedAt = new Date();
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
+    // The recurring-series-create advisory locks, AFTER the customer row
+    // lock above (pre-push audit on 4c3ff61175, P1): the three series
+    // creators (admin-schedule.js, booking.js, estimate-converter) all take
+    // their OWN customer row lock FIRST and only wait on this advisory lock
+    // SECOND — taking it in the opposite order here (advisory lock first,
+    // row lock second) is a classic ABBA: a concurrent creator holding the
+    // customer row while this merge held the series lock would deadlock,
+    // and checkActiveSeriesLocked's guard is fail-open on a guard error, so
+    // the deadlocked creator's OWN duplicate check would silently pass and
+    // it would seed anyway — the exact race this lock exists to close.
+    // Reading the identities to lock (both parties' recurring parents) HERE,
+    // under the row lock just taken, also closes the read/acquire gap: no
+    // NEW parent for either customer can commit between the identity read
+    // and the lock acquisition, because both customers are already locked.
+    // See lockSeriesCreateForMerge for the merge-vs-creator race this
+    // closes (a creator for the winner's identity could otherwise pass its
+    // own guard while the loser still owned the matching series, then
+    // insert right after this merge moved the loser's series onto the
+    // winner).
+    await lockSeriesCreateForMerge(trx, winnerId, loserId);
     // Both sides' saved cards, locked for the life of this transaction
     // (pre-push audit P1). payment_methods is read three times here — the
     // Stripe-profile derivation inside the fingerprint recheck, the same
@@ -5584,6 +5676,7 @@ module.exports = {
   findDuplicateGroups,
   duplicatePairEligibility,
   executeMerge,
+  lockSeriesCreateForMerge,
   runAutoMergeSweep,
   runRedPairAutoDismissSweep,
   revertMerge,
