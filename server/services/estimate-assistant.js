@@ -1216,45 +1216,28 @@ function isMistingSystemQuestion(q = '') {
   return isMistingSystemService({ text: q }) || /\b(misters?|nozzles?|design\s*visit|reservoir|cabinet)\b/i.test(q);
 }
 
-// Intent-specific misting-system copy, sourced from
-// wiki/protocols/mosquito-misting-systems.md (the tech protocol — the source
-// of truth for every fact below). Checked in this order; the first match
-// wins. Never a price (pricing is owner-pending) and never an online-
-// booking offer (the system is design-visit-first and not self-bookable —
+// Misting-system copy, sourced from wiki/protocols/mosquito-misting-systems.md
+// (the tech protocol — the source of truth for every fact below).
+//
+// Deliberately ONE fixed answer, not a keyword intent router. Seven Codex
+// rounds on #4779 kept finding natural-language collisions in regex routing
+// ("how much wind", "cycle schedule", "tech inspect after a hurricane",
+// "will it come on if it rains", "service appointment"...). A misrouted
+// answer here is worse than a complete one, so every misting question gets
+// the same short answer covering the design visit, placement and re-entry,
+// weather and storm pauses, maintenance, label precautions, exposure, and the
+// no-disease-prevention line. It never states a price and never offers online
+// booking (the system is design-visit-first, not self-bookable —
 // wiki/services/service-dispatch-rules.md).
-// Price intents win first; booking intents are checked only after the topic
-// intents, so "when should I pause it before a storm?" or "is it safe to be
-// outside when it sprays?" reach their protocol answer, not the design-visit
-// copy. Bare "when" and "estimate" are deliberately not intents.
-const MISTING_PRICE_INTENT_PATTERN = /\b(price|prices|pricing|cost|costs|quote|charge|fee|fees|payment)\b|\bhow\s+much\b/i;
-const MISTING_BOOKING_INTENT_PATTERN = /\b(book|booking|schedule|scheduling|appointment|reschedule)\b|\bdesign\s*visit\b/i;
-// Weather + visit wording ("will you still come if it rains?") is about the
-// appointment, not about pausing installed spray cycles.
-const MISTING_VISIT_CONTEXT_PATTERN = /\b(design\s*visit|visit|appointment|technician|tech|show\s+up)\b|\b(you|you\s+guys|tech|team|someone|anyone)\s+(still\s+)?(come|coming)\b|\bcome\s+(out|by)\b/i;
-const MISTING_WEATHER_INTENT_PATTERN = /\b(weather|wind|windy|rain|rains|raining|rainy|storm|storms|hurricane|hurricanes|cold|freeze|freezing|temperature|temp)\b/i;
-const MISTING_SAFETY_INTENT_PATTERN = /\b(safe|safety|kids?|child(?:ren)?|pets?|dogs?|cats?|bees?|bee|pollinators?|fish|pond|pool|expos\w*|allerg\w*|sick|misted|outside|outdoors|spray\w*|re-?entry|breath\w*|inhal\w*|smell\w*|skin|lanai|patio)\b|\bgo\s+out\b/i;
-const MISTING_MAINTENANCE_INTENT_PATTERN = /\b(refill\w*|maintain\w*|maintenance|clog(?:ged|s)?|service\w*|nozzle\w*|filter\w*|clean\w*|repair\w*|broken|leak\w*)\b/i;
-
-function mistingSystemFallbackAnswer(question, phone) {
-  const q = cleanText(question).toLowerCase();
-
-  const designVisitAnswer = `The misting system is designed and priced at a free on-site design visit — there is no published price yet and it is not self-bookable online. The Waves team will call to schedule that visit; you can also call or text Waves at ${phone} any time.`;
-
-  if (MISTING_PRICE_INTENT_PATTERN.test(q)) return designVisitAnswer;
-  if (MISTING_WEATHER_INTENT_PATTERN.test(q) && MISTING_VISIT_CONTEXT_PATTERN.test(q)) {
-    return `If weather affects your design visit, the Waves team will call to reschedule it. You can also call or text Waves at ${phone} any time.`;
-  }
-  if (MISTING_WEATHER_INTENT_PATTERN.test(q)) {
-    return `Cycles should be paused for rain, fog, wind over 10 mph, or temperatures below 50°F — automatically by an optional weather sensor where one is installed, otherwise from the app. Before a named storm we pause every system from the app, then do a post-storm inspection visit before resuming. Call or text Waves at ${phone} with questions about your system.`;
-  }
-  if (MISTING_SAFETY_INTENT_PATTERN.test(q)) {
-    return `Nozzles are placed under 10 ft and aimed away from pools, ponds, and other water, dining areas, and air intakes, and cycles run at dawn and dusk when people and pets are not outside. The system can also be paused from the app at any time. Pollinator and fish label precautions are reviewed for your property — "botanical" products can still be toxic to bees or fish, so the specific product label decides. Stay out of the misted area until the mist has settled and treated surfaces are dry, as the product label directs — your technician will confirm the re-entry timing for your system's product. If you suspect any exposure (a person, pet, fish, or bees), pause the system and call the office right away at ${phone}. The system reduces adult mosquitoes in the treated zone; it does not prevent disease.`;
-  }
-  if (MISTING_MAINTENANCE_INTENT_PATTERN.test(q)) {
-    return `The service plan includes a monthly check and solution refill, plus quarterly nozzle cleaning and a filter change. Only Waves-licensed techs handle or refill the solution — it is not a self-refill system, by company policy. Call or text Waves at ${phone} if something needs attention before your next visit.`;
-  }
-  if (MISTING_BOOKING_INTENT_PATTERN.test(q)) return designVisitAnswer;
-  return `Your Waves technician will cover that at the free on-site design visit. Call or text Waves at ${phone} with any questions before then.`;
+function mistingSystemFallbackAnswer(_question, phone) {
+  return [
+    `Misting systems are designed and priced at a free on-site design visit — there is no published price and it is not booked online; the Waves team will call to schedule it (or call or text ${phone}).`,
+    'Once installed, nozzles sit under 10 ft, aimed away from pools, ponds, dining areas, and air intakes, and cycles run at dawn and dusk; stay out of the misted area until the mist has settled and treated surfaces are dry, as the product label directs, and your technician will confirm re-entry timing.',
+    'Cycles should be paused for rain, fog, wind over 10 mph, or temperatures below 50°F — by an optional weather sensor where one is installed, otherwise from the app — and before a named storm we pause systems, then inspect them before resuming.',
+    'The service plan covers monthly checks and refills plus quarterly nozzle cleaning and a filter change; only Waves-licensed techs refill the solution.',
+    '"Botanical" products can still be toxic to bees or fish, so the specific product label decides; if you suspect any exposure, pause the system and call the office right away.',
+    'The system reduces adult mosquitoes in the treated zone; it does not prevent disease.',
+  ].join(' ');
 }
 
 // A question is a Bora-Care intent only when it names Bora-Care/borate, or pairs
