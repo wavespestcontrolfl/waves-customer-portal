@@ -263,7 +263,7 @@ function CalendarLine({ line, muted }) {
   );
 }
 
-function CurrentVisitCardV2({ visit, trackName, isLawnTrack }) {
+function CurrentVisitCardV2({ visit, trackName, isLawnTrack, pricingRestricted }) {
   if (!visit) return null;
   const primaryProducts = parseProductLines(visit.primary);
   const secondaryProducts = parseProductLines(visit.secondary);
@@ -383,6 +383,11 @@ function CurrentVisitCardV2({ visit, trackName, isLawnTrack }) {
             ))}
           </div>
         )}
+        {/* codex round-4 P1: a technician's /programs response is projected
+            server-side (viewerRole:'technician', no material/labor/
+            conditional cost fields) — hide the cost strip rather than
+            render "—" for every figure. */}
+        {!pricingRestricted && (
         <div className="flex gap-3 flex-wrap items-center px-3 py-2 bg-zinc-50 rounded border border-hairline border-zinc-200">
           {" "}
           <div className="text-12 text-ink-tertiary">
@@ -413,6 +418,7 @@ function CurrentVisitCardV2({ visit, trackName, isLawnTrack }) {
             </div>
           )}
         </div>
+        )}
         {visit.notes && stripLegacyBoilerplate(visit.notes) && (
           <div className="mt-2.5 text-12 text-ink-tertiary leading-normal px-2.5 py-2 bg-zinc-50 rounded">
             {stripLegacyBoilerplate(visit.notes)}
@@ -477,13 +483,18 @@ function LabelLinks({ product, className }) {
   );
 }
 
-function ProtocolMixCard({
+export function ProtocolMixCard({
   plan,
   selectedConditionalIds,
   onToggleConditional,
 }) {
   if (!plan) return null;
   const selectedItems = plan.selectedItems || [];
+  // codex round-3 P2: a technician response has viewerRole:'technician' and
+  // no materialCostSummary at all (server-side price projection) — that is
+  // NOT the same thing as "nothing is priced yet", so the Material Cost
+  // card/column is hidden rather than shown as a fabricated "0/N priced".
+  const pricingRestricted = plan.viewerRole === "technician";
   const materialSummary = plan.materialCostSummary || {};
   const materialTotal =
     materialSummary.pricedLineCount > 0 ? materialSummary.total : null;
@@ -678,18 +689,20 @@ function ProtocolMixCard({
                 {fmtNumber(plan.equipment?.tankCoverageSqft, " sq ft")}
               </div>{" "}
             </div>{" "}
-            <div className="rounded-sm border-hairline border-zinc-200 p-3">
-              {" "}
-              <div className="u-label text-ink-tertiary">
-                Material Cost
-              </div>{" "}
-              <div className="u-nums text-16 font-medium text-zinc-900">
-                {fmtMoney(materialTotal)}
+            {!pricingRestricted && (
+              <div className="rounded-sm border-hairline border-zinc-200 p-3">
+                {" "}
+                <div className="u-label text-ink-tertiary">
+                  Material Cost
+                </div>{" "}
+                <div className="u-nums text-16 font-medium text-zinc-900">
+                  {fmtMoney(materialTotal)}
+                </div>
+                <div className="text-11 text-ink-tertiary mt-0.5">
+                  {materialSummary.pricedLineCount || 0}/{materialSummary.selectedLineCount ?? selectedItems.length} lines priced
+                </div>{" "}
               </div>
-              <div className="text-11 text-ink-tertiary mt-0.5">
-                {materialSummary.pricedLineCount || 0}/{materialSummary.selectedLineCount ?? selectedItems.length} lines priced
-              </div>{" "}
-            </div>{" "}
+            )}{" "}
           </div>{" "}
           <div className="text-12 text-ink-secondary leading-normal mb-4">
             {plan.visit?.objective || "No objective available for this visit."}
@@ -718,9 +731,11 @@ function ProtocolMixCard({
                       <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
                         Area Mix
                       </th>
-                      <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
-                        Mat$
-                      </th>
+                      {!pricingRestricted && (
+                        <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
+                          Mat$
+                        </th>
+                      )}
                       <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
                         {fullTankLabel}
                       </th>
@@ -741,9 +756,11 @@ function ProtocolMixCard({
                         <td className="px-3 py-3 text-right whitespace-nowrap">
                           {row.areaMix}
                         </td>
-                        <td className="px-3 py-3 text-right whitespace-nowrap">
-                          {row.matCost}
-                        </td>
+                        {!pricingRestricted && (
+                          <td className="px-3 py-3 text-right whitespace-nowrap">
+                            {row.matCost}
+                          </td>
+                        )}
                         <td className="px-3 py-3 text-right whitespace-nowrap">
                           {row.tankMix}
                         </td>
@@ -763,15 +780,17 @@ function ProtocolMixCard({
                 {row.product}
                 {row.hasProduct && row.label}
                 {hasAnyMix && (
-                  <div className="grid grid-cols-3 gap-2 border-t border-hairline border-zinc-100 pt-2">
+                  <div className={`grid ${pricingRestricted ? "grid-cols-2" : "grid-cols-3"} gap-2 border-t border-hairline border-zinc-100 pt-2`}>
                     <div>
                       <div className="u-label text-ink-tertiary">Area mix</div>
                       {row.areaMix}
                     </div>
-                    <div>
-                      <div className="u-label text-ink-tertiary">Mat$</div>
-                      {row.matCost}
-                    </div>
+                    {!pricingRestricted && (
+                      <div>
+                        <div className="u-label text-ink-tertiary">Mat$</div>
+                        {row.matCost}
+                      </div>
+                    )}
                     <div>
                       <div className="u-label text-ink-tertiary">{fullTankLabel}</div>
                       {row.tankMix}
@@ -904,6 +923,9 @@ export default function ProtocolReferenceTabV2() {
   const [catalogReload, setCatalogReload] = useState(0);
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [trackData, setTrackData] = useState(null);
+  // codex round-4 P1: the /programs response is role-projected server-side;
+  // its viewerRole tag drives the Mat$/Lab$ column + cost-strip hiding below.
+  const [trackViewerRole, setTrackViewerRole] = useState(null);
   const [trackError, setTrackError] = useState(null);
   // Monotonic id of the latest protocol request: a slow earlier selection
   // must not install its data (or its failure rollback) over a later one.
@@ -932,6 +954,7 @@ export default function ProtocolReferenceTabV2() {
   const lawnTrackKeys = lawnTracks.map((t) => t.key);
   const isLawnTrack = selectedTrack && lawnTrackKeys.includes(selectedTrack);
   const isServiceProgram = selectedTrack && !isLawnTrack;
+  const pricingRestricted = trackViewerRole === "technician";
 
   const loadTrack = async (key) => {
     const requestId = ++trackRequestRef.current;
@@ -949,6 +972,7 @@ export default function ProtocolReferenceTabV2() {
       const data = d.track || d.program;
       lastLoadedRef.current = { key, data };
       setTrackData(data);
+      setTrackViewerRole(d.viewerRole || null);
       setSelectedConditionalIds([]);
     } catch (e) {
       if (!isCurrent()) return;
@@ -984,6 +1008,7 @@ export default function ProtocolReferenceTabV2() {
               lastLoadedRef.current = { key: defaultTrack, data: track.track || track.program };
               setSelectedTrack(defaultTrack);
               setTrackData(track.track || track.program);
+              setTrackViewerRole(track.viewerRole || null);
             }
           } catch {
             // Leave the selector visible; a manual click can retry the track fetch.
@@ -1282,6 +1307,7 @@ export default function ProtocolReferenceTabV2() {
               visit={currentVisit}
               trackName={trackData.name}
               isLawnTrack={isLawnTrack}
+              pricingRestricted={pricingRestricted}
             />
           )}
           {!currentVisit && trackData.visits?.length > 0 && (
@@ -1355,11 +1381,13 @@ export default function ProtocolReferenceTabV2() {
                         { k: "Month", cls: "" },
                         { k: "Primary Applications", cls: "min-w-[250px]" },
                         { k: "Secondary / Conditional", cls: "min-w-[200px]" },
-                        { k: "Mat$", cls: "text-right whitespace-nowrap" },
-                        { k: "Lab$", cls: "text-right whitespace-nowrap" },
+                        { k: "Mat$", cls: "text-right whitespace-nowrap", cost: true },
+                        { k: "Lab$", cls: "text-right whitespace-nowrap", cost: true },
                         { k: "Tiers", cls: "" },
                         { k: "Notes / SOP", cls: "min-w-[200px]" },
-                      ].map((h) => (
+                      ]
+                        .filter((h) => !(pricingRestricted && h.cost))
+                        .map((h) => (
                         <th
                           key={h.k}
                           className={cn(
@@ -1413,6 +1441,7 @@ export default function ProtocolReferenceTabV2() {
                             ))}
                             {!v.secondary && "\u2014"}
                           </td>
+                          {!pricingRestricted && (<>
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {formatProtocolCost(v.material_cost)}
                             {Number.isFinite(parseFloat(v.conditional_cost)) &&
@@ -1437,6 +1466,7 @@ export default function ProtocolReferenceTabV2() {
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {formatProtocolCost(v.labor_cost)}
                           </td>
+                          </>)}
                           <td className="px-2.5 py-2 align-top">
                             {" "}
                             <TierDotsV2

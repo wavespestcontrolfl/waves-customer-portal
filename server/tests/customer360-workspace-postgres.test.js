@@ -162,6 +162,44 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('composer context uses receipt chronology for a delayed STOP across Waves lines', async () => {
+    const conversationIds = [randomUUID(), randomUUID()];
+    const stopId = randomUUID();
+    const questionId = randomUUID();
+    const stopSid = `SM-synthetic-${stopId}`;
+    const appliedAt = new Date(Date.now() - 3000);
+    try {
+      await mockPg('conversations').insert([
+        { id: conversationIds[0], customer_id: ids[3], channel: 'sms', contact_phone: '+19415550103', our_endpoint_id: '+19415550190' },
+        { id: conversationIds[1], customer_id: ids[3], channel: 'sms', contact_phone: '+19415550103', our_endpoint_id: '+19415550191' },
+      ]);
+      await mockPg('messages').insert([
+        {
+          id: questionId, conversation_id: conversationIds[1], channel: 'sms', direction: 'inbound',
+          author_type: 'customer', body: 'Can you come tomorrow?', created_at: new Date(appliedAt.getTime() + 1000),
+        },
+        {
+          id: stopId, conversation_id: conversationIds[0], channel: 'sms', direction: 'inbound',
+          author_type: 'customer', body: 'STOP', message_type: 'opt_out', twilio_sid: stopSid,
+          created_at: new Date(appliedAt.getTime() + 2000),
+        },
+      ]);
+      await mockPg('inbound_sms_optout_receipts').insert({
+        message_sid: stopSid, phone: '+19415550103', applied_at: appliedAt,
+      });
+
+      const response = await read('/:id/comms', { channel: 'voice' }, { params: { id: ids[3] } });
+      expect(response.composerComms).toHaveLength(1);
+      expect(response.composerComms[0]).toMatchObject({
+        id: questionId, body: 'Can you come tomorrow?', ourEndpointId: '+19415550191',
+      });
+    } finally {
+      await mockPg('inbound_sms_optout_receipts').where({ message_sid: stopSid }).delete();
+      await mockPg('messages').whereIn('id', [stopId, questionId]).delete();
+      await mockPg('conversations').whereIn('id', conversationIds).delete();
+    }
+  }, 30000);
+
   test('SMS sender claims converge across pooled connections and stale owners cannot mutate a replacement', async () => {
     const phone = `+1202${randomBytes(4).readUInt32BE().toString().padStart(10, '0').slice(-7)}`;
     try {

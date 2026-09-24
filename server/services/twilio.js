@@ -992,6 +992,36 @@ const TwilioService = {
           err.annualOfferWithheld = true;
           throw err;
         }
+        // Optional caller-owned predicate for state that must be fresh after
+        // every asynchronous provider preparation step. It is deliberately
+        // separate from preSendCheck: existing opaque callbacks retain their
+        // once-only invocation, while this contract runs exactly once after
+        // the authoritative annual-offer guard and before the SDK request.
+        if (typeof options.providerPreSendCheck === 'function') {
+          let providerVerdict;
+          try {
+            providerVerdict = await options.providerPreSendCheck({
+              channel: 'sms',
+              dbi: trx || db,
+            });
+          } catch (checkErr) {
+            const err = new Error(checkErr?.message || 'provider pre-send check failed');
+            err.code = checkErr?.code || 'PROVIDER_PRE_SEND_CHECK_FAILED';
+            err.retryable = checkErr?.retryable === true;
+            err.providerPreSendCheckFailed = true;
+            err.cause = checkErr;
+            throw err;
+          }
+          if (!providerVerdict || providerVerdict.ok !== true) {
+            const err = new Error(providerVerdict?.reason || 'provider pre-send check did not pass');
+            err.code = providerVerdict?.code || 'PROVIDER_PRE_SEND_CHECK_FAILED';
+            err.retryable = providerVerdict?.retryable === true;
+            err.deferred = providerVerdict?.deferred === true;
+            err.nextAllowedAt = providerVerdict?.nextAllowedAt;
+            err.providerPreSendCheckFailed = true;
+            throw err;
+          }
+        }
         // Pre-push audit P1 (round 5): the guard above just awaited its own
         // DB reads — real time the send-window boundary re-check (the
         // caller's own preSendCheck, run once, earlier, before this
@@ -1048,6 +1078,16 @@ const TwilioService = {
             // deferral contract as any other send-window hold (retryable,
             // never treated as a definite failure).
             verdict = { ok: false, code: err.code || 'QUIET_HOURS_HOLD', reason: err.message, retryable: true };
+          } else if (err && err.providerPreSendCheckFailed) {
+            verdict = {
+              ok: false,
+              code: err.code || 'PROVIDER_PRE_SEND_CHECK_FAILED',
+              reason: err.message,
+              retryable: err.retryable === true,
+              deferred: err.deferred === true,
+              nextAllowedAt: err.nextAllowedAt,
+              validator: 'provider_pre_send_check_boundary',
+            };
           } else if (!dispatchStarted) {
             verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED',
               reason: 'SMS handoff authority check failed', retryable: true };
@@ -1062,8 +1102,11 @@ const TwilioService = {
           return { success: false, preSendBlocked: true,
             code: verdict?.code || 'SMS_HANDOFF_CHECK_FAILED',
             error: verdict?.reason || 'SMS handoff authority was not established',
-            ...(verdict?.retryable ? { retryable: true } : {}),
-            validator: 'check_sms_handoff_authority' };
+            retryable: verdict?.retryable === true,
+            ...(verdict?.deferred ? { deferred: true } : {}),
+            ...(verdict?.nextAllowedAt ? { nextAllowedAt: verdict.nextAllowedAt } : {}),
+            validator: verdict?.validator || 'check_sms_handoff_authority',
+            deliveryOutcome: 'not_sent' };
         }
       } else {
         await dispatch();
@@ -1211,6 +1254,17 @@ const TwilioService = {
           success: false, sid: null, preSendBlocked: true,
           code: err.code || 'ANNUAL_OFFER_GUARD_FAILED', error: err.message,
           retryable: true, deliveryOutcome: 'not_sent',
+        };
+      }
+      if (err && err.providerPreSendCheckFailed) {
+        return {
+          success: false, sid: null, preSendBlocked: true,
+          code: err.code || 'PROVIDER_PRE_SEND_CHECK_FAILED', error: err.message,
+          retryable: err.retryable === true,
+          deferred: err.deferred === true,
+          nextAllowedAt: err.nextAllowedAt,
+          validator: 'provider_pre_send_check_boundary',
+          deliveryOutcome: 'not_sent',
         };
       }
       if (deliveryOutcome === "uncertain" && isDefinitiveTwilioRejection(err)) {

@@ -156,6 +156,49 @@ describe('GET /balance — phantom failed-row exclusion', () => {
     expect(body.currentBalance).toBe(55);
   });
 
+  // Codex #4682 r3 P1: the monthly cron's lock-contention deferral is a
+  // 'failed' row with next_retry_at armed but NO attempt behind it — the
+  // competing collector may be landing this very month. It must not be
+  // shown (or payable) as balance, and must not raise the failed banner.
+  test('a never-attempted lock-contention deferral is neither balance nor a failed attempt', async () => {
+    const deferral = {
+      amount: '55.00', stripe_payment_intent_id: null, retry_count: 0, next_retry_at: '2026-09-24T14:00:00Z',
+      metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: '2026-09', deferred_reason: 'lock_contention' }),
+    };
+    tableResults.failedRows = [deferral];
+    tableResults.recentAttempts = [{ status: 'failed', ...deferral }, { status: 'paid', metadata: null }];
+
+    const body = await getBalance();
+    expect(body.currentBalance).toBe(0);
+    expect(body.lastPaymentFailed).toBe(false);
+  });
+
+  test('a deferral the sweep DISARMED without superseding (Auto Pay off / off the monthly lane) counts again — no collector is coming for it', async () => {
+    const disarmed = {
+      amount: '55.00', stripe_payment_intent_id: null, retry_count: 0, next_retry_at: null,
+      metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: '2026-09', deferred_reason: 'lock_contention' }),
+    };
+    tableResults.failedRows = [disarmed];
+    tableResults.recentAttempts = [{ status: 'failed', ...disarmed }];
+
+    const body = await getBalance();
+    expect(body.currentBalance).toBe(55);
+    expect(body.lastPaymentFailed).toBe(true);
+  });
+
+  test('once the retry sweep has actually attempted the deferral (retry_count > 0) it counts like any failed rung', async () => {
+    const attempted = {
+      amount: '55.00', stripe_payment_intent_id: null, retry_count: 1, next_retry_at: '2026-09-26T14:00:00Z',
+      metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: '2026-09', deferred_reason: 'lock_contention' }),
+    };
+    tableResults.failedRows = [attempted];
+    tableResults.recentAttempts = [{ status: 'failed', ...attempted }];
+
+    const body = await getBalance();
+    expect(body.currentBalance).toBe(55);
+    expect(body.lastPaymentFailed).toBe(true);
+  });
+
   test('a failure linked to a DRAFT invoice still counts — drafts are not in unpaidInvoices', async () => {
     // Per-application completion path: createFromService mints a draft, the
     // auto-charge fails. unpaidInvoices only sums sent/viewed/overdue, so

@@ -17,6 +17,35 @@ it('renders a blocked domain result as failed, never Done', async () => {
   expect(screen.queryByText('✓ Done')).not.toBeInTheDocument();
 });
 
+it('Codex #4715 r4 P2: a blocked receipt whose result carries only `message` (no warning/error) keeps alert styling, not the neutral success token', async () => {
+  // schedule-tools.js and others return exactly this shape on a refusal:
+  // `{ blocked: true, message: '...' }` — no `warning`/`error` string. The
+  // neutral-styling predicate used to treat ANY message-only result as a
+  // plain success note; it must require receiptState's own verdict
+  // ('confirmed') first, so a failed/blocked outcome always stays alert-red.
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ success: false, outcome: 'blocked', result: { blocked: true, message: 'Duplicate request' } })));
+  render(<PendingActionsCard actions={[action]} variant="light" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  const detail = await screen.findByText('Duplicate request');
+  expect(detail.className).toContain('text-alert-fg');
+  expect(detail.className).not.toContain('text-zinc-700');
+});
+
+it('Codex #4715 r4 P2: a completed receipt whose result carries only `message` still gets the neutral success token', async () => {
+  // The churn billing wind-down receipt (tools.js) is the real-world shape
+  // this predicate exists for: `success: true` / outcome 'completed', a
+  // plain `message`, no warning/error — must render neutral, not alert-red.
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({
+    success: true, outcome: 'completed',
+    result: { message: 'Billing wound down: Auto Pay off (customer + saved methods), next charge date and armed retries cleared.' },
+  })));
+  render(<PendingActionsCard actions={[action]} variant="light" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  const detail = await screen.findByText(/Billing wound down/);
+  expect(detail.className).toContain('text-zinc-700');
+  expect(detail.className).not.toContain('text-alert-fg');
+});
+
 it('reconciles a dropped confirm response by reading the saved outcome without a second write', async () => {
   const fetch = vi.fn().mockRejectedValueOnce(new TypeError('Network lost'))
     .mockResolvedValueOnce(response({ success: true, outcome: 'completed', result: { request_id: 'synthetic-request' } }));
