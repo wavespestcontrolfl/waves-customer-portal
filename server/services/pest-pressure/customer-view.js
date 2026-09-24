@@ -9,6 +9,7 @@
  */
 
 const { DEFAULT_CONFIG } = require('./config');
+const { scoreSourceFromComponents } = require('./calculate');
 const { detectFrequencyKey, isOneTimeServiceLabel } = require('./review-window');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 
@@ -204,6 +205,7 @@ function buildPestPressureAdminView({ scoreRow }) {
     overrideReason: scoreRow.override_reason || null,
     overriddenBy: scoreRow.overridden_by || null,
     overriddenAt: scoreRow.overridden_at || null,
+    scoreSource: scoreSourceFromComponents(scoreRow.component_scores),
     componentScores: scoreRow.component_scores || null,
     componentWeights: scoreRow.component_weights || null,
     missingComponents: scoreRow.missing_components || [],

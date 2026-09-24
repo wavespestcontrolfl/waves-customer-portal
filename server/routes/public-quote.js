@@ -3227,7 +3227,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         reason: quoteRequiredReason || 'commercial_property_manual_quote_required',
         service_interest: serviceInterest,
         message: quoteRequiredReason === 'quote_on_request'
-          ? `${keyedService?.name || serviceInterest} is priced by our team, not the calculator — we'll send your estimate shortly.`
+          ? (keyedService?.service_key === 'mosquito_misting_system'
+            ? 'Mosquito misting systems are designed and priced on site — we\'ll call to schedule your free design visit.'
+            : `${keyedService?.name || serviceInterest} is priced by our team, not the calculator — we'll send your estimate shortly.`)
           : quoteRequiredReason === 'unit_in_multi_unit_building'
           ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
           : quoteRequiredReason === 'low_confidence_turf_requires_field_verification'

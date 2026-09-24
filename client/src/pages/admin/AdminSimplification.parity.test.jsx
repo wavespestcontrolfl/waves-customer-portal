@@ -94,7 +94,7 @@ describe("preserved Settings and diagnostic capabilities", () => {
     expect(screen.queryByText("Synthetic provider")).not.toBeInTheDocument();
   });
 
-  it("keeps runtime alerts, time windows, refresh and polling cleanup", async () => {
+  it("keeps runtime alerts, time windows, resume refresh and polling cleanup", async () => {
     mount(<ToolHealthPage />);
     expect(await screen.findByText("Synthetic runtime failure")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Settings → Integrations" })).toHaveAttribute("href", "/admin/settings?tab=integrations");
@@ -102,7 +102,7 @@ describe("preserved Settings and diagnostic capabilities", () => {
     fireEvent.click(screen.getByRole("button", { name: "1h" }));
     await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith("tool-health?hours=1"))).toBe(true));
     const before = fetch.mock.calls.filter(([url]) => url.endsWith("tool-health?hours=1")).length;
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent(window, new Event("focus"));
     await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.endsWith("tool-health?hours=1"))).toHaveLength(before + 1));
     cleanup();
     vi.useFakeTimers();
@@ -121,7 +121,7 @@ describe("preserved Settings and diagnostic capabilities", () => {
     mount(<ToolHealthPage />);
     expect(await screen.findByText("Failed to load: HTTP 503")).toBeInTheDocument();
     failure = null;
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("Synthetic runtime failure")).toBeInTheDocument();
   });
 

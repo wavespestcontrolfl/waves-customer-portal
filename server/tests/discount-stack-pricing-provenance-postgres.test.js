@@ -14,6 +14,25 @@
  * migration itself, and the JSONB round trip through the REAL pg driver,
  * are proof — not just the mocked shape.
  */
+// GitHub Codex round 9 on #4657: the planner-level test below drives
+// computeUpdateDetailsFinancialPlan itself, whose fresh-pick path reaches
+// loadInvoiceDiscount — a module-`db` reader, not a `conn` parameter. Route
+// that module handle at the SAME per-test transaction every other read in
+// this suite already uses, so the fixture rows are visible to it and
+// nothing escapes the rollback. Every helper this suite tested before
+// takes its connection explicitly and is unaffected.
+jest.mock('../models/db', () => {
+  const proxy = (...args) => mockPg(...args);
+  for (const key of ['raw', 'transaction', 'fn', 'client', 'schema', 'select', 'from']) {
+    Object.defineProperty(proxy, key, {
+      get() {
+        const value = mockPg[key];
+        return typeof value === 'function' ? value.bind(mockPg) : value;
+      },
+    });
+  }
+  return proxy;
+});
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const {
@@ -27,7 +46,8 @@ const {
   restackStoredVisitFinancials, freezeLegacySeriesRootCaps, calculateStoredVisitFinancials, occurrenceFloorPrice,
   resolveUpdateDetailsAddonFinancials, legacyEconomicsPreservationDecision, calculateVisitFinancialsForAddons,
   insertScheduledServiceAddons, legacyPreservationSnapshotStale, loadDiscountCapsById,
-  assertDueAddonsWithinDiscountCapUniverse,
+  assertDueAddonsWithinDiscountCapUniverse, computeUpdateDetailsFinancialPlan,
+  addonRowIdsDrifted, financialStateDrifted,
 } = adminScheduleRouter._test;
 
 const connection = process.env.DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL;
@@ -1187,5 +1207,839 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     expect(legacyPreservationSnapshotStale({
       freshRow: freshRowAfter, existingRow: existing, freshAddonRows: existingAddonRows, existingAddonRows,
     })).toBe(true); // the ORIGINAL request's stale primaryServiceChanged=false conclusion must never be trusted for the write now
+  });
+  // GitHub Codex round 9 on #4657 (P1, admin-schedule.js:9984), END TO END
+  // through the real planner (computeUpdateDetailsFinancialPlan — the exact
+  // function PUT /:id/update-details and its preview share) on real
+  // Postgres rows: applying a fresh CAPPED add-on pick to an UNMARKED visit
+  // used to resolve the cap for that save but never stamp the row, so the
+  // NEXT edit that added an appointment credit replayed the unchanged
+  // preset cap-unaware ($95 → $80). Now save 1 adopts canonical pricing
+  // and writes the regime marker + the resolved cap; save 2 restacks from
+  // that frozen cap even after the catalog cap is raised.
+  test('PUT /:id/update-details (planner, real rows): a fresh 20%/$5-cap add-on pick on an UNMARKED visit stamps the regime + cap; the next save adding a $10 credit keeps the line at $95, never $80', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      const addonRowId = randomUUID();
+      const discountId = randomUUID();
+      await mockPg('discounts').insert({
+        id: discountId, discount_key: `fixture_r9_${discountId.slice(0, 8)}`, name: 'Fixture 20% (cap $5)',
+        discount_type: 'percentage', amount: 20, max_discount_dollars: 5, is_active: true, show_in_invoices: true,
+      });
+      // An UNMARKED legacy visit: $100 primary + a $100 undiscounted add-on.
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-15', service_type: 'Fixture Round-9 Service',
+        primary_line_price: 100, estimated_price: 200,
+      });
+      await mockPg('scheduled_service_addons').insert({
+        id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Capped Add-On', base_price: 100, estimated_price: 100,
+      });
+      const cols = await mockPg('scheduled_services').columnInfo();
+      const addonCols = await mockPg('scheduled_service_addons').columnInfo();
+      const noopEligibility = async () => {};
+
+      // SAVE 1 — the operator picks the capped 20% preset on the add-on line
+      // (exactly what SchedulePage.jsx posts for a fresh pick: the row id,
+      // the gross, and the catalog id/type/amount).
+      const updates1 = {};
+      const plan1 = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: updates1, primaryLinePrice: 100,
+        addons: [{
+          id: addonRowId, serviceName: 'Fixture Capped Add-On', basePrice: 100,
+          discountId, discountName: 'Fixture 20% (cap $5)', discountType: 'percentage', discountAmount: 20,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: noopEligibility,
+      });
+      expect(plan1.replaceAddons[0].price).toBe(95);
+      expect(plan1.replaceAddons[0].discount.discountDollars).toBe(5);
+      expect(updates1.estimated_price).toBe(195);
+      // THE FIX: the save plans a FULL regime stamp carrying the resolved cap.
+      expect(hasPricingRegimeMarker(updates1)).toBe(true);
+      expect(frozenCapsFromRow(updates1).addons[discountId]).toBe(5);
+
+      // Persist exactly what the PUT route persists from this plan: the
+      // row updates, and the add-on rows re-inserted from replaceAddons
+      // with the canonical per-line figures.
+      await mockPg('scheduled_services').where({ id }).update(updates1);
+      await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).del();
+      await insertScheduledServiceAddons(mockPg, id, plan1.replaceAddons, addonCols, plan1.canonicalRestackedAddonDollars);
+      const rowAfterSave1 = await mockPg('scheduled_services').where({ id }).first();
+      expect(hasPricingRegimeMarker(rowAfterSave1)).toBe(true); // a real JSONB round trip
+      expect(Number(rowAfterSave1.estimated_price)).toBe(195);
+      const addonAfterSave1 = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).first();
+      expect(Number(addonAfterSave1.estimated_price)).toBe(95);
+      expect(Number(addonAfterSave1.discount_dollars)).toBe(5);
+
+      // The catalog cap is raised AFTER save 1 — the frozen $5 must still win.
+      await mockPg('discounts').where({ id: discountId }).update({ max_discount_dollars: 50 });
+
+      // SAVE 2 — the operator adds a $10 appointment credit; the add-on's
+      // stamp round-trips UNCHANGED (the editor resends it verbatim).
+      const updates2 = {};
+      const plan2 = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: updates2, primaryLinePrice: 100,
+        discountType: 'fixed_amount', discountAmount: 10,
+        addons: [{
+          id: addonAfterSave1.id, serviceName: 'Fixture Capped Add-On', basePrice: 100,
+          discountId, discountName: 'Fixture 20% (cap $5)', discountType: 'percentage', discountAmount: 20,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: true, appointmentDiscountCols: cols,
+        presetEligibilityCheck: noopEligibility,
+      });
+      expect(plan2.replaceAddons[0].price).toBe(95); // NEVER the cap-unaware $80
+      expect(plan2.replaceAddons[0].discount.discountDollars).toBe(5);
+      expect(updates2.discount_dollars).toBe(10);
+      expect(updates2.estimated_price).toBe(185); // 100 + 95 - 10, never 170
+      // The marker is re-frozen, still carrying the ORIGINAL $5, not the raised $50.
+      expect(hasPricingRegimeMarker(updates2)).toBe(true);
+      expect(frozenCapsFromRow(updates2).addons[discountId]).toBe(5);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // GitHub Codex round 16 P1 (#4657, :10128): removing a line's
+  // catalog-backed discount must drop that discount id's cap from the
+  // row's frozen pricing_provenance.caps.addons — otherwise a LATER save
+  // that freshly re-picks the SAME preset sees resolveStoredDiscountCaps'
+  // own merge favor the untouched-looking (but stale) frozen entry over
+  // the live, since-changed catalog cap, and silently saves the wrong
+  // discount. Three real saves against the SAME row: (1) fresh pick of D
+  // (cap $10, frozen), (2) that add-on's discount removed (D must be
+  // pruned from the frozen snapshot), (3) D's catalog cap is raised to
+  // $20 and the SAME preset is picked again — the fresh pick must read
+  // the LIVE $20 cap, never the stale $10.
+  test('PUT /:id/update-details (planner, real rows): removing a catalog add-on discount prunes its frozen cap, so a later re-pick of the SAME preset reads the live (changed) catalog cap, never the stale one', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      const addonRowId = randomUUID();
+      const discountId = randomUUID();
+      await mockPg('discounts').insert({
+        id: discountId, discount_key: `fixture_r16_${discountId.slice(0, 8)}`, name: 'Fixture 20% (cap $10)',
+        discount_type: 'percentage', amount: 20, max_discount_dollars: 10, is_active: true, show_in_invoices: true,
+      });
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-19', service_type: 'Fixture Round-16 Prune', primary_line_price: 100, estimated_price: 200,
+      });
+      await mockPg('scheduled_service_addons').insert({
+        id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Prune Add-On', base_price: 100, estimated_price: 100,
+      });
+      const addonCols = await mockPg('scheduled_service_addons').columnInfo();
+      const noopEligibility = async () => {};
+
+      // SAVE 1 — fresh pick of D: 20% of $100 capped at $10 → net $90.
+      const updates1 = {};
+      const plan1 = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: updates1, primaryLinePrice: 100,
+        addons: [{
+          id: addonRowId, serviceName: 'Fixture Prune Add-On', basePrice: 100,
+          discountId, discountName: 'Fixture 20% (cap $10)', discountType: 'percentage', discountAmount: 20,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: noopEligibility,
+      });
+      expect(plan1.replaceAddons[0].price).toBe(90);
+      expect(plan1.replaceAddons[0].discount.discountDollars).toBe(10);
+      expect(hasPricingRegimeMarker(updates1)).toBe(true);
+      expect(frozenCapsFromRow(updates1).addons[discountId]).toBe(10);
+      await mockPg('scheduled_services').where({ id }).update(updates1);
+      await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).del();
+      await insertScheduledServiceAddons(mockPg, id, plan1.replaceAddons, addonCols, plan1.canonicalRestackedAddonDollars);
+      const addonAfterSave1 = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).first();
+      expect(Number(addonAfterSave1.estimated_price)).toBe(90);
+
+      // SAVE 2 — the SAME line's discount is REMOVED (posted with no
+      // discount fields at all): the row is already marked, so this
+      // restacks through the canonical branch, and the fix must prune
+      // discountId out of the frozen addons snapshot going forward.
+      const updates2 = {};
+      const plan2 = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: updates2, primaryLinePrice: 100,
+        addons: [{ id: addonAfterSave1.id, serviceName: 'Fixture Prune Add-On', basePrice: 100 }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: noopEligibility,
+      });
+      expect(plan2.replaceAddons[0].price).toBe(100); // discount gone
+      expect(hasPricingRegimeMarker(updates2)).toBe(true);
+      // THE FIX: discountId's stale $10 cap no longer rides along in the
+      // re-frozen snapshot once nothing on the row uses it any more.
+      expect(frozenCapsFromRow(updates2).addons[discountId]).toBeUndefined();
+      await mockPg('scheduled_services').where({ id }).update(updates2);
+      await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).del();
+      await insertScheduledServiceAddons(mockPg, id, plan2.replaceAddons, addonCols, plan2.canonicalRestackedAddonDollars);
+      const addonAfterSave2 = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).first();
+      expect(Number(addonAfterSave2.estimated_price)).toBe(100);
+
+      // The catalog cap is raised AFTER the removal — save 2 pruned the
+      // stale $10, so save 3's fresh pick must resolve this live $20.
+      await mockPg('discounts').where({ id: discountId }).update({ max_discount_dollars: 20 });
+
+      // SAVE 3 — the SAME preset is picked again (a genuinely fresh pick:
+      // the row's prior stored discount_id is null after save 2).
+      const updates3 = {};
+      const plan3 = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: updates3, primaryLinePrice: 100,
+        addons: [{
+          id: addonAfterSave2.id, serviceName: 'Fixture Prune Add-On', basePrice: 100,
+          discountId, discountName: 'Fixture 20% (cap $10)', discountType: 'percentage', discountAmount: 20,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: noopEligibility,
+      });
+      // 20% of $100 = $20, now capped at the LIVE $20 (never the stale
+      // $10) — net $80, discountDollars $20.
+      expect(plan3.replaceAddons[0].discount.discountDollars).toBe(20); // NEVER the stale-cap $10
+      expect(plan3.replaceAddons[0].price).toBe(80); // NEVER the stale-cap $90
+      expect(frozenCapsFromRow(updates3).addons[discountId]).toBe(20);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // Scope boundary of the round-9 fix: a PRICE-only edit on an unmarked
+  // row changes no discount term, so it stays on the legacy live-recompute
+  // path (#4405's own open product decision about repricing existing
+  // visits) and is NOT marked by this save.
+  // GitHub Codex round 27 P1 (#4657, :10969): Codex's exact repro on real
+  // rows. The route's early read saw the appointment discount as Silver
+  // (A), so its boolean says "unchanged" for a request that posts Silver
+  // again. Between that read and the planner's own read another editor
+  // moved the visit to a plain credit (B) and put Gold — Silver's
+  // non-stackable group-mate — on the add-on. The planner must judge
+  // freshness against the row it actually reads (B), classify Silver as
+  // NEW, and refuse the tier conflict — never grandfather it.
+  test('PUT /:id/update-details (planner, real rows): a concurrent A → B edit between the route read and the planner read makes a request restoring A a NEW pick — the tier conflict is refused, never grandfathered', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      const addonRowId = randomUUID();
+      const silverId = randomUUID();
+      const goldId = randomUUID();
+      const creditId = randomUUID();
+      const tag = silverId.slice(0, 8);
+      await mockPg('discounts').insert([
+        { id: silverId, discount_key: `fixture_r27_silver_${tag}`, name: 'Fixture Silver', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false },
+        { id: goldId, discount_key: `fixture_r27_gold_${tag}`, name: 'Fixture Gold', discount_type: 'fixed_amount', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false },
+        { id: creditId, discount_key: `fixture_r27_credit_${tag}`, name: 'Fixture Credit', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true },
+      ]);
+      // The row as the PLANNER reads it: already moved to the credit (B),
+      // with Gold on the add-on.
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-15', service_type: 'Fixture Round-27 Service',
+        primary_line_price: 100, estimated_price: 175,
+        discount_type: 'fixed_amount', discount_amount: 10, discount_id: creditId,
+      });
+      await mockPg('scheduled_service_addons').insert({
+        id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Add-On', base_price: 100, estimated_price: 85,
+        discount_id: goldId, discount_type: 'fixed_amount', discount_amount: 15, discount_dollars: 15,
+      });
+      const cols = await mockPg('scheduled_services').columnInfo();
+      const silver = await mockPg('discounts').where({ id: silverId }).first();
+      const restoreSilver = (appointmentDiscountChanged) => computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: {}, primaryLinePrice: 100,
+        discountType: 'fixed_amount', discountAmount: 10, discountId: silverId,
+        addons: [{
+          id: addonRowId, serviceName: 'Fixture Add-On', basePrice: 100,
+          discountId: goldId, discountName: 'Fixture Gold', discountType: 'fixed_amount', discountAmount: 15,
+        }],
+        appointmentDiscountPreset: silver,
+        // The route's STALE answer: computed while the row still held Silver.
+        appointmentDiscountChanged,
+        appointmentDiscountCols: cols,
+        presetEligibilityCheck: async () => {},
+      });
+      // The planner re-derives against ITS read (credit ≠ Silver) and
+      // refuses the Silver + Gold tier conflict regardless of the stale flag.
+      await expect(restoreSilver(false)).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+      await expect(restoreSilver(true)).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+
+      // The non-conflicting shape (add-on undiscounted) reports the
+      // re-derived freshness on the plan for the route to adopt, and stamps
+      // Silver's catalog identity.
+      await mockPg('scheduled_service_addons').where({ id: addonRowId }).update({ discount_id: null, discount_type: null, discount_amount: null, discount_dollars: null, estimated_price: 100 });
+      const updates = {};
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 100,
+        discountType: 'fixed_amount', discountAmount: 10, discountId: silverId,
+        addons: [{ id: addonRowId, serviceName: 'Fixture Add-On', basePrice: 100 }],
+        appointmentDiscountPreset: silver, appointmentDiscountChanged: false, appointmentDiscountCols: cols,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.appointmentDiscountChanged).toBe(true);
+      expect(updates.discount_id).toBe(silverId);
+      expect(updates.estimated_price).toBe(190); // $200 less the $10 tier credit
+
+      // Single-service branch (no addons array): the same re-derivation
+      // against that branch's own `existingPrice` read.
+      const singleUpdates = {};
+      const singlePlan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates: singleUpdates, estimatedPrice: 100, primaryLinePrice: 100,
+        discountType: 'fixed_amount', discountAmount: 10, discountId: silverId,
+        appointmentDiscountPreset: silver, appointmentDiscountChanged: false, appointmentDiscountCols: cols,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(singlePlan.appointmentDiscountChanged).toBe(true);
+      expect(singleUpdates.discount_id).toBe(silverId);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  test('PUT /:id/update-details (planner, real rows): a PRICE-only edit on an UNMARKED visit does not adopt — no regime marker is planned', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      const addonRowId = randomUUID();
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-16', service_type: 'Fixture Round-9 Price-Only', primary_line_price: 100, estimated_price: 140,
+      });
+      await mockPg('scheduled_service_addons').insert({
+        id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Plain Add-On', base_price: 40, estimated_price: 40,
+      });
+      const updates = {};
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 120, // the only change
+        addons: [{ id: addonRowId, serviceName: 'Fixture Plain Add-On', basePrice: 40 }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(updates.estimated_price).toBe(160);
+      expect(updates.pricing_provenance).toBeUndefined();
+      expect(plan.canonicalRestackedAddonDollars).toBeNull();
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+  // Same boundary, custom-stamp shape: a stored CUSTOM add-on discount (no
+  // catalog id) round-trips with a null discount_id exactly like an
+  // undiscounted line, so the catalog-pick freshness check alone would call
+  // it "new" — a price-only edit on such a row must still NOT adopt.
+  test('PUT /:id/update-details (planner, real rows): a PRICE-only edit with a round-tripped CUSTOM add-on stamp does not adopt either — no regime marker is planned', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      const addonRowId = randomUUID();
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-17', service_type: 'Fixture Round-9 Custom Stamp', primary_line_price: 100, estimated_price: 190,
+      });
+      await mockPg('scheduled_service_addons').insert({
+        id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Custom-Discounted Add-On',
+        base_price: 100, estimated_price: 90, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+      });
+      const updates = {};
+      await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 120, // the only change
+        addons: [{ id: addonRowId, serviceName: 'Fixture Custom-Discounted Add-On', basePrice: 100, discountType: 'percentage', discountAmount: 10 }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(updates.estimated_price).toBe(210); // 120 + 90, the legacy live recompute
+      expect(updates.pricing_provenance).toBeUndefined();
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+  // GitHub Codex round 10 on #4657 (P1, :10035): REMOVING one line's
+  // discount on an unmarked visit is a discount-term change too — the
+  // other add-on's capped stamp must restack from its real cap and the row
+  // must be marked, never replayed cap-unaware because "no term was posted".
+  async function seedTwoStampedAddonsUnmarked() {
+    const id = randomUUID();
+    const cappedRowId = randomUUID();
+    const customRowId = randomUUID();
+    const discountId = randomUUID();
+    await mockPg('discounts').insert({
+      id: discountId, discount_key: `fixture_r10_${discountId.slice(0, 8)}`, name: 'Fixture 20% (cap $5)',
+      discount_type: 'percentage', amount: 20, max_discount_dollars: 5, is_active: true, show_in_invoices: true,
+    });
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-18', service_type: 'Fixture Round-10 Removal', primary_line_price: 100, estimated_price: 240,
+    });
+    // A: capped catalog stamp, stored at its TRUE $95. B: a custom 10% stamp ($45).
+    await mockPg('scheduled_service_addons').insert([
+      { id: cappedRowId, scheduled_service_id: id, service_name: 'Fixture Capped Add-On', base_price: 100, estimated_price: 95,
+        discount_id: discountId, discount_name: 'Fixture 20% (cap $5)', discount_type: 'percentage', discount_amount: 20, discount_dollars: 5 },
+      { id: customRowId, scheduled_service_id: id, service_name: 'Fixture Custom Add-On', base_price: 50, estimated_price: 45,
+        discount_type: 'percentage', discount_amount: 10, discount_dollars: 5 },
+    ]);
+    return { id, cappedRowId, customRowId, discountId };
+  }
+  const cappedLineRoundTrip = (rowId, discountId) => ({
+    id: rowId, serviceName: 'Fixture Capped Add-On', basePrice: 100,
+    discountId, discountName: 'Fixture 20% (cap $5)', discountType: 'percentage', discountAmount: 20,
+  });
+
+  test('PUT /:id/update-details (planner, real rows): removing ONE line\'s discount on an UNMARKED visit adopts — the other capped line stays $95 (never $80) and the regime + cap are stamped', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const { id, cappedRowId, customRowId, discountId } = await seedTwoStampedAddonsUnmarked();
+      const updates = {};
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 100,
+        addons: [
+          cappedLineRoundTrip(cappedRowId, discountId),
+          { id: customRowId, serviceName: 'Fixture Custom Add-On', basePrice: 50 }, // discount REMOVED
+        ],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.replaceAddons[0].price).toBe(95); // NEVER $80
+      expect(plan.replaceAddons[1].price).toBe(50);
+      expect(updates.estimated_price).toBe(245);
+      expect(hasPricingRegimeMarker(updates)).toBe(true);
+      expect(frozenCapsFromRow(updates).addons[discountId]).toBe(5);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  test('PUT /:id/update-details (planner, real rows): DELETING a discounted line outright on an UNMARKED visit adopts the same way — the surviving capped line stays $95', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const { id, cappedRowId, discountId } = await seedTwoStampedAddonsUnmarked();
+      const updates = {};
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 100,
+        addons: [cappedLineRoundTrip(cappedRowId, discountId)], // the custom line is gone
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.replaceAddons).toHaveLength(1);
+      expect(plan.replaceAddons[0].price).toBe(95);
+      expect(updates.estimated_price).toBe(195);
+      expect(hasPricingRegimeMarker(updates)).toBe(true);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // GitHub Codex round 12 P0 (#4657, :10306): a zero-add-on legacy visit
+  // with NO trustworthy stored primary gross (primary_line_price NULL)
+  // but a stored appointment-level discount cannot safely adopt
+  // canonical pricing off a SUBMITTED primaryLinePrice — the edit modal
+  // seeds that field from the stored NET total when the real gross is
+  // unknown, so adding a fresh add-on discount posts that net back as if
+  // it were a fresh gross entry. The planner must refuse adoption
+  // (reporting legacyPrimaryGrossUnknown, never guessing) rather than
+  // reapply the stored 10% on top of the echoed net and stamp the row at
+  // the wrong (lower) base.
+  test('PUT /:id/update-details (planner, real rows): a zero-add-on legacy visit with NULL primary_line_price and a stored appointment discount refuses canonical adoption on a fresh add-on discount pick', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      // Stored: $100 primary (gross UNKNOWN — legacy row, no
+      // primary_line_price on file), a $10 fixed appointment-level
+      // discount, net $90, no add-ons. fixed_amount (never percentage)
+      // deliberately, so this test never depends on the module's
+      // percent-exclusion catalog prime — unrelated to this fix.
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-19', service_type: 'Fixture Round-12 Legacy Primary',
+        primary_line_price: null, estimated_price: 90,
+        discount_type: 'fixed_amount', discount_amount: 10,
+      });
+      const updates = {};
+      // The modal seeds Price from the stored discounted total (the only
+      // number it has) — $90, NOT the real $100 gross — then the
+      // operator adds a fresh discounted add-on.
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 90,
+        addons: [{
+          serviceName: 'Fixture Fresh Add-On', basePrice: 20,
+          discountType: 'fixed_amount', discountAmount: 5,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.legacyPrimaryGrossUnknown).toBe(true);
+      // THE FIX: canonical adoption never ran off the guessed gross — no
+      // regime marker is stamped, so the stored 10% is never reapplied
+      // on top of the echoed net.
+      expect(hasPricingRegimeMarker(updates)).toBe(false);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // Scope boundary of the round-12 fix: a row with NO stored discount at
+  // all is unaffected — net === gross there, so adoption stays correct
+  // off the same NULL primary_line_price (matches
+  // legacyPreservationCandidate's own scope, and the pre-existing
+  // round-9 fixture shape above).
+  test('PUT /:id/update-details (planner, real rows): a zero-add-on legacy visit with NULL primary_line_price but NO stored discount adopts normally', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-20', service_type: 'Fixture Round-12 Legacy Primary No Discount',
+        primary_line_price: null, estimated_price: 100,
+      });
+      const updates = {};
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 100,
+        addons: [{
+          serviceName: 'Fixture Fresh Add-On', basePrice: 20,
+          discountType: 'percentage', discountAmount: 10,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.legacyPrimaryGrossUnknown).toBe(false);
+      expect(hasPricingRegimeMarker(updates)).toBe(true);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // GitHub Codex round 13 P0 (#4657, :10660): the round-12 refusal only
+  // looked at a PARENT-level stored discount. The same trap exists when
+  // the stored discount lives on an EXISTING ADD-ON instead — the modal
+  // derives the primary from the stored total ($190 - $100 = $90, not
+  // the real $100) and changing that add-on's term would adopt canonical
+  // pricing off the false gross, underpricing the visit by $10.
+  test('PUT /:id/update-details (planner, real rows): a legacy visit with NULL primary_line_price, NO parent discount, and a DISCOUNTED add-on refuses canonical adoption when that add-on\'s discount changes', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      const addonRowId = randomUUID();
+      // Stored: $100 primary (gross UNKNOWN — NULL primary_line_price, no
+      // parent-level discount at all), one $100 add-on stored net $90 via
+      // its own $10 fixed discount, total $190.
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-21', service_type: 'Fixture Round-13 Legacy Add-On Discount',
+        primary_line_price: null, estimated_price: 190,
+      });
+      await mockPg('scheduled_service_addons').insert({
+        id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Discounted Add-On',
+        base_price: 100, estimated_price: 90,
+        discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10,
+      });
+      const updates = {};
+      // The modal derives the primary as total - add-on gross = $90 (the
+      // add-on's discount is already baked into the $190), then the
+      // operator changes the add-on's discount ($10 -> $20).
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 90,
+        addons: [{
+          id: addonRowId, serviceName: 'Fixture Discounted Add-On', basePrice: 100,
+          discountType: 'fixed_amount', discountAmount: 20, lineDiscountFresh: true,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.legacyPrimaryGrossUnknown).toBe(true);
+      // Never stamped canonical off the guessed $90 primary.
+      expect(hasPricingRegimeMarker(updates)).toBe(false);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // GitHub Codex round 12 P1 (#4657, :9970): the save transaction
+  // REPLACES every add-on row (delete + reinsert), so a submitted
+  // existing-row id absent from this visit means another editor's save
+  // already landed — it must retry like every other concurrent-edit
+  // conflict, never be treated as a fresh line that silently deletes the
+  // other editor's rows. Gate-independent (the stale-id guard runs
+  // unconditionally in normalizeUpdateDetailsAddons), so GATE_DISCOUNT_STACKING
+  // is left off here on purpose.
+  test('PUT /:id/update-details (planner, real rows): a submitted add-on row id absent from this visit rejects with VISIT_CHANGED_RETRY, never silently treated as a new line', async () => {
+    const id = randomUUID();
+    const realAddonRowId = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-21', service_type: 'Fixture Round-12 Stale Id', primary_line_price: 100, estimated_price: 140,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: realAddonRowId, scheduled_service_id: id, service_name: 'Fixture Existing Add-On', base_price: 40, estimated_price: 40,
+    });
+    // Never existed on this visit — simulates another editor's replace
+    // having already deleted/reinserted the add-on rows under a new id.
+    const staleId = randomUUID();
+    const updates = {};
+    await expect(computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100,
+      addons: [{ id: staleId, serviceName: 'Fixture Existing Add-On', basePrice: 40 }],
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    })).rejects.toMatchObject({ code: 'VISIT_CHANGED_RETRY', statusCode: 409 });
+  });
+
+  // Companion to the above: an OMITTED id is still a legitimate new line
+  // and must never be refused.
+  test('PUT /:id/update-details (planner, real rows): an OMITTED add-on id is still a legitimate new line, never refused', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-22', service_type: 'Fixture Round-12 New Line', primary_line_price: 100, estimated_price: 100,
+    });
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100,
+      addons: [{ serviceName: 'Fixture Brand New Add-On', basePrice: 30 }], // no id — a genuine new line
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.replaceAddons).toHaveLength(1);
+    expect(plan.replaceAddons[0].price).toBe(30);
+  });
+
+  // GitHub Codex round 21 P1 (#4657, :12301), END TO END through real
+  // Postgres rows: addonRowIdsDrifted (round 14's own fix, above) proves
+  // only that the add-on ROW SET a plan was built against is still on
+  // disk — it is blind to a concurrent caller that reprices this visit
+  // WITHOUT replacing any add-on row at all. MobileServiceEditModal's own
+  // primary-price-only save is exactly this shape: it updates
+  // estimated_price and NULLS every add-on's stored discount columns in
+  // place (:12444-12455), leaving every id untouched. This plans a
+  // desktop request's save first — capturing financialCasSnapshot from
+  // the SAME `existing`/existingAddonDiscountRows reads the planner
+  // already does — then lands that concurrent mobile write BEFORE running
+  // the route's own locked recheck (the exact sequence the route runs at
+  // :12297-12325: re-read under FOR UPDATE, addonRowIdsDrifted, THEN
+  // financialStateDrifted). The id set is untouched (addonRowIdsDrifted
+  // alone would pass, proving the pre-fix gap), but the money moved, so
+  // financialStateDrifted must catch it.
+  test('PUT /:id/update-details (planner, real rows): a concurrent mobile primary-price save that clears an add-on discount WITHOUT touching its id drifts the financial CAS even though addonRowIdsDrifted alone would pass', async () => {
+    const id = randomUUID();
+    const addonRowId = randomUUID();
+    const discountId = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-25', service_type: 'Fixture Round-21 Financial CAS',
+      primary_line_price: 100, estimated_price: 190,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Discounted Add-On', base_price: 100, estimated_price: 90,
+      discount_id: discountId, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+    });
+
+    // The DESKTOP request's plan — round-trips the add-on's own stamp
+    // verbatim (SchedulePage.jsx's convention for an unchanged discounted
+    // line); this save never touches the money at all.
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100,
+      addons: [{
+        id: addonRowId, serviceName: 'Fixture Discounted Add-On', basePrice: 100,
+        discountId, discountType: 'percentage', discountAmount: 10,
+      }],
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.financialCasSnapshot).toBeTruthy();
+    expect(plan.financialCasSnapshot.addons).toHaveLength(1);
+    expect(plan.financialCasSnapshot.addons[0].discount_id).toBe(discountId);
+
+    // Concurrent MOBILE save lands before the desktop request reaches the
+    // lock: a primary-price-only edit updates estimated_price/
+    // primary_line_price and clears the add-on's discount columns IN
+    // PLACE — same row, same add-on id.
+    await mockPg('scheduled_services').where({ id }).update({ estimated_price: 150, primary_line_price: 150 });
+    await mockPg('scheduled_service_addons').where({ id: addonRowId }).update({
+      discount_id: null, discount_type: null, discount_amount: null, discount_dollars: null, estimated_price: 100,
+    });
+
+    // The route's own locked recheck: re-read the SAME fields the
+    // snapshot carries, under the row's lock.
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    // The id-only check ALONE would pass — same row, same id, no rows
+    // added or removed. This is exactly the gap round 21 found.
+    expect(addonRowIdsDrifted(plan.expectedAddonRowIds, freshAddonRows.map((r) => r.id))).toBe(false);
+    // financialStateDrifted (the fix) catches the money move the id check
+    // cannot see. This assertion FAILS WITHOUT THE FIX: a pre-fix planner
+    // never returns a financialCasSnapshot at all, so the route would have
+    // nothing to compare here and the stale desktop save would proceed.
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(true);
+  });
+
+  test('PUT /:id/update-details (planner, real rows): no concurrent write — the SAME locked recheck proceeds (financial CAS not drifted)', async () => {
+    const id = randomUUID();
+    const addonRowId = randomUUID();
+    const discountId = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-26', service_type: 'Fixture Round-21 Financial CAS Control',
+      primary_line_price: 100, estimated_price: 190,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Discounted Add-On', base_price: 100, estimated_price: 90,
+      discount_id: discountId, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+    });
+
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100,
+      addons: [{
+        id: addonRowId, serviceName: 'Fixture Discounted Add-On', basePrice: 100,
+        discountId, discountType: 'percentage', discountAmount: 10,
+      }],
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.financialCasSnapshot).toBeTruthy();
+
+    // Nothing else touched this visit — the locked recheck re-reads the
+    // SAME state the plan was built from.
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    expect(addonRowIdsDrifted(plan.expectedAddonRowIds, freshAddonRows.map((r) => r.id))).toBe(false);
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(false);
+
+    // The save proceeds exactly as the route would.
+    await mockPg('scheduled_services').where({ id }).update(updates);
+    const rowAfter = await mockPg('scheduled_services').where({ id }).first();
+    expect(Number(rowAfter.estimated_price)).toBe(updates.estimated_price);
+  });
+
+  // GitHub Codex round 22 P1 (#4657, :11627), END TO END through real
+  // Postgres rows: round 21 fixed the financial CAS for the addons-array
+  // branch only — a visit opened with NO add-ons at all takes
+  // computeSingleServiceEstimatedPricePlan's branch instead, which never
+  // built a financialCasSnapshot, so this witness was checked only before
+  // the write transaction. A concurrent price change landing between the
+  // pre-transaction read and the route's row lock would have let the
+  // stale request persist its pre-change estimated_price. This plans a
+  // genuine (non-no-op) primary-price save on a zero-add-on visit first,
+  // then lands a concurrent parent price change before the route's own
+  // locked recheck would run.
+  test('PUT /:id/update-details (planner, real rows, NO add-ons): a concurrent price change on the parent drifts the financial CAS the single-service branch now builds', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-27', service_type: 'Fixture Round-22 No-Addon Financial CAS',
+      primary_line_price: 100, estimated_price: 100,
+    });
+
+    // A genuine primary-price edit (100 -> 120), desktop gross convention
+    // (primaryLinePrice posted) — never touches an addons array at all, so
+    // computeUpdateDetailsFinancialPlan takes the single-service branch.
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 120, estimatedPrice: 120,
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    // This assertion FAILS WITHOUT THE FIX: a pre-fix
+    // computeSingleServiceEstimatedPricePlan returns a bare boolean, so
+    // computeUpdateDetailsFinancialPlan's own financialCasSnapshot stays
+    // null for this branch.
+    expect(plan.financialCasSnapshot).toBeTruthy();
+    expect(plan.financialCasSnapshot.addons).toHaveLength(0);
+
+    // Concurrent caller reprices the SAME visit before the planning
+    // request reaches the row lock.
+    await mockPg('scheduled_services').where({ id }).update({ estimated_price: 150, primary_line_price: 150 });
+
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    // This assertion FAILS WITHOUT THE FIX: with financialCasSnapshot
+    // null, financialStateDrifted short-circuits to false and the stale
+    // desktop save would proceed and overwrite the concurrent price.
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(true);
+  });
+
+  // Companion case: the concurrent change is a NEW add-on row (not a
+  // parent price edit) — a row the snapshot (built when the visit had
+  // zero add-ons) never saw. financialStateDrifted's own missing-row loop
+  // only walks the snapshot's rows looking for one gone from `fresh`; it
+  // never previously checked the opposite direction (a fresh row absent
+  // from the snapshot), so this needed its own fix inside
+  // financialStateDrifted too (see the unit case below).
+  test('PUT /:id/update-details (planner, real rows, NO add-ons): a concurrently ADDED add-on row drifts the financial CAS', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-28', service_type: 'Fixture Round-22 No-Addon Concurrent Add',
+      primary_line_price: 100, estimated_price: 100,
+    });
+
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 120, estimatedPrice: 120,
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.financialCasSnapshot).toBeTruthy();
+    expect(plan.financialCasSnapshot.addons).toHaveLength(0);
+
+    // Concurrent caller adds a brand-new add-on line to this visit — no
+    // parent field changes, but the visit's true total is no longer what
+    // this plan priced against.
+    const newAddonRowId = randomUUID();
+    await mockPg('scheduled_service_addons').insert({
+      id: newAddonRowId, scheduled_service_id: id, service_name: 'Fixture Concurrently Added Add-On', base_price: 25, estimated_price: 25,
+    });
+
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    // This assertion FAILS WITHOUT THE FIX for two independent reasons:
+    // financialCasSnapshot is null pre-fix (short-circuits false), AND
+    // even given a snapshot, the pre-fix financialStateDrifted only
+    // walked the snapshot's own rows looking for one missing from
+    // `fresh` — a row present in `fresh` but absent from the snapshot
+    // (this exact case) passed through undetected.
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(true);
+  });
+
+  // Control: no concurrent change at all — the no-add-on path's own
+  // locked recheck must proceed exactly like round 21's addons-array
+  // control case.
+  test('PUT /:id/update-details (planner, real rows, NO add-ons): no concurrent write — the locked recheck proceeds (financial CAS not drifted)', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-29', service_type: 'Fixture Round-22 No-Addon Control',
+      primary_line_price: 100, estimated_price: 100,
+    });
+
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 120, estimatedPrice: 120,
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.financialCasSnapshot).toBeTruthy();
+
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(false);
+
+    await mockPg('scheduled_services').where({ id }).update(updates);
+    const rowAfter = await mockPg('scheduled_services').where({ id }).first();
+    expect(Number(rowAfter.estimated_price)).toBe(updates.estimated_price);
+  });
+
+  // GitHub Codex round 22 P1 (#4657, :11627): the fix must still produce a
+  // financialCasSnapshot on the NO-OP price path — computeSingleServiceEstimatedPricePlan
+  // throws 'noop-price-save' internally for an unchanged price, but the
+  // route still writes `updates.estimated_price` (the stored net, echoed
+  // back) on that path, so the witness must exist to guard THAT write too.
+  test('PUT /:id/update-details (planner, real rows, NO add-ons): a no-op price save still produces a financial CAS snapshot', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-30', service_type: 'Fixture Round-22 No-Addon Noop',
+      primary_line_price: 100, estimated_price: 100,
+    });
+
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100, estimatedPrice: 100, // unchanged — takes the no-op branch
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(updates.estimated_price).toBe(100);
+    expect(plan.financialCasSnapshot).toBeTruthy();
   });
 });

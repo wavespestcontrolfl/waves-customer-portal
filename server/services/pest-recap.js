@@ -34,6 +34,8 @@ const { invalidateServiceReportPdfCache } = require('./service-report/pdf-storag
 const { buildReportIdentitySnapshot, canonicalProductId, resolveVisitAddress } = require('./service-report/report-identity-snapshot');
 const { approvedReportProductFacts } = require('./service-report/report-data');
 const { detectServiceLine } = require('./service-report/service-line-configs');
+const { loadActiveConfig: loadPestPressureConfig } = require('./pest-pressure/store');
+const { pestPressureConfigAllowsTechnicianRating } = require('./pest-pressure/technician-rating-gate');
 const { isValidRateUnit } = require('./inventory-units');
 const { completionSuppliesOwedMarker } = require('./supplies-consumption');
 const { etDateString } = require('../utils/datetime-et');
@@ -375,6 +377,9 @@ async function submitRecap({
   // recap (a re-recap / edit of a historical completion, not the completion
   // itself) — callers must not apply once-per-completion effects.
   let recapPriorCompleted = false;
+  // Set inside the transaction: the staff rating passed the admin switch /
+  // service-line gate (read again after commit to decide the rescore).
+  let recapRatingAllowed = false;
   // Concurrency idempotency (Codex P1): scheduled_service_id has only a
   // non-unique index, so two simultaneous submits (double-tap, browser
   // retry, admin+tech race) could each pass the existing-record lookup
@@ -503,6 +508,27 @@ async function submitRecap({
     // never block on it.
     let serviceRecordCols = {};
     try { serviceRecordCols = await trx('service_records').columnInfo(); } catch { serviceRecordCols = {}; }
+    // Staff-entered rating: stamp the technician source (and time) so Pest
+    // Pressure scores it as the report score, same as the completion form
+    // (owner ruling 2026-09-24). Without the stamp the null source reads as
+    // a customer rating and lands on the blended path.
+    // Same admin switch + service-line gate as the completion form: with
+    // technician entry off, a stale or direct request's rating is ignored
+    // rather than written with technician provenance.
+    if (clientPestRating != null) {
+      const pestPressureConfig = await loadPestPressureConfig(trx).catch(() => null);
+      recapRatingAllowed = pestPressureConfigAllowsTechnicianRating({
+        pestPressureConfig,
+        serviceLine: detectServiceLine(locked?.service_type || svc.service_type || 'Pest Control'),
+      });
+    }
+    const staffRatingFields = clientPestRating != null && recapRatingAllowed
+      ? {
+        client_pest_rating: clientPestRating,
+        ...(serviceRecordCols.client_pest_rating_source ? { client_pest_rating_source: 'technician' } : {}),
+        ...(serviceRecordCols.client_pest_rating_at ? { client_pest_rating_at: new Date() } : {}),
+      }
+      : {};
     const existing = await trx('service_records')
       .where({ scheduled_service_id: serviceId })
       .orderBy('created_at', 'desc')
@@ -754,7 +780,7 @@ async function submitRecap({
           ? { service_line: detectServiceLine(existing.service_type || svc.service_type || 'Pest Control') }
           : {}),
         ...(mergedServiceData ? { service_data: mergedServiceData } : {}),
-        ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
+        ...staffRatingFields,
         ...smsClaim,
         // The completion TRANSITION owes the yard-sign kit: a durable marker
         // the route's consumption hook reads and clears, so a retry after a
@@ -801,7 +827,7 @@ async function submitRecap({
           ? { structured_notes: JSON.stringify({ closeoutRequirements: closeoutSnap }) }
           : {}),
         service_data: JSON.stringify({ ...frozenTraceIdentity, reportIdentitySnapshot }),
-        ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
+        ...staffRatingFields,
         ...smsClaim,
         // completion_supplies_owed: this recap performs the completion
         // transition (see the update branch above).
@@ -1354,6 +1380,15 @@ async function submitRecap({
     } catch (e) {
       logger.warn(`[pest-recap] card mint dispatch failed: ${e?.name || 'Error'}`);
     }
+  }
+
+  // A recap rating is the report score now (owner ruling 2026-09-24):
+  // rescore after the commit so the gauge and PDF never keep the old value.
+  // Best-effort, same as the completion flow — a scoring failure must not
+  // fail a committed recap.
+  if (clientPestRating != null && recapRatingAllowed) {
+    const { runAndSwallowErrors: rescorePestPressure } = require('./pest-pressure/orchestrate');
+    await rescorePestPressure(recordId, knex);
   }
 
   logger.info(
