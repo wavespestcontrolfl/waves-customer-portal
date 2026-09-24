@@ -97,16 +97,20 @@ function describeLiveVisit(liveVisit) {
   return `This customer still has a scheduled visit on ${date}`;
 }
 
-// A prepay term whose paid coverage is live as of today — reuses
-// coveredTermsAsOf (annual-prepay-renewals.js), the SAME canonical "is this
-// term's paid coverage live" predicate cancellation-eligibility.js's
-// hasCancellableWork calls, rather than a narrower status='active' check
-// that misses a renewal_pending term or a decided (renewed/switch_plan) term
-// still riding out its already-paid window.
-async function findActivePrepayTerm(dbh, customerId, { todayIso } = {}) {
+// Any term with still-valid paid coverage, past, present OR FUTURE — reuses
+// coveredTermsAsOf (annual-prepay-renewals.js) called with a null coverage
+// date, its own documented "audit" mode ("EVERY term with still-valid paid
+// coverage regardless of window"), the SAME canonical "is this term's paid
+// coverage live" predicate cancellation-eligibility.js's hasCancellableWork
+// calls with today's date. This guard intentionally does NOT restrict to
+// today: a renewal term paid in advance (term_start tomorrow) is a live
+// paid obligation with no scheduled_services row yet to catch it, and
+// leaving it live is exactly the residue this fix closes. A narrower
+// status='active' check would also miss a renewal_pending term or a decided
+// (renewed/switch_plan) term still riding out its already-paid window.
+async function findActivePrepayTerm(dbh, customerId) {
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
-  const today = todayIso || require('../utils/datetime-et').etDateString();
-  return coveredTermsAsOf(dbh, today)
+  return coveredTermsAsOf(dbh, null)
     .where('t.customer_id', customerId)
     .first('t.id as id', 't.term_end as term_end', 't.status as status');
 }
