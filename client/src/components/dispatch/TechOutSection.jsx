@@ -73,6 +73,12 @@ export default function TechOutSection({ techId, techName, onChanged }) {
   // change itself.
   const techIdRef = useRef(techId);
   techIdRef.current = techId;
+  // Board invalidation is independent of drawer state: a mutation that the
+  // server committed refreshes the roster (out_today, drop targets) even if
+  // this drawer moved to another tech or closed before the response landed.
+  // Only the drawer's own state updates are discarded when stale.
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
   // Unmount invalidates every in-flight request (drawer closed mid-mutation,
   // then reopened on another tech): a late response finds the seq advanced
   // and no current tech, so it neither renders nor calls onChanged.
@@ -149,6 +155,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
         body: JSON.stringify({ reason, note: note || undefined }),
       });
       const data = await res.json().catch(() => ({}));
+      if (res.ok) onChangedRef.current?.(requestTechId);
       if (fetchSeqRef.current !== seq || techIdRef.current !== requestTechId) {
         discarded = true;
         return;
@@ -167,7 +174,6 @@ export default function TechOutSection({ techId, techName, onChanged }) {
       setAbsence({ ...data.absence, redistribution: data.absence?.redistribution || data.summary });
       setConfirming(false);
       setNote('');
-      onChanged?.(requestTechId);
     } catch (err) {
       if (fetchSeqRef.current !== seq || techIdRef.current !== requestTechId) {
         discarded = true;
@@ -196,6 +202,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
         method: 'DELETE',
         headers: adminAuthHeaders(),
       });
+      if (res.ok) onChangedRef.current?.(requestTechId);
       if (fetchSeqRef.current !== seq || techIdRef.current !== requestTechId) {
         discarded = true;
         return;
@@ -205,7 +212,6 @@ export default function TechOutSection({ techId, techName, onChanged }) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       await fetchStatus(requestTechId);
-      onChanged?.(requestTechId);
     } catch (err) {
       if (discarded) return;
       setSubmitError(err.message || 'Failed to clear absence');

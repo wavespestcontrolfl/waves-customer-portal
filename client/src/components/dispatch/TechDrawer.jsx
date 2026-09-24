@@ -167,9 +167,12 @@ export default function TechDrawer({ techId, onClose, onAbsenceChanged }) {
   const techIdRef = useRef(techId);
   techIdRef.current = techId;
   const handleAbsenceChanged = useCallback((changedTechId) => {
-    if (changedTechId && changedTechId !== techIdRef.current) return;
+    // The board refresh is unconditional — the server committed the change.
     onAbsenceChanged?.();
-    if (techIdRef.current) fetchTech(techIdRef.current);
+    // The drawer's own details refetch only for the tech it still shows.
+    if (!changedTechId || changedTechId === techIdRef.current) {
+      if (techIdRef.current) fetchTech(techIdRef.current);
+    }
   }, [onAbsenceChanged, fetchTech]);
 
   const open = !!techId;

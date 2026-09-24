@@ -147,7 +147,7 @@ describe('out today', () => {
 // after the dispatcher had already selected tech B could still paint A's
 // redistribution result into B's drawer.
 describe('unmount mid-mutation (auditor P1)', () => {
-  it('a POST that resolves after the section unmounted never calls onChanged or renders', async () => {
+  it('a POST that resolves after the section unmounted still refreshes the board (onChanged) but renders nothing', async () => {
     const onChanged = vi.fn();
     fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
     const { unmount } = render(
@@ -175,7 +175,9 @@ describe('unmount mid-mutation (auditor P1)', () => {
       });
     });
 
-    expect(onChanged).not.toHaveBeenCalled();
+    // The server committed the mark-out: the roster must refresh even though
+    // this drawer is gone. Nothing rendered, no error thrown.
+    expect(onChanged).toHaveBeenCalledWith('tech-1');
   });
 });
 
@@ -221,7 +223,9 @@ describe('cross-tech mutation race (Codex P1)', () => {
     expect(screen.queryByText(/Out today/)).toBeNull();
     expect(screen.getByText('Availability')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Mark out today' })).toBeInTheDocument();
-    expect(onChanged).not.toHaveBeenCalled();
+    // The committed mutation still refreshes the board (reported for tech-1);
+    // only B's drawer state is protected from it.
+    expect(onChanged).toHaveBeenCalledWith('tech-1');
   });
 
   it('discards a stale DELETE response after switching to a different tech before it resolves', async () => {
@@ -256,7 +260,9 @@ describe('cross-tech mutation race (Codex P1)', () => {
     // a fetchStatus(tech-1) call or onChanged() on B's behalf.
     expect(screen.getByText('Availability')).toBeInTheDocument();
     expect(screen.queryByText(/Out today/)).toBeNull();
-    expect(onChanged).not.toHaveBeenCalled();
+    // The committed mutation still refreshes the board (reported for tech-1);
+    // only B's drawer state is protected from it.
+    expect(onChanged).toHaveBeenCalledWith('tech-1');
     // Only 3 fetches total: tech-1 GET, tech-2 GET, tech-1 DELETE. No
     // extra fetchStatus(tech-1) call snuck in after the discard.
     expect(fetch).toHaveBeenCalledTimes(3);
