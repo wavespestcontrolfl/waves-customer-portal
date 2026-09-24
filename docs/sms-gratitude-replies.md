@@ -74,9 +74,12 @@ PostgreSQL using relevant repository migrations and minimal unrelated foreign-ke
 stubs. Checks covered phone identity, timestamp precision, pending work, duplicate
 sweep rows, transactional claim/reservation creation, and idempotent retry. The
 qualification ledger checks covered duplicate refusal, stale recovery, failed lock
-handling and newest-run supersession. Each temporary database was stopped.
-This does not establish deployed schema, full migration-chain correctness,
-actual provider delivery, settlement or reconciliation.
+handling, execution ownership and newest-run supersession. A two-session local
+PostgreSQL proof confirmed that stale recovery cannot overwrite a completed run.
+Rollback-only local PostgreSQL cases also verified receipt preservation and
+reconciliation for accepted, failed, undelivered and canceled reservations.
+Each temporary database was stopped. This does not establish deployed schema,
+full migration-chain correctness or actual provider delivery.
 
 ## Qualification without customer messages
 
@@ -89,13 +92,17 @@ authentication. Request bodies cannot replace fixtures or submit passing results
 The exam calls the actual drafter and verifier on frozen synthetic conversations,
 using both existing exam model routes. It never creates a customer draft or enters
 the delivery path. Positive cases must produce the exact allowed reply with safe
-raw actions, no missing information and a converged verifier; negative cases must
-remain ineligible after the deterministic context checks. A complete result set
+raw actions, no missing information and a converged verifier. Every positive
+verifier response must report the pinned primary model; fallback or missing
+model telemetry fails qualification. Negative cases must return an empty reply
+with safe raw actions and remain ineligible after deterministic context checks. A complete result set
 is required. This measures the fixed reply, not general conversational autonomy.
 
 A pass is tied to policy and fixture hashes, relevant source code, the rendered
 system prompt, both drafting models, verifier configuration and the effective
-voice profile. Changed pins, failed or incomplete runs, and unavailable evidence
+voice profile actually applied to the prompt. Agent Control shows exam records
+in the SMS area and sealed-evaluation lane, distinguishing grading failures from
+execution failures. Changed pins, failed or incomplete runs, and unavailable evidence
 block qualification. The latest run supersedes older passes. Historical replay
 and mocked tests do not qualify production. Exam records do not invent customer
 acceptance or human approval.
