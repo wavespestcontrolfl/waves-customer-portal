@@ -43,7 +43,7 @@ describe('preserved recurring visit staff alert', () => {
       });
       expect(notifyAdmin).toHaveBeenCalledWith(
         'schedule_conflict', expect.any(String), expect.stringContaining('kept existing appointments'),
-        expect.objectContaining({ bell: true }),
+        expect.objectContaining({ bell: true, link: '/admin/schedule?service=visit-1' }),
       );
       expect(markerWrites.some((row) => Object.hasOwn(row, 'conflict_card_at'))).toBe(!!notification?.id);
     },
