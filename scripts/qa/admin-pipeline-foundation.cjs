@@ -201,7 +201,23 @@ function bodyFor(url, method) {
   if (p === "/api/admin/call-recordings/commitments/open")
     return { commitments: [], enabled: false };
   if (p === "/api/admin/leads/lead-fixture")
-    return { lead, activities: [], calls: [] };
+    return {
+      lead,
+      activities: [
+        {
+          id: "activity-contact-fixture",
+          activity_type: "status_change",
+          description: "Status: new → contacted",
+          performed_by: "AI Call Processor",
+          created_at: now,
+          metadata: JSON.stringify({
+            evidenceType: "live_conversation",
+            evidenceId: "call-evidence-fixture-1234",
+          }),
+        },
+      ],
+      calls: [],
+    };
   if (method !== "GET") return { ok: true };
   return null;
 }
@@ -303,7 +319,7 @@ async function main() {
       });
 
       await page.goto(
-        `${server.baseUrl}/admin/leads?leadId=lead-fixture`,
+        `${server.baseUrl}/admin/leads?leadId=lead-fixture&leadReview=1`,
         {
           timeout: 60000,
         },
@@ -315,6 +331,7 @@ async function main() {
         const url = new URL(current);
         return (
           url.searchParams.get("lead") === "lead-fixture" &&
+          url.searchParams.get("leadReview") === "1" &&
           !url.searchParams.has("leadId")
         );
       });
@@ -333,6 +350,11 @@ async function main() {
         false,
         `legacy lead link retained the open-only filter at ${width}`,
       );
+      const activityExplanation = page.getByText(
+        /^Contacted after a live conversation/,
+      );
+      await activityExplanation.waitFor();
+      await page.getByText(/Evidence reference call-evi.*1234/).waitFor();
       await waitForFonts(page);
       assert.equal(
         await page
@@ -341,6 +363,12 @@ async function main() {
           .getAttribute("data-ui-density"),
         "comfortable",
       );
+      await activityExplanation.evaluate((node) =>
+        node.scrollIntoView({ block: "center" }),
+      );
+      const activityShot = path.join(output, `lead-activity-${width}.png`);
+      await page.screenshot({ path: activityShot });
+      report.screenshots.push(activityShot);
       const listShot = path.join(output, `lead-list-${width}.png`);
       await page.screenshot({ path: listShot, fullPage: true });
       report.screenshots.push(listShot);
