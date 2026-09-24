@@ -71,7 +71,7 @@ const DEFAULT_CONFIG = Object.freeze({
     custom: 'Since your last service, how much pest activity have you noticed?',
   },
   customerExplanationText:
-    'Pest Pressure is a 0–5 score of the pest activity at your property: 0 means none, 1 very low, 2 low, 3 moderate, 4 elevated, and 5 high. When your technician rates activity during the visit, that rating is your score. Otherwise the score combines reported activity, technician observations, re-service history, recurring issue areas, and property risk factors such as entry points, moisture, sanitation, or harborage conditions.\n\nFor monthly services, we review activity since the last visit. For bi-monthly services, we review the past two months. For quarterly services, we review the past three months. Future reports compare scores over time to show whether pest pressure is improving, stable, or increasing.',
+    'Pest Pressure is a 0–5 score of the pest activity at your property, from 0 (none) to 5 (the most activity). When your technician rates activity during the visit, that rating is your score. Otherwise the score combines reported activity, technician observations, re-service history, recurring issue areas, and property risk factors such as entry points, moisture, sanitation, or harborage conditions.\n\nFor monthly services, we review activity since the last visit. For bi-monthly services, we review the past two months. For quarterly services, we review the past three months. Future reports compare scores over time to show whether pest pressure is improving, stable, or increasing.',
   calculationVersion: '1.0',
 });
 

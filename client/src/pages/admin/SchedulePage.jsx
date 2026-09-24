@@ -15866,6 +15866,12 @@ export function CompletionPanel({
       // strict validation passes.
       if (clientPestRating != null && Number.isInteger(clientPestRating)) {
         body.clientPestRating = clientPestRating;
+        // The untouched first-visit 5: the server re-checks it, since another
+        // visit may have completed since this form opened.
+        if (!clientPestRatingSetByTechRef.current && clientPestRatingDefault != null
+          && clientPestRating === clientPestRatingDefault) {
+          body.clientPestRatingPrefilled = true;
+        }
       } else if (clientPestRatingSetByTechRef.current) {
         // A deliberate clear. Without this the server applies the
         // first-visit 5 (owner ruling 2026-09-24) — which it also does when

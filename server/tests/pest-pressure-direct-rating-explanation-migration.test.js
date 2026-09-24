@@ -16,8 +16,8 @@ function fakeKnex() {
 }
 
 describe('20260924000012_pest_pressure_direct_rating_explanation', () => {
-  test('new text is the code default and describes the direct technician score', () => {
-    expect(NEW_TEXT).toBe(DEFAULT_CONFIG.customerExplanationText);
+  test('new text describes the direct technician score (000015 later moves it to label-neutral copy)', () => {
+    expect(NEW_TEXT).not.toBe(DEFAULT_CONFIG.customerExplanationText);
     expect(NEW_TEXT).toMatch(/When your technician rates activity during the visit, that rating is your score/);
   });
 

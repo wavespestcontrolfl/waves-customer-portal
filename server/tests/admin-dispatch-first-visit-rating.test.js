@@ -34,6 +34,9 @@ describe('tech-rating-allowed firstVisit (owner ruling 2026-09-24)', () => {
       ['service_line', 'pest'],
     ]));
     expect(calls.whereRaw.join(' ')).toMatch(/typedReportDelivery/);
+    // Non-performed visits (inspection only, declined, incomplete) never
+    // count as a prior visit (codex r5 P2).
+    expect(calls.whereRaw.join(' ')).toMatch(/visitOutcome/);
     // Legacy null-line rows count as prior visits (codex r1 P2).
     expect(calls.orWhereNull).toBe('service_line');
   });
@@ -71,6 +74,23 @@ describe('firstVisitDefaultRating — server-side first-visit 5 (codex r4 P2)', 
   test('a rating the tech sent always wins', async () => {
     await expect(firstVisitDefaultRating(base({ clientPestRating: 2 }))).resolves.toBe(2);
     await expect(firstVisitDefaultRating(base({ clientPestRating: 0 }))).resolves.toBe(0);
+  });
+
+  test('performed outcomes other than completed also get the default (codex r5 P2)', async () => {
+    await expect(firstVisitDefaultRating(base({ visitOutcome: 'follow_up_needed' }))).resolves.toBe(5);
+    await expect(firstVisitDefaultRating(base({ visitOutcome: 'customer_concern' }))).resolves.toBe(5);
+    await expect(firstVisitDefaultRating(base({ visitOutcome: 'inspection_only' }))).resolves.toBeNull();
+    await expect(firstVisitDefaultRating(base({ visitOutcome: 'customer_declined' }))).resolves.toBeNull();
+  });
+
+  test('an untouched prefilled 5 is re-checked; a chosen 5 is kept (codex r5 P2)', async () => {
+    await expect(firstVisitDefaultRating(base({ clientPestRating: 5, clientPestRatingPrefilled: true }))).resolves.toBe(5);
+    await expect(firstVisitDefaultRating(base({
+      clientPestRating: 5, clientPestRatingPrefilled: true, knex: fakeKnex({ id: 'sr-now-exists' }).knex,
+    }))).resolves.toBeNull();
+    await expect(firstVisitDefaultRating(base({
+      clientPestRating: 5, knex: fakeKnex({ id: 'sr-now-exists' }).knex,
+    }))).resolves.toBe(5);
   });
 
   test('no default when cleared, not performed, not allowed, or not a first visit', async () => {

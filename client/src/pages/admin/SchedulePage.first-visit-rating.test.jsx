@@ -139,7 +139,21 @@ describe('first-visit pest activity rating', () => {
     });
     const body = onSubmit.mock.calls[0][1];
     expect(body.clientPestRating).toBe(5);
+    expect(body.clientPestRatingPrefilled).toBe(true);
     expect(body).not.toHaveProperty('clientPestRatingCleared');
+  });
+
+  it('a 5 the tech chose is not marked as a prefill', async () => {
+    const onSubmit = await mount();
+    await answer({ allowed: true, firstVisit: true });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Rate pest activity 5 out of 5' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Rate pest activity 5 out of 5' })[0]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
+    });
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.clientPestRating).toBe(5);
+    expect(body).not.toHaveProperty('clientPestRatingPrefilled');
   });
 
   it('captions the scale with the active labels from the gate', async () => {

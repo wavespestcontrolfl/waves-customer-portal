@@ -2427,6 +2427,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // true when the tech deliberately cleared the picker — only then may
       // a first visit complete without the default 5.
       clientPestRatingCleared = false,
+      // true when the rating is the picker's untouched first-visit 5 — the
+      // server re-checks first-visit status instead of trusting it.
+      clientPestRatingPrefilled = false,
       structuredFindings = null,
       companionFindings = null,
       activityScore = null,
@@ -3403,6 +3406,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         knex: db,
         clientPestRating,
         clientPestRatingCleared,
+        clientPestRatingPrefilled,
         visitOutcome,
         completionAllowsRating: completionAllowsTechnicianPestRating({ typedFindingsType, isInternalOnlyCompletion }),
         configAllowsRating: async () => pestPressureConfigAllowsTechnicianRating({
