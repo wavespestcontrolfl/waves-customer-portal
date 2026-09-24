@@ -331,6 +331,71 @@ postgres('scheduled_services PUT /:id/update-details — add-on discount catalog
     return { statusCode, payload };
   }
 
+  // Follow-up to #4657 (owner-approved 2026-09-24): the generic row-version
+  // CAS. A write to a column NO field comparator lists (internal_notes),
+  // landing between the pre-transaction plan and the locked re-read, is
+  // refused with 409 VISIT_CHANGED_RETRY / ROW_VERSION_DRIFT — and the same
+  // save with no concurrent write commits normally.
+  test('row-version CAS: a concurrent write to an UNLISTED column between the plan and the lock is refused 409; the quiet save commits', async () => {
+    const realTrx = trx;
+    // The route's own `db.transaction(...)` is the seam between "plan read"
+    // and "locked re-read": inject the concurrent write right there.
+    const injected = new Proxy(realTrx, {
+      apply(target, _thisArg, args) { return target(...args); },
+      get(target, prop) {
+        if (prop === 'transaction') {
+          return async (...args) => {
+            await realTrx('scheduled_services').where({ id: visitId }).update({ internal_notes: 'written by another operator' });
+            return realTrx.transaction(...args);
+          };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    require('../models/db').connection = injected;
+    // The retry refusal is an operational error the route hands to next()
+    // (this helper rethrows it); accept a rendered 409 response too.
+    let refused;
+    try {
+      refused = await put(visitId, { primaryLinePrice: 120, addons: [] });
+    } catch (err) {
+      refused = { statusCode: err.statusCode || err.status, payload: { code: err.code, reason: err.reason } };
+    } finally {
+      require('../models/db').connection = realTrx;
+    }
+    expect(refused.statusCode).toBe(409);
+    expect(refused.payload.code).toBe('VISIT_CHANGED_RETRY');
+    expect(refused.payload.reason).toBe('ROW_VERSION_DRIFT');
+    const untouched = await realTrx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(untouched.estimated_price)).toBe(100); // nothing was written by the refused save
+
+    const { statusCode } = await put(visitId, { primaryLinePrice: 120, addons: [] });
+    expect(statusCode).toBe(200);
+    const saved = await realTrx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(saved.estimated_price)).toBe(120);
+
+    // GitHub Codex round 1 on #4769 (:13144): the route's OWN writes to
+    // this row (assignScheduleJobs / applyAppointmentAddress) run before
+    // the late financial CAS block, so a version compared there would read
+    // the route's own update as drift. A priced edit that also assigns a
+    // technician, with NO concurrent writer, must commit.
+    const technicianId = randomUUID();
+    await realTrx('technicians').insert({ id: technicianId, name: 'Fixture Assignee', employment_status: 'active', field_dispatchable: true, active: true });
+    // Reassignment is admin-only on this route — an admin staff token.
+    const handler = findHandler('put', '/:id/update-details');
+    const adminReq = { params: { id: visitId }, query: {}, body: { primaryLinePrice: 130, addons: [], technicianId }, headers: {}, techRole: 'admin' };
+    let assigned = { statusCode: 200, payload: null };
+    const adminRes = { status(code) { assigned.statusCode = code; return this; }, json(p) { assigned.payload = p; return this; } };
+    let assignErr = null;
+    await handler(adminReq, adminRes, (err) => { assignErr = err; });
+    if (assignErr) assigned = { statusCode: assignErr.statusCode || assignErr.status, payload: { code: assignErr.code, reason: assignErr.reason, message: assignErr.message } };
+    expect(assigned).toEqual(expect.objectContaining({ statusCode: 200 }));
+    const afterAssign = await realTrx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(afterAssign.estimated_price)).toBe(130);
+    expect(afterAssign.technician_id).toBe(technicianId);
+  });
+
   test('a NEW 20%-off-capped-at-$5 add-on discount on an unmarked visit saves capped at $5, never the raw uncapped $20', async () => {
     const { statusCode } = await put(visitId, {
       primaryLinePrice: 100,

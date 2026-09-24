@@ -202,7 +202,34 @@ function bodyFor(url, method) {
   if (p === "/api/admin/call-recordings/commitments/open")
     return { commitments: [], enabled: false };
   if (p === "/api/admin/leads/lead-fixture")
-    return { lead, activities: [], calls: [], ...(url.searchParams.get("leadReview") === "1" ? { linkedHistory: { original: null, canonical: null, linked: [linkedLead], unresolved: false, hasMore: false } } : {}) };
+    return {
+      lead,
+      activities: [
+        {
+          id: "activity-contact-fixture",
+          activity_type: "status_change",
+          description: "Status: new → contacted",
+          performed_by: "AI Call Processor",
+          created_at: now,
+          metadata: JSON.stringify({
+            evidenceType: "live_conversation",
+            evidenceId: "call-evidence-fixture-1234",
+          }),
+        },
+      ],
+      calls: [],
+      ...(url.searchParams.get("leadReview") === "1"
+        ? {
+            linkedHistory: {
+              original: null,
+              canonical: null,
+              linked: [linkedLead],
+              unresolved: false,
+              hasMore: false,
+            },
+          }
+        : {}),
+    };
   if (p === "/api/admin/leads/linked-fixture")
     return { lead: linkedLead, activities: [], calls: [], linkedHistory: { original: lead, canonical: lead, linked: [], unresolved: false, hasMore: false } };
   if (method !== "GET") return { ok: true };
@@ -318,6 +345,7 @@ async function main() {
         const url = new URL(current);
         return (
           url.searchParams.get("lead") === "lead-fixture" &&
+          url.searchParams.get("leadReview") === "1" &&
           !url.searchParams.has("leadId")
         );
       });
@@ -336,6 +364,11 @@ async function main() {
         false,
         `legacy lead link retained the open-only filter at ${width}`,
       );
+      const activityExplanation = page.getByText(
+        /^Contacted after a live conversation/,
+      );
+      await activityExplanation.waitFor();
+      await page.getByText(/Evidence reference call-evi.*1234/).waitFor();
       await waitForFonts(page);
       const history = page.getByRole("region", { name: "Linked lead history" });
       await history.getByText(/Linked record: Robin Example/).waitFor();
@@ -359,6 +392,12 @@ async function main() {
           .getAttribute("data-ui-density"),
         "comfortable",
       );
+      await activityExplanation.evaluate((node) =>
+        node.scrollIntoView({ block: "center" }),
+      );
+      const activityShot = path.join(output, `lead-activity-${width}.png`);
+      await page.screenshot({ path: activityShot });
+      report.screenshots.push(activityShot);
       const listShot = path.join(output, `lead-list-${width}.png`);
       await page.screenshot({ path: listShot, fullPage: true });
       report.screenshots.push(listShot);

@@ -66,10 +66,25 @@ async function firstVisitDefaultRating({
   return FIRST_VISIT_DEFAULT_RATING;
 }
 
+// Serialized re-check for a completion that is about to record the
+// first-visit default: inside the completion transaction, take a
+// customer/service-line advisory lock (held to commit) and re-read history,
+// so two first visits completing at the same instant can't both default —
+// the second waits for the first to commit and then sees its record.
+async function confirmFirstVisitUnderLock(trx, { customerId, serviceLine }) {
+  if (!customerId) return false;
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', [
+    'pest-first-visit',
+    `${customerId}:${serviceLine || ''}`,
+  ]);
+  return !(await customerHasPriorVisitOnLine(trx, { customerId, serviceLine }));
+}
+
 module.exports = {
   FIRST_VISIT_DEFAULT_RATING,
   NON_PERFORMED_VISIT_OUTCOMES,
   isPerformedVisitOutcome,
   customerHasPriorVisitOnLine,
+  confirmFirstVisitUnderLock,
   firstVisitDefaultRating,
 };

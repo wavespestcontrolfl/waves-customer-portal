@@ -837,6 +837,18 @@ describe('service report v1', () => {
     // An override keeps the calculated label_name; never show it for the
     // overridden number (codex r6 P2).
     expect(findPressureRow(build({ displayed_score: '5.0', label_name: 'Low', is_overridden: true }))?.detail).toBe('High · 5.0 / 5');
+    // …and resolves it against the scale the score was calculated with.
+    const customScale = [
+      { key: 'calm', name: 'Calm', min: 0, max: 2.4 },
+      { key: 'busy', name: 'Busy', min: 2.5, max: 4.4 },
+      { key: 'severe', name: 'Severe', min: 4.5, max: 5 },
+    ];
+    expect(findPressureRow(build({
+      displayed_score: '5.0', label_name: 'Calm', is_overridden: true, config_snapshot: { labels: customScale },
+    }))?.detail).toBe('Severe · 5.0 / 5');
+    expect(findPressureRow(build({
+      displayed_score: '5.0', label_name: 'Calm', is_overridden: true, config_snapshot: JSON.stringify({ labels: customScale }),
+    }))?.detail).toBe('Severe · 5.0 / 5');
   });
 
   test('premium experience builds customer-facing modules from service facts', () => {
