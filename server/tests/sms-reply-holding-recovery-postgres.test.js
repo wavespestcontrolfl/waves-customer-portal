@@ -141,6 +141,7 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
 
   test.each([
     ['exact provider SID', 'auto', `SM${'b'.repeat(32)}`],
+    ['exact MMS provider SID', 'auto', `MM${'c'.repeat(32)}`],
     ['post-reservation endpoint/body fallback', 'manual', null],
   ])('%s lets explicit cleanup remove only the duplicate reservation', async (_label, kind, reservationSid) => {
     const body = `Ordinary provider receipt ${kind}`;

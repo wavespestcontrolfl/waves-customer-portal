@@ -23,6 +23,7 @@ const db = require('../models/db');
 const suggest = require('../services/sms-suggest-mode');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const autoSend = require('../services/sms-auto-send');
+let decisions;
 
 function chain(overrides = {}) {
   const q = {};
@@ -39,7 +40,7 @@ beforeEach(() => {
     created_at: new Date(), from_phone: '+12025550101', to_phone: '+19413529161',
   })) });
   const activeClaim = chain();
-  const decisions = chain();
+  decisions = chain();
   const drafts = chain();
   db.trx = jest.fn((table) => {
     if (table === 'sms_log') return inbound;
@@ -82,5 +83,18 @@ test('accepted bookkeeping failure preserves the accepted reservation for recove
   expect(suggest.settleReplyHoldingReservation).toHaveBeenNthCalledWith(2, expect.objectContaining({
     reservationId: 'reservation-1', acceptedResult: expect.objectContaining({ deliveryOutcome: 'accepted' }),
   }));
+  expect(suggest.settleReplyHoldingReservation).toHaveBeenCalledTimes(2);
+});
+
+test('accepted promotion failure leaves the claim and parked decisions held', async () => {
+  suggest.settleReplyHoldingReservation
+    .mockResolvedValueOnce(true)
+    .mockResolvedValueOnce(false);
+
+  await expect(attempt()).resolves.toMatchObject({
+    sent: true, providerMessageId: expect.stringMatching(/^SM/),
+  });
+  expect(decisions.update).not.toHaveBeenCalled();
+  expect(suggest.ignoreParkedSuggestions).not.toHaveBeenCalled();
   expect(suggest.settleReplyHoldingReservation).toHaveBeenCalledTimes(2);
 });
