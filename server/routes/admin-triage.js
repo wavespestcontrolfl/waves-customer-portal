@@ -706,10 +706,16 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
   // requested address) stay, so a multi-property ask is still judged in
   // full (pre-push audit P1). The caller's RAW spoken line goes with the
   // disputed number (pre-push audit P1).
+  // A dispute the processor durably CLEARED keeps its scheduling snapshot
+  // as-is: the processor already re-pointed the ask when the on-file
+  // premise was validated, and deliberately left it when the stated
+  // premise is a saved secondary property — retargeting it here would file
+  // recovery work at the wrong property (codex r35 P1).
+  const cleared = !!payload?.address_dispute_cleared_at;
   const approvedWindow = payload?.scheduling_window
     ? {
       ...payload.scheduling_window,
-      ...(approvedAddress ? { requested_address: { ...(payload.scheduling_window.requested_address || {}), ...approvedAddress, raw_text: null } } : {}),
+      ...(approvedAddress && !cleared ? { requested_address: { ...(payload.scheduling_window.requested_address || {}), ...approvedAddress, raw_text: null } } : {}),
     }
     : null;
   const approvedPayload = payload ? {

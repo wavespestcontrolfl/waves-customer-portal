@@ -10477,7 +10477,15 @@ const CallRecordingProcessor = {
           standingConflictCoversCall = !standingPayload?.stated_street
             || !currentStreet
             || sameHouseNumberStreet(standingPayload.stated_street, currentStreet);
-          if (standingConflictCoversCall && disputePositivelyResolved) {
+          // A card a prior pass DURABLY cleared (address_dispute_cleared_at
+          // — the record validated, or the stated premise is a saved
+          // secondary property) is not re-armed by a later pass that merely
+          // repeats the stated street without fresh evidence of a NEW
+          // dispute (codex r35 P1): it stands for its scheduling ask only.
+          // (`houseNumberDisputed` is true here only when THIS pass detected a
+          // fresh conflict — the standing-card branch has not armed it yet.)
+          const durablyCleared = !!standingPayload?.address_dispute_cleared_at && !houseNumberDisputed;
+          if (standingConflictCoversCall && (disputePositivelyResolved || durablyCleared)) {
             // The card stands for its confirmed scheduling ask only; this
             // pass established the address is not in dispute, so nothing
             // is held or pulled on its account (codex r16 P1).

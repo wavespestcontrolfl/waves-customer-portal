@@ -375,6 +375,12 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(src).toContain("heldConflictPayload?.follow_up_plan && !decision.scheduleDenied");
   });
 
+  test('a durably cleared dispute keeps its scheduling snapshot (codex r35 P1)', () => {
+    const clearedHeld = { ...held, address_dispute_cleared_at: '2026-09-23T10:00:00Z' };
+    const d = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: clearedHeld, liveOnFile: { address_line1: '1260 Example St', address_line2: null, city: 'Parrish', zip: '34219' } });
+    expect(d.approvedWindow.requested_address).toEqual(held.scheduling_window.requested_address);
+  });
+
   test('the live customer address outranks the card snapshot once the office adopted the caller\'s number', () => {
     const d = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1250 Example St', address_line2: null, city: 'Parrish', zip: '34219' } });
     expect(d.approvedWindow.requested_address.street_line_1).toBe('1250 Example St');
