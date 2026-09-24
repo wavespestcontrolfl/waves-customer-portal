@@ -123,7 +123,7 @@ export default function AdminCommandHeader({
             hasSections && presentation.divider,
           )}
         >
-          <div className="flex min-w-0 items-center gap-2 md:gap-3">
+          <div className="ui-command-title flex min-w-0 items-center gap-2 md:gap-3">
             <div className="h-8 w-8 md:h-9 md:w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
               {Icon && <Icon size={17} strokeWidth={1.9} aria-hidden />}
             </div>

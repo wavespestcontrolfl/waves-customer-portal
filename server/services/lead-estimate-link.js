@@ -334,6 +334,101 @@ async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system
   return true;
 }
 
+// Evidence that proves a person actually spoke with the prospect, or that
+// staff booked/completed the in-person assessment discussed with them. Keep
+// this list positive: a voicemail, missed/failed call, transcription alone,
+// or generic enrichment must never move a lead out of the unanswered queue.
+const CONTACT_EVIDENCE_TYPES = new Set([
+  'live_conversation',
+  'assessment_booked',
+  'assessment_completed',
+]);
+
+/**
+ * Move one exactly identified lead from new -> contacted after live contact.
+ *
+ * `customerId` is required even when it is null. It pins the customer identity
+ * read by the caller, so a concurrent reassignment cannot mark another
+ * household's lead contacted. The positive `status = new` claim preserves
+ * contacted/estimate/won/closed states without needing a fragile exclusion
+ * list. The status, first-response SLA stamp, activity history, and funnel
+ * bridge all share one transaction; transactional callers reuse their handle.
+ */
+async function markLeadContactedFromEvidence(options = {}) {
+  const {
+    database = db,
+    leadId,
+    customerId,
+    evidenceType,
+    evidenceId = null,
+    performedBy = 'system',
+    respondedAt = null,
+  } = options;
+  if (!leadId) return { contacted: false, reason: 'missing_lead' };
+  if (!Object.prototype.hasOwnProperty.call(options, 'customerId')) {
+    return { contacted: false, reason: 'missing_customer_identity' };
+  }
+  if (!CONTACT_EVIDENCE_TYPES.has(evidenceType)) {
+    return { contacted: false, reason: 'ineligible_evidence' };
+  }
+
+  const apply = async (trx) => {
+    const leadQuery = trx('leads')
+      .where({ id: leadId, status: 'new' })
+      .whereNull('deleted_at');
+    if (customerId == null) leadQuery.whereNull('customer_id');
+    else leadQuery.where('customer_id', customerId);
+    const lead = await leadQuery.forUpdate().first();
+    if (!lead) return { contacted: false, reason: 'not_new_or_identity_changed' };
+
+    const patch = { status: 'contacted', updated_at: new Date() };
+    let responseMinutes = null;
+    if (lead.response_time_minutes == null && lead.first_contact_at) {
+      const firstContactMs = new Date(lead.first_contact_at).getTime();
+      const respondedMs = respondedAt ? new Date(respondedAt).getTime() : Date.now();
+      const minutes = Math.max(0, Math.round((respondedMs - firstContactMs) / 60000));
+      if (Number.isFinite(minutes)) {
+        responseMinutes = minutes;
+        patch.response_time_minutes = minutes;
+      }
+    }
+
+    // Reassert every claim from the locked read. The row lock serializes
+    // normal writers; the predicates also make the ownership/status contract
+    // explicit for fakes, savepoints, and any writer that does not lock first.
+    const updateQuery = trx('leads')
+      .where({ id: leadId, status: 'new' })
+      .whereNull('deleted_at');
+    if (customerId == null) updateQuery.whereNull('customer_id');
+    else updateQuery.where('customer_id', customerId);
+    const updated = await updateQuery.update(patch);
+    if (!updated) return { contacted: false, reason: 'claim_lost' };
+
+    if (responseMinutes != null) {
+      await trx('lead_activities').insert({
+        lead_id: leadId,
+        activity_type: 'first_response',
+        description: `First response in ${responseMinutes} minutes`,
+        performed_by: performedBy,
+      });
+    }
+    await trx('lead_activities').insert({
+      lead_id: leadId,
+      activity_type: 'status_change',
+      description: 'Status: new → contacted',
+      performed_by: performedBy,
+      metadata: JSON.stringify({ evidenceType, evidenceId }),
+    });
+    await bridgeLeadFunnelStage(leadId, 'contacted', trx, {
+      onlyIfLead: { status: 'contacted', customer_id: customerId ?? null },
+    });
+    return { contacted: true, responseMinutes };
+  };
+
+  if (database?.isTransaction) return apply(database);
+  return database.transaction(apply);
+}
+
 async function attachLeadToEstimate({
   database = db,
   leadId,
@@ -1449,9 +1544,8 @@ async function convertLeadFromEvent({
   leadAttributionService = leadAttribution,
 }) {
   try {
-    if (booking && await require('./assessment-booking').isAssessmentBooking(booking, database)) {
-      return { converted: false, reason: 'assessment_not_a_win' };
-    }
+    const assessmentEvent = !!booking
+      && await require('./assessment-booking').isAssessmentBooking(booking, database);
     let resolvedCustomerId = customerId || null;
     let resolvedPhone = phone || null;
     let resolvedEmail = email || null;
@@ -1475,6 +1569,50 @@ async function convertLeadFromEvent({
         valueHints = estimateValueHints(estimate);
         haveEstimateHints = true;
       }
+    }
+
+    // Assessment contact is independent of conversion eligibility: an
+    // established customer's exact new add-on lead was still contacted even
+    // though the first-close guard below correctly refuses to convert it.
+    // Identity stays strict — authoritative estimate linkage first, otherwise
+    // one open row already carrying this exact customer_id. No phone/email
+    // fallback, because a shared household contact does not identify which
+    // opportunity the assessment belongs to.
+    if (assessmentEvent) {
+      let assessmentLeads = estimateId
+        ? await database('leads').where({ estimate_id: estimateId })
+        : [];
+      const linkedByEstimate = assessmentLeads.length > 0;
+      if (!linkedByEstimate && resolvedCustomerId) {
+        assessmentLeads = await findOpenLeadsForCustomer(database, resolvedCustomerId);
+      }
+      assessmentLeads = assessmentLeads.filter((lead) => lead && !lead.deleted_at
+        && OPEN_LEAD_STATUSES.includes(lead.status));
+      if (!linkedByEstimate && assessmentLeads.length > 1) {
+        logger.warn(`[lead-trigger] ${source} assessment has ${assessmentLeads.length} open leads for one customer — contact status unchanged`, {
+          source,
+          customerId: resolvedCustomerId,
+          leadIds: assessmentLeads.map((lead) => lead.id),
+        });
+        return { converted: false, reason: 'assessment_not_a_win', contactedIds: [], contactReason: 'ambiguous_customer_link' };
+      }
+      const evidenceType = source === 'service_completed'
+        ? 'assessment_completed'
+        : 'assessment_booked';
+      const contactedIds = [];
+      for (const lead of assessmentLeads) {
+        const result = await markLeadContactedFromEvidence({
+          database,
+          leadId: lead.id,
+          customerId: lead.customer_id ?? null,
+          evidenceType,
+          evidenceId: booking.id || null,
+          performedBy: 'system',
+          respondedAt: booking.created_at || null,
+        });
+        if (result.contacted) contactedIds.push(lead.id);
+      }
+      return { converted: false, reason: 'assessment_not_a_win', contactedIds };
     }
 
     // Resolve the originating lead, most-authoritative first:
@@ -2019,6 +2157,7 @@ module.exports = {
   followDuplicateLink,
   settleRepeatFunnelRow,
   stampFirstResponseByContact,
+  markLeadContactedFromEvidence,
   resolveEstimateEventLeads,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,

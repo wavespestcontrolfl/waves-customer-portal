@@ -20,6 +20,12 @@
  * While the PATCH is in flight the button is disabled + shows
  * "Resolving…". On failure the button re-enables for retry. If no
  * `onResolve` prop is passed, the button is omitted (read-only mode).
+ *
+ * Job action: when an `onOpenJob(jobId)` prop is passed AND the alert
+ * carries a `job_id`, a secondary "Open job" button appears in the
+ * footer next to Resolve, calling onOpenJob(alert.job_id). Implemented
+ * once in the shared footer (not per-type body) so every alert type
+ * with a job_id gets it for free, not just tech_out_overflow.
  */
 import React, { useState } from 'react';
 import { Card, Button, cn } from '../ui';
@@ -264,19 +270,79 @@ function TrackingBody({ alert }) {
   );
 }
 
+const TECH_OUT_REASON_LABEL = {
+  sick: 'sick',
+  emergency: 'emergency',
+  no_show: 'no-show',
+  other: 'other',
+};
+
+// tech_out_overflow payload carries its own date/window/reason/near_miss
+// fields as a fallback for the same bare-live-socket-row gap TrackingBody
+// handles above — the row-level (joined) field wins when both are present.
+function formatRawWindow(start, end) {
+  if (!start && !end) return null;
+  const s = (start || '').slice(0, 5);
+  const e = (end || '').slice(0, 5);
+  if (s && e) return `${s}–${e}`;
+  return s || e;
+}
+
+function TechOutOverflowBody({ alert }) {
+  const payload = alert.payload || {};
+  const techName = alert.tech_name || payload.absent_tech_name;
+  const reasonLabel = TECH_OUT_REASON_LABEL[payload.reason] || payload.reason;
+  const customer = customerLine(alert) || payload.customer_name || null;
+  const serviceType = alert.service_type || payload.service_type;
+  const windowLabel = formatRawWindow(
+    alert.window_start || payload.window_start,
+    alert.window_end || payload.window_end
+  );
+  const detailLine = [customer, serviceType].filter(Boolean).join(' · ')
+    + (windowLabel ? ` (${windowLabel})` : '');
+  return (
+    <div className="text-14 text-ink-primary space-y-1">
+      <div>
+        {techName ? (
+          <span className="font-medium">{techName}</span>
+        ) : (
+          <span className="text-ink-tertiary italic">Unknown tech</span>
+        )}
+        {' '}is out{reasonLabel ? ` (${reasonLabel})` : ''}
+        {payload.bump_order != null && payload.bump_total != null && (
+          <> · bump #{payload.bump_order} of {payload.bump_total}</>
+        )}
+      </div>
+      {detailLine && <div className="text-ink-secondary">{detailLine}</div>}
+      {payload.bump_reason && (
+        <p className="text-ink-secondary">{payload.bump_reason}</p>
+      )}
+    </div>
+  );
+}
+
 const TYPE_RENDERERS = {
   tech_late: TechLateBody,
   unassigned_overdue: UnassignedOverdueBody,
   missed_photo: MissedPhotoBody,
   moa_violation: MoaViolationBody,
   schedule_route_quality: RouteQualityBody,
+  tech_out_overflow: TechOutOverflowBody,
 };
 
-export default function AlertCard({ alert, onResolve }) {
+// Header label for types that get a plain-English sentence instead of the
+// default uppercase type-slug treatment (text-14, not text-11 label case).
+const PRETTY_HEADER_LABEL = {
+  schedule_route_quality: 'Route needs review',
+  tech_out_overflow: 'Needs a decision',
+};
+
+export default function AlertCard({ alert, onResolve, onOpenJob }) {
   const tracking = alert.payload?.source === 'no_show_detector';
   const Body = tracking ? TrackingBody : (TYPE_RENDERERS[alert.type] || GenericBody);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState(null);
+  const showOpenJob = !!(alert.job_id && onOpenJob);
 
   async function handleResolve() {
     if (!onResolve || resolving) return;
@@ -310,8 +376,8 @@ export default function AlertCard({ alert, onResolve }) {
           >
             {alert.severity}
           </span>
-          <span className={cn('font-medium text-ink-tertiary truncate', alert.type === 'schedule_route_quality' ? 'text-14' : 'text-11 uppercase tracking-label')}>
-            {alert.type === 'schedule_route_quality' ? 'Route needs review' : tracking ? 'Missing tracking' : alert.type}
+          <span className={cn('font-medium text-ink-tertiary truncate', PRETTY_HEADER_LABEL[alert.type] ? 'text-14' : 'text-11 uppercase tracking-label')}>
+            {PRETTY_HEADER_LABEL[alert.type] || (tracking ? 'Missing tracking' : alert.type)}
           </span>
         </div>
         <span className="text-11 text-ink-tertiary flex-shrink-0">
@@ -319,19 +385,30 @@ export default function AlertCard({ alert, onResolve }) {
         </span>
       </div>
       <Body alert={alert} />
-      {onResolve && (
+      {(onResolve || showOpenJob) && (
         <div className="mt-2 flex items-center justify-end gap-2">
           {resolveError && (
             <span className="text-11 text-alert-fg">{resolveError}</span>
           )}
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={handleResolve}
-            disabled={resolving}
-          >
-            {resolving ? 'Resolving…' : 'Resolve'}
-          </Button>
+          {showOpenJob && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => onOpenJob(alert.job_id)}
+            >
+              Open job
+            </Button>
+          )}
+          {onResolve && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={handleResolve}
+              disabled={resolving}
+            >
+              {resolving ? 'Resolving…' : 'Resolve'}
+            </Button>
+          )}
         </div>
       )}
     </Card>

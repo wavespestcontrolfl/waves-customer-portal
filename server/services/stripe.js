@@ -1772,6 +1772,13 @@ const StripeService = {
             card_surcharge: surchargeAmount,
             surcharge_rate_bps: rateBps,
             surcharge_policy_version: policyVersion,
+            // The key this attempt consumed at Stripe — recorded on
+            // SUCCESS rows too (Codex round-3 P1), so a charge that later
+            // fully refunds still tells retry-collectibility.js's
+            // deriveMonthlyChargeIdempotencyKey which monthly-family key
+            // is spent; a same-day recollection then gets a fresh key
+            // instead of replaying this (refunded) PaymentIntent.
+            idempotency_key: effectiveIdempotencyKey,
             // Month-of-obligation stamp: billing-cron's month dedupe and
             // the retry sweep's already-collected guard match on this
             // (metadata-first, payment_date window only as legacy fallback).

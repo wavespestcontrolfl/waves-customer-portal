@@ -4,10 +4,18 @@
 describe('model-switchboard', () => {
   let sb;
   let MODELS;
+  // The image lane reads ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS at load:
+  // default-policy assertions must not inherit an operator's override, and it
+  // is handed back afterwards so the suite is environment-independent.
+  const ORIGINAL_OVERRIDE = process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
   beforeEach(() => {
+    delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
     jest.resetModules();
     MODELS = require('../config/models');
     sb = require('../services/model-switchboard');
+  });
+  afterAll(() => {
+    if (ORIGINAL_OVERRIDE === undefined) delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; else process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = ORIGINAL_OVERRIDE;
   });
 
   it('every selector names a real registry export with a model id', () => {
@@ -293,11 +301,13 @@ describe('model-switchboard', () => {
   it('the image lane resolves BLOG_IMAGE_PROVIDER as a chain: first valid slug, literal when none is valid', () => {
     const prev = process.env.BLOG_IMAGE_PROVIDER;
     try {
-      process.env.BLOG_IMAGE_PROVIDER = 'gemini-image-best, gpt-image-2';
+      // A Gemini slug in the env chain is dropped (SynthID pixel watermark,
+      // owner 2026-09-24), so the first VALID leg is the OpenAI one after it.
+      process.env.BLOG_IMAGE_PROVIDER = 'gemini-image-best, gpt-image-1.5';
       jest.resetModules();
       let lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
-      expect(lane.primary.model).toBe(MODELS.GEMINI_IMAGE_BEST);
-      expect(lane.primary.provider).toBe('gemini');
+      expect(lane.primary.model).toBe('gpt-image-1.5');
+      expect(lane.primary.provider).toBe('openai');
       expect(lane.primary.setEnv).toBe('BLOG_IMAGE_PROVIDER');
 
       process.env.BLOG_IMAGE_PROVIDER = 'not-a-provider';
@@ -309,11 +319,35 @@ describe('model-switchboard', () => {
     }
   });
 
-  it('the image lane exposes the Nano Banana Pro selector and reports it as the chain\'s second leg (Codex r1 P2 on #3964)', () => {
+  it('the image lane is OpenAI-only: fallback gpt-image-1.5, Nano Banana Pro selector kept but marked unreachable (owner 2026-09-24)', () => {
     expect(sb.SELECTORS.find((s) => s.key === 'GEMINI_IMAGE_PRO')).toMatchObject({ env: 'MODEL_GEMINI_IMAGE_PRO', accepts: { providers: ['gemini'], cap: 'image' } });
+    expect(sb.SELECTORS.find((s) => s.key === 'GEMINI_IMAGE_PRO').description).toMatch(/SynthID/);
     const lane = sb.getSwitchboard().lanes.find((l) => l.id === 'image_gen');
-    expect(lane.fallback.model).toBe(MODELS.GEMINI_IMAGE_PRO);
-    expect(lane.note).toMatch(/gpt-image-2 → GEMINI_IMAGE_PRO → gpt-image-1\.5/);
+    expect(lane.fallback.model).toBe('gpt-image-1.5');
+    expect(lane.fallback.provider).toBe('openai');
+    expect(lane.note).toMatch(/gpt-image-2 → gpt-image-1\.5 → gpt-image-1/);
+  });
+
+  it('with ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true the image lane reports the restored Gemini backup (Codex r3 P2 on #4717)', () => {
+    const prev = process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
+    const prevChain = process.env.BLOG_IMAGE_PROVIDER;
+    try {
+      delete process.env.BLOG_IMAGE_PROVIDER;
+      process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = 'true';
+      jest.resetModules();
+      let lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+      expect(lane.primary.model).toBe('gpt-image-2');
+      expect(lane.fallback.model).toBe(MODELS.GEMINI_IMAGE_PRO);
+      expect(lane.fallback.provider).toBe('gemini');
+      delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
+      jest.resetModules();
+      lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+      expect(lane.fallback.model).toBe('gpt-image-1.5');
+    } finally {
+      if (prev === undefined) delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; else process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = prev;
+      if (prevChain === undefined) delete process.env.BLOG_IMAGE_PROVIDER; else process.env.BLOG_IMAGE_PROVIDER = prevChain;
+      jest.resetModules();
+    }
   });
 
   it('locks the lanes a generic picker must not move', () => {

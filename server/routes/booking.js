@@ -14,6 +14,74 @@ const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requir
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
 
+// Series-creator owner-move guard (Codex #4716 r3 P1): shared by every
+// post-commit recurring-series creator in this file (the quarterly pest
+// follow-up seeding and activateWizardSeries's wizard-plan activation).
+// customer-dedupe.js's executeMerge takes the SAME customer -> parent-row
+// lock order these creators do, but as a SEPARATE transaction — a merge
+// can commit for the booking's customer between the booking's own
+// transaction (nothing else could touch that customer yet) and one of
+// these follow-up transactions. The follow-up then locks the
+// scheduled_services row by id, which still succeeds even though the
+// merge already repointed its customer_id to the winner: without this
+// check the creator would build the duplicate-series guard, the draft-
+// owner check, and every seeded child off the RETIRED loser id instead of
+// the row's real, current owner.
+class SeriesOwnerMovedError extends Error {
+  constructor(newCustomerId, parentRow) {
+    super(`series parent owner moved to customer ${newCustomerId}`);
+    this.code = 'SERIES_OWNER_MOVED';
+    this.newCustomerId = newCustomerId;
+    this.parentRow = parentRow;
+  }
+}
+
+// Re-reads the scheduled_services parent row FOR UPDATE and confirms it
+// still belongs to `expectedCustomerId`. Callers take it AFTER already
+// locking that customer's row (the customer -> parent-row order every
+// creator here and executeMerge share), so a concurrent merge either
+// already committed its repoint (caught here) or is still waiting behind
+// this transaction's own customer lock (nothing to catch yet — the merge
+// cannot proceed until this transaction finishes). A mismatch throws
+// SeriesOwnerMovedError carrying the row's CURRENT owner; a missing row
+// (deleted by the merge) returns null for the caller to handle the way it
+// already handles a vanished parent.
+async function lockAndVerifySeriesParentOwner(trx, { parentId, expectedCustomerId, columns = '*' }) {
+  const row = await trx('scheduled_services').where({ id: parentId }).forUpdate().first(columns);
+  if (row && String(row.customer_id) !== String(expectedCustomerId)) {
+    throw new SeriesOwnerMovedError(row.customer_id, row);
+  }
+  return row;
+}
+
+// Runs a series-creating transaction, retrying the WHOLE thing (never just
+// re-locking a second customer mid-transaction, which would invert the
+// customer -> parent-row lock order against the merge) when
+// lockAndVerifySeriesParentOwner reports the parent's owner moved. Capped
+// at `maxRetries` so a pathological repeat-merge fails loudly instead of
+// looping forever. `onOwnerChange` lets the caller update the customer id
+// its OWN transaction body closes over (this file's `custId`) before the
+// retry runs, so every helper the body already calls — the comms lock,
+// the duplicate-series guard, the draft-owner check, notification bodies
+// — is re-derived against the new owner without threading a parameter
+// through each one individually.
+async function runSeriesTxWithOwnerRetry(db, txBody, { maxRetries = 2, onOwnerChange } = {}) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await db.transaction(txBody);
+    } catch (err) {
+      if (err instanceof SeriesOwnerMovedError && attempt < maxRetries) {
+        attempt += 1;
+        logger.warn(`[booking:confirm] series parent owner moved (merge) — retrying under customer ${err.newCustomerId} (attempt ${attempt}/${maxRetries})`);
+        if (onOwnerChange) onOwnerChange(err.newCustomerId, err.parentRow);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // Funnel key -> catalog identity for the expected-minutes credit lookup
 // below (Codex r3 P2). An ordinary /book funnel key only ever carries a
 // broad display label ('Pest Control', 'Lawn Care') — catalog rows are
@@ -2945,7 +3013,7 @@ async function createSelfBooking(payload = {}) {
       // miss here is a "pick another slot" outcome, so it rides the SLOT_TAKEN
       // recovery below (just-created profile rolled back, generic message).
       try {
-        await assertAssignableTechnician(technician_id || null, { conn: trx });
+        await assertAssignableTechnician(technician_id || null, { conn: trx, date: String(slotDateStr).slice(0, 10) });
       } catch (eligErr) {
         if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
         const err = new Error('That time slot is no longer available. Please pick another.');
@@ -3546,7 +3614,7 @@ async function createSelfBooking(payload = {}) {
       // shorter reservation while the database holds the longer one.
       let parentExtension = null;
       try {
-        const outcome = await db.transaction(async (trx) => {
+        const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {
           // Rung 1 FIRST (scheduling/occupancy.js ORDERING CONTRACT — the
           // per-date occupancy locks precede every other lock, and taking
           // them after the comms/row locks below can deadlock with normal
@@ -3567,6 +3635,20 @@ async function createSelfBooking(payload = {}) {
           await acquireOccupancyLocks(trx, lockedSeedDates);
           const lockedSeedDateSet = new Set(lockedSeedDates);
           await lockCustomerComms(trx, custId);
+          // Customer row lock BEFORE any scheduled_services row lock/write in
+          // this transaction (Codex #4716 r2 P1): the parent-row FOR UPDATE
+          // just below (lockedParent) used to run first, with the customer
+          // row only locked later (the bookedCustomerRow read, further
+          // down) — the opposite of executeMerge's order (customer row
+          // FOR UPDATE first, THEN its scheduled_services FK/address
+          // sweep). A concurrent merge holding the customer row while
+          // waiting on THIS parent row, alongside this activation holding
+          // the parent row while waiting on the customer row, is a
+          // deadlock Postgres resolves by aborting one side. Taking it
+          // here, before lockedParent, puts this transaction on the same
+          // customer -> row order as the merge and every other creator in
+          // this file.
+          await trx('customers').where({ id: custId }).forUpdate().first('id');
           // Duplicate-confirmation idempotency (codex #3504 r2 P1): a replay
           // can observe the pricing draft still live BEFORE the winner's
           // activation commits, pass the replay pre-checks, and wait here on
@@ -3588,11 +3670,33 @@ async function createSelfBooking(payload = {}) {
           const lockedParent = await trx('scheduled_services')
             .where({ id: seriesParentRow.id })
             .forUpdate()
-            .first('id', 'is_recurring', 'status', 'payment_method_preference',
+            .first('id', 'customer_id', 'is_recurring', 'status', 'payment_method_preference',
               'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',
               'scheduled_date', 'window_start', 'window_end', 'technician_id',
               'service_type', 'service_id',
               ...((await trx.schema.hasColumn('scheduled_services', 'source_estimate_generation')) ? ['source_estimate_generation'] : []));
+          // Re-key on a merge that moved this parent under us (Codex #4716
+          // r3 P1): a merge can commit between the booking's own
+          // transaction and this post-commit activation, repointing
+          // seriesParentRow.customer_id to the winner while this
+          // transaction still holds (and was handed) the retired loser's
+          // row lock. Without this check the duplicate-series guard below
+          // reads the LOSER's series, seedFollowUpsForParent/markParent-
+          // Recurring seed children under the LOSER, and the draft-owner
+          // check further down compares the winner's fresh draft against
+          // the stale loser id — reading an unchanged quote as drift and
+          // stripping the moved visit's price/payment/invoice flag instead
+          // of activating the plan. Abort for a retry under the real owner
+          // rather than letting any of that run against the wrong customer.
+          if (lockedParent && String(lockedParent.customer_id) !== String(custId)) {
+            throw new SeriesOwnerMovedError(lockedParent.customer_id, lockedParent);
+          }
+          // Keep the in-memory parent's customer_id in sync with the
+          // locked row (a no-op on the normal path; on a retry after a
+          // SeriesOwnerMovedError it carries the new owner forward into
+          // seedFollowUpsForParent below, which builds every seeded
+          // child's customer_id off THIS object).
+          if (lockedParent) seriesParentRow.customer_id = lockedParent.customer_id;
           if (lockedParent && lockedParent.is_recurring) {
             // is_recurring alone is NOT activation-owned evidence (codex
             // #3504 r18): staff can make the committed parent recurring
@@ -3717,15 +3821,16 @@ async function createSelfBooking(payload = {}) {
           // THAT property — otherwise the activation would seed, scope,
           // and stamp a series for a property the customer did not book.
           // Uncertain parses read as a different property (fail closed).
-          // FOR UPDATE (codex #3504 r19): this read doubles as the CUSTOMER
-          // ROW LOCK, taken here — BEFORE the recurring-series advisory
-          // guard below — to keep the estimate-converter's customer→series
-          // lock order (it locks customers FOR UPDATE first, then takes the
-          // same advisory). The activation used to acquire the advisory
-          // first and the customer row only later (the setup-fee stamp), so
-          // a concurrent accept for the same family could deadlock; with
-          // the converter's guard savepoint as the victim its fail-open
-          // guard would proceed and BOTH would seed billable series.
+          // FOR UPDATE (codex #3504 r19): re-acquires the same customer row
+          // this transaction already locked at its top (Codex #4716 r2 —
+          // re-entrant no-op within one transaction), still BEFORE the
+          // recurring-series advisory guard below, to keep the
+          // estimate-converter's customer→series lock order (it locks
+          // customers FOR UPDATE first, then takes the same advisory). This
+          // query's own job is the address columns for the property compare
+          // below; FOR UPDATE stays on it deliberately so the read never
+          // regresses to unlocked if the top-of-transaction lock is ever
+          // refactored away.
           const bookedCustomerRow = await trx('customers')
             .where({ id: custId })
             .forUpdate()
@@ -4206,6 +4311,8 @@ async function createSelfBooking(payload = {}) {
           // a silent rollback.
           await trx.raw('SELECT 1');
           return { seedResult, parentExtension };
+        }, {
+          onOwnerChange: (newOwnerId) => { custId = newOwnerId; },
         });
         return outcome;
       } catch (err) {
@@ -4558,13 +4665,41 @@ async function createSelfBooking(payload = {}) {
     if (pestDuplicateKeptAtBooking) duplicateSeriesKept = pestDuplicateKeptAtBooking;
     if (shouldSeedQuarterlyPestFollowUps && !pestDuplicateKeptAtBooking) {
       try {
-        const outcome = await db.transaction(async (trx) => {
+        const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {
           // Rung 6 FIRST (Codex #3109 r37): admin/manual series creators
           // take customer-comms and THEN the series guard — this fresh
           // post-commit seeding transaction must acquire in the same
           // order, or concurrent creation for the same customer/service
           // deadlocks (the in-seeder acquire is then reentrant).
           await lockCustomerComms(trx, custId);
+          // Customer row lock BEFORE the series-advisory lock (Codex #4716
+          // r1 P1) — the same customer → series-advisory order admin-
+          // schedule.js (~7186) and this file's own in-booking guard
+          // (~2933) already use. executeMerge (customer-dedupe.js) holds
+          // this customer's row FOR UPDATE while it waits on the
+          // recurring-series-create advisory lock; seedFollowUpsForParent
+          // below inserts child scheduled_services rows whose customer_id
+          // FK takes a key-share lock on this same customer row. Without
+          // this row lock taken FIRST, this transaction could hold the
+          // advisory lock (via checkActiveSeriesLocked below) while
+          // waiting on the customer row the merge already holds, and the
+          // merge waits on the advisory lock this transaction holds — a
+          // deadlock Postgres resolves by aborting one side.
+          await trx('customers').where({ id: custId }).forUpdate().first('id');
+          // Re-read the parent under lock and confirm it is STILL this
+          // customer's (Codex #4716 r3 P1): a merge can commit between the
+          // booking's own transaction and this post-commit one, repointing
+          // serviceRow.customer_id to the winner while this transaction
+          // still holds (and was handed) the retired loser's row lock.
+          // lockAndVerifySeriesParentOwner throws for a retry under the
+          // real owner rather than letting the stale in-memory serviceRow
+          // drive the duplicate guard and the seeded children below.
+          const lockedParentRow = await lockAndVerifySeriesParentOwner(trx, {
+            parentId: serviceRow.id,
+            expectedCustomerId: custId,
+          });
+          if (!lockedParentRow) return { stale: true };
+          const effectiveParent = { ...serviceRow, ...lockedParentRow };
           // Composite parents (Pest + add-ons) guard and seed as the PEST
           // family: serviceKeyFor on the joined label would classify the
           // series as mosquito/lawn and (a) miss an existing pest series
@@ -4573,9 +4708,9 @@ async function createSelfBooking(payload = {}) {
           const compositePest = signedKeyComponents.length > 1 && signedKeyComponents.includes('pest_control');
           const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
             customerId: custId,
-            serviceId: serviceRow.service_id || null,
-            serviceType: compositePest ? 'Pest Control' : (serviceRow.service_type || resolvedServiceType),
-            excludeParentId: serviceRow.id,
+            serviceId: effectiveParent.service_id || null,
+            serviceType: compositePest ? 'Pest Control' : (effectiveParent.service_type || resolvedServiceType),
+            excludeParentId: effectiveParent.id,
           });
           if (guardError) logger.warn(`[booking:confirm] duplicate-series guard failed (seeding proceeds): ${guardError.message}`);
           if (matches.length > 0) {
@@ -4588,7 +4723,7 @@ async function createSelfBooking(payload = {}) {
             // column-guarded for pre-migration schemas).
             if (await trx.schema.hasColumn('scheduled_services', 'wizard_recovery_reconciled_at')) {
               await trx('scheduled_services')
-                .where({ id: serviceRow.id })
+                .where({ id: effectiveParent.id })
                 .update({
                   wizard_recovery_reconciled_at: trx.fn.now(),
                   notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'"),
@@ -4600,7 +4735,7 @@ async function createSelfBooking(payload = {}) {
           const pestDuration = BOOKING_FUNNEL_SERVICE_DURATIONS.pest_control;
           const pestEndMin = timeToMin(slot_start) + pestDuration;
           const pestWindowEnd = `${String(Math.floor(pestEndMin / 60)).padStart(2, '0')}:${String(pestEndMin % 60).padStart(2, '0')}`;
-          const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, serviceRow, {
+          const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, effectiveParent, {
             pattern: 'quarterly',
             plannedCount: 4,
             skipWeekends: true,
@@ -4643,7 +4778,7 @@ async function createSelfBooking(payload = {}) {
           // pricing path checks (draft shape, customer ownership) is
           // re-read fresh under the savepoint below.
           if (setupFeeHandoffEligible) {
-            await stampDisclosedSetupFee(trx, { stampServiceRow: serviceRow });
+            await stampDisclosedSetupFee(trx, { stampServiceRow: effectiveParent });
             // NO catch here: an ERROR while deciding/stamping must abort
             // this whole seeding transaction - series and fee obligation
             // commit together or not at all, never a series with a
@@ -4651,9 +4786,11 @@ async function createSelfBooking(payload = {}) {
             // booked visit itself stays.
           }
           return { seedResult };
+        }, {
+          onOwnerChange: (newOwnerId) => { custId = newOwnerId; },
         });
         if (outcome.kept) duplicateSeriesKept = outcome.kept;
-        else followUpRows = outcome.seedResult.insertedRows || [];
+        else if (outcome.seedResult) followUpRows = outcome.seedResult.insertedRows || [];
       } catch (err) {
         logger.error(`[booking:confirm] Quarterly follow-up seeding failed for ${serviceRow.id}: ${err.message}`);
       }
@@ -5436,4 +5573,10 @@ module.exports._internals = {
   // the raw row carries the full attribution capture).
   PUBLIC_BOOKING_FIELDS,
   toPublicBookingShape,
+  // Series-creator owner-move guard (Codex #4716 r3), shared by the
+  // quarterly pest follow-up seeding and activateWizardSeries — exported
+  // for direct unit coverage of the retry primitive itself.
+  SeriesOwnerMovedError,
+  lockAndVerifySeriesParentOwner,
+  runSeriesTxWithOwnerRetry,
 };

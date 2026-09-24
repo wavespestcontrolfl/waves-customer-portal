@@ -57,6 +57,24 @@ function receiptState(receipt) {
   return Object.hasOwn(RECEIPT_STATES, outcome) ? RECEIPT_STATES[outcome] : 'unknown';
 }
 
+// Codex #4715 r3 P1: a `result.message` (e.g. the churn billing wind-down
+// receipt) is a plain success note, not a problem — it must not render with
+// the same alert styling as a genuine `warning`/`error`. Neutral ONLY when
+// nothing ahead of `message` in the priority chain (body-level warning,
+// result.warning, result.error) is present; any of those wins and stays red.
+// Codex #4715 r4 P2: that presence check alone missed a receipt that marks
+// itself failed WITHOUT a warning/error string — e.g. `{ blocked: true,
+// message: 'Duplicate request' }` (schedule-tools.js and others return
+// exactly this shape). receiptState's own verdict is the single source of
+// truth for success/failure (RECEIPT_STATES maps outcome 'blocked'/'failed'
+// to 'failed'), so `state` is REQUIRED here — reused from the caller's
+// already-computed receiptState(...) call, never re-derived — and only a
+// successful/completed receipt ('confirmed') can use the neutral token.
+function detailIsNeutral(body, state) {
+  return state === 'confirmed'
+    && !(body?.warning || body?.result?.warning || body?.result?.error) && Boolean(body?.result?.message);
+}
+
 function groupEffects(effects) {
   const groups = new Map();
   for (const e of effects || []) {
@@ -137,6 +155,10 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   // status per action id: undefined | 'confirming' | 'confirmed' | 'cancelling' | 'cancelled' | 'failed'
   const [statusById, setStatusById] = useState({});
   const [errorById, setErrorById] = useState({});
+  // Codex #4715 r3 P1: parallel to errorById — whether the detail text
+  // currently stored for an action is a plain success message (neutral
+  // styling) rather than a warning/error (stays red).
+  const [neutralById, setNeutralById] = useState({});
   const [receiptById, setReceiptById] = useState({});
   const inFlightRef = useRef(new Set());
 
@@ -183,9 +205,10 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     return `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   };
 
-  const setStatus = (id, status, error) => {
+  const setStatus = (id, status, error, neutral = false) => {
     setStatusById((prev) => ({ ...prev, [id]: status }));
     setErrorById((prev) => ({ ...prev, [id]: error || null }));
+    setNeutralById((prev) => ({ ...prev, [id]: neutral }));
   };
 
   const showReceipt = (action, body) => {
@@ -194,7 +217,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     const message = body.warning || body.result?.warning || body.result?.error || body.result?.message
       || (state === "unknown" ? "The outcome is not established. Check status before taking further action."
         : state === "failed" ? "The action could not be completed" : null);
-    setStatus(action.id, state, message);
+    setStatus(action.id, state, message, detailIsNeutral(body, state));
     return state;
   };
 
@@ -265,10 +288,19 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     >
       {actions.map((action) => {
         const status = statusById[action.id] || action.resolvedStatus || (action.receipt ? receiptState(action.receipt) : undefined);
-        const receiptResult = (receiptById[action.id] || action.receipt)?.result;
+        const receiptBody = receiptById[action.id] || action.receipt;
+        const receiptResult = receiptBody?.result;
         const savedReceipt = status === 'confirmed' && receiptResult?.verification?.persisted === true ? receiptResult.receipt : null;
         const detail = errorById[action.id] || action.resolvedWarning || receiptResult?.warning || receiptResult?.error || receiptResult?.message
           || (status === 'unknown' ? 'The outcome is not established. Check status before taking further action.' : null);
+        // Codex #4715 r3 P1: prefer the neutral flag showReceipt stored
+        // alongside errorById (same body, same tick); an action resolved
+        // via props (resolvedStatus/resolvedWarning/action.receipt) never
+        // ran showReceipt this session, so recompute from the stored body —
+        // a resolvedWarning always wins and is never neutral.
+        const detailNeutral = errorById[action.id] != null
+          ? Boolean(neutralById[action.id])
+          : !action.resolvedWarning && detailIsNeutral(receiptBody, status);
         const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown"].includes(status);
         const busy = status === "confirming" || status === "cancelling";
         const remaining = msLeft(action);
@@ -325,8 +357,8 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
 
             {detail && (
               <div
-                style={dark ? { fontSize: 14, color: D.red, marginBottom: 8 } : undefined}
-                className={dark ? undefined : "text-[14px] text-alert-fg mb-2"}
+                style={dark ? { fontSize: 14, color: detailNeutral ? D.text : D.red, marginBottom: 8 } : undefined}
+                className={dark ? undefined : `text-[14px] mb-2 ${detailNeutral ? "text-zinc-700" : "text-alert-fg"}`}
               >
                 {detail}
               </div>

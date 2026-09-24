@@ -40,7 +40,7 @@ async function main() {
   let browser;
   try {
     browser = await launchBrowser();
-    for (const width of [320, 390, 430, 768, 1440]) {
+    for (const width of [320, 390, 430, 768, 820, 1024, 1440]) {
       const page = await browser.newPage({ viewport: { width, height: 1000 }, serviceWorkers: 'block' });
       page.setDefaultTimeout(60000);
       page.on('pageerror', error => report.errors.push(error.message));
@@ -55,19 +55,21 @@ async function main() {
       await waitForFonts(page);
       const metrics = await page.locator('[data-case]').evaluateAll(cases => cases.map(el => {
         const heading = el.querySelector('h1').getBoundingClientRect();
-        const group = el.querySelector('.ui-command-actions').getBoundingClientRect();
+        const group = el.querySelector('.ui-command-heading').getBoundingClientRect();
+        const groupStyle = getComputedStyle(el.querySelector('.ui-command-heading'));
         const buttons = [...el.querySelectorAll('.ui-command-action')];
         const primary = buttons[0].getBoundingClientRect();
-        return { title: el.dataset.case, headingBottom: heading.bottom, groupRight: group.right,
-          primaryRight: primary.right, primaryTop: primary.top, primaryBottom: primary.bottom,
+        return { title: el.dataset.case, headingTop: heading.top, headingBottom: heading.bottom, headingRight: heading.right, groupRight: group.right - parseFloat(groupStyle.paddingRight),
+          primaryLeft: primary.left, primaryRight: primary.right, primaryTop: primary.top, primaryBottom: primary.bottom,
           secondaryTop: buttons[1]?.getBoundingClientRect().top,
           styles: buttons.map(button => { const style = getComputedStyle(button); return { height: button.getBoundingClientRect().height, font: style.fontSize, transform: style.textTransform, radius: style.borderRadius }; }) };
       }));
       for (const row of metrics) {
         assert.ok(Math.abs(row.groupRight - row.primaryRight) < 2, `${width}: ${row.title} primary must align right`);
         assert.ok(row.styles.every(style => style.height >= 44 && style.font === '14px' && style.transform === 'uppercase' && style.radius === '4px'), JSON.stringify(row));
-        if (width < 768) {
-          assert.ok(row.primaryTop > row.headingBottom, `${row.title} action must follow title`);
+        if (width < 1024) {
+          assert.ok(Math.abs((row.primaryTop + row.primaryBottom) - (row.headingTop + row.headingBottom)) < 2, `${row.title} primary must align with the title center`);
+          assert.ok(row.headingRight <= row.primaryLeft, `${row.title} title stays left`);
           if (row.secondaryTop) assert.ok(row.secondaryTop >= row.primaryBottom, `${row.title} secondary follows primary`);
         }
       }
@@ -89,6 +91,6 @@ async function main() {
     await browser?.close();
     await server.close();
   }
-  console.log('Header action alignment, typography and interactions passed at five widths.');
+  console.log('Header action alignment, typography and interactions passed at seven widths.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

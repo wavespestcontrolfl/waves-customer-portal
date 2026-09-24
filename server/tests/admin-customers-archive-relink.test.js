@@ -28,6 +28,22 @@ jest.mock('../models/db', () => {
     q.where = (c) => { Object.assign(q._where, c); return q; };
     q.whereNull = () => q;
     q.whereNotNull = () => q;
+    // ADMIN-BUG-R14 guard (customer-lifecycle-guard.js): the DELETE route
+    // now pre-checks for a live future visit / active prepay term before
+    // archiving. This fixture's customer has neither, so every non-customers
+    // table read must keep resolving null/no-row through these no-op chains.
+    q.whereNot = () => q;
+    q.whereNotIn = () => q;
+    q.whereRaw = () => q;
+    q.leftJoin = () => q;
+    // findPendingPrepayInvoice (admin-cancellation.js, reused by
+    // churnGuardForRow — round-3 structural fix) selects candidate pending
+    // terms; this fixture has none, so a no-op chain resolving to an
+    // object with no .length (→ !pending.length → true → null) is correct.
+    q.select = () => q;
+    // The archive/restore/stage transactions take the customers row lock
+    // before the guard (pre-push audit on 1e776e385e).
+    q.forUpdate = () => q;
     q.first = async () => (table === 'customers' ? mockState.customer : null);
     q.update = async (patch) => { mockState.updates.push({ table, viaTrx, where: { ...q._where }, patch }); return 1; };
     return q;
@@ -67,9 +83,21 @@ describe('DELETE /admin/customers/:id (archive)', () => {
       await expect(res.json()).resolves.toEqual({ success: true });
     });
     expect(db.transaction).toHaveBeenCalledTimes(1);
+    // ADMIN-BUG-R14 (round 3): churnGuardForRow runs INSIDE this
+    // transaction, under the row lock, and writes the canonical billing
+    // disarm (customers active/autopay_enabled/next_charge_date,
+    // payment_methods.autopay_enabled, payments.next_retry_at) on the trx
+    // BEFORE deleted_at is stamped — every write is transactional.
     expect(mockState.updates).toEqual([
-      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ deleted_at: expect.any(Date) }) }),
+      // r6: archive never touches `active` (deleted_at already removes the
+      // row from every charge set; restore must hand it back as archived).
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
+      expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
+      expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
     ]);
+    // r6: no write on this path touches `active`.
+    expect(mockState.updates.filter((u) => u.table === 'customers').every((u) => !('active' in u.patch))).toBe(true);
     // By id: a subscriber whose stored email drifted from customer.email is
     // still found (it carries the archived customer_id) and moves to the twin
     // of its own email — the email-keyed helper would have missed it.
@@ -104,8 +132,16 @@ describe('PATCH /admin/customers/:id/restore', () => {
     });
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(mockState.updates).toEqual([
+      // ADMIN-BUG-R14 (round 3 → r6): restore disarms billing FIRST
+      // (preserving `active` — a legacy row archived before the archive-
+      // time disarm existed may still be billing-armed), then clears ONLY
+      // deleted_at: the customer comes back exactly as archived.
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
+      expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
+      expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: null } }),
     ]);
+    expect(mockState.updates.filter((u) => u.table === 'customers').every((u) => !('active' in u.patch))).toBe(true);
     expect(relinkSubscribersForEmail).toHaveBeenCalledWith(mockTrx, 'Household@Example.com');
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'customer.restore', resource_id: 'cust-1', critical: true, trx: mockTrx,

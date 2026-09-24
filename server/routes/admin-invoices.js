@@ -2681,6 +2681,34 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         } catch (err) {
           err.statusCode = locked.status === 'processing' ? 409 : 400; err.isOperational = true; throw err;
         }
+        // Saved-card claim fence (ADMIN-BUG-R20, mirrors recordManualPayment):
+        // a card charge whose process died right after the Stripe call
+        // leaves this invoice 'sent' with its stripe_invoice_charge_attempts
+        // row still 'claimed'/submitted. Every other collection rail asks
+        // assertNoInvoiceChargeReconciliationPending first — applying account
+        // credit here without it would draw down the customer's credit while
+        // that same card charge is still pending reconciliation (double
+        // collection once the webhook lands and quarantines it as an orphan).
+        // Codex round-2 P2: assertNoInvoiceChargeReconciliationPending can
+        // itself WRITE on this same trx — promoting a stale 'claimed' row
+        // to 'ambiguous' once its active window has passed
+        // (promoteStaleSavedCardClaim, services/stripe.js). Re-throwing
+        // its mapped error here would roll back that promotion along with
+        // everything else in this transaction, so every LATER attempt
+        // re-reads the same stale, not-yet-promoted claim and keeps
+        // reporting "in progress" forever instead of "ambiguous,
+        // reconcile it". Return a refusal sentinel instead (mirrors
+        // recordManualPayment's chargeReconciliationPending) so the
+        // transaction COMMITS — the promotion sticks — and map it to 409
+        // outside, after commit.
+        try {
+          await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(id, trx);
+        } catch (fenceErr) {
+          if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
+            return { chargeReconciliationPending: `${fenceErr.message} — resolve it before applying credit` };
+          }
+          throw fenceErr;
+        }
         // A customer could have opened /pay/:token/setup between our pre-lock
         // PI triage and this row lock, minting a NEW PaymentIntent (its own
         // lock released by now). If the invoice's PI changed from the one we
@@ -2752,6 +2780,10 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     } catch (err) {
       if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
       throw err;
+    }
+
+    if (outcome?.chargeReconciliationPending) {
+      return res.status(409).json({ error: outcome.chargeReconciliationPending });
     }
 
     const { invoice: covered, cover, balanceAfter } = outcome;

@@ -64,7 +64,7 @@ const interceptSeeder = require('./intercept-brief-seeder');
 // Single source of truth for the FAQ-section policy: 'tree-shrub' (among
 // others) is FAQ-blocked, and category seeds must NEVER ride the narrow
 // operator-intercept FAQ exemption — a blocked service simply gets no FAQ.
-const { isFaqBlockedService } = require('./content-guardrails');
+const { isFaqBlockedService, PAGE_CITY_SLUGS } = require('./content-guardrails');
 
 const OPERATOR_INTERCEPT_BUCKET = interceptSeeder.OPERATOR_INTERCEPT_BUCKET;
 const { BYLINE_AUTHORS, splitBriefSources } = interceptSeeder._internals;
@@ -91,6 +91,13 @@ const SERVICE_BY_SLUG_PREFIX = [
   ['/pest-control/', 'pest'],
   ['/mosquito/', 'mosquito'],
 ];
+
+// One narrowly supported override: a commercial-pest editorial topic may
+// keep the established /pest-control/ blog category slug while preserving
+// the commercial service id all the way into the brief builder. The builder
+// deliberately has no residential hub/calculator mapping for this id.
+const COMMERCIAL_PEST_SERVICE = 'commercial-pest';
+const COMMERCIAL_PEST_HUB_LINK_RE = /^\/commercial-pest-control-([a-z][a-z0-9-]*)-fl\/$/;
 
 // FAQ-blocked pest topics (mirrors content-guardrails.FAQ_BLOCKED_SERVICES
 // ids, matched as free-text so a slug/keyword/title names the topic even
@@ -176,11 +183,35 @@ function briefRequestsFaq(brief) {
 }
 
 function serviceForBrief(brief) {
+  if (Object.prototype.hasOwnProperty.call(brief || {}, 'service')) {
+    return brief.service === COMMERCIAL_PEST_SERVICE ? COMMERCIAL_PEST_SERVICE : null;
+  }
   const slug = String(brief.slug || '');
   for (const [prefix, service] of SERVICE_BY_SLUG_PREFIX) {
     if (slug.startsWith(prefix)) return service;
   }
   return null;
+}
+
+function validateServiceContract(brief) {
+  const hasServiceOverride = Object.prototype.hasOwnProperty.call(brief || {}, 'service');
+  const hasHubLink = Object.prototype.hasOwnProperty.call(brief || {}, 'hub_link');
+  if (!hasServiceOverride) {
+    if (hasHubLink) {
+      throw new Error(`category seed ${brief.id}: hub_link is supported only with service "${COMMERCIAL_PEST_SERVICE}"`);
+    }
+    return;
+  }
+  if (brief.service !== COMMERCIAL_PEST_SERVICE) {
+    throw new Error(`category seed ${brief.id}: unsupported service override "${brief.service || ''}" (only "${COMMERCIAL_PEST_SERVICE}" is allowed)`);
+  }
+  if (!String(brief.slug || '').startsWith('/pest-control/')) {
+    throw new Error(`category seed ${brief.id}: service "${COMMERCIAL_PEST_SERVICE}" requires a /pest-control/ blog slug`);
+  }
+  const match = String(brief.hub_link || '').match(COMMERCIAL_PEST_HUB_LINK_RE);
+  if (!match || !PAGE_CITY_SLUGS.has(match[1])) {
+    throw new Error(`category seed ${brief.id}: service "${COMMERCIAL_PEST_SERVICE}" requires a published /commercial-pest-control-{served-city}-fl/ hub_link`);
+  }
 }
 
 function dedupeKeyFor(brief) {
@@ -228,6 +259,7 @@ function loadManifest(file = DEFAULT_MANIFEST_PATH) {
     if (brief.action !== 'new_supporting_blog') {
       throw new Error(`category seed ${brief.id}: action must be new_supporting_blog (got "${brief.action}")`);
     }
+    validateServiceContract(brief);
     if (!serviceForBrief(brief)) {
       throw new Error(`category seed ${brief.id}: slug must start with one of ${SERVICE_BY_SLUG_PREFIX.map(([p]) => p).join(', ')} (got "${brief.slug || ''}")`);
     }
@@ -429,7 +461,9 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
   const ctaCodes = meta.cta_codes || {};
   const ctaDirectives = (Array.isArray(payload.cta) ? payload.cta : [])
     .map((code) => `${code}: ${ctaCodes[code] || 'see manifest'}`);
-  const internalLinks = Array.isArray(payload.internal_links) ? payload.internal_links : [];
+  const hubLink = payload.hub_link || null;
+  const payloadLinks = Array.isArray(payload.internal_links) ? payload.internal_links : [];
+  const internalLinks = hubLink && !payloadLinks.includes(hubLink) ? [hubLink, ...payloadLinks] : payloadLinks;
 
   const operatorBrief = {
     id: payload.id,
@@ -450,6 +484,10 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
     required_sources: requiredSources,
     source_notes: sourceNotes,
     verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes : [],
+    // The existing curated-hub gate contract makes this exact commercial
+    // city-service route authoritative for the draft. Keep the field absent
+    // on ordinary category seeds so their persisted overlay shape is unchanged.
+    ...(hubLink ? { hub_link: hubLink } : {}),
     internal_links_required: internalLinks,
     schema_types: payloadSchema,
     faq_required: !faqBlocked && (payloadSchema.includes('FAQPage') || outlineHasFaq),

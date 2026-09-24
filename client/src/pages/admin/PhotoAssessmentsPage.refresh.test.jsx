@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import PhotoAssessmentsPage from "./PhotoAssessmentsPage";
 import { adminFetch } from "../../lib/adminFetch";
@@ -13,7 +14,7 @@ it("finishes the initial read even if Add Assessment opens while it is pending",
   adminFetch.mockImplementation((path) => path.includes("/funnel")
     ? Promise.resolve({ ok: true, json: async () => ({ lawn: {}, pest: {} }) })
     : new Promise((resolve) => { finishList = resolve; }));
-  render(<PhotoAssessmentsPage />);
+  render(<MemoryRouter><PhotoAssessmentsPage /></MemoryRouter>);
   fireEvent.click(screen.getByRole("button", { name: "New assessment" }));
   expect(screen.getByRole("dialog")).toBeInTheDocument();
   await act(async () => finishList({ ok: true, json: async () => ({ assessments: [] }) }));

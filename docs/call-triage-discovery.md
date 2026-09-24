@@ -439,7 +439,7 @@ Tests:
 | Studio Flow greeting (`say_play_2`) — **primary** | plays `ElevenLabs_..._Veda%20Sky%20-%20Customer%20Care%20Agent_..._b_m2.mp3` | ✅ Confirmed by Adam (2026-04-29) to contain recording/transcription/AI disclosure language. This MP3 is the operative FL §934.03 consent surface for inbound calls. |
 | Studio Flow voicemail (`say_play_1`) | plays `voicemail-9557.twil.io/waves-voicemail.mp3` | ⚠️ Content not yet audited. By the time a caller reaches voicemail they've already heard `say_play_2`'s disclosure on the same call, so consent persists; voicemail-specific disclosure is belt-and-suspenders, not load-bearing. |
 | `/voice` fallback greeting (post-PR1) | plays `WAVES_GREETING_URL` (defaults to the same ElevenLabs MP3 the Studio Flow uses) + `<Dial>` to `WAVES_FALLBACK_FORWARD_NUMBERS` (`+19415993489,+17206334021`) | ✅ Same compliance-verified MP3. |
-| `/call-complete` voicemail fork | Plays `WAVES_VOICEMAIL_URL` → defensive `<Say>` "Your message will be recorded and transcribed" → `<Record transcribe="true">` | Defensive Say belt-and-suspenders the MP3 audit gap. |
+| `/call-complete` voicemail fork | Default (`WAVES_VOICEMAIL_GREETING=short`, 2026-09-24): ~8s `<Say>` greeting → `<Record transcribe="true">`. `recorded` mode: plays `WAVES_VOICEMAIL_URL` → `<Record>` (the trailing defensive `<Say>` was removed as redundant). | Short spoken greeting cut the pre-beep wait from ~55s to ~40s after the staff ring. |
 | `/outbound-connect` | Records customer leg via `record-from-answer-dual` | ✅ PR1 prepends spoken disclosure on the customer leg before dial bridges. Production-active (admin-initiated outbound calls). |
 
 **Studio Flow signature concern:** the Flow's `post_recording_to_portal` widget has `add_twilio_auth: false`, so its HTTP POST to `/recording-status` arrives **unsigned**. Twilio's standard recording-status callback (fired automatically by `record: true` on `forward_call`) IS signed. When PR1's signature middleware flips to `enforce`, the unsigned Studio HTTP request will 403; recording metadata will still arrive via the signed standard callback (and via the Studio Flow's fallthrough to voicemail recording, which goes through Twilio's standard signed callback path). Verify this during log-mode burn-in before flipping to enforce.
@@ -448,7 +448,7 @@ Tests:
 
 > "Thanks for calling Waves Pest Control. This call may be recorded, transcribed, and processed with AI to help schedule and improve service. By continuing, you consent to this recording and processing."
 
-For `/call-complete` voicemail: confirm the contents of `WAVES_VOICEMAIL_URL`. If disclosure is missing, replace the audio asset OR prepend a `<Say>` disclosure before `<Record>`.
+For `/call-complete` voicemail (updated 2026-09-24, #4705): the voicemail path carries NO disclosure of its own by design. The default short `<Say>` greeting has no recording language and the `recorded` asset (`WAVES_VOICEMAIL_URL`) is opaque; consent rests entirely on the `/voice` disclosure above, which the same in-progress call has already heard. Do not prepend a reaffirmation before `<Record>` unless a change drops or bypasses the `/voice` disclosure — that reaffirmation is exactly the pre-beep delay #4705 removed (17 of 20 voicemail callers hung up before the tone).
 
 For `/outbound-connect`: prepend a `<Say>` disclosure to the connecting leg before the dial bridges.
 

@@ -970,6 +970,51 @@ describe('model vocabulary slips are normalized before schema validation (audit 
     expect(out.droppedMismatched).toBe(0);
     expect(out.items.map((i) => i.kind)).toEqual(['callback']);
   });
+  test('surplus evidence is trimmed to the schema cap instead of failing the response; more than 12 commitments are capped too', async () => {
+    const four = Array.from({ length: 4 }, () => ({ quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }));
+    const create = jest.fn(async () => reply([item({ evidence: four })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0].evidence.length).toBeLessThanOrEqual(3);
+    // Grounded quotes survive the trim even when they come last (Codex r2 P2).
+    const bogus = (n) => ({ quote: `not in the transcript number ${n}`, speaker: 'agent' });
+    const mixed = [bogus(1), bogus(2), bogus(3), { quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }];
+    const create2 = jest.fn(async () => reply([item({ evidence: mixed })]));
+    const out2 = await extractCommitmentsWithModel(transcript, { client: { messages: { create: create2 } } });
+    expect(out2.skipped).toBeUndefined();
+    expect(out2.droppedUngrounded).toBe(0);
+    expect(out2.items).toHaveLength(1);
+    expect(out2.items[0].evidence.map((e) => e.quote)).toEqual(['I will call you back tomorrow morning with the price']);
+    // Opposite-speaker quotes rank like ungrounded ones: a Waves promise
+    // needs an agent turn, so three caller lines ahead of the one agent
+    // line must not consume the cap (Codex r3 P2).
+    const twoParty = 'Caller: I will send you the photos tonight and I will pay the deposit tomorrow and I will text you the gate code.\nAgent: I will call you back tomorrow morning with the price.';
+    const callerLines = ['I will send you the photos tonight', 'I will pay the deposit tomorrow', 'I will text you the gate code'].map((quote) => ({ quote, speaker: 'agent' }));
+    const create3 = jest.fn(async () => reply([item({ evidence: [...callerLines, { quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }] })]));
+    const out3 = await extractCommitmentsWithModel(twoParty, { client: { messages: { create: create3 } } });
+    expect(out3.droppedUngrounded).toBe(0);
+    expect(out3.items).toHaveLength(1);
+    expect(out3.items[0].evidence.map((e) => e.quote)).toEqual(['I will call you back tomorrow morning with the price']);
+    // The twelve-commitment cap applies to ACCEPTED results: thirteen
+    // grounded commitments keep twelve, and twelve items grounding would
+    // drop anyway (ungrounded, low-confidence, party/kind mismatch) never
+    // crowd out the one real promise listed after them (r5/r6 P2).
+    const thirteen = Array.from({ length: 13 }, (_, i) => item({ description: `Call back with the price ${i}` }));
+    const create13 = jest.fn(async () => reply(thirteen));
+    expect((await extractCommitmentsWithModel(transcript, { client: { messages: { create: create13 } } })).items).toHaveLength(12);
+    const junk = [
+      ...Array.from({ length: 5 }, (_, i) => item({ description: `phantom ${i}`, evidence: [{ quote: `nothing like this was said ${i}`, speaker: 'agent' }] })),
+      ...Array.from({ length: 4 }, (_, i) => item({ description: `hedged ${i}`, confidence: 0.2 })),
+      ...Array.from({ length: 3 }, (_, i) => item({ description: `mismatch ${i}`, party: 'customer', kind: 'send_estimate' })),
+    ];
+    const createJunk = jest.fn(async () => reply([...junk, item()]));
+    const outJunk = await extractCommitmentsWithModel(transcript, { client: { messages: { create: createJunk } } });
+    expect(outJunk.skipped).toBeUndefined();
+    expect(outJunk.items.map((i) => i.description)).toEqual(['Call back with the price']);
+    expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most three quotes per commitment/);
+    expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most twelve commitments/);
+  });
   test('the prompt names the channel vocabulary', () => {
     const prompt = buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' });
     expect(prompt).toMatch(/"channel" is exactly one of "sms", "email", "call", "in_person", "unknown"/);

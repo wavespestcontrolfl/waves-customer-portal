@@ -1149,6 +1149,183 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(flat.follow_up_date_time).toBeNull();
   });
 
+  // service_request.price (schema 1.12.0, codex #4707 P1): flatView must
+  // expose the normalized price fields so replay variance (FIELD_GROUPS in
+  // replay-call-extraction-variance.js) can actually watch them — otherwise
+  // a v8 extractor regression here goes unnoticed by the weekly bake-off.
+  test('flatView exposes service_request.price fields', () => {
+    const flat = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        primary_service_category: 'mosquito',
+        price: {
+          amount_usd: 90,
+          amount_max_usd: 100,
+          unit: 'per_quarter',
+          accepted: false,
+          caller_response: 'declined',
+          stated_by: 'agent',
+          prepay_term: 'annual',
+          tier_mentioned: 'gold',
+          evidence_quote: 'that runs ninety to a hundred a quarter',
+        },
+      },
+    });
+    expect(flat.price_amount_usd).toBe(90);
+    expect(flat.price_amount_max_usd).toBe(100);
+    expect(flat.price_unit).toBe('per_quarter');
+    expect(flat.price_accepted).toBe(false);
+    expect(flat.price_caller_response).toBe('declined');
+    expect(flat.price_prepay_term).toBe('annual');
+    expect(flat.price_tier_mentioned).toBe('gold');
+    expect(flat.price_stated_by).toBe('agent');
+    expect(flat.price_has_evidence).toBe(true);
+    const noQuote = flatView({ meta: { schema_version: '1.13.0' }, service_request: { price: { amount_usd: 65, unit: 'one_time' } } });
+    expect(noQuote.price_has_evidence).toBe(false);
+  });
+
+  test('flatView defaults every price field to null when price is absent or empty', () => {
+    const absent = flatView({ meta: { schema_version: '1.13.0' }, service_request: {} });
+    expect(absent.price_amount_usd).toBeNull();
+    expect(absent.price_amount_max_usd).toBeNull();
+    expect(absent.price_unit).toBeNull();
+    expect(absent.price_accepted).toBeNull();
+    expect(absent.price_caller_response).toBeNull();
+    expect(absent.price_prepay_term).toBeNull();
+    expect(absent.price_tier_mentioned).toBeNull();
+    expect(absent.price_stated_by).toBeNull();
+    expect(absent.price_has_evidence).toBeNull();
+    expect(absent.price_count).toBeNull();
+
+    const empty = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: { price: { amount_usd: null, amount_max_usd: null, unit: null, accepted: null, caller_response: null, stated_by: null, prepay_term: null, tier_mentioned: null, evidence_quote: null } },
+    });
+    expect(empty.price_amount_usd).toBeNull();
+    expect(empty.price_accepted).toBeNull();
+    expect(empty.price_caller_response).toBeNull();
+  });
+
+  test('flatView keeps price_accepted a genuine tri-state (false survives, unlike a truthy-only flag)', () => {
+    const declined = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: { price: { amount_usd: 65, accepted: false, caller_response: 'declined' } },
+    });
+    expect(declined.price_accepted).toBe(false);
+    expect(declined.price_caller_response).toBe('declined');
+  });
+
+  // service_request.prices[] (schema 1.13.0, #4707 follow-up 2): only the
+  // COUNT is flattened — the array entries themselves are never flattened
+  // individually, so readers must go to the nested extraction for detail.
+  test('flatView exposes price_count as the length of service_request.prices, null when absent', () => {
+    const absent = flatView({ meta: { schema_version: '1.13.0' }, service_request: { price: {} } });
+    expect(absent.price_count).toBeNull();
+
+    const withPrices = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        price: { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+        prices: [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', caller_response: 'accepted' },
+        ],
+      },
+    });
+    expect(withPrices.price_count).toBe(2);
+    expect(withPrices.price_amount_usd).toBe(65);
+    expect(withPrices).not.toHaveProperty('prices');
+  });
+
+  // prices_signature (codex #4722 r1 P1, extended r2 push-gate P1):
+  // price_count alone can't tell two 2-price extractions with a differing
+  // secondary entry apart. amount_usd|amount_max_usd|unit|caller_response|
+  // accepted|stated_by|prepay_term|tier_mentioned, plus an evidence
+  // PRESENCE flag (never the verbatim quote — that's free text and never
+  // diffed).
+  test('flatView exposes prices_signature as a deterministic per-entry string, null when prices absent', () => {
+    const absent = flatView({ meta: { schema_version: '1.13.0' }, service_request: { price: {} } });
+    expect(absent.prices_signature).toBeNull();
+
+    const withPrices = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        price: { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+        prices: [
+          { amount_usd: 65, amount_max_usd: null, unit: 'one_time', caller_response: 'accepted', prepay_term: null, tier_mentioned: null },
+          { amount_usd: 40, amount_max_usd: null, unit: 'per_month', caller_response: 'not_at_issue', prepay_term: null, tier_mentioned: 'gold' },
+        ],
+      },
+    });
+    expect(withPrices.prices_signature).toBe('65||one_time|accepted|||||0;40||per_month|not_at_issue||||gold|0');
+
+    // Order-sensitive, and differs when only the secondary entry's unit changes.
+    const secondaryChanged = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_quarter', caller_response: 'not_at_issue', tier_mentioned: 'gold' },
+        ],
+      },
+    });
+    expect(secondaryChanged.prices_signature).not.toBe(withPrices.prices_signature);
+  });
+
+  // codex #4722 r2 push-gate P1: stated_by, accepted, and evidence
+  // PRESENCE must be part of the signature — otherwise a secondary entry
+  // that silently flips from a caller-mentioned competitor price to an
+  // agent-stated one (or drops its supporting evidence, or a legacy
+  // accepted-only entry's acceptance changes) reads as unchanged even
+  // though the Calls tab "All prices" row would display it differently.
+  test('prices_signature changes when only a secondary entry\'s stated_by, accepted, or evidence presence changes', () => {
+    const base = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', stated_by: 'caller', evidence_quote: 'a competitor charges forty a month' },
+        ],
+      },
+    });
+    const statedByChanged = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', stated_by: 'agent', evidence_quote: 'a competitor charges forty a month' },
+        ],
+      },
+    });
+    const evidenceDropped = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', stated_by: 'caller' },
+        ],
+      },
+    });
+    const acceptedChanged = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', accepted: false },
+        ],
+      },
+    });
+    // Every variant reads as a real change against the base.
+    expect(statedByChanged.prices_signature).not.toBe(base.prices_signature);
+    expect(evidenceDropped.prices_signature).not.toBe(base.prices_signature);
+    expect(acceptedChanged.prices_signature).not.toBe(base.prices_signature);
+    // And the primary entry alone (identical on all four) doesn't hide it —
+    // price_count is unchanged, so it's the signature carrying the signal.
+    expect(base.price_count).toBe(statedByChanged.price_count);
+    expect(base.price_count).toBe(evidenceDropped.price_count);
+    expect(base.price_count).toBe(acceptedChanged.price_count);
+  });
+
   test('normalizeCallExtraction sanitizes the new V1 fields', () => {
     const out = normalizeCallExtraction({
       quoted_price: '350',

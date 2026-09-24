@@ -70,6 +70,7 @@ const pagesPoll = require('../services/content-astro/pages-poll');
 const publisher = require('../services/content-astro/astro-publisher');
 const indexNow = require('../services/seo/indexnow-submit');
 const social = require('../services/social-media');
+const logger = require('../services/logger');
 const topicGate = require('../services/content/topic-targeting-gate');
 const poller = require('../services/content/autonomous-pr-poller');
 // The topic-merge lock's transaction: queries delegate to the db mock (so
@@ -676,6 +677,23 @@ describe('post-merge social share (new on-hub blog posts)', () => {
       source: 'autonomous_blog',
       noAiImage: true,
     }));
+  });
+
+  test('reports a daily-cap result as skipped instead of failed', async () => {
+    setupDb({ pending: [makeRun()] });
+    social.shareUrlOnce.mockResolvedValueOnce({
+      shared: true,
+      success: false,
+      skippedByDailyCap: true,
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    await poller.pollPending();
+
+    expect(logger.info).toHaveBeenCalledWith(
+      `[autonomous-pr-poller] social share for ${CANONICAL}: skipped (daily_cap)`,
+    );
   });
 
   test('does NOT share refresh/metadata lanes (planLinks false)', async () => {

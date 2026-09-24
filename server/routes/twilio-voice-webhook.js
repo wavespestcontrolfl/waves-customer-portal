@@ -772,6 +772,23 @@ async function stampPreconnectScreen(callSid, value) {
   }
 }
 
+// Why the default greeting is short (2026-09-23 audit): after the 30s staff
+// ring, a caller heard the 21s recorded greeting plus a spoken sentence
+// before the beep — about 55s in all — and 17 of 20 inbound voicemail-path
+// callers that week hung up first (Twilio holds no recording for any of
+// them). The short greeting keeps the recorded script's substance (name,
+// number, quick message) in about 8 seconds. It deliberately makes NO
+// text-back promise: the voicemail lead text (GATE_VOICEMAIL_LEAD_SMS) only
+// fires from call-recording-processor after a recording exists, so a caller
+// who hangs up during the greeting would never get one.
+// WAVES_VOICEMAIL_GREETING=recorded restores the asset (WAVES_VOICEMAIL_URL);
+// re-record it at ~8s to keep the brand voice AND the short wait.
+const DEFAULT_VOICEMAIL_ASSET = 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
+const VOICEMAIL_SHORT_GREETING = "Thanks for calling Waves Pest Control. We're with another customer right now. After the tone, leave your name, number, and a quick message, and we'll call you right back.";
+function voicemailGreetingMode() {
+  return String(process.env.WAVES_VOICEMAIL_GREETING || 'short').trim().toLowerCase() === 'recorded' ? 'recorded' : 'short';
+}
+
 function appendVoicemailRecording(twiml, { language = null } = {}) {
   if (/^es/i.test(String(language || ''))) {
     // Spanish failover (GATE_VOICE_SPANISH_MENU): a caller who chose Spanish
@@ -780,10 +797,12 @@ function appendVoicemailRecording(twiml, { language = null } = {}) {
     const spanishAudio = process.env.WAVES_VOICEMAIL_URL_ES;
     if (spanishAudio) twiml.play(spanishAudio);
     twiml.say(SPANISH_SAY, 'Su mensaje será grabado y transcrito.');
+  } else if (voicemailGreetingMode() === 'recorded') {
+    // The recorded brand greeting (21s). The sentence that used to follow it
+    // repeated what the greeting already says and is dropped.
+    twiml.play(process.env.WAVES_VOICEMAIL_URL || DEFAULT_VOICEMAIL_ASSET);
   } else {
-    const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
-    twiml.play(voicemailAudio);
-    twiml.say({ voice: SAY_VOICE }, 'Your message will be recorded and transcribed.');
+    twiml.say({ voice: SAY_VOICE }, VOICEMAIL_SHORT_GREETING);
   }
   twiml.record({
     maxLength: 120,
@@ -1649,10 +1668,12 @@ router.post('/call-complete', async (req, res) => {
     // notified the caller that the call may be recorded/transcribed/
     // AI-processed BEFORE the dial bridged. That same call is still
     // in progress here, so the consent persists into the voicemail
-    // path. We add a brief reaffirmation before <Record> for clarity
-    // and to cover the edge case where WAVES_VOICEMAIL_URL doesn't
-    // include disclosure language (asset content is opaque to repo —
-    // tracked as a separate audit item).
+    // path. That /voice disclosure is the ONLY notice on this path
+    // (2026-09-24): neither greeting mode in appendVoicemailRecording
+    // reaffirms it — the short <Say> carries no recording language and
+    // the recorded asset's content is opaque to the repo. Any change
+    // that drops or bypasses the /voice disclosure must restore a
+    // reaffirmation here before <Record>.
     if (shouldRecordVoicemail) {
       const twiml = new VoiceResponse();
       let handedToAgent = false;
