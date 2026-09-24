@@ -311,8 +311,25 @@ async function loadLead(dbConn, leadId) {
 // none of that customer's address, visits or reschedule links are exposed,
 // and a booking goes onto a separate prospect (the existing link is left
 // as it is).
+const CONSULTATION_PROSPECT_ACTIVITY = 'consultation_prospect';
+
 async function loadTrustedCustomer(dbConn, lead, token) {
-  if (!lead?.customer_id) return null;
+  if (!lead?.id) return null;
+  // The prospect THIS flow created for this lead (local audit P1): an
+  // unverified lead's own booking must be found again on a retry, or every
+  // retry would mint another prospect and slip the assessment dedupe. Only
+  // this route writes this activity type, so it is server-owned provenance,
+  // unlike leads.customer_id.
+  const created = await dbConn('lead_activities')
+    .where({ lead_id: lead.id, activity_type: CONSULTATION_PROSPECT_ACTIVITY })
+    .orderBy('created_at', 'desc')
+    .first('metadata');
+  const meta = typeof created?.metadata === 'string' ? JSON.parse(created.metadata) : created?.metadata;
+  if (meta?.customer_id) {
+    const prospect = await loadCustomer(dbConn, meta.customer_id);
+    if (prospect) return prospect;
+  }
+  if (!lead.customer_id) return null;
   const customer = await loadCustomer(dbConn, lead.customer_id);
   if (!customer) return null;
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -853,6 +870,15 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
     }
   }
   const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
+  // Server-owned provenance for loadTrustedCustomer (local audit P1): this
+  // prospect is this lead's own, found again on every retry.
+  await trx('lead_activities').insert({
+    lead_id: freshLead.id,
+    activity_type: CONSULTATION_PROSPECT_ACTIVITY,
+    description: 'Consultation page created a prospect profile for this lead',
+    performed_by: 'consultation_page',
+    metadata: JSON.stringify({ customer_id: created.id }),
+  });
   return { customer: created };
 }
 

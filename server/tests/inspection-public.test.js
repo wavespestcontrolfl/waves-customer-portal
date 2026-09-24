@@ -439,6 +439,38 @@ describe('an UNPROVEN existing lead→customer link', () => {
     expect(res.body.state).toBe('already_booked');
   });
 
+  // Local audit P1: the prospect this flow created is this lead's own —
+  // found again on a retry (server-owned lead_activities provenance), so an
+  // unverified lead can never mint a second prospect or double-book.
+  test('retry by an UNVERIFIED lead: its own prospect (consultation_prospect activity) is reused — already_booked, no new prospect', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: null };
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
+    firstResults.customers = { id: 'cust-prospect', phone: '9415550101', address_line1: '123 Any St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [
+      { id: 'ss-p', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'p-tok' },
+    ];
+    const getRes = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(getRes.body.state).toBe('already_booked');
+    const postRes = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(postRes.body.state).toBe('already_booked');
+    expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
+  });
+
+  test('a first-time unverified booking records the consultation_prospect provenance for its new prospect', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: null };
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-new', existingCustomer: null, matchType: null });
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Any St, Bradenton, FL 34209' });
+    const provenance = insertCalls.find((c) => c.table === 'lead_activities' && c.payload.activity_type === 'consultation_prospect');
+    expect(provenance).toBeTruthy();
+    expect(JSON.parse(provenance.payload.metadata)).toEqual({ customer_id: 'new-cust-1' });
+  });
+
   test('POST: an unproven link books onto a separate prospect and leaves the existing link untouched', async () => {
     firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-victim' };
     firstResults.customers = VICTIM;
