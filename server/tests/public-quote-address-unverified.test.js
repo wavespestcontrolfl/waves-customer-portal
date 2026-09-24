@@ -226,6 +226,10 @@ describe('parseDisplayAddress', () => {
     expect(parseDisplayAddress('1260 Example St, Apt 4, Parrish, FL 34219')).toMatchObject({ streetLine: '1260 Example St', line1: '1260 Example St', unit: 'Apt 4', city: 'Parrish', state: 'FL', zip: '34219' });
     expect(parseDisplayAddress('1260 Example St Apt 5, Parrish, FL 34219')).toMatchObject({ line1: '1260 Example St', unit: 'Apt 5' });
     expect(parseDisplayAddress('1260 Example St, Parrish, FL 34219')).toMatchObject({ line1: '1260 Example St', unit: null });
+    // A compound door keeps every unit segment (a staff correction fans
+    // the whole unit out to the lead and customer, never the building alone).
+    expect(parseDisplayAddress('1250 Example St, Bldg 2, Apt 4, Parrish, FL 34219')).toMatchObject({ line1: '1250 Example St', unit: 'Bldg 2 Apt 4', city: 'Parrish', zip: '34219' });
+    expect(parseDisplayAddress('1250 Example St Bldg 2, Apt 4, Parrish, FL 34219')).toMatchObject({ line1: '1250 Example St', unit: 'Bldg 2 Apt 4', city: 'Parrish' });
     expect(parseDisplayAddress('12345 Example St, Parrish, FL 34219-1234')).toMatchObject({ city: 'Parrish', zip: '34219' });
     expect(parseDisplayAddress('')).toMatchObject({ streetLine: '', city: '', zip: '' });
   });

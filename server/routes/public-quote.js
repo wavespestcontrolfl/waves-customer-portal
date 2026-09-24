@@ -1352,8 +1352,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // committed after this run's clean evidence, { newerClean } when a
     // clean verdict committed after every matching flag (and after this
     // run's own flag), else {}.
-    const reconcileUnderLock = async (trx) => {
+    // `carriedFlag`: a block this run carried from the draft row (no
+    // fresh audit flag of its own) is judged the same way, so a clean
+    // verdict newer than it reads as { newerClean } too.
+    const reconcileUnderLock = async (trx, { carriedFlag = null } = {}) => {
       if (!contactEmail || !contactPhone) return {};
+      const blocked = addressUnverified || carriedFlag || null;
       const cleanAt = Math.max(
         Date.parse(cleanEvidenceAt || '') || 0,
         rollAnsweredThisRun ? (Date.parse(trustedProfileCachedAt || '') || 0) : 0,
@@ -1369,6 +1373,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .map((row) => recoverAddressUnverified(parseRow(row)))
         .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress));
       if (addressUnverified) flags.push(addressUnverified);
+      if (carriedFlag) flags.push(carriedFlag);
       const newestFlag = flags.sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0] || null;
       const newestFlagAt = newestFlag ? (Date.parse(newestFlag.flagged_at || '') || 0) : 0;
       const newestClean = rows
@@ -1377,8 +1382,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
         .reduce((max, at) => Math.max(max, at), 0);
       const effectiveCleanAt = Math.max(cleanAt, newestClean);
-      if (!addressUnverified && newestFlag && newestFlagAt > effectiveCleanAt) return { newerFlag: newestFlag };
-      if (addressUnverified && newestClean > newestFlagAt) return { newerClean: new Date(newestClean).toISOString() };
+      if (!blocked && newestFlag && newestFlagAt > effectiveCleanAt) return { newerFlag: newestFlag };
+      if (blocked && newestClean > newestFlagAt) return { newerClean: new Date(newestClean).toISOString() };
       return {};
     };
     if (addressUnverified) {
@@ -3412,6 +3417,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const { withdrawFlaggedPublications } = require('../services/website-quote-withdrawal');
         const withdrawn = await db.transaction(async (trx) => {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, contactPhone)]);
+          // A staff clean verdict that committed after this run's draft
+          // transaction (the office confirmed the number while this
+          // request paused) outranks the local flag: withdrawing on it
+          // would re-block the confirmed draft or archive a publication
+          // the office just sent. Judged under this lock (pre-push audit
+          // P1 on r24). The link stays withheld for this run — the
+          // visitor's next run, or the office, hands it over.
+          const rec = await reconcileUnderLock(trx, { carriedFlag: draftAddressBlockCarried ? carriedAddressFlag : null });
+          if (rec.newerClean) {
+            logger.info('[public-quote] withdrawal skipped — a clean verdict committed after this run\'s flag');
+            return [];
+          }
           return withdrawFlaggedPublications(trx, {
             leadId: lead.id, contactEmail, contactPhone, fullAddress: quoteFullAddress, flag: addressUnverified || carriedAddressFlag || null,
           });

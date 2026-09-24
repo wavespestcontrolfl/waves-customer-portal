@@ -142,9 +142,12 @@ function parseDisplayAddress(text) {
   const split = splitStreetLineUnit(streetLine);
   // "FL 34219" starts with the floor designator — the state/ZIP tail is
   // never a unit segment.
-  const unitSegment = parts.slice(1).find((part) => UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part)) || '';
+  // EVERY unit segment is kept, in order ("Bldg 2, Apt 4" is one door,
+  // not the building alone) — a truncated unit would fan out to the lead
+  // and customer records (pre-push audit P1 on r24).
+  const unitSegments = parts.slice(1).filter((part) => UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part));
   const line1 = String(split.street || streetLine).trim();
-  const unit = String(split.unit || unitSegment || '').trim() || null;
+  const unit = [split.unit, ...unitSegments].map((part) => String(part || '').trim()).filter(Boolean).join(' ') || null;
   return { streetLine, line1, unit, street: streetKeyNoUnit(streetLine), city, state: state ? state.toUpperCase() : null, zip: zip5(tail) };
 }
 
