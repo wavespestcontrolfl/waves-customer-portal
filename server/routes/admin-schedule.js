@@ -6559,7 +6559,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
       })();
       const { serviceMatchesCoverage } = require('../services/annual-prepay-renewals');
       const prepayEligibility = (linkedEstimate && acceptEstimateOnBook)
-        ? await prepayBookingEligibility(linkedEstimate)
+        // The prospective booking customer (codex round-2 P2): an unowned
+        // quote (customer_id NULL, matched only by captured contact) is
+        // attached to THIS customer only after booking succeeds, so the
+        // live-customer check needs it explicitly here or it silently skips
+        // — the accept guard sees the now-linked customer_id and rejects
+        // AFTER the appointment is already committed.
+        ? await prepayBookingEligibility(linkedEstimate, db, customerId)
         : null;
       if (!linkedEstimate || !acceptEstimateOnBook) {
         downgrade('Appointment booked as standard — annual prepay on book needs an open (not yet accepted) linked quote. Use the estimate’s Annual Prepay action instead.');

@@ -102,6 +102,9 @@ function makeDb(estimate, claimedOverrides = null) {
         this.statusList = { column, values };
         return this;
       },
+      whereNotIn() {
+        return this;
+      },
       whereNull(column) {
         this.nullColumns = [...(this.nullColumns || []), column];
         return this;

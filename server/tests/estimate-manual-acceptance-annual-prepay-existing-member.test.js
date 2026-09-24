@@ -92,7 +92,12 @@ function makeEstimate() {
   };
 }
 
-function makeDb(estimate) {
+// customerRow overrides existingMember for the 'customers' table (per_application
+// live-plan tests need a different fixture than the monthly-membership one).
+// liveSeriesCustomerId, when set, makes the 'scheduled_services' live-plan
+// query (customerHasLiveRecurringPlan) find ONE live recurring row for that
+// customer id — any other customer id (or none) finds nothing.
+function makeDb(estimate, { customerRow = existingMember, liveSeriesCustomerId = null } = {}) {
   const updates = [];
   const inserts = [];
   const database = jest.fn((table) => {
@@ -100,14 +105,19 @@ function makeDb(estimate) {
       clause: null,
       where(clause) { if (typeof clause !== 'function') this.clause = clause; return this; },
       whereIn() { return this; },
+      whereNotIn() { return this; },
       whereNull(column) { this.nullColumns = [...(this.nullColumns || []), column]; return this; },
       whereNotNull() { return this; },
       whereRaw() { return this; },
       orderBy() { return this; },
       forUpdate() { return this; },
-      first: async () => {
+      async first() {
         if (table === 'estimates') return estimate;
-        if (table === 'customers') return existingMember;
+        if (table === 'customers') return customerRow;
+        if (table === 'scheduled_services') {
+          return (liveSeriesCustomerId && this.clause && this.clause.customer_id === liveSeriesCustomerId)
+            ? { id: 'series-root-live' } : null;
+        }
         return null;
       },
       update(patch) {
@@ -158,6 +168,7 @@ function makeRacingDb(baseEstimate, staleData, freshData) {
       clause: null,
       where(clause) { if (typeof clause !== 'function') this.clause = clause; return this; },
       whereIn() { return this; },
+      whereNotIn() { return this; },
       whereNull(column) { this.nullColumns = [...(this.nullColumns || []), column]; return this; },
       whereNotNull() { return this; },
       whereRaw() { return this; },
@@ -279,5 +290,107 @@ describe('r2-estimate-conversion-money-1: annual prepay of an add-on for an exis
       estimateConverter,
     })).rejects.toMatchObject({ statusCode: 400 });
     expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a per_application customer with a live recurring series and NO membershipSnapshot is still refused (codex round-2 P1 — the per_application variant)', async () => {
+    // customerPreservesMonthlyMembership deliberately answers false for
+    // EVERY explicit non-monthly lane (billing-cadence.js) — per_application
+    // included. Without the strict live-plan-row check this exact customer
+    // sails past BOTH the (absent) snapshot and the membership predicate,
+    // and the add-on prepay term's payment-time stamp then flips the WHOLE
+    // account to annual_prepay, stopping the existing per-application series
+    // from auto-invoicing.
+    const perApplicationCustomer = {
+      id: 'customer-perapp',
+      pipeline_stage: 'active_customer',
+      billing_mode: 'per_application',
+      monthly_rate: null,
+      per_application_fee: 45,
+    };
+    const estimate = makeEstimate();
+    estimate.customer_id = perApplicationCustomer.id;
+    delete estimate.estimate_data.membershipSnapshot;
+    const { database } = makeDb(estimate, {
+      customerRow: perApplicationCustomer,
+      liveSeriesCustomerId: perApplicationCustomer.id,
+    });
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({
+        customerId: perApplicationCustomer.id,
+        billingTerm: 'prepay_annual',
+        draftInvoiceId: 'invoice-addon-prepay',
+      }),
+    };
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      source: 'verbal_annual_prepay',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService,
+      estimateConverter,
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+
+    // Sanity: the SAME customer with no live series (a brand-new
+    // per_application signup) is unaffected — the guard isn't just
+    // rejecting every per_application customer outright.
+    const freshEstimate = makeEstimate();
+    freshEstimate.customer_id = perApplicationCustomer.id;
+    delete freshEstimate.estimate_data.membershipSnapshot;
+    const { database: freshDb } = makeDb(freshEstimate, {
+      customerRow: perApplicationCustomer,
+      liveSeriesCustomerId: null,
+    });
+    const freshConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({
+        customerId: perApplicationCustomer.id,
+        billingTerm: 'prepay_annual',
+        draftInvoiceId: 'invoice-addon-prepay-2',
+      }),
+    };
+    await markEstimateManuallyAccepted({
+      estimateId: freshEstimate.id,
+      adminUserId: 'admin-1',
+      source: 'verbal_annual_prepay',
+      billingTerm: 'prepay_annual',
+      database: freshDb,
+      leadLinkService,
+      estimateConverter: freshConverter,
+    });
+    expect(freshConverter.convertEstimate).toHaveBeenCalled();
+  });
+
+  test('prepayBookingEligibility checks the PROSPECTIVE booking customer id when the estimate is not yet linked (codex round-2 P2)', async () => {
+    // An unowned quote (customer_id NULL, matched only by captured contact)
+    // in the prepay-on-book flow: admin-schedule.js only attaches it to the
+    // selected customer AFTER booking succeeds, so without the prospective
+    // id parameter this preflight has no customer to check at all and says
+    // eligible — the accept guard then rejects once the estimate IS linked,
+    // after the appointment already committed.
+    const perApplicationCustomer = {
+      id: 'customer-perapp-onbook',
+      pipeline_stage: 'active_customer',
+      billing_mode: 'per_application',
+      monthly_rate: null,
+    };
+    const unownedEstimate = makeEstimate();
+    unownedEstimate.customer_id = null;
+    delete unownedEstimate.estimate_data.membershipSnapshot;
+    const { database } = makeDb(unownedEstimate, {
+      customerRow: perApplicationCustomer,
+      liveSeriesCustomerId: perApplicationCustomer.id,
+    });
+
+    const withoutProspectiveId = await prepayBookingEligibility(unownedEstimate, database);
+    // No customer_id AND no prospective id given: nothing to check against
+    // (matches today's behavior for a genuinely unlinked quote) — proves the
+    // NEXT call's rejection comes from the new parameter, not some other path.
+    expect(withoutProspectiveId.reason).not.toBe('existing_customer');
+
+    const withProspectiveId = await prepayBookingEligibility(unownedEstimate, database, perApplicationCustomer.id);
+    expect(withProspectiveId).toMatchObject({ eligible: false, reason: 'existing_customer' });
   });
 });

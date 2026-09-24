@@ -63,6 +63,34 @@ function estimateDataMembershipSnapshotIsExistingCustomer(estimate = {}) {
   return !!(data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer);
 }
 
+// STRICT live-plan evidence (codex round-2 P1): customerPreservesMonthlyMembership
+// deliberately answers false for every explicit NON-monthly lane (billing-
+// cadence.js) — including per_application, the exact lane an on-site rodent
+// switch or a standard per-visit accept leaves a customer on. A per_application
+// customer with a live recurring series therefore sailed past the
+// membership-only guard whenever the estimate had no membershipSnapshot (or a
+// stale false one from before the plan activated): the add-on prepay term
+// still gets created, and on payment stampAnnualPrepayBillingMode flips the
+// WHOLE account to annual_prepay regardless of what lane it silently killed.
+// This checks the one thing that actually matters here — does the customer
+// have ANY live recurring plan row, in ANY billing lane — not billing_mode
+// classification. Excludes rows sourced from THIS estimate (prepay-on-book
+// creates the add-on's own scheduled_services row before calling accept), so
+// a customer with no other plan is never blocked by their own new booking.
+async function customerHasLiveRecurringPlan(database, customerId, excludeEstimateId = null) {
+  if (!customerId) return false;
+  const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+  const row = await database('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true })
+    .whereNotIn('status', TERMINAL_STATUSES)
+    .where((builder) => {
+      builder.whereNull('source_estimate_id');
+      if (excludeEstimateId) builder.orWhereNot('source_estimate_id', excludeEstimateId);
+    })
+    .first('id');
+  return !!row;
+}
+
 function hasManualAnnualPrepayRecurringRows(estimate = {}) {
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
   const explicitRecurringLists = [
@@ -262,7 +290,15 @@ function manualPrepayBlockingOneTimeCharge(estimate = {}) {
 // primary absorbs, mirroring the converter's multi-service 422).
 // Returns { eligible, invoiceTotal, reason }. Async because the eligible-path
 // invoiceTotal resolves the customer's effective commercial tax rate.
-async function prepayBookingEligibility(estimate = {}, database = db) {
+// prospectiveCustomerId (codex round-2 P2): the prepay-on-book flow calls
+// this BEFORE the estimate is attached to the selected customer — an
+// unowned quote (customer_id NULL, matched only by captured contact) would
+// otherwise skip the live-customer check entirely here while admin-schedule
+// still books the appointment and links the estimate to that customer right
+// after, so a rejection at markEstimateManuallyAccepted (which DOES see the
+// now-linked customer_id) leaves a booked-but-unlinked appointment. Ignored
+// once estimate.customer_id is set (that value always wins).
+async function prepayBookingEligibility(estimate = {}, database = db, prospectiveCustomerId = null) {
   const ineligible = (reason) => ({ eligible: false, invoiceTotal: null, reason });
   const baseAnnual = resolveAnnualPrepayAmount(estimate);
   if (!baseAnnual) return ineligible('no_recurring_annual');
@@ -288,13 +324,27 @@ async function prepayBookingEligibility(estimate = {}, database = db) {
   // booked-but-unlinked appointment behind. Read-only preflight, so a lookup
   // failure here just falls through to the ordinary eligibility checks below
   // rather than blocking the whole preview on a transient DB error.
-  if (estimate.customer_id) {
+  const liveCheckCustomerId = estimate.customer_id || prospectiveCustomerId || null;
+  if (liveCheckCustomerId) {
+    // Two INDEPENDENT lookups, each fault-isolated: a failure in the newer
+    // live-plan-row check must never mask an already-successful membership
+    // read (or vice versa) — either alone is enough to reject.
+    let preservesMembership = false;
     try {
-      const linkedCustomer = await database('customers').where({ id: estimate.customer_id }).first();
-      if (linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer)) return ineligible('existing_customer');
+      const linkedCustomer = await database('customers').where({ id: liveCheckCustomerId }).first();
+      preservesMembership = !!(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
     } catch (e) {
       logger.warn(`[estimate-manual-acceptance] prepayBookingEligibility: live-customer membership lookup failed for estimate ${estimate.id}: ${e.message}`);
     }
+    // STRICT live-plan evidence (codex round-2 P1), not only the monthly-
+    // preservation predicate — see customerHasLiveRecurringPlan.
+    let hasLivePlan = false;
+    try {
+      hasLivePlan = await customerHasLiveRecurringPlan(database, liveCheckCustomerId, estimate.id || null);
+    } catch (e) {
+      logger.warn(`[estimate-manual-acceptance] prepayBookingEligibility: live-plan-row lookup failed for estimate ${estimate.id}: ${e.message}`);
+    }
+    if (preservesMembership || hasLivePlan) return ineligible('existing_customer');
   }
   // Mirror the accept transaction's own blockers (status window, expiry,
   // manager approval, commercial risk-type review): the schedule POST books
@@ -581,14 +631,20 @@ async function markEstimateManuallyAccepted({
     // (stampAnnualPrepayBillingMode) unconditionally rewrites billing_mode to
     // 'annual_prepay' — silently killing the OTHER plan's billing for the
     // whole prepay term while its visits keep completing unbilled. Checked
-    // two ways: the frozen membershipSnapshot on the estimate (billing-mode
+    // three ways: the frozen membershipSnapshot on the estimate (billing-mode
     // agnostic — set for both monthly_membership and per_application
-    // customers), and, when a customer is linked, the LIVE row via the same
+    // customers); when a customer is linked, the LIVE row via the same
     // predicate the converter itself uses to decide preservation
     // (customerPreservesMonthlyMembership) — a defense against a stale/
-    // missing snapshot.
+    // missing snapshot; AND strict live-plan evidence (codex round-2 P1) —
+    // customerPreservesMonthlyMembership answers false for EVERY explicit
+    // non-monthly lane (per_application included), so a per_application
+    // customer with a live recurring series sailed past both the snapshot
+    // (when absent/stale) and the membership predicate alike. The register's
+    // "same fix" note for the per_application variant is this third check.
     if (annualPrepaySelected) {
       let customerLivePreservesMembership = false;
+      let customerHasLivePlan = false;
       if (estimate.customer_id) {
         // LOCKED, not a bare read (codex pre-push P0): an unlocked peek here
         // could pass on stale data while a concurrent membership activation
@@ -611,8 +667,9 @@ async function markEstimateManuallyAccepted({
         );
         const linkedCustomer = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
         customerLivePreservesMembership = !!(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
+        customerHasLivePlan = await customerHasLiveRecurringPlan(trx, estimate.customer_id, estimate.id || null);
       }
-      if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || customerLivePreservesMembership) {
+      if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || customerLivePreservesMembership || customerHasLivePlan) {
         throw httpError('Annual prepay is not available for an existing customer’s add-on — accept it as pay-at-visit (or per-application) so the customer’s existing plan keeps billing.', 400);
       }
     }
