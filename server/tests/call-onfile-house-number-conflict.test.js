@@ -341,6 +341,8 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(processor).toContain("if (disputedPremise(entry.address_line1)) continue;");
     // A standing hold carried over without fresh AV evidence restores the disputed street (codex r33 P1).
     expect(processor).toContain("if (!disputedStatedStreet) disputedStatedStreet = standingPayload?.stated_street || null;");
+    // A kept card's booking ask follows the positively resolved premise (codex r34 P1).
+    expect(processor).toContain("'{scheduling_window,requested_address}', COALESCE(payload #> '{scheduling_window,requested_address}', '{}'::jsonb) || ?::jsonb, true)");
     // A reprocess re-binds the identity only for a LINKED call; an unlink keeps the filing identity (codex r29 P2).
     expect(processor).toContain("...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),");
   });

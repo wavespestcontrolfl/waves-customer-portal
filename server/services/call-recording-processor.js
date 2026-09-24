@@ -10345,11 +10345,34 @@ const CallRecordingProcessor = {
                 // nulling it would let a later Accept bypass the relink guard
                 // (which only fires on a truthy stored id) and file a recovery
                 // task for a customerless call (codex r29 P2).
-                payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
-                  address_dispute_cleared_at: new Date().toISOString(),
-                  cleared_on_file_street: onFileAddress?.address_line1 || null,
-                  ...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),
-                })]),
+                // …and the booking ask's requested_address follows the
+                // positively resolved premise (the on-file number this pass
+                // validated), keeping its other fields (additional
+                // properties) and the service / window: a booking there
+                // must cover the card's ask, or a settled disagreement
+                // plus a booked appointment never auto-resolve (codex r34
+                // P1). Only when the card carries a scheduling_window.
+                payload: (() => {
+                  const merged = JSON.stringify({
+                    address_dispute_cleared_at: new Date().toISOString(),
+                    cleared_on_file_street: onFileAddress?.address_line1 || null,
+                    ...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),
+                  });
+                  if (!onFileAddress?.address_line1) return trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [merged]);
+                  const resolvedAddress = JSON.stringify({
+                    street_line_1: onFileAddress.address_line1,
+                    street_line_2: onFileAddress.address_line2 || null,
+                    city: onFileAddress.city || null,
+                    postal_code: onFileAddress.zip || null,
+                    raw_text: null,
+                  });
+                  return trx.raw(
+                    "CASE WHEN (COALESCE(payload, '{}'::jsonb) ? 'scheduling_window') "
+                    + "THEN jsonb_set(COALESCE(payload, '{}'::jsonb) || ?::jsonb, '{scheduling_window,requested_address}', COALESCE(payload #> '{scheduling_window,requested_address}', '{}'::jsonb) || ?::jsonb, true) "
+                    + "ELSE COALESCE(payload, '{}'::jsonb) || ?::jsonb END",
+                    [merged, resolvedAddress, merged],
+                  );
+                })(),
                 updated_at: new Date(),
               });
           }
