@@ -131,13 +131,15 @@ describe('buildLeadConsultationLink — gate on', () => {
   // Round 11 — Codex pre-push P1, 2026-09-24: an explicit { channel: 'sms' }
   // option rides into the minted token (createShortCode receives the LONG
   // url, so its own 4-segment token is directly observable here).
-  test('{ channel: "sms" } mints a channel-carrying token into the short-url wrap', async () => {
+  // Codex #4737 r1 P1 follow-through: 'sms' is signed as the PHONE-BOUND
+  // claim, the exact form the booking route's verifier accepts.
+  test('{ channel: "sms" } mints the phone-bound claim for the fresh row\'s phone', async () => {
+    const { verifyLeadConsultationToken, smsChannelFor } = require('../utils/lead-consultation-token');
     mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
     await buildLeadConsultationLink(LEAD_ID, { channel: 'sms' });
-    expect(createShortCode).toHaveBeenCalledWith(
-      expect.stringMatching(new RegExp(`/inspection/${LEAD_ID}\\.\\d+\\.sms\\.[A-Za-z0-9_-]+$`)),
-      expect.any(Object),
-    );
+    const longUrl = createShortCode.mock.calls[0][0];
+    const verified = verifyLeadConsultationToken(longUrl.split('/inspection/')[1]);
+    expect(verified).toEqual({ leadId: LEAD_ID, channel: smsChannelFor('9415550100') });
   });
 });
 

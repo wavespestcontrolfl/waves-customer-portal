@@ -21,7 +21,7 @@ const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { createShortCode } = require('./short-url');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
-const { mintLeadConsultationToken, TTL_SECONDS } = require('../utils/lead-consultation-token');
+const { mintLeadConsultationToken, smsChannelFor, TTL_SECONDS } = require('../utils/lead-consultation-token');
 
 function consultationSmsLineFor(url) {
   return url ? `Pick a time for us to stop by for a free consultation: ${url}\n\n` : '';
@@ -32,9 +32,10 @@ function consultationSmsLineFor(url) {
 // into the send-time template. `channel` (round 11, Codex pre-push P1,
 // 2026-09-24) is an OPTIONAL delivery-channel claim minted into the token
 // itself (server/utils/lead-consultation-token.js) — omitted here (the
-// default), a link is UNVERIFIED delivery; a future SMS send passes
-// `'sms'` so inspection-public.js's leadContactVerified can trust that this
-// exact link reached the lead's own phone. Never set it for an email send —
+// default), a link is UNVERIFIED delivery; an SMS send passes `'sms'` to
+// buildLeadConsultationLink, which signs it as smsChannelFor(lead.phone) so
+// inspection-public.js's leadContactVerified can trust that this exact link
+// reached the lead's CURRENT phone. Never set it for an email send —
 // only an SMS send is evidence the phone itself received the link.
 function consultationUrlForLead(leadId, channel) {
   const token = mintLeadConsultationToken(leadId, undefined, channel);
@@ -57,7 +58,14 @@ async function buildLeadConsultationLink(leadOrId, { channel } = {}) {
     if (!lead) return { url: null, line: '', reason: 'Lead not found' };
     if (!lead.phone) return { url: null, line: '', reason: 'Lead has no phone number' };
 
-    const longUrl = consultationUrlForLead(lead.id, channel);
+    // 'sms' is signed as the phone-bound claim (smsChannelFor of this fresh
+    // row's phone) — the only form inspection-public.js's
+    // leadContactVerified accepts (Codex #4737 r1 P1 follow-through).
+    const signedChannel = channel === 'sms' ? smsChannelFor(lead.phone) : channel;
+    if (channel === 'sms' && !signedChannel) {
+      return { url: null, line: '', reason: 'Lead phone is not a valid 10-digit number' };
+    }
+    const longUrl = consultationUrlForLead(lead.id, signedChannel);
     if (!longUrl) return { url: null, line: '', reason: 'Could not build a consultation link (no signing secret configured)' };
 
     const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000);
