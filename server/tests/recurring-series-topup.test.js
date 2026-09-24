@@ -39,6 +39,15 @@ jest.mock('../services/scheduling/occupancy', () => ({
   ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn(),
 }));
+// isFamilyOnPlanHold (Codex GitHub r6 P1) reuses cancellation-processor.js's
+// own familyOfServiceRow — mocked here so this suite's tests control which
+// family a fixture resolves to directly, rather than depending on (and
+// re-testing) that module's own service_type/service_key text heuristics,
+// which have their own dedicated coverage elsewhere.
+jest.mock('../services/cancellation-processor', () => ({
+  ...jest.requireActual('../services/cancellation-processor'),
+  familyOfServiceRow: jest.fn(() => null),
+}));
 
 const adminScheduleRouter = require('../routes/admin-schedule');
 const {
@@ -46,9 +55,15 @@ const {
 } = adminScheduleRouter._test;
 const AppointmentReminders = require('../services/appointment-reminders');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
+const { familyOfServiceRow } = require('../services/cancellation-processor');
 const { ACTIVE_STATUSES, PAYMENT_PENDING_STATUS } = require('../services/annual-prepay-renewals');
+const { ANNUAL_PREPAY_METHOD } = require('../services/prepaid-series');
 beforeEach(() => {
   findConflictingVisits.mockReset().mockResolvedValue([]);
+  // Default: no family at all (matches every fixture that never sets
+  // stampedAnnualTermId/stampedPrepaidMethod's own family concerns) — a
+  // series with no resolvable WaveGuard family can never be plan-held.
+  familyOfServiceRow.mockReset().mockReturnValue(null);
 });
 const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
 const { etDateString } = require('../utils/datetime-et');
@@ -140,15 +155,21 @@ function makeConn(handler, opts = {}) {
 // as the new "latest" on the next iteration — the real anchor-chaining
 // behavior extendSeriesOnceLocked relies on.
 //
-// `stampedSeriesRow` / `customerLiveTerm`: control isAnnualPrepaySeries'
-// two DB probes (a stamped scheduled_services row anywhere in the series;
-// any live/undecided annual_prepay_terms row for the customer) — both
-// default to "no prepay footprint" so every OTHER describe block's
-// fixtures are unaffected by the v1 scope cut.
+// `stampedAnnualTermId` / `stampedPrepaidMethod` / `customerLiveTerm`:
+// control isAnnualPrepaySeries' two DB probes (a stamped scheduled_services
+// row anywhere in the series — annual_prepay_term_id set, and/or
+// prepaid_method set to a specific value, evaluated the SAME way the
+// production query's own conditional OR does; any live/undecided
+// annual_prepay_terms row for the customer) — all default to "no prepay
+// footprint" so every OTHER describe block's fixtures are unaffected by
+// the v1 scope cut. `activeHold`: whether a plan_holds row matching
+// isFamilyOnPlanHold's own query (customer/family/status='active'/
+// resume_on > today) exists — the family itself is controlled per-test via
+// the mocked familyOfServiceRow (cancellation-processor.js), not this flag.
 function topupScenario({
   parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
-  colsOverrides = {}, stampedSeriesRow = false, customerLiveTerm = false,
-  captureCustomerCalls = null,
+  colsOverrides = {}, stampedAnnualTermId = false, stampedPrepaidMethod = null, customerLiveTerm = false,
+  captureCustomerCalls = null, activeHold = false,
 } = {}) {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'weekly',
@@ -169,6 +190,12 @@ function topupScenario({
     ...customerOverrides,
   };
   const cols = { ...BASE_COLS, ...colsOverrides };
+  // Mirrors isAnnualPrepaySeries' own conditional-OR exactly: a column the
+  // schema doesn't have can never contribute a match, and prepaid_method
+  // only counts when it's the annual writer's OWN method — an ordinary
+  // cash/Zelle stamp must not (Codex GitHub r6 P1).
+  const seriesHasAnnualStamp = (!!cols.annual_prepay_term_id && stampedAnnualTermId)
+    || (!!cols.prepaid_method && stampedPrepaidMethod === ANNUAL_PREPAY_METHOD);
   const seriesDates = new Set(initialDates);
   const inserted = [];
   const insertedById = new Map();
@@ -184,10 +211,11 @@ function topupScenario({
         if (firstCall[1] === 'status') return { status: 'pending' };
         if (firstCall[1] === 'id' && calls.some((c) => c[0] === 'whereFn')) {
           // isAnnualPrepaySeries' own stamped-row probe (root or any child
-          // carries annual_prepay_term_id/prepaid_method) — a combined
-          // recurring_parent_id-or-id + IS NOT NULL predicate, so it never
-          // matches the plain-object where() branch below.
-          return stampedSeriesRow ? { id: 'stamped-row' } : undefined;
+          // carries annual_prepay_term_id, or prepaid_method equal to the
+          // annual writer's own method) — a combined recurring_parent_id-or-
+          // id + stamped predicate, so it never matches the plain-object
+          // where() branch below.
+          return seriesHasAnnualStamp ? { id: 'stamped-row' } : undefined;
         }
         if (calls.some((c) => c[0] === 'orderBy')) {
           if (!seriesDates.size) return undefined;
@@ -250,6 +278,19 @@ function topupScenario({
     if (table === 'annual_prepay_terms') {
       // isAnnualPrepaySeries' customer-wide live/undecided-term probe.
       if (op === 'first') return customerLiveTerm ? { id: 'live-term' } : undefined;
+    }
+    if (table === 'services') {
+      // isFamilyOnPlanHold's service_key/name lookup — irrelevant to the
+      // result since familyOfServiceRow itself is mocked per-test; any
+      // shape is fine here.
+      if (op === 'first') return {};
+    }
+    if (table === 'plan_holds') {
+      // isFamilyOnPlanHold's own active-hold probe. The family actually
+      // queried is whatever the mocked familyOfServiceRow returned for this
+      // test — `activeHold` says whether a row matching customer/family/
+      // status='active'/resume_on>today exists at all.
+      if (op === 'first') return activeHold ? { id: 'hold-1' } : undefined;
     }
     if (table === 'system_settings') return null;
     if (table === 'schedule_blackout_dates') return [];
@@ -362,21 +403,34 @@ describe('topUpRecurringSeriesLocked — annual-prepay scope cut v1 (Codex GitHu
   test('skips a series whose root or any child row already carries a prepay stamp (annual_prepay_term_id)', async () => {
     const { conn, inserted } = topupScenario({
       colsOverrides: { annual_prepay_term_id: {} },
-      stampedSeriesRow: true,
+      stampedAnnualTermId: true,
     });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
     expect(result.skipped).toBe('annual_prepay_series');
     expect(inserted).toHaveLength(0);
   });
 
-  test('skips on a prepaid_method stamp too, on a schema without annual_prepay_term_id', async () => {
+  test('skips on an ANNUAL prepaid_method stamp too, on a schema without annual_prepay_term_id', async () => {
     const { conn, inserted } = topupScenario({
       colsOverrides: { prepaid_method: {} },
-      stampedSeriesRow: true,
+      stampedPrepaidMethod: ANNUAL_PREPAY_METHOD,
     });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
     expect(result.skipped).toBe('annual_prepay_series');
     expect(inserted).toHaveLength(0);
+  });
+
+  test('does NOT exclude on an ordinary cash/Zelle prepaid_method stamp — only the annual writer\'s own method counts (Codex GitHub r6 P1)', async () => {
+    // The pre-fix version matched ANY non-null prepaid_method, so a single
+    // manual cash/Zelle stamp on one visit (POST /api/admin/schedule/:id/
+    // prepaid) would have marked the WHOLE family annual forever.
+    const { conn, inserted } = topupScenario({
+      colsOverrides: { prepaid_method: {} },
+      stampedPrepaidMethod: 'cash',
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
   });
 
   test('skips a series whose customer holds ANY live/undecided annual_prepay_terms row, even with no scheduled_services link at all', async () => {
@@ -506,6 +560,50 @@ describe('topUpRecurringSeriesLocked — annual-prepay term-creation race (Codex
   });
 });
 
+describe('topUpRecurringSeriesLocked — plan-hold exclusion (Codex GitHub r6 P1)', () => {
+  // A held family (lawn_care / mosquito / tree_shrub — cancellation-
+  // resolution/holds.js's startHold) promises "no visits before resume_on."
+  // familyOfServiceRow is mocked (see the top-of-file jest.mock) so each
+  // test controls the family directly rather than depending on that
+  // module's own service_type/service_key text heuristics.
+  test('skips a series whose family has an active plan hold', async () => {
+    familyOfServiceRow.mockReturnValue('lawn_care');
+    const { conn, inserted } = topupScenario({ activeHold: true });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('plan_hold');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('a held lawn family does not block the SAME customer\'s pest series — plan_holds is never even queried for a non-holdable family', async () => {
+    // pest_control is not in HOLDABLE_FAMILIES, so isFamilyOnPlanHold must
+    // short-circuit to false without querying plan_holds at all — activeHold
+    // stays true here specifically to prove that: if the code incorrectly
+    // queried plan_holds for this family and the fake conn answered it
+    // unconditionally, this would wrongly skip.
+    familyOfServiceRow.mockReturnValue('pest_control');
+    const { conn, inserted } = topupScenario({ activeHold: true });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+  });
+
+  test('an expired (resume_on in the past, or no longer active) hold does not skip', async () => {
+    familyOfServiceRow.mockReturnValue('lawn_care');
+    const { conn, inserted } = topupScenario({ activeHold: false });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+  });
+
+  test('a series with no resolvable WaveGuard family is never held', async () => {
+    familyOfServiceRow.mockReturnValue(null);
+    const { conn, inserted } = topupScenario({ activeHold: true });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+  });
+});
+
 describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
   // Same shared verdict every OFFICE series writer consults
   // (seriesExtensionUnbillable) — the completion-time single-visit
@@ -618,6 +716,52 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
     expect(result.skipped).toBe('window_unplaceable');
     expect(inserted).toHaveLength(0);
+  });
+
+  test('skips an ALREADY on-the-hour window that ends past the 20:00 admin day bound (Codex GitHub r6 P2)', async () => {
+    // The pre-fix midnight-only check never even looked at an on-the-hour
+    // start (it short-circuited to "nothing to normalize"), so a legacy
+    // 21:00 template with a 60-minute duration — ending 22:00, well past
+    // the admin day's 20:00 close — would have inserted unchecked.
+    // assertAdminAppointmentWindow (window-rules.js) is the SAME validator
+    // every other admin write path runs through, so this ceiling was never
+    // a top-up-specific invention.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '21:00', window_end: '22:00',
+        estimated_duration_minutes: 60,
+      },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(result.skipped).toBe('window_unplaceable');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('skips an off-hour window whose FLOORED start + duration ends past the 20:00 admin day bound (Codex GitHub r6 P2)', async () => {
+    // 19:30 floors to 19:00; +120min duration lands the end at 21:00 — never
+    // past 24:00 (the old check's only concern), but past the 20:00 admin
+    // day bound assertAdminAppointmentWindow enforces.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '19:30', window_end: '21:30',
+        estimated_duration_minutes: 120,
+      },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(result.skipped).toBe('window_unplaceable');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('a normal on-the-hour 09:00 window, well within the admin day, is never treated as unplaceable', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00',
+        estimated_duration_minutes: 60,
+      },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
   });
 });
 

@@ -14761,20 +14761,32 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // extendSeriesOnceLocked's own per-insert normalization, so the exact same
 // arithmetic decides both "should this series even be attempted" and "what
 // window does the insert actually use." Returns null when nothing needs
-// normalizing (a windowless template, or a start already on the hour) — the
-// caller keeps its existing window fields. Returns
-// `{ unplaceable: true }` (Codex GitHub r3 P2) when flooring the start would
-// push the duration-derived end to or past 24:00 — never build an
-// out-of-range "24:15" time; the caller skips instead.
+// normalizing (a windowless template, or a start already on the hour AND
+// within every admin window rule) — the caller keeps its existing window
+// fields. Returns `{ unplaceable: true }` when the FINAL window (floored, if
+// flooring was needed) fails the SAME validator every other admin write path
+// runs through (assertAdminAppointmentWindow, window-rules.js) — never a
+// narrower reimplementation of just its midnight-overflow case. That
+// narrower check (Codex GitHub r3 P2: never build an out-of-range "24:15"
+// end) covered a start needing flooring whose duration pushed past 24:00,
+// but skipped validation ENTIRELY for a start that was already on the hour —
+// so an already-on-the-hour "21:00" template with a 60-minute duration
+// (ending 22:00, past the 20:00 admin day bound) would insert unchecked
+// (Codex GitHub r6 P2). The caller skips the series (or refuses the insert)
+// on `unplaceable` either way.
 function normalizeTopUpWindow(windowStart, durationMinutes) {
   if (!windowStart) return null;
   const startMin = parseHHMM(windowStart);
-  if (startMin == null || startMin % 60 === 0) return null;
-  const flooredMin = startMin - (startMin % 60);
-  const durationMin = Number.parseInt(durationMinutes, 10);
-  const endMin = flooredMin + (Number.isInteger(durationMin) && durationMin > 0 ? durationMin : 60);
-  if (endMin >= 24 * 60) return { unplaceable: true };
-  return { start: minutesToHHMM(flooredMin), end: minutesToHHMM(endMin) };
+  const needsFlooring = startMin != null && startMin % 60 !== 0;
+  const candidateStart = needsFlooring ? minutesToHHMM(startMin - (startMin % 60)) : windowStart;
+  let validated;
+  try {
+    validated = assertAdminAppointmentWindow({ windowStart: candidateStart, durationMinutes });
+  } catch (err) {
+    return { unplaceable: true };
+  }
+  if (!needsFlooring) return null;
+  return { start: validated.window_start, end: validated.window_end };
 }
 
 // Returns the spawned-visit payload (for the caller's post-commit reminder
@@ -15201,9 +15213,15 @@ function topupCustomerSkipReason(customer) {
 // authority instead of a parallel one.
 //
 // A series is excluded when EITHER: the root or any of its rows already
-// carries a prepay stamp (annual_prepay_term_id or prepaid_method — a
-// series can be linked before its first COVERED visit sets prepaid_method,
-// so both columns are checked), OR the customer holds any
+// carries ANNUAL prepay coverage specifically — annual_prepay_term_id set,
+// OR prepaid_method is the annual writer's own method (ANNUAL_PREPAY_METHOD,
+// 'annual_prepay_invoice') — the SQL twin of prepaid-series.js's own
+// hasAnnualCoverage(row), reused rather than a second hand-rolled
+// definition of "this row carries annual coverage". Matching ANY non-null
+// prepaid_method here (the pre-fix version) was wrong: a single ordinary
+// cash/Zelle stamp on one visit (POST /api/admin/schedule/:id/prepaid) has
+// nothing to do with the annual mechanism, and would have marked the WHOLE
+// family annual forever (Codex GitHub r6 P1). OR the customer holds any
 // annual_prepay_terms row still live or undecided — active, renewal_pending
 // (ACTIVE_STATUSES) or payment_pending (an invoice not yet paid;
 // PAYMENT_PENDING_STATUS) — reusing the SAME status vocabulary
@@ -15217,7 +15235,7 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
       })
       .where(function stamped() {
         if (cols.annual_prepay_term_id) this.orWhereNotNull('annual_prepay_term_id');
-        if (cols.prepaid_method) this.orWhereNotNull('prepaid_method');
+        if (cols.prepaid_method) this.orWhere('prepaid_method', ANNUAL_PREPAY_METHOD);
       })
       .first('id');
     if (stampedRow) return true;
@@ -15238,11 +15256,51 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
     .first('id');
   return !!liveTerm;
 }
+
+// A held family (lawn_care / mosquito / tree_shrub — cancellation-
+// resolution/holds.js's startHold, HOLDABLE_FAMILIES) promises "no visits
+// before resume_on": every one of the family's upcoming visits was moved out
+// to no earlier than that date and the monthly component (when the customer
+// is on one) suspended. Top-up must honor that same promise rather than
+// booking a fresh visit into the held window. Codex GitHub r6 P1.
+//
+// Reuses holds.js's own family classifier (familyOfServiceRow,
+// cancellation-processor.js — the SAME function the hold itself, its
+// familyUpcomingVisits, and every other cancellation surface use to decide
+// which family a scheduled_services row belongs to) rather than a second,
+// hand-rolled service-type-to-family map that could disagree with it. A
+// series whose family isn't one of HOLDABLE_FAMILIES (e.g. pest_control) can
+// never have a plan_holds row at all (startHold refuses any other family),
+// so this always returns false for it without even querying.
+//
+// "Active" uses the EXACT status/column semantics runPlanHoldLifecycle
+// itself reads: status: 'active' AND resume_on in the future. A hold whose
+// resume_on has already arrived is not fenced here — startHold moves every
+// visit in the family to no earlier than resume_on, so a visit ON that date
+// is exactly what the hold always intended to let through once it ends;
+// runPlanHoldLifecycle's own cron flips status to 'resumed' shortly after,
+// independently of top-up.
+async function isFamilyOnPlanHold(conn, parent, parentId) {
+  const { HOLDABLE_FAMILIES } = require('../services/cancellation-resolution/holds');
+  const { familyOfServiceRow } = require('../services/cancellation-processor');
+  const svc = parent.service_id
+    ? await conn('services').where({ id: parent.service_id }).first('service_key', 'name')
+    : null;
+  const family = familyOfServiceRow({ ...parent, service_key: svc?.service_key, service_name: svc?.name });
+  if (!family || !HOLDABLE_FAMILIES.includes(family)) return false;
+  const activeHold = await conn('plan_holds')
+    .where({ customer_id: parent.customer_id, family_key: family, status: 'active' })
+    .where('resume_on', '>', etDateString())
+    .first('id');
+  return !!activeHold;
+}
+
 // Table-driven (async — needs a DB read, unlike the synchronous customer
 // rules above) so a future prepay-aware top-up is one more row, not a
 // rewritten function.
 const TOPUP_SERIES_INELIGIBILITY_RULES = [
   ['annual_prepay_series', isAnnualPrepaySeries],
+  ['plan_hold', isFamilyOnPlanHold],
 ];
 async function topupSeriesSkipReason(conn, parent, parentId, cols) {
   for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
@@ -21187,6 +21245,7 @@ router._test = {
   topUpRecurringSeriesLocked,
   topupSeriesSkipReason,
   isAnnualPrepaySeries,
+  isFamilyOnPlanHold,
   normalizeTopUpWindow,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
   latestLiveSeriesVisit,
