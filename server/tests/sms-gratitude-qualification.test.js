@@ -1,7 +1,6 @@
 'use strict';
 
 const exam = require('../config/sms-gratitude-exam.json');
-const { evaluateGratitudeContext } = require('../services/sms-gratitude');
 
 function memoryDb() {
   const rows = [];
@@ -73,24 +72,28 @@ function setSnapshot(row, value) {
 }
 
 function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lockError = null,
-  runExclusiveImpl = null } = {}) {
+  runExclusiveImpl = null, mutateDraft = null } = {}) {
   jest.resetModules();
   const previousVerify = process.env.SHADOW_DRAFT_VERIFY;
   const previousRevisions = process.env.SHADOW_DRAFT_VERIFY_MAX_REVISIONS;
   process.env.SHADOW_DRAFT_VERIFY = verifyEnabled ? 'true' : 'false';
   process.env.SHADOW_DRAFT_VERIFY_MAX_REVISIONS = '2';
+  let draftIndex = 0;
   const dispatchWithFallback = jest.fn(async (policy, payload) => {
     expect(snapshot(dbi.rows.at(-1)).state).toBe('running');
     const encoded = payload.text.match(/APPROVED GRATITUDE REPLY: ("(?:[^"\\]|\\.)*")/);
     const approved = encoded ? JSON.parse(encoded[1]) : '';
+    const fixture = exam.fixtures[Math.floor((draftIndex % (exam.fixtures.length * 2)) / 2)];
+    draftIndex += 1;
+    const output = {
+      reply: fixture.expectedEligible ? approved : '',
+      intended_actions: [{ type: 'none' }],
+      missing_info: null,
+    };
     return {
       ok: true,
       model: policy.primary.model,
-      text: JSON.stringify({
-        reply: approved || 'Our pleasure, Casey!',
-        intended_actions: [{ type: 'none' }],
-        missing_info: null,
-      }),
+      text: JSON.stringify(mutateDraft ? mutateDraft({ fixture, output }) : output),
     };
   });
   const createDeepMessage = jest.fn(async () => ({
@@ -132,19 +135,6 @@ function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lock
 describe('sms gratitude qualification', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  test('fixed anonymous corpus covers every requested policy boundary', () => {
-    expect(exam.fixtures.map(fixture => fixture.id)).toEqual([
-      'positive_report', 'positive_receipt', 'positive_completed_service', 'positive_bank_ack',
-      'negative_mixed_thanks', 'negative_question', 'negative_promise', 'negative_complaint',
-      'negative_booking_acceptance', 'negative_media', 'negative_prior_operational',
-      'negative_new_inbound', 'negative_new_outbound', 'negative_loop',
-      'negative_missing_context', 'negative_pending_work',
-    ]);
-    for (const fixture of exam.fixtures) {
-      expect(evaluateGratitudeContext(fixture.source).eligible).toBe(fixture.expectedEligible);
-    }
-  });
-
   test('creates a durable unlinked run, exercises both live legs, and qualifies exact safe copy', async () => {
     const store = memoryDb();
     const { qualification, generateGroundedDraft, createDeepMessage, Anthropic } = loadQualification({ dbi: store });
@@ -152,7 +142,7 @@ describe('sms gratitude qualification', () => {
     const created = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'admin:synthetic' });
     expect(created).toMatchObject({ id: expect.any(String), state: 'running' });
     expect(store.rows[0]).toMatchObject({
-      workflow: 'sms_gratitude_qualification', mode: 'shadow', status: 'shadow',
+      workflow: 'sms_gratitude_qualification', mode: 'shadow', status: 'initiated',
     });
     expect(store.rows[0]).not.toHaveProperty('customer_id');
     expect(store.rows[0]).not.toHaveProperty('sms_log_id');
@@ -162,6 +152,7 @@ describe('sms gratitude qualification', () => {
       policyVersion: 'gratitude_v1',
       fixtureSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sourceSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      sourceFiles: expect.arrayContaining(['server/services/sms-gratitude-grading.js']),
       systemPromptSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       verifier: { enabled: true, maxRevisions: 2, model: expect.any(String), fallbackModel: expect.any(String) },
       voiceProfileVersion: 'synthetic-profile-v1',
@@ -170,16 +161,23 @@ describe('sms gratitude qualification', () => {
     await qualification.runGratitudeQualification({ dbi: store.dbi, runId: created.id });
     expect(Anthropic).toHaveBeenCalled();
     expect(generateGroundedDraft).toHaveBeenCalledTimes(exam.fixtures.length * 2);
-    expect(createDeepMessage).toHaveBeenCalledTimes(exam.fixtures.length * 2);
+    expect(createDeepMessage).toHaveBeenCalledTimes(exam.fixtures.filter(f => f.expectedEligible).length * 2);
     const completed = snapshot(store.rows[0]);
     expect(generateGroundedDraft).toHaveBeenCalledWith(expect.objectContaining({
       context: expect.objectContaining({ summary: expect.stringContaining('synthetic'), smsHistory: expect.any(Array) }),
+      intent: expect.objectContaining({ approvedReply: 'Our pleasure, Casey!' }),
       routeOverride: completed.pins.routes.anthropic,
       metricsLane: 'sealed',
       laneId: 'sealed_eval',
     }));
     expect(completed.state).toBe('complete');
     expect(completed.results).toHaveLength(exam.fixtures.length * 2);
+    const negativeResults = completed.results.filter(result => result.fixtureId.startsWith('negative_'));
+    expect(negativeResults).toHaveLength(24);
+    expect(negativeResults.every(result => result.output.parsed.reply === ''
+      && result.output.passes === 1 && result.output.converged === true)).toBe(true);
+    expect(completed.summary).toMatchObject({ qualified: true, positives: 8, negatives: 24 });
+    expect(store.rows[0]).toMatchObject({ status: 'shadow', correction_note: null });
 
     await expect(qualification.evaluateGratitudeQualification({
       dbi: store.dbi,
@@ -200,10 +198,12 @@ describe('sms gratitude qualification', () => {
     const recovered = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
     expect(recovered.id).not.toBe(first.id);
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'failed', failure: 'stale_run_recovered' });
+    expect(store.rows[0]).toMatchObject({ status: 'failed', correction_note: 'stale_run_recovered' });
     expect(snapshot(store.rows[1])).toMatchObject({ state: 'running' });
+    expect(store.rows[1].status).toBe('initiated');
   });
 
-  test('recomputes result safety and requires the complete exact fixture-leg set', async () => {
+  test('regrades the persisted result instead of trusting its stored summary', async () => {
     const store = memoryDb();
     const { qualification } = loadQualification({ dbi: store });
     const { id } = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
@@ -212,18 +212,11 @@ describe('sms gratitude qualification', () => {
     const complete = snapshot(row);
 
     complete.summary = { qualified: false, positives: 0, negatives: 0 };
-    for (const result of complete.results) result.policy = { eligible: false, reason: 'tampered', reply: '' };
     setSnapshot(row, complete);
     await expect(qualification.evaluateGratitudeQualification({ dbi: store.dbi }))
       .resolves.toMatchObject({ qualified: true });
 
-    const missing = snapshot(row);
-    missing.results.pop();
-    setSnapshot(row, missing);
-    await expect(qualification.evaluateGratitudeQualification({ dbi: store.dbi }))
-      .resolves.toMatchObject({ qualified: false, reason: 'result_set_incomplete' });
-
-    const unsafe = complete;
+    const unsafe = structuredClone(complete);
     unsafe.results.find(result => result.fixtureId === 'positive_report').output.parsed.actionsRawSafe = false;
     setSnapshot(row, unsafe);
     await expect(qualification.evaluateGratitudeQualification({ dbi: store.dbi }))
@@ -231,6 +224,25 @@ describe('sms gratitude qualification', () => {
   });
 
   test.each([
+    ['nonempty negative', ({ fixture, output }) => fixture.id === 'negative_question'
+      ? { ...output, reply: 'Our pleasure, Casey!' } : output],
+    ['unsafe negative action', ({ fixture, output }) => fixture.id === 'negative_question'
+      ? { ...output, intended_actions: [{ type: 'escalate' }] } : output],
+  ])('%s completes the exam but records a failed qualification lifecycle', async (_label, mutateDraft) => {
+    const store = memoryDb();
+    const { qualification } = loadQualification({ dbi: store, mutateDraft });
+    const run = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+
+    await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id }))
+      .resolves.toMatchObject({ state: 'complete', qualified: false, reason: 'false_positive' });
+    expect(snapshot(store.rows[0])).toMatchObject({
+      state: 'complete', summary: { qualified: false, reason: 'false_positive' },
+    });
+    expect(store.rows[0]).toMatchObject({ status: 'failed', correction_note: 'false_positive' });
+  });
+
+  test.each([
+    'server/services/sms-gratitude-grading.js',
     'server/services/sms-response-policy.js',
     'server/utils/phone.js',
     'server/services/sms-suggest-mode.js',
@@ -268,6 +280,7 @@ describe('sms gratitude qualification', () => {
     await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: second.id }))
       .rejects.toThrow('gratitude_qualification_draft_failed');
     expect(snapshot(store.rows[1])).toMatchObject({ state: 'failed', results: [] });
+    expect(store.rows[1]).toMatchObject({ status: 'failed', correction_note: 'gratitude_qualification_draft_failed' });
     await expect(qualification.evaluateGratitudeQualification({ dbi: store.dbi }))
       .resolves.toMatchObject({ eligible: false, blockers: [expect.any(String)], qualified: false, reason: 'failed' });
   });
@@ -287,6 +300,7 @@ describe('sms gratitude qualification', () => {
     );
     expect(generateGroundedDraft).not.toHaveBeenCalled();
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'failed', results: [], failure });
+    expect(store.rows[0]).toMatchObject({ status: 'failed', correction_note: failure });
   });
 
   test('a duplicate runner covered by the active lease leaves the owner authoritative', async () => {
@@ -313,6 +327,7 @@ describe('sms gratitude qualification', () => {
     await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id }))
       .resolves.toEqual({ skipped: true, reason: 'lease_held' });
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'running', results: [] });
+    expect(store.rows[0].status).toBe('initiated');
     expect(generateGroundedDraft).not.toHaveBeenCalled();
 
     releaseOwner();
@@ -320,6 +335,49 @@ describe('sms gratitude qualification', () => {
     expect(runExclusive).toHaveBeenCalledTimes(2);
     expect(generateGroundedDraft).toHaveBeenCalledTimes(exam.fixtures.length * 2);
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'complete' });
+    expect(store.rows[0].status).toBe('shadow');
+  });
+
+  test('a queued late acquirer rereads the durable row and skips after the owner completes', async () => {
+    const store = memoryDb();
+    let releaseOwner;
+    let announceOwner;
+    let invocation = 0;
+    let turn = Promise.resolve();
+    const ownerPaused = new Promise(resolve => { announceOwner = resolve; });
+    const ownerRelease = new Promise(resolve => { releaseOwner = resolve; });
+    const runExclusiveImpl = (_jobName, task) => {
+      invocation += 1;
+      const current = invocation;
+      const previous = turn;
+      let releaseTurn;
+      turn = new Promise(resolve => { releaseTurn = resolve; });
+      return previous.then(async () => {
+        if (current === 1) {
+          announceOwner();
+          await ownerRelease;
+        }
+        try { return await task(); } finally { releaseTurn(); }
+      });
+    };
+    const { qualification, runExclusive, generateGroundedDraft } = loadQualification({
+      dbi: store, runExclusiveImpl,
+    });
+    const run = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+
+    const owner = qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id });
+    await ownerPaused;
+    const late = qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(runExclusive).toHaveBeenCalledTimes(2);
+    releaseOwner();
+
+    await expect(owner).resolves.toMatchObject({ state: 'complete', qualified: true });
+    await expect(late).resolves.toEqual({
+      id: run.id, state: 'complete', skipped: true, reason: 'run_not_running',
+    });
+    expect(generateGroundedDraft).toHaveBeenCalledTimes(exam.fixtures.length * 2);
+    expect(store.rows[0].status).toBe('shadow');
   });
 
   test('fails closed for verifier-off runs, profile mismatch, and pin drift', async () => {

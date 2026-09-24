@@ -12,8 +12,12 @@ const verifier = require('./sms-draft-verifier');
 const {
   GRATITUDE_INTENT,
   GRATITUDE_POLICY_VERSION,
-  evaluateGratitudeContext,
 } = require('./sms-gratitude');
+const {
+  loadGratitudeExam,
+  buildGratitudeExamInput,
+  gradeGratitudeResults,
+} = require('./sms-gratitude-grading');
 const { LIVE_EXAM_LEGS, EXAM_LEG_ROUTES } = require('./sms-sealed-eval');
 const { runAsReplay } = require('./llm-dispatch-metrics');
 
@@ -22,9 +26,9 @@ const AGENT_NAME = 'sms-gratitude-qualification';
 const DECISION_VERSION = 'v1';
 const RUN_LOCK_KEY = 2026092401;
 const RUN_STALE_MS = 6 * 60 * 60 * 1000;
-const FIXTURE_PATH = path.join(__dirname, '..', 'config', 'sms-gratitude-exam.json');
 const SOURCE_FILES = Object.freeze([
   'server/services/sms-gratitude.js',
+  'server/services/sms-gratitude-grading.js',
   'server/services/sms-gratitude-context.js',
   'server/services/sms-response-policy.js',
   'server/utils/phone.js',
@@ -64,24 +68,6 @@ function same(left, right) {
   return stable(left) === stable(right);
 }
 
-function loadExam() {
-  const raw = fs.readFileSync(FIXTURE_PATH);
-  const exam = JSON.parse(raw.toString('utf8'));
-  if (exam?.schemaVersion !== 'sms-gratitude-exam.v1'
-      || !exam.baselineContext || !Array.isArray(exam.fixtures) || !exam.fixtures.length) {
-    throw new Error('invalid_gratitude_exam');
-  }
-  const ids = new Set();
-  for (const fixture of exam.fixtures) {
-    if (!fixture?.id || ids.has(fixture.id) || typeof fixture.expectedEligible !== 'boolean'
-        || !fixture.source?.inbound || !Array.isArray(fixture.source.history)) {
-      throw new Error('invalid_gratitude_fixture');
-    }
-    ids.add(fixture.id);
-  }
-  return { exam, fixtureSha256: sha256(raw) };
-}
-
 function sourceSha256() {
   const hash = crypto.createHash('sha256');
   for (const relative of SOURCE_FILES) {
@@ -91,7 +77,7 @@ function sourceSha256() {
 }
 
 async function readCurrent({ dbi }) {
-  const { fixtureSha256 } = loadExam();
+  const { fixtureSha256 } = loadGratitudeExam();
   if (!drafter.PROMPT_VERSION || typeof drafter.VERIFY_ENABLED !== 'boolean'
       || !Number.isInteger(drafter.MAX_REVISIONS) || drafter.MAX_REVISIONS < 0
       || !verifier.VERIFIER_MODEL || !MODELS.FLAGSHIP) {
@@ -130,14 +116,6 @@ async function readCurrent({ dbi }) {
   };
 }
 
-function frozenContext(exam, fixture) {
-  const thread = [fixture.source.inbound, ...fixture.source.history]
-    .slice()
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .map(row => ({ direction: row.direction, body: row.body }));
-  return { ...exam.baselineContext, smsHistory: thread };
-}
-
 function outputShape(output) {
   return {
     parsed: output.parsed ? {
@@ -151,61 +129,6 @@ function outputShape(output) {
     model: output.model,
     voiceProfileVersion: output.voiceProfileVersion ?? null,
   };
-}
-
-function evaluatePair({ fixture, leg, result, pins }) {
-  const policy = evaluateGratitudeContext(fixture.source);
-  const output = result?.output;
-  const parsed = output?.parsed;
-  const route = pins.routes[leg];
-  const checks = {
-    policyEligible: policy.eligible === true,
-    exactFixedCopy: Boolean(policy.reply) && parsed?.reply === policy.reply,
-    actionsRawSafe: parsed?.actionsRawSafe === true
-      && Array.isArray(parsed.intendedActions)
-      && parsed.intendedActions.every(action => action?.type === 'none'),
-    verified: pins.verifier.enabled === true && Boolean(parsed?.reply),
-    converged: output?.converged === true && Number(output?.passes) >= 1,
-    currentModel: output?.model === route?.model,
-    profileCurrent: (output?.voiceProfileVersion ?? null) === (pins.voiceProfileVersion ?? null),
-    noMissingInfo: parsed?.missingInfo == null || String(parsed.missingInfo).trim() === '',
-  };
-  return {
-    policy,
-    checks,
-    eligible: Object.values(checks).every(Boolean),
-  };
-}
-
-function gradeResults(exam, results, pins) {
-  const expected = new Set(exam.fixtures.flatMap(fixture => LIVE_EXAM_LEGS.map(leg => `${fixture.id}\0${leg}`)));
-  const byPair = new Map();
-  for (const result of results || []) {
-    const key = `${result?.fixtureId}\0${result?.leg}`;
-    if (!expected.has(key) || byPair.has(key)) return { qualified: false, reason: 'result_set_invalid' };
-    byPair.set(key, result);
-  }
-  if (byPair.size !== expected.size) return { qualified: false, reason: 'result_set_incomplete' };
-
-  let positives = 0;
-  let negatives = 0;
-  for (const fixture of exam.fixtures) {
-    const currentPolicy = evaluateGratitudeContext(fixture.source);
-    if (currentPolicy.eligible !== fixture.expectedEligible) {
-      return { qualified: false, reason: 'fixture_policy_drift' };
-    }
-    for (const leg of LIVE_EXAM_LEGS) {
-      const evaluated = evaluatePair({ fixture, leg, result: byPair.get(`${fixture.id}\0${leg}`), pins });
-      if (fixture.expectedEligible) {
-        positives += 1;
-        if (!evaluated.eligible) return { qualified: false, reason: 'positive_failed' };
-      } else {
-        negatives += 1;
-        if (evaluated.eligible) return { qualified: false, reason: 'false_positive' };
-      }
-    }
-  }
-  return { qualified: true, reason: 'qualified', positives, negatives };
 }
 
 async function createGratitudeQualification({ dbi = db, triggeredBy = null } = {}) {
@@ -230,6 +153,8 @@ async function createGratitudeQualification({ dbi = db, triggeredBy = null } = {
           results: [],
           failure: 'stale_run_recovered',
         }),
+        status: 'failed',
+        correction_note: 'stale_run_recovered',
         updated_at: trx.fn.now(),
       });
     }
@@ -247,7 +172,7 @@ async function createGratitudeQualification({ dbi = db, triggeredBy = null } = {
       agent_name: AGENT_NAME,
       decision_version: DECISION_VERSION,
       mode: 'shadow',
-      status: 'shadow',
+      status: 'initiated',
       input_snapshot: JSON.stringify(snapshot),
       reasoning_summary: 'Synthetic gratitude qualification run; no customer or send-path linkage.',
       prompt_version: current.pins.promptVersion,
@@ -262,32 +187,40 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
   const row = await dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW }).first('id', 'input_snapshot');
   const initial = parseSnapshot(row?.input_snapshot);
   if (!row || initial?.state !== 'running' || !initial.pins) throw new Error('gratitude_qualification_not_runnable');
+  let active = initial;
 
   try {
     const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
     const outcome = await runExclusive('sms-gratitude-qualification', async () => {
+      const durable = await dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW })
+        .first('id', 'input_snapshot');
+      active = parseSnapshot(durable?.input_snapshot);
+      if (!durable || active?.state !== 'running' || !active.pins) {
+        return { id: runId, state: active?.state || 'missing', skipped: true, reason: 'run_not_running' };
+      }
       const current = await readCurrent({ dbi });
-      if (!same(initial.pins, current.pins)
-          || !same(initial.frozenVoiceProfile, current.voiceProfile)
+      if (!same(active.pins, current.pins)
+          || !same(active.frozenVoiceProfile, current.voiceProfile)
           || current.pins.verifier.enabled !== true) {
         throw new Error('gratitude_qualification_pins_changed');
       }
-      const { exam } = loadExam();
+      const { exam } = loadGratitudeExam();
       const Anthropic = require('@anthropic-ai/sdk');
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
       const results = await runAsReplay(async () => {
         const modelResults = [];
         for (const fixture of exam.fixtures) {
-          const policy = evaluateGratitudeContext(fixture.source);
+          const examInput = buildGratitudeExamInput(exam, fixture);
           for (const leg of LIVE_EXAM_LEGS) {
             const generated = await drafter.generateGroundedDraft({
               client,
-              context: frozenContext(exam, fixture),
-              inboundMessage: fixture.source.inbound.body,
-              intent: { intent: GRATITUDE_INTENT, confidence: 1, approvedReply: policy.reply },
+              context: examInput.context,
+              inboundMessage: examInput.inboundMessage,
+              intent: { intent: GRATITUDE_INTENT, confidence: 1,
+                approvedReply: examInput.approvedReply },
               schedulingIntent: false,
               routeOverride: EXAM_LEG_ROUTES[leg],
-              voiceProfile: initial.frozenVoiceProfile,
+              voiceProfile: active.frozenVoiceProfile,
               metricsLane: 'sealed',
               laneId: 'sealed_eval',
             });
@@ -295,19 +228,24 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
             modelResults.push({
               fixtureId: fixture.id,
               leg,
-              policy: { eligible: policy.eligible, reason: policy.reason, reply: policy.reply },
               output: outputShape(generated),
             });
           }
         }
         return modelResults;
       });
-      const complete = { ...initial, state: 'complete', results };
+      const graded = gradeGratitudeResults({ exam, results, pins: current.pins, legs: LIVE_EXAM_LEGS });
+      const complete = { ...active, state: 'complete', results, summary: graded };
       const updated = await dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW })
         .whereRaw("input_snapshot->>'state' = 'running'")
-        .update({ input_snapshot: JSON.stringify(complete), updated_at: dbi.fn.now() });
+        .update({
+          input_snapshot: JSON.stringify(complete),
+          status: graded.qualified ? 'shadow' : 'failed',
+          correction_note: graded.qualified ? null : graded.reason,
+          updated_at: dbi.fn.now(),
+        });
       if (updated !== 1) throw new Error('gratitude_qualification_run_superseded');
-      return { id: runId, state: 'complete', results: results.length };
+      return { id: runId, state: 'complete', results: results.length, ...graded };
     }, { recordHealth: false });
     if (wasLockSkipped(outcome)) {
       // Another invocation holds this job. A duplicate must not fail its
@@ -318,7 +256,7 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
     return outcome;
   } catch (error) {
     const failed = {
-      ...initial,
+      ...active,
       state: 'failed',
       results: [],
       failure: String(error?.message || 'qualification_failed').slice(0, 200),
@@ -326,7 +264,12 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
     try {
       await dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW })
         .whereRaw("input_snapshot->>'state' = 'running'")
-        .update({ input_snapshot: JSON.stringify(failed), updated_at: dbi.fn.now() });
+        .update({
+          input_snapshot: JSON.stringify(failed),
+          status: 'failed',
+          correction_note: failed.failure,
+          updated_at: dbi.fn.now(),
+        });
     } catch { /* the original failure remains authoritative */ }
     throw error;
   }
@@ -353,7 +296,12 @@ async function evaluateGratitudeQualification({ dbi = db, voiceProfileVersion } 
       return verdict(false, 'voice_profile_changed', { runId: row.id });
     }
 
-    const graded = gradeResults(loadExam().exam, snapshot.results, current.pins);
+    const graded = gradeGratitudeResults({
+      exam: loadGratitudeExam().exam,
+      results: snapshot.results,
+      pins: current.pins,
+      legs: LIVE_EXAM_LEGS,
+    });
     return verdict(graded.qualified, graded.reason, { runId: row.id, ...graded });
   } catch {
     return verdict(false, 'qualification_unavailable');
