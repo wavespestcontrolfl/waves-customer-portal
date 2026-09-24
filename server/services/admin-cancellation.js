@@ -168,7 +168,14 @@ async function findPendingPrepayInvoice(customerId, scope = null, dbh = db) {
       if (identityFamily && !scope.includes(identityFamily)) continue;
     }
     const inv = await dbh('invoices').where({ id: p.prepay_invoice_id }).first('id', 'status', 'invoice_number');
-    if (inv && String(inv.status) !== 'void') return { term: p, invoice: inv };
+    // Only a STILL-PAYABLE invoice can re-activate coverage later; the
+    // coverage authority's own terminal set (annual-prepay-renewals.js
+    // INVOICE_CANCELLED_STATUSES: void/cancelled/canceled/refunded) is
+    // reused here so a legacy payment_pending term left pointing at a
+    // refunded or cancelled invoice never blocks a cancel/churn/archive
+    // (GitHub Codex #4684 r5 P2).
+    const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
+    if (inv && !INVOICE_CANCELLED_STATUSES.has(String(inv.status || '').toLowerCase())) return { term: p, invoice: inv };
   }
   return null;
 }

@@ -9,6 +9,9 @@
  * the family), so it FAILS on current code if the bug is real.
  */
 const { randomUUID } = require('crypto');
+// Relative dates: the merge guard's liveness rule compares the series'
+// upcoming child against today's ET date, so anchored dates would lapse.
+const isoDaysAhead = (n) => new Date(Date.now() + n * 24 * 3600 * 1000).toISOString().slice(0, 10);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
 
@@ -27,12 +30,12 @@ jest.setTimeout(60000);
     const parentId = randomUUID();
     await db('scheduled_services').insert({
       id: parentId, customer_id: customerId, service_type: 'Monthly Pest Control',
-      scheduled_date: '2026-10-05', status: 'confirmed', is_recurring: true, recurring_parent_id: null,
+      scheduled_date: isoDaysAhead(11), status: 'confirmed', is_recurring: true, recurring_parent_id: null,
       recurring_pattern: 'monthly', recurring_ongoing: true, notes: `repro-${tag}-parent`,
     });
     await db('scheduled_services').insert({
       id: randomUUID(), customer_id: customerId, service_type: 'Monthly Pest Control',
-      scheduled_date: '2026-11-05', status: 'pending', is_recurring: true, recurring_parent_id: parentId,
+      scheduled_date: isoDaysAhead(42), status: 'pending', is_recurring: true, recurring_parent_id: parentId,
       recurring_pattern: 'monthly', notes: `repro-${tag}-child`,
     });
     return parentId;

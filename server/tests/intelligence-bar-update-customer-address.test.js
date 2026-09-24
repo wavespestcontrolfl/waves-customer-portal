@@ -36,14 +36,14 @@ jest.mock('../services/customer-address-fanout', () => ({
 jest.mock('../services/geocoder', () => ({
   ensureCustomerGeocoded: jest.fn(() => Promise.resolve({ latitude: 27.1, longitude: -82.4 })),
 }));
-// Churn billing disarm disclosure (GitHub Codex #4684 r4): churnGuardForRow
+// Churn billing disarm disclosure (GitHub Codex #4684 r4): churnGuardOrRepair
 // itself (its live-visit/prepay-term/pending-invoice checks and its call
 // into cancellation-processor.js's disarm helpers) is exercised elsewhere
 // (customer-lifecycle-guard's own tests) — here it is mocked so the tool
 // RESULT shape can be asserted for both the blocked and wound-down paths
 // without re-deriving every one of its DB reads.
 jest.mock('../services/customer-lifecycle-guard', () => ({
-  churnGuardForRow: jest.fn(),
+  churnGuardOrRepair: jest.fn(),
   describeLiveVisit: jest.fn(() => 'This customer still has a scheduled visit'),
 }));
 
@@ -51,7 +51,7 @@ const db = require('../models/db');
 const customerProperties = require('../services/customer-properties');
 const addressFanout = require('../services/customer-address-fanout');
 const geocoder = require('../services/geocoder');
-const { churnGuardForRow } = require('../services/customer-lifecycle-guard');
+const { churnGuardOrRepair } = require('../services/customer-lifecycle-guard');
 const { executeTool } = require('../services/intelligence-bar/tools');
 
 const CUSTOMER_ID = 'cust-1';
@@ -173,12 +173,12 @@ test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode 
 });
 
 describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684 r4)', () => {
-  test('update_customer stage->churned reports billing_wound_down when churnGuardForRow does not block', async () => {
+  test('update_customer stage->churned reports billing_wound_down when churnGuardOrRepair does not block', async () => {
     db.__qb.first
       .mockResolvedValueOnce(baseRow) // before (pre-transaction read)
       .mockResolvedValueOnce(baseRow) // locked in-transaction read (FOR UPDATE)
       .mockResolvedValueOnce({ ...baseRow, pipeline_stage: 'churned', active: false }); // after
-    churnGuardForRow.mockResolvedValueOnce({ blocked: false });
+    churnGuardOrRepair.mockResolvedValueOnce({ blocked: false });
 
     const result = await executeTool('update_customer', {
       customer_id: CUSTOMER_ID,
@@ -186,7 +186,10 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
     });
 
     expect(result.success).toBe(true);
-    expect(churnGuardForRow).toHaveBeenCalledWith(expect.anything(), CUSTOMER_ID);
+    // churnGuardOrRepair (Codex #4715 parent round-6 rename/widen of
+    // churnGuardForRow) takes the locked row as a 3rd arg for its
+    // already-churned rail-only-repair decision.
+    expect(churnGuardOrRepair).toHaveBeenCalledWith(expect.anything(), CUSTOMER_ID, expect.anything());
     expect(result.billing_wound_down).toBe(true);
     expect(result.billing_wound_down_fields).toEqual(expect.arrayContaining([
       'active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at',
@@ -197,11 +200,11 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
     expect(result.message).toBe('Billing wound down: Auto Pay off (customer + saved methods), next charge date and armed retries cleared.');
   });
 
-  test('update_customer stage->churned refuses (no billing_wound_down) when churnGuardForRow blocks on a live visit', async () => {
+  test('update_customer stage->churned refuses (no billing_wound_down) when churnGuardOrRepair blocks on a live visit', async () => {
     db.__qb.first
       .mockResolvedValueOnce(baseRow) // before
       .mockResolvedValueOnce(baseRow); // locked in-transaction read
-    churnGuardForRow.mockResolvedValueOnce({
+    churnGuardOrRepair.mockResolvedValueOnce({
       blocked: true,
       liveVisit: { liveReason: 'upcoming_visit', scheduled_date: '2026-10-01', status: 'confirmed' },
       liveTerm: null,
@@ -222,7 +225,7 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
 
   test('bulk_update_customers (fast CASE path) reports billing_wound_down_count for non-blocked rows and skips the blocked one', async () => {
     db.__qb.select.mockResolvedValueOnce([{ id: 'cust-a' }, { id: 'cust-b' }, { id: 'cust-c' }]);
-    churnGuardForRow.mockImplementation((trx, cid) => Promise.resolve(
+    churnGuardOrRepair.mockImplementation((trx, cid) => Promise.resolve(
       cid === 'cust-b' ? { blocked: true, error: 'still has an active prepay term — use "Cancel plan…" first' } : { blocked: false },
     ));
 
@@ -232,7 +235,7 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
     });
 
     expect(result.success).toBe(true);
-    expect(churnGuardForRow).toHaveBeenCalledTimes(3);
+    expect(churnGuardOrRepair).toHaveBeenCalledTimes(3);
     expect(result.billing_wound_down_count).toBe(2);
     expect(result.skipped_customers).toEqual(expect.arrayContaining([
       expect.objectContaining({ customer_id: 'cust-b' }),
@@ -252,7 +255,7 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
       .mockResolvedValueOnce(rowA) // locked read (cust-a)
       .mockResolvedValueOnce(rowB) // before (cust-b)
       .mockResolvedValueOnce(rowB); // locked read (cust-b)
-    churnGuardForRow.mockImplementation((trx, cid) => Promise.resolve(
+    churnGuardOrRepair.mockImplementation((trx, cid) => Promise.resolve(
       cid === 'cust-b' ? { blocked: true, error: 'still has a scheduled visit — use "Cancel plan…" first' } : { blocked: false },
     ));
 

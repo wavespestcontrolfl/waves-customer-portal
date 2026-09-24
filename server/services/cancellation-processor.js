@@ -644,9 +644,14 @@ async function applyScopedWindDown(customerId, entryPlan, {
 // an already-churned residue row (money-leak class the 2026-08-30 audit
 // found) self-heal on the next call, whether that call is this processor's
 // own churn or an admin lifecycle writer's.
-async function disarmCustomerBillingFields(dbh, customerId) {
+// `preserveActive` (archive/restore only): a soft-deleted row is already
+// outside every dues/retry candidate set via deleted_at, so archiving must
+// not rewrite `active` — that flag is the customer's OWN state (a deliberate
+// deactivation, or the processor's churn stamp) and restore has nothing to
+// infer it back from (GitHub Codex #4684 r6 P1).
+async function disarmCustomerBillingFields(dbh, customerId, { preserveActive = false } = {}) {
   await dbh('customers').where({ id: customerId }).update({
-    active: false,
+    ...(preserveActive ? {} : { active: false }),
     autopay_enabled: false,
     next_charge_date: null,
     updated_at: new Date(),

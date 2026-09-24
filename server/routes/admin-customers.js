@@ -3961,7 +3961,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // catch below maps this one to its 409) rolls the disarm back
           // with everything else.
           if (updates.pipeline_stage === 'churned') {
-            const decision = await LifecycleGuard.churnGuardForRow(trx, req.params.id);
+            const decision = await LifecycleGuard.churnGuardOrRepair(trx, req.params.id, lockedBefore);
             if (decision.blocked) {
               const err = new Error('customer_still_billing_or_scheduled');
               err.churnBlocked = true;
@@ -4404,11 +4404,12 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
     if (!isValidStage(stage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    const oldStage = customer.pipeline_stage;
-    const stageUpdates = {
-      pipeline_stage: stage,
-      ...stageLifecycleStamps(oldStage, stage, customer, { today: etDateString(), churnReason: req.body.churnReason }),
-    };
+    // oldStage/stageUpdates are derived from the LOCKED row inside the
+    // transaction below (GitHub Codex #4684 r5 P2): computed from this
+    // unlocked read, a request that waited at the lock behind a Churned
+    // transition would re-apply stamps for a stale same-stage no-op and
+    // relabel the row active_customer over the committed active=false.
+    let oldStage = customer.pipeline_stage;
     // ADMIN-BUG-R10 (round 3): runs on EVERY write of stage='churned' —
     // including a re-save on an already-churned row — not only an actual
     // transition, so a pre-fix residue row self-heals the next time anyone
@@ -4427,9 +4428,14 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
     // state, and must not be able to undo a committed churn.
     try {
       await db.transaction(async (trx) => {
-        await trx('customers').where({ id: req.params.id }).forUpdate().first();
+        const locked = await trx('customers').where({ id: req.params.id }).forUpdate().first() || customer;
+        oldStage = locked.pipeline_stage;
+        const stageUpdates = {
+          pipeline_stage: stage,
+          ...stageLifecycleStamps(oldStage, stage, locked, { today: etDateString(), churnReason: req.body.churnReason }),
+        };
         if (stage === 'churned') {
-          const decision = await LifecycleGuard.churnGuardForRow(trx, req.params.id);
+          const decision = await LifecycleGuard.churnGuardOrRepair(trx, req.params.id, locked);
           if (decision.blocked) {
             const err = new Error('customer_still_billing_or_scheduled');
             err.churnBlocked = true;
@@ -4653,7 +4659,7 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     try {
       relink = await db.transaction(async (trx) => {
         await trx('customers').where({ id: req.params.id }).forUpdate().first();
-        const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id);
+        const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id, { archive: true });
         if (churnDecision.blocked) {
           const err = new Error('customer_still_billing_or_scheduled');
           err.churnBlocked = true;
@@ -4700,36 +4706,30 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
     // restored primary profile takes its subscriber links back.
     const { relinkSubscribersForEmail } = require('../services/newsletter-subscribers');
     const relink = await db.transaction(async (trx) => {
-      // ADMIN-BUG-R14 (round 3): archive now sets active=false as part of
-      // the billing wind-down — restore must re-establish active=true (a
-      // deleted_at=null row otherwise reads pipeline_stage=<a live stage>
-      // with active=false, which whereLiveCustomer and the portal admission
-      // check both reject, and a same-stage save is a stageLifecycleStamps
-      // no-op that can never repair it) while deliberately NOT re-arming
-      // autopay_enabled or next_charge_date — restoring a customer record
-      // is not re-establishing their plan; the office re-arms billing
-      // explicitly if the plan itself is coming back. A row that was
-      // ALREADY churned when it was archived stays active=false: that is
-      // the processor's own churn stamp, and auth.js's cancelled-read
-      // allowance (isCancelledCustomerRow) is keyed on exactly
-      // active=false + churned — re-arming active there would turn a
-      // cancelled customer's read-only portal into full admission.
+      // ADMIN-BUG-R14 (round 3 → r6): restore clears deleted_at and NOTHING
+      // else about the customer's state. Archive never touches `active`
+      // (deleted_at alone removes the row from every charge/retry set), so
+      // a customer comes back exactly as archived — a deliberately
+      // deactivated, lost, dormant or churned row stays inactive, and the
+      // cancelled-read allowance (auth.js isCancelledCustomerRow: active=
+      // false + churned) is preserved (GitHub Codex #4684 r6 P1).
       //
-      // Disarm FIRST, on this same transaction (pre-push audit P0 on
-      // 1e776e385e): rows archived BEFORE this change never received the
-      // archive-time disarm, so a legacy archived monthly member can still
-      // carry autopay_enabled=true / next_charge_date / an Auto Pay card /
-      // an armed retry — re-arming active on that row would put it straight
-      // back into the dues cron's charge set. The canonical
-      // cancellation-processor.js disarm is idempotent, so a row this
-      // change DID archive is a no-op here.
+      // Billing rails are disarmed FIRST, on this transaction, preserving
+      // `active` (pre-push audit P0 on 1e776e385e): rows archived before
+      // the archive-time disarm existed can still carry autopay_enabled /
+      // next_charge_date / an Auto Pay card / an armed retry — restoring a
+      // record is not re-establishing the plan; the office re-arms billing
+      // explicitly. Idempotent, so a row this change archived is a no-op.
+      const locked = await trx('customers').where({ id: req.params.id }).forUpdate().first() || customer;
+      if (!locked.deleted_at) {
+        const err = new Error('Customer not found or not deleted');
+        err.restoreNotDeleted = true;
+        throw err;
+      }
       const { disarmCustomerBillingFields, disarmPaymentRails } = require('../services/cancellation-processor');
-      await disarmCustomerBillingFields(trx, req.params.id);
+      await disarmCustomerBillingFields(trx, req.params.id, { preserveActive: true });
       await disarmPaymentRails(trx, req.params.id);
-      await trx('customers').where({ id: req.params.id }).update({
-        deleted_at: null,
-        active: customer.pipeline_stage !== 'churned',
-      });
+      await trx('customers').where({ id: req.params.id }).update({ deleted_at: null });
       const result = await relinkSubscribersForEmail(trx, customer.email);
       await auditCustomerMutation(req, 'customer.restore', req.params.id, {
         previousDeletedAt: customer.deleted_at || null,
@@ -4740,7 +4740,10 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
     });
     logger.info(`[customers] Restored customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err && err.restoreNotDeleted) return res.status(404).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/customers/:id/deposit-credit — the customer's open

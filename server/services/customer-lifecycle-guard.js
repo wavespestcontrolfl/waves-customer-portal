@@ -178,7 +178,7 @@ async function findPendingPrepayInvoiceConflict(dbh, customerId) {
 // stage move, and the per-row path a combined stage+address/email edit
 // takes) — so a bulk edit that combines a churn move with an address/email
 // change gets the exact same guard the plain bulk path already had.
-async function churnGuardForRow(dbh, customerId) {
+async function churnGuardForRow(dbh, customerId, { archive = false } = {}) {
   const [liveVisit, liveTerm, pendingPrepayInvoice] = await Promise.all([
     findLiveFutureVisit(dbh, customerId),
     findActivePrepayTerm(dbh, customerId),
@@ -200,14 +200,52 @@ async function churnGuardForRow(dbh, customerId) {
     };
   }
   const { disarmCustomerBillingFields, disarmPaymentRails } = require('./cancellation-processor');
-  await disarmCustomerBillingFields(dbh, customerId);
+  // An ARCHIVE keeps `active` as it was (see disarmCustomerBillingFields):
+  // deleted_at already removes the row from every charge set, and restore
+  // must hand the customer back in the state they were archived in.
+  await disarmCustomerBillingFields(dbh, customerId, { preserveActive: archive });
   await disarmPaymentRails(dbh, customerId);
   return { blocked: false };
+}
+
+// The one entry point every REPEATABLE churn writer calls: on a transition
+// into churned, or an already-churned row whose customer-level billing is
+// still live (churnGuardApplies), the full guard + wind-down; otherwise a
+// RAIL-ONLY repair — payment_methods.autopay_enabled / payments.next_retry_at
+// are independent charge rails the customer-level flags say nothing about
+// (a legacy churn whose later rail disarm failed leaves exactly this shape —
+// GitHub Codex #4684 r6 P1), so they are disarmed unconditionally, without
+// any refusal, on every churn write. Never blocks an unrelated edit to a
+// cleanly churned customer.
+async function churnGuardOrRepair(dbh, customerId, lockedRow) {
+  if (churnGuardApplies(lockedRow)) return churnGuardForRow(dbh, customerId);
+  const { disarmPaymentRails } = require('./cancellation-processor');
+  await disarmPaymentRails(dbh, customerId);
+  return { blocked: false, railsRepairedOnly: true };
+}
+
+// Does a write of pipeline_stage='churned' need churnGuardForRow at all?
+// Yes on an actual TRANSITION into churned (the fix's core case), and yes
+// on an ALREADY-churned row whose customer-level billing fields are still
+// live (the pre-fix residue shape the re-save self-heal exists for). No on
+// an already-churned row whose billing is already wound down: Customer 360
+// submits the whole form on every save, so gating unrelated edits (a phone
+// or note change) on a churned customer whose paid prepay term is still
+// riding out its window would 409 with "mark Churned" advice they already
+// followed (pre-push fallback audit P1 on d5e0ad00a4). The payment rails
+// (payment_methods/payments) are not probed here — the customer-level
+// flags are the signal the dues cron and the residue audit key on.
+function churnGuardApplies(row) {
+  if (!row) return true;
+  if (row.pipeline_stage !== 'churned') return true;
+  return row.active === true || row.autopay_enabled === true || row.next_charge_date != null;
 }
 
 module.exports = {
   findLiveFutureVisit,
   describeLiveVisit,
   findActivePrepayTerm,
+  churnGuardApplies,
   churnGuardForRow,
+  churnGuardOrRepair,
 };
