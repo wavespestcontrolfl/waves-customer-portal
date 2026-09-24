@@ -191,6 +191,7 @@ const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
 const { verifyLeadConsultationToken, smsChannelFor } = require('../utils/lead-consultation-token');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
@@ -860,6 +861,11 @@ async function undoAddressWrite(addressWrite, leadId) {
       // write if ANY live visit was booked for the customer since it landed
       // (local audit P1): a concurrent commit may have booked against the
       // address this request wrote, and reverting would strand that visit.
+      // The same per-customer comms fence booking.js's insert transaction
+      // takes (local audit P1) — FIRST, so an in-flight booking for this
+      // customer either finished inserting its visit (seen below) or waits
+      // until this rollback commits and then books against the restored row.
+      await lockCustomerComms(undoTrx, addressWrite.customerId);
       await undoTrx('customers').where({ id: addressWrite.customerId }).forUpdate().first('id');
       const adopted = await undoTrx('scheduled_services')
         .where({ customer_id: addressWrite.customerId })
