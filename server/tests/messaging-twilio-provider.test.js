@@ -70,6 +70,19 @@ describe('Twilio messaging provider adapter', () => {
     );
   });
 
+  test('forwards the optional final provider predicate unchanged', async () => {
+    const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+
+    await sendViaTwilio(baseInput(), { providerPreSendCheck });
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ providerPreSendCheck }),
+    );
+    expect(providerPreSendCheck).not.toHaveBeenCalled();
+  });
+
   test('returns sanitized provider details when Twilio throws', async () => {
     const err = new Error('The To number +15551230000 is not a valid mobile number.');
     err.code = 21614;

@@ -93,7 +93,7 @@ function providerMediaUrls(input) {
   return urls;
 }
 
-async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
+async function sendViaTwilio(input, { preSendCheck, providerPreSendCheck, withSmsHandoff } = {}) {
   // metadata.original_message_type lets a caller force a specific
   // legacy messageType (e.g. 'lead_response', 'invoice', 'manual')
   // through to TwilioService.sendSMS so the existing
@@ -170,6 +170,7 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       // handoff, after sendSMS's own internal awaits (redirect check,
       // template lookup, customer/location query).
       preSendCheck,
+      providerPreSendCheck,
       withSmsHandoff,
     });
 
