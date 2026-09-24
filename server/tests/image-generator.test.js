@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { ImageGenerator, _internals } = require('../services/content/image-generator');
 const {
   DEFAULT_CHAIN, MODEL_MAP, MODE_SIZES,
-  parseChain, isFatalOpenAIError, sizeFor, buildPrompt,
+  parseChain, isFatalOpenAIError, sizeFor, buildPrompt, planFor,
 } = _internals;
 
 // Helpers to build Response-like fixtures for mocked fetch.
@@ -116,6 +116,19 @@ describe('buildPrompt', () => {
     const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' } });
     expect(info).not.toMatch(uniform);
     expect(info).toMatch(/plain light background/);
+  });
+
+  test('the unmarked Waves van appears in the background of SOME yard scenes only (owner ask 2026-09-23)', () => {
+    const yardPlans = Array.from({ length: 60 }, (_, i) => planFor({ slug: `post-${i}`, subject: 'chinch bug damage on a St. Augustine lawn' }));
+    const withVan = yardPlans.filter((p) => p.van);
+    expect(withVan.length).toBeGreaterThan(5);
+    expect(withVan.length).toBeLessThan(40);
+    const indoorPlans = Array.from({ length: 60 }, (_, i) => planFor({ slug: `post-${i}`, subject: 'German cockroaches in the kitchen' }));
+    expect(indoorPlans.every((p) => !p.van)).toBe(true);
+    const vanPlan = { ...withVan[0] };
+    const prompt = buildPrompt({ title: 'Post', keyword: 'chinch bug damage', mode: 'blog-hero', plan: vanPlan });
+    expect(prompt).toMatch(/Ford Transit work van .* plain and unmarked, no lettering, no logo/);
+    expect(buildPrompt({ title: 'Post', keyword: 'chinch bug damage', mode: 'blog-hero', plan: { ...vanPlan, van: false } })).not.toMatch(/Ford Transit/);
   });
 
   test('blog-body framing rotates by shot and names the hero subject it must differ from (variation, not three of the same picture)', () => {

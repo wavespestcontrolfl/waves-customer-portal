@@ -257,13 +257,22 @@ function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject =
   if (style === 'infographic') {
     return { style, setting: pick(INFOGRAPHIC_LAYOUTS, 1), timeOfDay: '', vantage: 'straight-on, centered' };
   }
+  const settings = settingsFor(subject);
   return {
     style,
-    setting: pick(settingsFor(subject), 1),
+    setting: pick(settings, 1),
     timeOfDay: pick(TIMES_OF_DAY, 2),
     vantage: pick(VANTAGES, 3),
+    // Owner ask 2026-09-23: the Waves van in the background of SOME exterior
+    // scenes. Yard settings only (a van in a kitchen is a contradiction), and
+    // about one in three so the variation directive (2026-09-05) still holds.
+    // The van is UNMARKED by design — the real wrap carries the retired name
+    // and generators turn lettering into gibberish; the logo screen would
+    // reject it. Revisit as a reference-image path after the re-wrap.
+    van: settings[0] === SETTINGS.yard[0] && (seed + 4 * 7919) % 3 === 0,
   };
 }
+const VAN_LINE = 'In the background, a solid Waves-blue (#009CDE) Ford Transit work van parked at the curb or in the driveway — plain and unmarked, no lettering, no logo, not the focus of the shot.';
 // The style a slot regenerates in after a failed text/logo screen: one no
 // sibling slot of the post uses (the permutation's unused fourth style, when
 // the slot can carry it), else the slot's own style under a fresh seed — a
@@ -338,7 +347,8 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
     : '';
   const uniform = isInfographic ? '' : WAVES_UNIFORM_LINE;
-  return [base, focus, local, framing, uniform, composition, styleLine, textRule, guards, distinct].filter(Boolean).join(' ');
+  const van = plan && plan.van && !isInfographic ? VAN_LINE : '';
+  return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
