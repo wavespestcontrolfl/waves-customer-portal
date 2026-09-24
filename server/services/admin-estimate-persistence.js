@@ -3079,6 +3079,17 @@ async function reviseAdminEstimate({
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
       }
     }
+    // A blocked row's correction fans out to the linked customer under
+    // the row lock, while the Customer 360 edit locks the customer FIRST
+    // and then rewrites matching estimates — so the customer row is
+    // locked here BEFORE the estimate row, one order with that path
+    // (codex #4667 r26 P2). Only rows carrying the block pay for it.
+    {
+      const parsePre = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
+      if (estimate?.customer_id && parsePre(estimate.estimate_data)?.addressUnverified === true) {
+        await trx('customers').where({ id: estimate.customer_id }).whereNull('deleted_at').forUpdate().first('id');
+      }
+    }
     const lockedPrior = await trx('estimates')
       .where({ id: estimate.id })
       .forUpdate()
@@ -3326,6 +3337,48 @@ async function reviseAdminEstimate({
           const after = await trx('customers').where({ id: before.id }).first();
           await require('./customer-properties').syncPrimaryAddress(after, trx, { explicitLine2: true });
           await require('./customer-address-fanout').propagateCustomerAddressChange({ before, after }, trx);
+          // Sibling estimates the fan-out just moved to the corrected
+          // premise still carry the OLD premise's county block — their
+          // sends would keep refusing ADDRESS_UNVERIFIED and their links
+          // stay off-surface for an address staff has now vouched for.
+          // Cleared for every open sibling that now names the corrected
+          // premise and whose flag was stamped on the rejected one (or
+          // carries no stamp) (codex #4667 r26 P1).
+          try {
+            const { flagCoversAddress, recoverAddressUnverified: recoverSiblingFlag } = require('./lead-address-unverified');
+            const correctedDisplay = [parsed.unit ? `${parsed.line1} ${parsed.unit}` : parsed.line1, parsed.city, [parsed.state, parsed.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+            const siblings = await trx('estimates')
+              .where({ customer_id: before.id })
+              .whereNot({ id: row.id })
+              .whereNull('archived_at')
+              // The fan-out's own open set.
+              .whereIn('status', ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'])
+              .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+              .select('id', 'address', 'estimate_data');
+            const stale = siblings.filter((sib) => {
+              if (!samePremiseDisplay(sib.address, correctedDisplay, { requireLocality: true })) return false;
+              const flag = recoverSiblingFlag(parseJson(sib.estimate_data) ? { address_unverified: parseJson(sib.estimate_data).addressUnverifiedFlag } : null);
+              return !flag || !flag.address_line1 || flagCoversAddress(flag, { line1: priorParsed.line1, city: priorParsed.city, state: priorParsed.state, zip: priorParsed.zip });
+            }).map((sib) => sib.id);
+            if (stale.length) {
+              await trx('estimates')
+                .whereIn('id', stale)
+                .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+                .update({
+                  estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                    addressUnverified: false,
+                    addressUnverifiedFlag: null,
+                    addressUnverifiedSupersededAt: new Date().toISOString(),
+                    addressUnverifiedClearedBy: 'address_corrected',
+                  })]),
+                  updated_at: now(),
+                });
+            }
+          } catch (siblingErr) {
+            // The correction itself must land; a sibling left blocked is
+            // the pre-existing state, not a new hazard.
+            logger.warn(`[admin-estimate-persistence] sibling address holds not cleared: ${siblingErr.code || siblingErr.name || 'error'}`);
+          }
           const committed = require('../utils/trx-commit-promise').commitPromiseOf(trx);
           const regeocode = () => require('./geocoder').regeocodeCustomerAddressGuarded(before.id).catch(() => {});
           if (committed) committed.then(regeocode).catch(() => {}); else regeocode();

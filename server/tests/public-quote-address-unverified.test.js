@@ -246,6 +246,9 @@ describe('parseDisplayAddress', () => {
     // A hash unit with a space is a unit segment, never the city.
     expect(parseDisplayAddress('1260 Example St, # 4, Parrish, FL 34219')).toMatchObject({ line1: '1260 Example St', unit: '# 4', city: 'Parrish', zip: '34219' });
     expect(parseDisplayAddress('1260 Example St, #4, Parrish, FL 34219')).toMatchObject({ unit: '#4', city: 'Parrish' });
+    // A ZIP-less tail's bare state is a region, never the floor designator.
+    expect(parseDisplayAddress('1260 Example St, Parrish, FL')).toMatchObject({ line1: '1260 Example St', unit: null, city: 'Parrish', state: 'FL', zip: '' });
+    expect(parseDisplayAddress('1260 Example St, Fl 2, Parrish, FL')).toMatchObject({ unit: 'Fl 2', city: 'Parrish', state: 'FL' });
     expect(parseDisplayAddress('')).toMatchObject({ streetLine: '', city: '', zip: '' });
   });
 });

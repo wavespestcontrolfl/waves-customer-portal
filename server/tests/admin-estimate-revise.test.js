@@ -68,6 +68,10 @@ function makeReviseDatabase({
           clause = c;
           return customerChain;
         },
+        // The blocked-row pre-lock (customer BEFORE the estimate row, one
+        // order with the Customer 360 edit — codex #4667 r26 P2).
+        whereNull: () => customerChain,
+        forUpdate: () => customerChain,
         first: async () => {
           if (!customer) return null;
           return String(customer.id) === String(clause?.id) ? customer : null;

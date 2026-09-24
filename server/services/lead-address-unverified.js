@@ -137,12 +137,17 @@ function flagCoversAddress(flag, address) {
 // pre-push audit P1 on r24).
 const UNIT_SEGMENT = /^(?:#|(?:apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\b)/i;
 const STATE_ZIP_SEGMENT = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$/i;
+// A ZIP-less submission ends in a BARE state segment (", FL") — a region,
+// never the floor designator (codex #4667 r26 P1).
+const STATE_ONLY_SEGMENT = /^[a-z]{2}$/i;
+const isUnitSegment = (part) => UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part) && !STATE_ONLY_SEGMENT.test(part);
 function parseDisplayAddress(text) {
   const parts = String(text || '').split(',').map((part) => part.trim()).filter(Boolean);
   const streetLine = parts[0] || '';
-  const city = parts.slice(1).find((part) => !UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part)) || '';
+  const city = parts.slice(1).find((part) => !isUnitSegment(part) && !STATE_ZIP_SEGMENT.test(part) && !STATE_ONLY_SEGMENT.test(part)) || '';
   const tail = parts.slice(1).find((part) => STATE_ZIP_SEGMENT.test(part) || /^\d{5}(?:-\d{4})?$/.test(part)) || '';
-  const state = (tail.match(/^([a-z]{2})\s*\d{5}/i) || [null, null])[1];
+  const stateOnly = parts.slice(1).find((part) => STATE_ONLY_SEGMENT.test(part)) || '';
+  const state = (tail.match(/^([a-z]{2})\s*\d{5}/i) || [null, stateOnly || null])[1];
   // The complete corrected door for record fan-out: the street line with
   // any inline unit peeled, plus the unit from either the line or its own
   // comma segment (codex #4667 r14 P1).
@@ -153,7 +158,7 @@ function parseDisplayAddress(text) {
   // EVERY unit segment is kept, in order ("Bldg 2, Apt 4" is one door,
   // not the building alone) — a truncated unit would fan out to the lead
   // and customer records (pre-push audit P1 on r24).
-  const unitSegments = parts.slice(1).filter((part) => UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part));
+  const unitSegments = parts.slice(1).filter(isUnitSegment);
   const line1 = String(split.street || streetLine).trim();
   const unit = [split.unit, ...unitSegments].map((part) => String(part || '').trim()).filter(Boolean).join(' ') || null;
   return { streetLine, line1, unit, street: streetKeyNoUnit(streetLine), city, state: state ? state.toUpperCase() : null, zip: zip5(tail) };
