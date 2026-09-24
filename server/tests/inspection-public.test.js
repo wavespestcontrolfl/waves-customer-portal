@@ -1212,6 +1212,26 @@ describe('POST /:token commit', () => {
       expect(updateCalls.some((c) => c.table === 'customers' && c.payload.address_line1)).toBe(false);
       const created = insertCalls.find((c) => c.table === 'customers');
       expect(created.payload).toMatchObject({ account_id: 'acct-1', address_line1: '9 Rental Ln', profile_label: 'Additional property' });
+      // ...and it becomes the lead's provenance, so a reopened link finds it.
+      const provenance = insertCalls.find((c) => c.table === 'lead_activities' && c.payload.activity_type === 'consultation_prospect');
+      expect(JSON.parse(provenance.payload.metadata)).toEqual({ customer_id: 'new-cust-1', requires_verification: true });
+    });
+
+    // Codex #4737 r7 pre-push P0: that provenance is an existing account's
+    // property — an unverified token never inherits it.
+    test('provenance that requires verification is not trusted on an unverified token', async () => {
+      const { loadTrustedCustomer } = inspectionPublicRouter._test;
+      const lead = { id: LEAD_ID, phone: '9415550101', first_contact_channel: 'web', customer_id: null };
+      const profile = { id: 'cust-2', phone: '9415550101' };
+      const dbConn = (table) => ({
+        where() { return this; }, whereNull() { return this; }, orderBy() { return this; },
+        first: async () => (table === 'lead_activities'
+          ? { metadata: JSON.stringify({ customer_id: 'cust-2', requires_verification: true }) }
+          : profile),
+      });
+      expect(await loadTrustedCustomer(dbConn, lead, null)).toBeNull();
+      const smsToken = { channel: require('../utils/lead-consultation-token').smsChannelFor('9415550101') };
+      expect(await loadTrustedCustomer(dbConn, lead, smsToken)).toEqual(profile);
     });
 
     test('a supplied address that does not geocode is address_unresolved — never a silent fall-back to the stored one', async () => {
@@ -1456,6 +1476,10 @@ describe('POST /:token commit', () => {
         expect(customerInsert).toBeTruthy();
         expect(customerInsert.payload.account_id).toBe('acct-9'); // same account — never a new customer_accounts row
         expect(customerInsert.payload.profile_label).toBe('Additional property');
+        // Codex #4737 r7 pre-push P0: an existing account's new property is
+        // trusted later only under the verified-phone proof.
+        const provenance = insertCalls.find((c) => c.table === 'lead_activities' && c.payload.activity_type === 'consultation_prospect');
+        expect(JSON.parse(provenance.payload.metadata).requires_verification).toBe(true);
         expect(customerInsert.payload.address_line1).toBe('123 Palm Ave');
         expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe('new-cust-2');
         expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'new-cust-2')).toBe(true);
@@ -1549,6 +1573,8 @@ describe('POST /:token commit', () => {
         const customerInsert = insertCalls.find((c) => c.table === 'customers');
         expect(customerInsert).toBeTruthy();
         expect(customerInsert.payload.profile_label).toBe('Primary'); // a genuinely separate account, not "Additional property"
+        const ownProvenance = insertCalls.find((c) => c.table === 'lead_activities' && c.payload.activity_type === 'consultation_prospect');
+        expect(JSON.parse(ownProvenance.payload.metadata).requires_verification).toBeUndefined();
         expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'prospect-1')).toBe(true);
       });
 

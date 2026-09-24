@@ -330,14 +330,23 @@ async function loadTrustedCustomer(dbConn, lead, token) {
   const meta = typeof created?.metadata === 'string' ? JSON.parse(created.metadata) : created?.metadata;
   if (meta?.customer_id) {
     const prospect = await loadCustomer(dbConn, meta.customer_id);
-    if (prospect) return prospect;
+    // A property of an EXISTING account (requires_verification — Codex
+    // #4737 r7 pre-push P0) is trusted only under the same proof as any
+    // linked customer; only a flow-created prospect is trusted outright.
+    if (prospect && !meta.requires_verification) return prospect;
+    if (prospect) return (await verifiedForCustomer(lead, prospect, token, dbConn)) ? prospect : null;
   }
   if (!lead.customer_id) return null;
   const customer = await loadCustomer(dbConn, lead.customer_id);
   if (!customer) return null;
+  return (await verifiedForCustomer(lead, customer, token, dbConn)) ? customer : null;
+}
+
+// The lead's contact is verified AND the customer is on the lead's phone.
+async function verifiedForCustomer(lead, customer, token, dbConn) {
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-  if (!last10(customer.phone) || last10(customer.phone) !== last10(lead.phone)) return null;
-  return (await leadContactVerified(lead, token, dbConn)) ? customer : null;
+  if (!last10(customer.phone) || last10(customer.phone) !== last10(lead.phone)) return false;
+  return leadContactVerified(lead, token, dbConn);
 }
 
 async function loadCustomer(dbConn, customerId) {
@@ -947,13 +956,15 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   }
   const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
   // Server-owned provenance for loadTrustedCustomer (local audit P1): this
-  // prospect is this lead's own, found again on every retry.
+  // prospect is this lead's own, found again on every retry. A profile
+  // created under an EXISTING account is that account's property, trusted
+  // only under the verified-phone proof (Codex #4737 r7 pre-push P0).
   await trx('lead_activities').insert({
     lead_id: freshLead.id,
     activity_type: CONSULTATION_PROSPECT_ACTIVITY,
     description: 'Consultation page created a prospect profile for this lead',
     performed_by: 'consultation_page',
-    metadata: JSON.stringify({ customer_id: created.id }),
+    metadata: JSON.stringify({ customer_id: created.id, ...(account.existingCustomer ? { requires_verification: true } : {}) }),
   });
   return { customer: created };
 }
@@ -975,9 +986,22 @@ async function resolveOtherAccountProperty(trx, freshLead, linked, resolved) {
     });
   }
   const existing = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
-  if (existing) return reuseMatchedProfile(trx, freshLead, existing, resolved);
-  const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
-  return { customer: created };
+  const chosen = existing
+    ? await reuseMatchedProfile(trx, freshLead, existing, resolved)
+    : { customer: await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account) };
+  // The selected property becomes this lead's consultation provenance
+  // (Codex #4737 r7 pre-push P1): loadTrustedCustomer prefers it, so a
+  // reopened link and every retry see THIS profile and its assessment.
+  if (chosen.customer) {
+    await trx('lead_activities').insert({
+      lead_id: freshLead.id,
+      activity_type: CONSULTATION_PROSPECT_ACTIVITY,
+      description: 'Consultation page booked an additional property for this lead',
+      performed_by: 'consultation_page',
+      metadata: JSON.stringify({ customer_id: chosen.customer.id, requires_verification: true }),
+    });
+  }
+  return chosen;
 }
 
 // A verified lead's existing property, reused: its own open assessment wins
@@ -1710,6 +1734,7 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
 });
 
 router._test = {
+  loadTrustedCustomer,
   verifyIgnoringExpiry,
   maskPhone,
   addressDisplay,
