@@ -556,6 +556,14 @@ function effectiveBookingTimestamp(booking) {
  * Returns { won_via, won_at } for the earliest match across both sources,
  * or null.
  */
+// Which of these bookings' linked estimates were accepted (one query).
+async function acceptedEstimateIdsFor(database, bookings) {
+  const ids = [...new Set(bookings.map((b) => b.source_estimate_id).filter(Boolean).map(String))];
+  if (!ids.length) return new Set();
+  const rows = await database('estimates').whereIn('id', ids).where({ status: 'accepted' }).select('id');
+  return new Set((rows || []).map((r) => String(r.id)));
+}
+
 async function findSaleEvidenceForConsultation(database, {
   customerId, scheduledDateStr, windowStart = null, now = new Date(),
 }) {
@@ -612,19 +620,14 @@ async function findSaleEvidenceForConsultation(database, {
   // must not exclude it before effectiveBookingTimestamp gets a chance to
   // read the right column. Each candidate row is re-checked against the
   // bounds below using its OWN effective timestamp before being accepted.
-  // Codex #4710 r14 P2 :625: a slot reservation graduated at estimate
-  // acceptance (slot-reservation.js commitReservation) keeps the
-  // scheduled_services row's ORIGINAL hold-time created_at — it is never
-  // rewritten to the acceptance moment — and stamps source_estimate_id on
-  // it. Left in this query that hold-time timestamp can predate (and so
-  // outrank) the estimate's own accepted_at as booking evidence, crediting
-  // the wrong moment for the same sale. Simpler-correct fix: exclude every
-  // source_estimate_id row from BOOKING evidence outright — the linked
-  // estimate's acceptance is already picked up as evidence source (a)
-  // above, so nothing is lost, and no row needs re-dating.
+  // Codex #4710 r14 + r16 P2s: a booking linked to an ACCEPTED estimate
+  // (a slot reservation graduated at acceptance keeps its hold-time
+  // created_at) is not separate booking evidence — the acceptance above
+  // already is, dated correctly. A booking linked to an estimate that was
+  // never accepted (the quote-wizard activation archives it as a draft)
+  // is a real sale and stays in.
   const bookings = await database('scheduled_services')
     .where({ customer_id: customerId })
-    .whereNull('source_estimate_id')
     .where(function boundedByEitherTimestamp() {
       this.where(function createdInWindow() {
         this.where('created_at', '>=', lowerBound).where('created_at', '<=', upperBound);
@@ -640,8 +643,9 @@ async function findSaleEvidenceForConsultation(database, {
       'status', 'source_action', 'customer_confirmed',
       'is_callback', 'recurring_parent_id', 'followup_included',
       'estimated_price', 'annual_prepay_term_id',
-      'is_recurring', 'create_invoice_on_complete',
+      'is_recurring', 'create_invoice_on_complete', 'source_estimate_id',
     );
+  const acceptedEstimateIds = await acceptedEstimateIdsFor(database, bookings);
   let earliestBookingAt = null;
   let earliestBookingId = null;
   for (const booking of bookings) {
@@ -653,6 +657,7 @@ async function findSaleEvidenceForConsultation(database, {
     // child, an included follow-up, …). Only a row that survives the sync
     // rule pays for the catalog lookup.
     if (!isQualifyingSaleBooking(booking)) continue;
+    if (booking.source_estimate_id && acceptedEstimateIds.has(String(booking.source_estimate_id))) continue;
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale — separate, async, checked only for surviving candidates
     const effectiveAt = new Date(effectiveBookingTimestamp(booking));
     if (effectiveAt < lowerBound || effectiveAt > upperBound) continue; // the OR above is a superset of the true bound — re-check the row's own effective timestamp
@@ -1146,13 +1151,18 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
         // is never won — even if its best-effort no-show write failed and
         // the row is still open.
         .whereNotIn('ss.status', DEAD_CONSULTATION_STATUSES)
-        .select('co.id as outcome_id', 'co.outcome', 'co.lost_reason', 'ss.scheduled_date', 'ss.window_start');
+        .select('co.id as outcome_id', 'co.scheduled_service_id', 'co.outcome', 'co.lost_reason', 'ss.scheduled_date', 'ss.window_start');
 
       for (const row of candidates) {
         if (!isConvertibleOutcome(row)) continue;
-         
+        // The consultation locked and re-read under the customer lock (Codex
+        // #4710 r16 P2), as the record and sweep paths do: dispatch may have
+        // moved or killed it since the candidate read.
+        const visit = await sp('scheduled_services').where({ id: row.scheduled_service_id }).forNoKeyUpdate()
+          .first('status', 'scheduled_date', 'window_start');
+        if (!visit || DEAD_CONSULTATION_STATUSES.includes(visit.status) || toDateStr(visit.scheduled_date) > nowDateStr) continue;
         const evidence = await findSaleEvidenceForConsultation(sp, {
-          customerId, scheduledDateStr: toDateStr(row.scheduled_date), windowStart: row.window_start || null, now,
+          customerId, scheduledDateStr: toDateStr(visit.scheduled_date), windowStart: visit.window_start || null, now,
         });
         // No qualifying evidence (e.g. the sale predates this consultation's
         // window on the same day) → not won; the caller's own write is never

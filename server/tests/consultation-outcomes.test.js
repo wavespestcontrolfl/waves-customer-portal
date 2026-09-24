@@ -1153,6 +1153,22 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-15T00:00:00Z').toISOString());
   });
 
+  // Codex #4710 r16 P2: an estimate-linked booking whose estimate was never
+  // accepted (the quote-wizard activation keeps it a draft) is a real sale.
+  test('a booking linked to a DRAFT estimate is still booking evidence', async () => {
+    const fakeDb = seededDb({
+      estimates: [{ id: 'est-draft', customer_id: 'cust-1', status: 'draft', accepted_at: null }],
+    });
+    fakeDb.__store.scheduled_services.push({
+      id: 'visit-wizard', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
+      created_at: new Date(`${SCHEDULED_DATE}T15:00:00Z`), status: 'confirmed', source_estimate_id: 'est-draft',
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('office_booking');
+    expect(saved.won_evidence_booking_id).toBe('visit-wizard');
+  });
+
   test('P1-2: evidence dated in the FUTURE relative to `now` does not count', async () => {
     // Sanity companion to the markWonForCustomer future-consultation test
     // below — the upper bound applies to evidence dates here too.
@@ -2320,6 +2336,30 @@ describe('Codex #4710 pre-push P1: every sweep pass bounds its lock wait; the jo
     expect(customerChains.some((c) => c.__noWait)).toBe(true);
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/job-status.js'), 'utf8');
     expect(src).toContain('markNoShow(jobId, { trx: sp, customerLockNowait: true })');
+  });
+});
+
+describe('Codex #4710 r16 P2: the direct win hook attributes against the visit locked and re-read', () => {
+  const NOW = new Date('2026-09-23T20:00:00Z');
+  test('a consultation moved later as the hook takes its lock is not won by a sale that precedes its new time', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-05', customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1', created_at: new Date('2026-09-07T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'warm' },
+      ],
+    });
+    const spyDb = (name) => {
+      if (name === 'customers') fakeDb.__store.scheduled_services.find((r) => r.id === 'visit-1').scheduled_date = '2026-09-10';
+      return fakeDb(name);
+    };
+    Object.assign(spyDb, fakeDb);
+    spyDb.transaction = async (fn) => fn(spyDb);
+    const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
+    expect(count).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('warm');
   });
 });
 
