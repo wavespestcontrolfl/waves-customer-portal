@@ -92,7 +92,12 @@ describe('onFileHouseNumberConflict', () => {
 
   test('a different ZIP or city is not a typo either', () => {
     expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street', { postal_code: '34221' }), onFileAddress: ON_FILE })).toBeNull();
-    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street', { city: 'Bradenton' }), onFileAddress: ON_FILE })).toBeNull();
+    // A different city vetoes only when no ZIP pair already agreed…
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street', { city: 'Bradenton', postal_code: '' }), onFileAddress: ON_FILE })).toBeNull();
+    // …postal-city names alias (Bradenton / Lakewood Ranch share a ZIP), so
+    // agreeing ZIPs keep the same-street conflict (codex r30 P1).
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street', { city: 'Bradenton' }), onFileAddress: ON_FILE }))
+      .toMatchObject({ stated_house_number: '1250', on_file_house_number: '1260', stated_city: 'Bradenton', stated_zip: '34219' });
   });
 
   test('a locality missing on one side does not veto the comparison', () => {

@@ -15230,13 +15230,28 @@ const CallRecordingProcessor = {
                 // its own transaction; best-effort.
                 await db.transaction(async (ttrx) => {
                   await lockTriageCall(ttrx, call.id);
-                  await ttrx('triage_items')
+                  const noted = await ttrx('triage_items')
                     .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
                     .whereIn('status', ['open', 'in_progress'])
                     .update({
                       payload: ttrx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retained_service_id: svc.id })]),
                       updated_at: new Date(),
                     });
+                  // The card was settled between the reuse commit and this
+                  // stamp: the settlement filed its recovery task without
+                  // knowing about the retained visit, so the visit is merged
+                  // onto that task instead — never a "book another" task
+                  // beside a live appointment (codex r30 P1).
+                  if (!noted) {
+                    await ttrx('triage_items')
+                      .where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })
+                      .whereIn('status', ['open', 'in_progress'])
+                      .update({
+                        payload: ttrx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retained_service_id: svc.id, skipped_reason: 'address_correction_needed_on_retained_visit' })]),
+                        summary: `Address confirmed on file after a house-number dispute — the retained appointment (visit ${svc.id}) still carries the disputed number; correct its address, do not book a second one`,
+                        updated_at: new Date(),
+                      });
+                  }
                 }).catch((noteErr) => logger.warn(`[call-proc] retained visit not noted on the conflict card for ${maskSid(callSid)}: ${noteErr.code || noteErr.name || 'db_error'}`));
               } else {
                 // Same-key REPLAY of this call's OWN still-live booking

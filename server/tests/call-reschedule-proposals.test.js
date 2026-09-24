@@ -211,6 +211,19 @@ test.each(['resolved', 'dismissed'])('shared triage %s rejects stale or missing 
   }
 });
 
+test.each(['resolved', 'dismissed'])('the settlement recovery task %s rejects a stale or missing version (its window / retained visit is refreshed in place)', async (nextStatus) => {
+  const { transitionCore } = require('../routes/admin-triage');
+  const call = { id: 'call' };
+  const card = { id: 'card', call_log_id: 'call', reason_code: 'auto_booking_skipped_after_approval', status: 'in_progress',
+    updated_at: new Date('2026-09-13T04:00:00Z'), payload: { follow_up_plan: { scheduled_date: '2026-10-09' }, retained_service_id: 'svc-9' } };
+  for (const expectedUpdatedAt of [undefined, '2026-09-13T03:00:00Z']) {
+    const conn = stageConn(call, card);
+    const result = await transitionCore({ conn, id: card.id, nextStatus, expectedUpdatedAt });
+    expect(result.outcome).toBe('stale_version');
+    expect(conn.updates).toEqual([]);
+  }
+});
+
 test.each(['resolved', 'dismissed'])('the attached-booking follow-up card %s rejects a stale or missing version (its promised plan is refreshed in place)', async (nextStatus) => {
   const { transitionCore } = require('../routes/admin-triage');
   const call = { id: 'call' };

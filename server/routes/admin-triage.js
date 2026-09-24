@@ -236,6 +236,10 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // r27).
     if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
       || item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'attached_booking_followup_unbooked'
+      // …and the recovery task a settlement refreshes in place (window,
+      // address, retained visit) — a stale click must not close the newer
+      // obligation (codex r30 P1).
+      || item.reason_code === 'auto_booking_skipped_after_approval'
       || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {

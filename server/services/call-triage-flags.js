@@ -1843,7 +1843,11 @@ function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = n
   if (statedZip && onFileZip && statedZip !== onFileZip) return null;
   const statedCity = cityKey(av.normalized?.city);
   const onFileCity = cityKey(onFileAddress.city);
-  if (statedCity && onFileCity && statedCity !== onFileCity) return null;
+  // Postal-city names alias (Bradenton / Lakewood Ranch share 34211) — the
+  // same rule the address comparison above applies: a city mismatch vetoes
+  // the conflict only when no ZIP pair already positively agreed (codex r30
+  // P1).
+  if (!(statedZip && onFileZip) && statedCity && onFileCity && statedCity !== onFileCity) return null;
   return {
     stated_street: stated,
     on_file_street: onFile,
