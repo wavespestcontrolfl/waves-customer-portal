@@ -337,10 +337,13 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(src).toContain("whereIn('status', ['resolved', 'dismissed'])");
     const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     // The disputed premise is held out of active property persistence on both authority paths (codex r32 P1).
-    expect(processor).toContain("if (!v2SoleAddressAuthority && !disputedPremise(extracted.address_line1)");
-    expect(processor).toContain("if (disputedPremise(entry.address_line1)) continue;");
+    expect(processor).toContain("if (!v2SoleAddressAuthority && !disputedPremise({ address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip })");
+    expect(processor).toContain("if (disputedPremise(entry)) continue;");
+    // …and rows an earlier pass persisted for the disputed premise are retired with the hold (codex r36 P1).
+    expect(processor).toContain(".where({ customer_id: customerId, source: 'call_pipeline', active: true })");
     // A standing hold carried over without fresh AV evidence restores the disputed street (codex r33 P1).
-    expect(processor).toContain("if (!disputedStatedStreet) disputedStatedStreet = standingPayload?.stated_street || null;");
+    expect(processor).toContain("disputedStatedStreet = standingPayload?.stated_street || null;");
+    expect(processor).toContain("disputedStatedUnit = standingPayload?.stated_unit || null;");
     // A kept card's booking ask follows the positively resolved premise (codex r34 P1) — and the
     // raw expression COMPILES under knex (a bare `?` existence operator would read as a binding).
     expect(processor).toContain("CASE WHEN jsonb_exists(COALESCE(payload, '{}'::jsonb), 'scheduling_window') ");

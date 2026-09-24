@@ -9936,6 +9936,9 @@ const CallRecordingProcessor = {
     // property persistence below can hold that premise out of active
     // properties — codex r32 P1).
     let disputedStatedStreet = null;
+    let disputedStatedUnit = null;
+    let disputedStatedCity = null;
+    let disputedStatedZip = null;
     // A claimed (in_progress) card that could not record this pass's newly
     // confirmed ask: the standing-card recovery below must NOT count it as
     // filed, or both fallback paths would suppress the task (codex r11 P1).
@@ -9994,7 +9997,12 @@ const CallRecordingProcessor = {
       // a lookup that throws must leave the dispute standing, not silently
       // release the booking (pre-push audit P1). Cleared only when an
       // independently saved property positively resolves it.
-      if (houseConflict) { houseNumberDisputed = true; disputedStatedStreet = houseConflict.stated_street || null; }
+      if (houseConflict) {
+        houseNumberDisputed = true;
+        disputedStatedStreet = houseConflict.stated_street || null;
+        disputedStatedCity = houseConflict.stated_city || null;
+        disputedStatedZip = houseConflict.stated_zip || null;
+      }
       // The booking authority snapshot is built HERE, before the property
       // lookup below can throw: the shadow-mode fallback that a thrown
       // lookup triggers must see the confirmed legacy ask, not fall back to
@@ -10077,6 +10085,7 @@ const CallRecordingProcessor = {
         || unitOfLine(corroboratingStreet)
         || unitOfLine(avNormalized.street_line_1)
         || null;
+      if (houseConflict) disputedStatedUnit = statedUnit;
       let knownIndependentProperty = false;
       if (houseConflict && process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
         const statedKey = propertyKey({ address_line1: avNormalized.street_line_1, address_line2: statedUnit, city: avNormalized.city, zip: avNormalized.postal_code });
@@ -10387,10 +10396,12 @@ const CallRecordingProcessor = {
                   const validatedLine = String(avNormalized?.street_line_1 || '');
                   const onFileValidated = !!validatedLine && sameHouseNumberStreet(validatedLine, String(onFileAddress.address_line1 || ''))
                     && (() => {
-                      const { normalizeUnitLine: nu, splitStreetLineUnit: su } = require('../utils/address-normalizer');
-                      const validatedUnit = String(nu(String(avNormalized?.street_line_2 || '')) || su(validatedLine).unit || '').toLowerCase();
-                      const onFileUnit = String(nu(String(onFileAddress.address_line2 || '')) || su(String(onFileAddress.address_line1 || '')).unit || '').toLowerCase();
-                      if (validatedUnit !== onFileUnit) return false;
+                      // The shared any-position canonical unit key ("Apt 2" ==
+                      // "Unit 2", unit-first or street-first) — codex r36 P1.
+                      const { unitKey: ovUnitKey } = require('./customer-properties');
+                      const { splitStreetLineUnit: ovSplit, splitUnitFirstLine: ovUnitFirst } = require('../utils/address-normalizer');
+                      const ovUnitOf = (l1, l2) => ovUnitKey(l2) || ovUnitKey(ovUnitFirst(String(l1 || ''))?.unit) || ovUnitKey(ovSplit(String(l1 || '')).unit) || '';
+                      if (ovUnitOf(validatedLine, avNormalized?.street_line_2) !== ovUnitOf(onFileAddress.address_line1, onFileAddress.address_line2)) return false;
                       const vz = (String(avNormalized?.postal_code || '').match(/\d{5}/) || [''])[0];
                       const oz = (String(onFileAddress.zip || '').match(/\d{5}/) || [''])[0];
                       if (vz && oz) return vz === oz;
@@ -10498,7 +10509,12 @@ const CallRecordingProcessor = {
             // The carried-over hold restores the disputed street too, so the
             // property persistence keeps holding that premise out (codex r33
             // P1).
-            if (!disputedStatedStreet) disputedStatedStreet = standingPayload?.stated_street || null;
+            if (!disputedStatedStreet) {
+              disputedStatedStreet = standingPayload?.stated_street || null;
+              disputedStatedUnit = standingPayload?.stated_unit || null;
+              disputedStatedCity = standingPayload?.stated_city || null;
+              disputedStatedZip = standingPayload?.stated_zip || null;
+            }
             if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
             logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
           } else {
@@ -10841,9 +10857,41 @@ const CallRecordingProcessor = {
         // secondary property other workflows would treat as real (codex
         // r32 P1). The card carries the address; Accept adopts the on-file
         // number, a correction records the right one.
-        const disputedPremise = (line1) => houseNumberDisputed === true
-          && !!disputedStatedStreet && sameHouseNumberStreet(String(line1 || ''), disputedStatedStreet);
-        if (!v2SoleAddressAuthority && !disputedPremise(extracted.address_line1)
+        // The FULL disputed premise — street, unit and ZIP-wins locality —
+        // never the street alone: a second property on the same street with
+        // another unit or in another town is not the dispute (codex r36 P2).
+        const disputedPremise = (entry) => {
+          if (houseNumberDisputed !== true || !disputedStatedStreet) return false;
+          const e = typeof entry === 'string' ? { address_line1: entry } : (entry || {});
+          if (!sameHouseNumberStreet(String(e.address_line1 || ''), disputedStatedStreet)) return false;
+          const { unitKey: dpUnitKey } = require('./customer-properties');
+          const { splitStreetLineUnit: dpSplit, splitUnitFirstLine: dpUnitFirst } = require('../utils/address-normalizer');
+          const unitOf = (l1, l2) => dpUnitKey(l2) || dpUnitKey(dpUnitFirst(String(l1 || ''))?.unit) || dpUnitKey(dpSplit(String(l1 || '')).unit) || '';
+          if (unitOf(e.address_line1, e.address_line2) !== unitOf('', disputedStatedUnit)) return false;
+          const z5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+          const ck = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+          const ez = z5(e.zip); const dz = z5(disputedStatedZip);
+          if (ez && dz) return ez === dz;
+          const ec = ck(e.city); const dc = ck(disputedStatedCity);
+          return !ec || !dc || ec === dc;
+        };
+        // A row an EARLIER pass persisted for the disputed premise (an
+        // AV-unavailable pass that ran before the conflict was detected) is
+        // retired with the hold — property selectors and linkage must not
+        // keep treating the unconfirmed number as real (codex r36 P1).
+        // call_pipeline rows only; best-effort.
+        if (houseNumberDisputed === true && disputedStatedStreet && customerId) {
+          try {
+            const priorRows = await db('customer_properties')
+              .where({ customer_id: customerId, source: 'call_pipeline', active: true })
+              .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+            const staleIds = priorRows.filter(disputedPremise).map((r) => r.id);
+            if (staleIds.length) await db('customer_properties').whereIn('id', staleIds).update({ active: false, updated_at: new Date() });
+          } catch (retireErr) {
+            logger.warn(`[call-proc] disputed call-pipeline property not retired for ${maskSid(callSid)}: ${retireErr.code || retireErr.name || 'db_error'}`);
+          }
+        }
+        if (!v2SoleAddressAuthority && !disputedPremise({ address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip })
           && (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress))) {
           const recorded = await customerProperties.recordCallProperty({
             customerId,
@@ -10988,7 +11036,7 @@ const CallRecordingProcessor = {
                 const entryZip = String(entry.zip || '').trim();
                 if (!String(entry.address_line1 || '').trim()) continue;
                 // The disputed premise waits for the conflict card (codex r32 P1).
-                if (disputedPremise(entry.address_line1)) continue;
+                if (disputedPremise(entry)) continue;
                 const firstAddressException = isFirstAddress && firstStreetPending;
                 firstStreetPending = false;
                 if (!firstAddressException && (!entryCity || !entryZip)) continue;
@@ -16673,6 +16721,11 @@ const CallRecordingProcessor = {
                 updated_at: new Date(),
               });
           });
+          // The task rides the call's review state like the conflict card
+          // would have: review_status and the lead's confirm-before-dispatch
+          // note derive from this list, not from open triage rows (codex
+          // r36 P2).
+          if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
         } catch (skipTriageErr) {
           // Code/name only — the bound payload carries the call's address.
           logger.warn(`[call-proc] skip-triage insert failed for ${maskSid(callSid)}: ${skipTriageErr.code || skipTriageErr.name || 'db_error'}`);

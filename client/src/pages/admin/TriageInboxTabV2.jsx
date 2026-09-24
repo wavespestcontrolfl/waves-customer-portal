@@ -197,6 +197,13 @@ export function ConfirmEvidence({ payload }) {
     },
     // …and the whole on-file door too: Accept means the entire saved
     // address is right, so a differing saved unit must be visible.
+    // A recovery task books at its PRESERVED requested premise when that
+    // differs from the primary on file (a cleared dispute whose stated
+    // address is a saved secondary property) — codex r36 P1.
+    p.skipped_reason && p.scheduling_window?.requested_address?.street_line_1 && {
+      label: "Book at",
+      value: [p.scheduling_window.requested_address.street_line_1, p.scheduling_window.requested_address.street_line_2, p.scheduling_window.requested_address.city, p.scheduling_window.requested_address.postal_code].filter((v) => String(v || "").trim()).join(", "),
+    },
     // …and on the RECOVERY task Accept files (stated_street deliberately
     // removed, on_file_address kept as the address to book / apply).
     (p.stated_street || p.skipped_reason) && (p.on_file_address?.address_line1 || p.on_file_street) && {

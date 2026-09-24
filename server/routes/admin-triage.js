@@ -854,19 +854,25 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   // …and that correction work files even when ANOTHER booking already
   // covers the ask (codex r34 P1): closing the warning must not leave the
   // old visit scheduled at the rejected number.
-  const retainedNeedsCorrection = !!retained && decision.confirmed && !decision.scheduleDenied;
+  // …and after a DENIAL of the scheduling evidence too: the retained visit
+  // already exists (assignment, reminders), so silently closing the only
+  // warning would leave it scheduled at the rejected number — explicit
+  // cancel-or-review work is filed instead (codex r36 P1).
+  const retainedNeedsCorrection = !!retained && decision.confirmed;
   if (decision.file || retainedNeedsCorrection) {
     const { buildTriageItem } = require('../services/call-routing-gates');
-    const taskSummary = retained
-      ? `Address confirmed on file after a house-number dispute — the retained appointment (visit ${retained.id}) still carries the disputed number; correct its address, do not book a second one`
-      : decision.summary;
+    const taskSummary = retained && decision.scheduleDenied
+      ? `House-number dispute card denied — the retained appointment (visit ${retained.id}) is still scheduled at the disputed number; cancel it or review it`
+      : retained
+        ? `Address confirmed on file after a house-number dispute — the retained appointment (visit ${retained.id}) still carries the disputed number; correct its address, do not book a second one`
+        : decision.summary;
     await trx('triage_items')
       .insert(buildTriageItem({
         callLogId: item.call_log_id,
         flag: 'auto_booking_skipped_after_approval',
         extraction: { meta: { call_summary: taskSummary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
         extraPayload: {
-          skipped_reason: retained ? 'address_correction_needed_on_retained_visit' : decision.skippedReason,
+          skipped_reason: retained && decision.scheduleDenied ? 'retained_visit_review_after_denial' : retained ? 'address_correction_needed_on_retained_visit' : decision.skippedReason,
           // Explicit nulls when no visit qualifies any more: the merge onto a
           // standing task would otherwise keep an obsolete retained visit
           // (cancelled / completed since) in the instructions (codex r31 P1).
@@ -1226,7 +1232,11 @@ router.post('/:id/verdict', async (req, res) => {
     // right" (codex r20 P2). The card resolution above is unchanged.
     const feedbackVerdict = (verdict === 'accept' && conflictCardSettled) ? 'deny' : verdict;
     const feedbackWrongFields = (verdict === 'accept' && conflictCardSettled) ? ['address'] : wrongFields;
-    await upsertFeedback({
+    // A recovery task is an operational obligation, not a routing verdict:
+    // its Accept must not overwrite the call's calibration row (the
+    // conflict card's `deny · address`) — route_feedback is unique per
+    // call (codex r36 P1).
+    if (item.reason_code !== 'auto_booking_skipped_after_approval') await upsertFeedback({
       callLogId: item.call_log_id,
       triageItemId: id,
       decisionKind: 'triaged',
