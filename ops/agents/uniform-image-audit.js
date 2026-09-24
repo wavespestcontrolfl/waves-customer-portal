@@ -67,15 +67,18 @@ async function main() {
   const rows = [];
   for (const rel of todo) {
     const key = rel.split(path.sep).join('__');
-    let buf;
-    try { buf = fs.readFileSync(path.join(DIR, rel)); } catch (err) { rows.push({ file: key, path: rel, error: `unreadable: ${err.message}` }); process.stdout.write(`? ${key} (unreadable)\n`); continue; }
-    const res = await classifyUniform({ buffer: buf, mimeType: MIME[path.extname(rel).toLowerCase()] });
-    if (!res.ok) { rows.push({ file: key, path: rel, error: res.reason, raw: res.raw }); process.stdout.write(`? ${key} (${res.reason})\n`); continue; }
-    const parsed = res.parsed;
-    rows.push({ file: key, path: rel, ...parsed });
-    const flag = outOfUniform(parsed);
-    process.stdout.write(`${flag ? 'FIX' : ' ok'} ${key}${parsed.person ? ` — ${parsed.role}: ${parsed.shirt}; cap ${parsed.cap} (${parsed.head || '?'}); pants ${parsed.pants}` : ' — no person'}\n`);
-    writeReport(); // incremental: a crash mid-sweep never loses the paid calls so far
+    try {
+      let buf;
+      try { buf = fs.readFileSync(path.join(DIR, rel)); } catch (err) { rows.push({ file: key, path: rel, error: `unreadable: ${err.message}` }); process.stdout.write(`? ${key} (unreadable)\n`); continue; }
+      const res = await classifyUniform({ buffer: buf, mimeType: MIME[path.extname(rel).toLowerCase()] });
+      if (!res.ok) { rows.push({ file: key, path: rel, error: res.reason, raw: res.raw }); process.stdout.write(`? ${key} (${res.reason})\n`); continue; }
+      const parsed = res.parsed;
+      rows.push({ file: key, path: rel, ...parsed });
+      const flag = outOfUniform(parsed);
+      process.stdout.write(`${flag ? 'FIX' : ' ok'} ${key}${parsed.person ? ` — ${parsed.role}: ${parsed.shirt}; cap ${parsed.cap} (${parsed.head || '?'}); pants ${parsed.pants}` : ' — no person'}\n`);
+    } finally {
+      writeReport(); // incremental, on error rows too: a crash mid-sweep never loses the paid calls so far
+    }
   }
   const fix = writeReport();
   function writeReport() {
