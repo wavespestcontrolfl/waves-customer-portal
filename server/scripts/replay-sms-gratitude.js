@@ -15,12 +15,14 @@
 const fs = require('fs');
 const path = require('path');
 const {
+  CONTEXT_WINDOW_MS,
+  QUIET_WINDOW_MS,
   evaluateGratitudeContext,
   gratitudeTimingReason,
 } = require('../services/sms-gratitude');
 
-const REPLAY_DELAY_MS = 2 * 60 * 1000;
 const OUTBOUND_DIRECTIONS = new Set(['outbound-api', 'outbound-reply']);
+const PENDING_OUTBOUND_STATUSES = new Set(['queued', 'scheduled', 'sending']);
 
 function usage() {
   return 'Usage: node server/scripts/replay-sms-gratitude.js --input <private.jsonl> --output <private.json>';
@@ -96,7 +98,10 @@ function normalizeRow(row, lineNumber) {
 
   const from = requireString(row, 'from', lineNumber);
   const to = requireString(row, 'to', lineNumber);
-  if (!Number.isInteger(row.numMedia) || row.numMedia < 0) {
+  const mediaCount = typeof row.numMedia === 'string' && /^\d+$/.test(row.numMedia)
+    ? Number(row.numMedia)
+    : row.numMedia;
+  if (!Number.isSafeInteger(mediaCount) || mediaCount < 0) {
     throw new Error(`Input line ${lineNumber} has an invalid numMedia`);
   }
 
@@ -110,7 +115,7 @@ function normalizeRow(row, lineNumber) {
     to,
     body: requireString(row, 'body', lineNumber, { allowEmpty: true }),
     status: typeof row.status === 'string' ? row.status : null,
-    mediaCount: row.numMedia,
+    mediaCount,
     messageType: null,
     threadKey: [from, to].sort().join('\u0000'),
   };
@@ -146,8 +151,8 @@ function policyHistory(rows, candidate, evaluationTimestamp) {
     // Match the live loader: failed/undelivered outbounds do not establish
     // what the customer saw. Later queued/in-flight messages still cancel.
     .filter((row) => row.direction === 'inbound'
-      || ['queued', 'sent', 'delivered'].includes(row.status)
-      || (row.timestamp >= candidate.timestamp && ['scheduled', 'sending'].includes(row.status)))
+      || ['sent', 'delivered'].includes(row.status)
+      || (row.timestamp >= candidate.timestamp && PENDING_OUTBOUND_STATUSES.has(row.status)))
     .map((row) => ({
       id: row.id,
       body: row.body,
@@ -183,15 +188,20 @@ function replayRows(rows) {
     if (inbound.direction !== 'inbound') continue;
 
     evaluatedIds.push(inbound.id);
-    const evaluationTimestamp = inbound.timestamp + REPLAY_DELAY_MS;
+    const evaluationTimestamp = inbound.timestamp + QUIET_WINDOW_MS;
     const evaluationAt = new Date(evaluationTimestamp).toISOString();
     const timingReason = gratitudeTimingReason({
       inboundCreatedAt: inbound.createdAt,
       now: evaluationAt,
       activatedAt,
     });
-    const history = policyHistory(threads.get(inbound.threadKey), inbound, evaluationTimestamp);
+    const thread = threads.get(inbound.threadKey);
+    const history = policyHistory(thread, inbound, evaluationTimestamp);
     const firstName = inferPreviewFirstName(history);
+    const pendingWork = thread.some((row) => row.direction === 'outbound'
+      && row.timestamp < inbound.timestamp
+      && row.timestamp <= evaluationTimestamp
+      && PENDING_OUTBOUND_STATUSES.has(row.status));
     const context = timingReason
       ? { eligible: false, reason: timingReason, reply: null }
       : evaluateGratitudeContext({
@@ -204,7 +214,8 @@ function replayRows(rows) {
         },
         history,
         firstName,
-        contextComplete: true,
+        contextComplete: inbound.timestamp - earliestTimestamp >= CONTEXT_WINDOW_MS,
+        pendingWork,
       });
 
     if (context.eligible) {
@@ -281,14 +292,33 @@ function readInput(inputPath) {
   }
 }
 
-function writePrivateReport(outputPath, report) {
-  const directory = path.dirname(path.resolve(outputPath));
-  if (!fs.existsSync(directory)) throw new Error('The output directory does not exist');
+function assertDistinctFiles(inputPath, outputPath) {
   try {
-    fs.writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
-    fs.chmodSync(outputPath, 0o600);
+    const input = fs.statSync(inputPath);
+    const output = fs.statSync(outputPath);
+    if (input.dev === output.dev && input.ino === output.ino) {
+      throw new Error('--input and --output must be different files');
+    }
+  } catch (error) {
+    if (error.message === '--input and --output must be different files') throw error;
+    if (error.code !== 'ENOENT') throw new Error('Could not inspect the input and output files');
+  }
+}
+
+function writePrivateReport(outputPath, report) {
+  const resolvedOutput = path.resolve(outputPath);
+  const directory = path.dirname(resolvedOutput);
+  if (!fs.existsSync(directory)) throw new Error('The output directory does not exist');
+  let tempDirectory = null;
+  try {
+    tempDirectory = fs.mkdtempSync(path.join(directory, '.sms-gratitude-replay-'));
+    const tempPath = path.join(tempDirectory, 'report.json');
+    fs.writeFileSync(tempPath, `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    fs.renameSync(tempPath, resolvedOutput);
   } catch {
     throw new Error('Could not write the private output file');
+  } finally {
+    if (tempDirectory) fs.rmSync(tempDirectory, { recursive: true, force: true });
   }
 }
 
@@ -299,7 +329,9 @@ function run(argv = process.argv.slice(2)) {
     return null;
   }
 
-  const rows = normalizeRows(parseJsonLines(readInput(args.input)));
+  const input = readInput(args.input);
+  assertDistinctFiles(args.input, args.output);
+  const rows = normalizeRows(parseJsonLines(input));
   const report = replayRows(rows);
   writePrivateReport(args.output, report);
   process.stdout.write(
