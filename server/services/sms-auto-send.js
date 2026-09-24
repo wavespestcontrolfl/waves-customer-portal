@@ -65,7 +65,10 @@ const FAILED_STATUS = 'auto_send_failed';
 // orphan — failClaim leaves the draft 'shadow', so it re-enters ordinary
 // drafting rather than staying invisibly stuck.
 // One source of truth with the readers' hide window (review-ask-reservation).
-const { REPLY_RESERVATION_HOLD_HOURS: UNCERTAIN_CLAIM_HOLD_HOURS } = require('./messaging/review-ask-reservation');
+const {
+  REPLY_RESERVATION_HOLD_HOURS: UNCERTAIN_CLAIM_HOLD_HOURS,
+  preserveSoleAcceptedReplyReceipts,
+} = require('./messaging/review-ask-reservation');
 // message_drafts.status once the send is confirmed (out of the judge pool).
 const DRAFT_SENT_STATUS = 'auto_sent';
 
@@ -622,6 +625,7 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
               )`);
           });
       })
+      .modify(preserveSoleAcceptedReplyReceipts)
       .del();
   } catch (err) {
     logger.warn(`[sms-auto-send] reservation sweep failed: ${err.message}`);
