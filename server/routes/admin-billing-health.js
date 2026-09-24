@@ -246,6 +246,49 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           };
         }
 
+        // Attempt-scoped idempotency key (Codex round-1 P1): the bare
+        // autopay_monthly_<cid>_<date> key — shared with chargeMonthly()'s
+        // own default, for the genuine-race case — must NOT be reused
+        // after a TERMINAL failure that day, because charge-now's own
+        // description/metadata (manual_charge) never matches
+        // chargeMonthly's (monthly_autopay), so Stripe would reject the
+        // replay with a parameter-mismatch error instead of attempting a
+        // fresh charge — meaning a decline (from either the cron or a
+        // prior charge-now click) would make every same-day "Charge now"
+        // click fail, even after the customer's card is fixed. Look up the
+        // most recent failed attempt for this exact obligation (still
+        // inside the lock, so this read can't race a concurrent writer);
+        // its OWN metadata carries the idempotency key it used
+        // (services/stripe.js's failure-record insert), so the next
+        // attempt number is derived from THAT key rather than a separate
+        // count query — one read, not two, and immune to any gap between
+        // a count and the row it counted.
+        const latestFailedAttempt = await db('payments')
+          .where({ customer_id: customerId, status: 'failed' })
+          .where(function () {
+            this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+              .orWhere(function () {
+                this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+                  .andWhere('payment_date', '>=', monthStart)
+                  .andWhere('payment_date', '<=', monthEnd)
+                  .andWhere('description', 'like', '%WaveGuard Monthly%');
+              });
+          })
+          .orderBy('created_at', 'desc')
+          .first();
+        let attemptNumber = 0;
+        if (latestFailedAttempt) {
+          let priorMeta = {};
+          try {
+            const raw = latestFailedAttempt.metadata;
+            priorMeta = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
+          } catch (_) { /* unparseable legacy metadata — treat as attempt 0 */ }
+          const priorKeyMatch = /_r(\d+)$/.exec(String(priorMeta.idempotency_key || ''));
+          attemptNumber = priorKeyMatch ? parseInt(priorKeyMatch[1], 10) + 1 : 1;
+        }
+        const baseIdempotencyKey = `autopay_monthly_${customerId}_${etDateString()}`;
+        const idempotencyKey = attemptNumber > 0 ? `${baseIdempotencyKey}_r${attemptNumber}` : baseIdempotencyKey;
+
         try {
           // Machine provenance (Codex #3598 r5 P1): an admin clicking Charge
           // Now is not the customer's own action — the PI's ACH lifecycle
@@ -255,7 +298,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
             tier: customer.waveguard_tier || '',
             billed_month: monthKey,
             initiated_by: 'machine',
-          }, `autopay_monthly_${customerId}_${etDateString()}`);
+          }, idempotencyKey);
           return { payment: chargedPayment };
         } catch (err) {
           return { response: await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId }) };

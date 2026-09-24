@@ -91,6 +91,16 @@ export default function MobileCardOnFileSheet({
   // Per-card quoted amount (base/surcharge/total from /charge-card-quote),
   // shown next to the card and bound into the charge as expectedTotal.
   const [quotes, setQuotes] = useState({});
+  // Set on unmount — handleCharge's continuation checks this after every
+  // await so a sheet closed/unmounted mid-quote (Back is disabled while
+  // charging, but this is the backstop for any other removal path) never
+  // fires the actual /charge-card POST from a closed sheet.
+  const abortedRef = useRef(false);
+  useEffect(() => {
+    return () => {
+      abortedRef.current = true;
+    };
+  }, []);
 
   const resolvedCustomerId =
     customerId || service?.customerId || service?.customer_id;
@@ -160,6 +170,11 @@ export default function MobileCardOnFileSheet({
       if (!quoteResponse.ok) {
         throw new Error(quoteData.error || "Could not price this charge");
       }
+      // The sheet closed (Back, or some other unmount) while the quote was
+      // in flight — stop here. Nothing has moved money yet; do not fire
+      // the charge-card POST from a closed sheet, and there is no live
+      // component left to receive the quote into state.
+      if (abortedRef.current) return;
       const quote = quoteData.quote || {};
       setQuotes((prev) => ({ ...prev, [card.id]: quote }));
 
@@ -178,6 +193,9 @@ export default function MobileCardOnFileSheet({
         },
       );
       const d = await r.json().catch(() => ({}));
+      // The charge already happened (or is in flight) by this point — this
+      // is only about not touching an unmounted component's state.
+      if (abortedRef.current) return;
       if (!r.ok) {
         const terminal =
           d.orphan === true || d.ambiguous === true || d.in_progress === true;
@@ -188,6 +206,7 @@ export default function MobileCardOnFileSheet({
       onChargeSuccess?.(d);
       onClose?.();
     } catch (e) {
+      if (abortedRef.current) return;
       setError(e.message || "Charge failed");
       if (e.terminal) {
         // The charge either succeeded upstream or may have succeeded. Keep every
@@ -289,8 +308,9 @@ export default function MobileCardOnFileSheet({
         <button
           type="button"
           onClick={onClose}
+          disabled={chargingId !== null && !chargeBlocked}
           aria-label="Back"
-          className="flex items-center justify-center h-11 w-11 rounded-full u-focus-ring text-zinc-900"
+          className="flex items-center justify-center h-11 w-11 rounded-full u-focus-ring text-zinc-900 disabled:opacity-40"
           style={{ background: "#F4F4F5" }}
         >
           <ArrowLeft size={20} strokeWidth={2} />

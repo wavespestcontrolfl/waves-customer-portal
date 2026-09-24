@@ -54,18 +54,40 @@
  * in production) still shares a durable Stripe idempotency key with its
  * sibling caller (autopay_monthly_<customerId>_<ET date> — the SAME
  * literal key chargeMonthly() defaults to, which charge-now and the retry
- * sweep's monthly branch pass explicitly), so Stripe replays one
- * PaymentIntent and charge()'s own per-PI pg_advisory_xact_lock
- * (services/stripe.js) collapses it to one ledger row.
+ * sweep's monthly branch pass explicitly for a customer's FIRST attempt
+ * that day), so Stripe replays one PaymentIntent and charge()'s own
+ * per-PI pg_advisory_xact_lock (services/stripe.js) collapses it to one
+ * ledger row.
+ *
+ * A THIRD, rollout-compatibility check runs before either lock layer:
+ * during a rolling deploy, an OLD pod's retry sweep or monthly cron
+ * (code that predates this whole file) has no idea this per-customer lock
+ * exists, so a NEW pod's charge-now taking `billing-customer:<id>` alone
+ * would not see it. Both jobs, in every version of this code (the wrapping
+ * in services/scheduler.js is untouched by this file), already run inside
+ * a NAMED job-level advisory lock ('billing-monthly' / 'billing-retries',
+ * utils/cron-lock.js's runExclusive) for their ENTIRE run — a signal
+ * visible regardless of which pod's code is doing the checking. A plain
+ * `pg_locks` read (lockHeldByAnySession — db.raw only, no connection
+ * pinning) checks whether either job is running ANYWHERE before
+ * proceeding. Callers that ARE themselves running inside one of those two
+ * jobs pass `excludeJobLocks` naming their OWN job — checking it would
+ * otherwise refuse every one of their own charges (the lock they hold IS
+ * what's reported as "held").
  *
  * Callers MUST hold this lock across BOTH the already-collected read and
  * the charge() call — locking only the write leaves the classic
  * check-then-act race open.
  */
 const db = require('../models/db');
-const { runExclusive } = require('./cron-lock');
+const { runExclusive, lockHeldByAnySession } = require('./cron-lock');
 
 const locks = new Map(); // customerId -> tail promise (never rejects)
+
+// The two named jobs every version of this code already serializes
+// cluster-wide (services/scheduler.js) — see the rollout-compatibility
+// note above.
+const ROLLOUT_COMPAT_JOB_LOCKS = ['billing-monthly', 'billing-retries'];
 
 function crossProcessLockName(customerId) {
   return `billing-customer:${customerId}`;
@@ -85,7 +107,26 @@ function claimHeldElsewhereError(customerId, reason) {
   return err;
 }
 
-async function runCrossProcessGuarded(customerId, fn) {
+// Rollout-compatibility probe: is EITHER named cron job (other than the
+// caller's own, if it named one) currently running on ANY pod? A plain
+// pg_locks read — degrades to "not running" (false/null) on a DB hiccup or
+// a test double, since the per-customer layer below is the primary defense
+// and already fails closed on genuine ambiguity; this is a supplementary
+// net for the old/new-pod overlap the per-customer lock alone can't see.
+async function anyOtherJobRunning(excludeJobLocks) {
+  const exclude = new Set(excludeJobLocks || []);
+  for (const jobName of ROLLOUT_COMPAT_JOB_LOCKS) {
+    if (exclude.has(jobName)) continue;
+    const held = await lockHeldByAnySession(jobName).catch(() => null);
+    if (held === true) return jobName;
+  }
+  return null;
+}
+
+async function runCrossProcessGuarded(customerId, fn, excludeJobLocks) {
+  const busyJob = await anyOtherJobRunning(excludeJobLocks);
+  if (busyJob) throw claimHeldElsewhereError(customerId, `job ${busyJob} is running`);
+
   if (!crossProcessLockCapable()) {
     // No pg connection-pinning API at all (a unit test's db double) — no
     // cross-process signal exists to trust either way. The in-process Map
@@ -106,10 +147,10 @@ async function runCrossProcessGuarded(customerId, fn) {
   return result;
 }
 
-async function withCustomerBillingLock(customerId, fn) {
+async function withCustomerBillingLock(customerId, fn, { excludeJobLocks } = {}) {
   const key = String(customerId);
   const prior = locks.get(key) || Promise.resolve();
-  const run = prior.then(() => runCrossProcessGuarded(customerId, fn));
+  const run = prior.then(() => runCrossProcessGuarded(customerId, fn, excludeJobLocks));
   // Never-rejecting tail so the NEXT caller's chain always proceeds, even
   // when this caller's fn() throws — a lock must not stay held forever
   // just because one holder failed.

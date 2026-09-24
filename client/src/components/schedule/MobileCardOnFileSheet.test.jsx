@@ -147,6 +147,53 @@ describe.each(["legacy", "comfortable"])(
       // after the fact.
       expect(document.body.textContent).toMatch(/\$100\.00.*\$3\.00.*\$103\.00/);
     });
+
+    it("never posts /charge-card if the sheet unmounts while the quote is still in flight", async () => {
+      let resolveQuote;
+      const quotePromise = new Promise((resolve) => {
+        resolveQuote = resolve;
+      });
+      fetch.mockReturnValueOnce(jsonResponse({ cards }));
+      fetch.mockImplementation((url) => {
+        const u = String(url);
+        if (u.includes("/cards")) return jsonResponse({ cards });
+        if (u.includes("/charge-card-quote")) return quotePromise;
+        return jsonResponse({ success: true, status: "paid" });
+      });
+      const { unmount } = render(
+        <UiSurface density={density}>
+          <MobileCardOnFileSheet
+            presentation={density === "comfortable" ? "admin" : "legacy"}
+            desktopVisible
+            invoiceId="inv-1"
+            customerId="cust-1"
+            customerName="Test Customer"
+          />
+        </UiSurface>,
+      );
+      await screen.findByText("Visa 1111");
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+      await waitFor(() => {
+        expect(
+          fetch.mock.calls.some(([u]) =>
+            String(u).includes("/charge-card-quote"),
+          ),
+        ).toBe(true);
+      });
+
+      // Sheet is removed (Back, or any other unmount) BEFORE the quote
+      // resolves — the pending fetch resolves only afterward.
+      unmount();
+      resolveQuote(jsonResponse({ quote: QUOTE }));
+      // Let the already-in-flight promise chain settle.
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(
+        fetch.mock.calls.some(([u]) => String(u).endsWith("/charge-card")),
+      ).toBe(false);
+    });
   },
 );
 

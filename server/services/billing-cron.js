@@ -325,6 +325,14 @@ const BillingCron = {
           const service = await require('./stripe');
           const paymentResult = await service.chargeMonthly(customer.id);
           return { paymentResult };
+        }, {
+          // This loop IS the 'billing-monthly' job (scheduler.js wraps
+          // processMonthlyBilling in runExclusive('billing-monthly', ...))
+          // — checking that job's own lock here would report it "held" by
+          // this very call and refuse every monthly charge. Still checks
+          // 'billing-retries' (a different job, a real other-process
+          // concern).
+          excludeJobLocks: ['billing-monthly'],
         });
 
         const MONTHLY_LOCK_RETRY_ATTEMPTS = 3;
@@ -346,14 +354,42 @@ const BillingCron = {
         }
 
         if (lockOutcome.claimHeldElsewhere) {
-          logger.error(`[billing-cron] Monthly charge for customer ${customer.id} could not confirm exclusive collection after ${MONTHLY_LOCK_RETRY_ATTEMPTS} attempts — dues NOT collected today; billing_day only recurs next month, so this needs a manual "Charge now"`);
+          logger.error(`[billing-cron] Monthly charge for customer ${customer.id} could not confirm exclusive collection after ${MONTHLY_LOCK_RETRY_ATTEMPTS} attempts — deferring to the retry sweep; billing_day only recurs next month, so this must not rely on tomorrow's tick alone`);
+          // Codex round-1 P1: a bare skip here has NO natural recovery —
+          // isBillingDayMatch above only matches once a month, unlike
+          // charge-now (user-retryable) or a normal retry-sweep row (its
+          // OWN next_retry_at survives untouched and is reclassified on the
+          // very next tick). Write a synthetic 'failed' row in EXACTLY the
+          // shape a real declined charge leaves behind — no PI, no amount
+          // moved, description carrying the 'WaveGuard Monthly' marker
+          // isMonthlyObligationRow requires, metadata.billed_month stamped
+          // — so the 10 AM retry sweep's armedRetryQuery picks it up on its
+          // very next run and collects it through the SAME lock-protected
+          // monthly-charge path (with its own 3-rung backoff if it fails
+          // again), reusing the existing retry ladder rather than a
+          // bespoke deferred-collection queue.
+          try {
+            await db('payments').insert({
+              customer_id: customer.id,
+              status: 'failed',
+              payment_date: etDateString(now),
+              amount: customer.monthly_rate,
+              description: `${customer.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${customer.first_name} ${customer.last_name} — DEFERRED (collection lock held elsewhere)`,
+              failure_reason: `Could not confirm exclusive collection after ${MONTHLY_LOCK_RETRY_ATTEMPTS} short retries (another process held the same customer's billing lock — expected only during a deploy overlap) — deferred to the retry sweep`,
+              retry_count: 0,
+              next_retry_at: new Date(),
+              metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: monthKey, tier: customer.waveguard_tier || '', deferred_reason: 'lock_contention' }),
+            });
+          } catch (insertErr) {
+            logger.error(`[billing-cron] Could not persist deferred-collection retry row for customer ${customer.id}: ${insertErr.message} — falling back to the alert only`);
+          }
           try {
             await db('customer_health_alerts').insert({
               customer_id: customer.id,
               alert_type: 'billing_collection_deferred',
               severity: 'high',
-              title: 'Monthly dues NOT collected — collection lock held elsewhere',
-              description: `The daily dues cron could not confirm exclusive collection for this customer after ${MONTHLY_LOCK_RETRY_ATTEMPTS} short retries (another process held the same customer's billing lock the whole time — expected only during a deploy overlap). Today's billing_day will not recur until next month with no further automatic attempt. Use Customer 360 "Charge now" to collect ${monthKey} manually.`,
+              title: 'Monthly dues collection deferred — collection lock held elsewhere',
+              description: `The daily dues cron could not confirm exclusive collection for this customer after ${MONTHLY_LOCK_RETRY_ATTEMPTS} short retries (another process held the same customer's billing lock the whole time — expected only during a deploy overlap). A retry row was armed for the 10 AM retry sweep to pick up; if it also fails, a "final retry failed" SMS/alert will follow that ladder. Customer 360 "Charge now" can also collect ${monthKey} manually at any time.`,
               trigger_data: JSON.stringify({ billed_month: monthKey, source: 'billing_monthly_cron_lock_contention' }),
             });
           } catch (alertErr) {
@@ -361,7 +397,7 @@ const BillingCron = {
           }
           await logAutopay(customer.id, 'skipped_lock_contention', {
             details: { source: 'autopay', billed_month: monthKey },
-          }).catch(() => {});
+          });
           skipped++;
           continue;
         }
@@ -951,6 +987,14 @@ const BillingCron = {
               billed_month: obligationMonth || undefined,
             }, retryIdempotencyKey);
             return { charged };
+          }, {
+            // This sweep IS the 'billing-retries' job (scheduler.js wraps
+            // processPaymentRetries in runExclusive('billing-retries', ...))
+            // — checking that job's own lock here would report it "held" by
+            // this very call and refuse every retry. Still checks
+            // 'billing-monthly' (a different job, a real other-process
+            // concern).
+            excludeJobLocks: ['billing-retries'],
           }).catch((lockErr) => {
             if (lockErr.code === 'BILLING_CLAIM_HELD_ELSEWHERE') return { claimHeldElsewhere: true };
             throw lockErr;
