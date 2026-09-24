@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { pairBeforeAfterPhotos } = require('../lawn-visit-input');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
@@ -2582,39 +2583,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // keying on it would falsely pair two arbitrary first-selected photos as
     // the same area (codex P1 #3038 r3). Photos without real zones fall back
     // to best-vs-best, same as before this change.
-    // PAIRABLE_ZONES excludes 'close_up'/'trouble' — a non-pairable zone value
-    // is treated the same as no zone at all, both for finding a match and for
-    // the "both sides zoned but disjoint" check below.
-    // Close-up / trouble photos are never progress evidence: they are
-    // excluded from the best-vs-best fallback too, so a visit whose only
-    // photos are close-ups shows no comparison rather than a false one.
-    const PAIRABLE_ZONES = new Set(['front', 'back', 'side']);
-    const NON_PAIRABLE_ZONES = new Set(['close_up', 'trouble']);
-    const rawZone = (p) => String(p?.zone || '').trim().toLowerCase();
-    const zoneKey = (p) => (PAIRABLE_ZONES.has(rawZone(p)) ? rawZone(p) : '');
-    const fallbackEligible = (p) => !NON_PAIRABLE_ZONES.has(rawZone(p));
-    let beforePhoto = null;
-    let afterPhoto = null;
-    for (const candidate of beforeCandidates) {
-      const zone = zoneKey(candidate);
-      if (!zone) continue;
-      const match = afterCandidates.find((p) => zoneKey(p) === zone);
-      if (match) {
-        beforePhoto = candidate;
-        afterPhoto = match;
-        break;
-      }
-    }
-    if (!beforePhoto) {
-      const bothSidesZoned = beforeCandidates.some((p) => zoneKey(p))
-        && afterCandidates.some((p) => zoneKey(p));
-      const beforeFallback = beforeCandidates.find(fallbackEligible) || null;
-      const afterFallback = afterCandidates.find(fallbackEligible) || null;
-      // Zones recorded on both sides but disjoint → no honest pair exists.
-      // A side with only close-up/trouble photos has nothing to compare.
-      beforePhoto = beforeFallback;
-      afterPhoto = !bothSidesZoned && beforeFallback ? afterFallback : null;
-    }
+    const { before: beforePhoto, after: afterPhoto } = pairBeforeAfterPhotos(beforeCandidates, afterCandidates);
     beforeAfter = {
       before: {
         date: initialRow.service_date,

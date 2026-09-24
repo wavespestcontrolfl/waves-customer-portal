@@ -246,6 +246,32 @@ function photoTypeForZone(zone) {
   return PHOTO_TYPE_BY_ZONE[zone] || 'general';
 }
 
+// Before/after photo pair for the progress slider (report + customer portal).
+// Candidates arrive best-first. Only a same-spot zone pairs: 'front', plus
+// legacy 'back'/'side' rows from before the 2026-09-24 rename. 'close_up' and
+// 'trouble' are a different spot every visit, so they never pair and never
+// fill the best-vs-best fallback either. Zones recorded on both sides but
+// disjoint → no honest pair (after is null). photo_type is not a location
+// claim (the gate-off path synthesizes it from upload order), so only `zone`
+// counts.
+const PAIRABLE_ZONES = new Set(['front', 'back', 'side']);
+const NON_PAIRABLE_ZONES = new Set(['close_up', 'trouble']);
+function pairBeforeAfterPhotos(beforeCandidates = [], afterCandidates = []) {
+  const rawZone = (p) => String(p?.zone || '').trim().toLowerCase();
+  const zoneKey = (p) => (PAIRABLE_ZONES.has(rawZone(p)) ? rawZone(p) : '');
+  for (const candidate of beforeCandidates) {
+    const zone = zoneKey(candidate);
+    if (!zone) continue;
+    const match = afterCandidates.find((p) => zoneKey(p) === zone);
+    if (match) return { before: candidate, after: match };
+  }
+  const bothSidesZoned = beforeCandidates.some((p) => zoneKey(p)) && afterCandidates.some((p) => zoneKey(p));
+  const eligible = (p) => !NON_PAIRABLE_ZONES.has(rawZone(p));
+  const before = beforeCandidates.find(eligible) || null;
+  const after = !bothSidesZoned && before ? (afterCandidates.find(eligible) || null) : null;
+  return { before, after };
+}
+
 // The gate-on request contract for /assess photos: at most MAX_VISIT_PHOTOS,
 // each with base64 data and an optional technician zone label.
 function validateVisitPhotos(photos) {
@@ -299,5 +325,5 @@ function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) 
 }
 
 module.exports = {
-  GATE, PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, PROMPT_DIGEST, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, validateVisitPhotos, contextHash
+  GATE, PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, PROMPT_DIGEST, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
 };

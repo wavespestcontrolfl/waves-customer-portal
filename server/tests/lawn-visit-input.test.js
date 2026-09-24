@@ -136,3 +136,32 @@ describe('prompt input digest', () => {
     expect(visit.contextHash({ ...original, photos: [photo('different bytes')] })).not.toBe(expected);
   });
 });
+
+// One pairing rule feeds both the service report and the customer portal's
+// /api/lawn-health slider (Codex #4768 r1).
+describe('pairBeforeAfterPhotos', () => {
+  const { pairBeforeAfterPhotos } = require('../services/lawn-visit-input');
+  const p = (id, zone = null) => ({ id, zone });
+
+  test('Front pairs with Front even when it is not the best-ranked photo', () => {
+    expect(pairBeforeAfterPhotos([p('b1', 'close_up'), p('b2', 'front')], [p('a1'), p('a2', 'front')]))
+      .toEqual({ before: p('b2', 'front'), after: p('a2', 'front') });
+  });
+
+  test('two close-ups never pair and never fill the fallback', () => {
+    expect(pairBeforeAfterPhotos([p('b', 'close_up')], [p('a', 'close_up')])).toEqual({ before: null, after: null });
+  });
+
+  test('a trouble photo is never the "before" of a front photo', () => {
+    expect(pairBeforeAfterPhotos([p('b', 'trouble')], [p('a', 'front')])).toEqual({ before: null, after: null });
+  });
+
+  test('unlabeled photos fall back best-vs-best, skipping close-up and trouble', () => {
+    expect(pairBeforeAfterPhotos([p('b1', 'trouble'), p('b2')], [p('a1', 'close_up'), p('a2')]))
+      .toEqual({ before: p('b2'), after: p('a2') });
+  });
+
+  test('zoned but disjoint same-spot zones show no after photo', () => {
+    expect(pairBeforeAfterPhotos([p('b', 'front')], [p('a', 'back')])).toEqual({ before: p('b', 'front'), after: null });
+  });
+});

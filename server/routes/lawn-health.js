@@ -13,6 +13,7 @@ const { authenticate } = require('../middleware/auth');
 const { getLatestTurfHeight, getTurfHeightTrend } = require('../services/turf-height-service');
 const { buildMowingHeightContext } = require('../services/service-report/turf-height');
 const logger = require('../services/logger');
+const { pairBeforeAfterPhotos } = require('../services/lawn-visit-input');
 
 const CARD_PRIORITY_RANK = { high: 1, medium: 2, low: 3 };
 
@@ -224,11 +225,11 @@ router.get('/:customerId', async (req, res, next) => {
     if (assessments.length >= 2) {
       const initialPhotos = await db('lawn_assessment_photos')
         .where({ assessment_id: initial.id, customer_visible: true })
-        .orderByRaw('is_best_photo DESC, quality_score DESC')
-        .limit(1);
+        .orderByRaw('is_best_photo DESC, quality_score DESC, photo_order ASC');
 
-      const latestBest = latestPhotos.find(p => p.is_best_photo) || latestPhotos[0];
-      const initialBest = initialPhotos[0] || null;
+      // Same pairing rule as the service report: Front pairs Front; close-up
+      // and trouble photos never stand in as progress.
+      const { before: initialBest, after: latestBest } = pairBeforeAfterPhotos(initialPhotos, latestPhotos);
 
       const calcOverall = (a) => lawnOverall(a);
 
