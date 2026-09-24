@@ -10917,6 +10917,9 @@ const CallRecordingProcessor = {
           const extraCity = String(extra.city || '').trim();
           const extraZip = String(extra.zip || '').trim();
           if (!extraCity || !extraZip) continue;
+          // The disputed premise waits for the conflict card on this legacy
+          // path too (codex r36 P1).
+          if (disputedPremise(extra)) continue;
           const recordedExtra = await customerProperties.recordCallProperty({
             customerId,
             address_line1: extra.address_line1,
