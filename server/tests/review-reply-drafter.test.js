@@ -372,7 +372,7 @@ describe('verifyReplyText — public-surface safety net', () => {
   });
   test('provenance: sentence-initial names need provenance too; common starters are exempt', () => {
     expect(verify(good('Hi Dana,\n\nKevin was glad to help with the ants. Marcus says thanks.'))).toBe('unlisted_name');
-    expect(verify(good('Hi Dana,\n\nGlad the ants are handled. Marcus says thanks. Anytime you need us, reach out.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nGlad the ants are handled. Marcus says thanks. Kevin will help anytime you need us.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nGlad the ants are gone. Marcus says thanks. Thanks for having us out.'))).toBeNull();
   });
   test('provenance: fragments of unrelated served cities do not launder a name', () => {
@@ -467,10 +467,17 @@ describe('verifyReplyText — public-surface safety net', () => {
       'Truly says thanks, and Marcus is glad the ants are gone.',
       'Roach says thanks, and Marcus is glad the ants are gone.',
       'Palm was glad to help alongside Marcus.',
-      'Moles are no match for Marcus.',
       'Treatment is glad Marcus handled the ants.',
       'Communication matters, and we are glad Marcus could help.',
     ]) expect(verify(good(`Hi Dana,\n\n${body}`))).toBe('unlisted_name');
+    // 2026-09-25 fix: the sentence-initial pass condition is now restricted
+    // to gerund/participle/adverb morphology (ends in ing/ed/ly) — "Moles"
+    // does not, so it is back to a plain unlisted_name rejection (pre-push
+    // P1: the earlier, unrestricted version of this pass also let
+    // "Sentricon"/"Jenkins around your property…" through).
+    expect(verify(good('Hi Dana,\n\nMoles are no match for Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nSentricon around your property can help with ants.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nJenkins around your property can help with ants.'))).toBe('unlisted_name');
     // Openers are sentence-start only — never a lowercase name slot (codex r1).
     expect(verify(good('Hi Dana, we will pass this along to roaches, who handled the kitchen with Marcus.'))).toBe('unlisted_name');
     expect(verify(good('Hello there, we are glad our technician roaches could help with your ants.'), grounding({ firstName: null, mentionedTechNames: [] }))).toBe('unlisted_name');
@@ -493,7 +500,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, glad the service hit the mark. Thanks for having us out to the house.'), g)).toBeNull();
     // An account service category makes its words sourced.
     const g2 = grounding({ text: 'Great service!', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['mosquito control'], city: null } });
-    expect(verify(good('Hi Dana, glad the mosquito control is doing its job. Thanks for sticking with us over the years.'), g2)).toBeNull();
+    expect(verify(good('Hi Dana, glad you trust us with the mosquito control. Thanks for sticking with us over the years.'), g2)).toBeNull();
+    // …the category sources the NAME only; "Great service!" states no
+    // outcome, so an efficacy idiom about it is unsourced (round-6 P1).
+    expect(verify(good('Hi Dana, glad the mosquito control is doing its job.'), g2)).toBe('unlisted_service_claim');
     // Outcome vocabulary is a claim too.
     expect(verify(good('Hi Dana, glad we eliminated the infestation and protected your home.'), g)).toBe('unlisted_service_claim');
     const g3 = grounding({ text: 'They eliminated our ant infestation fast!', mentionedTechNames: [], topics: [], account: null });
@@ -568,7 +578,10 @@ describe('verifyReplyText — public-surface safety net', () => {
   test('service-quality adjectives need the reviewer\'s words (rating-only reviews get none)', () => {
     const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
     expect(verify(good("Hello there, we're glad our team was helpful, honest, and efficient. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
-    expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBeNull();
+    // The old fixed "pest and lawn team" line can never post again (2026-09-24
+    // fix): it is now a banned stock phrase, not a passing no_text reply.
+    expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBe('stock_phrase');
+    expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('quantified tenure needs the whole phrase in the review', () => {
     const g = grounding({ text: '10/10 great service', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control'], city: null } });
@@ -623,21 +636,344 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus is glad the ants are gone from your Venice kitchen.'))).toBe('unlisted_city');
     expect(verify(good('Hi Dana, Marcus is glad the ants are gone from your Sarasota kitchen.'))).toBeNull();
   });
-  test('non-repetition against recent posted replies', () => {
-    const recent = [good('Hi Dana, glad Marcus got out quickly and the ants are staying out of your kitchen. Thanks.')];
-    expect(verify(CLEAN, grounding(), { recentReplies: recent })).toBe('repetitive_opening');
-    const recent2 = [good('Hello there, glad Marcus got out fast and the ants are staying out of your kitchen. We will pass that along to him.')];
-    expect(verify(CLEAN, grounding(), { recentReplies: recent2 })).toBe('repetitive_body');
+  test('non-repetition compares the opening AFTER the greeting, not the greeting itself (2026-09-24 fix)', () => {
+    // Same after-greeting opening, different greeting name: still caught —
+    // the check is greeting-blind, not merely name-blind.
+    const sameContentDifferentGreeting = good('Hi Priya,\n\nGlad Marcus got out fast and the ants are staying out of your kitchen. Thanks.');
+    expect(verify(CLEAN, grounding(), { recentReplies: [sameContentDifferentGreeting] })).toBe('repetitive_opening');
+    // Same greeting, content that only differs from the 5th word on ("fast"
+    // vs "quickly"): the fixed opening check (now 5 REAL content words) no
+    // longer fires, but the near-duplicate is still caught — correctly, as
+    // repetitive_body.
+    const sameGreetingNearDuplicate = good('Hi Dana,\n\nGlad Marcus got out quickly and the ants are staying out of your kitchen. We will pass that along to him.');
+    expect(verify(CLEAN, grounding(), { recentReplies: [sameGreetingNearDuplicate] })).toBe('repetitive_body');
+    // The bug itself: two genuinely different replies that both open "Hi
+    // Dana, Thanks for the ..." used to collide because the greeting ate 2
+    // of the 5 compared words, leaving only "thanks for the" as the signal.
+    const genuinelyDifferentPrior = good('Hi Dana,\n\nThanks for the wonderful review, we hope your week goes great and the ants stay far away for good this time around here.');
+    const genuinelyDifferentDraft = good('Hi Dana,\n\nThanks for the nice note, Marcus is glad the ants in your kitchen are finally gone.');
+    expect(verify(genuinelyDifferentDraft, grounding(), { recentReplies: [genuinelyDifferentPrior] })).toBeNull();
   });
   test('the greeting is mandatory: "Hi <reviewer first name>," or "Hello there,"', () => {
     expect(verify(good('Thanks for trusting Marcus with the ants in your kitchen.'))).toBe('missing_greeting');
     expect(verify(good('Hey Dana, thanks for trusting Marcus with the ants in your kitchen.'))).toBe('missing_greeting');
     expect(verify(good('Hello there, thanks for trusting Marcus with the ants in your kitchen.'))).toBeNull();
     const g = grounding({ firstName: null, text: '', mentionedTechNames: [], topics: [], account: null });
-    expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBeNull();
+    expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('placeholders are rejected', () => {
     expect(verify(good('Hi {first name}, Marcus is glad the ants are gone from your kitchen.'))).toBe('placeholder');
+  });
+});
+
+describe('2026-09-24 fix: sentence-initial gerunds pass, servicesPerformed words are sourced', () => {
+  // Reproduces the prod diagnosis: a reviewer whose review names no specific
+  // service, but whose account has a completed "Cockroach Treatment" visit.
+  function tylerGrounding(overText) {
+    const text = overText ?? 'We had a cockroach problem in our kitchen from the previous owners. Adam was able to quickly find their nest and explain how he was going to take care of them.';
+    const g = grounding({ firstName: 'Tyler', text, mentionedTechNames: ['Adam'], topics: ['technician', 'pest'], forbiddenNames: ['Bob'] });
+    g.allow.names = ['Tyler', 'Adam'];
+    // Whole-phrase provenance (2026-09-25 P1 fix): the account's own public
+    // name for the completed service, not the bare component words.
+    g.allow.servicePhrases = ['cockroach treatment'];
+    return g;
+  }
+  test('"Working around your schedule…" and sentence-initial "Inheriting…" pass', () => {
+    const g = tylerGrounding();
+    expect(Drafter.verifyReplyText(good("Hi Tyler,\n\nGood to hear Adam found the source and explained the plan. Working around your schedule is part of the job, and we'll pass your note along."), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad we handled the nest. Thanks for trusting us with the cockroach treatment.'), g)).toBeNull();
+  });
+  test('a common first name (Kevin) sentence-initial still rejects', () => {
+    const g = tylerGrounding();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nKevin did a great job with the cockroach situation.'), g)).toBe('unlisted_name');
+  });
+  test('a known (forbidden tech) name sentence-initial still rejects', () => {
+    const g = tylerGrounding();
+    g.allow.forbiddenNames = ['Fields'];
+    // Caught by the earlier known-name check (forbidden_name) rather than the
+    // proper-noun loop — still a rejection, just a more specific code.
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nFields did a great job with the cockroach situation.'), g)).toBe('forbidden_name');
+  });
+  test('an on-time claim the reviewer did not make is still rejected', () => {
+    const g = tylerGrounding('Adam fixed our cockroach problem quickly.');
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nGlad Adam was on time.'), g)).toBe('unlisted_experience_claim');
+  });
+  test('service words are sourced only as a WHOLE PHRASE, never freely composed (2026-09-25 P1 fix)', () => {
+    // Review mentions "ants"; the account only has "Cockroach Treatment".
+    // "ant" + "treatment" must not compose into a sourced "ant treatment".
+    const g = grounding({ text: 'We had ants in the kitchen.', mentionedTechNames: [], topics: [] });
+    g.allow.servicePhrases = ['cockroach treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for the note about the ant treatment.'), g)).toBe('unlisted_service_claim');
+    // The full phrase, used as written, passes.
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for trusting us with the cockroach treatment.'), g)).toBeNull();
+    // …but the phrase sources only the service NAME, never an efficacy
+    // claim about it (round-6 P1): the review states no outcome at all.
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the cockroach treatment did its job.'), g)).toBe('unlisted_service_claim');
+  });
+});
+
+describe('2026-09-24 round-6 P1 fixes: outcome idioms, negated membership, reply version', () => {
+  const genericGrounding = (text = 'Great service.') => {
+    const g = grounding({ text, mentionedTechNames: [], topics: [] });
+    g.allow.servicePhrases = ['cockroach treatment'];
+    return g;
+  };
+  test.each([
+    'Glad the cockroach treatment did its job.',
+    'Glad the cockroach treatment did the trick.',
+    'Glad the cockroach treatment made a real difference.',
+    'Glad the cockroach treatment paid off.',
+  ])('an outcome idiom after a sourced service name needs outcome evidence: %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBe('unlisted_service_claim');
+  });
+  test('the idiom passes when the review states that outcome about the same subject', () => {
+    const g = genericGrounding('The cockroach treatment did the trick, no more roaches.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the cockroach treatment did the trick.'), g)).toBeNull();
+  });
+  test('"I am not a member" cannot source "Glad to have you as a member"', () => {
+    const g = genericGrounding('I am not a member but the tech was great.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad to have you as a member.'), g)).toBe('negated_review_claim');
+  });
+  test('a negated service plan cannot source an affirmative one', () => {
+    const g = genericGrounding('We do not have a service plan yet.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for being on our service plan.'), g)).toBe('negated_review_claim');
+  });
+  test('an affirmative membership the reviewer wrote still passes', () => {
+    const g = genericGrounding('We have been a member for years.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for being a member.'), g)).toBeNull();
+  });
+  test.each([
+    'Glad the cockroach treatment is working for you.',
+    'Glad the cockroach treatment keeps working.',
+    'Glad the cockroach treatment is keeping them away.',
+  ])('ongoing efficacy after a sourced service name needs outcome evidence (round 7): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBe('unlisted_service_claim');
+  });
+  test('"working" as ordinary prose is not an efficacy claim', () => {
+    const g = genericGrounding('Great service, the team was hard-working.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nWorking around your schedule is part of the job.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nWe enjoy working with you.'), g)).toBeNull();
+  });
+  test.each([
+    ['I am not in your program.', 'Glad to have you in our program.'],
+    ['We are not on a quarterly schedule.', 'Glad the quarterly service suits you.'],
+    ['We do not do monthly service.', 'Glad the monthly service suits you.'],
+  ])('negated account status never sources the affirmative (round 7): %s', (review, line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding(review))).toBe('negated_review_claim');
+  });
+  test('a linked account with no completed visit does not prove a visit (round 8)', () => {
+    const g = grounding({ text: '', rating: 5, mentionedTechNames: [], topics: [], account: { relationship: null, tenure: null, serviceCategories: [], city: null } });
+    g.review.hasText = false;
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went smoothly.'), g)).toBe('unlisted_experience_claim');
+  });
+  test.each(["O'Neil", 'Mary-Jane'])('a punctuated reviewer first name is allowed in the greeting (round 8): %s', (name) => {
+    const g = grounding({ firstName: name, text: 'Great service.', mentionedTechNames: [], topics: [] });
+    g.allow.names = [name];
+    expect(Drafter.verifyReplyText(good(`Hi ${name},\n\nGlad to hear it, and thanks for writing.`), g)).toBeNull();
+  });
+  test.each([["O'Neil", 'Neil'], ['Mary-Jane', 'Jane']])('a piece of a punctuated name is not sourced outside the whole name (round 9): %s', (name, piece) => {
+    const g = grounding({ firstName: name, text: 'Great service.', mentionedTechNames: [], topics: [] });
+    g.allow.names = [name];
+    expect(Drafter.verifyReplyText(good(`Hi ${name},\n\n${piece} was glad to help.`), g)).toBe('unlisted_name');
+  });
+  test.each([
+    'Thanks for being on our plan.',
+    'We appreciate you trusting us with your plan.',
+  ])('possessive/status plan wording needs review evidence (round 11): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBe('unlisted_service_claim');
+  });
+  test('ordinary "the plan" prose still passes, and a negated plan rejects the possessive (round 11)', () => {
+    const g = genericGrounding('Marcus explained the plan and was great.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad Marcus explained the plan.'), { ...g, allow: { ...g.allow, names: [...g.allow.names, 'Marcus'] } })).toBeNull();
+    // Rejected either way: "on our plan" is not the review's literal wording.
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for being on our plan.'), genericGrounding('We are not on your plan.'))).toMatch(/^(?:negated_review_claim|unlisted_service_claim)$/);
+  });
+  test.each([
+    'Glad the cockroach treatment was successful for you.',
+    'The cockroach treatment brought real relief.',
+    'Thanks for trusting us with the cockroach treatment, it was a success.',
+  ])('an account-only service name outside a fixed frame rejects, whatever the predicate (round 12, structural): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBe('unlisted_service_claim');
+  });
+  test.each([
+    'Thanks for choosing us for the cockroach treatment.',
+    'Glad we could help with the cockroach treatment.',
+    'Glad you chose us for the cockroach treatment at your home.',
+  ])('the fixed frames pass (round 12): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBeNull();
+  });
+  test.each([
+    'Calling us was easy, and we appreciate your review.',
+    'Scheduling your appointment went smoothly.',
+    'Planning your visit with us was easy.',
+  ])('an interaction opener the reviewer never used rejects (round 12): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).not.toBeNull();
+  });
+  test('an interaction opener the reviewer did use still passes (round 12)', () => {
+    const g = genericGrounding('Scheduling was easy and the tech was great.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nScheduling should always be that easy.'), g)).toBeNull();
+  });
+  test('a service phrase inside a longer review word is not the reviewer naming it (round 13)', () => {
+    const g = genericGrounding('Important treatment and great company.');
+    g.allow.servicePhrases = ['ant treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the Ant Treatment was successful for you.'), g)).toBe('unlisted_service_claim');
+  });
+  test.each([
+    'We appreciate that scheduling your appointment was easy.',
+    'We appreciate hearing that calling our office was easy.',
+  ])('interaction gerunds need review words in any position (round 13): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding('Great company and friendly people.'))).toBe('unlisted_experience_claim');
+  });
+  test.each([
+    'Glad the Ant Treatment was successful for you.',
+    'We are glad the Ant Treatment brought relief.',
+  ])('a review that names the service but negates its success cannot source success (round 13): %s', (line) => {
+    const g = genericGrounding('The ant treatment was not successful, but the staff were friendly.');
+    g.allow.servicePhrases = ['ant treatment'];
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), g)).toMatch(/^(?:negated_review_claim|unlisted_service_claim)$/);
+  });
+  test('REPLY_VERSION moved past reply-v1 so stored safe-copy drafts are never reused on a publish retry', () => {
+    expect(Drafter.REPLY_VERSION).not.toBe('reply-v1');
+  });
+});
+
+describe('2026-09-24 P1 fix: worked/handled negation restored, compliment adjectives restored, outcome fallback widened', () => {
+  test('a negated outcome the review stated is still caught: "did not work" blocks "Glad the treatment worked."', () => {
+    const g = grounding({ text: 'The treatment did not work.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the treatment worked. Thanks for choosing us.'), g)).toBe('negated_review_claim');
+  });
+  test('a compliment the reviewer did not make is still rejected: "helpful and thorough" with no such praise in the review', () => {
+    const g = grounding({ text: 'Marcus came out and finished the job.', mentionedTechNames: ['Marcus'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad to hear it. Our team was helpful and thorough.'), g)).toBe('unlisted_experience_claim');
+  });
+  test('"got much much better" licenses an outcome word the review did not literally use ("handled")', () => {
+    const g = grounding({ text: 'Our ant situation got much much better.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the ants are handled.'), g)).toBeNull();
+  });
+  test('"under control" licenses an outcome word the review did not literally use ("handled")', () => {
+    const g = grounding({ text: 'Our spider issues are under control.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the spiders are handled.'), g)).toBeNull();
+  });
+  test('sentence-initial gerunds from the earlier fix still pass (regression guard)', () => {
+    const g = grounding({ firstName: 'Tyler', text: 'We had a cockroach problem in our kitchen from the previous owners. Adam was able to quickly find their nest and explain how he was going to take care of them.', mentionedTechNames: ['Adam'], topics: ['technician', 'pest'], forbiddenNames: ['Bob'] });
+    g.allow.names = ['Tyler', 'Adam'];
+    g.allow.servicePhrases = ['cockroach treatment'];
+    expect(Drafter.verifyReplyText(good("Hi Tyler,\n\nGood to hear Adam found the source and explained the plan. Working around your schedule is part of the job, and we'll pass your note along."), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad we handled the nest. Thanks for trusting us with the cockroach treatment.'), g)).toBeNull();
+  });
+});
+
+describe('2026-09-25 pre-push round: legacy labels / greedy exemption / composable service words / greeting strip / invented interactions', () => {
+  test('worked/handled still need review provenance: generic praise does not license them (confirms head a3af06c106)', () => {
+    const g = grounding({ text: 'Marcus was very nice and professional.', mentionedTechNames: ['Marcus'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad everything worked and the issue was handled.'), g)).toBe('unlisted_service_claim');
+  });
+  test('the greeting strip only removes a recognized greeting word, not the body\'s first comma (2026-09-25 P2 fix)', () => {
+    // A manual prior reply with no greeting word at all: its real opening
+    // must survive untouched for the comparison, not get truncated at its
+    // first (mid-sentence) comma as if that were a greeting boundary.
+    const manual = 'Thanks for choosing us for pest control, we always try to help fast.';
+    const draft = good('Hi Dana,\n\nThanks for choosing us for pest control, glad the ants are finally gone from your kitchen.');
+    expect(Drafter.verifyReplyText(draft, grounding(), { recentReplies: [manual] })).toBe('repetitive_opening');
+  });
+  test('a no-text, no-account review invents no interaction: "visit went smoothly" is rejected', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(Drafter.verifyReplyText(good('Hello there,\n\nGlad the visit went smoothly.'), g)).toBe('unlisted_experience_claim');
+  });
+  test('the same no-text body passes once account facts exist (something DOES prove a relationship)', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hello there,\n\nGlad the visit went smoothly.'), g)).toBeNull();
+  });
+  test('a text review still licenses ordinary visit language even with no account facts', () => {
+    const g = grounding({ text: 'Adam explained everything.', mentionedTechNames: ['Adam'], topics: ['technician'], account: null });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went well.'), g)).toBeNull();
+  });
+  test('a TEXT review that NEGATES an interaction still blocks the un-negated claim (2026-09-25 P1 fix, pre-push round 3)', () => {
+    const g = grounding({ text: 'He never explained anything and did not answer my questions.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad we explained everything and answered your questions.'), g)).toBe('negated_review_claim');
+  });
+  test('the same root, un-negated in the review, passes', () => {
+    const g = grounding({ text: 'Adam explained everything clearly.', mentionedTechNames: ['Adam'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad Adam explained everything.'), g)).toBeNull();
+  });
+  test('a root the review never mentions at all is left alone (ordinary prose)', () => {
+    const g = grounding({ text: 'Great service', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went well.'), g)).toBeNull();
+  });
+});
+
+describe('2026-09-25 pre-push round 2: subject-scoped outcome fallback / opener allowlist / phrase punctuation / membership claims', () => {
+  test('the outcome fallback is subject-scoped: an unrelated account phrase cannot borrow the review\'s outcome elsewhere', () => {
+    const g = grounding({ text: 'The ants are gone.', mentionedTechNames: [], topics: [] });
+    g.allow.servicePhrases = ['cockroach treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the Cockroach Treatment worked so well.'), g)).toBe('unlisted_service_claim');
+  });
+  test('"Glad the ants are handled" passes: the review states an outcome about the SAME subject (ants)', () => {
+    const g = grounding({ text: 'Our ant situation got much much better.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the ants are handled.'), g)).toBeNull();
+  });
+  test('"Glad the spiders are handled" passes: the review states an outcome about the SAME subject (spiders)', () => {
+    const g = grounding({ text: 'Our spider issues are under control.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the spiders are handled.'), g)).toBeNull();
+  });
+  test('resolution paraphrases (behind you / history / thing of the past) are subject-scoped the same way (2026-09-25 round-3 P1 fix)', () => {
+    const g1 = grounding({ text: 'The ants are gone.', mentionedTechNames: [], topics: [] });
+    g1.allow.servicePhrases = ['cockroach treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the Cockroach Treatment is history.'), g1)).toBe('unlisted_service_claim');
+    const g2 = grounding({ text: 'The ants are gone.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the ants are history.'), g2)).toBeNull();
+  });
+  test('the sentence-initial pass is now purely the ORDINARY_OPENERS allowlist: Working/Inheriting pass, surnames that happen to end in -ing do not (2026-09-25 P1 fix)', () => {
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nWorking around your schedule is part of the job.'), grounding())).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nInheriting a mess is no fun, but we are glad to help.'), grounding())).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nSterling around your property can help with ants.'), grounding())).toBe('unlisted_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nHarding around your property can help with ants.'), grounding())).toBe('unlisted_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nSentricon around your property can help with ants.'), grounding())).toBe('unlisted_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nJenkins around your property can help with ants.'), grounding())).toBe('unlisted_name');
+  });
+  test('service-phrase spans match names joined by "&" or a hyphen, not just plain whitespace (2026-09-25 P2 fix)', () => {
+    const g1 = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [] });
+    g1.allow.servicePhrases = ['flea tick treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you chose the Flea & Tick Treatment.'), g1)).toBeNull();
+    const g2 = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [] });
+    g2.allow.servicePhrases = ['one time pest control'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you chose the One-Time Pest Control for your home.'), g2)).toBeNull();
+  });
+  test('membership/plan claims are sourced ONLY by the review\'s own words — a recurring account alone is not enough (2026-09-25 round-3 fix)', () => {
+    const gNoAccount = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [], account: null });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for choosing our membership plan.'), gNoAccount)).toBe('unlisted_service_claim');
+    // Two completed visits alone label an account "recurring" — no plan
+    // evidence at all — so that relationship fact must not license this.
+    const gRecurring = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'established', serviceCategories: ['pest control'], city: null } });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for choosing our membership plan.'), gRecurring)).toBe('unlisted_service_claim');
+    // The review's own words still source it.
+    const gReviewSaysIt = grounding({ text: 'We love our membership plan with Waves.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for choosing our membership plan.'), gReviewSaysIt)).toBeNull();
+  });
+  test('"explained the plan" is ordinary prose — bare "plan" is not a claim', () => {
+    const g = grounding({ text: 'Adam explained everything.', mentionedTechNames: ['Adam'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad Adam explained the plan.'), g)).toBeNull();
+  });
+});
+
+describe('2026-09-25 pre-push round 4: results restored, explain/answered/communicat* back under EXPERIENCE_CLAIM_RE', () => {
+  test('"results" needs review provenance (P1)', () => {
+    const g = grounding({ text: 'Great company and friendly people.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you saw such positive results.'), g)).toBe('unlisted_service_claim');
+    const g2 = grounding({ text: 'Great results with the ant problem.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you saw such positive results.'), g2)).toBeNull();
+  });
+  test('explain/answered/communicat* now need review provenance the same way every other EXPERIENCE_CLAIM_RE term does (P1)', () => {
+    const generic = grounding({ text: 'Great company and friendly people.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nWe explained everything clearly.'), generic)).toBe('unlisted_experience_claim');
+    const g2 = grounding({ text: 'Adam explained everything.', mentionedTechNames: ['Adam'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad Adam explained it all.'), g2)).toBeNull();
+    const g3 = grounding({ text: 'He never explained anything.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad we explained it.'), g3)).toBe('negated_review_claim');
+  });
+  test('"visit" stays out of EXPERIENCE_CLAIM_RE — a text review still licenses ordinary visit language', () => {
+    const g = grounding({ text: 'Great company and friendly people.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went well.'), g)).toBeNull();
   });
 });
 
@@ -656,16 +992,18 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(payload.text).toContain('Review text:');
     expect(payload.system).not.toContain('ants in the kitchen');
   });
-  test('retries with every prior violation and its words named, withholds account facts from attempt 3, then falls back to safe copy', async () => {
+  test('retries with every prior violation and its words named, withholds account facts from attempt 3, then parks as verifier_reject (no template)', async () => {
     mockDispatch
       .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') })
       .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, call 941-555-1212 about the ants Marcus treated.') })
       .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, our records show Marcus treated the ants for you.') })
       .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, Marcus says the ants are gone for good from your kitchen.') });
     const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
-    expect(r.ok).toBe(true);
-    expect(r.safeCopy).toBe(true);
-    expect(r.text).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
+    // 2026-09-24 owner ruling: a template reply is worse than a parked row —
+    // every ladder attempt rejected means ok:false, never a canned last rung.
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('verifier_reject');
+    expect(r.text).toBeUndefined();
     expect(r.rejections).toEqual(['forbidden_name', 'phone', 'private_channel', 'banned_phrase']);
     expect(r.rejectionDetails.map((d) => d.span)).toEqual([null, null, 'our records', null]);
     expect(r.rejectionDetails.every((d) => d.text === undefined && d.promptSpan === undefined)).toBe(true);
@@ -682,7 +1020,7 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(mockDispatch.mock.calls[2][1].text).toContain('ACCOUNT FACTS: none available');
     expect(mockDispatch.mock.calls[3][1].text).toContain('ACCOUNT FACTS: none available');
   });
-  test('safe copy is verified like any draft: a low rating still parks, and the row reports every rejection', async () => {
+  test('every rejected draft is re-verified the same way: a low rating still parks, and the row reports every rejection', async () => {
     mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') });
     const r = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [] });
     expect(r.ok).toBe(false);
@@ -691,11 +1029,12 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(r.rejectionDetails).toHaveLength(4);
     expect(r.rejectionDetails[0]).toEqual({ attempt: 1, code: 'forbidden_name', span: null });
     // The opening span starts with the greeting name: redacted from stored details (GitHub r2 P1).
-    const rep = Drafter.verifyReplyDetailed(CLEAN, grounding(), { recentReplies: [good('Hi Dana, glad Marcus got out quickly and the ants are staying out of your kitchen. Thanks.')] });
+    const recentSameOpening = [good('Hi Priya,\n\nGlad Marcus got out fast and the ants are staying out of your kitchen. Thanks.')];
+    const rep = Drafter.verifyReplyDetailed(CLEAN, grounding(), { recentReplies: recentSameOpening });
     expect(rep.code).toBe('repetitive_opening');
     mockDispatch.mockReset();
     mockDispatch.mockResolvedValue({ ok: true, text: CLEAN });
-    const r2 = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [good('Hi Dana, glad Marcus got out quickly and the ants are staying out of your kitchen. Thanks.')] });
+    const r2 = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: recentSameOpening });
     expect(r2.rejectionDetails.every((d) => d.code === 'repetitive_opening' && d.span === null)).toBe(true);
     // A reviewer named for a month is greeted by name, not flagged as a date claim (GitHub r4 P1);
     // and a date_claim span elsewhere is never stored (allowlist of phrase-class codes only).
@@ -725,42 +1064,6 @@ describe('draftReviewReply — fallback ladder', () => {
     mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana,\n\nGlad Marcus got the ants. Thanks for the kind words.') });
     const r5 = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [] });
     expect(r5.rejectionDetails[0]).toEqual({ attempt: 1, code: 'stock_phrase', span: 'kind words' });
-  });
-  test('safe copy never names a technician, and its variants dodge the non-repetition rule', () => {
-    const g = grounding({ mentionedTechNames: [], topics: [] });
-    const first = Drafter.safeCopyReply(g, 'service_quality', []);
-    expect(first).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
-    const second = Drafter.safeCopyReply(g, 'service_quality', [first]);
-    expect(second).not.toBe(first);
-    expect(Drafter.verifyReplyText(second, g, { recentReplies: [first], mode: 'service_quality' })).toBeNull();
-    // No variant implies a relationship the account does not license.
-    const RELATIONSHIP_HINT = /\b(?:keep|continu|again|back|with us|ongoing|return|loyal|years?)\b/i;
-    const seen = new Set();
-    for (const gg of [g, grounding({ mentionedTechNames: [], topics: [], account: null }), grounding({ account: { relationship: 'first_visit', tenure: null, serviceCategories: [], city: null } })]) {
-      let prior = [];
-      for (let i = 0; i < 3; i++) { const v = Drafter.safeCopyReply(gg, 'service_quality', prior); expect(v).toBeTruthy(); expect(v).not.toMatch(RELATIONSHIP_HINT); seen.add(v); prior = [...prior, v]; }
-    }
-    expect(seen.size).toBeGreaterThanOrEqual(3);
-    // Once every variant is recent at a location the first is re-used rather than parking (pre-push r9).
-    const all = [...seen].filter((v) => v.startsWith('Hi Dana,'));
-    expect(Drafter.safeCopyReply(g, 'service_quality', all)).toBe(all[0]);
-    const noText = grounding({ firstName: '', text: '', mentionedTechNames: [], topics: [], account: null });
-    expect(Drafter.safeCopyReply(noText, 'no_text', [])).toBe(good('Hello there,\n\nThanks for the five stars. Glad to be your pest and lawn team.'));
-    expect(Drafter.safeCopyReply(grounding({ rating: 2 }), 'low_rating', [])).toBeNull();
-    // A month name is a greeting, not a date claim (GitHub r4): April is greeted by name.
-    const april = grounding({ firstName: 'April', mentionedTechNames: [], topics: [] });
-    april.allow.names = ['April'];
-    expect(Drafter.safeCopyReply(april, 'service_quality', [])).toBe(good('Hi April,\n\nThanks for the review. Glad to be your pest and lawn team.'));
-    // A first name the verifier cannot pass falls back to the generic greeting (GitHub r2).
-    for (const firstName of ["O'Neil", 'Mary-Jane', 'McDonald']) {
-      const gn = grounding({ firstName, mentionedTechNames: [], topics: [] });
-      gn.allow.names = [firstName];
-      expect(Drafter.safeCopyReply(gn, 'service_quality', [])).toBe(good('Hello there,\n\nThanks for the review. Glad to be your pest and lawn team.'));
-    }
-    // A 4-star review can name a tech in a complaint; safe copy never names one.
-    const mixed = grounding({ rating: 4, text: 'Marcus was rude, but the ants are gone and the yard looks good.' });
-    expect(Drafter.safeCopyReply(mixed, 'tech_praise', [])).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
-    expect(Drafter.safeCopyReply(grounding(), 'tech_praise', [])).not.toContain('Marcus');
   });
   test('the first prompt names the reviewer phrases the reply may not echo, and the relationship rule', () => {
     const g = grounding({ text: 'If you want to be bug free call Marcus, absolutely the best pest control around.', account: null });
@@ -814,15 +1117,18 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam was the right guy for the ant problems. We will pass that along.'), g)).toBeNull();
     expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam helped with the ant problems. We will make sure kevin hears it.'), g)).toBe('unlisted_name');
   });
-  test('provider outage surfaces as provider_unavailable, carrying the verified safe copy for a 4-5 star review', async () => {
+  test('provider outage surfaces as provider_unavailable; no template posts even for a 4-5 star review (2026-09-24: template reply removed)', async () => {
     mockDispatch.mockResolvedValueOnce({ ok: false, reason: 'all_failed' });
     const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('provider_unavailable');
-    expect(r.fallbackText).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
+    expect(r.fallbackText).toBeUndefined();
+    expect(r.text).toBeUndefined();
     mockDispatch.mockResolvedValueOnce({ ok: false, reason: 'all_failed' });
     const low = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [] });
-    expect(low.fallbackText).toBeNull();
+    expect(low.ok).toBe(false);
+    expect(low.reason).toBe('provider_unavailable');
+    expect(low.fallbackText).toBeUndefined();
   });
   test('a quoted draft is normalized before verification', async () => {
     mockDispatch.mockResolvedValueOnce({ ok: true, text: `"${CLEAN}"` });
