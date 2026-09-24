@@ -106,7 +106,9 @@ jest.mock('../models/db', () => {
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(table));
-  dbFn.raw = jest.fn((sql) => sql);
+  // pg_try_advisory_xact_lock answers "acquired" (the non-blocking
+  // customer-comms fence); everything else echoes its SQL as before.
+  dbFn.raw = jest.fn((sql) => (String(sql).includes('pg_try_advisory_xact_lock') ? Promise.resolve({ rows: [{ locked: true }] }) : sql));
   // Tracks whether a db.transaction() call is currently open (its callback
   // has started but not yet returned) — Codex pre-push P1, 2026-09-24:
   // proves createSelfBooking never runs while one of OUR transactions is

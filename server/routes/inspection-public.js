@@ -930,6 +930,17 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
       // (Codex #4737 r3 P1): createSelfBooking reloads the customer's own
       // coordinates for its commit-time travel check, so leaving them null
       // would run that check locationless.
+      // The customer-comms fence for this customer, which only became known
+      // mid-transaction (local audit P1), is taken NON-blocking: the lead row
+      // is already locked, and a blocking wait here could deadlock a
+      // merge-undo that holds the fence and wants the lead. Not acquired →
+      // the coordinates are simply not persisted (the booking still carries
+      // the validated location as expectedLocation).
+      const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
+      if (!(await tryLockCustomerComms(trx, matched.id))) {
+        logger.warn(`[inspection-public] comms fence busy for ${matched.id}; coordinates not persisted`);
+        return { customer: matched, location: resolved.location };
+      }
       const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
       await trx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
       return { customer: { ...matched, ...after }, location: resolved.location };
