@@ -164,9 +164,15 @@ function MessageBubble({ m }) {
 // strips https://, so the real consultation line reads "wavespest.co/l/abc".
 // A scheme-free match needs a dotted host AND a path, so ordinary prose
 // ("it's Waves.") never reads as a URL.
+// No regex lookbehind (Codex #4709 r5 P2): Safari/WKWebView before 16.4
+// cannot parse it, and this panel runs on phones. The boundary is a
+// captured leading start-of-text or separator instead.
 function firstUrlIn(text) {
-  const match = String(text || "").match(/(?:https?:\/\/\S+|(?<![\w@.\/])(?:[a-z0-9-]+\.)+[a-z]{2,}\/\S+)/i);
-  return match ? match[0] : null;
+  const str = String(text || "");
+  const withScheme = str.match(/https?:\/\/\S+/i);
+  if (withScheme) return withScheme[0];
+  const bare = str.match(/(^|[\s(<"'])((?:[a-z0-9-]+\.)+[a-z]{2,}\/\S+)/i);
+  return bare ? bare[2] : null;
 }
 function urlHost(url) {
   if (!url) return null;
@@ -222,7 +228,12 @@ function combineAppendedDraft(existing, addition, remembered) {
   const base = String(existing || "");
   const newHost = urlHost(firstUrlIn(addition));
   if (newHost) {
-    const isPriorClauseLine = (line) => (remembered
+    // The remembered line is trusted only while it is still in the draft
+    // verbatim (Codex #4709 r5 P2): an operator edit to that line leaves the
+    // memory stale, and exact matching would then keep the old invite. Fall
+    // back to the wording + host heuristic in that case.
+    const rememberedPresent = remembered && base.split("\n").includes(remembered);
+    const isPriorClauseLine = (line) => (rememberedPresent
       ? line === remembered
       : urlHost(firstUrlIn(line)) === newHost && CONSULTATION_WORDING_RE.test(line));
     const withoutPriorClause = base

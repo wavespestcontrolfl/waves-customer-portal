@@ -2680,10 +2680,11 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
   const LEAD_ROW = { id: 'lead-1', phone: '+19415550100', status: 'new', converted_at: null };
   const CODE_ROW = { code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' };
 
-  function wireConsultation({ codeRows = [CODE_ROW], leadRow = LEAD_ROW } = {}) {
+  function wireConsultation({ codeRows = [CODE_ROW], leadRow = LEAD_ROW, templateRow = { is_active: true } } = {}) {
     mockBuilders = {
       short_codes: chainBuilder({ rows: codeRows }),
       leads: chainBuilder({ firstRow: leadRow }),
+      sms_templates: chainBuilder({ firstRow: templateRow }),
     };
   }
 
@@ -2712,6 +2713,40 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     const refusal = await checkConsultationLinkSend('Pick a time: wavespest.co/l/cons1', '9415550100');
     expect(refusal.ok).toBe(false);
     expect(refusal.error).toMatch(/Reply STOP to opt out/);
+  });
+
+  // Codex #4709 r5 P1: the template kill switch is re-read at the send.
+  test('the consultation template was disabled (or is missing) since the insert → refused', async () => {
+    wireConsultation({ templateRow: { is_active: false } });
+    expect((await checkConsultationLinkSend(BODY, '9415550100')).error).toMatch(/template is switched off/);
+    wireConsultation({ templateRow: null });
+    expect((await checkConsultationLinkSend(BODY, '9415550100')).error).toMatch(/template is switched off/);
+  });
+
+  // Codex #4709 r5 P1: the standalone Leads send path enforces the US-only rule itself.
+  test('a non-US destination on the standalone (no ctx) path → refused', async () => {
+    wireConsultation();
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100', null, 'lead-1', { usDestination: false });
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/US number/);
+  });
+
+  // Codex #4709 r5 P1: a pasted long /inspection/<token> URL is checked too.
+  test('a long-form /inspection/<token> link is verified like its short wrapper', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const host = 'wavespest.co'; // the owned short host BODY already uses
+    const good = mintLeadConsultationToken('lead-1');
+    wireConsultation({ codeRows: [] });
+    expect(await checkConsultationLinkSend(`Pick a time: ${host}/inspection/${good} Reply STOP to opt out.`, '9415550100')).toBeNull();
+    wireConsultation({ codeRows: [] });
+    const other = await checkConsultationLinkSend(`Pick a time: ${host}/inspection/${good} Reply STOP to opt out.`, '9995551234');
+    expect(other.error).toMatch(/different lead/);
+    wireConsultation({ codeRows: [] });
+    const forged = await checkConsultationLinkSend(`Pick a time: ${host}/inspection/lead-1.9999999999.bad Reply STOP to opt out.`, '9415550100');
+    expect(forged.error).toMatch(/not valid/);
+    wireConsultation({ codeRows: [] });
+    const expired = await checkConsultationLinkSend(`Pick a time: ${host}/inspection/${mintLeadConsultationToken('lead-1', 1000)} Reply STOP to opt out.`, '9415550100');
+    expect(expired.error).toMatch(/expired/);
   });
 
   test('the gate went off since the insert → refused', async () => {

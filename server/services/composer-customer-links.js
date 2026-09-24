@@ -1384,8 +1384,13 @@ async function checkContractLinks(ctx, contracts) {
 // primitive every other bearer check in this file binds by — rather than a
 // customerId/leadId param, so the identical check works unmodified from
 // either route: the consultation lead's OWN phone must be the destination.
-// The consultation short_codes rows a body carries (empty when none).
-async function consultationShortRows(body) {
+// Every consultation link a body carries, short OR long form (empty when
+// none). Short /l/ codes resolve through short_codes; a pasted long
+// /inspection/<token> URL (Codex #4709 r5 P1 — e.g. copied after opening
+// the short link in a browser) is verified directly. Each entry is
+// { lead_id, expired, invalid }: a long-form token on our host that fails
+// its signature is `invalid`, never ignored.
+async function consultationLinkRows(body) {
   const runs = decodedRuns(body);
   const hosts = ownedPortalHosts();
   const codes = [...new Set(
@@ -1394,15 +1399,33 @@ async function consultationShortRows(body) {
       .filter(Boolean)
       .map((code) => code.toLowerCase())
   )];
-  if (!codes.length) return [];
-  return db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id');
+  const rows = [];
+  if (codes.length) {
+    const shortRows = await db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id');
+    for (const row of shortRows) rows.push({ lead_id: row.lead_id, expired: expiredShortRow(row), invalid: false });
+  }
+  const tokens = [...new Set(
+    linkRuns(runs, /\/inspection\//i)
+      .map((run) => canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME))
+      .filter(Boolean)
+  )];
+  if (tokens.length) {
+    const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
+    for (const token of tokens) {
+      const signed = verifyLeadConsultationToken(token, 0); // signature only, expiry ignored
+      rows.push(signed
+        ? { lead_id: signed.leadId, expired: !verifyLeadConsultationToken(token), invalid: false }
+        : { lead_id: null, expired: false, invalid: true });
+    }
+  }
+  return rows;
 }
 
 // Codex #4709 r3 P1: the composer route checks this BEFORE its phone-only
 // recruiting diversion, so a consultation text never rides an applicant
 // thread past the consultation checks.
 async function bodyCarriesConsultationLink(body) {
-  return (await consultationShortRows(body)).length > 0;
+  return (await consultationLinkRows(body)).length > 0;
 }
 
 // expectedLeadId (Codex #4709 r3 P1): when the sending route knows which
@@ -1410,12 +1433,29 @@ async function bodyCarriesConsultationLink(body) {
 // lead-only leadId), every consultation link in the body must belong to
 // THAT lead. Two open leads sharing a phone otherwise let lead A's bearer
 // go out while the activity lands on lead B.
-async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLeadId = null) {
-  const rows = await consultationShortRows(body);
+// usDestination (Codex #4709 r5 P1): the standalone Leads send path has no
+// bearerLinkSendCheck around it, so it passes its own destination verdict
+// and the shared US-only rule is enforced here; bearerLinkSendCheck callers
+// get it from that function instead (ctx.bearers).
+async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLeadId = null, { usDestination = true } = {}) {
+  const rows = await consultationLinkRows(body);
   if (!rows.length) return null;
   const { leadInspectionLinkLive } = require('../config/feature-gates');
   if (!leadInspectionLinkLive()) {
     return refuseSend('Consultation links are switched off (GATE_LEAD_INSPECTION_LINK) — remove the link before sending.');
+  }
+  if (!ctx && !usDestination) return refuseSend(NON_US_REFUSAL);
+  // The template kill switch, re-read at the send (Codex #4709 r5 P1): an
+  // admin disabling lead_consultation_link after a link was inserted stops
+  // the stale draft too. Missing, inactive or unreadable fails closed.
+  try {
+    const template = await db('sms_templates').where({ template_key: 'lead_consultation_link' }).first('is_active');
+    if (!template || template.is_active === false) {
+      return refuseSend('The consultation text template is switched off — remove the link before sending.');
+    }
+  } catch (err) {
+    logger.warn(`[composer-customer-links] consultation template check failed: ${err.message}`);
+    return refuseSend('Could not confirm the consultation text template — try again in a moment.');
   }
   // Send-time keep-list check (Codex #4709 r4 P1): both composers are
   // editable, so the operator can delete the STOP line after inserting the
@@ -1425,7 +1465,10 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLea
   }
   const { isOpenLeadRow } = require('./lead-statuses');
   for (const row of rows) {
-    if (expiredShortRow(row)) {
+    if (row.invalid) {
+      return refuseSend('This consultation link is not valid — remove it and insert a fresh one.');
+    }
+    if (row.expired) {
       return refuseSend('This consultation link has expired — remove it and insert a fresh one.');
     }
     if (!row.lead_id) {

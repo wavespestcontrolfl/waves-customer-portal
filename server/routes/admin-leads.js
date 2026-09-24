@@ -1285,6 +1285,15 @@ router.post('/:id/consultation-link', async (req, res, next) => {
 // the SAME shared send helper the generic route uses (sendCustomerMessage →
 // providers/twilio-sms.js, which reads metadata.fromNumber / .mediaUrls /
 // .media) — nothing route-specific is duplicated.
+// A US destination for the consultation bearer rule: 10 digits, or 11
+// starting with 1 — any other explicit +country code is not.
+function isUsPhone(phone) {
+  const raw = String(phone || '').trim();
+  const digits = raw.replace(/\D/g, '');
+  if (raw.startsWith('+')) return digits.length === 11 && digits.startsWith('1');
+  return digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
+}
+
 router.post('/:id/send-sms', async (req, res, next) => {
   try {
     const { message, mediaUrls, mediaAttachments, fromNumber } = req.body;
@@ -1324,7 +1333,15 @@ router.post('/:id/send-sms', async (req, res, next) => {
     // whole bearerLinkSendCheck, which needs customer/account context this
     // route doesn't have.
     const { checkConsultationLinkSend } = require('../services/composer-customer-links');
-    const consultationRefusal = await checkConsultationLinkSend(message, String(lead.phone || '').replace(/\D/g, '').slice(-10), null, lead.id);
+    const consultationRefusal = await checkConsultationLinkSend(
+      message,
+      String(lead.phone || '').replace(/\D/g, '').slice(-10),
+      null,
+      lead.id,
+      // Same US-only bearer rule the Communications route applies (Codex
+      // #4709 r5 P1): a bare 10-digit number or +1/1-prefixed 11 digits.
+      { usDestination: isUsPhone(lead.phone) },
+    );
     if (consultationRefusal) {
       return res.status(409).json({ error: consultationRefusal.error });
     }

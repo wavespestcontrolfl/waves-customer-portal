@@ -239,6 +239,22 @@ describe("CustomerSmsPanel", () => {
     expect((box.value.match(/wavespest\.co\/l\//g) || []).length).toBe(1);
   });
 
+  // Codex #4709 r5 P2: the operator edited the inserted line, so the
+  // remembered line is no longer in the draft verbatim — the wording + host
+  // fallback must still replace the old invite.
+  it("replaces an edited consultation line on re-insert (stale remembered line falls back to the heuristic)", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem("c360:sms-consult-line:staff-a:cust-a", "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old111");
+    sessionStorage.setItem("c360:sms-draft:staff-a:cust-a", "Hi Avery!! Pick a time for a free consultation: wavespest.co/l/old111\n\nReply STOP to opt out.");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/new222\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old111");
+  });
+
   it("sends once per click through the canonical route, pinned to the customer, and keeps the draft on failure", async () => {
     const send = deferred();
     adminFetch.mockImplementation(async (path, options = {}) => {
