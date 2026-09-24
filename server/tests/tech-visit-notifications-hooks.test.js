@@ -78,15 +78,21 @@ describe('assignDispatchJob → tech notice', () => {
     });
   });
 
-  test('inside the writing trx the tech-day fence is taken BEFORE the technician row is read FOR SHARE (lock order shared with tech-out mark-out)', async () => {
+  test('with a caller trx, BOTH eligibility reads ride that trx — nothing touches the plain pool — and the locked re-check comes AFTER the tech-day fence', async () => {
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
     const trx = assignmentTrx();
     await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: 'adam', trx });
+    // Pool safety (pre-push auditor P1 on #4678): a read on the plain `db`
+    // from inside a caller-owned transaction would check out a second
+    // connection per call. With a trx supplied, the technician / absence
+    // reads never go to `db`.
+    expect(db.mock.calls.filter(([table]) => table === 'technicians' || table === 'technician_absences')).toHaveLength(0);
+    const techReads = trx.mock.calls.map(([table], i) => (table === 'technicians' ? i : -1)).filter((i) => i >= 0);
+    expect(techReads).toHaveLength(2); // pre-check + locked re-check
     const fenceOrder = lockTechDays.mock.invocationCallOrder[0];
-    const techReadIdx = trx.mock.calls.findIndex(([table]) => table === 'technicians');
     expect(fenceOrder).toBeDefined();
-    expect(techReadIdx).toBeGreaterThanOrEqual(0);
-    expect(fenceOrder).toBeLessThan(trx.mock.invocationCallOrder[techReadIdx]);
+    // The authoritative re-check is the one after the fence.
+    expect(trx.mock.invocationCallOrder[techReads[1]]).toBeGreaterThan(fenceOrder);
   });
 
   test('a caller that will rewrite the schedule in the same trx overrides the row snapshot (edit modal: tech + date)', async () => {
@@ -107,27 +113,25 @@ describe('assignDispatchJob → tech notice', () => {
       noticeSnapshot: { date: '2026-09-20' },
     });
 
-    // Pre-check: always runs on the plain `db` connection, even with a
-    // caller trx (see the pre-transaction-read comment in the source).
-    expect(absenceChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: '2026-09-20' });
-    expect(absenceChain.where).not.toHaveBeenCalledWith(expect.objectContaining({ absence_date: JOB.scheduled_date }));
-
-    // Locked re-check: runs on the caller's trx, after the tech-day fence.
-    const taCallIdx = trx.mock.calls.findIndex(([table]) => table === 'technician_absences');
-    expect(taCallIdx).toBeGreaterThanOrEqual(0);
-    const taChain = trx.mock.results[taCallIdx].value;
-    expect(taChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: '2026-09-20' });
-    expect(taChain.where).not.toHaveBeenCalledWith(expect.objectContaining({ absence_date: JOB.scheduled_date }));
+    // Both reads (pre-check and locked re-check) ride the caller's trx —
+    // never the plain `db` (pool safety) — and both use the snapshot date.
+    expect(absenceChain.where).not.toHaveBeenCalled();
+    const taChains = trx.mock.calls.map(([table], i) => (table === 'technician_absences' ? trx.mock.results[i].value : null)).filter(Boolean);
+    expect(taChains).toHaveLength(2);
+    for (const taChain of taChains) {
+      expect(taChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: '2026-09-20' });
+      expect(taChain.where).not.toHaveBeenCalledWith(expect.objectContaining({ absence_date: JOB.scheduled_date }));
+    }
   });
 
   test('without a noticeSnapshot date, both eligibility reads fall back to the row\'s own date (byte-identical to before the override existed)', async () => {
     const trx = assignmentTrx();
     await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: 'adam', trx });
 
-    expect(absenceChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: JOB.scheduled_date });
-    const taCallIdx = trx.mock.calls.findIndex(([table]) => table === 'technician_absences');
-    const taChain = trx.mock.results[taCallIdx].value;
-    expect(taChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: JOB.scheduled_date });
+    expect(absenceChain.where).not.toHaveBeenCalled();
+    const taChains = trx.mock.calls.map(([table], i) => (table === 'technician_absences' ? trx.mock.results[i].value : null)).filter(Boolean);
+    expect(taChains).toHaveLength(2);
+    for (const taChain of taChains) expect(taChain.where).toHaveBeenCalledWith({ technician_id: 't-new', absence_date: JOB.scheduled_date });
   });
 
   test('a caller-owned trx is passed through so the notice waits for THAT commit', async () => {

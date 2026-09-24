@@ -172,11 +172,14 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // offers a tech who has since gone prospective/inactive/office-only, or one
   // marked out for this job's date (technician_absences), cannot complete
   // the assignment.
-  // Pre-transaction read on the PLAIN connection even when a caller hands us
-  // its trx: inside a transaction this helper locks the row FOR SHARE, and
-  // taking that before the tech-day fence below inverts tech-out's mark-out
-  // order (fence, then FOR UPDATE) — a deadlock window. The authoritative,
-  // locked re-check runs after the fence inside applyAssignment.
+  // Read on the CALLER'S connection (its trx when it hands one in): a read
+  // on the plain pool from inside a caller-owned transaction would check out
+  // a second connection per call and, under a saturated pool, wait on the
+  // very transaction holding the first (pre-push auditor P1 on #4678). The
+  // FOR SHARE this takes inside a trx no longer orders against anything:
+  // tech-out's mark-out holds only the tech-day fence and never locks the
+  // technician row. The authoritative, locked re-check still runs after the
+  // fence inside applyAssignment.
   //
   // `noticeSnapshot?.date`: a caller whose SAME transaction is about to move
   // the visit to a new date (the edit modal: tech + date in one save) passes
@@ -184,7 +187,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // the tech will actually be on, not the row's stale stored date. Falls
   // back to the row's own date when no snapshot date is given.
   const eligibilityDate = dateOnly(noticeSnapshot?.date) || dateOnly(job.scheduled_date);
-  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn: db, date: eligibilityDate }) : null;
+  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn, date: eligibilityDate }) : null;
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -221,9 +224,9 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     }
     // Re-checked FOR SHARE on the writing trx, AFTER the fence: a Team-tab
     // offboarding or field-eligibility removal (FOR UPDATE) cannot slip
-    // between the pre-transaction read above and this commit, and the lock
-    // order (tech-day fence, then technician row) matches tech-out's
-    // mark-out (fence, then FOR UPDATE) so the two never deadlock.
+    // between the read above and this commit, and a mark-out that committed
+    // while we waited on the fence is seen here (tech-out's mark-out takes
+    // the fence and never the technician row, so there is no order to keep).
     //
     // Same noticeSnapshot?.date override as the pre-check above: the locked
     // re-check must agree with the pre-check on which day is authoritative,
