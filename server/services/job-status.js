@@ -507,6 +507,8 @@ async function transitionJobStatus({
     // outcome as lost/no_show (no-op for every other visit and for one
     // already recorded lost/won). Savepoint-isolated (waves-db §5b) — an
     // outcome-write hiccup must never block the no-show transition itself.
+    // A failed write here is retried by the hourly consultation-outcome
+    // sweep (repairMissedNoShowOutcomes), so logging and moving on is safe.
     if (String(toStatus || '') === 'no_show') {
       try {
         await t.transaction((sp) => require('./consultation-outcomes').markNoShow(jobId, { trx: sp }));

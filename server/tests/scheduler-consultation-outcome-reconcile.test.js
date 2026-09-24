@@ -70,7 +70,7 @@ test('a tick that wins rows logs the counts', async () => {
   reconcileOpenConsultationOutcomes.mockResolvedValue({ scanned: 5, won: 2, errors: 0 });
   const handler = registeredHandler();
   await handler();
-  expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('scanned=5 won=2 errors=0'));
+  expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('scanned=5 won=2 no_show_repaired=0 errors=0'));
 });
 
 test('a tick with per-row errors still logs (visibility into the best-effort skip count)', async () => {
@@ -85,4 +85,23 @@ test('the sweep function throwing (contract violation — it should never throw)
   const handler = registeredHandler();
   await expect(handler()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Consultation-outcome reconcile tick failed'));
+});
+
+// Round 12 fix (codex P1 scheduler.js:6918, post-push): with GATE_CRON_JOBS
+// off, initScheduledJobs returns early BEFORE reaching most cron.schedule
+// calls — but this sweep is the completeness guarantee behind every
+// no-hook booking path (booking.js's public flow, estimate-accept,
+// proposal-win, ...), not a feature cron, so it must register regardless.
+// Pre-fix, this exact scenario (cron jobs off) meant nothing reconciled
+// those bookings at all.
+test('P1 (codex, post-push): the sweep registers even when GATE_CRON_JOBS (and every other gate) is off — a completeness guarantee, not a feature cron', async () => {
+  isEnabled.mockImplementation(() => false); // every gate off, including cronJobs
+  reconcileOpenConsultationOutcomes.mockResolvedValue({ scanned: 0, won: 0, errors: 0 });
+  initScheduledJobs();
+  const registration = cron.schedule.mock.calls.find(([expression]) => expression === '27 * * * *');
+  expect(registration).toBeDefined();
+  expect(registration[2]).toEqual({ timezone: 'America/New_York' });
+  // And the registered handler still runs the sweep normally.
+  await registration[1]();
+  expect(reconcileOpenConsultationOutcomes).toHaveBeenCalledTimes(1);
 });

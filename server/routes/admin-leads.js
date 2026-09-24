@@ -1805,8 +1805,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         // closeout-detection hint. That field is the visit's ASSIGNEE, not
         // who booked it; an office admin assigning a new visit to the
         // consultation's own technician is an ordinary office booking, not
-        // a door-side close. See isCloseoutEvidence's own comment for why
-        // no real "booked by" signal exists on scheduled_services today.
+        // a door-side close. No real "booked by" signal exists on
+        // scheduled_services today (see WON_VIA PROVENANCE atop
+        // consultation-outcomes.js).
         await require('../services/consultation-outcomes')
           .markWonForCustomer(customerId, { via: 'office_booking', trx });
       }

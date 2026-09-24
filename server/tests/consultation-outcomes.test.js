@@ -62,8 +62,42 @@ function pick(row, cols) {
 // disambiguate from `excluded.*`; our flat row objects don't have that
 // ambiguity.
 function resolveField(row, col) {
+  // The no-show repair's ss-rooted source keeps the LEFT-joined outcome's id
+  // apart from the visit's own id (whereNull('co.id') = "no outcome row").
+  if (col === 'co.id' && row && Object.prototype.hasOwnProperty.call(row, '__coId')) return row.__coId;
   const key = col.includes('.') ? col.split('.').pop() : col;
   return row[key];
+}
+
+// whereRaw shim for the one raw shape these queries use:
+// lower(trim(<alias>.<col>)) = '<literal>'
+function rawPredicate(sql) {
+  const m = /lower\(trim\(\w+\.(\w+)\)\)\s*=\s*'([^']*)'/.exec(sql);
+  if (!m) return () => false;
+  return (r) => String(r[m[1]] == null ? '' : r[m[1]]).trim().toLowerCase() === m[2];
+}
+
+// A grouped where(fn) callback as OR-of-AND-chains, recursing into nested
+// groups — enough for knex's where/orWhere/whereIn/orWhereIn/whereNull/
+// whereNotNull/whereRaw/orWhereRaw builder shapes used by the service.
+function groupPredicate(fn) {
+  const groups = [[]];
+  const cur = () => groups[groups.length - 1];
+  const argPred = (args) => (args.length === 1 && typeof args[0] === 'function'
+    ? groupPredicate(args[0])
+    : (r) => applyWhereArgs([r], args).length === 1);
+  const ctx = {
+    where(...args) { cur().push(argPred(args)); return ctx; },
+    orWhere(...args) { groups.push([argPred(args)]); return ctx; },
+    whereIn(col, arr) { cur().push((r) => arr.includes(resolveField(r, col))); return ctx; },
+    orWhereIn(col, arr) { groups.push([(r) => arr.includes(resolveField(r, col))]); return ctx; },
+    whereNull(col) { cur().push((r) => resolveField(r, col) == null); return ctx; },
+    whereNotNull(col) { cur().push((r) => resolveField(r, col) != null); return ctx; },
+    whereRaw(sql) { cur().push(rawPredicate(sql)); return ctx; },
+    orWhereRaw(sql) { groups.push([rawPredicate(sql)]); return ctx; },
+  };
+  fn.call(ctx);
+  return (r) => groups.some((g) => g.length > 0 && g.every((pred) => pred(r)));
 }
 
 function compare(rv, op, val) {
@@ -75,16 +109,7 @@ function compare(rv, op, val) {
 
 function applyWhereArgs(rows, args) {
   if (args.length === 1 && typeof args[0] === 'function') {
-    const clauses = { eq: [], orIn: [] };
-    args[0].call({
-      where(col, val) { clauses.eq.push([col, val]); return this; },
-      orWhereIn(col, arr) { clauses.orIn.push([col, arr]); return this; },
-    });
-    return rows.filter((r) => {
-      const eqMatch = clauses.eq.every(([c, v]) => resolveField(r, c) === v);
-      if (eqMatch) return true;
-      return clauses.orIn.some(([c, arr]) => arr.includes(resolveField(r, c)));
-    });
+    return rows.filter(groupPredicate(args[0]));
   }
   if (args.length === 1 && typeof args[0] === 'object') {
     return rows.filter((r) => Object.entries(args[0]).every(([k, v]) => resolveField(r, k) === v));
@@ -136,12 +161,20 @@ function makeFakeDb(seed = {}) {
         const ss = (store.scheduled_services || []).find((s) => s.id === co.scheduled_service_id);
         return ss ? { ...ss, ...co } : null;
       }).filter(Boolean)
-      : (store[name] || (store[name] = []));
+      : name === 'scheduled_services as ss'
+        // repairMissedNoShowOutcomes: visits LEFT JOIN their outcome row.
+        ? (store.scheduled_services || []).map((ss) => {
+          const co = (store.consultation_outcomes || []).find((c) => c.scheduled_service_id === ss.id);
+          return { ...ss, outcome: co ? co.outcome : null, __coId: co ? co.id : null };
+        })
+        : (store[name] || (store[name] = []));
     let filtered = rows;
     let insertPayload = null;
 
     const api = {
       join() { return api; }, // the row source above already performed the one join shape this shim supports
+      leftJoin() { return api; }, // likewise — the ss-rooted row source above did the outcome join
+      whereRaw(sql) { filtered = filtered.filter(rawPredicate(sql)); return api; },
       where(...args) { filtered = applyWhereArgs(filtered, args); return api; },
       whereNull(col) { filtered = filtered.filter((r) => resolveField(r, col) == null); return api; },
       whereNotNull(col) { filtered = filtered.filter((r) => resolveField(r, col) != null); return api; },
@@ -845,7 +878,7 @@ describe('markWonForCustomer', () => {
       .resolves.toBe(0);
   });
 
-  test('atomic guard (round 12 shape, P1 :774): a SELECT gathers candidate rows, but each row is only ever committed by its OWN guarded UPDATE — never a batch decision applied blind', async () => {
+  test('atomic guard: one guarded UPDATE carries the outcome + window checks — no read-then-write', async () => {
     const fakeDb = seededDb();
     const tableCalls = [];
     const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
@@ -853,27 +886,11 @@ describe('markWonForCustomer', () => {
 
     const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
     expect(count).toBe(2);
-    // One SELECT (the join-aliased 'consultation_outcomes as co') gathers
-    // the open in-window candidates; already-lost/outside-window rows are
-    // filtered out of THAT query (its own WHERE, not a later JS check) so
-    // they never reach an UPDATE attempt at all. Then exactly one guarded
-    // UPDATE per row the SELECT found (2 open rows here — co-recent,
-    // co-lead) — the outcome IN (warm,cold) guard rides in EACH of those
-    // UPDATEs' own WHERE, so a row that resolved between the SELECT and
-    // its write is provably untouched (a 0-row update), never a stale
-    // overwrite. scheduled_services is never queried as a standalone step
-    // — its data rides on the SELECT's own join and each UPDATE's window
-    // subquery.
-    expect(tableCalls.filter((n) => n === 'consultation_outcomes as co')).toHaveLength(1);
-    expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(2);
-    expect(tableCalls.filter((n) => n === 'scheduled_services')).toHaveLength(0);
-    // 'customers' first (P1-A round 5's row lock), then leads, then the
-    // SELECT, then the two per-row UPDATEs.
-    expect(tableCalls).toEqual(['customers', 'leads', 'consultation_outcomes as co', 'consultation_outcomes', 'consultation_outcomes']);
+    // 'customers' first (P1-A round 5's row lock), then leads, then the one
+    // UPDATE whose own WHERE holds the outcome IN (warm,cold) guard and the
+    // visit-window subquery. No candidate SELECT precedes it.
+    expect(tableCalls).toEqual(['customers', 'leads', 'consultation_outcomes']);
 
-    // And the guard is real, not just "fewer calls": a row whose outcome is
-    // NOT warm/cold is provably excluded (never even reaches the SELECT —
-    // see the 'leaves older/lost rows alone' case above).
     const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
     expect(byId['co-already-lost'].outcome).toBe('lost');
   });
@@ -915,94 +932,16 @@ describe('markWonForCustomer', () => {
   });
 });
 
-// ---- markWonForCustomer — P1 :774/:923 per-row closeout_booking provenance (round 12) --
+// ---- markWonForCustomer — won_via is exactly `via` (round 12, P2 :411) ---
 //
-// evidenceCreatorTechnicianId is NOT supplied by any production caller
-// today (admin-leads.js/admin-schedule.js are office tools and stopped
-// passing anything after the codex P1 audit caught the assignee-vs-creator
-// bug — see isCloseoutEvidence's own comment in the service file). These
-// tests exercise the MECHANISM directly — proving isCloseoutEvidence's
-// logic is correct once a real creator signal exists — the way a future
-// tech-closeout PR's own caller would supply it; they do not claim any
-// current route produces closeout_booking today.
+// The dormant same-day/same-technician closeout auto-detection is gone: no
+// scheduled_services column says who BOOKED a row. 'closeout_booking' is
+// written only when a caller passes it explicitly (the future PR1b tech
+// closeout route).
 
-describe('markWonForCustomer — per-row closeout_booking provenance (round 12, P1 :774 fixing the P1 :923 pre-check; codex-audited signal fix)', () => {
+describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => {
   function seededDb() {
     return makeFakeDb({
-      scheduled_services: [
-        { id: 'visit-1', scheduled_date: '2026-09-10', technician_id: 'tech-1' },
-      ],
-      leads: [],
-      consultation_outcomes: [
-        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
-      ],
-    });
-  }
-
-  test('mechanism: evidenceCreatorTechnicianId matching same-day + the visit\'s own technician sets won_via closeout_booking on that row\'s own UPDATE', async () => {
-    const fakeDb = seededDb();
-    const count = await markWonForCustomer('cust-1', {
-      via: 'office_booking',
-      trx: fakeDb,
-      now: new Date('2026-09-10T20:00:00Z'),
-      evidenceCreatedAt: new Date('2026-09-10T15:00:00Z'),
-      evidenceCreatorTechnicianId: 'tech-1',
-    });
-    expect(count).toBe(1);
-    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking');
-  });
-
-  test('mechanism: a creator signal for a DIFFERENT technician than the visit is not closeout evidence — won_via stays as passed (office_booking)', async () => {
-    const fakeDb = seededDb();
-    await markWonForCustomer('cust-1', {
-      via: 'office_booking',
-      trx: fakeDb,
-      now: new Date('2026-09-10T20:00:00Z'),
-      evidenceCreatedAt: new Date('2026-09-10T15:00:00Z'),
-      evidenceCreatorTechnicianId: 'tech-9',
-    });
-    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
-  });
-
-  test('mechanism: a creator signal on a LATER calendar day than the visit is not closeout evidence — won_via stays as passed', async () => {
-    const fakeDb = seededDb();
-    await markWonForCustomer('cust-1', {
-      via: 'office_booking',
-      trx: fakeDb,
-      now: new Date('2026-09-12T20:00:00Z'),
-      evidenceCreatedAt: new Date('2026-09-12T15:00:00Z'),
-      evidenceCreatorTechnicianId: 'tech-1',
-    });
-    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
-  });
-
-  test('P1 :761 regression (mechanism): a creator signal timestamped 21:00 ET (01:00Z the NEXT calendar day) on the visit\'s own day still reads as the same ET day, so it IS closeout evidence', async () => {
-    // 2026-09-10 21:00 America/New_York (EDT, UTC-4) is 2026-09-11 01:00Z —
-    // a different UTC calendar day than the visit's own scheduled_date.
-    // The pre-fix code ran evidenceCreatedAt through toDateOnlyString (the
-    // UTC-calendar-day reader for DATE columns), which read this as
-    // 2026-09-11 and silently lost the closeout credit for every booking
-    // made after 8pm ET. etDateString reads its correct ET day, 2026-09-10,
-    // matching the visit.
-    const fakeDb = seededDb();
-    await markWonForCustomer('cust-1', {
-      via: 'office_booking',
-      trx: fakeDb,
-      now: new Date('2026-09-11T02:00:00Z'),
-      evidenceCreatedAt: new Date('2026-09-11T01:00:00Z'), // 2026-09-10 21:00 ET
-      evidenceCreatorTechnicianId: 'tech-1',
-    });
-    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking');
-  });
-
-  test('no evidence hint passed (the real shape of every production caller today) — won_via is exactly `via` on every row', async () => {
-    const fakeDb = seededDb();
-    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
-    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
-  });
-
-  test('P1 :774 (mechanism): two open outcomes for the same customer (last week\'s and today\'s); a creator signal for today\'s technician credits ONLY today\'s row as closeout_booking — last week\'s wins as office_booking, not copied', async () => {
-    const fakeDb = makeFakeDb({
       scheduled_services: [
         { id: 'visit-last-week', scheduled_date: '2026-09-03', technician_id: 'tech-1' },
         { id: 'visit-today', scheduled_date: '2026-09-10', technician_id: 'tech-1' },
@@ -1013,21 +952,22 @@ describe('markWonForCustomer — per-row closeout_booking provenance (round 12, 
         { id: 'co-today', scheduled_service_id: 'visit-today', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
       ],
     });
+  }
 
-    const count = await markWonForCustomer('cust-1', {
-      via: 'office_booking',
-      trx: fakeDb,
-      now: new Date('2026-09-10T20:00:00Z'),
-      evidenceCreatedAt: new Date('2026-09-10T15:00:00Z'), // today, by tech-1 — matches ONLY visit-today
-      evidenceCreatorTechnicianId: 'tech-1',
-    });
+  test('every open row wins with exactly the `via` passed (office_booking), never an inferred closeout_booking', async () => {
+    const fakeDb = seededDb();
+    const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
+    expect(count).toBe(2);
+    for (const row of fakeDb.__store.consultation_outcomes) {
+      expect(row.outcome).toBe('won');
+      expect(row.won_via).toBe('office_booking');
+    }
+  });
 
-    expect(count).toBe(2); // both are still within the 90-day window and both win
-    const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
-    expect(byId['co-today'].outcome).toBe('won');
-    expect(byId['co-today'].won_via).toBe('closeout_booking');
-    expect(byId['co-last-week'].outcome).toBe('won');
-    expect(byId['co-last-week'].won_via).toBe('office_booking'); // NOT closeout_booking — the pre-fix P1 :774 bug
+  test('an explicit via closeout_booking (the PR1b tech-closeout caller) is written as passed', async () => {
+    const fakeDb = seededDb();
+    await markWonForCustomer('cust-1', { via: 'closeout_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-today').won_via).toBe('closeout_booking');
   });
 });
 
@@ -1068,7 +1008,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
 
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
 
-    expect(result).toEqual({ scanned: 1, won: 1, errors: 0 });
+    expect(result).toEqual({ scanned: 1, won: 1, errors: 0, no_show_repaired: 0 });
     const row = fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1');
     expect(row.outcome).toBe('won');
     expect(row.won_via).toBe('office_booking');
@@ -1088,7 +1028,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
 
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
 
-    expect(result).toEqual({ scanned: 0, won: 0, errors: 0 });
+    expect(result).toEqual({ scanned: 0, won: 0, errors: 0, no_show_repaired: 0 });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-old').outcome).toBe('warm');
   });
 
@@ -1118,7 +1058,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
     // period exists for).
     const result = await reconcileOpenConsultationOutcomes({ now: new Date('2026-08-31T04:27:00Z') }); // 00:27 ET day91
 
-    expect(result).toEqual({ scanned: 1, won: 1, errors: 0 });
+    expect(result).toEqual({ scanned: 1, won: 1, errors: 0, no_show_repaired: 0 });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').outcome).toBe('won');
   });
 
@@ -1142,7 +1082,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
     // examined — scanned: 1), but findSaleEvidenceForConsultation's own
     // strict 90-day evidence bound (untouched by this fix) still excludes
     // a booking created after the window closed — no evidence, no win.
-    expect(result).toEqual({ scanned: 1, won: 0, errors: 0 });
+    expect(result).toEqual({ scanned: 1, won: 0, errors: 0, no_show_repaired: 0 });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').outcome).toBe('warm');
   });
 
@@ -1158,7 +1098,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
 
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
 
-    expect(result).toEqual({ scanned: 0, won: 0, errors: 0 });
+    expect(result).toEqual({ scanned: 0, won: 0, errors: 0, no_show_repaired: 0 });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking'); // untouched
   });
 
@@ -1424,7 +1364,7 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
     expect(stats.median_days_to_close).toBe(0);
   });
 
-  test('round 12 (P1 :923): a won row with won_via closeout_booking counts toward won_at_door, not won_after (previously always zero — no write path produced that value)', async () => {
+  test('round 12 (P2 :411): won rows count once in `won` with a won_by_via breakdown (no permanently-zero at-door metric)', async () => {
     const visits = [
       {
         status: 'completed', scheduled_date: '2026-09-10', technician_id: 't1', technician_name: 'Adam',
@@ -1436,7 +1376,72 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
       },
     ];
     const stats = await consultationStats({ trx: statsDb(visits) });
-    expect(stats.won_at_door).toBe(1);
-    expect(stats.won_after).toBe(1);
+    expect(stats.won).toBe(2);
+    expect(stats.won_by_via).toEqual({ closeout_booking: 1, office_booking: 1 });
+    expect(stats).not.toHaveProperty('won_at_door');
+  });
+});
+
+// ---- repairMissedNoShowOutcomes (round 12, P2 job-status.js:514) ----------
+//
+// The no-show transition's outcome write is best-effort; the hourly sweep
+// re-runs markNoShow for any no-showed consultation whose outcome is still
+// missing or open, so a failed write there is retried rather than lost.
+
+describe('reconcileOpenConsultationOutcomes — no-show outcome repair (round 12, P2 job-status.js:514)', () => {
+  const NOW = new Date('2026-09-23T12:00:00Z');
+
+  function install(seed) {
+    const fakeDb = makeFakeDb(seed);
+    db.mockImplementation(fakeDb);
+    db.transaction = fakeDb.transaction;
+    return fakeDb;
+  }
+
+  afterEach(() => {
+    db.mockReset();
+  });
+
+  test('a no-showed consultation with NO outcome row gets lost/no_show written', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-ns', status: 'no_show', service_type: 'Waves Assessment', scheduled_date: '2026-09-20', customer_id: 'cust-1' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.no_show_repaired).toBe(1);
+    expect(result.errors).toBe(0);
+    const row = fakeDb.__store.consultation_outcomes.find((r) => r.scheduled_service_id === 'visit-ns');
+    expect(row).toMatchObject({ outcome: 'lost', lost_reason: 'no_show' });
+  });
+
+  test('a no-showed consultation left open (warm) is closed lost/no_show', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-ns', status: 'no_show', service_type: 'Waves Assessment', scheduled_date: '2026-09-20', customer_id: null },
+      ],
+      consultation_outcomes: [
+        { id: 'co-ns', scheduled_service_id: 'visit-ns', customer_id: null, outcome: 'warm' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.no_show_repaired).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-ns')).toMatchObject({ outcome: 'lost', lost_reason: 'no_show' });
+  });
+
+  test('leaves a won outcome and a non-consultation no-show alone', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-won', status: 'no_show', service_type: 'Waves Assessment', scheduled_date: '2026-09-20', customer_id: null },
+        { id: 'visit-pest', status: 'no_show', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: null },
+      ],
+      consultation_outcomes: [
+        { id: 'co-won', scheduled_service_id: 'visit-won', customer_id: null, outcome: 'won' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.no_show_repaired).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
+    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('won');
   });
 });

@@ -24,18 +24,12 @@
  * (last_reconciled_at NULLS FIRST, recorded_at ASC), not recorded_at alone
  * — see the FAIRNESS paragraph above reconcileOpenConsultationOutcomes.
  *
- * WON_VIA PROVENANCE (round 12, DORMANT — codex P1 audit): 'closeout_booking'
- * is meant for the technician booking the next visit themselves, at the
- * door, same-day — vs. 'office_booking'/'estimate_accept' otherwise —
- * decided by isCloseoutEvidence (same ET day + the SAME TECHNICIAN WHO
- * CREATED the winning booking, never the booking's mere assignee — that
- * confusion was this round's own bug, caught by codex post-push). No
- * column on scheduled_services distinguishes who booked a row from who
- * it's assigned to (grepped; see isCloseoutEvidence's own comment), so
- * isCloseoutEvidence always returns false today and every real win reads
- * office_booking/estimate_accept — 'closeout_booking' stays in the DB
- * CHECK enum and this function's contract, dormant, for a future
- * tech-closeout PR to activate once a real creator signal exists.
+ * WON_VIA PROVENANCE: every automatic win reads office_booking or
+ * estimate_accept. No column on scheduled_services distinguishes who booked
+ * a row from who it is assigned to, so there is no door-side auto-detection.
+ * 'closeout_booking' stays in the DB CHECK enum for the tech-closeout PR
+ * (PR1b), which passes it explicitly because that caller already knows the
+ * booking was made at the door.
  */
 
 const db = require('../models/db');
@@ -404,89 +398,69 @@ function isQualifyingSaleBooking(row) {
   return true;
 }
 
-// Round 12: 'closeout_booking' is the FIRST won_via value in the CHECK
-// enum (20260923000010) but no production write path ever produces it —
-// every real win reads as office_booking/estimate_accept, so
-// consultationStats' won_at_door metric is permanently 0 today. KEPT in the
-// enum and in this function's contract for a future tech-closeout PR to
-// populate for real (see creatorTechnicianId below) — this is currently
-// dormant, not removed.
-//
-// round-12-fix (codex P1 audit, post-push): the FIRST attempt at this
-// (same push) used scheduled_services.technician_id — the winning
-// booking's ASSIGNEE — as the "who closed this" signal, reasoning it was
-// the only field available. That was wrong: technician_id is who the
-// visit is ASSIGNED to, never who CREATED the row. Both of this file's
-// callers (admin-leads.js/admin-schedule.js schedule-appointment routes)
-// are OFFICE/ADMIN tools — an office admin booking a new visit and
-// assigning it to the consultation's own technician (routine, e.g. the
-// tech's existing route) is an ordinary office_booking, not a door-side
-// close, and the assignee-based check mislabelled it closeout_booking.
-// Re-grepped this repo for a real "who booked this row" signal
-// (`source`, `created_by`, `booked_by_technician_id`, or similar) on
-// scheduled_services: NONE EXISTS. `created_by_technician_id` exists on
-// several OTHER tables (admin_layer, lawn_diagnostic_runs,
-// prospect_photo_assessments, treatment_zone_maps) but was never added to
-// scheduled_services, and the tech portal has no booking-CREATION route
-// today (server/routes/tech-*.js has no scheduled_services insert). So the
-// required signal is always absent, and creatorTechnicianId below is
-// always null from every current caller — this function always returns
-// false, and every evidence type (c) booking resolves as office_booking,
-// exactly the pre-round-12 behavior. When a future tech-closeout PR adds a
-// real creator column (on scheduled_services, or an explicit signal a
-// tech-portal booking route stamps), it threads THAT through here as
-// creatorTechnicianId — never technician_id/the assignee again — or, more
-// simply, calls markWonForCustomer/recordOutcome with an explicit
-// `won_via: 'closeout_booking'` directly, since a tech-portal closeout
-// route would already know contextually it IS one and would not need
-// auto-detection at all.
-function isCloseoutEvidence(evidenceCreatedAt, creatorTechnicianId, visitScheduledDateStr, visitTechnicianId) {
-  if (!evidenceCreatedAt || !creatorTechnicianId || !visitTechnicianId) return false;
-  // round 12 fix (codex P1 :761): evidenceCreatedAt is a TIMESTAMP (an
-  // instant, e.g. scheduled_services.created_at) — it must go through
-  // etDateString to read its ET calendar day, exactly like every other
-  // timestamp this file compares to a day (accepted_at, converted_at
-  // above). Running a TIMESTAMP through toDateOnlyString (the DATE-column
-  // reader — see its own comment) instead reads the UTC calendar day, so a
-  // booking made at, say, 9pm ET (already past midnight UTC) compared as
-  // the day AFTER the visit and silently lost its closeout credit.
-  // visitScheduledDateStr stays exactly as passed in — it is always
-  // already a DATE-column string (toDateOnlyString'd by the caller), never
-  // run through etDateString here.
-  return String(creatorTechnicianId) === String(visitTechnicianId)
-    && etDateString(evidenceCreatedAt) === visitScheduledDateStr;
+// Round 12, P2 consultation-outcomes.js:411 (codex, post-push): the
+// same-day/same-technician closeout auto-detection layer (isCloseoutEvidence
+// + the creatorTechnicianId params it needed) is REMOVED — no column on
+// scheduled_services has ever distinguished who booked a row from who it's
+// assigned to (grepped the whole schema; see the file header), so it could
+// only ever resolve false. consultationStats now reports a single `won`
+// count plus a won_by_via breakdown instead of a permanently-zero at-door
+// metric. 'closeout_booking' stays in the DB CHECK enum
+// (20260923000010_consultation_outcomes.js) — it's simply reachable only
+// by a caller passing it explicitly: a future tech-closeout PR (PR1b) that
+// DOES know a booking was closed at the door calls markWonForCustomer/
+// recordOutcome with `via`/`won_via: 'closeout_booking'` directly, no
+// auto-detection needed since that caller already has the context.
+
+// Effective attribution timestamp for a scheduled_services booking (P2
+// consultation-outcomes.js:537, codex): an office-review booking
+// (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS — voice_agent /
+// ai_call_outbound_review) exists as a PENDING row from the moment the
+// agent takes the call, but isQualifyingSaleBooking only lets it through
+// once customer_confirmed is true — the office's confirmation is the
+// moment it became a REAL booking, not its created_at, which can predate
+// the visit (and the window) entirely: a row created before the
+// consultation but confirmed after it must still count, dated at the
+// confirmation. A legacy row with no confirmed_at value (or any other
+// source_action) falls back to created_at exactly as before.
+function effectiveBookingTimestamp(booking) {
+  if (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(booking.source_action) && booking.confirmed_at) {
+    return booking.confirmed_at;
+  }
+  return booking.created_at;
 }
 
 /**
  * Reconciliation from the CONSULTATION side (P1-1): a sale can commit
  * BEFORE the technician gets around to recording the visit's outcome, in
  * which case markWonForCustomer already ran and found nothing to win — a
- * warm/cold row recorded afterward would otherwise sit open forever. Checks,
- * in order, for the first qualifying evidence dated on/after the visit's
- * scheduled_date (ET) and on/before BOTH `now` (P1-2 — never a future date)
- * and the visit's own 90-day window:
+ * warm/cold row recorded afterward would otherwise sit open forever.
+ *
+ * Round 12, P2 consultation-outcomes.js:520 (codex, post-push): collects the
+ * EARLIEST qualifying candidate from EACH of the three sources below (not
+ * "the first source with any match" — a converted lead dated well after an
+ * earlier accepted estimate used to win outright just for being checked
+ * first) and returns the overall-earliest one, deriving won_via from
+ * whichever source it came from. Every candidate is still bounded to
+ * [visit's scheduled_date (ET), min(now, scheduled_date + 90 days)] (P1-2 —
+ * never a future date, never past the visit's own window):
  *   (a) leads.converted_at for any lead on this customer,
  *   (b) an accepted estimate for this customer (estimates.status='accepted',
  *       accepted_at),
- *   (c) a non-assessment scheduled_services row for this customer created
- *       after the visit that is a genuine NEW booking — another
- *       consultation, a free callback (is_callback), a recurring-series
- *       child spawned onto an EXISTING plan (recurring_parent_id), an
- *       included $0 follow-up minted from a completion (followup_included),
- *       or any other ALWAYS-free service type (isAlwaysFreeServiceType —
- *       appointment/estimate/re-service/follow-up/re-visit by name) is
- *       never itself a sale. won_via would be 'closeout_booking' when the
- *       booking was created same-day BY the consultation's own technician
- *       (isCloseoutEvidence) — but no signal on scheduled_services says who
- *       CREATED a booking (only who it's assigned to), so this always
- *       resolves 'office_booking' today (dormant — see isCloseoutEvidence's
- *       own comment).
- * Returns { won_via, won_at } for the first match, or null. `technicianId`
- * is the CONSULTATION visit's own assigned technician (not the winning
- * booking's) — only used for the dormant closeout determination above.
+ *   (c) a non-assessment scheduled_services row for this customer that is a
+ *       genuine NEW booking — another consultation, a free callback
+ *       (is_callback), a recurring-series child spawned onto an EXISTING
+ *       plan (recurring_parent_id), an included $0 follow-up minted from a
+ *       completion (followup_included), or any other ALWAYS-free service
+ *       type (isAlwaysFreeServiceType — appointment/estimate/re-service/
+ *       follow-up/re-visit by name) is never itself a sale. Dated at
+ *       effectiveBookingTimestamp(booking) — confirmed_at for an
+ *       office-review booking, created_at otherwise (P2 :537 above).
+ * Returns { won_via, won_at } for the earliest match across all three
+ * sources, or null.
  */
 async function findSaleEvidenceForConsultation(database, {
-  customerId, scheduledDateStr, technicianId = null, now = new Date(),
+  customerId, scheduledDateStr, now = new Date(),
 }) {
   if (!customerId) return null;
 
@@ -509,6 +483,10 @@ async function findSaleEvidenceForConsultation(database, {
   const lowerBound = parseETDateTime(`${scheduledDateStr}T00:00:00`);
   const upperBound = new Date(parseETDateTime(`${upperBoundStr}T23:59:59`).getTime() + 999);
 
+  // Round 12, P2 :520: gather one candidate per source (never return on
+  // the first match) and pick the overall-earliest at the end.
+  const candidates = [];
+
   const convertedLead = await database('leads')
     .where({ customer_id: customerId })
     .whereNotNull('converted_at')
@@ -517,7 +495,7 @@ async function findSaleEvidenceForConsultation(database, {
     .orderBy('converted_at', 'asc')
     .first('converted_at');
   if (convertedLead) {
-    return { won_via: 'office_booking', won_at: new Date(convertedLead.converted_at) };
+    candidates.push({ won_via: 'office_booking', won_at: new Date(convertedLead.converted_at) });
   }
 
   const acceptedEstimate = await database('estimates')
@@ -528,38 +506,49 @@ async function findSaleEvidenceForConsultation(database, {
     .orderBy('accepted_at', 'asc')
     .first('accepted_at');
   if (acceptedEstimate) {
-    return { won_via: 'estimate_accept', won_at: new Date(acceptedEstimate.accepted_at) };
+    candidates.push({ won_via: 'estimate_accept', won_at: new Date(acceptedEstimate.accepted_at) });
   }
 
+  // Round 12, P2 :537: bounded by EITHER created_at or confirmed_at falling
+  // in the window (a superset of what actually qualifies) — an
+  // office-review row's created_at can sit outside the window entirely
+  // while its confirmed_at is the only in-window timestamp, so the query
+  // must not exclude it before effectiveBookingTimestamp gets a chance to
+  // read the right column. Each candidate row is re-checked against the
+  // bounds below using its OWN effective timestamp before being accepted.
   const bookings = await database('scheduled_services')
     .where({ customer_id: customerId })
-    .where('created_at', '>=', lowerBound)
-    .where('created_at', '<=', upperBound)
+    .where(function boundedByEitherTimestamp() {
+      this.where(function createdInWindow() {
+        this.where('created_at', '>=', lowerBound).where('created_at', '<=', upperBound);
+      }).orWhere(function confirmedInWindow() {
+        this.whereNotNull('confirmed_at').where('confirmed_at', '>=', lowerBound).where('confirmed_at', '<=', upperBound);
+      });
+    })
     .orderBy('created_at', 'asc')
     .select(
-      'id', 'service_type', 'service_id', 'created_at',
+      'id', 'service_type', 'service_id', 'created_at', 'confirmed_at',
       // Every field isQualifyingSaleBooking's single positive rule needs —
       // see the comment above that function for what each one decides.
       'status', 'source_action', 'customer_confirmed',
       'is_callback', 'recurring_parent_id', 'followup_included',
       'estimated_price', 'annual_prepay_term_id',
     );
+  let earliestBookingAt = null;
   for (const booking of bookings) {
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale — separate, async, not part of the sync predicate
     if (!isQualifyingSaleBooking(booking)) continue;
-    // round 12 fix (codex P1 audit, post-push): no real "who booked this
-    // row" signal exists on scheduled_services (see isCloseoutEvidence's
-    // own comment) — pass null explicitly rather than booking.technician_id
-    // (the ASSIGNEE, not the creator — the exact wrong signal the audit
-    // caught). Always resolves office_booking until a future PR supplies a
-    // genuine creator signal.
-    const wonVia = isCloseoutEvidence(booking.created_at, null, scheduledDateStr, technicianId)
-      ? 'closeout_booking'
-      : 'office_booking';
-    return { won_via: wonVia, won_at: new Date(booking.created_at) };
+    const effectiveAt = new Date(effectiveBookingTimestamp(booking));
+    if (effectiveAt < lowerBound || effectiveAt > upperBound) continue; // the OR above is a superset of the true bound — re-check the row's own effective timestamp
+    if (!earliestBookingAt || effectiveAt < earliestBookingAt) earliestBookingAt = effectiveAt;
+  }
+  if (earliestBookingAt) {
+    candidates.push({ won_via: 'office_booking', won_at: earliestBookingAt });
   }
 
-  return null;
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => a.won_at.getTime() - b.won_at.getTime());
+  return candidates[0];
 }
 
 // Shared by recordOutcome's post-record reconciliation AND the hourly sweep
@@ -577,11 +566,11 @@ async function findSaleEvidenceForConsultation(database, {
 // error — best-effort is the CALLER's responsibility (each logs its own
 // context), not this shared piece.
 async function attemptEvidenceBasedWin(database, {
-  outcomeRowId, customerId, scheduledDateStr, technicianId = null, now,
+  outcomeRowId, customerId, scheduledDateStr, now,
 }) {
   let won = null;
   await database.transaction(async (sp) => {
-    const evidence = await findSaleEvidenceForConsultation(sp, { customerId, scheduledDateStr, technicianId, now });
+    const evidence = await findSaleEvidenceForConsultation(sp, { customerId, scheduledDateStr, now });
     if (!evidence) return;
     const [wonRow] = await sp('consultation_outcomes')
       .where({ id: outcomeRowId })
@@ -614,12 +603,12 @@ async function attemptEvidenceBasedWin(database, {
 // re-selected by the sweep's own WHERE outcome IN (warm,cold) again either
 // way.
 async function reconcileOneOpenOutcome(database, {
-  outcomeRowId, customerId, scheduledDateStr, technicianId = null, now,
+  outcomeRowId, customerId, scheduledDateStr, now,
 }) {
   return database.transaction(async (locked) => {
     await lockCustomerRow(locked, customerId);
     const won = await attemptEvidenceBasedWin(locked, {
-      outcomeRowId, customerId, scheduledDateStr, technicianId, now,
+      outcomeRowId, customerId, scheduledDateStr, now,
     });
     await locked('consultation_outcomes').where({ id: outcomeRowId }).update({ last_reconciled_at: now });
     return won;
@@ -756,7 +745,6 @@ async function recordOutcome(params = {}, { trx } = {}) {
           outcomeRowId: saved.id,
           customerId,
           scheduledDateStr: toDateOnlyString(svcRow.scheduled_date),
-          technicianId,
           now,
         });
         if (won) return won;
@@ -798,23 +786,14 @@ async function recordOutcome(params = {}, { trx } = {}) {
  * the booking/accept that is reconciling. Returns the count won (0 on any
  * failure or no match) — never throws.
  *
- * won_via provenance (round 12, P1 :774 / codex P1 audit): optional
- * evidenceCreatedAt/evidenceCreatorTechnicianId decide 'closeout_booking'
- * vs `via` PER open row, against THAT row's own visit (isCloseoutEvidence)
- * — never once for the whole batch. Each row wins through its own guarded
- * UPDATE (see the loop below); no row is a bulk-decided value copied onto
- * every other open row for the customer. evidenceCreatorTechnicianId must
- * be the technician CONFIRMED to have personally created the winning
- * booking — NEVER scheduled_services.technician_id (that row's assignee;
- * see isCloseoutEvidence's own comment). No caller passes either param
- * today (admin-leads.js/admin-schedule.js are office tools and stopped
- * passing them after the codex P1 audit caught exactly this
- * assignee-vs-creator confusion) — they exist for a future tech-closeout
- * PR that has a real creator signal to supply.
+ * won_via is exactly `via` for every row this call wins (round 12, P2
+ * consultation-outcomes.js:411 — removed the dormant per-row
+ * closeout_booking auto-detection layer; see the file header). A future
+ * tech-closeout PR (PR1b) that DOES know a booking was closed at the door
+ * calls this with `via: 'closeout_booking'` directly — no auto-detection
+ * needed, since that caller already knows contextually.
  */
-async function markWonForCustomer(customerId, {
-  via, trx, now = new Date(), evidenceCreatedAt = null, evidenceCreatorTechnicianId = null,
-} = {}) {
+async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {}) {
   if (!customerId || !trx || !via) return 0;
   try {
     let winCount = 0;
@@ -853,71 +832,26 @@ async function markWonForCustomer(customerId, {
       // median_days_to_close negative. Bounds the window on BOTH sides.
       const nowDateStr = etDateString(now);
 
-      // Round 12, P1 :774: won_via is decided PER ROW, against THAT row's
-      // own visit — not once for the whole batch. A single bulk-wide
-      // decision (the pre-round-12 shape: one SELECT deciding one wonVia,
-      // then one UPDATE writing it into every open row) let a same-day
-      // booking credit a consultation from WEEKS earlier as "won at the
-      // door" merely because it shared the customer and was also still
-      // open — wrong provenance on every row but the one the booking
-      // actually closed. This SELECT gathers the customer's open in-window
-      // rows joined to each row's own visit (scheduled_date + technician_id
-      // — exactly what isCloseoutEvidence needs); it is not itself a win —
-      // every row it finds is committed only by its OWN guarded UPDATE
-      // below, which re-checks outcome IN (warm, cold) at write time, so a
-      // row this SELECT sees can never be double-won or overwrite a
-      // concurrent resolution (the same no-TOCTOU guarantee the old single
-      // UPDATE gave, now per row instead of per batch — mirrors how
-      // reconcileOpenConsultationOutcomes' sweep already SELECTs candidate
-      // rows and then guards each one's own UPDATE separately).
-      const openRows = await sp('consultation_outcomes as co')
-        .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
-        .whereIn('co.outcome', ['warm', 'cold'])
+      // One atomic UPDATE: the outcome guard (only an open warm/cold row can
+      // win) and the [90-day-ago, today] window (a subquery against
+      // scheduled_services, not a prior SELECT) both live in the same
+      // statement's WHERE, so nothing can flip a row's outcome between
+      // "read" and "write" — there is no read. The win count is the rows
+      // this UPDATE actually touched, never a pre-computed candidate list.
+      const updated = await sp('consultation_outcomes')
+        .whereIn('outcome', ['warm', 'cold'])
         .where(function matchCustomerOrItsLeads() {
-          this.where('co.customer_id', customerId);
-          if (leadIds.length) this.orWhereIn('co.lead_id', leadIds);
+          this.where('customer_id', customerId);
+          if (leadIds.length) this.orWhereIn('lead_id', leadIds);
         })
-        .where('ss.scheduled_date', '>=', cutoff)
-        .where('ss.scheduled_date', '<=', nowDateStr)
-        .select('co.id as outcome_id', 'ss.scheduled_date', 'ss.technician_id');
-
-      for (const row of openRows) {
-        // isCloseoutEvidence compares the evidence's TIMESTAMP (via
-        // etDateString) against THIS row's own visit DATE (toDateOnlyString
-        // — see its own comment on why a DATE column must never go through
-        // etDateString) and THIS row's own visit's technician — never a
-        // different open row's. No caller passes evidenceCreatorTechnicianId
-        // today (see the docstring above) so this always returns false, and
-        // wonVia is exactly `via` for every row — unchanged from before
-        // round 12.
-        const wonVia = isCloseoutEvidence(
-          evidenceCreatedAt, evidenceCreatorTechnicianId, toDateOnlyString(row.scheduled_date), row.technician_id,
-        ) ? 'closeout_booking' : via;
-        // Same WHERE shape the old single bulk UPDATE used — outcome guard
-        // + customer/lead match + live-visit window — scoped to this ONE
-        // row by id. A row that resolved (won/lost) between the SELECT
-        // above and this write is provably untouched: a 0-row update, not
-        // a stale overwrite.
-        // Each row's UPDATE lands before the next is attempted
-        // (savepoint-serial, not a real bottleneck: this is a best-effort
-        // per-customer reconcile over at most a handful of open rows, not
-        // a bulk sweep).
-        const wonRow = await sp('consultation_outcomes')
-          .where({ id: row.outcome_id })
-          .whereIn('outcome', ['warm', 'cold'])
-          .where(function matchCustomerOrItsLeads() {
-            this.where('customer_id', customerId);
-            if (leadIds.length) this.orWhereIn('lead_id', leadIds);
-          })
-          .whereIn('scheduled_service_id', function liveVisits() {
-            this.select('id').from('scheduled_services')
-              .where('scheduled_date', '>=', cutoff)
-              .where('scheduled_date', '<=', nowDateStr);
-          })
-          .update({ outcome: 'won', won_at: now, won_via: wonVia, updated_at: now })
-          .returning('id');
-        if (wonRow.length) winCount += 1;
-      }
+        .whereIn('scheduled_service_id', function liveVisits() {
+          this.select('id').from('scheduled_services')
+            .where('scheduled_date', '>=', cutoff)
+            .where('scheduled_date', '<=', nowDateStr);
+        })
+        .update({ outcome: 'won', won_at: now, won_via: via, updated_at: now })
+        .returning('id');
+      winCount = updated.length;
     });
     return winCount;
   } catch (err) {
@@ -992,7 +926,7 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
       .where('ss.scheduled_date', '<=', nowDateStr)
       .orderBy([{ column: 'co.last_reconciled_at', order: 'asc', nulls: 'first' }, { column: 'co.recorded_at', order: 'asc' }])
       .limit(limit)
-      .select('co.id as outcome_id', 'co.customer_id', 'ss.scheduled_date', 'ss.technician_id');
+      .select('co.id as outcome_id', 'co.customer_id', 'ss.scheduled_date');
   } catch (err) {
     logger.error(`[consultation-outcomes] reconcile sweep query failed: ${err.message}`);
     result.errors += 1;
@@ -1006,7 +940,6 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
         outcomeRowId: row.outcome_id,
         customerId: row.customer_id,
         scheduledDateStr: toDateOnlyString(row.scheduled_date),
-        technicianId: row.technician_id,
         now,
       });
       if (wonRow) result.won += 1;
@@ -1015,7 +948,53 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
       logger.warn(`[consultation-outcomes] reconcile sweep failed for outcome ${row.outcome_id}: ${err.message}`);
     }
   }
+
+  await repairMissedNoShowOutcomes({ now, limit, result });
   return result;
+}
+
+// Round 12, P2 job-status.js:514 (codex): the no-show transition writes the
+// outcome best-effort inside a savepoint, so a failed write there is logged
+// and lost. This pass makes it retryable: any no-showed consultation visit
+// in the sweep window whose outcome is still missing or open (warm/cold) is
+// re-run through markNoShow, which re-checks isAssessmentBooking and keeps
+// its own guarded UPDATE / insert-if-missing. Mutates `result` in place.
+async function repairMissedNoShowOutcomes({ now, limit, result }) {
+  result.no_show_repaired = 0;
+  let rows;
+  try {
+    const cutoff = etDateString(addETDays(now, -(WON_WINDOW_DAYS + SWEEP_GRACE_DAYS)));
+    rows = await db('scheduled_services as ss')
+      .leftJoin('services as svc', 'svc.id', 'ss.service_id')
+      .leftJoin('consultation_outcomes as co', 'co.scheduled_service_id', 'ss.id')
+      .where('ss.status', 'no_show')
+      .where('ss.scheduled_date', '>=', cutoff)
+      .where(function matchConsultation() {
+        this.whereRaw("lower(trim(ss.service_type)) = 'waves assessment'")
+          .orWhere('svc.service_key', 'lawn_inspection')
+          .orWhereRaw("lower(trim(svc.name)) = 'waves assessment'");
+      })
+      .where(function missingOrOpen() {
+        this.whereNull('co.id').orWhereIn('co.outcome', ['warm', 'cold']);
+      })
+      .orderBy('ss.scheduled_date', 'asc')
+      .limit(limit)
+      .select('ss.id as scheduled_service_id');
+  } catch (err) {
+    logger.error(`[consultation-outcomes] no-show repair query failed: ${err.message}`);
+    result.errors += 1;
+    return;
+  }
+
+  for (const row of rows) {
+    try {
+      const saved = await db.transaction((sp) => markNoShow(row.scheduled_service_id, { trx: sp }));
+      if (saved && saved.outcome === 'lost' && saved.lost_reason === 'no_show') result.no_show_repaired += 1;
+    } catch (err) {
+      result.errors += 1;
+      logger.warn(`[consultation-outcomes] no-show repair failed for visit ${row.scheduled_service_id}: ${err.message}`);
+    }
+  }
 }
 
 /**
@@ -1142,8 +1121,8 @@ async function consultationStats({ from, to, trx } = {}) {
   const stats = {
     booked: visits.length,
     showed: 0,
-    won_at_door: 0,
-    won_after: 0,
+    won: 0,
+    won_by_via: {},
     warm: 0,
     cold: 0,
     lost: 0,
@@ -1169,8 +1148,9 @@ async function consultationStats({ from, to, trx } = {}) {
       const reason = v.lost_reason || 'unspecified';
       stats.lost_by_reason[reason] = (stats.lost_by_reason[reason] || 0) + 1;
     } else if (v.outcome === 'won') {
-      if (v.won_via === 'closeout_booking') stats.won_at_door += 1;
-      else stats.won_after += 1;
+      stats.won += 1;
+      const via = v.won_via || 'unspecified';
+      stats.won_by_via[via] = (stats.won_by_via[via] || 0) + 1;
       if (v.won_at) {
         // P1-1: v.scheduled_date is a DATE column — toDateOnlyString reads
         // its calendar fields directly rather than routing it through
