@@ -222,6 +222,56 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   });
 });
 
+(process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('a historical backfill must not outrank a later, still-effective old-shape legacy rate (codex round-5 P0)', () => {
+  const county = 'Collier';
+  const customerId = randomUUID();
+  // "July" — an old-shape legacy row still genuinely in force (expiry in
+  // the future) — and "January", a historical backfill posted well after
+  // it, both computed relative to today.
+  const legacyEffective = etDateString(addETDays(new Date(), -60));
+  const legacyExpiry = etDateString(addETDays(new Date(), 30));
+  const backfillDate = etDateString(addETDays(new Date(), -200));
+
+  beforeAll(async () => {
+    await db('customers').insert({
+      id: customerId, first_name: 'TaxLegacyPrecedence', last_name: 'Commercial', phone: '9415550195',
+      email: `tax-legacy-precedence-${customerId}@example.com`, zip: '34102', property_type: 'commercial',
+    });
+    // The old-shape legacy row: active=false, but its window still covers
+    // today.
+    await db('tax_rates').insert({
+      county, state: 'FL', state_rate: 0.06, county_surtax: 0.015, combined_rate: 0.075,
+      effective_date: legacyEffective, expiry_date: legacyExpiry, active: false,
+    });
+  });
+
+  afterAll(async () => {
+    await db('customers').where({ id: customerId }).del();
+    await db('tax_rates').where({ county, effective_date: legacyEffective }).del();
+    await db('tax_rates').where({ county, effective_date: backfillDate }).del();
+  });
+
+  test('a January backfill posted after the fact does not outrank the still-current July legacy rate', async () => {
+    const backfillPost = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ county, stateRate: 0.06, countySurtax: 0.005, effectiveDate: backfillDate, notes: 'historical (January) backfill' }),
+    }).then((r) => r.json()));
+    expect(backfillPost.success).toBe(true);
+
+    // EXPECTED: the legacy row's 7.5% still wins — it is the newer
+    // effective_date whose window covers today, even though it is
+    // active:false and the backfill is active:true.
+    const r = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 100);
+    expect(r.rate).toBeCloseTo(0.075, 6);
+
+    const TaxAdvisor = require('../services/tax-advisor');
+    const rates = await TaxAdvisor.getCurrentTaxRates();
+    const collierRows = rates.filter((row) => row.county === county);
+    expect(collierRows).toHaveLength(1);
+    expect(parseFloat(collierRows[0].combined_rate)).toBeCloseTo(0.075, 6);
+  });
+});
+
 (process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('correcting a staged future rate must not show the discarded draft as upcoming too (codex round-4 P1)', () => {
   const county = 'Lee';
   const staged = etDateString(addETDays(new Date(), 45));

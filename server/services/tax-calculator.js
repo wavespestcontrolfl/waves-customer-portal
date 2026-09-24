@@ -95,33 +95,27 @@ const TaxCalculator = {
     // Bound by effective_date so a staged future-dated rate (posted ahead of
     // its start date) never applies before it takes effect, and by
     // expiry_date so a retired rate never resurfaces (audit r1-billing-1).
+    // Deliberately NOT filtered by `active`: a backfilled correction posted
+    // after a later rate is already in force inserts its own active:true
+    // row, and a rate staged by the OLD (pre-fix) route can leave a
+    // still-genuinely-current predecessor marked active:false — in both
+    // cases `active` no longer tracks which row actually covers today. The
+    // single ordering rule below (newest effective_date whose window covers
+    // today, active or not) picks the same row calculateTax's own
+    // date-bounded selection should for every one of those shapes,
+    // instead of an `active`-gated primary query only falling back to a
+    // legacy row when NO active row exists at all — that precedence let a
+    // backfilled active row win over a later, still-effective legacy
+    // predecessor (codex round-5 P0).
     const nowET = todayET();
-    let taxRate = await conn('tax_rates')
-      .where({ county, active: true })
+    const taxRate = await conn('tax_rates')
+      .where({ county })
       .andWhere('effective_date', '<=', nowET)
       .andWhere(function () {
         this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
       })
       .orderBy('effective_date', 'desc')
       .first();
-
-    if (!taxRate) {
-      // Compatibility: a rate staged by the OLD route (before the
-      // effective-date fix) marked its predecessor active=false with
-      // expiry_date on the future effective date, while the successor sat
-      // active=true but not yet effective. The query above requires
-      // active=true, so during that gap it found neither row and fell back
-      // to the hardcoded default even though the predecessor is still
-      // genuinely in force (codex round-1 P1). Honor that old shape for its
-      // remaining window: an inactive row is still current if today falls
-      // inside [effective_date, expiry_date).
-      taxRate = await conn('tax_rates')
-        .where({ county, active: false })
-        .andWhere('effective_date', '<=', nowET)
-        .andWhere('expiry_date', '>', nowET)
-        .orderBy('effective_date', 'desc')
-        .first();
-    }
 
     const rate = taxRate ? parseFloat(taxRate.combined_rate) : 0.07;
     const amount = Math.round(subtotal * rate * 100) / 100;
