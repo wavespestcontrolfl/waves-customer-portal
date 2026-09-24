@@ -951,6 +951,17 @@ router.post('/:id/verdict', async (req, res) => {
       const heldConflictPayload = typeof heldConflict?.payload === 'string'
         ? (() => { try { return JSON.parse(heldConflict.payload); } catch { return null; } })()
         : heldConflict?.payload;
+      // A call verdict also closes an open dispute RECOVERY task for this
+      // call: lift the reminder hold it carried, exactly as the single-card
+      // transition does (local audit P1 after codex r19).
+      const recoveryTasks = await trx('triage_items')
+        .where({ call_log_id: item.call_log_id, reason_code: 'auto_booking_skipped_after_approval' })
+        .whereIn('status', OPEN_STATES)
+        .select('payload');
+      for (const task of recoveryTasks) {
+        const taskPayload = typeof task.payload === 'string' ? (() => { try { return JSON.parse(task.payload); } catch { return null; } })() : task.payload;
+        await releaseDisputeReminderHold(trx, taskPayload);
+      }
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
         // Bounce follow-ups, pending property-role confirmations, and parked
