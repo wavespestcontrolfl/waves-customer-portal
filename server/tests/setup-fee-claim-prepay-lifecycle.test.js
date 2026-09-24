@@ -1071,30 +1071,42 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
   function revivalConn({
     stamp = '99.00', invoiceRow = prepayInvoiceRow, rebills = [], markerRebill = null,
     // The estimate-origin switch guard's own 3-arg where('notes', 'like', …)
-    // probe for a voided sibling carrying [prepay-switch-superseded-by:…]
-    // (P0 fix): default null (no superseded sibling) so every pre-existing
-    // fixture in this describe block — none of which is a switch prepay —
-    // keeps hitting the normal ledger/stamp path unchanged.
-    supersededSibling = null,
+    // probe for voided siblings carrying [prepay-switch-superseded-by:…]
+    // (codex P0 — a switch can supersede MULTIPLE invoices at once, so the
+    // source reads them all via .select(), never .first()): default []
+    // (no superseded siblings) so every pre-existing fixture in this
+    // describe block — none of which is a switch prepay — keeps hitting the
+    // normal ledger/stamp path unchanged. restoredMarkerIds: sibling ids
+    // whose OWN prepay-switch-restore marker probe should find a match
+    // (i.e. that sibling's marker re-mint has already fired once).
+    supersededSiblings = [],
+    restoredMarkerIds = [],
   } = {}) {
     const c = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp } });
     const inner = c;
     const wrapped = (table) => {
       const q = inner(table);
       if (table === 'invoices') {
-        // Both the switch-supersede probe and the r75 rebill-marker probe
-        // are a 3-arg where('notes', 'like', <pattern>) — route each to its
-        // own fixture by the marker text in the pattern, everything else to
-        // the row.
+        // Every probe here is a 3-arg where('notes', 'like', <pattern>) —
+        // route each to its own fixture by the marker text in the pattern,
+        // everything else to the row.
         let notesPattern = null;
         const origWhere = q.where;
         q.where = (...args) => { if (args[0] === 'notes') { notesPattern = String(args[2] || ''); return q; } return origWhere(args[0]); };
         q.first = async () => {
-          if (notesPattern && notesPattern.includes('prepay-switch-superseded-by')) return supersededSibling;
+          if (notesPattern && notesPattern.includes('prepay-switch-superseded-by')) return supersededSiblings[0] || null;
+          if (notesPattern && notesPattern.includes('prepay-switch-restore:')) {
+            const m = /prepay-switch-restore:([^%\]]+)/.exec(notesPattern);
+            const siblingId = m && m[1];
+            return siblingId && restoredMarkerIds.includes(siblingId) ? { id: `restored-${siblingId}` } : null;
+          }
           if (notesPattern) return markerRebill;
           return invoiceRow;
         };
-        q.select = async () => rebills;
+        q.select = async () => {
+          if (notesPattern && notesPattern.includes('prepay-switch-superseded-by')) return supersededSiblings;
+          return rebills;
+        };
       }
       return q;
     };
@@ -1183,6 +1195,33 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     expect(section).not.toMatch(/whereNotIn\("status", \["cancelled", "canceled", "rescheduled"\]\)/);
     // Both re-bill mints carry the machine marker the revival sweep voids by.
     expect((invoiceSrc.match(/rodentSetupRebillMarker\(/g) || []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('codex round-2 P0: a SECOND superseded invoice with no setup line must not hide the setup-bearing sibling', async () => {
+    // resolveSupersededInvoices can void MULTIPLE invoices for the same
+    // switch (matches on the visit set OR the whole estimate-scoped AR),
+    // every one stamped with the SAME [prepay-switch-superseded-by:P]
+    // marker. Deliberately lists the NON-setup sibling FIRST in the array —
+    // an unordered .first()/[0] read would pick it and never see the one
+    // that actually carries the $99, wrongly falling through to ledger a
+    // claim the marker restore will ALSO cover once it re-mints the
+    // setup-bearing sibling.
+    const applicationOnlySibling = { id: 'inv-superseded-apponly', line_items: [{ description: 'First service application', amount: 128 }] };
+    const setupBearingSibling = { id: 'inv-superseded-setup', line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 99 }] };
+    const c = revivalConn({ supersededSiblings: [applicationOnlySibling, setupBearingSibling] });
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(c, 'inv-prepay')).toBeNull();
+    expect(c.writes).toEqual([]);
+
+    // Once that setup-bearing sibling's OWN marker re-mint has fired once,
+    // the marker path is spent and the claim must ledger instead — proving
+    // the per-sibling restore check, not just per-sibling setup detection.
+    const restored = revivalConn({
+      supersededSiblings: [applicationOnlySibling, setupBearingSibling],
+      restoredMarkerIds: [setupBearingSibling.id],
+    });
+    const out = await InvoiceService.retireRodentSetupObligationForRevivedPrepay(restored, 'inv-prepay');
+    expect(out).not.toBeNull();
+    expect(restored.writes.some((w) => w.table === 'setup_fee_claims' && w.op === 'insert')).toBe(true);
   });
 
   test('wired into BOTH term revival transitions (source contract)', () => {

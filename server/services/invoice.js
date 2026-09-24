@@ -8783,39 +8783,55 @@ const InvoiceService = {
     // the marker re-mint, once via the claims-restore stamp/re-bill. Detect
     // the shape from the marker itself (the switch's own estimate flag isn't
     // available here): a voided sibling invoice pointing at this prepay that
-    // still carries a setup-fee line.
-    const supersededSibling = await conn("invoices")
+    // still carries a setup-fee line. The switch can supersede MULTIPLE
+    // invoices at once (resolveSupersededInvoices matches on the visit set
+    // OR the whole estimate-scoped AR) — an unordered single-row read could
+    // pick an application-only sibling while ANOTHER sibling carries the
+    // setup, wrongly falling through to ledger a claim the marker restore
+    // will ALSO cover once it re-mints the setup-bearing sibling (codex P0).
+    // Read every sibling.
+    const supersededSiblings = await conn("invoices")
       .where("notes", "like", `%${prepaySwitchSupersededByMarker(prepayInvoiceId)}%`)
-      .first("id", "line_items");
-    if (supersededSibling) {
-      let siblingLines = supersededSibling.line_items;
-      if (typeof siblingLines === "string") { try { siblingLines = JSON.parse(siblingLines); } catch { siblingLines = []; } }
-      const siblingCarriesSetup = (Array.isArray(siblingLines) ? siblingLines : [])
-        .some((li) => /setup fee/i.test(String(li?.description || "")));
+      .select("id", "line_items");
+    if (supersededSiblings.length > 0) {
+      const carriesSetup = (sib) => {
+        let siblingLines = sib.line_items;
+        if (typeof siblingLines === "string") { try { siblingLines = JSON.parse(siblingLines); } catch { siblingLines = []; } }
+        return (Array.isArray(siblingLines) ? siblingLines : [])
+          .some((li) => /setup fee/i.test(String(li?.description || "")));
+      };
+      const setupBearingSiblings = supersededSiblings.filter(carriesSetup);
       // The marker re-mint is idempotent PER SUPERSEDED INVOICE
       // (restoreSwitchSupersededInvoicesForPrepay's own `existing` guard):
-      // once a restore has been minted for this superseded row, it will
+      // once a restore has been minted for a given superseded row, it will
       // NEVER be minted again on any later refund, no matter what happens
       // to that restore afterward. A REVIVAL (dispute won / re-payment)
       // voids any currently-live restore right after this call
       // (_retireSwitchRestoredInvoicesForRevivedPrepay, since the prepay's
-      // own coverage is live again) — so once a restore has ever existed
-      // for this chain, the marker path is a spent, one-time mechanism and
-      // this ledger must take over from here, or a later
+      // own coverage is live again) — so once a restore has ever existed for
+      // the setup-bearing sibling(s), the marker path is a spent, one-time
+      // mechanism and this ledger must take over from here, or a later
       // dispute-lost -> dispute-won -> refund cycle drops the setup fee
       // obligation forever (codex P1: the void replacement blocks a second
       // re-mint AND no claim exists for the claims-restore path to find).
       // Checked by EXISTENCE only (any status) — never by current liveness,
       // which the imminent void in this same transaction would make racy.
-      const alreadyRestoredOnce = siblingCarriesSetup && await conn("invoices")
-        .where("notes", "like", `%${prepaySwitchRestoreMarker(supersededSibling.id)}%`)
-        .first("id");
-      if (siblingCarriesSetup && !alreadyRestoredOnce) {
-        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: estimate-origin switch — superseded invoice ${supersededSibling.id} already carries the setup line and has never been restored; no claim ledgered (its marker re-mint on refund is the sole restore path so far)`);
+      let anySetupSiblingNeverRestored = false;
+      let anyRestoredOnce = false;
+      for (const sib of setupBearingSiblings) {
+         
+        const restored = await conn("invoices")
+          .where("notes", "like", `%${prepaySwitchRestoreMarker(sib.id)}%`)
+          .first("id");
+        if (restored) anyRestoredOnce = true;
+        else anySetupSiblingNeverRestored = true;
+      }
+      if (setupBearingSiblings.length > 0 && anySetupSiblingNeverRestored) {
+        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: estimate-origin switch — ${setupBearingSiblings.length} superseded invoice(s) carry the setup line and at least one has never been restored; no claim ledgered (its marker re-mint on refund is the sole restore path so far)`);
         return null;
       }
-      if (alreadyRestoredOnce) {
-        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: estimate-origin switch — the marker re-mint for superseded invoice ${supersededSibling.id} already fired once and cannot fire again; ledgering the claim so a future refund can restore the setup via the claims path instead`);
+      if (setupBearingSiblings.length > 0 && anyRestoredOnce) {
+        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: estimate-origin switch — every setup-bearing superseded invoice's marker re-mint already fired and cannot fire again; ledgering the claim so a future refund can restore the setup via the claims path instead`);
       }
     }
     let lines = invoiceRow.line_items;

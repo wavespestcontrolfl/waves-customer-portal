@@ -277,4 +277,39 @@ postgres('r2-prepay-switch-and-term-lifecycle-1: estimate-origin switch prepay �
     expect(obligationsAfterSecondRefund).toBe(1);
     expect(stampAfterSecondRefund).toBe(99);
   });
+
+  test('codex P0: a SECOND superseded invoice with no setup line must not hide the setup-bearing sibling', async () => {
+    // resolveSupersededInvoices can void more than one invoice for the same
+    // switch (matches on the visit set OR the whole estimate-scoped AR) —
+    // every voided row gets the SAME [prepay-switch-superseded-by:P] marker.
+    // An unordered single-row read could pick the application-only sibling
+    // and never see the one that actually carries the $99 setup line.
+    f = await seed();
+    const { etDateString } = require('../utils/datetime-et');
+    const applicationOnlySiblingId = randomUUID();
+    await mockPg('invoices').insert({
+      id: applicationOnlySiblingId, token: randomUUID(), invoice_number: `AUD-${applicationOnlySiblingId.slice(0, 8)}`,
+      customer_id: f.customerId, scheduled_service_id: f.rootId, title: 'Rodent Bait Stations — Second Visit',
+      status: 'void', total: 128, subtotal: 128,
+      notes: `Auto-generated from accepted estimate #${f.estimateId}.\n[prepay-switch-superseded-by:${f.prepayInvoiceId}]`,
+      line_items: JSON.stringify([
+        { description: 'First service application', quantity: 1, unit_price: 128, amount: 128 },
+      ]),
+      due_date: etDateString(),
+    });
+
+    const InvoiceService = require('../services/invoice');
+    const paidAt = new Date();
+    await mockPg('invoices').where({ id: f.prepayInvoiceId }).update({ status: 'paid', paid_at: paidAt, payment_recorded_at: paidAt, payment_method: 'cash' });
+    // Call the exact function under test directly (same signature the
+    // revival/first-payment sync uses) so this asserts the fix itself,
+    // independent of which of the two siblings Postgres happens to return
+    // first with no ORDER BY.
+    const out = await InvoiceService.retireRodentSetupObligationForRevivedPrepay(mockPg, f.prepayInvoiceId);
+    expect(out).toBeNull();
+    const claimOnPrepay = await mockPg('setup_fee_claims').where({ invoice_id: f.prepayInvoiceId }).first();
+    expect(claimOnPrepay).toBeUndefined();
+
+    await mockPg('invoices').where({ id: applicationOnlySiblingId }).del().catch(() => {});
+  });
 });
