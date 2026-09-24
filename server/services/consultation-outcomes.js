@@ -723,6 +723,15 @@ async function boundLockWait(trx) {
   await trx.raw(`SET LOCAL lock_timeout = '${RECONCILE_LOCK_WAIT_MS}ms'`);
 }
 
+// The consultation visit behind an outcome row, row-locked (FOR NO KEY
+// UPDATE) — callers hold the customer lock first.
+async function lockedConsultationVisit(trx, outcomeRowId) {
+  const outcome = await trx('consultation_outcomes').where({ id: outcomeRowId }).first('scheduled_service_id');
+  if (!outcome?.scheduled_service_id) return null;
+  return trx('scheduled_services').where({ id: outcome.scheduled_service_id }).forNoKeyUpdate()
+    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_start');
+}
+
 // The sweep's per-row unit of work: lock the customer row FIRST (P1-A
 // discipline — see lockCustomerRow), then attempt the evidence-based win
 // for this one already-existing open outcome row, both inside ONE
@@ -743,18 +752,32 @@ async function boundLockWait(trx) {
 // concurrent process already won in between is harmless and never
 // re-selected by the sweep's own WHERE outcome IN (warm,cold) again either
 // way.
-async function reconcileOneOpenOutcome(database, {
-  outcomeRowId, customerId, scheduledDateStr, windowStart = null, now,
-}) {
+async function reconcileOneOpenOutcome(database, { outcomeRowId, customerId, now }) {
   return database.transaction(async (locked) => {
     // The bound is transaction-local (SET LOCAL — no restore needed, this
     // transaction does nothing else afterward) and set before the lock it
     // is meant to bound; a no-op when there is no customer to lock.
     if (customerId) await boundLockWait(locked);
     await lockCustomerRow(locked, customerId);
-    const won = await attemptEvidenceBasedWin(locked, {
-      outcomeRowId, customerId, scheduledDateStr, windowStart, now,
-    });
+    // The consultation's schedule re-read UNDER the lock (Codex #4710 r10
+    // pre-push P1), customer → visit order: dispatch may have moved it since
+    // the batch SELECT, and a sale that precedes the NEW time is not its
+    // sale. A visit now dead, reassigned, or not yet started is skipped.
+    const visit = await lockedConsultationVisit(locked, outcomeRowId);
+    const live = visit
+      && !DEAD_CONSULTATION_STATUSES.includes(visit.status)
+      && String(visit.customer_id || '') === String(customerId || '')
+      && toDateOnlyString(visit.scheduled_date) <= etDateString(now)
+      && (visitWindowOpensMs(visit) ?? -Infinity) <= now.getTime();
+    const won = live
+      ? await attemptEvidenceBasedWin(locked, {
+        outcomeRowId,
+        customerId,
+        scheduledDateStr: toDateOnlyString(visit.scheduled_date),
+        windowStart: visit.window_start || null,
+        now,
+      })
+      : 0;
     await locked('consultation_outcomes').where({ id: outcomeRowId }).update({ last_reconciled_at: now });
     return won;
   });
@@ -1200,8 +1223,6 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
       const wonRow = await reconcileOneOpenOutcome(db, {
         outcomeRowId: row.outcome_id,
         customerId: row.customer_id,
-        scheduledDateStr: toDateOnlyString(row.scheduled_date),
-        windowStart: row.window_start || null,
         now,
       });
       if (wonRow) result.won += 1;

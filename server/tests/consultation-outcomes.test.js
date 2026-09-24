@@ -2093,6 +2093,40 @@ describe('Codex #4710 pre-push P1: every sweep pass bounds its lock wait; the jo
   });
 });
 
+describe('Codex #4710 r10 pre-push P1: the sweep attributes against the schedule re-read under lock', () => {
+  const NOW = new Date('2026-09-23T20:00:00Z');
+  afterEach(() => { db.mockReset(); });
+
+  test('a consultation moved later after the batch SELECT is not won by a sale that precedes its new time', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-05', customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1', created_at: new Date('2026-09-07T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'warm' },
+      ],
+    });
+    // Dispatch moves the consultation to 09-10 the moment the sweep takes
+    // the customer lock (after its batch SELECT saw 09-05).
+    const spyDb = (name) => {
+      if (name === 'customers') {
+        const visit = fakeDb.__store.scheduled_services.find((r) => r.id === 'visit-1');
+        visit.scheduled_date = '2026-09-10';
+      }
+      return fakeDb(name);
+    };
+    spyDb.raw = fakeDb.raw;
+    spyDb.transaction = async (fn) => fn(spyDb);
+    db.mockImplementation(spyDb);
+    db.transaction = spyDb.transaction;
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.won).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('warm');
+  });
+});
+
 // ---- reopenWinsWithDeadEvidence (Codex #4710 r3 P1) ------------------------
 
 describe('reconcileOpenConsultationOutcomes — a win whose evidence booking died is reopened', () => {
