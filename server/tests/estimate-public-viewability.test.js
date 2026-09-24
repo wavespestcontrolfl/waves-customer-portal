@@ -151,6 +151,17 @@ describe('resolveEstimateDeclineGuard — linkage-invalidation fail-closed (PR #
       .toEqual({ ok: false, status: 404, error: 'Estimate not found' });
   });
 
+  it('the county-roll address block 404s the decline like every other off-surface token route — never the hold\'s 409 (codex #4667 r25 P0)', () => {
+    const blocked = JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: { source: 'county_roll', reason: 'r' } });
+    for (const status of ['sending', 'sent', 'viewed', 'declined']) {
+      expect(resolveEstimateDeclineGuard({ status, expires_at: FUTURE, estimate_data: blocked }))
+        .toEqual({ ok: false, status: 404, error: 'Estimate not found' });
+    }
+    // A lifted block (clean verdict) declines again.
+    expect(resolveEstimateDeclineGuard({ status: 'sent', expires_at: FUTURE, estimate_data: JSON.stringify({ addressUnverified: false }) }))
+      .toEqual({ ok: true });
+  });
+
   it('an unmarked sendable row still declines', () => {
     expect(resolveEstimateDeclineGuard({ status: 'sent', expires_at: FUTURE, estimate_data: null }))
       .toEqual({ ok: true });

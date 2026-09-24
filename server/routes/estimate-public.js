@@ -18584,6 +18584,15 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   if (estimate.estimate_data !== undefined && estimateLinkageInvalidated(estimate)) {
     return { ok: false, status: 404, error: 'Estimate not found' };
   }
+  // The county-roll address block is off-surface like every other token
+  // route treats it (/data, accept, tier-select): the same generic 404,
+  // never the hold's 409 — a 409 would confirm the blocked token maps to
+  // a real estimate (codex #4667 r25 P0). The UPDATE carries the matching
+  // predicate (ADDRESS_UNVERIFIED_ABSENT_SQL) for the TOCTOU window and
+  // the zero-row re-read lands here too.
+  if (estimate.estimate_data !== undefined && parseEstimateDataSafe(estimate)?.addressUnverified === true) {
+    return { ok: false, status: 404, error: 'Estimate not found' };
+  }
   // A clarify re-price hold refuses the decline the way accept refuses it
   // (same 409 + copy): a browser that loaded the estimate before the hold
   // landed would otherwise flip the held row to 'declined' — a terminal

@@ -411,6 +411,10 @@ async function performPropertyLookupCore(address, options = {}) {
       // miss instead (codex #3367 PR r18) — the caller prices from the
       // stored profile alone, and any non-cache-only caller still backfills
       // the audit and resumes normal hits.
+      // (A county record whose situs line cannot vouch for the typed number
+      // still SERVES on this latency-bound path — its verdict then reads
+      // 'unanswered', never 'county_record', so no prior hold is cleared;
+      // the non-cache-only backfill below obtains the audit.)
       if (
         cacheOnly
         && cached.property_record
@@ -424,7 +428,7 @@ async function performPropertyLookupCore(address, options = {}) {
         !cacheOnly
         && cached.property_record
         && cached.property_record._addressAudit === undefined
-        && (!hasCountyEvidence(cached.property_record) || cachedSnapped)
+        && (!countyRecordVouchesTypedNumber(address, cached.property_record) || cachedSnapped)
       ) {
         const audit = await auditAddressHouseNumber(address, null).catch(() => null);
         const marker = audit
@@ -628,7 +632,9 @@ async function performPropertyLookupCore(address, options = {}) {
   // anyway so the panel flags the customer's number instead of silently
   // pricing the neighbor's parcel.
   const snappedRecord = typedNumberDisagreesWithRecord(address, result.propertyRecord);
-  if (!hasCountyEvidence(result.propertyRecord) || snappedRecord) {
+  // …and a record with no parseable situs number cannot vouch for the
+  // typed one either — audit it (codex #4667 r25 P1).
+  if (!countyRecordVouchesTypedNumber(address, result.propertyRecord) || snappedRecord) {
     // Canonical address for the street (typo-fixed names make the roll
     // findable); typedAddress so the audit checks the CUSTOMER'S house number
     // even when Google snapped a nonexistent number to the nearest premise.
@@ -2505,7 +2511,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // 'unanswered' (no county signal at all — outage, out-of-area). The
     // quote intake clears a prior address flag only on the first two;
     // an unanswered profile must not erase an earlier warning.
-    addressVerdict: addressAudit ? 'audited' : (hasCountyEvidence(rc) ? 'county_record' : 'unanswered'),
+    addressVerdict: addressAudit ? 'audited' : (countyRecordVouchesTypedNumber(lookupAddress, rc) ? 'county_record' : 'unanswered'),
     fieldVerifyFlags,
 
     // ── DATA SOURCE TRACKING ──
@@ -2610,12 +2616,27 @@ function buildProviderStatus() {
 // number to a different premise and the "county evidence" describes the
 // wrong building.
 function typedNumberDisagreesWithRecord(address, rc) {
-  const typed = (String(address || '').match(/^\s*(\d+)\s/) || [])[1] || null;
-  const recordLine = rc?.addressLine1 || rc?._parcel?.situsAddress || '';
-  const record = (String(recordLine).match(/^\s*(\d+)\s/) || [])[1] || null;
+  const { typed, record } = houseNumbersOf(address, rc);
   return typed && record && typed !== record
     ? { typed: parseInt(typed, 10), record: parseInt(record, 10) }
     : null;
+}
+function houseNumbersOf(address, rc) {
+  const typed = (String(address || '').match(/^\s*(\d+)\s/) || [])[1] || null;
+  const recordLine = rc?.addressLine1 || rc?._parcel?.situsAddress || '';
+  const record = (String(recordLine).match(/^\s*(\d+)\s/) || [])[1] || null;
+  return { typed, record };
+}
+// Does the county/parcel record VOUCH for the typed house number? Only when
+// the record carries a parseable situs number that agrees with the typed
+// one. A parcel id alone (no situs line) is county evidence for the
+// PROPERTY, not for the typed number — such a lookup runs the audit and,
+// without one, reads 'unanswered', never 'county_record' (codex #4667 r25
+// P1: an unvouched county_record would clear a prior address hold).
+function countyRecordVouchesTypedNumber(address, rc) {
+  if (!hasCountyEvidence(rc)) return false;
+  const { typed, record } = houseNumbersOf(address, rc);
+  return !!(typed && record && typed === record);
 }
 
 const FALLBACK_CRITICAL_FIELDS = ['squareFootage', 'lotSize', 'stories', 'propertyType'];
@@ -5423,6 +5444,7 @@ module.exports._private = {
   lookupCoalesceKey,
   applyParcelTurfBound,
   typedNumberDisagreesWithRecord,
+  countyRecordVouchesTypedNumber,
   applySatelliteAttachmentType,
   applyVisionPropertyTypeEvidence,
   buildFallbackPropertyDataQuality,

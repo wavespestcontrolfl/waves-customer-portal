@@ -930,7 +930,9 @@ the sent/viewed, unarchived, not-price-locked predicates re-applied on
 the archive write itself (`website_quote_withdrawn_address_unverified`
 audit event), so its old token neither renders nor accepts — and the row's
 `estimate_data.addressUnverified` marker is itself an off-customer-surface
-verdict (`estimateOffCustomerSurface`: view, server page, accept, asks),
+verdict (`estimateOffCustomerSurface`: view, server page, accept, asks;
+`/decline`'s guard answers the same generic 404 for it, never the
+re-price hold's 409),
 so a generic unarchive or a withdrawal that failed to land still cannot
 revive the link; the archived row keeps the verdict
 (`estimate_data.addressUnverified` + `addressUnverifiedFlag`), and a later
