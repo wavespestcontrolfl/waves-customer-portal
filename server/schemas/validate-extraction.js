@@ -42,7 +42,14 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // additional_properties[].is_primary_residence. All optional/nullable: older
 // payloads still validate. Consumed by property-role-proposals (gated,
 // GATE_CALL_PROPERTY_ROLE) — fill-or-park, never a silent primary flip.
-const SCHEMA_VERSION = '1.11.0';
+// 1.12.0: additive — service_request.price object (call-agent audit
+// 2026-09-23: quoted_price_usd's accepted-total-only rule left every
+// unaccepted, ranged, unit-bearing, or prepay/tier price null). Captures
+// amount_usd/amount_max_usd (ranges), unit, accepted, stated_by,
+// prepay_term, tier_mentioned, evidence_quote. quoted_price_usd keeps its
+// existing semantics and consumers unchanged. Optional/nullable: older
+// payloads still validate.
+const SCHEMA_VERSION = '1.12.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);
