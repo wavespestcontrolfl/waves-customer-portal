@@ -45,6 +45,17 @@ function argValue(flag) {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : null;
 }
 
+// A selector flag with no value (e.g. a trailing `--apply --customer`) must
+// fail, never widen to every eligible series (Codex GitHub r5 P2).
+for (const flag of ['--customer', '--parent', '--horizon-days']) {
+  if (!args.includes(flag)) continue;
+  const v = argValue(flag);
+  if (v == null || v.startsWith('--')) {
+    console.error(`Missing value for ${flag}.`);
+    process.exit(1);
+  }
+}
+
 const CUSTOMER_ID = argValue('--customer');
 const PARENT_ID = argValue('--parent');
 const HORIZON_DAYS_ARG = argValue('--horizon-days');

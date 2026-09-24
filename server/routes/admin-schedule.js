@@ -15223,9 +15223,18 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
     if (stampedRow) return true;
   }
   const { ACTIVE_STATUSES, PAYMENT_PENDING_STATUS } = require('../services/annual-prepay-renewals');
+  // Any term still inside its window counts, WHATEVER its status: a decided
+  // term (renewed / switch_plan / cancelled-with-decision) keeps providing
+  // paid coverage until term_end in coveredTermsAsOf, so a status list alone
+  // misses real prepay footprints (Codex GitHub r5 P1). v1 errs wide — a
+  // customer excluded here is simply left exactly as they are today.
   const liveTerm = await conn('annual_prepay_terms')
     .where({ customer_id: parent.customer_id })
-    .whereIn('status', [...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS])
+    .where(function stillCovering() {
+      this.whereIn('status', [...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS])
+        .orWhereNull('term_end')
+        .orWhere('term_end', '>=', etDateString());
+    })
     .first('id');
   return !!liveTerm;
 }

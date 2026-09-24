@@ -78,7 +78,7 @@ function makeConn(handler, opts = {}) {
       if ((name === 'where' || name === 'whereNotExists') && typeof args[0] === 'function') {
         const nested = [];
         const sub = {};
-        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw', 'orWhereNotIn', 'orWhereNotNull']) {
+        for (const nm of ['where', 'orWhere', 'whereIn', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw', 'orWhereNotIn', 'orWhereNotNull']) {
           sub[nm] = (...a) => { nested.push([nm, ...a]); return sub; };
         }
         args[0].call(sub, sub);
@@ -406,9 +406,36 @@ describe('topUpRecurringSeriesLocked — annual-prepay scope cut v1 (Codex GitHu
     });
     await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
     expect(capturedCalls).toHaveLength(1);
-    const whereInCall = capturedCalls[0].find((c) => c[0] === 'whereIn');
+    const coveringFn = capturedCalls[0].find((c) => c[0] === 'whereFn');
+    expect(coveringFn).toBeDefined();
+    const nested = coveringFn[1];
+    const whereInCall = nested.find((c) => c[0] === 'whereIn');
     expect(whereInCall).toBeDefined();
     expect(whereInCall[2].slice().sort()).toEqual([...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS].sort());
+  });
+
+  test('also counts a DECIDED term still inside its window (renewed / switch_plan / cancelled-with-decision), whatever its status (Codex GitHub r5 P1)', async () => {
+    // coveredTermsAsOf keeps decided terms covering until term_end, so the
+    // status list alone would let an unstamped series of a still-covered
+    // customer through. The exclusion also matches any term whose term_end
+    // is unset or today-or-later.
+    const capturedCalls = [];
+    const { customer, parent } = topupScenario();
+    const conn = makeConn(({ table, calls, op }) => {
+      if (table === 'scheduled_services' && op === 'columnInfo') return BASE_COLS;
+      if (table === 'scheduled_services' && op === 'first') {
+        const firstCall = calls.find((c) => c[0] === 'first');
+        return firstCall[1] ? null : parent;
+      }
+      if (table === 'customers' && op === 'first') return customer;
+      if (table === 'annual_prepay_terms' && op === 'first') { capturedCalls.push(calls); return { id: 'renewed-term' }; }
+      return null;
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('annual_prepay_series');
+    const nested = capturedCalls[0].find((c) => c[0] === 'whereFn')[1];
+    expect(nested).toContainEqual(['orWhereNull', 'term_end']);
+    expect(nested).toContainEqual(['orWhere', 'term_end', '>=', etDateString()]);
   });
 
   test('a series with no prepay stamp anywhere and no live customer term proceeds normally', async () => {
