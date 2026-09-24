@@ -110,4 +110,47 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
     expect(conflict).not.toBeNull();
     expect(conflict.code).toBe('duplicate_series_conflict');
   });
+
+  test('distinct customer-owned property_id rows at the SAME real address still conflict (round-1 GitHub Codex P1)', async () => {
+    // Each customer independently saved the same physical address as their
+    // OWN customer_properties row — two different property_id UUIDs, same
+    // address_line1/city/zip. A bare property_id inequality must not be
+    // read as "different premises".
+    const winnerId = await makeCustomer({ address_line1: '1 Alpha St', city: 'Sarasota', zip: '34231' });
+    const loserId = await makeCustomer({ address_line1: '5 Beta Ave', city: 'Sarasota', zip: '34232' });
+    const winnerPropertyId = randomUUID();
+    const loserPropertyId = randomUUID();
+    await db('customer_properties').insert([
+      { id: winnerPropertyId, customer_id: winnerId, label: 'Rental', address_line1: '22 Sample Way', city: 'Sarasota', zip: '34231', is_primary: false },
+      { id: loserPropertyId, customer_id: loserId, label: 'Rental', address_line1: '22 Sample Way', city: 'Sarasota', zip: '34231', is_primary: false },
+    ]);
+    await seedParent(winnerId, { propertyId: winnerPropertyId });
+    await seedParent(loserId, { propertyId: loserPropertyId });
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).not.toBeNull();
+    expect(conflict.code).toBe('duplicate_series_conflict');
+  });
+
+  test('a stamped unitless secondary address does not inherit either owner\'s home unit (round-1 GitHub Codex P1)', async () => {
+    // Both series are stamped to the SAME unitless secondary address
+    // (no property_id, no service_address_line2) — but the two customers'
+    // own HOME addresses carry DIFFERENT units. The secondary property's key
+    // must come from the stamp alone; borrowing either owner's home unit
+    // would either falsely diverge (blocking nothing) or, worse, could
+    // falsely agree with a third, unrelated match.
+    const winnerId = await makeCustomer({ address_line1: '1 Alpha St', address_line2: 'Apt 9', city: 'Sarasota', zip: '34231' });
+    const loserId = await makeCustomer({ address_line1: '5 Beta Ave', address_line2: 'Unit 4', city: 'Sarasota', zip: '34232' });
+    const sharedStamp = { service_address_line1: '22 Sample Way', service_address_line2: null, service_address_city: 'Sarasota', service_address_zip: '34231' };
+    await seedParent(winnerId, { addressStamp: sharedStamp });
+    await seedParent(loserId, { addressStamp: sharedStamp });
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).not.toBeNull();
+    expect(conflict.code).toBe('duplicate_series_conflict');
+  });
 });

@@ -1249,37 +1249,63 @@ async function dbLevelMergeConflict(database, winner, loser) {
   return null;
 }
 
-// The full per-series property identity for a findActiveRecurringSeries
-// match: its own stamped service address when present, else the OWNING
-// customer's primary address (legacy/unstamped rows implicitly serve the
-// customer's home — the same fallback the schedule board's day view applies
-// via COALESCE(scheduled_services.service_address_line1,
-// customers.address_line1)). Never street alone: line2/unit, city and ZIP
-// all ride along, so two units of one building, or the same street name in
-// two different cities, do not collapse onto one key.
-function seriesAddressKey(match, ownerCustomer) {
-  const line1 = match.service_address_line1 || ownerCustomer.address_line1;
-  const streetKey = normalizeStreetKey(line1);
+// The effective address for a findActiveRecurringSeries match, resolved as
+// ONE whole record from exactly one source — never mixing fields from two
+// sources (e.g. a stamped line1 with the OWNER's line2 would silently
+// inherit the owner's home apartment number onto an unrelated, unitless
+// secondary property): (1) the match's OWN property_id's row in
+// customer_properties, when resolvable — two DIFFERENT customers can each
+// own a customer_properties row for the SAME real-world address under
+// different UUIDs, so property_id equality/inequality alone proves nothing
+// across customers; resolving to the row's own address is what actually
+// decides sameness; (2) else the match's own stamped service_address_*
+// fields, taken together; (3) else the OWNING customer's primary address,
+// taken together (legacy/unstamped rows implicitly serve the customer's
+// home — the same fallback the schedule board's day view applies via
+// COALESCE(scheduled_services.service_address_line1, customers.address_line1)).
+function seriesEffectiveAddress(match, ownerCustomer, propertiesById) {
+  const resolvedProperty = match.property_id ? propertiesById.get(String(match.property_id)) : null;
+  if (resolvedProperty) return resolvedProperty;
+  if (match.service_address_line1) {
+    return {
+      address_line1: match.service_address_line1,
+      address_line2: match.service_address_line2,
+      city: match.service_address_city,
+      zip: match.service_address_zip,
+    };
+  }
+  return {
+    address_line1: ownerCustomer.address_line1,
+    address_line2: ownerCustomer.address_line2,
+    city: ownerCustomer.city,
+    zip: ownerCustomer.zip,
+  };
+}
+
+// The full property identity key for a resolved address (see
+// seriesEffectiveAddress) — never street alone: line2/unit, city and ZIP all
+// ride along, so two units of one building, or the same street name in two
+// different cities, do not collapse onto one key.
+function seriesAddressKey(address) {
+  if (!address) return null;
+  const streetKey = normalizeStreetKey(address.address_line1);
   if (!streetKey) return null;
-  const line2 = match.service_address_line2 || ownerCustomer.address_line2;
-  const unit = streetKey.unit || unitFromLine2(line2) || '';
-  const city = String(match.service_address_city || ownerCustomer.city || '').trim().toLowerCase();
-  const zip = String(match.service_address_zip || ownerCustomer.zip || '').slice(0, 5);
+  const unit = streetKey.unit || unitFromLine2(address.address_line2) || '';
+  const city = String(address.city || '').trim().toLowerCase();
+  const zip = String(address.zip || '').slice(0, 5);
   return `${streetKey.key}|${unit}|${city}|${zip}`;
 }
 
 // Do two findActiveRecurringSeries matches (one per side) serve the SAME
-// property? property_id is authoritative when BOTH sides carry one (the
-// same rule executeMerge's own primary-property anchoring applies below);
-// otherwise fall back to the full address key — never property_id on one
-// side against an address key on the other, which would be comparing two
-// different identity spaces.
-function seriesSameProperty(matchA, ownerA, matchB, ownerB) {
-  const pidA = matchA.property_id ? String(matchA.property_id) : null;
-  const pidB = matchB.property_id ? String(matchB.property_id) : null;
-  if (pidA && pidB) return pidA === pidB;
-  const keyA = seriesAddressKey(matchA, ownerA);
-  const keyB = seriesAddressKey(matchB, ownerB);
+// property? Always by resolved address key (see seriesEffectiveAddress) —
+// there is no separate property_id fast path, because a bare id compare
+// cannot tell "two different customers' own rows for the same address"
+// (should match) apart from "two different addresses" (should not);
+// resolving property_id to its row's address folds both correctly into one
+// comparison.
+function seriesSameProperty(matchA, ownerA, matchB, ownerB, propertiesById) {
+  const keyA = seriesAddressKey(seriesEffectiveAddress(matchA, ownerA, propertiesById));
+  const keyB = seriesAddressKey(seriesEffectiveAddress(matchB, ownerB, propertiesById));
   return !!keyA && keyA === keyB;
 }
 
@@ -1324,8 +1350,18 @@ async function duplicateSeriesMergeConflict(database, winner, loser) {
       findActiveRecurringSeries(database, { customerId: winner.id, serviceId, serviceType }),
     ]);
     if (!Array.isArray(loserActive) || !loserActive.length || !Array.isArray(winnerActive) || !winnerActive.length) continue;
+    const propertyIds = [...new Set(
+      [...loserActive, ...winnerActive].map((m) => m.property_id).filter(Boolean).map(String),
+    )];
+    let propertiesById = new Map();
+    if (propertyIds.length) {
+      const propertyRows = await database('customer_properties')
+        .whereIn('id', propertyIds)
+        .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+      propertiesById = new Map((propertyRows || []).map((row) => [String(row.id), row]));
+    }
     const samePropertyCollision = loserActive.some(
-      (lm) => winnerActive.some((wm) => seriesSameProperty(lm, loser, wm, winner)),
+      (lm) => winnerActive.some((wm) => seriesSameProperty(lm, loser, wm, winner, propertiesById)),
     );
     if (samePropertyCollision) {
       return { family: serviceType || `service ${serviceId}` };
