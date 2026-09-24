@@ -349,8 +349,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
       }
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const moved = Array.isArray(data.moved) ? data.moved.length : 0;
-      const leftParked = Array.isArray(data.left_parked) ? data.left_parked.length : 0;
-      setAutoAssignResult({ moved, leftParked });
+      setAutoAssignResult({ moved });
       // Re-read status so the parked count (parked_open_count) and any
       // resolved cards reflect what the batch just did.
       await fetchStatus(requestTechId);
@@ -398,7 +397,10 @@ export default function TechOutSection({ techId, techName, onChanged }) {
             </Button>
             {autoAssignResult && (
               <div className="text-12 text-ink-tertiary mt-1">
-                Moved {autoAssignResult.moved}, left {autoAssignResult.leftParked} parked for a decision.
+                {/* Moved only: the live parked count above is the authoritative
+                    remainder — it counts every stop of a grouped visit, which a
+                    per-card tally here would undercount (Codex r4 P2). */}
+                Moved {autoAssignResult.moved} {autoAssignResult.moved === 1 ? 'stop' : 'stops'} automatically.
               </div>
             )}
             {autoAssignError && <div className="text-12 text-alert-fg mt-1">{autoAssignError}</div>}

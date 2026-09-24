@@ -362,6 +362,21 @@ describe('selection matches the commit policy', () => {
     expect(SmartRebooker.reschedule.mock.calls[0][5].excludeServiceIds).toEqual([JOB_ID]);
   });
 
+  test('only stops this run could move are skipped by the probe; parked-for-a-human work keeps its window', async () => {
+    SmartRebooker.previewMoveConflicts.mockResolvedValue([{ id: 'x' }]);
+    const exclusion = query([]);
+    const queue = [query(baseAlert()), query(baseStop()), exclusion, query({})];
+    db.mockImplementation(() => queue.shift());
+
+    await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    // Same rule as stopMoveRefusal: plain confirmed + ungrouped (+ tracker /
+    // office-review predicates applied as grouped where-callbacks).
+    expect(exclusion.where).toHaveBeenCalledWith({ technician_id: ABSENT_TECH, scheduled_date: DATE, status: 'confirmed' });
+    expect(exclusion.whereNull).toHaveBeenCalledWith('visit_id');
+    expect(exclusion.where.mock.calls.filter(([arg]) => typeof arg === 'function')).toHaveLength(2);
+  });
+
   test('a lapsed estimate hold on the candidate\'s day does not count as a conflict', async () => {
     const { _test: { fitsWindow } } = require('../services/tech-out-auto-move');
     const others = query([]);

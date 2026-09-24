@@ -383,7 +383,10 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
     function onAbsenceChange(event) {
       const changedDate = event?.detail?.date ? String(event.detail.date).slice(0, 10) : null;
       if (!jobDate || (changedDate && changedDate !== jobDate)) return;
+      // Drop the old roster now: a pending or failed refetch must fall back
+      // to the current assignment, never keep offering a tech now out.
       fetchedTechsForDateRef.current = null;
+      setAvailableTechs([]);
       setRosterEpoch((n) => n + 1);
     }
     window.addEventListener(TECH_ABSENCE_EVENT, onAbsenceChange);

@@ -298,16 +298,13 @@ const EXCLUSION_STALE = 'TECH_OUT_EXCLUSION_STALE';
 function makeStillParkedGuard({ alertId, absentTechId, date, stopId, excludeServiceIds, toTechId, actorId }) {
   return async (trx) => {
     // The commit probe skips excludeServiceIds; that is only sound while
-    // each of them still sits open on the absent tech's day. Re-read them
+    // each of them is still a movable stop on the absent tech's day. Re-read them
     // here, FOR SHARE, so none can leave that day until this move commits.
     // Other rebooker moves on this date already wait on the date-occupancy
     // lock the mover took before calling us, so this cannot cycle with one.
     const siblings = excludeServiceIds.filter((id) => id !== String(stopId));
     if (siblings.length) {
-      const still = await trx('scheduled_services')
-        .whereIn('id', siblings)
-        .where({ technician_id: absentTechId, scheduled_date: date })
-        .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
+      const still = await movableOnAbsentDay(trx('scheduled_services').whereIn('id', siblings), absentTechId, date)
         .orderBy('id')
         .forShare()
         .select('id');
@@ -455,11 +452,26 @@ async function resolveStaleAlert(alertId) {
 }
 
 /** Open stops still on the absent tech that day (the batch the mover may pass over). */
+/**
+ * Stops on the absent tech's day that THIS run could move — the same rule
+ * stopMoveRefusal applies: plain 'confirmed', tracker not live, ungrouped,
+ * not awaiting office review. Only these may be skipped by the occupancy
+ * probe; pending, live, grouped and review-held work stays parked and so
+ * keeps occupying its window (Codex r4 P1).
+ */
+function movableOnAbsentDay(q, absentTechId, date) {
+  return q
+    .where({ technician_id: absentTechId, scheduled_date: date, status: 'confirmed' })
+    .whereNull('visit_id')
+    .where((w) => w.whereNull('track_state').orWhereNotIn('track_state', LIVE_TRACK_STATES))
+    .where((w) => w.whereNull('source_action')
+      .orWhereNotIn('source_action', OFFICE_REVIEW_PENDING_SOURCE_ACTIONS)
+      .orWhere('customer_confirmed', true));
+}
+
+/** Movable open stops still on the absent tech that day (the batch the probe may pass over). */
 async function absentDayStopIds(absentTechId, date) {
-  const rows = await db('scheduled_services')
-    .where({ technician_id: absentTechId, scheduled_date: date })
-    .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
-    .select('id');
+  const rows = await movableOnAbsentDay(db('scheduled_services'), absentTechId, date).select('id');
   return rows.map((r) => String(r.id));
 }
 

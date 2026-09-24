@@ -427,7 +427,7 @@ describe('auto-assign parked stops (GATE_TECH_OUT_AUTO_MOVE)', () => {
       releasePost({ ok: true, json: async () => ({ enabled: true, auto_move_enabled: true, moved: [{ alert_id: 'a1', job_id: 'j1', to_technician_id: 'tech-2' }], left_parked: [{ alert_id: 'a2', reason: 'no_eligible_candidate' }] }) });
     });
 
-    expect(await screen.findByText('Moved 1, left 1 parked for a decision.')).toBeInTheDocument();
+    expect(await screen.findByText('Moved 1 stop automatically.')).toBeInTheDocument();
     expect(screen.getByText('1 stop parked in the Action Queue — decide who to move')).toBeInTheDocument();
     expect(onChanged).toHaveBeenCalledWith('tech-1');
 
@@ -474,7 +474,7 @@ describe('auto-assign parked stops (GATE_TECH_OUT_AUTO_MOVE)', () => {
     await act(async () => {
       releasePost({ ok: true, json: async () => ({ moved: [{ alert_id: 'a1' }], left_parked: [{ alert_id: 'a2', reason: 'window_occupied' }] }) });
     });
-    expect(await screen.findByText('Moved 1, left 1 parked for a decision.')).toBeInTheDocument();
+    expect(await screen.findByText('Moved 1 stop automatically.')).toBeInTheDocument();
   });
 
   it('shows an inline error on failure and re-enables the button', async () => {
