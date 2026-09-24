@@ -334,9 +334,10 @@ async function prepayBookingEligibility(estimate = {}, database = db, prospectiv
   // rather than blocking the whole preview on a transient DB error.
   const liveCheckCustomerId = estimate.customer_id || prospectiveCustomerId || null;
   if (liveCheckCustomerId) {
-    // Two INDEPENDENT lookups, each fault-isolated: a failure in the newer
-    // live-plan-row check must never mask an already-successful membership
-    // read (or vice versa) — either alone is enough to reject.
+    // Two INDEPENDENT lookups, each fault-isolated: a failure in one must
+    // never mask an already-successful positive read from the other — a
+    // definitive "yes" from either short-circuits immediately, before the
+    // other lookup even runs.
     let preservesMembership = false;
     try {
       const linkedCustomer = await database('customers').where({ id: liveCheckCustomerId }).first();
@@ -344,15 +345,28 @@ async function prepayBookingEligibility(estimate = {}, database = db, prospectiv
     } catch (e) {
       logger.warn(`[estimate-manual-acceptance] prepayBookingEligibility: live-customer membership lookup failed for estimate ${estimate.id}: ${e.message}`);
     }
+    if (preservesMembership) return ineligible('existing_customer');
     // STRICT live-plan evidence (codex round-2 P1), not only the monthly-
     // preservation predicate — see customerHasLiveRecurringPlan.
     let hasLivePlan = false;
     try {
       hasLivePlan = await customerHasLiveRecurringPlan(database, liveCheckCustomerId, estimate.id || null);
     } catch (e) {
+      // FAIL CLOSED (codex round-3 P2): reached only when the membership
+      // check above did NOT already resolve the shape (preservesMembership
+      // was false, or itself failed) — a transient read error here used to
+      // fall through as hasLivePlan=false — reporting "eligible" while the
+      // customer might genuinely have a live plan. The schedule-modal
+      // one-step flow then books the appointment on that false "eligible"
+      // and the accept guard (which retries the same lookup) rejects it,
+      // leaving a booked-but-unlinked appointment — the exact failure mode
+      // this whole preflight exists to prevent. Unknown is treated as a
+      // blocker, not a pass: the schedule flow downgrades to a standard
+      // accept before booking instead of committing on unverifiable data.
       logger.warn(`[estimate-manual-acceptance] prepayBookingEligibility: live-plan-row lookup failed for estimate ${estimate.id}: ${e.message}`);
+      return ineligible('live_plan_unknown');
     }
-    if (preservesMembership || hasLivePlan) return ineligible('existing_customer');
+    if (hasLivePlan) return ineligible('existing_customer');
   }
   // Mirror the accept transaction's own blockers (status window, expiry,
   // manager approval, commercial risk-type review): the schedule POST books

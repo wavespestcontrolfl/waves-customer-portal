@@ -223,7 +223,7 @@ describe('r2-estimate-conversion-money-1: annual prepay of an add-on for an exis
     expect(customerLookupDb).toHaveBeenCalledWith('customers');
   });
 
-  test('prepayBookingEligibility stays eligible when the live row also does not preserve membership, and a lookup failure fails OPEN to the ordinary checks (not a hard error)', async () => {
+  test('prepayBookingEligibility stays eligible when the live row also does not preserve membership; a live-plan-row lookup failure fails CLOSED (codex round-3 P2)', async () => {
     const noSnapshotEstimate = makeEstimate();
     delete noSnapshotEstimate.estimate_data.membershipSnapshot;
     const freshCustomerDb = jest.fn(() => ({
@@ -236,8 +236,16 @@ describe('r2-estimate-conversion-money-1: annual prepay of an add-on for an exis
     const result = await prepayBookingEligibility(noSnapshotEstimate, freshCustomerDb);
     expect(result.reason).not.toBe('existing_customer');
 
+    // A transient error resolving the live-plan-row query must NOT fall
+    // through as "eligible": the schedule-modal one-step flow would then
+    // book the appointment on unverifiable data and the accept guard
+    // (which retries the same lookup) rejects it afterward, leaving a
+    // booked-but-unlinked appointment. Unknown fails the preflight closed
+    // with its own reason, never resolving to a bare {} eligible-by-default
+    // shape.
     const throwingDb = jest.fn(() => { throw new Error('connection reset'); });
-    await expect(prepayBookingEligibility(noSnapshotEstimate, throwingDb)).resolves.toMatchObject({});
+    await expect(prepayBookingEligibility(noSnapshotEstimate, throwingDb))
+      .resolves.toMatchObject({ eligible: false, reason: 'live_plan_unknown' });
   });
 
   test('markEstimateManuallyAccepted(prepay_annual) is refused with 400 and never converts', async () => {
@@ -455,5 +463,25 @@ describe('r2-estimate-conversion-money-1: annual prepay of an add-on for an exis
       estimateConverter,
     });
     expect(estimateConverter.convertEstimate).toHaveBeenCalled();
+  });
+
+  test('admin-schedule.js: the prepay-on-book operator message for existing_customer does not point back at the same rejecting action (codex round-3 P3, source contract)', () => {
+    // The estimate's own "Annual Prepay" action runs the identical guard
+    // (both read prepayBookingEligibility / markEstimateManuallyAccepted),
+    // so telling the operator to "use the estimate's Annual Prepay action
+    // instead" for reason 'existing_customer' sends them straight back to
+    // another rejection. This asserts the special-cased message exists and
+    // that the generic reasonPhrase branch is never reached for this reason.
+    const fs = require('fs');
+    const path = require('path');
+    const adminSchedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(adminSchedule).toMatch(/if \(prepayEligibility\.reason === 'existing_customer'\) \{/);
+    expect(adminSchedule).toMatch(/this customer already has a live plan, so annual prepay is not offered for an add-on service\. Bill the new service at the visit \(or per-application\), or add it to the customer.s existing plan instead\./);
+    // The existing_customer branch must come BEFORE the generic
+    // reasonPhrase downgrade so it actually short-circuits it.
+    const specialCaseAt = adminSchedule.indexOf("prepayEligibility.reason === 'existing_customer'");
+    const genericDowngradeAt = adminSchedule.indexOf('annual prepay was not applied');
+    expect(specialCaseAt).toBeGreaterThan(-1);
+    expect(genericDowngradeAt).toBeGreaterThan(specialCaseAt);
   });
 });

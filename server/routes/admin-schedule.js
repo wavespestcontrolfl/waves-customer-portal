@@ -6581,9 +6581,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
           status_not_acceptable: 'only sent or viewed quotes can be accepted while booking',
           expired: 'the quote has expired',
           multi_service: 'annual prepay covers a single recurring service and this quote has more than one',
+          live_plan_unknown: 'the system could not confirm the customer’s plan status just now (a transient lookup issue)',
         }[prepayEligibility.reason]
           || 'this quote is not prepay-eligible for one-step booking (it needs a single recurring service)';
-        downgrade(`Appointment booked, but annual prepay was not applied — ${reasonPhrase}. Use the estimate’s Annual Prepay action instead.`);
+        if (prepayEligibility.reason === 'existing_customer') {
+          // The estimate's own Annual Prepay action rejects for the SAME
+          // reason (both read the identical guard), so pointing the
+          // operator at it — the generic message below — sends them
+          // straight back to another rejection (codex round-3 P3). This
+          // customer already has a live plan; add-on coverage bills at the
+          // visit or per-application, or gets folded into the existing plan.
+          downgrade('Appointment booked as standard — this customer already has a live plan, so annual prepay is not offered for an add-on service. Bill the new service at the visit (or per-application), or add it to the customer’s existing plan instead.');
+        } else {
+          downgrade(`Appointment booked, but annual prepay was not applied — ${reasonPhrase}. Use the estimate’s Annual Prepay action instead.`);
+        }
       } else if (visitOverride.error) {
         downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
       } else if (!isRecurring || !coverageVisitCount) {

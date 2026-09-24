@@ -63,6 +63,24 @@ describe('annualPrepayTermSetupFeeFallback', () => {
     expect(noSetupLine.prepay_setup_fee_amount).toBeNull();
   });
 
+  test('codex round-3 P1: a broad match must not pick the annual-prepay line over the setup line', () => {
+    // The converter's own annual-prepay line text contains the substring
+    // "setup fee" too ("WaveGuard Membership — 12 months prepaid (setup fee
+    // waived)"). A broad /setup fee/i .find() picks whichever line sorts
+    // first — here the $500 annual line — and would expose $500 as the
+    // "setup share", so the renewal default subtracts $500 instead of $99
+    // and suggests $0 (or a negative/garbage coverage) for next year.
+    const row = {
+      prepay_setup_fee_amount: null,
+      prepay_invoice_line_items: [
+        { description: 'WaveGuard Membership — 12 months prepaid (setup fee waived)', amount: 500 },
+        { description: 'Bait Station Setup — one-time setup fee', amount: 99 },
+      ],
+    };
+    annualPrepayTermSetupFeeFallback(row);
+    expect(row.prepay_setup_fee_amount).toBe(99);
+  });
+
   test('is null-safe for a missing/unparseable line_items value', () => {
     expect(() => annualPrepayTermSetupFeeFallback({ prepay_setup_fee_amount: null, prepay_invoice_line_items: null })).not.toThrow();
     expect(() => annualPrepayTermSetupFeeFallback({ prepay_setup_fee_amount: null, prepay_invoice_line_items: 'not json' })).not.toThrow();

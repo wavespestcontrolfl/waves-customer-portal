@@ -2971,11 +2971,16 @@ router.post('/at-address', async (req, res, next) => {
 // claims-ledger join found nothing; mutates and returns the same row.
 function annualPrepayTermSetupFeeFallback(row) {
   if (!row || row.prepay_setup_fee_amount != null) return row;
-  let lines = row.prepay_invoice_line_items;
-  if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = []; } }
-  const setupLine = (Array.isArray(lines) ? lines : [])
-    .find((li) => /setup fee/i.test(String(li?.description || '')));
-  const lineAmount = setupLine ? Number(setupLine.amount ?? setupLine.unit_price) : NaN;
+  // The repository's existing positive one-time setup-fee line matcher
+  // (estimate-first-application-invoice.js, Codex P0 pre-push round 17):
+  // description mentions "setup fee" but explicitly rejects "waiv" language.
+  // A broad /setup fee/i substring test alone false-matches the converter's
+  // OWN annual-prepay line ("WaveGuard Membership — 12 months prepaid (setup
+  // fee waived)"), so a $500 annual + $99 setup invoice whose annual line
+  // happens to sort first would expose $500 as the setup share instead of
+  // $99 (codex round-3 P1).
+  const { positiveSetupFeeLineAmount } = require('../services/estimate-first-application-invoice');
+  const lineAmount = positiveSetupFeeLineAmount({ line_items: row.prepay_invoice_line_items });
   if (Number.isFinite(lineAmount) && lineAmount > 0) {
     row.prepay_setup_fee_amount = Math.round(lineAmount * 100) / 100;
   }
