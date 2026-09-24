@@ -2956,6 +2956,32 @@ router.post('/at-address', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Fallback provenance for the immutable one-time setup share riding an
+// annual-prepay term's invoice (codex round-2 P0 follow-up): an
+// ESTIMATE-origin on-site switch prepay deliberately never ledgers a
+// setup_fee_claims row on its first cycle (the superseded accept invoice's
+// marker re-mint is the sole restore mechanism there — invoice.js
+// retireRodentSetupObligationForRevivedPrepay), so the setup_fee_claims LEFT
+// JOIN a term row otherwise reads this from (codex #3591 r72 P1) is null for
+// that shape even though the prepay invoice's OWN line items still carry the
+// $99 setup line. Without this, the renewal default
+// (annualPrepayPretaxBase, client Customer360ProfileV2.jsx) sees no setup
+// share to subtract from the pre-tax subtotal and silently re-charges the
+// one-time fee as recurring coverage on the next renewal. Only used when the
+// claims-ledger join found nothing; mutates and returns the same row.
+function annualPrepayTermSetupFeeFallback(row) {
+  if (!row || row.prepay_setup_fee_amount != null) return row;
+  let lines = row.prepay_invoice_line_items;
+  if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = []; } }
+  const setupLine = (Array.isArray(lines) ? lines : [])
+    .find((li) => /setup fee/i.test(String(li?.description || '')));
+  const lineAmount = setupLine ? Number(setupLine.amount ?? setupLine.unit_price) : NaN;
+  if (Number.isFinite(lineAmount) && lineAmount > 0) {
+    row.prepay_setup_fee_amount = Math.round(lineAmount * 100) / 100;
+  }
+  return row;
+}
+
 router.get('/:id', async (req, res, next) => {
   try {
     // The 360 payload below includes billing history, stored payment
@@ -2986,11 +3012,15 @@ router.get('/:id', async (req, res, next) => {
             'inv.total as prepay_invoice_total',
             'inv.subtotal as prepay_invoice_subtotal',
             'sfc.amount as prepay_setup_fee_amount',
+            'inv.line_items as prepay_invoice_line_items',
             'ss.service_type as last_scheduled_service_type',
           )
           .orderBy('apt.term_end', 'desc')
           .limit(5)
         : [])
+      .then((rows) => (Array.isArray(rows)
+        ? rows.map((row) => { annualPrepayTermSetupFeeFallback(row); delete row.prepay_invoice_line_items; return row; })
+        : rows))
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_terms: ${e.message}`); return []; });
 
     // The COMPLETE consumed-estimate set for the prefill exclusion — the
@@ -5650,6 +5680,7 @@ router._private = {
   applyCustomerListFilters,
   CUSTOMER_STAGES,
   SENSITIVE_CUSTOMER_FIELDS,
+  annualPrepayTermSetupFeeFallback,
   SCHEDULED_HISTORY_LIMIT,
   customerScheduledHistoryQuery,
   customerScheduledHistory,
