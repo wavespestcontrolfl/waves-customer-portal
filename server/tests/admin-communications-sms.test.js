@@ -12,7 +12,9 @@ jest.mock('../utils/recruiting-thread-scope', () => {
   const real = jest.requireActual('../utils/recruiting-thread-scope');
   return { ...real, isRecruitingPhone: jest.fn(async () => false) };
 });
-jest.mock('../services/twilio', () => ({}));
+jest.mock('../services/twilio', () => ({
+  deriveOutboundNumber: jest.fn(async () => '+19413529161'),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -85,7 +87,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),
   parkThreadSuggestions: jest.fn(async () => []),
-  createReplyHoldingReservation: jest.fn(async () => 'resv-1'),
+  createReplyHoldingReservation: jest.fn(async () => '44444444-4444-4444-8444-444444444444'),
   settleReplyHoldingReservation: jest.fn(async () => true),
   reopenScheduledSuggestions: jest.fn(async () => 0),
   ignoreParkedSuggestions: jest.fn(async () => 0),
@@ -218,7 +220,7 @@ function makeUniversalBuilder() {
   for (const m of ['where', 'whereNull', 'whereNot', 'whereIn', 'whereRaw', 'leftJoin', 'join', 'joinRaw', 'select', 'orderBy', 'groupBy', 'distinct', 'limit', 'offset', 'insert', 'update', 'onConflict', 'ignore', 'merge', 'count']) {
     b[m] = jest.fn(chain);
   }
-  b.returning = jest.fn(() => Promise.resolve([{ id: 'resv-1' }]));
+  b.returning = jest.fn(() => Promise.resolve([{ id: '44444444-4444-4444-8444-444444444444' }]));
   b.first = jest.fn(() => Promise.resolve(null));
   b.del = jest.fn(() => Promise.resolve(1));
   b.pluck = jest.fn(() => Promise.resolve([]));
@@ -1793,7 +1795,7 @@ describe('admin communications SMS route', () => {
       expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledWith(db, expect.objectContaining({
         parkedDecisionIds: ['parked-1'],
       }));
-      expect(suggestMode.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: 'resv-1', uncertain: true });
+      expect(suggestMode.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: '44444444-4444-4444-8444-444444444444', uncertain: true });
       expect(suggestMode.reopenScheduledSuggestions).not.toHaveBeenCalled();
     });
   });
@@ -1870,6 +1872,23 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('sender lookup failure stays retryable before reservation or provider entry', async () => {
+    mockGates.smsGratitudeReplies = true;
+    db.mockImplementation(() => makeUniversalBuilder());
+    require('../services/twilio').deriveOutboundNumber.mockRejectedValueOnce(new Error('db down'));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Hi there' }),
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ retryable: true, code: 'PROVIDER_HANDOFF_PREPARATION_FAILED' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+  });
+
   test.each([
     ['general auto-send', 'smsAutoSend'],
     ['gratitude-only', 'smsGratitudeReplies'],
@@ -1894,7 +1913,141 @@ describe('admin communications SMS route', () => {
         body: 'Hi there',
       }));
       expect(sendCustomerMessage).toHaveBeenCalled();
+      const sentInput = sendCustomerMessage.mock.calls[0][0];
+      expect(require('../services/messaging/provider-handoff-reservation')
+        .isProviderHandoffHandle(sentInput.providerHandoffReservation)).toBe(true);
+      const expectedFromNumber = gate === 'smsGratitudeReplies'
+        ? '+19413529161'
+        : require('../config/twilio-numbers').getOutboundNumber();
+      expect(sentInput.providerHandoffReservation.context).toMatchObject({
+        fromNumber: expectedFromNumber, to: '+15551234567', body: 'Hi there', messageType: 'manual',
+      });
+      if (gate === 'smsGratitudeReplies') {
+        expect(sentInput.metadata.fromNumber).toBe(expectedFromNumber);
+      }
     });
+  });
+
+  test('bearer customer adoption re-derives and corrects the reserved and canonical sender', async () => {
+    mockGates.smsAutoSend = true;
+    mockGates.smsGratitudeReplies = true;
+    const reservationUpdates = [];
+    db.mockImplementation((table) => {
+      const builder = makeUniversalBuilder();
+      builder.update.mockImplementation((values) => {
+        if (table === 'sms_log') reservationUpdates.push(values);
+        return builder;
+      });
+      return builder;
+    });
+    const bearer = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, customerId: 'cust-A' });
+    const derive = require('../services/twilio').deriveOutboundNumber;
+    derive.mockResolvedValueOnce('+19413529161').mockResolvedValueOnce('+19413529999');
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: `SM${'9'.repeat(32)}`,
+    });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Validated bearer send', messageType: 'manual' }),
+        });
+        expect(response.status).toBe(200);
+      });
+    } finally {
+      bearer.mockRestore();
+    }
+
+    expect(derive).toHaveBeenNthCalledWith(1, { customerId: null });
+    expect(derive).toHaveBeenNthCalledWith(2, { customerId: 'cust-A' });
+    expect(reservationUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from_phone: '+19413529999', customer_id: 'cust-A' }),
+    ]));
+    const sentInput = sendCustomerMessage.mock.calls[0][0];
+    expect(sentInput).toMatchObject({
+      customerId: 'cust-A',
+      metadata: expect.objectContaining({ fromNumber: '+19413529999' }),
+      providerHandoffReservation: expect.objectContaining({
+        context: expect.objectContaining({ fromNumber: '+19413529999' }),
+      }),
+    });
+  });
+
+  test('review-request customer adoption re-derives before its reservation and canonical handoff', async () => {
+    mockGates.smsAutoSend = true;
+    mockGates.smsGratitudeReplies = true;
+    const reservationUpdates = [];
+    db.mockImplementation((table) => {
+      const builder = makeUniversalBuilder();
+      if (table === 'review_requests') builder.first.mockResolvedValue({
+        id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null,
+        triggered_by: 'auto_inline', token: 'tok-abc123',
+      });
+      if (table === 'customers') builder.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      builder.update.mockImplementation((values) => {
+        if (table === 'sms_log') reservationUpdates.push(values);
+        return builder;
+      });
+      return builder;
+    });
+    const derive = require('../services/twilio').deriveOutboundNumber;
+    derive.mockResolvedValueOnce('+19413529161').mockResolvedValueOnce('+19413529998');
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: `SM${'8'.repeat(32)}`,
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567', body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual', reviewRequestId: 'rr-1',
+        }),
+      });
+      expect(response.status).toBe(200);
+    });
+
+    expect(derive).toHaveBeenNthCalledWith(1, { customerId: null });
+    expect(derive).toHaveBeenNthCalledWith(2, { customerId: 'cust-A' });
+    expect(reservationUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from_phone: '+19413529998', customer_id: 'cust-A' }),
+    ]));
+    const sentInput = sendCustomerMessage.mock.calls[0][0];
+    expect(sentInput).toMatchObject({
+      customerId: 'cust-A',
+      metadata: expect.objectContaining({ fromNumber: '+19413529998' }),
+      providerHandoffReservation: expect.objectContaining({
+        context: expect.objectContaining({ fromNumber: '+19413529998' }),
+      }),
+    });
+  });
+
+  test('gate-off bearer adoption preserves the legacy sender path', async () => {
+    mockGates.smsGratitudeReplies = false;
+    db.mockImplementation(() => makeUniversalBuilder());
+    const bearer = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, customerId: 'cust-A' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-legacy' });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Legacy bearer send', messageType: 'manual' }),
+        });
+        expect(response.status).toBe(200);
+      });
+    } finally {
+      bearer.mockRestore();
+    }
+    expect(require('../services/twilio').deriveOutboundNumber).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-A', providerHandoffReservation: null,
+      metadata: expect.objectContaining({ fromNumber: undefined }),
+    }));
   });
 
   test('rejects an MMS whose media exceeds Twilio\'s 5MB total per-message cap', async () => {
@@ -2294,7 +2447,7 @@ describe('Communications review ask serialization', () => {
     reviews.releaseInlineClaim.mockReset().mockResolvedValue(undefined);
     sendCustomerMessage.mockReset().mockResolvedValue({ sent: true, providerMessageId: 'SM-test' });
     suggestMode.parkThreadSuggestions.mockReset().mockResolvedValue([]);
-    suggestMode.createReplyHoldingReservation.mockReset().mockResolvedValue('resv-1');
+    suggestMode.createReplyHoldingReservation.mockReset().mockResolvedValue('44444444-4444-4444-8444-444444444444');
     suggestMode.settleReplyHoldingReservation.mockReset().mockResolvedValue(true);
     suggestMode.reopenScheduledSuggestions.mockReset().mockResolvedValue(0);
     suggestMode.ignoreParkedSuggestions.mockReset().mockResolvedValue(0);
@@ -2329,7 +2482,7 @@ describe('Communications review ask serialization', () => {
           selected = {
             ...values,
             metadata: typeof values.metadata === 'string' ? JSON.parse(values.metadata) : values.metadata,
-            id: `resv-${reservations.length + 1}`,
+            id: `00000000-0000-4000-8000-${String(reservations.length + 1).padStart(12, '0')}`,
           };
           reservations.push(selected);
           b.returning.mockResolvedValue([{ id: selected.id }]);
@@ -2517,11 +2670,11 @@ describe('Communications review ask serialization', () => {
     });
     // The claimed-link seam now reserves BEFORE dispatchReviewAsk's own
     // spacing check runs, and passes excludeReservationId so this same
-    // attempt's own row (the default builder always returns id 'resv-1')
+    // attempt's own row (the default builder always returns id '44444444-4444-4444-8444-444444444444')
     // doesn't self-block it — a later request (no exclude, or a different
     // id) still sees it as durable spacing evidence.
     history.lastManualAskAt.mockImplementation(async (_customerId, opts = {}) =>
-      (reserved && opts.excludeReservationId !== 'resv-1') ? new Date() : null);
+      (reserved && opts.excludeReservationId !== '44444444-4444-4444-8444-444444444444') ? new Date() : null);
     sendCustomerMessage.mockImplementation(async () => {
       expect(reserved).toBe(true);
       if (mode.includes('throw')) throw Object.assign(new Error('audit unavailable'), { providerOutcome: { sent: true, providerMessageId: 'SM-accepted' } });

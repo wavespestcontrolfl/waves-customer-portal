@@ -188,8 +188,8 @@ const TYPES = {
     photoKeyPrefix: 'lawnfunnel',
     reportPath: (token) => `/lawn-report/${token}`,
     label: 'Lawn Assessment',
-    // Admin lane = prospect-mode rows only (see scopeLawn).
-    scope: (qb) => scopeLawn(qb),
+    // Admin lane = prospect-mode rows only (see scopeProspectMode).
+    scope: (qb) => scopeProspectMode(qb),
     listFields: (row) => ({ headline: overallStatusLabel(row.overall_score) }),
     techView: (row, contract) => ({ contract }),
     customerPreview: (row) => buildPublicLawnReport(row),
@@ -202,7 +202,13 @@ const TYPES = {
     photoKeyPrefix: 'pestid',
     reportPath: (token) => `/pest-report/${token}`,
     label: 'Pest Identification',
-    scope: null,
+    // pest_identifications also gets mode='customer' rows from the
+    // authenticated customer Photo ID API (server/routes/photo-id.js) —
+    // those have no contact/lead to claim and none of this queue's actions
+    // (relink, generate/send an expiring report) apply to them, so they're
+    // excluded the same way an internal tech diagnostic already is on lawn
+    // (codex GH r1 P2 on PR #4752).
+    scope: (qb) => scopeProspectMode(qb),
     listFields: (row) => pestListFields(row),
     techView: (row, contract) => pestTechView(row, contract),
     customerPreview: (row) => buildPublicPestReport(row),
@@ -219,6 +225,10 @@ const TYPES = {
     // none), and keeps report_url null, so no dead link is ever shown.
     reportPath: null,
     label: 'Tree & Shrub Assessment',
+    // No scope needed: the customer Photo ID API's tree & shrub submissions
+    // insert into their own table (tree_shrub_assessments), never this
+    // admin table (tree_shrub_identifications) — unlike lawn and pest,
+    // which share their table with the customer lane.
     scope: null,
     listFields: (row) => treeShrubListFields(row),
     techView: (row, contract) => treeShrubTechView(contract),
@@ -242,8 +252,10 @@ function configFor(type) {
 }
 
 // The admin lane = prospect-mode rows. Internal tech diagnostics (mode
-// 'internal') belong to the tech portal flow, not this list.
-function scopeLawn(qb) {
+// 'internal') belong to the tech portal flow, not this list — and neither
+// does a customer's own Photo ID submission (mode 'customer', source
+// 'portal', server/routes/photo-id.js).
+function scopeProspectMode(qb) {
   return qb.where({ mode: 'prospect' });
 }
 

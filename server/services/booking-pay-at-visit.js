@@ -357,6 +357,10 @@ function wizardDraftSelfServeBookable(row) {
   if (row.archived_at) return false;
   const data = row.estimate_data || {};
   if (data.commercialEstimatedPricing || data.quoteRequired) return false;
+  // The county roll could not vouch for the typed house number on the run
+  // that last refreshed this draft: no self-serve booking until the office
+  // confirms the address on the callback (public-quote addressUnverified).
+  if (data.addressUnverified === true) return false;
   const summary = data.engineResult?.summary || {};
   const recurringAnnual = Number(summary.recurringAnnualAfterDiscount ?? summary.recurringAnnual ?? data.annual ?? 0);
   if (engineSummaryHasMixedBilling(summary, data)) return false;

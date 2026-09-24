@@ -527,6 +527,54 @@ router.post('/sms', async (req, res, next) => {
       trustedCustomerId = customer.id;
     }
 
+    // Provider coordination must publish the same From endpoint the SDK will
+    // use. Resolve it before any thread-lock transaction, then freeze it into
+    // both an existing caller-owned reservation and canonical delivery.
+    const providerCoordinationEnabled = isEnabled('smsGratitudeReplies');
+    let providerCoordinationFromNumber = null;
+    let providerCoordinationCustomerId = trustedCustomerId || null;
+    if (providerCoordinationEnabled) {
+      try {
+        providerCoordinationFromNumber = fromNumber || await TwilioService.deriveOutboundNumber({
+          customerId: trustedCustomerId || null,
+        });
+      } catch (deriveErr) {
+        logger.warn(`[communications] provider sender resolution failed before dispatch: ${deriveErr.message}`);
+        return res.status(503).json({
+          error: 'Could not reserve this conversation for provider delivery — try again in a moment.',
+          code: 'PROVIDER_HANDOFF_PREPARATION_FAILED',
+          retryable: true,
+        });
+      }
+    }
+    let reservationFromNumber = providerCoordinationFromNumber
+      || fromNumber
+      || TWILIO_NUMBERS.getOutboundNumber();
+    // Some bearer/review seams establish customer ownership only after the
+    // initial phone-scoped reservation. Re-resolve the location sender after
+    // that trusted adoption, outside any transaction, then correct the held
+    // row under the same thread lock before provider entry.
+    const refreshProviderCoordinationOwner = async () => {
+      if (!providerCoordinationEnabled || !trustedCustomerId
+        || providerCoordinationCustomerId === trustedCustomerId) return;
+      const resolvedFromNumber = fromNumber || await TwilioService.deriveOutboundNumber({
+        customerId: trustedCustomerId,
+      });
+      if (manualReservationId) {
+        const threadLast10 = normalizePhoneLast10(to);
+        await db.transaction(async (trx) => {
+          if (threadLast10) await lockSuggestThread(trx, threadLast10);
+          const updated = await trx('sms_log')
+            .where({ id: manualReservationId, direction: 'outbound', status: 'sending' })
+            .update({ from_phone: resolvedFromNumber, customer_id: trustedCustomerId, updated_at: new Date() });
+          if (updated === 0) throw new Error('Provider reservation was lost during customer adoption');
+        });
+      }
+      providerCoordinationFromNumber = resolvedFromNumber;
+      reservationFromNumber = resolvedFromNumber;
+      providerCoordinationCustomerId = trustedCustomerId;
+    };
+
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
       verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
@@ -610,7 +658,7 @@ router.post('/sms', async (req, res, next) => {
             manualReservationId = await createReplyHoldingReservation(trx, {
               to,
               customerId: trustedCustomerId || null,
-              fromNumber: fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+              fromNumber: reservationFromNumber,
               body: cleanBody,
               adminUserId: req.technicianId || null,
               agentDecisionId: claimedDecisionId,
@@ -754,7 +802,10 @@ router.post('/sms', async (req, res, next) => {
       // its owner): trust the row the seam verified so the recipient's own
       // consent policy applies, never the unverified-lead one (GH Codex
       // #3844 r9 P1). The seam already refused an ambiguous number.
-      if (!trustedCustomerId && bearerCheck.customerId) trustedCustomerId = bearerCheck.customerId;
+      if (!trustedCustomerId && bearerCheck.customerId) {
+        trustedCustomerId = bearerCheck.customerId;
+        await refreshProviderCoordinationOwner();
+      }
       if (bearerCheck.contracts) {
         const activation = await require('./admin-contracts').activatePreparedShareLinks(bearerCheck.contracts, req);
         if (!activation.ok) return abortUnsent(409, activation.error);
@@ -824,7 +875,10 @@ router.post('/sms', async (req, res, next) => {
         if (!owner || !ownerPhone || ownerPhone !== normalizePhone(to)) {
           return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
         }
-        trustedCustomerId = rr.customer_id;
+        if (!trustedCustomerId) {
+          trustedCustomerId = rr.customer_id;
+          await refreshProviderCoordinationOwner();
+        }
         // Live consent + the ask gates + the claim, serialized under the same
         // per-customer review lock the mint runs under: a draft can sit open
         // for hours, so the MINT-time gate is stale — a cadence or one-off
@@ -876,7 +930,7 @@ router.post('/sms', async (req, res, next) => {
               } else {
                 const seamReservation = await reserveForRequest({
                   request: { id: rr.id, customer_id: trustedCustomerId },
-                  to, body: cleanBody, fromPhone: fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+                  to, body: cleanBody, fromPhone: reservationFromNumber,
                   extraMetadata: { manual_send_reservation: true },
                   messageType: 'manual', adminUserId: req.technicianId || null,
                 });
@@ -973,7 +1027,10 @@ router.post('/sms', async (req, res, next) => {
     // blocked — and the claim released — where the funnel accepts it (GH
     // Codex #3844 r5 P1). The composer inserts the BASE template copy.
     const cardVisitIds = cardClaim ? cardClaim.cards.map((c) => c.scheduledServiceId) : [];
-    const sendMessage = () => sendCustomerMessage({
+    const providerMessageType = autopayLinkTokens ? 'autopay_setup_link'
+      : cardClaim ? require('../services/appointment-card-request').TEMPLATE_KEY
+        : (messageType || 'manual');
+    const sendMessage = (reservationId = null) => sendCustomerMessage({
       to,
       body: cleanBody,
       channel: 'sms',
@@ -983,13 +1040,21 @@ router.post('/sms', async (req, res, next) => {
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
       ...(cardClaim ? { operatorInitiated: true } : {}),
+      providerHandoffReservation: reservationId
+        ? require('../services/messaging/provider-handoff-reservation').borrowProviderHandoffReservation({
+          reservationId,
+          to,
+          fromNumber: reservationFromNumber,
+          body: cleanBody,
+          messageType: providerMessageType,
+          adminUserId: req.technicianId,
+        })
+        : null,
       metadata: {
         // An Auto Pay setup link makes this an Auto Pay customer SMS whatever
         // the composer called it — the classifier keys on this prefix; a
         // card request link, the funnel's own template key.
-        original_message_type: autopayLinkTokens ? 'autopay_setup_link'
-          : cardClaim ? require('../services/appointment-card-request').TEMPLATE_KEY
-            : (messageType || 'manual'),
+        original_message_type: providerMessageType,
         ...(autopayLinkTokens ? { autopay_setup_tokens: autopayLinkTokens } : {}),
         ...(cardClaim ? { scheduled_service_id: cardVisitIds[0], trigger: 'admin', ...(cardVisitIds.length > 1 ? { scheduled_service_ids: cardVisitIds } : {}) } : {}),
         adminUserId: req.technicianId,
@@ -1000,7 +1065,7 @@ router.post('/sms', async (req, res, next) => {
         parkedDecisionIds: parkedThreadIds.length ? parkedThreadIds : undefined,
         agentDraft: verifiedAgentDraft || undefined,
         suggestedReply: verifiedAgentDraft || undefined,
-        fromNumber: fromNumber || undefined,
+        fromNumber: providerCoordinationFromNumber || fromNumber || undefined,
         mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
         allowMediaUrls: cleanMediaUrls.length > 0,
         media,
@@ -1026,9 +1091,10 @@ router.post('/sms', async (req, res, next) => {
               const logged = outcome.providerMessageId && await db('sms_log')
                 .where({ twilio_sid: outcome.providerMessageId, direction: 'outbound' }).first('id');
               if (logged) await releaseReservationById({ id: reviewReservationId });
-              else await db('sms_log').where({ id: reviewReservationId }).update({
-                status: 'sent', twilio_sid: outcome.providerMessageId || null, updated_at: new Date(),
-              });
+              else if (!await settleReplyHoldingReservation({
+                reservationId: reviewReservationId,
+                acceptedResult: outcome,
+              })) throw new Error('Review reservation promotion did not land');
             } catch (stampErr) {
               logger.warn(`[communications] accepted review keeps its reservation (${reviewReservationId}): ${stampErr.message}`);
             }
@@ -1061,7 +1127,7 @@ router.post('/sms', async (req, res, next) => {
             } else {
               const [reservation] = await db('sms_log').insert({
                 customer_id: trustedCustomerId, direction: 'outbound',
-                from_phone: fromNumber || TWILIO_NUMBERS.getOutboundNumber(), to_phone: to,
+                from_phone: reservationFromNumber, to_phone: to,
                 message_body: cleanBody, status: 'sending', message_type: 'manual',
                 admin_user_id: req.technicianId || null, metadata,
               }).returning('id');
@@ -1073,7 +1139,7 @@ router.post('/sms', async (req, res, next) => {
             if (reviewReservationId === manualReservationId) manualReservationId = null;
           }
           reviewProviderStarted = true;
-          result = await sendMessage();
+          result = await sendMessage(reviewReservationId || manualReservationId);
           if (!claimedReviewRequestId) await settleReviewReservation(result);
         } catch (err) {
           if (result) err.providerOutcome = result;

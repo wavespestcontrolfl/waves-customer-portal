@@ -714,6 +714,67 @@ describe('estimate AI support context', () => {
     expect(terms.length).toBeLessThanOrEqual(10);
   });
 
+  test('misting-system questions always surface the misting protocol, past the repo-file cap', async () => {
+    // The fixed REPO_CONTEXT_FILES list and the mosquito BARRIER program's
+    // other repo matches (waveguard-tier-logic.md, protocols.json, the
+    // pricing README) are scanned first and share "mosquito" with the
+    // misting-system question — without an explicit guarantee, the misting
+    // protocol loses the 5-result cap to those before it's ever reached.
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'What happens at the design visit before you install the misting system?',
+      context: {
+        services: [{
+          service: 'mosquito_misting_system',
+          label: 'Mosquito Misting System Service',
+          detail: 'Automatic mosquito misting system — install and monthly service plan.',
+        }],
+      },
+    });
+
+    const mistingFile = result.repositoryFiles.find(
+      (file) => file.path === 'wiki/protocols/mosquito-misting-systems.md',
+    );
+    expect(mistingFile).toBeTruthy();
+    expect(mistingFile.snippet).toBeTruthy();
+    expect(result.repositoryFiles.length).toBeLessThanOrEqual(5);
+  });
+
+  test('non-misting questions never load the misting protocol file', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'Can you explain the lawn fungus treatment?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Weed and fungus applications' }] },
+    });
+
+    expect(result.repositoryFiles.some(
+      (file) => file.path === 'wiki/protocols/mosquito-misting-systems.md',
+    )).toBe(false);
+  });
+
+  test('bare "misting" (a barrier customer\'s question) does not pull the misting-system protocol; "misting system" does', async () => {
+    // A barrier-program customer's question uses "misting" for the 21-day
+    // cycle wording — that must not route them to the misting SYSTEM's
+    // install/design-visit protocol. Only the two-word phrase does.
+    const bareMisting = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'How does the 21-day misting cycle work?',
+      context: { services: [{ label: 'Mosquito Control', detail: 'Barrier spray program' }] },
+    });
+    expect(bareMisting.repositoryFiles.some(
+      (file) => file.path === 'wiki/protocols/mosquito-misting-systems.md',
+    )).toBe(false);
+
+    const mistingSystem = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'How often do you refill the misting system?',
+      context: { services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', detail: 'Automatic misting system' }] },
+    });
+    expect(mistingSystem.repositoryFiles.some(
+      (file) => file.path === 'wiki/protocols/mosquito-misting-systems.md',
+    )).toBe(true);
+  });
+
   test('loads shaped support sources from knowledge tables and static references', async () => {
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({

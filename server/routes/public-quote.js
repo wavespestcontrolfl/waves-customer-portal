@@ -1043,6 +1043,8 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey, cachedAuditSuperseded, auditEvidenceAt } = require('../services/lead-address-unverified');
+
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
     // Honeypot (always on). /calculate is step 2 of the quote flow — the paid
@@ -1169,6 +1171,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       : (normalizedAddress.fullAddress || String(address || '').trim());
     let trustedTurf = {};
     let trustedProfileFound = false;
+    // When the cached profile was saved (property_lookup_cache): a cache-only
+    // re-read obtains no NEW evidence, so its county audit is only as fresh
+    // as this stamp (see the staff-verdict check below).
+    let trustedProfileCachedAt = null;
     const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
     if (parcelLookupAddress) {
       try {
@@ -1176,11 +1182,222 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (serverLookup?.enriched) {
           trustedTurf = serverLookup.enriched;
           trustedProfileFound = true;
+          trustedProfileCachedAt = auditEvidenceAt(serverLookup);
         }
       } catch (turfErr) {
         logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
         trustedTurf = {};
       }
+    }
+    // County roll could not vouch for the typed house number — carried on
+    // the lead for the callback (see deriveAddressUnverified). Never
+    // changes the price: the profile the engine priced from is unchanged.
+    // The prior server-written flag on the visitor's OWN lead row (the
+    // lookup stage persisted it; so does every /calculate) — ownership-
+    // predicated (id + typed email, the same proof the UPDATE below uses),
+    // only when the snapshot is for this address, and only the server-
+    // written key (after a /calculate the snapshot's `enriched` is the
+    // client's own submission — pre-push audit P1). It answers two cases:
+    // the cache-only re-read misses when the lookup found an audit but no
+    // record to cache (the missing-house-number case itself — codex r1
+    // P1), and a GIS outage on a recalculation must not erase an earlier
+    // authoritative warning (codex r5 P1).
+    let priorAddressUnverified = null;
+    // The clean evidence's ORIGINAL timestamp, carried onto the published
+    // verdict so a recovered clean verdict never outranks a flag committed
+    // after it (pre-push audit P1). Declared before the reconciliation
+    // that assigns it.
+    let cleanEvidenceAt = null;
+    // The lookup stage's server-owned CLEAN verdict for this premise: it
+    // stands in for a roll answer this run could not get (record-less
+    // clean lookups are never cached) and supersedes every older warning
+    // (pre-push audit P1).
+    let leadCleanVerdict = false;
+    // The own lead is read by id alone: this recovers a NEGATIVE verdict
+    // (a flag can only withhold the handoff, never grant it), so a visitor
+    // who corrected their email between the stages keeps the roll's
+    // warning for the same judged address (codex r13 P1). The flag's own
+    // stamped address still has to cover this request.
+    if (leadId) {
+      try {
+        const own = await db('leads')
+          .where({ id: leadId })
+          .whereNull('deleted_at')
+          .first('extracted_data');
+        const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
+        // The own lead's clean verdict is NOT taken on its own: it joins the
+        // contact-pair reconciliation below, where the newest evidence wins
+        // by timestamp (pre-push audit P1).
+        // Both checks: the snapshot's address (older flags carry no stamp)
+        // AND the flag's own stamped address (a re-attach may have rewritten
+        // the snapshot's address already).
+        if (snapshot && snapshotCoversAddress(snapshot, normalizedAddress)) {
+          const recovered = recoverAddressUnverified(snapshot);
+          if (recovered && flagCoversAddress(recovered, normalizedAddress)) priorAddressUnverified = recovered;
+        }
+      } catch (snapErr) {
+        logger.warn(`[public-quote] lookup-stage snapshot re-read failed — prior address flag not recovered: ${snapErr.code || snapErr.name || 'error'}`);
+      }
+    }
+    // No prior flag on the lead row (a repeat lookup minted a fresh one):
+    // a publication a FLAGGED run withdrew for this visitor still carries
+    // the verdict — both contact factors plus the complete premise, the
+    // same proof the withdrawal itself required (pre-push audit P1).
+    // Earlier LEAD rows for the same contact pair and premise (a lookup
+    // abandoned before /calculate leaves neither draft nor publication):
+    // their flags carry over unless a newer clean verdict for the premise
+    // supersedes them (pre-push audit P1).
+    if (contactEmail && contactPhone) {
+      try {
+        const phoneTen = String(contactPhone).replace(/\D/g, '').slice(-10);
+        const rows = phoneTen ? await db('leads')
+          .whereNull('deleted_at')
+          .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+          .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneTen])
+          .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+          .select('id', 'extracted_data') : [];
+        const parseSnap = (row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data);
+        const snapshots = rows.map(parseSnap).filter(Boolean);
+        // The visitor's OWN lead (leadId) is judged on the unit-insensitive
+        // premise alone: a street-only intake that staff confirmed carries
+        // the same incomplete locality on its clean verdict, and the strict
+        // cross-lead rule would ignore it (codex r17 P1). Other leads still
+        // need the complete locality.
+        const newestClean = rows
+          .map((row) => ({ own: String(row.id) === String(leadId || ''), snap: parseSnap(row) }))
+          .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, normalizedAddress, { requireLocality: !own }))
+          .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
+          .reduce((max, at) => Math.max(max, at), 0);
+        // The clean verdict counts only when it is newer than EVERY matching
+        // flag — a clean lookup followed by a flagged one and an outage must
+        // end flagged (pre-push audit P1).
+        // Cross-lead flags must be STAMPED with their premise: an unstamped
+        // (older) flag on another lead for the same contact proves nothing
+        // about this address (pre-push audit P1).
+        // The own lead's flag (recovered above, possibly unstamped) joins
+        // the reconciliation as a candidate.
+        const matchingFlags = snapshots
+          .map((snap) => recoverAddressUnverified(snap))
+          .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress));
+        if (priorAddressUnverified) matchingFlags.push(priorAddressUnverified);
+        const newestFlag = matchingFlags.map((flag) => Date.parse(flag.flagged_at || '') || 0).reduce((max, at) => Math.max(max, at), 0);
+        if (newestClean && newestClean > newestFlag) {
+          leadCleanVerdict = true;
+          priorAddressUnverified = null;
+          cleanEvidenceAt = new Date(newestClean).toISOString();
+        } else if (matchingFlags.length) {
+          leadCleanVerdict = false;
+          priorAddressUnverified = matchingFlags.sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0];
+        }
+      } catch (leadErr) {
+        logger.warn(`[public-quote] contact-pair lead flag re-read failed: ${leadErr.code || leadErr.name || 'error'}`);
+      }
+    }
+    if (!priorAddressUnverified && !leadCleanVerdict && contactEmail && contactPhone) {
+      try {
+        const rows = await db('estimates')
+          .where({ source: 'quote_wizard' })
+          .whereNotNull('archived_at')
+          .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+          .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
+          // No row cap: the premise match runs in code, and a cap applied
+          // first could hide the one matching row behind newer unrelated
+          // premises for the same contact pair (codex r6 P2).
+          .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
+          .orderBy('updated_at', 'desc')
+          .select('address', db.raw("estimate_data->'addressUnverifiedFlag' as flag"), db.raw("estimate_data->'proposal'->>'propertyAddress' as proposal_address"));
+        // Judged on the CUSTOMER-FACING premise (a commercial proposal's
+        // editable propertyAddress over the immutable base column), as the
+        // withdrawal judges it, and the recovered flag itself must cover the
+        // requested premise — a run for A must not inherit B's stored flag
+        // (codex r48 P1).
+        const { customerFacingPremise } = require('../services/website-quote-withdrawal');
+        const match = rows.find((row) => samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true }));
+        if (match) {
+          const recovered = recoverAddressUnverified({ address_unverified: match.flag });
+          if (recovered && (!recovered.address_line1 || flagCoversAddress(recovered, normalizedAddress))) priorAddressUnverified = recovered;
+        }
+      } catch (withdrawnErr) {
+        logger.warn(`[public-quote] withdrawn-publication flag re-read failed: ${withdrawnErr.code || withdrawnErr.name || 'error'}`);
+      }
+    }
+    // A staff confirmation (a clean verdict newer than every flag, stamped
+    // on the lead by the estimate revise) outranks the CACHED county audit
+    // it was given in answer to: the cache-only re-read above obtained no
+    // new evidence, so deriving a fresh flag from it would undo the
+    // confirmation on the next recalculation (pre-push audit P1). Only a
+    // profile cached AFTER the clean verdict may flag again.
+    const profileEvidence = trustedProfileFound && !cachedAuditSuperseded({
+      leadCleanVerdict, profileFound: trustedProfileFound, cachedAt: trustedProfileCachedAt, cleanEvidenceAt,
+    });
+    let addressUnverified = nextAddressUnverified({
+      enriched: profileEvidence ? trustedTurf : null,
+      profileFound: profileEvidence,
+      prior: leadCleanVerdict ? null : priorAddressUnverified,
+      evidenceAt: trustedProfileCachedAt,
+    });
+    // Did the county roll answer on THIS run (or, for this premise, on the
+    // lookup stage)? Only an answer may clear a marker an existing draft
+    // already carries (see the draft refresh).
+    let rollAnsweredThisRun = (profileEvidence && countyRollAnswered(trustedTurf)) || leadCleanVerdict;
+    // Set when an existing draft's own addressUnverified marker was carried
+    // over under its row lock (a repeat lookup minted a NEW lead, so the
+    // lead-level recovery above could not see it) — the handoff is then
+    // withheld exactly as for a fresh flag (pre-push audit P1).
+    let draftAddressBlockCarried = false;
+    // The draft upsert is where an existing draft's block is carried and
+    // reconciled; if that transaction fails (a deadlock, a setup-fee
+    // write) the carry never ran, and the draft may be the ONLY carrier
+    // of a block — the handoff is withheld rather than minted against an
+    // unreconciled verdict (codex r27 P1).
+    let draftReconcileFailed = false;
+    // The structured audit carried with it, to land on the CURRENT lead
+    // (a repeat lookup's new row was saved without it).
+    let carriedAddressFlag = null;
+    // Re-reconciled right before a draft verdict is PERSISTED (codex r20
+    // P1): a flagged lookup that committed after this run's contact-pair
+    // reconciliation released its lock must not be overwritten by this
+    // run's clean marker. Under the contact-pair lock: the newest matching
+    // flag newer than this run's clean evidence, else null.
+    const draftVerdictLock = async (trx) => {
+      if (contactEmail && contactPhone) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, contactPhone)]);
+      }
+    };
+    // Two-way (codex r23 P1): returns { newerFlag } when a matching flag
+    // committed after this run's clean evidence, { newerClean } when a
+    // clean verdict committed after every matching flag (and after this
+    // run's own flag), else {}.
+    // `carriedFlag`: a block this run carried from the draft row (no
+    // fresh audit flag of its own) is judged the same way, so a clean
+    // verdict newer than it reads as { newerClean } too.
+    const reconcileUnderLock = async (trx, { carriedFlag = null } = {}) => {
+      if (!contactEmail || !contactPhone) return {};
+      const { loadContactVerdicts, reconcileVerdictPrecedence } = require('../services/lead-address-unverified');
+      // ONE shared read + decision with the lookup stage (codex r44 P2).
+      const verdicts = await loadContactVerdicts(trx, { email: contactEmail, phone: contactPhone, premise: normalizedAddress, ownLeadId: lead?.id || null });
+      return reconcileVerdictPrecedence({
+        verdicts,
+        blocked: addressUnverified || carriedFlag || null,
+        extraFlags: [addressUnverified, carriedFlag].filter(Boolean),
+        cleanAt: Math.max(
+          Date.parse(cleanEvidenceAt || '') || 0,
+          rollAnsweredThisRun ? (Date.parse(trustedProfileCachedAt || '') || 0) : 0,
+        ),
+      });
+    };
+    if (addressUnverified) {
+      // Stamp the judged address on a freshly derived flag (a recovered
+      // prior flag already carries its own).
+      if (!addressUnverified.address_line1) {
+        Object.assign(addressUnverified, {
+          address_line1: String(normalizedAddress.line1 || '').trim() || null,
+          city: String(normalizedAddress.city || '').trim() || null,
+          state: String(normalizedAddress.state || '').trim().toUpperCase().slice(0, 2) || null,
+          zip: (String(normalizedAddress.zip || '').match(/\d{5}/) || [''])[0] || null,
+        });
+      }
+      logger.info(`[public-quote] county roll could not match the typed house number (${addressUnverified.county || 'county unknown'}) — lead flagged address_unverified`);
     }
     // A lot the lookup itself flagged verify-first (the condo unit-lot flag:
     // a per-unit folio carrying the association's parcel — GH codex P1 on
@@ -1844,6 +2061,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       landing_url: attr?.landing_url || null,
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
+      // Always present: on the merge path (a lead the wizard attached to)
+      // an omitted key would keep a stale flag from an earlier address —
+      // null clears it once a clean lookup prices the corrected address
+      // (codex r1 P2).
+      // address_unverified / address_verdict are NOT written here: the
+      // locked publication after the lead write owns them, so no verdict
+      // ever commits outside the contact-pair lock (pre-push audit P1).
     });
 
     // If the property-lookup step already captured a lead row, update it
@@ -1919,7 +2143,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // (jsonb_strip_nulls drops a key the prior row never had); a value in
         // THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
-          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
+          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
           [extractedData, extractedData]
         ),
         updated_at: new Date(),
@@ -1959,7 +2183,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const relabel = label === undefined ? {} : {
           status: label ? 'duplicate' : 'new',
           extracted_data: db.raw(
-            "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb || ?::jsonb",
+            "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict')) || ?::jsonb || ?::jsonb",
             [extractedData, JSON.stringify(label ? { duplicate_of_lead_id: label } : {})],
           ),
         };
@@ -2136,6 +2360,190 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     }
 
+    // The lead's verdict is (re)written under the contact-pair advisory
+    // lock the booking confirm also takes: a flag becomes visible to a
+    // concurrent old-link confirmation only in lock order, never as a
+    // phantom row between its read and its insert (codex r11 P1). The
+    // snapshot above already carries the same keys; this is the serialized
+    // publication of them.
+    if (lead?.id && contactEmail && contactPhone) {
+      try {
+        await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, contactPhone)]);
+          // Re-read the contact pair UNDER the lock: a flag committed since
+          // the unlocked scan outranks a recovered clean verdict when it is
+          // newer than that verdict's ORIGINAL evidence (pre-push audit P1).
+          // A cached profile's clean answer is evidence from its CACHE time,
+          // not now: a flag another lookup committed after that stamp
+          // outranks it too (pre-push audit P1).
+          const cachedCleanAt = profileEvidence && countyRollAnswered(trustedTurf) ? (trustedProfileCachedAt || null) : null;
+          // The newest clean evidence the locked reconciliation accepted
+          // (a staff/lookup verdict newer than the cache) — the persisted
+          // clean stamp must never fall back to the older cache time
+          // (pre-push audit P1 on r24).
+          let acceptedCleanAt = 0;
+          // Reconciled BOTH ways under the lock, whatever the pre-lock value:
+          // a flag committed since the unlocked scan outranks a recovered
+          // clean verdict when it is newer than that verdict's ORIGINAL
+          // evidence, and a clean verdict committed since (a staff
+          // confirmation, a clean lookup) outranks a recovered flag when it
+          // is newer than every matching flag (codex r17 P1). A flag THIS
+          // run derived from a live roll answer is stamped now and always
+          // wins.
+          {
+            const phoneTen = String(contactPhone).replace(/\D/g, '').slice(-10);
+            const lockedRows = await trx('leads')
+              .whereNull('deleted_at')
+              .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+              .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneTen])
+              .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+              .select('id', 'extracted_data');
+            const parseLocked = (row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data);
+            const lockedClean = lockedRows
+              .map((row) => ({ own: String(row.id) === String(lead.id), snap: parseLocked(row) }))
+              .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, normalizedAddress, { requireLocality: !own }))
+              .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
+              .reduce((max, at) => Math.max(max, at), 0);
+            // BOTH clean timestamps independently, never first-wins (pre-push
+            // audit P1 after r47): an older lead clean verdict must not hide
+            // a newer cached county confirmation from this comparison.
+            const cleanAt = Math.max(lockedClean, Date.parse(cleanEvidenceAt || '') || 0, Date.parse(cachedCleanAt || '') || 0);
+            acceptedCleanAt = cleanAt;
+            const lockedFlags = lockedRows
+              .map((row) => recoverAddressUnverified(parseLocked(row)))
+              .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress));
+            if (addressUnverified) lockedFlags.push(addressUnverified);
+            const newestFlag = lockedFlags
+              .sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0] || null;
+            const newestFlagAt = newestFlag ? (Date.parse(newestFlag.flagged_at || '') || 0) : 0;
+            if (newestFlagAt > cleanAt) {
+              if (!addressUnverified || newestFlag !== addressUnverified) {
+                addressUnverified = newestFlag;
+                leadCleanVerdict = false;
+              }
+            } else if (cleanAt > newestFlagAt && addressUnverified) {
+              addressUnverified = null;
+              leadCleanVerdict = true;
+              rollAnsweredThisRun = true;
+              cleanEvidenceAt = new Date(cleanAt).toISOString();
+            }
+          }
+          // A clean answer for this premise SUPERSEDES the verdict riding on
+          // publications an earlier flagged run withdrew for this contact pair —
+          // otherwise a fresh lead during a later outage would recover the old
+          // warning forever (pre-push audit P1). Same ownership proof as the
+          // withdrawal: both contact factors plus the complete premise.
+          // Deferred to AFTER the locked reconciliation above: a flag newer
+          // than the cached clean answer restores addressUnverified there, and
+          // the archived rows must keep their off-surface marker in that case
+          // (codex r12 P1).
+          if (!addressUnverified && rollAnsweredThisRun) {
+            try {
+              // Judged on the CUSTOMER-FACING premise (a commercial
+              // proposal's editable propertyAddress over the immutable base
+              // column), as the withdrawal judges it: a clean verdict for A
+              // must not lift the hold on a proposal staff moved to B that a
+              // later lookup flagged (pre-push audit P1 after r46).
+              const { customerFacingPremise } = require('../services/website-quote-withdrawal');
+              const stale = await trx('estimates')
+                .where({ source: 'quote_wizard' })
+                .whereNotNull('archived_at')
+                .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+                .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
+                .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
+                .select('id', 'address', trx.raw("estimate_data->'proposal'->>'propertyAddress' as proposal_address"));
+              const superseded = stale
+                .filter((row) => samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true }));
+              // Each write re-asserts the row's matched address AND this
+              // contact pair (codex r39 P1): a customer edit that moved the
+              // row to another pair and premise — and a lookup under that
+              // pair that stamped a fresh rejection — must win, never be
+              // cleared by this pair's clean answer.
+              const contactPairPredicates = (q) => q
+                .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+                .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)]);
+              for (const row of superseded) {
+                await trx('estimates')
+                  .where({ id: row.id, address: row.address })
+                  .modify(contactPairPredicates)
+                  .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
+                  .update({
+                    estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
+                    updated_at: new Date(),
+                  });
+              }
+              // Legacy quote-wizard rows a flagged run BLOCKED without
+              // archiving (scheduled / send_failed / draft …) get the block
+              // lifted by the same clean verdict — otherwise every later
+              // send keeps failing ADDRESS_UNVERIFIED after the roll
+              // cleared the premise (codex r18 P1).
+              const blocked = await trx('estimates')
+                .where({ source: 'quote_wizard' })
+                .whereNull('archived_at')
+                .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+                .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
+                .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+                .select('id', 'address', trx.raw("estimate_data->'proposal'->>'propertyAddress' as proposal_address"));
+              const unblocked = blocked
+                .filter((row) => samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true }));
+              for (const row of unblocked) {
+                await trx('estimates')
+                  .where({ id: row.id, address: row.address })
+                  .modify(contactPairPredicates)
+                  .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+                  .update({
+                    estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
+                    updated_at: new Date(),
+                  });
+              }
+            } catch (supersedeErr) {
+              logger.warn(`[public-quote] withdrawn-publication supersession failed: ${supersedeErr.code || supersedeErr.name || 'error'}`);
+            }
+          }
+          const verdict = buildAddressVerdict({
+            flag: addressUnverified,
+            enriched: profileEvidence ? trustedTurf : (leadCleanVerdict ? { addressVerdict: 'audited' } : null),
+            profileFound: profileEvidence || leadCleanVerdict,
+            address: normalizedAddress,
+          });
+          if (verdict.status === 'clean') {
+            const newestCleanAt = Math.max(acceptedCleanAt, Date.parse(cleanEvidenceAt || '') || 0, Date.parse(cachedCleanAt || '') || 0);
+            if (newestCleanAt) verdict.at = new Date(newestCleanAt).toISOString();
+          } else if (verdict.status === 'unanswered' && !addressUnverified && leadCleanVerdict) {
+            // An UNANSWERED cached profile (no county answer) newer than a
+            // recovered staff confirmation must not overwrite the lead's
+            // clean verdict with 'unanswered' — older sibling-lead flags
+            // would reactivate the block. The reconciled clean verdict
+            // stands, at its original timestamp (codex r33 P1).
+            const keptAt = Math.max(acceptedCleanAt, Date.parse(cleanEvidenceAt || '') || 0);
+            Object.assign(verdict, buildAddressVerdict({ flag: null, enriched: { addressVerdict: 'audited' }, profileFound: true, address: normalizedAddress }), keptAt ? { at: new Date(keptAt).toISOString() } : {});
+          }
+          await trx('leads').where({ id: lead.id }).update({
+            extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+              address_unverified: addressUnverified || null,
+              address_verdict: verdict,
+            })]),
+            updated_at: new Date(),
+          });
+        });
+      } catch (lockErr) {
+        // FAIL CLOSED for a FLAGGED run (codex r21 P1): with the lead's
+        // verdict unpersisted an older clean verdict would stand, and a
+        // later outage would treat it as the roll's answer and clear the
+        // draft's block — the recordless negative audit is never cached, so
+        // the warning would be unrecoverable. The visitor retries.
+        // …and for a CLEAN run whose verdict was to be persisted (codex r28
+        // P1): the lead would keep its older flag while this run's
+        // in-memory clean result wrote the draft unblocked and minted a
+        // handoff that /booking/confirm — which re-reads the lead — then
+        // refuses. Only a run the roll never answered may continue.
+        if (addressUnverified || rollAnsweredThisRun) {
+          logger.error(`[public-quote] locked verdict publication failed on a ${addressUnverified ? 'flagged' : 'clean'} run — refusing: ${lockErr.code || lockErr.name || 'error'}`);
+          return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
+        }
+        logger.warn(`[public-quote] locked verdict publication failed: ${lockErr.code || lockErr.name || 'error'}`);
+      }
+    }
     // Upsert a customers row so wizard-priced leads surface in /admin/customers
     // alongside the leads pipeline. Mirrors the lead-webhook precedent where
     // any qualified inbound creates a customer record at pipeline_stage=
@@ -2711,6 +3119,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         },
         commercialEstimatedPricing: !!commercialDisclaimer,
         commercialDisclaimer: commercialDisclaimer || undefined,
+        // Durable address block on the DRAFT: a booking link minted by an
+        // earlier clean run stays HMAC-valid for days and re-checks this
+        // draft through wizardDraftSelfServeBookable — the marker is what
+        // that shared predicate reads, so the stale link dies with the
+        // flag (codex #4667 r4 P1). Always written; false clears it once a
+        // clean run refreshes the draft in place.
+        addressUnverified: !!addressUnverified,
+        // The structured audit beside the boolean, so a carry-over can put
+        // the callback ask back on the current lead.
+        addressUnverifiedFlag: addressUnverified || null,
       };
       if (quoteRequired) {
         // A quoteRequired draft with NO engine manual line (the unit-on-
@@ -2738,6 +3156,22 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // would otherwise stamp the next series with the OLD property.
       const wizardAddressChanged = (row) => String(row?.address || '').trim().toLowerCase()
         !== String(quoteFullAddress || '').trim().toLowerCase();
+      // The locked draft's own county-roll marker survives a refresh whose
+      // run got NO roll answer (outage, or a repeat lookup that minted a new
+      // lead with no prior flag to recover): a clean answer clears it, a
+      // changed address makes it moot, missing evidence keeps it (pre-push
+      // audit P1). Read under the row lock.
+      const carryDraftAddressBlock = (lockedRow) => {
+        if (addressUnverified || rollAnsweredThisRun) return false;
+        // Same PREMISE (street + locality, unit-insensitive), not the same
+        // display string — an added apartment number is the same audited
+        // house number (pre-push audit P1).
+        if (!samePremiseDisplay(lockedRow?.address, quoteFullAddress)) return false;
+        const data = typeof lockedRow?.estimate_data === 'string' ? (() => { try { return JSON.parse(lockedRow.estimate_data); } catch { return null; } })() : lockedRow?.estimate_data;
+        if (data?.addressUnverified !== true) return false;
+        if (data.addressUnverifiedFlag && typeof data.addressUnverifiedFlag === 'object') carriedAddressFlag = data.addressUnverifiedFlag;
+        return true;
+      };
       const estFields = {
         customer_id: customerId,
         customer_name: `${contactFirstName} ${contactLastName}`,
@@ -2792,10 +3226,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // archived and untouched: the response still carries this run's
         // pricing, it just mints no self-book handoff for it.
         await db.transaction(async (trx) => {
+          await draftVerdictLock(trx);
           const lockedEst = await trx('estimates')
             .where({ id: existingEst.id })
             .forUpdate()
-            .first('id', 'source', 'status', 'archived_at', 'address');
+            .first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data');
           if (!lockedEst || lockedEst.source !== 'quote_wizard' || lockedEst.status !== 'draft') return;
           if (lockedEst.archived_at) {
             const consumedBy = await trx('scheduled_services')
@@ -2804,13 +3239,34 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             if (!consumedBy) return;
           }
           await applySetupFeeQuote(trx);
-          await trx('estimates').where({ id: existingEst.id }).update({
+          let carried = carryDraftAddressBlock(lockedEst);
+          let clearedUnderLock = false;
+          {
+            const rec = await reconcileUnderLock(trx, { carriedFlag: carried ? carriedAddressFlag : null });
+            if (!carried && rec.newerFlag) { carried = true; carriedAddressFlag = rec.newerFlag; }
+            if (rec.newerClean) { carried = false; clearedUnderLock = true; addressUnverified = null; cleanEvidenceAt = rec.newerClean; }
+          }
+          if (carried) draftAddressBlockCarried = true;
+          // Never over a LIVE delivery claim (pre-push audit P1 after r45):
+          // this whole-blob refresh would erase the delivering_at / token
+          // another request holds across its provider sends, and a flag
+          // stamped here would then be withdrawn under nobody's claim. A
+          // refused refresh is retryable: no handoff is minted for it.
+          const { DELIVERY_CLAIM_NOT_LIVE_SQL: CLAIM_NOT_LIVE } = require('../utils/estimate-claim-sql');
+          const refreshedExisting = await trx('estimates').where({ id: existingEst.id }).whereRaw(CLAIM_NOT_LIVE).update({
             ...estFields,
+            ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag, addressUnverifiedClearedBy: null } } : {}),
+            ...(clearedUnderLock ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
             ...(wizardAddressChanged(lockedEst) ? { property_id: null } : {}),
             archived_at: null,
             updated_at: new Date(),
           });
-          draftEstimateId = existingEst.id;
+          if (refreshedExisting === 1) {
+            draftEstimateId = existingEst.id;
+          } else {
+            draftReconcileFailed = true;
+            logger.info(`[public-quote] wizard draft ${existingEst.id} is under a live delivery claim — refresh refused, no handoff minted for lead ${lead.id} (retryable)`);
+          }
         });
       } else {
         await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
@@ -2836,23 +3292,42 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               // #3489 follow-up). draftEstimateId is set ONLY when the
               // locked row is still the wizard's own live draft and the
               // update actually landed.
+              await draftVerdictLock(trx);
               const lockedDup = await trx('estimates')
                 .where({ id: duplicateBlock.existingEstimateId })
                 .forUpdate()
-                .first('id', 'source', 'status', 'archived_at', 'address');
+                .first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data');
               if (lockedDup && lockedDup.source === 'quote_wizard'
                 && lockedDup.status === 'draft' && !lockedDup.archived_at) {
                 await applySetupFeeQuote(trx);
+                let carried = carryDraftAddressBlock(lockedDup);
+                let clearedUnderLock = false;
+                {
+                  const rec = await reconcileUnderLock(trx, { carriedFlag: carried ? carriedAddressFlag : null });
+                  if (!carried && rec.newerFlag) { carried = true; carriedAddressFlag = rec.newerFlag; }
+                  if (rec.newerClean) { carried = false; clearedUnderLock = true; addressUnverified = null; cleanEvidenceAt = rec.newerClean; }
+                }
+                if (carried) draftAddressBlockCarried = true;
                 const refreshed = await trx('estimates')
                   .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
+                  // …never over a LIVE delivery claim (pre-push audit P1
+                  // after r45) — same rule as the lead-keyed refresh above.
+                  .whereRaw(require('../utils/estimate-claim-sql').DELIVERY_CLAIM_NOT_LIVE_SQL)
                   .update({
                     ...estFields,
+                    ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag, addressUnverifiedClearedBy: null } } : {}),
+                    ...(clearedUnderLock ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
                     ...(wizardAddressChanged(lockedDup) ? { property_id: null } : {}),
                     updated_at: new Date(),
                   });
                 if (refreshed === 1) {
                   draftEstimateId = duplicateBlock.existingEstimateId;
                   logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
+                } else {
+                  // The locked row was live but the guarded write landed
+                  // nowhere: a delivery claim is live on it — retryable.
+                  draftReconcileFailed = true;
+                  logger.info(`[public-quote] wizard draft ${duplicateBlock.existingEstimateId} is under a live delivery claim — refresh refused, no handoff minted for lead ${lead.id} (retryable)`);
                 }
               } else {
                 logger.info(`[public-quote] Wizard draft ${duplicateBlock.existingEstimateId} changed under lock (promoted/archived) — refresh skipped, no handoff minted for lead ${lead.id}`);
@@ -2864,13 +3339,70 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // New draft: nothing to lock (no row, no handoff token exists
             // yet), but the queued-obligation check still rides this trx.
             await applySetupFeeQuote(trx);
-            const [inserted] = await trx('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' }).returning('id');
+            // The NEW row gets the same lock-and-reconcile as a refresh: a
+            // flag a concurrent lookup committed since the reconciliation
+            // released its lock rides onto the inserted draft (codex r22
+            // P1).
+            await draftVerdictLock(trx);
+            const recInsert = await reconcileUnderLock(trx);
+            const newerForInsert = recInsert.newerFlag || null;
+            if (newerForInsert) { draftAddressBlockCarried = true; carriedAddressFlag = newerForInsert; }
+            if (recInsert.newerClean) { addressUnverified = null; cleanEvidenceAt = recInsert.newerClean; }
+            const [inserted] = await trx('estimates').insert({
+              ...estFields,
+              ...(newerForInsert ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: newerForInsert, addressUnverifiedClearedBy: null } } : {}),
+              ...(recInsert.newerClean ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
+              status: 'draft',
+              source: 'quote_wizard',
+            }).returning('id');
             draftEstimateId = inserted?.id || inserted || null;
           }
         });
       }
     } catch (e) {
-      logger.error(`[public-quote] Estimate upsert failed: ${e.message}`);
+      draftReconcileFailed = true;
+      logger.error(`[public-quote] Estimate upsert failed — self-book handoff withheld: ${e.message}`);
+    }
+    // A carried draft block puts its structured audit back on the CURRENT
+    // lead (own row, this run's insert/update above) so the lead card shows
+    // the callback ask the draft still enforces (pre-push audit P1).
+    // Written under the contact-pair lock, and only if the carried
+    // evidence still wins: a lookup or staff confirmation committed after
+    // the draft transaction must not have its newer verdict overwritten.
+    // Both keys land together so address_unverified never disagrees with
+    // address_verdict (pre-push audit P1 on r24).
+    const carryFlagToLead = async () => {
+      if (!(draftAddressBlockCarried && carriedAddressFlag && lead?.id)) return;
+      try {
+        await db.transaction(async (trx) => {
+          await draftVerdictLock(trx);
+          const rec = await reconcileUnderLock(trx, { carriedFlag: carriedAddressFlag });
+          if (rec.newerClean) {
+            logger.info('[public-quote] carried address flag not written — a clean verdict committed after it');
+            return;
+          }
+          // The newest winning flag lands, never an older carried one over
+          // a concurrently updated lead (codex r34 P1).
+          if (rec.newerFlag) carriedAddressFlag = rec.newerFlag;
+          const verdict = { ...buildAddressVerdict({ flag: carriedAddressFlag, address: normalizedAddress }), at: carriedAddressFlag.flagged_at || new Date().toISOString() };
+          await trx('leads').where({ id: lead.id }).update({
+            extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: carriedAddressFlag, address_verdict: verdict })]),
+            updated_at: new Date(),
+          });
+        });
+      } catch (carryErr) {
+        // FAIL CLOSED (codex r32 P1): when the draft is the only carrier of
+        // the block, a lead returned without its flag lets a bare booking
+        // request book the county-rejected premise. The caller refuses the
+        // run; the visitor retries.
+        logger.error(`[public-quote] carried address flag not written to the lead: ${carryErr.code || carryErr.name || 'error'}`);
+        throw carryErr;
+      }
+    };
+    try {
+      await carryFlagToLead();
+    } catch {
+      return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
     }
 
     try {
@@ -2908,7 +3440,107 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // A keyed product the Service Library has set booking_enabled=false
     // prices instantly but never mints a self-book slot (GH codex #3585).
     const keyedNotBookable = !!(keyedService && keyedService.booking_enabled === false);
-    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate) && !keyedNotBookable) {
+    // A house number the county roll could not vouch for gets NO self-book
+    // link and no website publication: the price still shows, but the
+    // visitor must not book (or publish) the bad address before the
+    // callback confirms it — the exact incident path (codex #4667 r3 P1).
+    // Rechecked once more right before the handoff is minted (codex r24
+    // P1): a /property-lookup that committed a county flag AFTER this
+    // run's draft transaction released the contact-pair lock has already
+    // stamped the draft blocked, but this request's local verdict is stale
+    // and would still mint and send a /book URL that /booking/confirm then
+    // refuses with ADDRESS_UNVERIFIED. Under the same lock, the newest
+    // matching flag newer than this run's clean evidence withholds the
+    // handoff (and lands on the current lead). The persisted draft verdict
+    // is not rewritten at this point (fail closed; the next run clears it
+    // under the draft lock).
+    if (!addressUnverified && !draftAddressBlockCarried && contactEmail && contactPhone) {
+      try {
+        const late = await db.transaction(async (trx) => {
+          await draftVerdictLock(trx);
+          return reconcileUnderLock(trx);
+        });
+        if (late.newerFlag) {
+          draftAddressBlockCarried = true;
+          carriedAddressFlag = late.newerFlag;
+          logger.info('[public-quote] address flag committed after the draft write — handoff withheld');
+          await carryFlagToLead();
+        }
+      } catch (recheckErr) {
+        // FAIL CLOSED: without the recheck a link could go out to a number
+        // the roll has just refused; the visitor retries, nothing is lost.
+        logger.error(`[public-quote] pre-handoff address recheck failed — refusing the run: ${recheckErr.code || recheckErr.name || 'error'}`);
+        return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
+      }
+    }
+    // Two different reasons withhold the link: an ADDRESS verdict (this
+    // run's flag or a carried draft hold) also quarantines earlier
+    // publications below; a failed draft reconciliation only withholds —
+    // an unrelated upsert error must never archive valid publications or
+    // stamp legacy rows blocked with no flag (pre-push audit P1 after r27).
+    const addressVerdictBlocks = !!addressUnverified || draftAddressBlockCarried;
+    const selfBookBlockedByAddress = addressVerdictBlocks || draftReconcileFailed;
+    if (draftReconcileFailed && !addressVerdictBlocks) {
+      logger.info('[public-quote] self-book link withheld — the draft reconciliation did not complete; the visitor retries');
+    }
+    if (addressVerdictBlocks) {
+      logger.info('[public-quote] self-book link withheld — address flagged by the county-roll audit; office confirms on the callback');
+      // A website estimate an EARLIER run already published for this lead
+      // (publication promotes the row to `sent`, past the draft predicate)
+      // stays customer-viewable and acceptable on its old token — archive
+      // it so /estimate/:token and accept refuse it (both reject
+      // archived_at outright); the office re-sends once the address is
+      // confirmed (codex #4667 r5 P1). Own lead only; best-effort.
+      try {
+        // sent AND viewed: opening the link flips the row to 'viewed'
+        // (estimate-public), which is just as acceptable (pre-push audit P1).
+        // A repeat /property-lookup mints a NEW lead row (only a prefill
+        // token re-attaches), so the earlier publication is found by the
+        // visitor's verified ownership — the typed email, the same proof
+        // the lead UPDATE uses — plus the same street line, not by lead id
+        // alone (pre-push audit P1). Own publications only.
+        // Candidates: this lead's own, or — ownership without a token —
+        // BOTH typed contact factors (the pair the same-phone draft refresh
+        // trusts); then the audited PREMISE is matched in code (street
+        // with any unit stripped, plus the complete locality), never an
+        // email plus a street with a mistyped locality (pre-push audit
+        // P0) and never a display string a unit changes (pre-push audit P1).
+        // Withdrawal and its critical audit row commit TOGETHER: a lost
+        // audit row for a system-initiated archival is worse than a failed
+        // run (codex r8 P2). The marker on the row is the durable guard
+        // (estimateOffCustomerSurface) if this transaction fails.
+        const { withdrawFlaggedPublications } = require('../services/website-quote-withdrawal');
+        const withdrawn = await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, contactPhone)]);
+          // A staff clean verdict that committed after this run's draft
+          // transaction (the office confirmed the number while this
+          // request paused) outranks the local flag: withdrawing on it
+          // would re-block the confirmed draft or archive a publication
+          // the office just sent. Judged under this lock (pre-push audit
+          // P1 on r24). The link stays withheld for this run — the
+          // visitor's next run, or the office, hands it over.
+          const rec = await reconcileUnderLock(trx, { carriedFlag: draftAddressBlockCarried ? carriedAddressFlag : null });
+          if (rec.newerClean) {
+            logger.info('[public-quote] withdrawal skipped — a clean verdict committed after this run\'s flag');
+            return [];
+          }
+          return withdrawFlaggedPublications(trx, {
+            leadId: lead.id, contactEmail, contactPhone, fullAddress: quoteFullAddress, flag: addressUnverified || carriedAddressFlag || null,
+          });
+        });
+        if (withdrawn.length) {
+          logger.info(`[public-quote] withdrew ${withdrawn.length} published website estimate(s) for the flagged address`);
+        }
+      } catch (withdrawErr) {
+        // FAIL CLOSED: the off-surface marker is written inside the same
+        // transaction and rolled back with it, so an earlier publication
+        // would stay viewable and acceptable at the flagged number. The
+        // visitor retries; nothing has been priced away (codex r9 P1).
+        logger.error(`[public-quote] website estimate withdrawal failed — refusing the flagged run: ${withdrawErr.code || withdrawErr.name || 'error'}`);
+        return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
+      }
+    }
+    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate) && !keyedNotBookable && !selfBookBlockedByAddress) {
       try {
         let bookingServiceId;
         let recurringServiceLabelParam = null;
@@ -3046,6 +3678,139 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     }
 
+    // The LAST recheck, after publication and immediately before the
+    // customer delivery below (codex r31 P1): the pre-handoff recheck
+    // released the contact-pair lock before URL shortening, publication and
+    // the sends, so a /property-lookup that commits a county flag in that
+    // window has blocked or archived the draft while this request still
+    // holds a live bookingUrl. Under the same lock: a newer matching flag
+    // withholds the link, withdraws this run's own publication and lands on
+    // the lead. A failed recheck refuses the run (fail closed).
+    // Re-run immediately before EACH provider send (codex r32 P1): the
+    // email is awaited first and the SMS follows, so the SMS gets its own
+    // locked recheck rather than reusing the email's answer.
+    const recheckBeforeSend = async () => {
+      if (!((bookingUrl || websiteEstimateUrl) && !addressUnverified && !draftAddressBlockCarried && contactEmail && contactPhone)) return;
+      {
+        const late = await db.transaction(async (trx) => {
+          await draftVerdictLock(trx);
+          const rec = await reconcileUnderLock(trx);
+          if (rec.newerFlag) {
+            const { withdrawFlaggedPublications } = require('../services/website-quote-withdrawal');
+            await withdrawFlaggedPublications(trx, {
+              leadId: lead.id, contactEmail, contactPhone, fullAddress: quoteFullAddress, flag: rec.newerFlag,
+            });
+          }
+          return rec;
+        });
+        if (late.newerFlag) {
+          draftAddressBlockCarried = true;
+          carriedAddressFlag = late.newerFlag;
+          bookingUrl = null;
+          websiteEstimateUrl = null;
+          logger.info('[public-quote] address flag committed before delivery — link withheld and this run\'s publication withdrawn');
+          await carryFlagToLead();
+        }
+      }
+    };
+    try {
+      await recheckBeforeSend();
+    } catch (deliveryRecheckErr) {
+      logger.error(`[public-quote] pre-delivery address recheck failed — refusing the run: ${deliveryRecheckErr.code || deliveryRecheckErr.name || 'error'}`);
+      return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
+    }
+    // A DELIVERY CLAIM on the linked estimate across BOTH provider sends
+    // (codex #4667 r45 P1): the rechecks above release the contact-pair
+    // lock before each provider call, so a lookup flagging this premise in
+    // that gap could withdraw the publication while the email / text still
+    // carries its link. The withdrawal refuses to commit while a claim is
+    // fresh (the same protocol the admin send and the extension use);
+    // token-fenced release after the SMS leg, TTL otherwise. No claim
+    // (off-surface since the recheck, or another sender's live claim) →
+    // the links are withheld, fail closed.
+    let quoteDeliveryClaimToken = null;
+    if ((bookingUrl || websiteEstimateUrl) && !draftEstimateId) {
+      // A BARE link with no claimable draft (mirroring skipped — a
+      // non-wizard estimate already stands for this contact) has nothing
+      // the withdrawal can see: a county flag committed between the last
+      // recheck and the provider call would leave the visitor a link that
+      // /booking/confirm then refuses. Withheld, fail closed (codex r47
+      // P1); the office follows up from the standing estimate.
+      bookingUrl = null;
+      websiteEstimateUrl = null;
+      logger.info(`[public-quote] self-book link withheld for lead ${lead.id} — no claimable draft to fence the delivery`);
+    }
+    if (draftEstimateId && (bookingUrl || websiteEstimateUrl)) {
+      const token = require('crypto').randomUUID();
+      try {
+        const { ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
+        const CLAIM_STAMP_SQL = "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)";
+        const taken = await db.transaction(async (trx) => {
+          // A GROUPED draft's link renders its published siblings too: group
+          // advisory lock first, then the anchor, then every link-visible
+          // sibling locked in id order, verified on-surface and claimed with
+          // the same token — the admin send's and the extension's protocol
+          // (codex r48 P1). Any short claim rolls the whole attempt back.
+          const groupRow = await trx('estimates').where({ id: draftEstimateId }).first('estimate_group_id');
+          if (groupRow?.estimate_group_id) {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['estimate-group-send', String(groupRow.estimate_group_id)]);
+          }
+          const row = await trx('estimates')
+            .where({ id: draftEstimateId })
+            .whereNull('archived_at')
+            .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
+            .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+            .forUpdate()
+            .first('id');
+          if (!row) return false;
+          let visibleSiblingIds = [];
+          if (groupRow?.estimate_group_id) {
+            const siblings = await trx('estimates')
+              .where({ estimate_group_id: groupRow.estimate_group_id })
+              .whereNot({ id: draftEstimateId })
+              .whereNull('archived_at')
+              // …'sending' too: the public renderer's link-visible scope
+              // includes it (codex r51 P1); a sibling under another sender's
+              // live claim refuses this claim, which withholds the sends.
+              .whereIn('status', ['sending', 'sent', 'viewed', 'expired'])
+              .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")
+              .orderBy('id')
+              .forUpdate()
+              .select('id', 'estimate_data');
+            const { estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
+            if (siblings.some((sib) => estimateOffCustomerSurface({ estimate_data: sib.estimate_data }))) return false;
+            visibleSiblingIds = siblings.map((sib) => sib.id);
+          }
+          const claimedAt = new Date().toISOString();
+          await trx('estimates').where({ id: draftEstimateId }).update({
+            estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, token]),
+            updated_at: trx.fn.now(),
+          });
+          if (visibleSiblingIds.length) {
+            const stamped = await trx('estimates')
+              .whereIn('id', visibleSiblingIds)
+              .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+              .update({ estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, token]), updated_at: trx.fn.now() });
+            if (Number(stamped) !== visibleSiblingIds.length) {
+              throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });
+            }
+          }
+          return true;
+        });
+        if (taken) {
+          quoteDeliveryClaimToken = token;
+        } else {
+          bookingUrl = null;
+          websiteEstimateUrl = null;
+          logger.info('[public-quote] quote link withheld — the estimate left the customer surface (or is under another delivery) before the sends');
+        }
+      } catch (claimErr) {
+        bookingUrl = null;
+        websiteEstimateUrl = null;
+        logger.warn(`[public-quote] quote delivery claim not taken — links withheld: ${claimErr.code || claimErr.name || 'db_error'}`);
+      }
+    }
+
     // Per-application phrasing when the quote resolves to one (owner
     // 2026-07-11: recurring emails lead per-application, never /mo where a
     // per-application figure exists; every amount shows cents). Multi-service
@@ -3103,7 +3868,28 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // {service_label}") belongs to the estimate-acceptance moment; at the
     // quote moment nothing is booked yet, so leads were thanked for a
     // booking that doesn't exist (owner report, 2026-06-12).
-    if (normalizedPhone && !quoteRequired && bookingUrl) {
+    // The SMS's own locked recheck (codex r32 P1): the email above was
+    // awaited first, and a flag that committed meanwhile must withhold
+    // the link here too. Past the email, a failed recheck WITHHOLDS the
+    // SMS (nothing else can be refused now) rather than sending a link it
+    // could not vouch for.
+    let smsLinkDeliverable = !!bookingUrl;
+    if (smsLinkDeliverable) {
+      try {
+        await recheckBeforeSend();
+        smsLinkDeliverable = !!bookingUrl;
+      } catch (smsRecheckErr) {
+        smsLinkDeliverable = false;
+        // …and the JSON response's link and handoff token go with it (pre-push
+        // audit P1 after r50): a recheck that could not vouch for the link
+        // (a withdrawal refused by this run's own claim, say) must not hand
+        // the same link back to the client either.
+        bookingUrl = null;
+        websiteEstimateUrl = null;
+        logger.error(`[public-quote] pre-SMS address recheck failed — booking SMS and response link withheld: ${smsRecheckErr.code || smsRecheckErr.name || 'error'}`);
+      }
+    }
+    if (normalizedPhone && !quoteRequired && bookingUrl && smsLinkDeliverable) {
       try {
         const customerBody = await renderTemplate(
           'quote_wizard_booking_invite',
@@ -3143,6 +3929,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         }
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
     }
+    // The delivery claim is HELD through the HTTP handoff too — the JSON
+    // response carries the same link and handoff token — and released
+    // right before res.json (codex r49 P1); see the release below.
 
     // Newsletter enrollment — gated on explicit opt-in from a public quote
     // client. Public quote emails are user-provided and
@@ -3343,7 +4132,25 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // never a book link (same rule as nextStepSummary).
     if (bookingUrl) response.booking_url = bookingUrl;
     if (websiteEstimateUrl) response.website_estimate_url = websiteEstimateUrl;
+    // The response is WRITTEN FIRST (codex r50 P1): the JSON link and
+    // handoff token are handed to the client before the claim goes, so a
+    // quarantine cannot land between the release and the send. Then every
+    // handoff — both provider legs and this JSON link — is behind us and
+    // this run's delivery claim is released (token-fenced; the shared
+    // release also completes a deferred invalidation). Non-fatal — an
+    // uncleared claim ages out by TTL. A quarantine that lands after this
+    // point meets /booking/confirm's own locked recheck.
     res.json(response);
+    if (quoteDeliveryClaimToken) {
+      try {
+        const adminEstimates = require('./admin-estimates');
+        await adminEstimates.clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken);
+        const groupRow = await db('estimates').where({ id: draftEstimateId }).first('id', 'estimate_group_id');
+        if (groupRow?.estimate_group_id) await adminEstimates.clearGroupSiblingDeliveryClaims(groupRow, quoteDeliveryClaimToken);
+      } catch (releaseErr) {
+        logger.warn(`[public-quote] quote delivery claim release failed (ages out by TTL): ${releaseErr.code || releaseErr.name || 'db_error'}`);
+      }
+    }
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: `Something went wrong. Please call ${WAVES_SUPPORT_PHONE_DISPLAY} for a quote.` });
@@ -3456,6 +4263,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._internals = {
+  deriveAddressUnverified,
   findPriorOpenWizardLeadId,
   duplicateOfFromExtracted,
   WIZARD_LEAD_REUSE_DAYS,

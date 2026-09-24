@@ -160,6 +160,16 @@ async function textFromLine({ req, ctx, target, body }) {
   // cannot reopen a reply the customer may already hold. Provider evidence
   // can settle the held decisions later.
   const settleAmbiguous = () => settleHumanReply({ ...reply, parkedDecisionIds: [], sent: false, ambiguous: true, reviewedBy: req.technicianId }).catch(() => {});
+  const providerHandoffReservation = reply.reservationId
+    ? require('../services/messaging/provider-handoff-reservation').borrowProviderHandoffReservation({
+      reservationId: reply.reservationId,
+      to: target.to,
+      fromNumber: ctx.line.number,
+      body,
+      messageType: 'manual',
+      adminUserId: req.technicianId,
+    })
+    : null;
   let result;
   try {
     result = await sendCustomerMessage({
@@ -171,6 +181,7 @@ async function textFromLine({ req, ctx, target, body }) {
       customerId: target.customer.id,
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: 'tech_line_text',
+      providerHandoffReservation,
       metadata: {
         original_message_type: 'manual',
         tech_line: true,

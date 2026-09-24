@@ -85,7 +85,11 @@ function parseMetadata(value) {
 // Review reservations remain unresolved across scheduled/terminal recovery
 // statuses. Reply reservations are hidden only during their sending hold.
 const REVIEW_ASK_MARKER = 'review_ask_reservation';
-const REPLY_RESERVATION_MARKERS = ['manual_send_reservation', 'auto_send_reservation'];
+const REPLY_RESERVATION_MARKERS = [
+  'manual_send_reservation',
+  'auto_send_reservation',
+  'provider_handoff_reservation',
+];
 const SEND_RESERVATION_MARKERS = [REVIEW_ASK_MARKER, ...REPLY_RESERVATION_MARKERS];
 // A reply placeholder is hidden only while its reconciliation hold runs
 // (sms-auto-send's uncertain-claim hold). Past that it SURFACES as the
@@ -175,7 +179,9 @@ function excludeUnresolvedSendReservations(query, table = 'sms_log') {
 // a narrow fallback: the same endpoints/body, created between reservation
 // creation and promotion. A later delivery callback can move both rows to a
 // terminal failed/undelivered/canceled status without changing that identity.
-// Every candidate needs a real SID.
+// Push receipts have no Twilio SID. A real push notification id is exact
+// identity even when a deduped receipt predates the new reservation; without
+// one, channel/type/body remain bounded to the reservation promotion window.
 function preserveSoleAcceptedReplyReceipts(query) {
   const nonReservation = SEND_RESERVATION_MARKERS
     .map(marker => `COALESCE(receipt.metadata->>'${marker}', 'false') <> 'true'`)
@@ -189,12 +195,39 @@ function preserveSoleAcceptedReplyReceipts(query) {
       WHERE receipt.id <> sms_log.id
         AND receipt.direction = 'outbound'
         AND receipt.status IN ('queued', 'sent', 'delivered', 'failed', 'undelivered', 'canceled')
-        AND receipt.twilio_sid ~* '^(SM|MM)[a-f0-9]{32}$'
+        AND (
+          receipt.twilio_sid ~* '^(SM|MM)[a-f0-9]{32}$'
+          OR ((receipt.from_phone = 'push'
+              OR receipt.metadata->>'push_settled_without_proof' = 'true')
+            AND receipt.metadata->>'channel' = 'push'
+            AND receipt.metadata->>'providerAccepted' = 'true')
+        )
         AND ${nonReservation}
         AND (
           (sms_log.twilio_sid IS NOT NULL AND receipt.twilio_sid = sms_log.twilio_sid)
           OR (
             sms_log.twilio_sid IS NULL
+            AND sms_log.metadata->>'provider_channel' = 'push'
+            AND (receipt.from_phone = 'push'
+              OR receipt.metadata->>'push_settled_without_proof' = 'true')
+            AND receipt.to_phone = sms_log.to_phone
+            AND receipt.message_body IS NOT DISTINCT FROM sms_log.message_body
+            AND receipt.message_type IS NOT DISTINCT FROM sms_log.message_type
+            AND receipt.metadata->>'channel' = 'push'
+            AND receipt.metadata->>'providerAccepted' = 'true'
+            AND (
+              (NULLIF(receipt.metadata->>'push_notification_id', '') IS NOT NULL
+                AND sms_log.metadata->>'provider_message_id'
+                  = 'push:' || (receipt.metadata->>'push_notification_id'))
+              OR ((NULLIF(receipt.metadata->>'push_notification_id', '') IS NULL
+                  OR NULLIF(sms_log.metadata->>'provider_message_id', '') IS NULL)
+                AND receipt.created_at >= sms_log.created_at
+                AND receipt.created_at <= sms_log.updated_at)
+            )
+          )
+          OR (
+            sms_log.twilio_sid IS NULL
+            AND COALESCE(sms_log.metadata->>'provider_channel', 'sms') <> 'push'
             AND receipt.from_phone = sms_log.from_phone
             AND receipt.to_phone = sms_log.to_phone
             AND receipt.message_body IS NOT DISTINCT FROM sms_log.message_body

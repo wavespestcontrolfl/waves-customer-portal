@@ -205,6 +205,9 @@ test('thread advancement normalizes formatted endpoints and excludes only anchor
   expect(queries[0].sql).toContain("status IN ('accepted','queued','sent','delivered','scheduled','sending')");
   expect(queries[0].sql).toContain("OR (direction = 'outbound' AND status IN ('accepted','queued','scheduled','sending'))");
   expect(queries[0].sql).toContain("BTRIM(COALESCE(to_phone, ''))");
+  expect(queries[0].sql).toContain("metadata->>'channel' = 'push'");
+  expect(queries[0].sql).toContain("metadata->>'providerAccepted' = 'true'");
+  expect(queries[0].sql).toContain("metadata->>'provider_from_number'");
   expect(queries[0].sql).not.toContain('to_phone = ?');
   expect(queries[0].bindings).toEqual(expect.arrayContaining([
     '00000000-0000-4000-8000-000000000002',
@@ -212,6 +215,7 @@ test('thread advancement normalizes formatted endpoints and excludes only anchor
     '9415550100',
     '9413529161',
   ]));
+  expect(queries[0].bindings.filter((value) => value === '9413529161')).toHaveLength(3);
 });
 
 test('read context rejects when authoritative queues contain pending work', async () => {

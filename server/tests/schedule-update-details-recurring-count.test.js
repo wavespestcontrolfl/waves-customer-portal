@@ -736,10 +736,34 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
   test('every OFFICE series writer consults the shared verdict; the completion auto-extend deliberately does not (owner ruling: warn at completion)', () => {
     // reconcile (count raise + ongoing flip) + the two alert-action loops.
     expect((src.match(/await seriesExtensionUnbillable\(trx, \{/g) || []).length).toBe(3);
-    const from = src.indexOf('async function runRecurringSeriesMaintenanceLocked(');
-    const autoExtend = src.slice(from, src.indexOf('\nasync function ', from + 10));
-    expect(autoExtend).toContain("insert(nextData)");
-    expect(autoExtend).not.toContain('seriesExtensionUnbillable(');
+    // The single-visit insert step (candidate search → insert → prepay →
+    // add-ons → visit-groups) was extracted out of
+    // runRecurringSeriesMaintenanceLocked into extendSeriesOnceLocked so the
+    // nightly top-up loop (below) can share it, gated behind
+    // opts.checkUnbillable — the shared function's body now legitimately
+    // contains the call, but the COMPLETION call site never opts in, so its
+    // own behavior (never consulting the gate) is unchanged.
+    expect(src).toContain('spawnedVisit = await extendSeriesOnceLocked(conn, parent, parentId, cols, svc);');
+    const fnFrom = src.indexOf('async function extendSeriesOnceLocked(');
+    const fnBody = src.slice(fnFrom, src.indexOf('\nasync function ', fnFrom + 10));
+    expect(fnBody).toContain('insert(nextData)');
+    expect(fnBody).toContain('if (opts.checkUnbillable) {');
+  });
+
+  test('the nightly top-up DOES consult the shared verdict — it is not the completion auto-extend, and it can mint many unattended rows in one run', () => {
+    // topUpRecurringSeriesLocked's loop calls the shared extendSeriesOnceLocked
+    // with checkUnbillable: true (up to 24x/run) with no human approving each
+    // date — unlike the completion path's one blocking visit, there is no
+    // "don't hold up a tech closing a job" reason to skip the gate here, and
+    // skipping it would let an unattended run quietly commit the business to
+    // a stack of $0 visits. Checked against the ACTUAL candidate date inside
+    // extendSeriesOnceLocked (price varies by date — a coarse upfront guess
+    // isn't enough, Codex pre-push P1), not a separate call in topUp's own
+    // body.
+    const from = src.indexOf('async function topUpRecurringSeriesLocked(');
+    const topUp = src.slice(from, src.indexOf('\nasync function ', from + 10));
+    expect(topUp).toContain('checkUnbillable: true');
+    expect(topUp).not.toContain('seriesExtensionUnbillable(');
   });
 });
 

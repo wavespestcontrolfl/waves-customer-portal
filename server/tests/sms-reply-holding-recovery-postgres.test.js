@@ -14,6 +14,8 @@ const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
 const suggest = require('../services/sms-suggest-mode');
 const autoSend = require('../services/sms-auto-send');
+const providerCoordination = require('../services/messaging/provider-handoff-reservation');
+const { gratitudeThreadAdvanced } = require('../services/sms-gratitude-context');
 jest.setTimeout(30000);
 
 postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
@@ -97,6 +99,308 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     return id;
   }
 
+  async function acceptedProviderHandle(body) {
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body, messageType: 'manual',
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: `SM${'c'.repeat(32)}`, channel: 'sms',
+    });
+    return prepared.handle;
+  }
+
+  test('provider coordination preserves exact accepted SMS evidence when the ordinary provider row is missing', async () => {
+    const adminUserId = randomUUID();
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '(202) 555-0101', fromNumber: '+19413529161', body: 'Draft body',
+      messageType: 'estimate_service_details', adminUserId,
+    });
+    expect(prepared.blocked).not.toBe(true);
+    const reservedAt = new Date(Date.now() - 10000);
+    const inboundAt = new Date(Date.now() - 5000);
+    const providerAcceptedAt = new Date(Date.now() - 1000);
+    await trx('sms_log').where({ id: prepared.handle.reservationId }).update({ created_at: reservedAt });
+    providerCoordination.captureProviderContext(prepared.handle, {
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Final normalized body',
+      messageType: 'estimate_service_details', channel: 'sms', providerAcceptedAt,
+      metadata: { pre_handoff_stamp: true },
+    });
+    const sid = `SM${'a'.repeat(32)}`;
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: sid, channel: 'sms',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+
+    const row = await trx('sms_log').where({ id: prepared.handle.reservationId }).first();
+    expect(row).toMatchObject({
+      from_phone: '+19413529161', to_phone: '+12025550101', message_body: 'Final normalized body',
+      message_type: 'estimate_service_details', status: 'sent', twilio_sid: sid, admin_user_id: adminUserId,
+    });
+    expect(row.created_at.getTime()).toBe(providerAcceptedAt.getTime());
+    expect(row.created_at.getTime()).toBeGreaterThan(inboundAt.getTime());
+    expect(row.metadata).toMatchObject({
+      provider_handoff_reservation: true, provider_outcome: 'accepted',
+      provider_channel: 'sms', pre_handoff_stamp: true,
+    });
+  });
+
+  test('a caller-owned reservation is borrowed without duplication and receives the actual provider context', async () => {
+    const adminUserId = randomUUID();
+    const reservationId = await suggest.createReplyHoldingReservation(trx, {
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Draft body',
+      messageType: 'manual', adminUserId, reservationKind: 'manual', uncertain: true,
+    });
+    const handle = providerCoordination.borrowProviderHandoffReservation({
+      reservationId, to: '+12025550101', fromNumber: '+19413529161', body: 'Draft body',
+      messageType: 'manual', adminUserId,
+    });
+    const providerAcceptedAt = new Date(Date.now() - 1000);
+    providerCoordination.captureProviderContext(handle, {
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Final normalized body',
+      messageType: 'manual', channel: 'sms', providerAcceptedAt,
+    });
+    const sid = `SM${'d'.repeat(32)}`;
+    providerCoordination.recordProviderOutcome(handle, {
+      deliveryOutcome: 'accepted', providerMessageId: sid, channel: 'sms',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(true);
+    expect(await trx('sms_log').where({ id: reservationId }).first('status')).toMatchObject({ status: 'sending' });
+
+    const acceptedResult = providerCoordination.attachReservationContext(handle, {
+      sent: true, deliveryOutcome: 'accepted', providerMessageId: sid,
+    });
+    expect(Object.keys(acceptedResult)).not.toContain('reservationContext');
+    expect(await suggest.settleReplyHoldingReservation({ reservationId, acceptedResult })).toBe(true);
+
+    const rows = await trx('sms_log').where({ to_phone: '+12025550101' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: reservationId, status: 'sent', twilio_sid: sid, message_body: 'Final normalized body',
+      from_phone: '+19413529161', message_type: 'manual', admin_user_id: adminUserId,
+    });
+    expect(rows[0].created_at.getTime()).toBe(providerAcceptedAt.getTime());
+  });
+
+  test('a failed accepted promotion retries inside the shared settlement attempt', async () => {
+    const handle = await acceptedProviderHandle('Retry accepted promotion');
+    const realSettle = suggest.settleReplyHoldingReservation;
+    const settleSpy = jest.spyOn(suggest, 'settleReplyHoldingReservation');
+    let failPromotion = true;
+    settleSpy.mockImplementation((input) => {
+      if (input.acceptedResult && failPromotion) {
+        failPromotion = false;
+        return Promise.resolve(false);
+      }
+      return realSettle(input);
+    });
+    try {
+      expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(true);
+      expect(await trx('sms_log').where({ id: handle.reservationId }).first('status')).toMatchObject({ status: 'sent' });
+      expect(settleSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      settleSpy.mockRestore();
+    }
+  });
+
+  test('concurrent settlement callers share one promotion and cleanup attempt', async () => {
+    const handle = await acceptedProviderHandle('Concurrent settlement');
+    const realSettle = suggest.settleReplyHoldingReservation;
+    let releasePromotion;
+    const settleSpy = jest.spyOn(suggest, 'settleReplyHoldingReservation')
+      .mockImplementationOnce(input => new Promise((resolve) => {
+        releasePromotion = () => realSettle(input).then(resolve);
+      }))
+      .mockImplementation(input => realSettle(input));
+    try {
+      const first = providerCoordination.settleProviderHandoffReservation(handle);
+      const second = providerCoordination.settleProviderHandoffReservation(handle);
+      expect(second).toBe(first);
+      expect(settleSpy).toHaveBeenCalledTimes(1);
+      releasePromotion();
+      await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+      expect(settleSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      settleSpy.mockRestore();
+    }
+  });
+
+  test('a cleanup failure retries cleanup without re-promoting the accepted reservation', async () => {
+    const handle = await acceptedProviderHandle('Retry accepted cleanup');
+    const realSettle = suggest.settleReplyHoldingReservation;
+    let failCleanup = true;
+    let promotionCalls = 0;
+    const settleSpy = jest.spyOn(suggest, 'settleReplyHoldingReservation').mockImplementation((input) => {
+      if (input.acceptedResult) {
+        promotionCalls += 1;
+        return realSettle(input);
+      }
+      if (failCleanup) {
+        failCleanup = false;
+        return Promise.resolve(false);
+      }
+      return realSettle(input);
+    });
+    try {
+      expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(false);
+      expect(await trx('sms_log').where({ id: handle.reservationId }).first('status')).toMatchObject({ status: 'sent' });
+      expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(true);
+      expect(promotionCalls).toBe(1);
+    } finally {
+      settleSpy.mockRestore();
+    }
+  });
+
+  test('provider coordination removes only a duplicate accepted SMS reservation', async () => {
+    const sid = `MM${'b'.repeat(32)}`;
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Photo caption', messageType: 'manual',
+    });
+    await trx('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: '+19413529161', to_phone: '+12025550101',
+      message_body: 'Photo caption', message_type: 'manual', status: 'sent', twilio_sid: sid,
+      metadata: {},
+    });
+    providerCoordination.captureProviderContext(prepared.handle, {
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Photo caption',
+      messageType: 'manual', channel: 'sms',
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: sid, channel: 'sms',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeUndefined();
+  });
+
+  test.each(['none', 'ordinary', 'scheduled', 'unmarked phone'])('accepted push coordination with %s proof preserves exactly one valid receipt', async (proofKind) => {
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Push body', messageType: 'receipt',
+    });
+    const providerAcceptedAt = new Date();
+    if (proofKind !== 'none') {
+      await trx('sms_log').insert({
+        id: randomUUID(), direction: 'outbound', from_phone: proofKind === 'ordinary' ? 'push' : '+19413180000', to_phone: '+12025550101',
+        message_body: 'Push body', message_type: 'receipt', status: 'sent', twilio_sid: null, created_at: providerAcceptedAt,
+        metadata: { channel: 'push', providerAccepted: true,
+          ...(proofKind === 'scheduled' ? { push_settled_without_proof: true } : {}) },
+      });
+    }
+    providerCoordination.captureProviderContext(prepared.handle, {
+      to: '+12025550101', fromNumber: 'push', body: 'Push body', messageType: 'receipt',
+      channel: 'push', providerAcceptedAt, metadata: { channel: 'push', providerAccepted: true, provider_from_number: '+19413529161' },
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: 'push:notification-1', channel: 'push',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    const reservation = await trx('sms_log').where({ id: prepared.handle.reservationId }).first();
+    if (['ordinary', 'scheduled'].includes(proofKind)) expect(reservation).toBeUndefined();
+    else expect(reservation).toMatchObject({ from_phone: 'push', status: 'sent', twilio_sid: null });
+  });
+
+  test.each(['ordinary proof', 'promoted sole receipt', 'scheduled fallback'].flatMap(kind => [
+    [kind, 'after the inbound on the same thread', 60000, '+19413529161', '+12025550101', true],
+    [kind, 'before the inbound', -60000, '+19413529161', '+12025550101', false],
+    [kind, 'from another Waves endpoint', 60000, '+19413529162', '+12025550101', false],
+    [kind, 'to another recipient', 60000, '+19413529161', '+12025550102', false],
+  ]))('%s %s advances only the exact gratitude thread', async (
+    kind, _case, proofOffsetMs, providerFromNumber, recipient, advanced,
+  ) => {
+    const inboundId = randomUUID();
+    const inboundAt = new Date(Date.now() - 2 * 60 * 1000);
+    await trx('sms_log').insert({
+      id: inboundId, direction: 'inbound', from_phone: '+12025550101', to_phone: '+19413529161',
+      message_body: 'Thank you!', message_type: 'inbound', status: 'received', created_at: inboundAt,
+      metadata: {},
+    });
+    const proofAt = new Date(inboundAt.getTime() + proofOffsetMs);
+    if (kind === 'ordinary proof') {
+      await trx('sms_log').insert({
+        id: randomUUID(), direction: 'outbound', from_phone: 'push', to_phone: recipient,
+        message_body: 'Our pleasure!', message_type: 'receipt', status: 'sent', created_at: proofAt,
+        metadata: {
+          channel: 'push', providerAccepted: true, provider_from_number: providerFromNumber,
+        },
+      });
+    } else if (kind === 'promoted sole receipt') {
+      const prepared = await providerCoordination.prepareProviderHandoffReservation({
+        to: recipient, fromNumber: providerFromNumber, body: 'Our pleasure!', messageType: 'receipt',
+      });
+      providerCoordination.captureProviderContext(prepared.handle, {
+        to: recipient, fromNumber: 'push', body: 'Our pleasure!', messageType: 'receipt',
+        channel: 'push', providerAcceptedAt: proofAt,
+        metadata: { channel: 'push', providerAccepted: true, provider_from_number: providerFromNumber },
+      });
+      providerCoordination.recordProviderOutcome(prepared.handle, {
+        deliveryOutcome: 'accepted', providerMessageId: `push:${randomUUID()}`, channel: 'push',
+      });
+      expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    } else {
+      // When the ordinary proof insert fails, attemptPushFirst promotes the
+      // existing scheduled row. Its queued From may differ from the endpoint
+      // actually selected at delivery, so the trusted metadata is decisive.
+      await trx('sms_log').insert({
+        id: randomUUID(), direction: 'outbound', from_phone: '+19419999999', to_phone: recipient,
+        message_body: 'Our pleasure!', message_type: 'receipt', status: 'sent', created_at: proofAt,
+        metadata: {
+          channel: 'push', providerAccepted: true, push_settled_without_proof: true,
+          provider_from_number: providerFromNumber,
+        },
+      });
+    }
+
+    await expect(gratitudeThreadAdvanced(trx, {
+      inboundId, fromPhone: '+12025550101', toPhone: '+19413529161',
+    })).resolves.toBe(advanced);
+  });
+
+  test.each(['ordinary', 'scheduled'].flatMap(kind => [
+    ['an older matching', 'notification-1', -60 * 60 * 1000, true],
+    ['an older different', 'notification-2', -60 * 60 * 1000, false],
+    ['a same-window different', 'notification-2', 0, false],
+  ].map(values => [kind, ...values])))('a %s push proof with %s notification identity removes only a true dedup reservation', async (kind, _label, proofNotificationId, proofOffsetMs, removed) => {
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Deduped push body', messageType: 'receipt',
+    });
+    const reservationCreatedAt = new Date(Date.now() - 1000);
+    await trx('sms_log').where({ id: prepared.handle.reservationId }).update({
+      created_at: reservationCreatedAt,
+      updated_at: reservationCreatedAt,
+    });
+    await trx('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: kind === 'ordinary' ? 'push' : '+19413180000', to_phone: '+12025550101',
+      message_body: 'Deduped push body', message_type: 'receipt', status: 'sent', twilio_sid: null,
+      created_at: new Date(reservationCreatedAt.getTime() + proofOffsetMs),
+      metadata: { channel: 'push', providerAccepted: true, push_notification_id: proofNotificationId,
+        ...(kind === 'scheduled' ? { push_settled_without_proof: true } : {}) },
+    });
+    providerCoordination.captureProviderContext(prepared.handle, {
+      to: '+12025550101', fromNumber: 'push', body: 'Deduped push body', messageType: 'receipt',
+      channel: 'push', metadata: { channel: 'push', providerAccepted: true, push_notification_id: 'notification-1' },
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: 'push:notification-1', channel: 'push',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    expect(Boolean(await trx('sms_log').where({ id: prepared.handle.reservationId }).first())).toBe(!removed);
+  });
+
+  test.each([
+    [23, true],
+    [25, false],
+  ])('provider uncertainty aged %sh is retained only inside the reconciliation window', async (hours, retained) => {
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Maybe sent', messageType: 'manual',
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, { deliveryOutcome: 'uncertain' });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    const agedAt = new Date(Date.now() - hours * 60 * 60 * 1000);
+    await trx('sms_log').where({ id: prepared.handle.reservationId }).update({ created_at: agedAt, updated_at: agedAt });
+    await suggest.recoverSuggestionHoldingStates();
+    expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeDefined();
+    await expect(autoSend.reconcileAutoSendClaims()).resolves.toMatchObject({ reservationsCleared: retained ? 0 : 1 });
+    expect(Boolean(await trx('sms_log').where({ id: prepared.handle.reservationId }).first())).toBe(retained);
+  });
+
   async function agedAutoClaimReservation({ reservationAgeHours, accepted = false }) {
     const customerId = randomUUID();
     const inboundId = randomUUID();
@@ -134,6 +438,25 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     await expect(autoSend.hasActiveAutoSendClaim(trx, {
       threadLast10: '2025550101', customerId,
     })).resolves.toBe(expected);
+  });
+
+  test('provider expiration keeps a live linked decision and accounts for cleanup only after release', async () => {
+    const held = await decision();
+    await trx('agent_decisions').where({ id: held.id }).update({ updated_at: new Date() });
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Pending owner', messageType: 'manual',
+    });
+    const agedAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    await trx('sms_log').where({ id: prepared.handle.reservationId }).update({
+      created_at: agedAt, updated_at: agedAt,
+      metadata: { provider_handoff_reservation: true, provider_outcome_uncertain: true, agent_decision_id: held.id },
+    });
+    await suggest.recoverSuggestionHoldingStates();
+    await expect(autoSend.reconcileAutoSendClaims()).resolves.toMatchObject({ reservationsCleared: 0 });
+    expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeDefined();
+    await trx('agent_decisions').where({ id: held.id }).update({ status: 'pending_review' });
+    await expect(autoSend.reconcileAutoSendClaims()).resolves.toMatchObject({ reservationsCleared: 1 });
+    expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeUndefined();
   });
 
   test.each([

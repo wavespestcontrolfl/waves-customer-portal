@@ -147,8 +147,9 @@ class PushNotificationService {
   async sendToCustomer(customerId, notification, opts = {}) {
     if (opts.notificationId) {
       try {
-        const previous = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata');
-        if (previous?.metadata?.pushState === 'accepted') return { ...summarize([], 0), sent: 1, deduped: true };
+        const previous = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata', 'created_at');
+        if (previous?.metadata?.pushState === 'accepted') return { ...summarize([], 0), sent: 1, deduped: true,
+          acceptedAt: previous.metadata.pushAcceptedAt || previous.created_at };
       } catch {
         return { ...summarize([], 0), reason: 'push_in_flight' };
       }
@@ -208,9 +209,10 @@ class PushNotificationService {
               '-infinity'::timestamptz) < now())`)
           .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ pushState: 'sending', pushAttemptToken: attemptToken, pushAttemptedAt: new Date().toISOString(), pushLeaseUntil: leaseUntil })]) });
         if (!claimed) {
-          const current = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata');
+          const current = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata', 'created_at');
           const accepted = current?.metadata?.pushState === 'accepted';
-          return { ...summarize([], 0), sent: Number(accepted), deduped: true, reason: accepted ? null : 'push_in_flight' };
+          return { ...summarize([], 0), sent: Number(accepted), deduped: true, reason: accepted ? null : 'push_in_flight',
+            ...(accepted ? { acceptedAt: current.metadata.pushAcceptedAt || current.created_at } : {}) };
         }
       } catch {
         return { ...summarize([], 0), reason: 'push_in_flight' };

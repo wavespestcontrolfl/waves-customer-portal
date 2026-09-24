@@ -503,6 +503,23 @@ async function transitionJobStatus({
       }
     }
 
+    // Consultation-outcomes: a no-showed Waves Assessment visit closes its
+    // outcome as lost/no_show (no-op for every other visit and for one
+    // already recorded lost/won). Savepoint-isolated (waves-db §5b) — an
+    // outcome-write hiccup must never block the no-show transition itself.
+    // A failed write here is retried by the hourly consultation-outcome
+    // sweep (repairMissedNoShowOutcomes), so logging and moving on is safe.
+    if (String(toStatus || '') === 'no_show') {
+      try {
+        // NOWAIT on the customer lock: this transaction already holds the
+        // visit lock (the UPDATE above), so waiting would invert the
+        // customer → visit order (Codex #4710 pre-push P1).
+        await t.transaction((sp) => require('./consultation-outcomes').markNoShow(jobId, { trx: sp, customerLockNowait: true }));
+      } catch (outcomeErr) {
+        logger.warn(`[job-status] consultation no-show outcome failed for ${jobId}: ${outcomeErr.message}`);
+      }
+    }
+
     // Auto-resolve any open overdue-family alerts (tech_late +
     // unassigned_overdue) when the transition makes the "running
     // late" signal obsolete. Same trx — if the outer transition

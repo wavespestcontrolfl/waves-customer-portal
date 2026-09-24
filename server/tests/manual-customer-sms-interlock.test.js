@@ -47,7 +47,7 @@ const reservation = () => ({
   startedAt: new Date('2026-09-24T12:00:00Z'),
   parkedDecisionIds: ['decision-1'],
   heldDecisionIds: ['decision-1'],
-  reservationId: 'reservation-1',
+  reservationId: '11111111-1111-4111-8111-111111111111',
   autoSendInFlight: false,
 });
 
@@ -108,13 +108,19 @@ test('the durable reservation and actual derived endpoint precede canonical deli
     blockOnActiveManualReservation: true,
   }));
   expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+    providerHandoffReservation: expect.any(Object),
     metadata: expect.objectContaining({
       fromNumber: '+19413529161',
       parkedDecisionIds: ['decision-1'],
     }),
   }));
+  const borrowed = mockSendCustomerMessage.mock.calls[0][0].providerHandoffReservation;
+  expect(require('../services/messaging/provider-handoff-reservation').isProviderHandoffHandle(borrowed)).toBe(true);
+  expect(borrowed.context).toMatchObject({
+    to: '+19415550100', fromNumber: '+19413529161', body: 'Our pleasure!', messageType: 'manual',
+  });
   expect(mockSettleHumanReply).toHaveBeenCalledWith(expect.objectContaining({
-    reservationId: 'reservation-1', sent: true, reviewedBy: 'intelligence_bar',
+    reservationId: '11111111-1111-4111-8111-111111111111', sent: true, reviewedBy: 'intelligence_bar',
     acceptedResult: expect.objectContaining({ providerMessageId: 'SM-accepted' }),
   }));
   expect(mockSendCustomerMessage.mock.calls[0][0].metadata.adminUserId).toBe('intelligence_bar');
@@ -171,7 +177,7 @@ test.each([
 
   expect(manualSmsDeliveryState(outcome)).toBe('uncertain');
   expect(mockSettleHumanReply).toHaveBeenCalledWith(expect.objectContaining({
-    reservationId: 'reservation-1',
+    reservationId: '11111111-1111-4111-8111-111111111111',
     heldDecisionIds: ['decision-1'],
     parkedDecisionIds: [],
     ambiguous: true,
@@ -198,7 +204,7 @@ test('explicit uncertainty stays uncertain even when the thrown outcome says sen
 
   expect(manualSmsDeliveryState(outcome)).toBe('uncertain');
   expect(mockSettleHumanReply).toHaveBeenCalledWith(expect.objectContaining({
-    reservationId: 'reservation-1', parkedDecisionIds: [], ambiguous: true, sent: false,
+    reservationId: '11111111-1111-4111-8111-111111111111', parkedDecisionIds: [], ambiguous: true, sent: false,
   }));
 });
 

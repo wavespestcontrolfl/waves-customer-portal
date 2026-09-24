@@ -577,6 +577,12 @@ const TwilioService = {
     let deliveryOutcome = "not_sent";
     let acceptedMessage = null;
     let handoffAt = null;
+    const providerCoordination = require('./messaging/provider-handoff-reservation');
+    const suppliedProviderHandoffReservation = options.providerHandoffReservation;
+    let providerHandoffReservation = providerCoordination.isProviderHandoffHandle(suppliedProviderHandoffReservation)
+      ? suppliedProviderHandoffReservation
+      : null;
+    let ownsProviderHandoffReservation = false;
     try {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
       if (internalRedirect) return internalRedirect;
@@ -770,6 +776,57 @@ const TwilioService = {
         return { success: false, sid: null, deliveryOutcome: "not_sent", error: "Twilio not configured" };
       }
 
+      const acquiredProviderHandoff = await providerCoordination.acquireProviderHandoffReservation({
+        existingHandle: providerHandoffReservation,
+        applies: providerCoordination.directCoordinationApplies({
+          messageType: options.messageType,
+          reservationOwner: options.providerReservationOwner,
+        }),
+        reservation: {
+          to: providerCoordination.normalizeRecipient(to),
+          customerId: options.customerId,
+          fromNumber,
+          body,
+          messageType: options.messageType || 'manual',
+          adminUserId: options.adminUserId,
+        },
+      });
+      providerHandoffReservation = acquiredProviderHandoff.handle;
+      ownsProviderHandoffReservation = acquiredProviderHandoff.owns;
+      if (acquiredProviderHandoff.block) {
+        return {
+          success: false,
+          sid: null,
+          preSendBlocked: true,
+          deliveryOutcome: acquiredProviderHandoff.block.deliveryOutcome,
+          retryable: acquiredProviderHandoff.block.retryable,
+          code: acquiredProviderHandoff.block.code,
+          error: acquiredProviderHandoff.block.reason,
+          validator: acquiredProviderHandoff.block.validator,
+        };
+      }
+      if (ownsProviderHandoffReservation) to = providerCoordination.normalizeRecipient(to);
+
+      const providerSmsMetadata = () => ({
+        pre_handoff_stamp: true,
+        ...(isKnownOwnerPhone(to) ? { to_owner_phone_at_send: true } : {}),
+        ...(options.media ? { media: options.media } : {}),
+        ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
+        ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
+          ? { parked_decision_ids: options.parkedDecisionIds }
+          : {}),
+        ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
+        ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
+      });
+      providerCoordination.captureProviderContext(providerHandoffReservation, {
+        to,
+        fromNumber,
+        body,
+        messageType: options.messageType || 'manual',
+        channel: 'sms',
+        metadata: providerSmsMetadata(),
+      });
+
       const domain =
         process.env.SERVER_DOMAIN ||
         process.env.RAILWAY_PUBLIC_DOMAIN ||
@@ -860,6 +917,8 @@ const TwilioService = {
           error: 'Locked lead handoff requires SMS routing', validator: 'check_sms_handoff_authority' };
       }
       if (pushRoute === "push_first") {
+        deliveryOutcome = 'uncertain';
+        providerCoordination.recordProviderOutcome(providerHandoffReservation, { deliveryOutcome: 'uncertain' });
         const pushed = await PushRouting.attemptPushFirst({
           customerId: options.customerId,
           to,
@@ -879,11 +938,30 @@ const TwilioService = {
           preSendCheck: options.preSendCheck,
         });
         if (pushed.delivered) {
+          deliveryOutcome = 'accepted';
+          providerCoordination.captureProviderContext(providerHandoffReservation, {
+            fromNumber: 'push',
+            channel: 'push',
+            providerAcceptedAt: pushed.acceptedAt,
+            metadata: {
+              channel: 'push',
+              requestedChannel: options.explicitPushOnly ? 'push' : 'sms',
+              providerAccepted: true,
+              ...(pushed.notificationId ? { push_notification_id: pushed.notificationId } : {}),
+              ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
+              provider_from_number: fromNumber,
+            },
+          });
+          providerCoordination.recordProviderOutcome(providerHandoffReservation, {
+            deliveryOutcome: 'accepted', providerMessageId: pushed.sid, channel: 'push',
+          });
           logger.info(
             `[push-routing] ${options.messageType} delivered as push to customer ${options.customerId} — SMS skipped`,
           );
           return { success: true, sid: pushed.sid, fromNumber, pushRouted: true };
         }
+        deliveryOutcome = pushed.deliveryOutcome === 'uncertain' ? 'uncertain' : 'not_sent';
+        providerCoordination.recordProviderOutcome(providerHandoffReservation, { deliveryOutcome });
         if (options.explicitPushOnly) {
           if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason };
           if (pushed.pending) return { success: false, appPending: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason };
@@ -1050,10 +1128,18 @@ const TwilioService = {
         // though no SID made it back to us. Only a concrete 4xx response can
         // move the outcome back to definitive non-delivery in the catch.
         deliveryOutcome = "uncertain";
+        providerCoordination.captureProviderContext(providerHandoffReservation, {
+          to, fromNumber, body, messageType: options.messageType || 'manual',
+          channel: 'sms', providerAcceptedAt: handoffAt, metadata: providerSmsMetadata(),
+        });
+        providerCoordination.recordProviderOutcome(providerHandoffReservation, { deliveryOutcome: 'uncertain' });
         message = await c.messages.create(msgPayload);
         if (!message?.sid) throw new Error("Twilio messages.create returned no SID");
         acceptedMessage = message;
         deliveryOutcome = "accepted";
+        providerCoordination.recordProviderOutcome(providerHandoffReservation, {
+          deliveryOutcome: 'accepted', providerMessageId: message.sid, channel: 'sms',
+        });
       };
       if (typeof options.withSmsHandoff === 'function') {
         let verdict;
@@ -1313,6 +1399,15 @@ const TwilioService = {
         ...(deliveryOutcome === "accepted" && handoffAt ? { sentAt: handoffAt.toISOString() } : {}),
       };
       throw wrapped;
+    } finally {
+      await providerCoordination.finalizeProviderHandoffReservation({
+        handle: providerHandoffReservation,
+        outcome: {
+          deliveryOutcome,
+          ...(acceptedMessage?.sid ? { providerMessageId: acceptedMessage.sid, channel: 'sms' } : {}),
+        },
+        settle: ownsProviderHandoffReservation,
+      });
     }
   },
 

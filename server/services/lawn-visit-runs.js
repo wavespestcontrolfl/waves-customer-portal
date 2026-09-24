@@ -1,6 +1,6 @@
 /** Lawn visit provenance, review/confirmation transactions, and delivery ownership. */
 const { randomUUID } = require('crypto');
-const { SCORE_KEYS, confirmScores } = require('./lawn-visit-scores');
+const { SCORE_KEYS, confirmScores, runAiScores } = require('./lawn-visit-scores');
 const lawnAssessment = require('./lawn-assessment');
 const { validateReview } = require('./lawn-visit-review-input');
 const { buildReview } = require('./lawn-visit-review-evidence');
@@ -54,7 +54,7 @@ function runRowFor({ assessment, analysis, adjustedScores = null, photoRecords =
     // This writer creates the run alongside a NEW assessment. Capture the
     // exact initial text written there; later reviews compare before replacing
     // it and clear ownership when the technician changes the text manually.
-    reconciliation: JSON.stringify({ published_observations: assessment.observations ?? null, stress_damage_override: null }),
+    reconciliation: JSON.stringify({ published_observations: assessment.observations ?? null }),
     tokens_in: usage.input_tokens,
     tokens_out: usage.output_tokens,
     tokens_reasoning: usage.reasoning_tokens,
@@ -120,6 +120,13 @@ function responseForRun(run) {
     reviewedFindings: run.reviewed_findings == null ? null : array(run.reviewed_findings),
     addedDetails: run.added_details == null ? null : array(run.added_details),
     reconciliation: parseObject(run.reconciliation), reviewedAt: run.reviewed_at || null,
+    // The run's immutable AI read (owner ruling 2026-09-24: lawn scores are
+    // read-only from photos). A client uses THIS, never the mutable
+    // assessment row, to decide which metrics stay editable — the assessment
+    // row can already hold a technician's earlier fill of a genuinely blank
+    // metric from a prior partial save, which must not look "AI-known" on
+    // reload just because it now has a value (Codex P1 2026-09-24).
+    aiScores: runAiScores(run),
   };
 }
 
@@ -128,12 +135,9 @@ function responseForRun(run) {
 // takes its customer baseline lock BEFORE this assessment -> run lock order.
 // Read under those locks: a second partial review must merge the first one's
 // committed decisions, not the snapshot it saw before waiting.
-async function reviewRun({ assessmentId, review = {}, technicianId = null, observationEdit, stressOverride }, knex) {
+async function reviewRun({ assessmentId, review = {}, technicianId = null, observationEdit }, knex) {
   if (observationEdit !== undefined && observationEdit !== null && typeof observationEdit !== 'string') {
     throw new TypeError('Observation edit must be text or null');
-  }
-  if (stressOverride !== undefined && stressOverride !== null && (!Number.isFinite(stressOverride) || stressOverride < 0 || stressOverride > 100)) {
-    throw new TypeError('Stress override must be a score from 0 to 100 or null');
   }
   return knex.transaction(async (trx) => {
     let assessment = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
@@ -143,7 +147,7 @@ async function reviewRun({ assessmentId, review = {}, technicianId = null, obser
     const validated = validateReview(review, run);
     if (validated.errors.length) throw Object.assign(new Error('Invalid visit assessment review'), { status: 400, details: validated.errors });
     const provided = validated.review.provided;
-    if (!provided && observationEdit === undefined && stressOverride === undefined) return { assessment, run };
+    if (!provided && observationEdit === undefined) return { assessment, run };
 
     const previous = parseObject(run.reconciliation) || {};
     const built = provided ? buildReview(run, validated.review) : {};
@@ -158,10 +162,7 @@ async function reviewRun({ assessmentId, review = {}, technicianId = null, obser
     // generated sentence. A mismatched or absent marker never regains it.
     const published = observationEdit !== undefined || assessment.observations !== previous.published_observations
       ? null : (provided ? observations : previous.published_observations ?? null);
-    const reconciliation = {
-      ...previous, ...built.reconciliation, published_observations: published,
-      ...(stressOverride !== undefined ? { stress_damage_override: stressOverride } : {}),
-    };
+    const reconciliation = { ...previous, ...built.reconciliation, published_observations: published };
     const [updatedRun] = await trx('lawn_assessment_runs').where({ id: run.id }).update({
       reconciliation: JSON.stringify(reconciliation), updated_at: trx.fn.now(),
       ...(provided ? {
@@ -208,7 +209,7 @@ async function confirmLockedRun(args, customerId, trx) {
   }
   const decision = confirmScores(before, originalRun, adjustedScores, { scoreValue, calculateOverallScore });
   let { assessment, run } = await reviewRun({
-    assessmentId, review, technicianId, observationEdit, stressOverride: decision.stressOverride,
+    assessmentId, review, technicianId, observationEdit,
   }, trx);
   const update = {
     ...decision.finalScores, overall_score: decision.overallScore,
@@ -216,7 +217,15 @@ async function confirmLockedRun(args, customerId, trx) {
     ...(decision.confirmed ? { confirmed_at: trx.fn.now() } : {}),
     // Both existing clients also read observations from this JSON snapshot.
     // A copied adjustedScores.observations is not evidence of an explicit edit.
-    adjusted_scores: JSON.stringify({ ...parseObject(assessment.adjusted_scores), ...decision.finalScores, observations: assessment.observations }),
+    // stress_damage_explicit persists ONLY whether Stress was ever explicitly
+    // entered by a technician while AI-blank — confirmScores reads it back on
+    // the next partial save so an auto-derived (never explicit) Stress keeps
+    // re-deriving from current components instead of freezing stale (Codex
+    // P1 2026-09-24); inert once Stress is AI-known.
+    adjusted_scores: JSON.stringify({
+      ...parseObject(assessment.adjusted_scores), ...decision.finalScores,
+      stress_damage_explicit: decision.stressExplicit, observations: assessment.observations,
+    }),
     ...(stressFlags !== undefined ? { stress_flags: JSON.stringify(stressFlags) } : {}),
   };
   if (decision.confirmed && !propertyHistoryEnabled) {

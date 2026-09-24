@@ -8,7 +8,7 @@ const { createDefaultCustomerRows } = require('../services/customer-default-rows
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL, callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -8957,7 +8957,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // { success, alreadyAccepted } shape; blocking outright is strictly
       // tighter and consistent with the rest of the route.
       if (!isEstimateCustomerViewable(estimate)) {
-        return res.status(409).json({ error: 'Estimate is no longer active' });
+        const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
       }
       // Retry of an already-accepted estimate (e.g. the first response was
       // lost in transit): rebuild the FULL success payload from persisted
@@ -9007,7 +9008,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });
     }
     if (!isEstimateAcceptActive(estimate)) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
 
     const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
@@ -10562,18 +10564,39 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
             ? JSON.parse(freshLinkRow.estimate_data) : (freshLinkRow?.estimate_data || null);
         } catch { freshLinkData = null; }
+        // The shared off-surface predicate on the freshly LOCKED row (the
+        // county-roll address block among its markers): a flag stamped
+        // after the handler's pre-read must refuse the accept here, not
+        // rely on the millisecond-truncated updated_at CAS (codex #4667
+        // r18 P1).
         const eng = freshLinkData?.estimatorEngine;
+        // A bedroom re-price in flight (estimate-clarify-asks): the
+        // fallback dollars on this draft are being replaced — refuse the
+        // accept until the replacement lands (or the marker lapses). Judged
+        // FIRST (codex #4667 r45 P0): the re-price hold is part of the
+        // shared off-surface predicate below, and its contract is the 409
+        // retry message, never the generic 404.
+        if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) {
+          const err = new Error('This estimate is being re-priced — please try again in a few minutes');
+          err.status = 409;
+          throw err;
+        }
+        // A linkage-invalidated row keeps its long-standing 409 contract
+        // (the accept-atomicity audit pins it: no payload, no amounts) —
+        // judged before the generic off-surface refusal below.
         if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
           const err = new Error('Estimate is no longer active');
           err.status = 409;
           throw err;
         }
-        // A bedroom re-price in flight (estimate-clarify-asks): the
-        // fallback dollars on this draft are being replaced — refuse the
-        // accept until the replacement lands (or the marker lapses).
-        if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) {
-          const err = new Error('This estimate is being re-priced — please try again in a few minutes');
-          err.status = 409;
+        if (freshLinkData && require('../utils/estimate-claim-sql').estimateOffCustomerSurface({ estimate_data: freshLinkData })) {
+          // The token route's GENERIC 404 (codex #4667 r35 P0): the same
+          // token answers 404 from the view / data surfaces once blocked
+          // by the county-roll address hold, so a 409 here would tell a
+          // bearer the token maps to a real estimate.
+          const err = new Error('Estimate not found');
+          err.status = 404;
+          err.code = 'OFF_CUSTOMER_SURFACE';
           throw err;
         }
         // The call row is locked FOR UPDATE and HELD through the
@@ -14014,6 +14037,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
     if (err && err.status >= 400 && err.status < 500) {
+      // A 404 is the token route's GENERIC answer and carries no code: a
+      // raced hold (OFF_CUSTOMER_SURFACE) must read exactly like an unknown
+      // token (codex #4667 r38 P0).
+      if (err.status === 404) return res.status(404).json({ error: 'Estimate not found' });
       return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     }
     next(err);
@@ -14080,6 +14107,11 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // An OFF-SURFACE row (the county-roll address block among its markers)
+    // answers the token route's generic 404 like every other surface, never
+    // a 400 that tells a bearer the token maps to a real estimate (codex
+    // #4667 r36 P0); an ordinary inactive state keeps its 400.
+    if (estimateOffCustomerSurface(estimate)) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
     if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
@@ -14197,6 +14229,8 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       // marker off) a held row — the ms-truncated CAS below does not exclude
       // a same-millisecond hold stamp (pre-push codex P0 on #3804).
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -14207,7 +14241,8 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       })
       .update(writes);
     if (!tierUpdateCount) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
 
     // Notify admin of tier selection \u2014 only on an actual CHANGE. Re-clicking
@@ -14494,6 +14529,8 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       // marker off) a held row — the ms-truncated CAS below does not exclude
       // a same-millisecond hold stamp (pre-push codex P0 on #3804).
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
       // write — an accept, a preference toggle, another bond switch — makes
       // this update 0-row and the caller reloads server truth. Millisecond
@@ -14514,7 +14551,8 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
         updated_at: db.fn.now(),
       });
     if (!bondUpdateCount) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
     clearEstimatePricingCache(estimate.id);
     logger.info(`[estimate] ${estimate.id}: bond term -> ${outcome.selectedBondTerm || 'none'} ($${monthlyTotal}/mo, $${annualTotal}/yr)`);
@@ -14760,6 +14798,8 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
       // marker off) a held row — the ms-truncated CAS below does not exclude
       // a same-millisecond hold stamp (pre-push codex P0 on #3804).
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -14775,7 +14815,8 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
         updated_at: db.fn.now(),
       });
     if (!updateCount) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
     clearEstimatePricingCache(estimate.id);
     logger.info(`[estimate] ${estimate.id}: commercial interior service -> ${included ? 'included' : 'excluded'} ($${monthlyTotal}/mo, $${annualTotal}/yr)`);
@@ -15553,6 +15594,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         // marker off) a held row — the ms-truncated CAS below does not exclude
         // a same-millisecond hold stamp (pre-push codex P0 on #3804).
         .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+        // …and the county-roll address block (codex #4667 r23 P1).
+        .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
         // Same ms-truncated CAS as the bond/interior writes: any concurrent
         // write — an accept, a preference toggle, another opt-out — makes this
         // a zero-row update and the caller reloads server truth.
@@ -15606,7 +15649,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
     if (!updateCount) {
-      return { status: 409, body: ({ error: 'Estimate is no longer active' }) };
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return { status: zeroRowStatus, body: zeroRowMutationBody(zeroRowStatus) };
     }
 
     clearEstimatePricingCache(estimate.id);
@@ -15666,6 +15710,11 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // An OFF-SURFACE row (the county-roll address block among its markers)
+    // answers the token route's generic 404 like every other surface, never
+    // a 400 that tells a bearer the token maps to a real estimate (codex
+    // #4667 r36 P0); an ordinary inactive state keeps its 400.
+    if (estimateOffCustomerSurface(estimate)) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
     if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
@@ -15782,6 +15831,8 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       // marker off) a held row — the ms-truncated CAS below does not exclude
       // a same-millisecond hold stamp (pre-push codex P0 on #3804).
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -15798,7 +15849,8 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
         updated_at: db.fn.now(),
       });
     if (!prefUpdateCount) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
     clearEstimatePricingCache(estimate.id);
 
@@ -16200,6 +16252,8 @@ async function claimNotifyOnlyExtensionRequest(estimateId, dedupeOpen) {
     const claimed = await query
       .where(dedupeOpen)
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .update({ extension_requested_at: trx.fn.now() });
     return { claimed, blocked: false };
   });
@@ -16267,6 +16321,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       // falls through to the notify-office path — a human hears, no link
       // goes out.
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      // …and the county-roll address block (codex #4667 r23 P1).
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .update({
         extension_requested_at: db.fn.now(),
         extension_auto_granted_at: db.fn.now(),
@@ -16306,6 +16362,11 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
             : { extension_requested_at: null },
         ).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
         if (err.code === 'FIXED_BID_VALIDITY') return res.status(404).json({ error: 'Estimate not found' });
+        // A hold (the county-roll address block, a linkage invalidation)
+        // that raced in between the claim and the locked anchor read is
+        // the generic 404 every off-surface token answer carries (codex
+        // #4667 r30 P0).
+        if (err.code === 'OFF_CUSTOMER_SURFACE') return res.status(404).json({ error: 'Estimate not found' });
         logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
         return res.status(500).json({ error: 'extension_request_failed' });
       }
@@ -16547,6 +16608,8 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
         // stamped between the pre-read and this write parks the decline
         // on the guard's 409 via the re-read below.
         .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+        // …and the county-roll address block (codex #4667 r23 P1).
+        .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update({
           status: 'declined',
@@ -16601,7 +16664,8 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       // the same generic 404 as the pre-read path, not a "no longer active"
       // hint that the token maps to a real estimate.
       if (!freshGuard.ok) return res.status(freshGuard.status).json({ error: freshGuard.error });
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
 
     // Refund any acceptance deposit the customer paid before declining \u2014
@@ -18541,6 +18605,24 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   return !!(estimate.expires_at && new Date(estimate.expires_at) < now);
 }
 
+// A zero-row atomic mutation write (the CAS lost, or a marker predicate
+// refused it): re-read the row and answer the token route's GENERIC 404
+// when it is now off-surface (the county-roll address block among the
+// markers) — a 409 there would confirm the token maps to a real estimate
+// (codex #4667 r37 P0). Every other zero-row cause keeps its 409.
+async function zeroRowMutationStatus(estimateId) {
+  try {
+    // An archived row keeps the pre-existing 409 ("no longer active") the
+    // accept-atomicity audit pins; only an unknown row or one under the
+    // shared off-surface markers (the county-roll hold among them) answers
+    // the generic 404.
+    const fresh = await db('estimates').where({ id: estimateId }).first('estimate_data', 'archived_at');
+    if (!fresh || estimateOffCustomerSurface(fresh)) return 404;
+  } catch { /* fall through to the 409 */ }
+  return 409;
+}
+const zeroRowMutationBody = (status) => (status === 404 ? { error: 'Estimate not found' } : { error: 'Estimate is no longer active' });
+
 function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   if (!estimate) {
     return { ok: false, status: 404, error: 'Estimate not found' };
@@ -18562,6 +18644,19 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   // (pre-read and post-UPDATE re-read) pass estimate_data; the UPDATE
   // itself carries matching marker predicates for the TOCTOU window.
   if (estimate.estimate_data !== undefined && estimateLinkageInvalidated(estimate)) {
+    return { ok: false, status: 404, error: 'Estimate not found' };
+  }
+  // The county-roll address block is off-surface like every other token
+  // route treats it (/data, accept, tier-select): the same generic 404,
+  // never the hold's 409 — a 409 would confirm the blocked token maps to
+  // a real estimate (codex #4667 r25 P0). The UPDATE carries the matching
+  // predicate (ADDRESS_UNVERIFIED_ABSENT_SQL) for the TOCTOU window and
+  // the zero-row re-read lands here too.
+  // Deliberately NOT estimateOffCustomerSurface(): that shared predicate
+  // also covers the clarify re-price hold, which the decline guard must
+  // keep answering with the documented 409 below (codex r4 P1 on #3804),
+  // never a 404. Only the address block joins the 404 set here.
+  if (estimate.estimate_data !== undefined && parseEstimateDataSafe(estimate)?.addressUnverified === true) {
     return { ok: false, status: 404, error: 'Estimate not found' };
   }
   // A clarify re-price hold refuses the decline the way accept refuses it

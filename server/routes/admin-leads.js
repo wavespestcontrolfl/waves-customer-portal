@@ -1962,6 +1962,37 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           metadata: JSON.stringify({ customerId }),
         });
       }
+      // Consultation-outcomes reconciliation: this is a real (non-assessment)
+      // booking closing for the customer — settle any open warm/cold
+      // consultation outcome within its 90-day window. Runs for EVERY real
+      // booking, not just a first-time conversion (isConversion) — a lead
+      // that converted BEFORE a consultation outcome was recorded must still
+      // reconcile when it later books again. Best-effort, savepoint-isolated
+      // inside markWonForCustomer (waves-db §5b).
+      // round 8: `isQualifyingSaleBooking` (server/services/
+      // consultation-outcomes.js) is the ONE positive-allow-list predicate
+      // for "this scheduled_services row is evidence of a real, confirmed
+      // sale" — same decision point findSaleEvidenceForConsultation's own
+      // booking-evidence check uses, so the two can never drift. Read
+      // straight off `appt` (this same INSERT's own RETURNING row, `*`) —
+      // no extra query. This manual booking form's insertData never sets
+      // source_action/customer_confirmed/is_callback/recurring_parent_id/
+      // followup_included (all come back at their DB defaults), so the
+      // predicate is currently a no-op gate here beyond `assessmentVisit`,
+      // but stays correct if this endpoint ever grows any of those fields.
+      if (!assessmentVisit
+        && require('../services/consultation-outcomes').isQualifyingSaleBooking(appt)) {
+        // round 12 fix (codex P1 audit, post-push): this route is an
+        // office/admin tool — never pass appt.technician_id as a
+        // closeout-detection hint. That field is the visit's ASSIGNEE, not
+        // who booked it; an office admin assigning a new visit to the
+        // consultation's own technician is an ordinary office booking, not
+        // a door-side close. No real "booked by" signal exists on
+        // scheduled_services today (see WON_VIA PROVENANCE atop
+        // consultation-outcomes.js).
+        await require('../services/consultation-outcomes')
+          .markWonForCustomer(customerId, { via: 'office_booking', trx });
+      }
       await trx('lead_activities').insert({
         lead_id: req.params.id,
         activity_type: 'appointment_scheduled',

@@ -637,6 +637,14 @@ async function maybeAutoSend(params = {}) {
           return { sent: false, reason: verdict.reason };
         }
       }
+      const providerHandoffReservation = gratitudeLane ? null : require('./messaging/provider-handoff-reservation')
+        .borrowProviderHandoffReservation({
+          reservationId: claim.reservationId,
+          to: claim.toPhone,
+          fromNumber: claim.fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+          body: sendReply,
+          messageType: AUTOSEND_MESSAGE_TYPE,
+        });
       result = await sendCustomerMessage({
         to: claim.toPhone,
         body: sendReply,
@@ -662,6 +670,7 @@ async function maybeAutoSend(params = {}) {
         // texted into an active thread — the send class the window
         // deliberately never defers.
         conversationalContext: true,
+        providerHandoffReservation,
         metadata: {
           original_message_type: gratitudeLane ? 'ai_gratitude' : AUTOSEND_MESSAGE_TYPE,
           ...(gratitudeLane ? { gratitude_policy_version: GRATITUDE_POLICY_VERSION } : {}),
@@ -878,7 +887,8 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
       .whereIn('status', ['sending', 'sent', 'delivered', 'failed', 'undelivered', 'canceled'])
       .where(function replyReservation() {
         this.whereRaw("metadata->>'manual_send_reservation' = 'true'")
-          .orWhereRaw("metadata->>'auto_send_reservation' = 'true'");
+          .orWhereRaw("metadata->>'auto_send_reservation' = 'true'")
+          .orWhereRaw("metadata->>'provider_handoff_reservation' = 'true'");
       })
       .whereRaw("COALESCE(metadata->>'review_ask_reservation', 'false') != 'true'")
       .where('created_at', '<', cutoff)
@@ -887,8 +897,9 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
       // same bounded 24-hour window the retry interlock observes.
       .whereRaw(`NOT (
         status = 'sending'
-        AND COALESCE(metadata->>'manual_wrapper_reservation', 'false') = 'true'
         AND COALESCE(metadata->>'provider_outcome_uncertain', 'false') = 'true'
+        AND (COALESCE(metadata->>'manual_wrapper_reservation', 'false') = 'true'
+          OR COALESCE(metadata->>'provider_handoff_reservation', 'false') = 'true')
         AND created_at >= ?
       )`, [uncertainCutoff])
       .where(function settledOrOrdinaryReservation() {
