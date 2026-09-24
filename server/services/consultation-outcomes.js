@@ -809,7 +809,7 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     const liveVisit = await locked('scheduled_services')
       .where({ id: scheduledServiceId })
       .forNoKeyUpdate()
-      .first('status', 'technician_id', 'customer_id');
+      .first('status', 'technician_id', 'customer_id', 'scheduled_date');
     // A customer merge that repointed the visit between the first read and
     // this lock would otherwise write the retired customer_id (Codex #4710
     // r6 P2) — retried once from the top against the surviving customer.
@@ -818,6 +818,12 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     }
     if (liveVisit && DEAD_CONSULTATION_STATUSES.includes(liveVisit.status)) {
       throw makeError('That consultation was marked no-show, cancelled or skipped — its outcome cannot be recorded', 409, 'CONSULTATION_NOT_HELD');
+    }
+    // A consultation scheduled after today (ET) cannot have happened yet
+    // (Codex #4710 r7 P2) — the same rule dispatch applies to field
+    // lifecycle actions on future visits.
+    if (liveVisit?.scheduled_date && toDateOnlyString(liveVisit.scheduled_date) > etDateString(new Date())) {
+      throw makeError('That consultation has not happened yet — record its outcome on or after the visit day', 409, 'CONSULTATION_IN_FUTURE');
     }
     if (actingTechnicianId && !actingIsAdmin && String(liveVisit?.technician_id || '') !== String(actingTechnicianId)) {
       throw makeError('Not assigned to this consultation', 403, 'NOT_ASSIGNED');
@@ -974,9 +980,17 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date(), evid
       const candidates = await sp('consultation_outcomes as co')
         .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
         .whereIn('co.outcome', CONVERTIBLE_OUTCOMES)
+        // The outcome's OWN customer snapshot decides (Codex #4710 r7 P2);
+        // lead linkage is only a fallback for outcomes with no customer —
+        // a call relinked to another customer moves its lead, not the
+        // consultation, and must not credit it with the new customer's sale.
         .where(function matchCustomerOrItsLeads() {
           this.where('co.customer_id', customerId);
-          if (leadIds.length) this.orWhereIn('co.lead_id', leadIds);
+          if (leadIds.length) {
+            this.orWhere(function unlinkedOutcomeViaLead() {
+              this.whereNull('co.customer_id').whereIn('co.lead_id', leadIds);
+            });
+          }
         })
         .where('ss.scheduled_date', '>=', cutoff)
         .where('ss.scheduled_date', '<=', nowDateStr)

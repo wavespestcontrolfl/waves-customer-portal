@@ -682,6 +682,15 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(saved.lead_id).toBe('lead-original');
   });
 
+  test('Codex #4710 r7 P2: an outcome for a consultation scheduled after today is refused', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [{ id: 'visit-1', status: 'confirmed', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: etDateString(addETDays(new Date(), 3)) }],
+      leads: [],
+    });
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_IN_FUTURE' });
+  });
+
   test('Codex #4710 P2: a technician reassigned off the visit cannot write its outcome (checked under the lock); an admin can', async () => {
     const fakeDb = makeFakeDb({
       scheduled_services: [
@@ -1130,6 +1139,19 @@ describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => 
     const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
     expect(byId['co-today']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' });
     expect(byId['co-last-week']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-1', pre_win_outcome: 'cold' });
+  });
+
+  test('Codex #4710 r7 P2: an outcome snapshotted to ANOTHER customer is not won through a relinked lead', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [{ id: 'visit-a', scheduled_date: '2026-09-08' }],
+      leads: [{ id: 'lead-relinked', customer_id: 'cust-1' }],
+      consultation_outcomes: [
+        { id: 'co-a', scheduled_service_id: 'visit-a', customer_id: 'cust-A', lead_id: 'lead-relinked', outcome: 'warm' },
+      ],
+    });
+    const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
+    expect(count).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('warm');
   });
 
   test('an explicit via closeout_booking (the PR1b tech-closeout caller) is written as passed', async () => {
