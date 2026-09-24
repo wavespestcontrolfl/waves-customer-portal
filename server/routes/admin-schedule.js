@@ -14750,7 +14750,12 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // (array) feeds applyExtensionPrepayCoverage additional candidate term ids
 // beyond svcLike/parent's own stamped column — topUp's discovered-but-
 // not-yet-linked customer term (see resolveTopUpTermCap); omitted, coverage
-// discovery is byte-identical to before this extraction.
+// discovery is byte-identical to before this extraction. `opts.checkUnbillable`
+// (bool), when true, refuses (never inserts) a candidate the shared
+// seriesExtensionUnbillable verdict rejects — topUp's OFFICE-writer-class
+// billable-amount gate, checked against this ACTUAL candidate date; omitted
+// (the completion path), the gate is never consulted, byte-identical to
+// before this extraction (owner ruling: warn at completion, don't block it).
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
@@ -14900,6 +14905,25 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       if (cols.create_invoice_on_complete) {
         const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
         if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
+      }
+      // opts.checkUnbillable (topUp only — never set by the completion
+      // path, so its own behavior is unchanged): the SAME shared verdict
+      // every OFFICE series writer consults, run against THIS ACTUAL
+      // candidate date and its real due add-ons — price varies by date
+      // (e.g. an annual-only add-on not due on every occurrence), so a
+      // single upfront probe date could pass while a later candidate in
+      // the same horizon run is genuinely unbillable (Codex pre-push P1).
+      // Refuses rather than inserts — never a compensating delete.
+      if (opts.checkUnbillable) {
+        const unbillable = await seriesExtensionUnbillable(conn, {
+          parent, dates: [nextStr], cols, parentAddons, storedDiscountScope,
+          blackoutDates: autoExtendBlackoutDates, skipParent,
+          seriesCioc: nextData.create_invoice_on_complete,
+        });
+        if (unbillable) {
+          logger.warn(`[recurring-topup] Auto-extend skipped for parent=${parentId} — ${nextStr} would be unbillable`);
+          return spawnedVisit;
+        }
       }
       const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
       // Annual-prepay coverage for the row we just inserted.
@@ -15194,59 +15218,6 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   const { cap: termCap, failed: termCapFailed, extraTermIds } = await resolveTopUpTermCap(conn, parent, parentId, cols);
   if (termCapFailed) return { spawnedVisits: [], skipped: 'prepay_cap_unresolved' };
 
-  // Billable-amount gate — the SAME shared verdict every OFFICE series
-  // writer consults before adding visits (reconcileRecurringSeriesVisitCount,
-  // the recurring-alert extend/convert_ongoing loops — see
-  // seriesExtensionUnbillable's own header). The completion-time single-
-  // visit auto-extend deliberately skips it (owner ruling: warn at
-  // completion, never block a tech closing out today's job over a future
-  // pricing question) — but this nightly top-up blocks no one. Left
-  // unchecked it can mint up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN
-  // unattended rows in one run: exactly the "quietly commit the business to
-  // a stack of unbillable visits" risk this gate exists to catch, so top-up
-  // belongs with the OFFICE-writer class, not the completion exemption.
-  // Probed with ONE representative next-candidate date (unshifted by
-  // seasonal/blackout nudges — a coarse "is this series billable at all"
-  // check, not a per-date financial calculation; the real insert loop below
-  // still resolves each inserted date's own precise price the usual way).
-  const latestForBillingProbe = await latestLiveSeriesVisit(conn, parentId);
-  if (latestForBillingProbe) {
-    const probeROpts = {
-      ...recurrenceOrdinalOptions(parent.scheduled_date, {
-        nth: parent.recurring_nth,
-        weekday: parent.recurring_weekday,
-      }),
-      intervalDays: parent.recurring_interval_days,
-    };
-    const probeAnchor = seriesExtendAnchor(latestForBillingProbe, parent.recurring_pattern, probeROpts);
-    const probeDate = nextRecurringDate(probeAnchor, parent.recurring_pattern, 1, probeROpts);
-    let probeAddons = [];
-    try {
-      // Savepoint (conn is already inside the caller's transaction), not a
-      // bare try/catch — a missing scheduled_service_addons table
-      // (pre-migration env) must not abort the caller's transaction, same
-      // convention as reconcileRecurringSeriesVisitCount's own preload.
-      probeAddons = await conn.transaction((sp) => sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
-    } catch { probeAddons = []; }
-    const probeDiscountScope = await loadStoredDiscountScope(conn, parent, probeAddons);
-    const probeBlackoutDates = await loadSeriesBlackoutDates(conn, probeAnchor);
-    // Stamped flag only, not the live customer-preference lookup: this is a
-    // coarse "does this series bill ANYTHING" probe (unshifted candidate
-    // date, see above) — whether add-ons shift a day or two under a live
-    // weekend preference doesn't change that qualitative verdict, and the
-    // real insert loop below (extendSeriesOnceLocked) already resolves the
-    // live preference correctly for the actual dates it writes.
-    const probeSkip = cols.skip_weekends ? !!parent.skip_weekends : false;
-    const probeSeriesCioc = cols.create_invoice_on_complete
-      ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent)
-      : undefined;
-    const unbillable = await seriesExtensionUnbillable(conn, {
-      parent, dates: [probeDate], cols, parentAddons: probeAddons, storedDiscountScope: probeDiscountScope,
-      blackoutDates: probeBlackoutDates, skipParent: probeSkip, seriesCioc: probeSeriesCioc,
-    });
-    if (unbillable) return { spawnedVisits: [], skipped: 'unbillable_extension' };
-  }
-
   const todayStr = etDateString();
   const desiredHorizon = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), horizonDays));
   const effectiveHorizon = (termCap && termCap < desiredHorizon) ? termCap : desiredHorizon;
@@ -15281,7 +15252,22 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // "the last booked date" this horizon check needs, with no extra query.
     const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
     if (latestStr >= effectiveHorizon) break;
-    const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, { maxDate: effectiveHorizon, extraTermIds });
+    // checkUnbillable: the SAME shared verdict every OFFICE series writer
+    // consults (seriesExtensionUnbillable) before adding a visit — the
+    // completion-time single-visit auto-extend deliberately skips it
+    // (owner ruling: warn at completion, never block a tech closing out
+    // today's job over a future pricing question), but this unattended
+    // loop can mint up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN rows with no
+    // human reviewing any of them — exactly the "quietly commit the
+    // business to a stack of unbillable visits" risk that gate exists to
+    // catch, so top-up belongs with the OFFICE-writer class. Checked
+    // against THIS actual candidate date and its real due add-ons inside
+    // extendSeriesOnceLocked (price varies by date), not a coarse upfront
+    // guess — a series can fill partway then stop exactly where billability
+    // breaks down, same as running out of horizon or hitting the cap.
+    const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, {
+      maxDate: effectiveHorizon, extraTermIds, checkUnbillable: true,
+    });
     if (!spawned) break;
     spawnedVisits.push(spawned);
   }

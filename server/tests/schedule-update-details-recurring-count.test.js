@@ -739,27 +739,31 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
     // The single-visit insert step (candidate search → insert → prepay →
     // add-ons → visit-groups) was extracted out of
     // runRecurringSeriesMaintenanceLocked into extendSeriesOnceLocked so the
-    // nightly top-up loop (below) can share it — the insert site moved, the
-    // completion path's behavior did not: it still never consults the gate.
-    const from = src.indexOf('async function extendSeriesOnceLocked(');
-    const autoExtend = src.slice(from, src.indexOf('\nasync function ', from + 10));
-    expect(autoExtend).toContain("insert(nextData)");
-    expect(autoExtend).not.toContain('seriesExtensionUnbillable(');
+    // nightly top-up loop (below) can share it, gated behind
+    // opts.checkUnbillable — the shared function's body now legitimately
+    // contains the call, but the COMPLETION call site never opts in, so its
+    // own behavior (never consulting the gate) is unchanged.
+    expect(src).toContain('spawnedVisit = await extendSeriesOnceLocked(conn, parent, parentId, cols, svc);');
+    const fnFrom = src.indexOf('async function extendSeriesOnceLocked(');
+    const fnBody = src.slice(fnFrom, src.indexOf('\nasync function ', fnFrom + 10));
+    expect(fnBody).toContain('insert(nextData)');
+    expect(fnBody).toContain('if (opts.checkUnbillable) {');
   });
 
   test('the nightly top-up DOES consult the shared verdict — it is not the completion auto-extend, and it can mint many unattended rows in one run', () => {
-    // topUpRecurringSeriesLocked calls the mechanism-only
-    // extendSeriesOnceLocked in a loop (up to 24x/run) with no human
-    // approving each date — unlike the completion path's one blocking
-    // visit, there is no "don't hold up a tech closing a job" reason to
-    // skip the gate here, and skipping it would let an unattended run
-    // quietly commit the business to a stack of $0 visits. It uses `conn`
-    // (this function's own parameter name), not `trx` — same helper, same
-    // verdict, just topUp's own naming convention.
+    // topUpRecurringSeriesLocked's loop calls the shared extendSeriesOnceLocked
+    // with checkUnbillable: true (up to 24x/run) with no human approving each
+    // date — unlike the completion path's one blocking visit, there is no
+    // "don't hold up a tech closing a job" reason to skip the gate here, and
+    // skipping it would let an unattended run quietly commit the business to
+    // a stack of $0 visits. Checked against the ACTUAL candidate date inside
+    // extendSeriesOnceLocked (price varies by date — a coarse upfront guess
+    // isn't enough, Codex pre-push P1), not a separate call in topUp's own
+    // body.
     const from = src.indexOf('async function topUpRecurringSeriesLocked(');
     const topUp = src.slice(from, src.indexOf('\nasync function ', from + 10));
-    expect(topUp).toContain('await seriesExtensionUnbillable(conn, {');
-    expect(topUp).toContain("skipped: 'unbillable_extension'");
+    expect(topUp).toContain('checkUnbillable: true');
+    expect(topUp).not.toContain('seriesExtensionUnbillable(');
   });
 });
 

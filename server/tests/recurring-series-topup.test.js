@@ -263,13 +263,20 @@ describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
   // but this unattended nightly loop can mint many rows in one run and so
   // belongs with the OFFICE-writer class (schedule-update-details-
   // recurring-count.test.js pins that classification on the source).
-  test('skips an unpriced series with no create-invoice stamp and no membership/lane — never mints a stack of $0 visits', async () => {
+  // Checked per ACTUAL candidate date inside extendSeriesOnceLocked (price
+  // varies by date), so an unbillable series silently inserts nothing and
+  // stops — `skipped` stays null, same as running out of horizon or hitting
+  // the insert cap; it isn't a distinct ineligibility reason like
+  // 'not_ongoing' because the series WAS otherwise eligible and simply
+  // couldn't produce a billable date.
+  test('an unpriced series with no create-invoice stamp and no membership/lane inserts nothing — never mints a stack of $0 visits', async () => {
     const { conn, inserted } = topupScenario({
       parentOverrides: { create_invoice_on_complete: false, estimated_price: null },
     });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    expect(result.skipped).toBe('unbillable_extension');
+    expect(result.skipped).toBeNull();
     expect(inserted).toHaveLength(0);
+    expect(result.spawnedVisits).toHaveLength(0);
   });
 
   test('a monthly member with a real dues rate is billable even with no price stamp — dues cover it', async () => {
