@@ -691,6 +691,10 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
     confirmed,
     approvedPayload,
     approvedWindow,
+    // Exposed so the promised follow-up honors the same denial: a whole-
+    // call Deny, or a denial naming scheduling / service, rejects the
+    // follow-up's evidence too (pre-push audit P1 after r25).
+    scheduleDenied,
     file: confirmed && !scheduleDenied && !bookingCovered,
     skippedReason: verdict === 'accept' ? 'address_confirmed_on_file_after_house_number_dispute' : 'house_number_dispute_denied_appointment_unbooked',
     summary: verdict === 'accept'
@@ -787,11 +791,14 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
         summary: trx.raw('EXCLUDED.summary'),
         updated_at: new Date(),
       });
-  } else if (heldConflictPayload?.follow_up_plan) {
-    // No task filed (the primary is covered, or the verdict denied it) but
-    // the card recorded a PROMISED follow-up the hold kept from booking:
-    // that owed visit 2 gets its own card, as the reuse path files it,
-    // unless one already stands (local audit P1 after r20).
+  } else if (heldConflictPayload?.follow_up_plan && !decision.scheduleDenied) {
+    // No task filed (the primary is covered) but the card recorded a
+    // PROMISED follow-up the hold kept from booking: that owed visit 2
+    // gets its own card, as the reuse path files it, unless one already
+    // stands (local audit P1 after r20). A verdict that DENIED the call's
+    // scheduling evidence files nothing — staff must not be told to book
+    // a visit whose evidence they just rejected (pre-push audit P1 after
+    // r25).
     const { buildTriageItem } = require('../services/call-routing-gates');
     await trx('triage_items')
       .insert(buildTriageItem({

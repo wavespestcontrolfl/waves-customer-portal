@@ -294,6 +294,18 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(d.approvedPayload.heard_address.street_line_1).toBe('1260 Example St');
   });
 
+  test('a denial of the call\'s scheduling evidence is exposed so the promised follow-up files nothing either (pre-push audit P1 after r25)', () => {
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: [], heldConflictPayload: held }).scheduleDenied).toBe(true);
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held }).scheduleDenied).toBe(true);
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['service'], heldConflictPayload: held }).scheduleDenied).toBe(true);
+    // A denial naming only the address keeps the appointment evidence.
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['address'], heldConflictPayload: held }).scheduleDenied).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held }).scheduleDenied).toBe(false);
+    // The settlement guards the follow-up branch on it.
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    expect(src).toContain("heldConflictPayload?.follow_up_plan && !decision.scheduleDenied");
+  });
+
   test('the live customer address outranks the card snapshot once the office adopted the caller\'s number', () => {
     const d = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1250 Example St', address_line2: null, city: 'Parrish', zip: '34219' } });
     expect(d.approvedWindow.requested_address.street_line_1).toBe('1250 Example St');

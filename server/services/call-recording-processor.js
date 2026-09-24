@@ -10201,7 +10201,21 @@ const CallRecordingProcessor = {
               // not only the caller's street (codex r23 P1).
               const sameOnFile = sameHouseNumberStreet(claimedPayload?.on_file_address?.address_line1, parsedCard.on_file_address?.address_line1)
                 || (!claimedPayload?.on_file_address?.address_line1 && !parsedCard.on_file_address?.address_line1);
-              const serviceKey = (p) => JSON.stringify(p?.scheduling_window?.service_request || p?.service_request || null);
+              // …read from the fields the card actually PERSISTS
+              // (buildTriageItem writes the ask onto scheduling_window as
+              // requested_service_categories / requested_specific_service /
+              // requested_service_intent, never a service_request object),
+              // or a changed ask on the same street and start reads as the
+              // same card and its fallback task is lost (pre-push audit P1
+              // after r25).
+              const serviceKey = (p) => {
+                const w = p?.scheduling_window || {};
+                return JSON.stringify({
+                  categories: (Array.isArray(w.requested_service_categories) ? w.requested_service_categories : []).map((c) => String(c || '').toLowerCase()).sort(),
+                  specific: String(w.requested_specific_service || '').toLowerCase().trim() || null,
+                  intent: String(w.requested_service_intent || '').toLowerCase().trim() || null,
+                });
+              };
               const sameService = serviceKey(claimedPayload) === serviceKey(parsedCard);
               if (!sameStreet || !sameOnFile || !sameService) return 'claimed_unrecorded';
               if (!newlyConfirmed) return 'filed';
