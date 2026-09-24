@@ -685,7 +685,9 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // The claim itself now rides the group lock + fixed-hold recheck in
     // claimNotifyOnlyExtensionRequest (GH codex P1 r5 on #4309); the held-row
     // re-read still follows a zero-row claim at the call site.
-    expect(pub).toContain(".whereRaw(REPRICE_PENDING_ABSENT_SQL)\n      .update({ extension_requested_at: trx.fn.now() });");
+    // …and, since #4667 r23, the county-roll address block rides the same
+    // write: the extension claim reasserts BOTH holds.
+    expect(pub).toContain(".whereRaw(REPRICE_PENDING_ABSENT_SQL)\n      // …and the county-roll address block (codex #4667 r23 P1).\n      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)\n      .update({ extension_requested_at: trx.fn.now() });");
     const notifyClaimAt = pub.indexOf("const { claimed, blocked } = await claimNotifyOnlyExtensionRequest(estimate.id, DEDUPE_OPEN);");
     expect(notifyClaimAt).toBeGreaterThan(-1);
     expect(pub.slice(notifyClaimAt, notifyClaimAt + 500)).toContain("if (!fresh || estimateOffCustomerSurface(fresh)) {\n        return res.status(404).json({ error: 'Estimate not found' });");
