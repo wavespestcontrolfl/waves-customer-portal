@@ -1568,6 +1568,8 @@ router.post('/sms', async (req, res) => {
           smsLogId: smsLogEntry?.id || null,
           intent: triage,
           schedulingIntent,
+          source: 'live_webhook',
+          hasMedia: inboundMedia.length > 0,
         }).catch((err) => logger.warn(`[sms-shadow] async draft failed: ${err.message}`));
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }

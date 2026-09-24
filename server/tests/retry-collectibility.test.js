@@ -5,6 +5,8 @@
  */
 let mockCollectedRow = null;
 let mockPaidMonthlyRow = null;
+let mockOrphanRow = null;
+let mockAmbiguousSiblingRow = null;
 let mockCalls = [];
 
 jest.mock('../models/db', () => {
@@ -19,6 +21,20 @@ jest.mock('../models/db', () => {
     b.insert = () => { throw new Error('verdict must not write'); };
     b.update = () => { throw new Error('verdict must not write'); };
     b.first = () => {
+      // hasUnresolvedSiblingStripeOutcome's two reads: an unresolved
+      // orphan (a different table) and a sibling row flagged
+      // ambiguous_outcome (a whereRaw mentioning it, distinct from every
+      // other 'payments' lookup below).
+      // The orphan fence is scoped to INVOICE-LESS orphans (whereNull
+      // 'invoice_id'): honour that filter so an invoice-linked fixture is
+      // invisible to it, exactly as Postgres would make it.
+      if (table === 'stripe_orphan_charges') {
+        const scopedToNoInvoice = b._wheres.some(([m, a]) => m === 'whereNull' && a === 'invoice_id');
+        if (mockOrphanRow && scopedToNoInvoice && mockOrphanRow.invoice_id) return Promise.resolve(null);
+        return Promise.resolve(mockOrphanRow);
+      }
+      const ambiguousSiblingLookup = b._wheres.some(([m, a]) => m === 'whereRaw' && String(a).includes('ambiguous_outcome'));
+      if (ambiguousSiblingLookup) return Promise.resolve(mockAmbiguousSiblingRow);
       // The already-collected lookup carries whereIn(status paid/processing);
       // the paid-monthly lookup carries where({status:'paid'}).
       const collectedLookup = b._wheres.some(([m, a]) => m === 'whereIn' && a === 'status');
@@ -63,6 +79,8 @@ const classify = (payment, customer = { ...CUSTOMER }, ctx = loadRetryContext())
 beforeEach(() => {
   mockCollectedRow = null;
   mockPaidMonthlyRow = null;
+  mockOrphanRow = null;
+  mockAmbiguousSiblingRow = null;
   mockCalls = [];
   jest.clearAllMocks();
   prepay.getActivelyCoveredCustomerIds.mockResolvedValue(new Set());
@@ -149,6 +167,28 @@ describe('classifyFailedPaymentRetry — guard chain in the sweep order', () => 
     expect((await classify(det)).collectible).toBe(true);
   });
 
+  // Codex round-3 P1: the orphan fence is customer-scoped (an orphan row
+  // carries no obligation month), so it must never PARK (self-supersede)
+  // a monthly row — an unrelated orphan would write the month off for good.
+  test('an unresolved invoice-less orphan for the customer fences the row as SKIP_ARMED — never a park', async () => {
+    mockOrphanRow = { id: 'orphan-1', stripe_payment_intent_id: 'pi_orphan', invoice_id: null };
+    const v = await classify(monthlyRow());
+    expect(v).toMatchObject({
+      collectible: false, reason: REASONS.SIBLING_ORPHAN_UNRESOLVED, disposition: DISPOSITIONS.SKIP_ARMED,
+    });
+    expect(v.unresolvedSibling).toMatchObject({ reason: 'unresolved_orphan_charge' });
+  });
+
+  test('an unresolved orphan that belongs to an INVOICE (invoice_card_on_file) does not fence monthly dues at all', async () => {
+    mockOrphanRow = { id: 'orphan-inv', stripe_payment_intent_id: 'pi_inv', invoice_id: 'inv-1' };
+    expect((await classify(monthlyRow())).collectible).toBe(true);
+  });
+
+  test('a month-stamped ambiguous SIBLING attempt (provably this obligation) still parks', async () => {
+    mockAmbiguousSiblingRow = { id: 'pay-ambiguous-sibling' };
+    expect(await classify(monthlyRow())).toMatchObject({ reason: REASONS.AMBIGUOUS_OUTCOME_PARKED, disposition: DISPOSITIONS.PARK });
+  });
+
   test('ORDER: resolution guards beat state guards (collected + disabled → supersede; absorbed + paused → self-supersede)', async () => {
     mockCollectedRow = { id: 'pay-collector' };
     expect((await classify(monthlyRow(), { ...CUSTOMER, autopay_enabled: false })).disposition).toBe(DISPOSITIONS.SUPERSEDE_BY_COLLECTOR);
@@ -172,9 +212,74 @@ describe('classifyFailedPaymentRetry — guard chain in the sweep order', () => 
     expect(prepay.getActivelyCoveredCustomerIds).not.toHaveBeenCalled();
   });
 
-  test('classification touches payments only — never payment_methods, never a write', async () => {
+  test('classification touches payments and stripe_orphan_charges only — never payment_methods, never a write', async () => {
     await classify(monthlyRow(), { ...CUSTOMER, billing_mode: 'per_application' });
-    expect(new Set(mockCalls)).toEqual(new Set(['payments']));
+    // stripe_orphan_charges: the sibling-unresolved-outcome read
+    // (hasUnresolvedSiblingStripeOutcome) — still read-only, still no
+    // payment_methods, still no write (insert/update throw in this mock).
+    expect(new Set(mockCalls)).toEqual(new Set(['payments', 'stripe_orphan_charges']));
+  });
+});
+
+// hasUnresolvedSiblingStripeOutcome's ambiguous-attempt fence, run against
+// a tiny in-memory conn that actually applies its predicates — the shared
+// jest.mock above returns fixtures regardless of the where clauses.
+describe('hasUnresolvedSiblingStripeOutcome — ambiguous-attempt resolution path', () => {
+  const { hasUnresolvedSiblingStripeOutcome } = require('../services/retry-collectibility');
+  function memConn({ payments = [] } = {}) {
+    return (table) => {
+      let rows = table === 'payments' ? payments.slice() : [];
+      const qb = {
+        where(a, b, c) {
+          if (typeof a === 'object' && a) {
+            rows = rows.filter((r) => Object.entries(a).every(([k, v]) => r[k] === v));
+          } else if (b === '=') {
+            rows = rows.filter((r) => r[a] === c);
+          }
+          return qb;
+        },
+        whereIn(col, vals) { rows = rows.filter((r) => vals.includes(r[col])); return qb; },
+        whereNull(col) { rows = rows.filter((r) => r[col] == null); return qb; },
+        whereRaw(sql, bindings = []) {
+          const meta = (r) => { try { return r.metadata ? JSON.parse(r.metadata) : {}; } catch { return {}; } };
+          if (String(sql).includes('billed_month')) rows = rows.filter((r) => meta(r).billed_month === bindings[0]);
+          if (String(sql).includes('ambiguous_outcome')) rows = rows.filter((r) => meta(r).ambiguous_outcome === true);
+          // "(superseded_by_payment_id IS NULL OR superseded_by_payment_id = payments.id)"
+          if (String(sql).includes('superseded_by_payment_id')) {
+            rows = rows.filter((r) => r.superseded_by_payment_id == null || r.superseded_by_payment_id === r.id);
+          }
+          return qb;
+        },
+        first: () => Promise.resolve(rows[0] || null),
+      };
+      return qb;
+    };
+  }
+  const ambiguousRow = (overrides = {}) => ({
+    id: 'pay-amb', customer_id: 'cust-1', status: 'failed', superseded_by_payment_id: null,
+    metadata: JSON.stringify({ billed_month: '2026-06', ambiguous_outcome: true }),
+    ...overrides,
+  });
+
+  test('an unreconciled ambiguous attempt for the month fences', async () => {
+    const v = await hasUnresolvedSiblingStripeOutcome('cust-1', '2026-06', memConn({ payments: [ambiguousRow()] }));
+    expect(v).toMatchObject({ blocked: true, reason: 'ambiguous_stripe_outcome' });
+  });
+
+  test('a PARKED (self-superseded) ambiguous attempt still fences — parking is not reconciliation', async () => {
+    const v = await hasUnresolvedSiblingStripeOutcome('cust-1', '2026-06', memConn({ payments: [ambiguousRow({ superseded_by_payment_id: 'pay-amb' })] }));
+    expect(v.blocked).toBe(true);
+  });
+
+  test('an ambiguous attempt linked to a DIFFERENT superseding payment is reconciled — the month collects again', async () => {
+    const v = await hasUnresolvedSiblingStripeOutcome('cust-1', '2026-06', memConn({ payments: [ambiguousRow({ superseded_by_payment_id: 'pay-verified-elsewhere' })] }));
+    expect(v).toEqual({ blocked: false });
+  });
+
+  test('correcting metadata.ambiguous_outcome after verifying Stripe also clears the fence', async () => {
+    const corrected = ambiguousRow({ metadata: JSON.stringify({ billed_month: '2026-06', ambiguous_outcome: false }) });
+    const v = await hasUnresolvedSiblingStripeOutcome('cust-1', '2026-06', memConn({ payments: [corrected] }));
+    expect(v).toEqual({ blocked: false });
   });
 });
 

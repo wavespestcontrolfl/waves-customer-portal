@@ -19,9 +19,39 @@ const {
 const { createAlertOnce } = require('./dispatch-alerts');
 const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspection-fee');
 const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSuppliesOwedMarker } = require('./supplies-consumption');
+const { INVOICE_DELIVERED_STATUSES } = require('./closeout-status');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
+
+// Only a DELIVERED or SETTLED invoice satisfies the project closeout billing
+// guard (ADMIN-BUG-R49). A lone 'draft' — e.g. one minted by a cancelled
+// "Send with invoice" preview on a non-WDO project — was never sent to the
+// customer, carries no balance (open-balance.js only counts sent/viewed/
+// overdue) and is delivered by nothing in the close flow, so it must not
+// let the visit close as though it were billed. "Delivered" reuses
+// closeout-status.js's canonical INVOICE_DELIVERED_STATUSES vocabulary
+// (imported above) instead of a second, driftable copy — that set already
+// includes 'partially_paid' (a customer who received and paid part of the
+// invoice was clearly shown it) — and a stamped sent_at/sms_sent_at also
+// counts, matching that module's own invoiceDelivery fact.
+function invoiceCountsAsDelivered(invoice) {
+  return !!(invoice.sent_at || invoice.sms_sent_at || INVOICE_DELIVERED_STATUSES.has(String(invoice.status)));
+}
+
+// Codex round-2 P1: 'processing' is deliberately NOT in the customer-
+// delivery vocabulary above (a manually created, visit-linked draft can be
+// paid by ACH via its own returned pay URL — no email/SMS send at all, so
+// sent_at/sms_sent_at is never stamped — and its status moves straight
+// from 'draft' to 'processing'). But money already in flight is not an
+// "unsent draft" either: resolveOrCreateProjectInvoice's own already-
+// billed / locked-billed re-checks (admin-projects.js :2899, :3072,
+// `.whereIn('status', ['paid', 'processing'])`) already treat a
+// 'processing' invoice as billed for this exact reason ("paid OR
+// in-flight ('processing', ACH) ... means the work is settled or
+// settling"). Mirror that vocabulary here so a for-real ACH payment does
+// not block closeout for days while it clears.
+const MONEY_IN_FLIGHT_INVOICE_STATUSES = new Set(['processing']);
 
 function normalizeDateOnly(value) {
   if (!value) return null;
@@ -247,11 +277,31 @@ async function resolveProjectCompletionBilling({
     knex,
   });
   if (invoice) {
+    // A NET-terms payer invoice accrued to a monthly statement stays 'draft'
+    // BY DESIGN — admin-projects.js deliberately suppresses its individual
+    // delivery/finalization because it bills as a line on the consolidated
+    // statement instead (invoice.js stamps payer_statement_id at create
+    // time, before any send). That is a resolved billing state, not an
+    // unsent draft nobody chose to send.
+    if (invoiceCountsAsDelivered(invoice) || invoice.payer_statement_id
+      || MONEY_IN_FLIGHT_INVOICE_STATUSES.has(String(invoice.status))) {
+      return {
+        required: true,
+        resolved: true,
+        amount: invoiceAmount,
+        reason: 'invoice_exists',
+        invoice,
+      };
+    }
+    // A never-sent draft (or any other non-terminal, non-delivered,
+    // non-accrued status) does not resolve billing — nothing in the close
+    // path sends or charges it, so treating it as resolved would close the
+    // visit as billed while the money sits uncollected in an orphan draft.
     return {
       required: true,
-      resolved: true,
+      resolved: false,
       amount: invoiceAmount,
-      reason: 'invoice_exists',
+      reason: 'invoice_draft_unsent',
       invoice,
     };
   }

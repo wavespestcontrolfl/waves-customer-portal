@@ -78,7 +78,7 @@ const INVOICE = {
 
 function makeRecorder(overrides = {}) {
   const qb = {};
-  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => {
+  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => {
     qb[m] = jest.fn(() => qb);
   });
   qb.first = jest.fn(async () => null);
@@ -131,6 +131,11 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       if (table === 'customers') return trxCustomers;
       // completeActivePlansForInvoice also releases plan-owned dunning stops.
       if (table === 'invoice_followup_sequences') return makeRecorder();
+      // The saved-card claim fence (assertNoInvoiceChargeReconciliationPending)
+      // reads these two tables under the same lock as the paid/prepaid flip —
+      // no claim/orphan fixtures here, so an empty first() clears the fence.
+      if (table === 'stripe_invoice_charge_attempts') return makeRecorder();
+      if (table === 'stripe_orphan_charges') return makeRecorder();
       throw new Error(`unexpected trx table ${table}`);
     });
     trx.isTransaction = true; // real knex trx flag — completeActivePlansForInvoice reuses a caller trx as-is

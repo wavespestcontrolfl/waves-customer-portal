@@ -35,6 +35,8 @@ function query(table) {
   };
   return builder;
 }
+// Advisory locks (the customer comms fence) recorded apart from row locks.
+query.raw = async (sql, params) => { if (/pg_advisory_xact_lock/.test(sql)) locks.push(`advisory:${params[0]}`); return { rows: [] }; };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -73,7 +75,7 @@ test('publishes the current verified quote once, freezing the canonical snapshot
   expect(rows.estimates[0]).toMatchObject({ status: 'sent', token: result.token });
   expect(JSON.parse(rows.estimates[0].estimate_data).sendSnapshot).toEqual(snapshot.sendSnapshot);
   expect(JSON.parse(rows.estimates[0].estimate_data).noEngagementAutomation).toBe(true);
-  expect(locks).toEqual(['estimates', 'customers']);
+  expect(locks).toEqual(['advisory:customer-comms:customer-fixture', 'estimates', 'customers']);
   expect(delivery._internals.assertEstimateSendable).toHaveBeenCalledTimes(1);
   expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'website_quote_published', critical: true, trx: query }));
   expect(await publishWebsiteQuote(args)).toBeNull();
