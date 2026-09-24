@@ -716,6 +716,12 @@ async function attemptEvidenceBasedWin(database, {
 // customer lock is a per-request technician write, not part of the
 // serialized completeness guarantee, so it is unaffected.
 const RECONCILE_LOCK_WAIT_MS = 5000;
+// The transaction-local lock wait bound every sweep pass sets before its
+// first lock (Codex #4710 r10 P1 + pre-push P1): one blocked row fails
+// that row, never the whole runExclusive sweep.
+async function boundLockWait(trx) {
+  await trx.raw(`SET LOCAL lock_timeout = '${RECONCILE_LOCK_WAIT_MS}ms'`);
+}
 
 // The sweep's per-row unit of work: lock the customer row FIRST (P1-A
 // discipline — see lockCustomerRow), then attempt the evidence-based win
@@ -744,7 +750,7 @@ async function reconcileOneOpenOutcome(database, {
     // The bound is transaction-local (SET LOCAL — no restore needed, this
     // transaction does nothing else afterward) and set before the lock it
     // is meant to bound; a no-op when there is no customer to lock.
-    if (customerId) await locked.raw(`SET LOCAL lock_timeout = '${RECONCILE_LOCK_WAIT_MS}ms'`);
+    if (customerId) await boundLockWait(locked);
     await lockCustomerRow(locked, customerId);
     const won = await attemptEvidenceBasedWin(locked, {
       outcomeRowId, customerId, scheduledDateStr, windowStart, now,
@@ -1262,6 +1268,7 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
     try {
        
       const changed = await db.transaction(async (locked) => {
+        await boundLockWait(locked);
         if (row.customer_id) await lockCustomerRow(locked, row.customer_id);
         // Every write here is one of three shapes (Codex #4710 r9 P2 —
         // unified): stamp only, re-point to surviving evidence, or clear the
@@ -1349,7 +1356,10 @@ async function repairMissedNoShowOutcomes({ now, limit, result }) {
 
   for (const row of rows) {
     try {
-      const saved = await db.transaction((sp) => markNoShow(row.scheduled_service_id, { trx: sp }));
+      const saved = await db.transaction(async (sp) => {
+        await boundLockWait(sp);
+        return markNoShow(row.scheduled_service_id, { trx: sp });
+      });
       if (saved && saved.outcome === 'lost' && saved.lost_reason === 'no_show') result.no_show_repaired += 1;
     } catch (err) {
       result.errors += 1;
@@ -1364,7 +1374,7 @@ async function repairMissedNoShowOutcomes({ now, limit, result }) {
  * outcome='lost', lost_reason='no_show'. A visit already 'lost' or 'won' is
  * left untouched — a no-show flip must not regress a closed outcome.
  */
-async function markNoShow(scheduledServiceId, { trx } = {}) {
+async function markNoShow(scheduledServiceId, { trx, customerLockNowait = false } = {}) {
   const database = trx || db;
   if (!scheduledServiceId) return null;
   // Codex #4710 r10 P2 :1307 (lock order): read the customer id UNLOCKED
@@ -1379,7 +1389,17 @@ async function markNoShow(scheduledServiceId, { trx } = {}) {
   // recordOutcomeOnce's own svcRow-then-liveVisit shape below.
   const preview = await database('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
   if (!preview) return null;
-  await lockCustomerRow(database, preview.customer_id);
+  // customerLockNowait (Codex #4710 pre-push P1): the job-status no-show
+  // hook runs AFTER its status UPDATE already holds this visit's lock, so a
+  // blocking customer wait there is visit → customer — the reverse of every
+  // other site. It takes the customer lock NOWAIT instead: busy → this
+  // throws (lock_not_available), the caller's savepoint rolls back, and the
+  // hourly repair pass (repairMissedNoShowOutcomes) records it later.
+  if (customerLockNowait && preview.customer_id) {
+    await database('customers').where({ id: preview.customer_id }).forNoKeyUpdate().noWait().first('id');
+  } else {
+    await lockCustomerRow(database, preview.customer_id);
+  }
 
   // Locked and re-checked (local audit P1): the repair sweep selects visits
   // before processing them, so the office may have reopened/rescheduled one

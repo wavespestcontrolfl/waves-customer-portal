@@ -237,6 +237,7 @@ function makeFakeDb(seed = {}) {
       // lock-conflict semantics, only the call-ORDER assertions the
       // P1-A-specific tests below build with their own spy wrapper.
       forNoKeyUpdate() { return api; },
+      noWait() { api.__noWait = true; return api; },
       onConflict() { return api; },
       // ON CONFLICT ... DO UPDATE SET ... [WHERE ...] — matches real Postgres:
       // no conflicting row -> insert always applies, the WHERE never runs;
@@ -2026,6 +2027,69 @@ describe('reconcileOpenConsultationOutcomes — no-show outcome repair (round 12
     // Codex #4710 r4 P2: a win on a consultation that was no-showed
     // afterwards is cleared by the reopen pass, to markNoShow's own shape.
     expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'lost', lost_reason: 'no_show', won_at: null });
+  });
+});
+
+// ---- Codex #4710 pre-push P1s on the r10 fixes -------------------------------
+
+describe('Codex #4710 pre-push P1: every sweep pass bounds its lock wait; the job-status hook never waits on the customer', () => {
+  const NOW = new Date('2026-09-23T12:00:00Z');
+  afterEach(() => { db.mockReset(); });
+
+  test('the no-show repair and dead-win reopen passes set lock_timeout before any customer lock in their transaction', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-ns', status: 'no_show', service_type: 'Waves Assessment', scheduled_date: '2026-09-20', customer_id: 'cust-2' },
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'cancelled', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1', created_at: new Date('2026-09-12T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: 'sale-1', pre_win_outcome: 'cold' },
+      ],
+    });
+    let depth = 0;
+    let boundedInTx = false;
+    const unboundedCustomerLocks = [];
+    const spyDb = (name) => {
+      if (name === 'customers' && depth > 0 && !boundedInTx) unboundedCustomerLocks.push(name);
+      return fakeDb(name);
+    };
+    spyDb.raw = (sql, bindings) => {
+      if (/lock_timeout/i.test(sql)) boundedInTx = true;
+      return fakeDb.raw(sql, bindings);
+    };
+    spyDb.transaction = async (fn) => {
+      if (depth === 0) boundedInTx = false;
+      depth += 1;
+      try { return await fn(spyDb); } finally { depth -= 1; }
+    };
+    db.mockImplementation(spyDb);
+    db.transaction = spyDb.transaction;
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.no_show_repaired).toBe(1);
+    expect(result.reopened).toBe(1);
+    expect(unboundedCustomerLocks).toEqual([]);
+  });
+
+  test('markNoShow with customerLockNowait takes the customer lock NOWAIT (the job-status hook already holds the visit)', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-ns', status: 'no_show', service_type: 'Waves Assessment', scheduled_date: '2026-09-20', customer_id: 'cust-1' },
+      ],
+    });
+    const customerChains = [];
+    const spyDb = (name) => {
+      const chain = fakeDb(name);
+      if (name === 'customers') customerChains.push(chain);
+      return chain;
+    };
+    spyDb.raw = fakeDb.raw;
+    spyDb.transaction = async (fn) => fn(spyDb);
+    await markNoShow('visit-ns', { trx: spyDb, customerLockNowait: true });
+    expect(customerChains.some((c) => c.__noWait)).toBe(true);
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/job-status.js'), 'utf8');
+    expect(src).toContain('markNoShow(jobId, { trx: sp, customerLockNowait: true })');
   });
 });
 

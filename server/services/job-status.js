@@ -511,7 +511,10 @@ async function transitionJobStatus({
     // sweep (repairMissedNoShowOutcomes), so logging and moving on is safe.
     if (String(toStatus || '') === 'no_show') {
       try {
-        await t.transaction((sp) => require('./consultation-outcomes').markNoShow(jobId, { trx: sp }));
+        // NOWAIT on the customer lock: this transaction already holds the
+        // visit lock (the UPDATE above), so waiting would invert the
+        // customer → visit order (Codex #4710 pre-push P1).
+        await t.transaction((sp) => require('./consultation-outcomes').markNoShow(jobId, { trx: sp, customerLockNowait: true }));
       } catch (outcomeErr) {
         logger.warn(`[job-status] consultation no-show outcome failed for ${jobId}: ${outcomeErr.message}`);
       }
