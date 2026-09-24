@@ -14434,6 +14434,14 @@ const CallRecordingProcessor = {
                         .where((qb) => qb
                           .where({ parent_service_id: primaryRow.id, source_action: 'ai_call_pipeline_followup' })
                           .orWhere({ followup_source_service_id: primaryRow.id }))
+                        .first('id'))
+                      // …or staff already handled visit 2 ("Follow-up booked" /
+                      // dismissed): the partial unique index excludes terminal
+                      // cards, so a reprocess would otherwise open a new task
+                      // beside the standalone booking (codex r31 P1).
+                      || !!(await trx('triage_items')
+                        .where({ call_log_id: call.id, reason_code: 'attached_booking_followup_unbooked' })
+                        .whereIn('status', ['resolved', 'dismissed'])
                         .first('id'));
                     if (!followUpOwned) disputeSkippedFollowUpPlan = true;
                   }
