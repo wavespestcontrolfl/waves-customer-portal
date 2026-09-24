@@ -50,6 +50,35 @@ function draftReplyToMessageIdSql(draftSmsLogIdExpression) {
       AND draft_inbound.direction = 'inbound')`;
 }
 
+// A signed STOP can commit its durable receipt before a delayed retry repairs
+// the canonical inbox row. Readers must use that receipt for both command
+// classification and chronology without rewriting history. Keep the
+// canonical message_type available to authorization scopes (notably job_*);
+// these expressions are only for the client-facing response projection.
+function inboundSmsReceiptProjectionSql({
+  messageAlias,
+  legacyAlias,
+  receiptAlias,
+}) {
+  for (const identifier of [messageAlias, legacyAlias, receiptAlias]) {
+    if (!/^[a-z_][a-z0-9_]*$/i.test(identifier || '')) throw new Error('Invalid SMS receipt projection alias');
+  }
+  const receiptMatch = `${receiptAlias}.message_sid IS NOT NULL
+    AND ${messageAlias}.channel = 'sms'
+    AND ${messageAlias}.direction = 'inbound'`;
+  return {
+    joinSql: `LEFT JOIN inbound_sms_optout_receipts ${receiptAlias}
+      ON ${receiptAlias}.message_sid = ${messageAlias}.twilio_sid
+     AND ${messageAlias}.channel = 'sms'
+     AND ${messageAlias}.direction = 'inbound'`,
+    responseMessageTypeSql: `(CASE WHEN ${receiptMatch} THEN 'opt_out'
+      ELSE COALESCE(${legacyAlias}.message_type, ${messageAlias}.message_type) END)`,
+    effectiveCreatedAtSql: `(CASE WHEN ${receiptMatch}
+      THEN LEAST(${messageAlias}.created_at, ${receiptAlias}.applied_at)
+      ELSE ${messageAlias}.created_at END)`,
+  };
+}
+
 async function loadPriorOutboundBodies(db, messages, {
   customerScoped = false,
   fallbackCustomerPhone = null,
@@ -200,6 +229,7 @@ module.exports = {
   phoneIdentitySql,
   draftIdSql,
   draftReplyToMessageIdSql,
+  inboundSmsReceiptProjectionSql,
   loadPriorOutboundBodies,
   responseFlags,
   inboundNeedsResponse,

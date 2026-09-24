@@ -246,6 +246,24 @@ it("uses authoritative legacy response types and delivery states without changin
   expect(needsSmsReply([request, { ...reply, responseStatus: "delivered", responseMessageType: "reminder" }])).toBe(true);
 });
 
+it("keeps the real question pending after a delayed receipt-backed STOP retry", () => {
+  const stop = message("inbound", "2026-09-21T13:00:00Z", {
+    id: "delayed-stop",
+    body: "STOP",
+    messageType: "inbound",
+    responseMessageType: "opt_out",
+  });
+  const request = message("inbound", "2026-09-21T13:01:00Z", {
+    id: "real-question",
+    body: "Can you still come Friday?",
+  });
+
+  expect(unansweredSmsReply([stop, request])).toMatchObject({
+    messageId: "real-question",
+    messageType: "inbound",
+  });
+});
+
 it("does not treat a proactive approved draft as an answer but allows a nearby real reply", () => {
   const request = message("inbound", "2026-09-21T13:00:00Z");
   const nudge = message("outbound", "2026-09-21T13:01:00Z", { messageType: "ai_approved", responseIsAnswer: false });

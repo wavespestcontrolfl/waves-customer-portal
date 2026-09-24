@@ -120,7 +120,8 @@ jest.mock('../services/tech-line', () => ({ notifyTechLineText: jest.fn(async ()
 const { EventEmitter } = require('node:events');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { recordTouchpoint, updateByTwilioSid } = require('../services/conversations');
-const { recordSuppression } = require('../services/messaging/validators/suppression');
+const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
+const { releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 const { handleClarifyReply } = require('../services/estimate-clarify-asks');
 const { startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
 const { processInboundSms } = require('../services/estimate-conversion-agent');
@@ -227,8 +228,32 @@ test.each([
   const res = await receive(body);
   expect(res.body).toContain('<Message>');
   expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe(messageType);
+  expect(updateByTwilioSid).toHaveBeenCalledWith('SM-synthetic-solicitation', expect.objectContaining({ message_type: messageType }));
   expect(dispatchWithFallback).not.toHaveBeenCalled();
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
+});
+
+test.each([
+  ['STOP', 'opt_out'], ['START', 'opt_in'], ['HELP', 'help_request'],
+])('a %s canonical typing failure defers before later command work', async (body, messageType) => {
+  findKnownCallerCustomer.mockResolvedValueOnce({ id: 'contact-1' });
+  updateByTwilioSid.mockResolvedValueOnce(null);
+  await receive(body, undefined, 503);
+  expect(updateByTwilioSid).toHaveBeenCalledWith('SM-synthetic-solicitation', expect.objectContaining({ message_type: messageType }));
+  expect(mockWrites.filter(({ table }) => table === 'sms_log')).toHaveLength(0);
+  expect(releaseInboundWebhook).toHaveBeenCalledWith('SM-synthetic-solicitation');
+  if (body === 'STOP') expect(recordSuppression).toHaveBeenCalledTimes(1);
+  if (body === 'START') expect(clearSuppression).not.toHaveBeenCalled();
+});
+
+test('an applicant command keeps its canonical recruiting privacy type', async () => {
+  findKnownCallerCustomer.mockResolvedValueOnce({ id: 'contact-1' });
+  require('../services/recruiting-inbound').matchApplicantReply.mockResolvedValueOnce({ applicationId: 'application-1' });
+  recordTouchpoint.mockResolvedValueOnce({ message: { id: 'saved-inbound-message', message_type: 'job_applicant_reply' } });
+  await receive('STOP');
+  expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({ messageType: 'job_applicant_reply' }));
+  expect(updateByTwilioSid).toHaveBeenCalledWith('SM-synthetic-solicitation', expect.not.objectContaining({ message_type: expect.anything() }));
+  expect(recordSuppression).toHaveBeenCalledTimes(1);
 });
 
 // Contract: "standalone carrier commands ... bypass the classifier" applies
@@ -686,6 +711,12 @@ test('STOP with a failed inbox, then START, then the old STOP retry preserves ne
   expect(suppression.clearSuppression).toHaveBeenCalledTimes(1);
   const res = await receive('STOP');
   expect(res.body).toBe('<Response></Response>');
+  const retryTyping = updateByTwilioSid.mock.calls.find(([, patch]) => patch.message_type === 'opt_out');
+  expect(retryTyping?.[0]).toBe('SM-synthetic-solicitation');
+  expect(retryTyping?.[1].created_at).toMatchObject({
+    sql: 'LEAST(created_at, ?::timestamptz)',
+    bindings: [mockOptoutReceipts.get('SM-synthetic-solicitation').applied_at],
+  });
   expect(recordSuppression).toHaveBeenCalledTimes(1);
   expect(recipient.mock.calls.map(call => call[1])).toEqual(['declined', 'confirmed']);
   expect(mockWrites.filter(({ table }) => table === 'notification_prefs').map(({ row }) => row.sms_enabled))
