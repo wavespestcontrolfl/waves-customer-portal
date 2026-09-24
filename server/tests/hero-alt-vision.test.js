@@ -213,5 +213,14 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(isAllowedUniformLogo('Waves badge on the uniform')).toBe(false);
     expect(isAllowedUniformLogo('wave pattern on the shirt')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo on the glove and cap')).toBe(false);
+    expect(isAllowedUniformLogo('Waves logo on left chest')).toBe(false);
+    expect(isAllowedUniformLogo("Waves logo on the technician's left chest")).toBe(false);
+  });
+
+  test('a left-chest mark reported only under logos_or_brand_marks is still a violation (Codex r4 P2 on #4761)', async () => {
+    const r = await screen({ logos_or_brand_marks: ['Waves logo on left chest'] });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toEqual(['logo or brand mark: Waves logo on left chest']);
+    expect(r.logos).toEqual(['Waves logo on left chest']);
   });
 });

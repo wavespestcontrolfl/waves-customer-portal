@@ -243,7 +243,9 @@ function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUni
 const UNIFORM_LOGO_WORDS = /\bwaves\b/i;
 const UNIFORM_LOCATION = /\b(cap|hat|chest|polo|shirt)\b/i;
 const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|sprayer|tank|packaging|bottle|box|background|floating|standalone|sky|ground|clipboard|tablet|backpack|bag|glove|gloves|tool|tools|mailbox|fence)\b/i;
-const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t);
+// A LEFT-chest detection is never allowed: it is a misplaced mark, kept for
+// the reasons and the ranking (Codex r4 P2 on #4761).
+const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t) && !/\bleft\b/i.test(t);
 // The words inside the Waves logo. A readable_text entry is dropped only
 // when the model ALSO attributed that same string to the uniform logo under
 // uniform_logo_lettering — the model's own placement, not a blanket filter
