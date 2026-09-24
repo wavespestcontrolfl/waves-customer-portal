@@ -974,7 +974,7 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   const multiAccount = sharedPhoneHouseholds.length > 1;
   if (multiAccount) {
     const matched = await uniqueProfileAcrossAccounts(trx, sharedPhoneHouseholds, resolved);
-    if (matched) return reuseMatchedProfile(trx, freshLead, matched, resolved);
+    if (matched) return reuseWithProvenance(trx, freshLead, matched, resolved);
   }
   const account = await ensureCustomerAccount(trx, {
     firstName: freshLead.first_name || 'New Lead',
@@ -991,7 +991,7 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   });
   if (verifiedContact && !multiAccount) {
     const matched = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
-    if (matched) return reuseMatchedProfile(trx, freshLead, matched, resolved);
+    if (matched) return reuseWithProvenance(trx, freshLead, matched, resolved);
   }
   const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
   // Server-owned provenance for loadTrustedCustomer (local audit P1): this
@@ -1072,6 +1072,26 @@ async function resolveOtherAccountProperty(trx, freshLead, linked, resolved) {
 // A verified lead's existing property, reused: its own open assessment wins
 // (already_booked), else it is the booking customer, at its OWN stored pin
 // when it has one.
+// A verified lead reusing an existing account's profile records it as this
+// lead's provenance (Codex #4737 r9 pre-push P1): a lead whose own
+// customer_id is untrusted is never relinked, so without this a reopened
+// link could not find the booking and the lead-wide dedupe would miss it.
+// It is an existing account's property: trusted later only under the
+// verified-phone proof.
+async function reuseWithProvenance(trx, freshLead, matched, resolved) {
+  const reused = await reuseMatchedProfile(trx, freshLead, matched, resolved);
+  if (reused.customer) {
+    await trx('lead_activities').insert({
+      lead_id: freshLead.id,
+      activity_type: CONSULTATION_PROSPECT_ACTIVITY,
+      description: 'Consultation page booked an existing property for this lead',
+      performed_by: 'consultation_page',
+      metadata: JSON.stringify({ customer_id: reused.customer.id, requires_verification: true }),
+    });
+  }
+  return reused;
+}
+
 async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
   // includeRescheduleUrl:false — this runs under the caller's advisory
   // lock (round 13, Codex pre-push P1, 2026-09-24); see

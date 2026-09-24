@@ -1248,6 +1248,49 @@ describe('POST /:token commit', () => {
       expect(res.body.visit.window.end).toBe('09:45');
       expect(res.body.endLabel).toBe('9:45 AM');
     });
+
+    // Codex #4737 r9 pre-push P1: a verified lead whose own customer_id is
+    // UNTRUSTED reuses a matched profile — that profile is recorded as its
+    // provenance (verification-required), so a reopened link finds it.
+    test('an untrusted existing link + a reused matched profile records verification-required provenance, and reopening finds the booking', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-stranger', first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      // The linked customer is on another phone: not trusted.
+      firstResults.customers = { id: 'cust-stranger', phone: '9415550199', address_line1: '1 Elsewhere', city: 'Sarasota', state: 'FL', zip: '34236', latitude: 27.3, longitude: -82.5 };
+      const existingCustomer = {
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.52, longitude: -82.57,
+      };
+      mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(200);
+      expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id)).toBe(false); // the link is left alone
+      const provenance = insertCalls.find((c) => c.table === 'lead_activities' && c.payload.activity_type === 'consultation_prospect');
+      expect(JSON.parse(provenance.payload.metadata)).toEqual({ customer_id: 'cust-9', requires_verification: true });
+
+      // Reopening: loadTrustedCustomer finds cust-9 through that provenance.
+      const { loadTrustedCustomer } = inspectionPublicRouter._test;
+      const rows = { 'cust-9': existingCustomer, 'cust-stranger': firstResults.customers };
+      const conn = (table) => {
+        let id = null;
+        return {
+          where(cond) { if (cond?.id) id = cond.id; return this; },
+          whereNull() { return this; }, orderBy() { return this; },
+          select: async () => [],
+          first: async () => {
+            if (table === 'lead_activities') return { metadata: provenance.payload.metadata };
+            if (table === 'call_log') return { from_phone: '+19415550101' };
+            return rows[id] || null;
+          },
+        };
+      };
+      const found = await loadTrustedCustomer(conn, firstResults.leads, null);
+      expect(found.id).toBe('cust-9');
+    });
   });
 
   // Round 13 (Codex pre-push P1 :845, 2026-09-24) — phase 1 no longer
