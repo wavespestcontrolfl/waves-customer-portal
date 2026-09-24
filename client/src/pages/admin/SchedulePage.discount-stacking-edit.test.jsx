@@ -2150,6 +2150,32 @@ it('round 19 P2 (:3737): preview permanently down on an undiscounted visit with 
 });
 
 // ---------------------------------------------------------------------
+// GitHub Codex round 24 P1 (#4657, :3794): the failed-preview bypass
+// enabled BOTH save buttons on an untouched, undiscounted visit, but
+// saveTouchesMoney cannot see the per-click takePayment argument —
+// "Save & take payment" posted createInvoice true with no fresh
+// expectedTotal, into billing against an unconfirmed total.
+// ---------------------------------------------------------------------
+
+it('round 24 P1 (:3794): preview permanently down on an untouched undiscounted visit — plain Save stays allowed, "Save & take payment" is disabled and never posts', async () => {
+  const fetchMock = previewDownFetch(undiscountedVisit);
+  vi.stubGlobal('fetch', fetchMock);
+  const onSaved = vi.fn();
+  render(<Harness service={undiscountedVisit} onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getByText(/Could not confirm the totals/)).toBeInTheDocument());
+  fireEvent.change(labeledControl('Appointment notes'), { target: { value: 'Gate code 4321' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+  const takePayment = screen.getByRole('button', { name: 'Save & take payment' });
+  expect(takePayment).toBeDisabled();
+  fireEvent.click(takePayment);
+  expect(fetchMock.mock.calls.some(([url, options]) => (
+    url.includes('/update-details') && !url.includes('/preview') && options?.method === 'PUT'
+  ))).toBe(false);
+  expect(onSaved).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------
 // GitHub Codex round 19 P2 (#4657, :3768): displayPrimaryGross falls back
 // to the (net) form seed when neither the preview's own primaryLinePrice
 // nor the visit's stored primaryLinePrice is known. For a zero-add-on

@@ -335,14 +335,38 @@ function resolveStoredDiscountCaps(parent, liveDiscountCaps) {
 // on ANY current line — including the still-shared-with-the-primary-line
 // case resolveStoredDiscountCaps' own comment documents as supported — is
 // left untouched; only an id absent from every current line is dropped.
-function pruneObsoleteFrozenAddonCaps(frozen, liveAddonIds, lineDiscountId) {
+//
+// GitHub Codex round 24 P1 (#4657, :2973): "on a current line" alone is
+// not enough. A marked row's snapshot can carry obsolete caps for SEVERAL
+// formerly used presets, and when the operator switches an add-on
+// straight from A to a historical B, B IS on a current line after this
+// save — so the rule above kept caps.addons[B], and the canonical restack
+// (frozen wins) then applied that stale figure over B's freshly loaded
+// catalog cap. `priorAddonIds`, when the caller passes it (any iterable of
+// the discount ids the row's add-on rows carried BEFORE this save), makes
+// a frozen add-on entry survive only if its id was live before AND is live
+// after. A same-current-id re-pick (owner Ruling A, 2026-09-24: the frozen
+// cap wins) is live on both sides and is kept exactly as before; an id
+// that was NOT active before this save is a fresh pick whatever the
+// snapshot remembers about it, and reads its cap live. The primary line's
+// own id is always kept — this editor never changes it. Omitted (null/
+// undefined), the prior-side check is skipped and the round 16 rule
+// applies unchanged.
+function pruneObsoleteFrozenAddonCaps(frozen, liveAddonIds, lineDiscountId, priorAddonIds = null) {
   const addons = frozen?.addons && typeof frozen.addons === 'object' && !Array.isArray(frozen.addons)
     ? frozen.addons
     : null;
   if (!addons) return frozen ?? null;
+  let priorIds = null;
+  if (priorAddonIds != null) {
+    priorIds = new Set();
+    for (const id of priorAddonIds) {
+      if (id != null) priorIds.add(String(id));
+    }
+  }
   const keepIds = new Set();
   for (const id of (liveAddonIds || [])) {
-    if (id != null) keepIds.add(String(id));
+    if (id != null && (!priorIds || priorIds.has(String(id)))) keepIds.add(String(id));
   }
   if (lineDiscountId != null) keepIds.add(String(lineDiscountId));
   const prunedAddons = {};

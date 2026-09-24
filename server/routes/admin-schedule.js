@@ -1605,6 +1605,29 @@ function previewTotalDrifted(expectedTotal, plannedEstimatedPrice) {
   return Math.abs(Number(plannedEstimatedPrice) - Number(expectedTotal)) >= 0.005;
 }
 
+// GitHub Codex round 24 P1 (#4657, :14442): the total this save will
+// actually leave on the row. When the plan writes estimated_price (a
+// number, or null for a genuinely unpriced result) that is the answer.
+// When it leaves estimated_price UNDEFINED the PUT retains whatever is
+// stored — the shape a cleared Price field on a no-add-on visit produces
+// (the client omits both price fields, so no pricing branch runs). The
+// preview used to report `total: null` there, the modal showed "Not
+// priced", and the null witness passed previewTotalDrifted for an
+// undefined plan — so the operator confirmed "no price" while the old
+// charge silently stayed. Both the preview's `total` and the PUT's drift
+// check now resolve through this one helper, so the figure confirmed on
+// screen is the figure the save keeps, and a numeric witness is compared
+// against the retained total instead of being declared drift outright.
+// `cols` is optional (the PUT has no columnInfo in hand at its check);
+// a failed read resolves null, which the drift check then treats as the
+// unpriced state exactly as before.
+async function resolvePlannedTotal(db, id, updates, cols = null) {
+  if (updates.estimated_price !== undefined) return updates.estimated_price;
+  if (cols && !cols.estimated_price) return null;
+  const row = await db('scheduled_services').where({ id }).first('estimated_price').catch(() => null);
+  return row?.estimated_price ?? null;
+}
+
 function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
   const existingType = existing?.discount_type || null;
   const existingAmount = existing?.discount_amount == null || existing.discount_amount === ''
@@ -2899,6 +2922,10 @@ async function resolveUpdateDetailsAddonFinancials({
   db, existing, updates, primaryGross, normalizedAddons,
   effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
   appointmentDiscountId, adoptCanonicalPricing = false,
+  // GitHub Codex round 24 P1 (#4657, :2973): the discount ids the row's
+  // add-on rows carried BEFORE this save (normalizeUpdateDetailsAddons'
+  // own existingAddonDiscountRows read) — see the prune call below.
+  priorAddonDiscountIds = null,
 }) {
   // Primary line discount is not exposed here — back it out of the gross
   // primary price so the subtotal matches what was originally stored
@@ -2965,12 +2992,22 @@ async function resolveUpdateDetailsAddonFinancials({
     // it stops that id's stale cap from being merged forward and later
     // resurrected over a fresh re-pick's live (possibly since-changed)
     // catalog cap.
+    // GitHub Codex round 24 P1 (#4657, :2973): surviving is not enough —
+    // a snapshot holding obsolete caps for several formerly used presets
+    // kept a historical B's stale cap when an add-on switched straight
+    // from A to B (B survives this save, so the round 16 rule retained
+    // it) and the restack's frozen-wins merge then applied it over B's
+    // live catalog cap. A frozen add-on entry now also has to have been
+    // live BEFORE this save (priorAddonDiscountIds); a same-current-id
+    // re-pick (owner Ruling A) is live on both sides and keeps its frozen
+    // cap exactly as before.
     if (canonicalParent.pricing_provenance?.caps) {
       const survivingAddonIds = canonicalAddonRows.map((a) => a.discount_id);
       const prunedCaps = pruneObsoleteFrozenAddonCaps(
         canonicalParent.pricing_provenance.caps,
         survivingAddonIds,
         canonicalParent.line_discount_id,
+        priorAddonDiscountIds,
       );
       if (prunedCaps !== canonicalParent.pricing_provenance.caps) {
         canonicalParent.pricing_provenance = { ...canonicalParent.pricing_provenance, caps: prunedCaps };
@@ -11024,6 +11061,7 @@ async function computeUpdateDetailsFinancialPlan({
           effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
           appointmentDiscountId: appointmentDiscountPreset?.id ?? existing?.discount_id ?? null,
           adoptCanonicalPricing: adoptCanonicalPricing && !legacyPrimaryGrossUnknown,
+          priorAddonDiscountIds: existingAddonDiscountRows.map((r) => r.discount_id),
         });
         canonicalRestackedAddonDollars = canonicalDollars;
 
@@ -11725,7 +11763,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // repeated for the collective/series path's own re-run of the
       // planner further down, since that would just re-check the same
       // witness against a plan for a DIFFERENT visit.
-      if (previewTotalDrifted(expectedTotal, updates.estimated_price)) {
+      // GitHub Codex round 24 P1 (#4657, :14442): compared against the
+      // total this save actually leaves on the row (resolvePlannedTotal —
+      // the planned write, else the retained stored figure), the same
+      // resolution the preview reported as `total`.
+      if (expectedTotal !== undefined
+        && previewTotalDrifted(expectedTotal, await resolvePlannedTotal(db, req.params.id, updates))) {
         throw Object.assign(
           new Error('The total changed while saving — review the new total and save again.'),
           { statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'PREVIEW_TOTAL_DRIFT' },
@@ -14439,7 +14482,10 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       ? updates.line_discount_name
       : (primaryLineDiscountRow?.line_discount_name ?? null);
     res.json({
-      total: updates.estimated_price !== undefined ? updates.estimated_price : null,
+      // GitHub Codex round 24 P1 (#4657, :14442): the total the save will
+      // LEAVE on the row — the planned write, else the retained stored
+      // figure — never null just because this save plans no price write.
+      total: await resolvePlannedTotal(db, id, updates, cols),
       primaryLinePrice: updates.primary_line_price !== undefined ? updates.primary_line_price : null,
       appointmentDiscountDollars: previewAppointmentDiscountDollars != null
         ? Number(previewAppointmentDiscountDollars) : null,
@@ -21850,6 +21896,7 @@ function blackoutDateString(value) {
 router._test = {
   negativePricePosted,
   buildPresetEligibilityCheck,
+  resolvePlannedTotal,
   addonRowIdsDrifted,
   financialStateDrifted,
   previewTotalDrifted,

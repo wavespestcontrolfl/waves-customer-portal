@@ -3102,7 +3102,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // and appointmentTotal are declared further down this component body but
     // are in scope here by closure; handleSave itself is only ever invoked
     // after the full render (and every const in it) has completed.
-    if (moneyPreviewBlocksSave) return;
+    if (takePayment ? takePaymentBlocksSave : moneyPreviewBlocksSave) return;
     if (savingRef.current || cancellingRef.current) return;
     savingRef.current = true;
     setSaveError("");
@@ -3792,6 +3792,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     || createInvoice !== createInvoiceSeedRef.current;
   const moneyPreviewBlocksSave =
     moneyPreviewLoading || (!moneyPreviewFresh && !(previewErroredForLatest && !saveTouchesMoney));
+  // GitHub Codex round 24 P1 (#4657, :3794): the failed-preview bypass
+  // above is justified by "this save cannot change money" — but
+  // saveTouchesMoney cannot see the per-click `takePayment` argument, and
+  // "Save & take payment" posts createInvoice true and moves into billing.
+  // That action always needs the server's confirmed figure (and a witness
+  // to send), whatever the form's money inputs did, so it never takes the
+  // bypass: a preview 5xx / network failure disables it until a fresh
+  // preview resolves, while the plain Save keeps the r14 exception.
+  const takePaymentBlocksSave = moneyPreviewLoading || !moneyPreviewFresh;
   // null (not 0, not a stale figure) while unconfirmed — the render below
   // shows "Confirming…" rather than ever displaying a client-computed
   // guess as if it were the real total.
@@ -4553,7 +4562,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             )}{" "}
             <button
               onClick={() => handleSave({ takePayment: true })}
-              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing}
+              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -4562,8 +4571,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#fff",
                 border: "none",
                 fontSize: 13,
-                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing) ? "wait" : "pointer",
-                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing) ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >

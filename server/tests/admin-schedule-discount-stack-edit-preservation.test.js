@@ -1696,3 +1696,70 @@ describe('buildPresetEligibilityCheck — one eligibility rule for the save and 
     expect(src.match(/const presetEligibilityCheck = async \(lines\)/g)).toBeNull();
   });
 });
+
+// GitHub Codex round 24 P1 (#4657, :14442): a cleared Price on a no-add-on
+// visit omits both price fields, the planner leaves estimated_price
+// undefined and the PUT RETAINS the stored charge — yet the preview said
+// `total: null` ("Not priced") and the null witness passed the drift
+// check. Both routes now resolve the total through resolvePlannedTotal.
+describe('resolvePlannedTotal — the preview reports, and the drift check compares against, the total the save actually leaves on the row (round 24 P1, #4657 :14442)', () => {
+  const { resolvePlannedTotal, previewTotalDrifted } = require('../routes/admin-schedule')._test;
+  const db = require('../models/db');
+  let storedRow;
+  beforeEach(() => {
+    db.mockReset();
+    storedRow = { estimated_price: 100 };
+    const chain = { where: () => chain, first: async () => storedRow };
+    db.mockImplementation(() => chain);
+  });
+
+  test('a planned write wins without reading the row (number)', async () => {
+    await expect(resolvePlannedTotal(db, 'v1', { estimated_price: 85 })).resolves.toBe(85);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a planned null (genuinely unpriced result) stays null without reading the row', async () => {
+    await expect(resolvePlannedTotal(db, 'v1', { estimated_price: null })).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('no planned write: the RETAINED stored total is reported, never null', async () => {
+    await expect(resolvePlannedTotal(db, 'v1', {})).resolves.toBe(100);
+    expect(db).toHaveBeenCalledWith('scheduled_services');
+  });
+
+  test('no planned write on a never-priced row resolves null (still "Not priced")', async () => {
+    storedRow = { estimated_price: null };
+    await expect(resolvePlannedTotal(db, 'v1', {})).resolves.toBeNull();
+    storedRow = null;
+    await expect(resolvePlannedTotal(db, 'v1', {})).resolves.toBeNull();
+  });
+
+  test('a failed read resolves null rather than throwing', async () => {
+    const chain = { where: () => chain, first: async () => { throw new Error('db down'); } };
+    db.mockImplementation(() => chain);
+    await expect(resolvePlannedTotal(db, 'v1', {})).resolves.toBeNull();
+  });
+
+  test('cols without estimated_price short-circuits to null', async () => {
+    await expect(resolvePlannedTotal(db, 'v1', {}, { id: {} })).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('the repro: cleared Price on a priced no-add-on visit — the operator now confirms the RETAINED $100 and the save accepts that witness; a $120 concurrent reprice is drift', async () => {
+    const previewed = await resolvePlannedTotal(db, 'v1', {});
+    expect(previewed).toBe(100);
+    expect(previewTotalDrifted(previewed, await resolvePlannedTotal(db, 'v1', {}))).toBe(false);
+    storedRow = { estimated_price: 120 };
+    expect(previewTotalDrifted(previewed, await resolvePlannedTotal(db, 'v1', {}))).toBe(true);
+  });
+
+  test('the PUT drift check and the preview total both go through resolvePlannedTotal (no bare `updates.estimated_price` total left)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+    expect(src.match(/previewTotalDrifted\(expectedTotal, await resolvePlannedTotal\(db, req\.params\.id, updates\)\)/g)).toHaveLength(1);
+    expect(src.match(/total: await resolvePlannedTotal\(db, id, updates, cols\)/g)).toHaveLength(1);
+    expect(src.match(/total: updates\.estimated_price !== undefined \? updates\.estimated_price : null/g)).toBeNull();
+    // round 24 P1 (:2973): the save hands the pruner the PRIOR add-on discount ids.
+    expect(src.match(/priorAddonDiscountIds: existingAddonDiscountRows\.map\(\(r\) => r\.discount_id\)/g)).toHaveLength(1);
+  });
+});
