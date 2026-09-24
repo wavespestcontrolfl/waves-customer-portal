@@ -16126,7 +16126,6 @@ const CallRecordingProcessor = {
     // that pressed 1 is recorded in metadata.forward_acceptance by the
     // /inbound-forward-accept webhook. Resolve that to a CSR name when mapped,
     // and fall back to 'Unknown' so analytics aren't silently booked to one name.
-    let csrScoreResult = null;
     // Re-checked here: the synopsis above is a provider await, so ownership
     // can have moved since the last gate. Losing it ABANDONS rather than
     // skipping scoring and carrying on into the finalization work — a
@@ -16138,48 +16137,44 @@ const CallRecordingProcessor = {
     // could file a bogus follow-up, codex r5 P1).
     const csrTranscript = recordedPartOfComposite(transcription) || transcription;
     if (csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {
-      try {
-        const callMeta = typeof call.metadata === 'string'
-          ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
-          : (call.metadata || {});
-        const answeredByCsr = callMeta?.forward_acceptance?.csr_name || 'Unknown';
-        const CSRCoach = require('./csr/csr-coach');
-        const scoreResult = await CSRCoach.scoreCall({
-          // Checked inside, immediately before the score row is written: the
-          // provider await between here and there is minutes long.
-          stillOwnsClaim,
-          csrName: answeredByCsr,
-          customerId: customerId || null,
-          callDirection: 'inbound',
-          callSource: call.to_phone || 'unknown',
-          // A transferred call's composite carries Sandy's leg ahead of the
-          // staff leg: the CSR is scored on the HUMAN leg only (Sandy's
-          // greeting / empathy / closing must not be awarded to the employee,
-          // codex r4 P1). The composite stays the call record.
-          transcript: csrTranscript,
-          metadata: {
-            callSid,
-            duration: call.duration_seconds,
-            service: extracted.matched_service || extracted.requested_service,
-            sentiment: extracted.sentiment,
-          },
-        });
-        // The scorer's own post-await check found the claim gone. That is
-        // not "no score" — it is this pass being superseded, and the
-        // route-decision insert and ai_validation write below are unfenced,
-        // so a stale pass that carried on could win the unique insert or
-        // overwrite the replacement's verdict (codex #3677 P1). Abandon.
-        if (scoreResult?.skipped && scoreResult.reason === 'ownership_lost') {
-          return abandonToPeer('finalization after CSR scoring');
-        }
-        // CSRCoach.scoreCall returns the score object itself (total_score,
-        // call_outcome, ...), not a wrapper — the old `.score.` read logged
-        // "undefined/15 (undefined)" on every call (2026-09-20 audit).
-        csrScoreResult = { score: scoreResult?.total_score, outcome: scoreResult?.call_outcome };
-        logger.info(`[call-proc] CSR scored: ${csrScoreResult.score}/15 (${csrScoreResult.outcome})`);
-      } catch (err) {
-        logger.error(`[call-proc] CSR scoring failed (non-blocking): ${err.message}`);
-      }
+      const CSRCoach = require('./csr/csr-coach');
+      const callMeta = typeof call.metadata === 'string'
+        ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
+        : (call.metadata || {});
+      const answeredByCsr = callMeta?.forward_acceptance?.csr_name || 'Unknown';
+      // Applicability (the 15-point rubric only describes an inbound
+      // new_lead call, 2026-09-23 audit) plus scoring itself are OWNED by
+      // csr-coach.js (moved 2026-09-24, codex r1 P2b) — this call is the
+      // processor's only decision point, and it just consumes the result.
+      const csrOutcome = await CSRCoach.scoreCallIfApplicable({
+        direction: isOutboundCall(call) ? 'outbound' : 'inbound',
+        v2Extraction: v2Result?.extraction || null,
+        v2Status: v2Result?.status || null,
+        // "V2 drives routing" (call-recording-processor.js ~64-71 contract):
+        // shadow mode (this false) restores the full legacy V1 drive, so v2's
+        // call_nature must never suppress scoring until routing is promoted
+        // (codex r1 P2a). Same enforce-mode test used elsewhere in this file.
+        v2Promoted: CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED,
+        maskedCallSid: maskSid(callSid),
+        // Checked inside, immediately before the score row is written: the
+        // provider await between here and there is minutes long.
+        stillOwnsClaim,
+        csrName: answeredByCsr,
+        customerId: customerId || null,
+        callSource: call.to_phone || 'unknown',
+        // A transferred call's composite carries Sandy's leg ahead of the
+        // staff leg: the CSR is scored on the HUMAN leg only (Sandy's
+        // greeting / empathy / closing must not be awarded to the employee,
+        // codex r4 P1). The composite stays the call record.
+        transcript: csrTranscript,
+        metadata: {
+          callSid,
+          duration: call.duration_seconds,
+          service: extracted.matched_service || extracted.requested_service,
+          sentiment: extracted.sentiment,
+        },
+      });
+      if (csrOutcome?.abandon) return abandonToPeer('finalization after CSR scoring');
     }
 
     if (newsletterCandidate && v2EmailBlocked) {
