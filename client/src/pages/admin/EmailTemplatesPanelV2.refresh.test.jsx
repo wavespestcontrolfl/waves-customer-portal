@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
 
@@ -31,4 +31,56 @@ it("refreshes send history without hiding it, and offers Retry after a failed ba
   await act(async () => {});
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(reads).toBe(3);
+});
+
+it.each([
+  {
+    button: "Send History",
+    endpoint: "send-history",
+    oldPayload: { messages: [{ id: "old-message", subject_snapshot: "Older history" }] },
+    newPayload: { messages: [{ id: "new-message", subject_snapshot: "Newer history" }] },
+    oldText: "Older history",
+    newText: "Newer history",
+  },
+  {
+    button: "Issues",
+    endpoint: "/issues?",
+    oldPayload: { issues: [{ id: "old-issue", reason: "Older issue" }] },
+    newPayload: { issues: [{ id: "new-issue", reason: "Newer issue" }] },
+    oldText: "Older issue",
+    newText: "Newer issue",
+  },
+  {
+    button: "Deliverability",
+    endpoint: "/deliverability",
+    oldPayload: { health: { total_messages: 111 } },
+    newPayload: { health: { total_messages: 222 } },
+    oldText: "111",
+    newText: "222",
+  },
+])("keeps the newer $button read when an older background response resolves last", async ({ button, endpoint, oldPayload, newPayload, oldText, newText }) => {
+  let finishOlder;
+  let reads = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url) => {
+    if (String(url).includes(endpoint)) {
+      reads += 1;
+      if (reads === 1) return { ok: true, json: async () => oldPayload };
+      if (reads === 2) return new Promise((resolve) => { finishOlder = resolve; });
+      return { ok: true, json: async () => newPayload };
+    }
+    return { ok: true, json: async () => ({ templates: [], groups: [] }) };
+  }));
+
+  render(<EmailTemplatesPanelV2 />);
+  fireEvent.click(await screen.findByRole("button", { name: button }));
+  expect(await screen.findByText(oldText)).toBeInTheDocument();
+  fireEvent(window, new Event("focus"));
+  await waitFor(() => expect(reads).toBe(2));
+  fireEvent.click(screen.getByRole("button", { name: "Templates" }));
+  fireEvent.click(screen.getByRole("button", { name: button }));
+  expect(await screen.findByText(newText)).toBeInTheDocument();
+
+  await act(async () => finishOlder({ ok: true, json: async () => oldPayload }));
+  expect(screen.getByText(newText)).toBeInTheDocument();
+  expect(screen.queryByText(oldText)).not.toBeInTheDocument();
 });

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
+import { StrictMode } from 'react';
+import { act, render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, afterEach, it, expect, vi } from 'vitest';
 import NewsletterPage from './NewsletterPage';
@@ -84,4 +85,24 @@ it('drops vanished inbox selections while keeping visible rows selected for bulk
  await waitFor(()=>expect(fetch).toHaveBeenCalledWith('/api/admin/newsletter/events/bulk-action',expect.objectContaining({
   method:'POST',body:JSON.stringify({action:'approve',ids:['event-b']})
  })));
+});
+
+it('ignores the first StrictMode events response after the second setup has loaded',async()=>{
+ let finishFirst;
+ let eventReads=0;
+ const original=fetch.getMockImplementation();
+ fetch.mockImplementation(async(url,options)=>{
+  if(String(url).includes('/newsletter/events?')){
+   eventReads+=1;
+   if(eventReads===1)return new Promise(resolve=>{finishFirst=resolve;});
+   return response({events:[{id:'new-event',title:'Current event'}]});
+  }
+  return original(url,options);
+ });
+ render(<StrictMode><MemoryRouter><NewsletterPage/></MemoryRouter></StrictMode>);
+ await screen.findByText('Current event');
+ expect(eventReads).toBe(2);
+ await act(async()=>{finishFirst(response({events:[{id:'old-event',title:'Stale event'}]}));});
+ expect(screen.getByText('Current event')).toBeInTheDocument();
+ expect(screen.queryByText('Stale event')).not.toBeInTheDocument();
 });

@@ -537,23 +537,23 @@ function DashboardView({
   };
   const [events, setEvents] = useState([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
-  const eventsMounted = useRef(true);
+  const eventsRequest = useRef(0);
   const loadEvents = useCallback((background = false) => {
+    const request = ++eventsRequest.current;
     if (!background) setLoadingEvents(true);
     return adminFetch("/admin/newsletter/events?days=14&limit=12")
       .then((d) => {
-        if (eventsMounted.current) setEvents(d.events || []);
+        if (request === eventsRequest.current) setEvents(d.events || []);
       })
       .catch(() => {})
       .finally(() => {
-        if (eventsMounted.current) setLoadingEvents(false);
+        if (request === eventsRequest.current) setLoadingEvents(false);
       });
   }, []);
   useEffect(() => {
-    eventsMounted.current = true;
     void loadEvents();
     return () => {
-      eventsMounted.current = false;
+      eventsRequest.current += 1;
     };
   }, [loadEvents]);
   useVisiblePageRefresh(

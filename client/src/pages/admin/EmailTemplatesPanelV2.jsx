@@ -1664,6 +1664,9 @@ export default function EmailTemplatesPanelV2() {
   const [testEmail, setTestEmail] = useState("contact@wavespestcontrol.com");
   const [toast, setToast] = useState("");
   const [readErrors, setReadErrors] = useState({});
+  const historySequence = useRef(0);
+  const templateIssuesSequence = useRef(0);
+  const deliverabilitySequence = useRef(0);
   const runsSequence = useRef(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -1727,21 +1730,37 @@ export default function EmailTemplatesPanelV2() {
   }, [applyFixture]);
 
   const loadHistory = useCallback(({ background = false } = {}) => {
+    const seq = ++historySequence.current;
     if (!background) setHistoryLoading(true);
     return adminFetch("/admin/email-templates/send-history?limit=100")
-      .then((d) => setHistory(d.messages || []))
-      .then(() => setReadErrors((prev) => ({ ...prev, history: null })))
-      .catch((e) => setReadErrors((prev) => ({ ...prev, history: e.message })))
-      .finally(() => { if (!background) setHistoryLoading(false); });
+      .then((d) => {
+        if (seq !== historySequence.current) return;
+        setHistory(d.messages || []);
+        setReadErrors((prev) => ({ ...prev, history: null }));
+      })
+      .catch((e) => {
+        if (seq === historySequence.current) setReadErrors((prev) => ({ ...prev, history: e.message }));
+      })
+      .finally(() => {
+        if (seq === historySequence.current) setHistoryLoading(false);
+      });
   }, []);
 
   const loadTemplateIssues = useCallback(({ background = false } = {}) => {
+    const seq = ++templateIssuesSequence.current;
     if (!background) setTemplateIssuesLoading(true);
     return adminFetch("/admin/email-templates/issues?limit=100")
-      .then((d) => setTemplateIssues(d.issues || []))
-      .then(() => setReadErrors((prev) => ({ ...prev, issues: null })))
-      .catch((e) => setReadErrors((prev) => ({ ...prev, issues: e.message })))
-      .finally(() => { if (!background) setTemplateIssuesLoading(false); });
+      .then((d) => {
+        if (seq !== templateIssuesSequence.current) return;
+        setTemplateIssues(d.issues || []);
+        setReadErrors((prev) => ({ ...prev, issues: null }));
+      })
+      .catch((e) => {
+        if (seq === templateIssuesSequence.current) setReadErrors((prev) => ({ ...prev, issues: e.message }));
+      })
+      .finally(() => {
+        if (seq === templateIssuesSequence.current) setTemplateIssuesLoading(false);
+      });
   }, []);
 
   const loadSuppressions = useCallback(() => {
@@ -1761,12 +1780,20 @@ export default function EmailTemplatesPanelV2() {
   }, [suppressionFilter]);
 
   const loadDeliverability = useCallback(({ background = false } = {}) => {
+    const seq = ++deliverabilitySequence.current;
     if (!background) setDeliverabilityLoading(true);
     return adminFetch("/admin/email-templates/deliverability")
-      .then((d) => setDeliverability(d))
-      .then(() => setReadErrors((prev) => ({ ...prev, deliverability: null })))
-      .catch((e) => setReadErrors((prev) => ({ ...prev, deliverability: e.message })))
-      .finally(() => { if (!background) setDeliverabilityLoading(false); });
+      .then((d) => {
+        if (seq !== deliverabilitySequence.current) return;
+        setDeliverability(d);
+        setReadErrors((prev) => ({ ...prev, deliverability: null }));
+      })
+      .catch((e) => {
+        if (seq === deliverabilitySequence.current) setReadErrors((prev) => ({ ...prev, deliverability: e.message }));
+      })
+      .finally(() => {
+        if (seq === deliverabilitySequence.current) setDeliverabilityLoading(false);
+      });
   }, []);
 
   const loadAutomations = useCallback(() => {
@@ -1808,6 +1835,12 @@ export default function EmailTemplatesPanelV2() {
     loadTemplates();
     loadGroups();
   }, [loadTemplates, loadGroups]);
+
+  useEffect(() => () => {
+    historySequence.current += 1;
+    templateIssuesSequence.current += 1;
+    deliverabilitySequence.current += 1;
+  }, []);
 
   useEffect(() => {
     loadDetail(selectedKey);
