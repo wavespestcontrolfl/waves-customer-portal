@@ -328,6 +328,8 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null, in
   const eventPeer = phoneIdentitySql('base.contact_phone');
   const eventEndpoint = phoneIdentitySql('base.our_endpoint_id');
   const blockedPeer = phoneIdentitySql('b.number');
+  const stopPeer = phoneIdentitySql("COALESCE(NULLIF(stop_conversation.contact_phone, ''), stop_customer.phone, '')");
+  const legacyStopPeer = phoneIdentitySql('stop_log.from_phone');
   const { rows = [] } = await db.raw(`
     WITH base_sms AS MATERIALIZED (
       SELECT m.id, m.direction, m.body AS message_body, m.created_at,
@@ -369,6 +371,7 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null, in
         s.message_type, s.metadata, s.media, s.created_at, s.twilio_sid
       FROM inbound_events s
       WHERE s.peer <> ''
+        AND s.endpoint <> ''
         AND s.message_type <> ALL(CAST(:ignoredInboundTypes AS text[]))
         -- Recruiting replies have their own inbox and notification lifecycle.
         AND s.message_type NOT LIKE 'job\\_%'
@@ -433,10 +436,52 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null, in
         -- inbound anchor for ambiguous types; proactive drafts never clear an ask.
         AND (os.message_type <> ALL(CAST(:draftReplyTypes AS text[])) OR os.has_inbound_draft_anchor)
         AND os.draft_intent IS DISTINCT FROM 'click_followup'
+    ), all_stop_events AS MATERIALIZED (
+      SELECT ${stopPeer} AS peer,
+             COALESCE(stop_legacy.created_at, stop_message.created_at) AS created_at
+      FROM messages stop_message
+      JOIN conversations stop_conversation ON stop_conversation.id = stop_message.conversation_id
+      LEFT JOIN customers stop_customer ON stop_customer.id = stop_conversation.customer_id
+      LEFT JOIN LATERAL (
+        SELECT sl.message_type, sl.created_at
+        FROM sms_log sl
+        WHERE sl.twilio_sid = stop_message.twilio_sid AND sl.direction = stop_message.direction
+        ORDER BY sl.created_at DESC, sl.id DESC
+        LIMIT 1
+      ) stop_legacy ON true
+      WHERE stop_message.channel = 'sms'
+        AND stop_message.direction = 'inbound'
+        -- Restrict the lateral overlay to plausible STOP rows. COALESCE then
+        -- preserves the canonical type when a nullable legacy twin lacks one.
+        AND (stop_message.message_type = 'opt_out' OR EXISTS (
+          SELECT 1
+          FROM sms_log stop_candidate
+          WHERE stop_candidate.twilio_sid = stop_message.twilio_sid
+            AND stop_candidate.direction = stop_message.direction
+            AND stop_candidate.message_type = 'opt_out'
+        ))
+        AND COALESCE(stop_legacy.message_type, stop_message.message_type, '') = 'opt_out'
+        AND NOT (COALESCE(stop_conversation.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
+          OR COALESCE(stop_conversation.contact_phone, '') = ANY(CAST(:excludePhones AS text[]))
+          OR COALESCE(stop_customer.phone, '') = ANY(CAST(:excludePhones AS text[])))
+      UNION ALL
+      SELECT ${legacyStopPeer} AS peer, stop_log.created_at
+      FROM sms_log stop_log
+      LEFT JOIN customers stop_log_customer ON stop_log_customer.id = stop_log.customer_id
+      WHERE stop_log.direction = 'inbound'
+        AND stop_log.message_type = 'opt_out'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM messages stop_twin
+          WHERE stop_twin.twilio_sid = stop_log.twilio_sid AND stop_twin.direction = stop_log.direction
+        )
+        AND NOT (COALESCE(stop_log.to_phone, '') = ANY(CAST(:excludePhones AS text[]))
+          OR COALESCE(stop_log.from_phone, '') = ANY(CAST(:excludePhones AS text[]))
+          OR COALESCE(stop_log_customer.phone, '') = ANY(CAST(:excludePhones AS text[])))
     ), latest_stop AS MATERIALIZED (
       SELECT st.peer, MAX(st.created_at) AS stopped_at
-      FROM inbound_events st
-      WHERE st.message_type = 'opt_out'
+      FROM all_stop_events st
+      WHERE st.peer <> ''
       GROUP BY st.peer
     )
     SELECT li.id, li.peer, li.endpoint, li.customer_id, li.message_body,

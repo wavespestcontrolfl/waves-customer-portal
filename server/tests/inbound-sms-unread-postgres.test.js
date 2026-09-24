@@ -130,10 +130,10 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
   });
 
-  test('an unknown business endpoint cannot prove a courtesy closer', async () => {
+  test('an unknown business endpoint is excluded because no valid reply line exists', async () => {
     await seedEvent({ direction: 'outbound', ours: '', body: 'The work is complete' });
     await seedEvent({ ours: '', body: 'Thanks!' });
-    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
   });
 
   test('successful human reply closes; automated or failed outbound does not', async () => {
@@ -262,6 +262,18 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     const stop = await seedEvent({ body: 'STOP', messageType: 'inbound' });
     await mockPg('sms_log').where({ twilio_sid: stop.sid }).update({ message_type: 'opt_out' });
     expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
+    await seedEvent({ body: 'A later question?' });
+    const canonicalStop = await seedEvent({ body: 'STOP', messageType: 'opt_out' });
+    await mockPg('sms_log').where({ twilio_sid: canonicalStop.sid }).update({ message_type: null });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
+  });
+
+  test('a legacy-only STOP closes its canonical peer', async () => {
+    await seedEvent({ body: 'Can you call me?' });
+    const stop = await seedEvent({ body: 'STOP', messageType: 'opt_out' });
+    await mockPg('messages').where({ twilio_sid: stop.sid }).del();
+
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
   });
 
   test('preserves customer, blocked sender, and internal-phone scope', async () => {
@@ -273,6 +285,15 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms({ excludePhones: ['+19415550101'] })).toEqual({ conversations: 0, messages: 0 });
   });
 
+  test('a peer-wide STOP closes a customer-scoped question across duplicate customer records', async () => {
+    const original = await seedEvent({ customerId: 'new', body: 'Can you call me?' });
+    await seedEvent({ customerId: 'new', body: 'STOP', messageType: 'opt_out' });
+
+    expect(await countUnreadInboundSms({ customerId: original.customerId })).toEqual({ conversations: 0, messages: 0 });
+    await seedEvent({ customerId: original.customerId, body: 'Can you call tomorrow?' });
+    expect(await countUnreadInboundSms({ customerId: original.customerId })).toEqual({ conversations: 1, messages: 1 });
+  });
+
   test('canonical customer phone changes keep the badge aligned with the displayed thread', async () => {
     const owned = await seedEvent({ customerId: 'new', phone: '+19415550100' });
     await mockPg('conversations').where({ customer_id: owned.customerId }).update({ contact_phone: null });
@@ -282,6 +303,15 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms({ customerId: owned.customerId })).toEqual({ conversations: 0, messages: 0 });
     await seedEvent({ customerId: owned.customerId, phone: '+19415550101', body: 'Can you help again?' });
     expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+  });
+
+  test('a STOP twin follows the canonical customer phone after identity changes', async () => {
+    const owned = await seedEvent({ customerId: 'new', phone: '+19415550100', body: 'Can you call me?' });
+    await seedEvent({ customerId: owned.customerId, phone: '+19415550100', body: 'STOP', messageType: 'opt_out' });
+    await mockPg('conversations').where({ customer_id: owned.customerId }).update({ contact_phone: null });
+    await mockPg('customers').where({ id: owned.customerId }).update({ phone: '+19415550101' });
+
+    expect(await countUnreadInboundSms({ customerId: owned.customerId })).toEqual({ conversations: 0, messages: 0 });
   });
 
   test('international peers stay distinct when a NANP peer with matching last digits is blocked', async () => {
