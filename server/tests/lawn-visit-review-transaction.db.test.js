@@ -16,7 +16,7 @@ const finding = (finding_id) => ({ finding_id, name: 'Weed pressure', label: 'we
   beforeAll(async () => { db = await createLawnVisitDb(); }, 60000);
   afterAll(async () => { if (db) await db.dispose(); });
 
-  async function seed(reconciliation = { published_observations: NO_OBSERVATIONS, stress_damage_override: 63 }) {
+  async function seed(reconciliation = { published_observations: NO_OBSERVATIONS }) {
     const customerId = randomUUID();
     await db.knex('customers').insert({ id: customerId, first_name: 'Review fixture', phone: `+1555${String(parseInt(customerId.slice(0, 6), 16) % 10000000).padStart(7, '0')}` });
     const [assessment] = await db.knex('lawn_assessments').insert({ customer_id: customerId, service_date: etDateString(), observations: NO_OBSERVATIONS }).returning('*');
@@ -36,10 +36,10 @@ const finding = (finding_id) => ({ finding_id, name: 'Weed pressure', label: 'we
     const { assessment } = await seed();
     const first = await addSpecies(assessment.id);
     expect(first.assessment.observations).toBe(MODEL_TEXT);
-    expect(first.run.reconciliation).toMatchObject({ published_observations: MODEL_TEXT, stress_damage_override: 63, technician_finding_high_water: 1 });
+    expect(first.run.reconciliation).toMatchObject({ published_observations: MODEL_TEXT, technician_finding_high_water: 1 });
     const second = await reviewRun({ assessmentId: assessment.id, review: { addedDetails: [] } }, db.knex);
     expect(second.assessment.observations).toBe(NO_OBSERVATIONS);
-    expect(second.run.reconciliation).toMatchObject({ published_observations: NO_OBSERVATIONS, stress_damage_override: 63, technician_finding_high_water: 1 });
+    expect(second.run.reconciliation).toMatchObject({ published_observations: NO_OBSERVATIONS, technician_finding_high_water: 1 });
     expect((await readAssessment(assessment.id)).observations).toBe(NO_OBSERVATIONS);
     expect((await loadRun(assessment.id, db.knex)).added_details).toEqual([]);
   });
@@ -80,23 +80,19 @@ const finding = (finding_id) => ({ finding_id, name: 'Weed pressure', label: 'we
     }
   });
 
-  test('text and score-only saves leave review stamps untouched and preserve or clear the stress override explicitly', async () => {
+  test('a text-only save leaves review stamps untouched', async () => {
     const { assessment, run } = await seed();
     expect((await reviewRun({ assessmentId: assessment.id }, db.knex)).run).toEqual(run);
-    const textOnly = await reviewRun({ assessmentId: assessment.id, observationEdit: NO_OBSERVATIONS, stressOverride: 77 }, db.knex);
+    const textOnly = await reviewRun({ assessmentId: assessment.id, observationEdit: NO_OBSERVATIONS }, db.knex);
     expect(textOnly.run).toMatchObject({ reviewed_at: null, reviewed_by_technician_id: null, reviewed_findings: null });
     const reviewed = await addSpecies(assessment.id);
-    expect(reviewed.run.reconciliation.stress_damage_override).toBe(77);
-    const cleared = await reviewRun({ assessmentId: assessment.id, stressOverride: null }, db.knex);
-    expect(cleared.run.reconciliation.stress_damage_override).toBeNull();
-    expect(cleared.run.reviewed_at).toEqual(reviewed.run.reviewed_at);
+    expect(reviewed.run.reviewed_at).toBeInstanceOf(Date);
   });
 
   test('invalid review, missing rows and invalid edits fail without a partial write', async () => {
     const { assessment, run } = await seed();
     await expect(reviewRun({ assessmentId: assessment.id, observationEdit: 'Must not save', review: { reviewedFindings: [{ finding_id: 'foreign' }] } }, db.knex)).rejects.toMatchObject({ status: 400 });
     await expect(reviewRun({ assessmentId: assessment.id, observationEdit: {} }, db.knex)).rejects.toThrow(TypeError);
-    await expect(reviewRun({ assessmentId: assessment.id, stressOverride: NaN }, db.knex)).rejects.toThrow(TypeError);
     await expect(reviewRun({ assessmentId: randomUUID() }, db.knex)).rejects.toMatchObject({ status: 404 });
     expect(await loadRun(assessment.id, db.knex)).toEqual(run);
     expect(await readAssessment(assessment.id)).toEqual(assessment);

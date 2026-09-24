@@ -9992,11 +9992,18 @@ function LawnAssessmentCompletionBlock({
     }
   }
 
-  function adjustScore(key, delta) {
+  // Owner ruling 2026-09-24: lawn health scores are read-only from photos.
+  // The only manual entry allowed is filling a metric the AI left blank —
+  // this never touches a metric the AI already scored (the server enforces
+  // the same rule independently; this just keeps the tech from typing into
+  // a metric that won't take effect).
+  function fillScore(key, rawValue) {
     setTechScores((prev) => {
       if (!prev) return prev;
-      const current = Number(prev[key]) || 0;
-      return { ...prev, [key]: Math.max(0, Math.min(100, current + delta)) };
+      if (rawValue === "") return { ...prev, [key]: null };
+      const n = Number(rawValue);
+      if (!Number.isFinite(n)) return prev;
+      return { ...prev, [key]: Math.max(0, Math.min(100, Math.round(n))) };
     });
   }
 
@@ -10234,6 +10241,15 @@ function LawnAssessmentCompletionBlock({
           <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
             {metrics.map((metric) => {
               const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
+              // Whether the AI itself knew this metric — fixed at analysis
+              // time (result.adjustedScores/displayScores), never from
+              // scoreSource, so a fill-in input stays open (still editable,
+              // still shows what was typed) once the tech starts typing into
+              // a metric the AI left blank, instead of collapsing to
+              // read-only the moment it first has a value.
+              const aiValue = lawnScores.lawnScoreValue(
+                (result?.adjustedScores ?? result?.displayScores)?.[metric.key],
+              );
               return (
                 <div
                   key={metric.key}
@@ -10250,15 +10266,33 @@ function LawnAssessmentCompletionBlock({
                     {value == null ? "—" : `${value}/100`}
                   </div>
                   <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
-                  {!confirmed && (
-                    <div style={{ display: "flex", justifyContent: "center", gap: 4, marginTop: 6 }}>
-                      <button type="button" aria-label={`Decrease ${metric.label}`} onClick={() => adjustScore(metric.key, -5)} style={scoreButtonStyle}>
-                        -
-                      </button>
-                      <button type="button" aria-label={`Increase ${metric.label}`} onClick={() => adjustScore(metric.key, 5)} style={scoreButtonStyle}>
-                        +
-                      </button>
-                    </div>
+                  {/* AI-known scores are read-only (owner ruling 2026-09-24).
+                      A metric the AI left blank (aiValue == null) is the one
+                      the tech can fill — the server enforces this too. */}
+                  {!confirmed && aiValue == null && (
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={100}
+                      value={techScores?.[metric.key] ?? ""}
+                      aria-label={`Enter ${metric.label}`}
+                      placeholder="0-100"
+                      onChange={(e) => fillScore(metric.key, e.target.value)}
+                      style={{
+                        width: "100%",
+                        marginTop: 6,
+                        height: 28,
+                        padding: "0 6px",
+                        borderRadius: 6,
+                        border: `1px solid ${D.border}`,
+                        background: D.white,
+                        color: D.heading,
+                        fontSize: 13,
+                        textAlign: "center",
+                        boxSizing: "border-box",
+                      }}
+                    />
                   )}
                 </div>
               );
@@ -10340,19 +10374,6 @@ function LawnAssessmentCompletionBlock({
     </div>
   );
 }
-
-const scoreButtonStyle = {
-  width: 24,
-  height: 24,
-  borderRadius: 6,
-  border: `1px solid ${D.border}`,
-  background: D.white,
-  color: D.heading,
-  fontSize: 14,
-  fontWeight: 500,
-  lineHeight: 1,
-  cursor: "pointer",
-};
 
 function serviceLineFromType(serviceType = "") {
   const text = String(serviceType || "").toLowerCase();

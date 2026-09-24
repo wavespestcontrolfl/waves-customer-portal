@@ -54,7 +54,7 @@ function runRowFor({ assessment, analysis, adjustedScores = null, photoRecords =
     // This writer creates the run alongside a NEW assessment. Capture the
     // exact initial text written there; later reviews compare before replacing
     // it and clear ownership when the technician changes the text manually.
-    reconciliation: JSON.stringify({ published_observations: assessment.observations ?? null, stress_damage_override: null }),
+    reconciliation: JSON.stringify({ published_observations: assessment.observations ?? null }),
     tokens_in: usage.input_tokens,
     tokens_out: usage.output_tokens,
     tokens_reasoning: usage.reasoning_tokens,
@@ -128,12 +128,9 @@ function responseForRun(run) {
 // takes its customer baseline lock BEFORE this assessment -> run lock order.
 // Read under those locks: a second partial review must merge the first one's
 // committed decisions, not the snapshot it saw before waiting.
-async function reviewRun({ assessmentId, review = {}, technicianId = null, observationEdit, stressOverride }, knex) {
+async function reviewRun({ assessmentId, review = {}, technicianId = null, observationEdit }, knex) {
   if (observationEdit !== undefined && observationEdit !== null && typeof observationEdit !== 'string') {
     throw new TypeError('Observation edit must be text or null');
-  }
-  if (stressOverride !== undefined && stressOverride !== null && (!Number.isFinite(stressOverride) || stressOverride < 0 || stressOverride > 100)) {
-    throw new TypeError('Stress override must be a score from 0 to 100 or null');
   }
   return knex.transaction(async (trx) => {
     let assessment = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
@@ -143,7 +140,7 @@ async function reviewRun({ assessmentId, review = {}, technicianId = null, obser
     const validated = validateReview(review, run);
     if (validated.errors.length) throw Object.assign(new Error('Invalid visit assessment review'), { status: 400, details: validated.errors });
     const provided = validated.review.provided;
-    if (!provided && observationEdit === undefined && stressOverride === undefined) return { assessment, run };
+    if (!provided && observationEdit === undefined) return { assessment, run };
 
     const previous = parseObject(run.reconciliation) || {};
     const built = provided ? buildReview(run, validated.review) : {};
@@ -158,10 +155,7 @@ async function reviewRun({ assessmentId, review = {}, technicianId = null, obser
     // generated sentence. A mismatched or absent marker never regains it.
     const published = observationEdit !== undefined || assessment.observations !== previous.published_observations
       ? null : (provided ? observations : previous.published_observations ?? null);
-    const reconciliation = {
-      ...previous, ...built.reconciliation, published_observations: published,
-      ...(stressOverride !== undefined ? { stress_damage_override: stressOverride } : {}),
-    };
+    const reconciliation = { ...previous, ...built.reconciliation, published_observations: published };
     const [updatedRun] = await trx('lawn_assessment_runs').where({ id: run.id }).update({
       reconciliation: JSON.stringify(reconciliation), updated_at: trx.fn.now(),
       ...(provided ? {
@@ -208,7 +202,7 @@ async function confirmLockedRun(args, customerId, trx) {
   }
   const decision = confirmScores(before, originalRun, adjustedScores, { scoreValue, calculateOverallScore });
   let { assessment, run } = await reviewRun({
-    assessmentId, review, technicianId, observationEdit, stressOverride: decision.stressOverride,
+    assessmentId, review, technicianId, observationEdit,
   }, trx);
   const update = {
     ...decision.finalScores, overall_score: decision.overallScore,

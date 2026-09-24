@@ -99,21 +99,39 @@ function independentStressFloor(run) {
   return parts.length ? Math.min(...parts) : null;
 }
 
-// `stressFloor`: the floor the derivation uses when the technician sent no
-// explicit stress correction — the run's INDEPENDENT stressors (above), so a
-// corrected fungus or thatch score re-derives stress from the corrected
-// components instead of keeping the stored AI stress as a permanent floor
-// (Codex #4150 r13: the standalone panel deletes stress_damage before posting
-// a fungus edit). `undefined` (no run) keeps the stored value as the floor.
-function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor, stressOverride } = {}) {
+// Owner ruling 2026-09-24: lawn health scores are READ-ONLY from photos. An
+// override is honored ONLY for a key the AI left unknown (null) — a blank AI
+// read is the one thing a technician may fill in; a key the AI DID determine
+// is authoritative no matter what the client posts. "The AI's value" is the
+// run's immutable `scores_adjusted` snapshot (`aiScores`, from `runAiScores`)
+// when a complete run exists — never the mutable assessment row, which a
+// technician's own earlier fill may already have changed. Without a run
+// (legacy rows, `aiScores` omitted), the assessment row's own stored value
+// stands in for the AI's read, exactly as before this ruling.
+//
+// `stressFloor`: the run's INDEPENDENT stressors (insect/drought/mechanical),
+// used only when the AI determined NO stress_damage at all (every underlying
+// signal, including fungus/thatch, was unknown) — the one case where
+// stress_damage is itself fillable/derivable rather than AI-fixed.
+// `undefined` (no run) leaves the floor to the stored value below.
+function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor, aiScores } = {}) {
   const adjusted = adjustedScores && typeof adjustedScores === 'object' ? adjustedScores : {};
+  const ai = aiScores && typeof aiScores === 'object' ? aiScores : null;
   const present = (value) => value != null && value !== '';
   // An override counts only when it is a finite number (or a non-blank string
   // that parses to one) — a blank, whitespace or malformed value falls back to
   // the stored score exactly as the legacy path does, never to 0.
+  // AI-known: read straight off the immutable run snapshot when one is
+  // supplied — that IS the AI's read, so it can never come back null while
+  // still counting as "known". Without a run (legacy path), the assessment
+  // row's own stored value stands in for the AI's read.
   const pick = (key) => {
-    if (numericOverride(adjusted[key])) return scoreValue(adjusted[key]);
-    return present(assessment[key]) ? scoreValue(assessment[key]) : null;
+    if (ai) {
+      if (known(ai[key])) return scoreValue(ai[key]);
+    } else if (present(assessment[key])) {
+      return scoreValue(assessment[key]);
+    }
+    return numericOverride(adjusted[key]) ? scoreValue(adjusted[key]) : (present(assessment[key]) ? scoreValue(assessment[key]) : null);
   };
   const final = {
     turf_density: pick('turf_density'),
@@ -122,12 +140,19 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
     fungus_control: pick('fungus_control'),
     thatch_level: pick('thatch_level'),
   };
-  if (numericOverride(adjusted.stress_damage)) {
+  const stressKnown = ai ? known(ai.stress_damage) : present(assessment.stress_damage);
+  if (stressKnown) {
+    // AI-produced Stress is fixed — never re-derived from a component edit,
+    // since an AI-known fungus/thatch can't be moved either.
+    final.stress_damage = ai ? scoreValue(ai.stress_damage) : scoreValue(assessment.stress_damage);
+  } else if (numericOverride(adjusted.stress_damage)) {
     final.stress_damage = scoreValue(adjusted.stress_damage);
-  } else if (known(stressOverride)) {
-    final.stress_damage = scoreValue(stressOverride);
+  } else if (present(assessment.stress_damage)) {
+    // A technician's earlier fill (this key was AI-blank) sticks across a
+    // later partial save that doesn't repeat it.
+    final.stress_damage = scoreValue(assessment.stress_damage);
   } else {
-    const floor = stressFloor === undefined ? (present(assessment.stress_damage) ? Number(assessment.stress_damage) : null) : stressFloor;
+    const floor = stressFloor === undefined ? null : stressFloor;
     const parts = [final.fungus_control, final.thatch_level, floor]
       .filter((value) => typeof value === 'number' && Number.isFinite(value));
     final.stress_damage = parts.length ? Math.min(...parts) : null;
@@ -165,28 +190,18 @@ function overallScoreFor(finalScores, calculateOverallScore) {
 // calibration needs a confirmed row with AI scores to compare against.
 function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
   const adjusted = adjustedScores || {};
-  const previousOverride = parseJsonObject(run?.reconciliation)?.stress_damage_override;
-  const componentChanged = ['fungus_control', 'thatch_level'].some((key) => numericOverride(adjusted[key]) && scoreValue(adjusted[key]) !== (numericOverride(assessment[key]) ? scoreValue(assessment[key]) : null));
-  // Preserve an explicit correction across partial confirmations. A later
-  // change to a component without an explicit stress edit requests a fresh
-  // derivation. The caller persists this marker on the run in the SAME
-  // transaction as the assessment, including null when ownership is cleared.
-  const stressOverride = numericOverride(adjusted.stress_damage)
-    ? scoreValue(adjusted.stress_damage)
-    : (componentChanged || !known(previousOverride) ? null : previousOverride);
+  const aiScores = runAiScores(run);
   const finalScores = resolveConfirmScores(assessment, adjusted, scoreValue, {
     ...(run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {}),
-    stressOverride,
+    aiScores,
   });
   const confirmed = scoresComplete(finalScores);
-  const aiScores = runAiScores(run);
   return {
     finalScores,
     overallScore: overallScoreFor(finalScores, calculateOverallScore),
     confirmed,
     missing: missingScores(finalScores),
     aiScores,
-    stressOverride,
     calibrationEligible: confirmed && SCORE_KEYS.some((key) => known(aiScores[key])),
   };
 }

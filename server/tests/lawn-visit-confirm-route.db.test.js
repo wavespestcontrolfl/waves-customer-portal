@@ -63,6 +63,10 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     if (owned) await owned.dispose();
   });
 
+  // The run's immutable scores_adjusted snapshot IS the AI's read (owner
+  // ruling 2026-09-24: lawn scores are read-only from photos) — it mirrors
+  // `scores` by default, exactly like the real /assess writer. A test that
+  // wants an AI-blank (fillable) key passes it as `null` in `scores`.
   async function seed(scores = {}, { run = true, service = false } = {}) {
     const f = await fixture(mockKnex);
     const visit = service ? await f.visit() : null;
@@ -74,9 +78,9 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     if (run) await mockKnex('lawn_assessment_runs').insert({
       assessment_id: assessment.id, customer_id: f.customerId, status: 'complete',
       prompt_version: 'route-fixture', context_hash: 'c'.repeat(64),
-      observations: MODEL_TEXT, scores_adjusted: JSON.stringify(COMPLETE),
+      observations: MODEL_TEXT, scores_adjusted: JSON.stringify({ ...UNKNOWN, ...scores }),
       findings: JSON.stringify([{ finding_id: 'F1', name: 'Weed pressure', label: 'weed pressure', confidence: 'moderate', severity: 'moderate', urgency: 'monitor' }]),
-      reconciliation: JSON.stringify({ published_observations: copy.NO_OBSERVATIONS, stress_damage_override: null }),
+      reconciliation: JSON.stringify({ published_observations: copy.NO_OBSERVATIONS }),
     });
     return { assessment, f, visit };
   }
@@ -283,8 +287,10 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     const { assessment } = await seed(COMPLETE, { run: false });
     if (missingTable) await mockKnex.schema.renameTable('lawn_assessment_runs', 'temporarily_missing_runs');
     try {
+      // turf_density is AI-known here (80, from COMPLETE) — the override is
+      // ignored; the free-text observations edit is unaffected.
       const result = await request(assessment.id, { adjustedScores: { turf_density: 72, observations: 'Technician legacy text' } });
-      expect(result.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 72, observations: 'Technician legacy text' } });
+      expect(result.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 80, observations: 'Technician legacy text' } });
       expect(result.body).not.toHaveProperty('confirmed');
       await drain();
       expect(delivery).not.toHaveBeenCalled();

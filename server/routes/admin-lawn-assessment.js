@@ -117,6 +117,40 @@ function finiteNumberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// /confirm's legacy (no-run) branch. Owner ruling 2026-09-24: lawn health
+// scores are READ-ONLY from photos. adjustedScores is honored ONLY for a key
+// the AI's own read left null on this assessment row — a blank AI read is
+// the one thing a technician may fill in. A key the AI DID determine keeps
+// its stored value regardless of what the client sends. Stress/Damage is
+// fixed the same way when AI-known — never re-derived from a component edit,
+// since an AI-known fungus/thatch can't be moved either. Only a genuinely
+// AI-blank Stress accepts a tech entry, falling back to the prior
+// derivation: worst of the fungus + thatch scores and the AI worst-spot
+// floor stored at /assess (which already folds in insect/drought/mechanical
+// and the worst per-photo disease/thatch). Pre-stress_damage rows (null
+// floor) fall back to worst-of(fungus, thatch) — never 0.
+function legacyConfirmFinalScores(assessment, adjustedScores) {
+  const aiKnown = (key) => assessment[key] != null;
+  const finalScores = Object.fromEntries(
+    ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level']
+      .map((key) => [key, aiKnown(key) ? scoreValue(assessment[key]) : scoreValue(adjustedScores?.[key], assessment[key])]),
+  );
+  if (aiKnown('stress_damage')) {
+    finalScores.stress_damage = scoreValue(assessment.stress_damage);
+    return finalScores;
+  }
+  const aiFloor = Number.isFinite(Number(assessment.stress_damage))
+    ? Number(assessment.stress_damage)
+    : 95;
+  const derivedStress = Math.min(
+    Number(finalScores.fungus_control),
+    Number(finalScores.thatch_level),
+    aiFloor,
+  );
+  finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
+  return finalScores;
+}
+
 function normalizeProtocolFieldChecks(input = {}) {
   const source = input && typeof input === 'object' ? input : {};
   const errors = [];
@@ -1089,29 +1123,7 @@ router.post('/confirm', async (req, res, next) => {
         });
       }
     } else {
-      const finalScores = Object.fromEntries(
-        ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level']
-          .map((key) => [key, scoreValue(adjustedScores?.[key], assessment[key])]),
-      );
-      // Stress/Damage. The tech now corrects a single "Stress" score directly on
-      // the completion screen, so honor an explicit adjustedScores.stress_damage
-      // when sent. When it isn't (older clients, or a prefill re-confirm that only
-      // carries the AI values), fall back to the prior derivation: worst of the
-      // fungus + thatch scores and the AI worst-spot floor stored at /assess (which
-      // already folds in insect/drought/mechanical and the worst per-photo
-      // disease/thatch). Pre-stress_damage rows (null floor) fall back to
-      // worst-of(fungus, thatch) — never 0.
-      {
-        const aiFloor = Number.isFinite(Number(assessment.stress_damage))
-          ? Number(assessment.stress_damage)
-          : 95;
-        const derivedStress = Math.min(
-          Number(finalScores.fungus_control),
-          Number(finalScores.thatch_level),
-          aiFloor,
-        );
-        finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
-      }
+      const finalScores = legacyConfirmFinalScores(assessment, adjustedScores);
 
       const updateData = {
         confirmed_by_tech: true,

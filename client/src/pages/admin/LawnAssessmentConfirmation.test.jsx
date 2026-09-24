@@ -51,7 +51,9 @@ it('keeps the field panel editable after a pending save and accepts a later lega
   fireEvent.click(await screen.findByRole('button', { name: 'Confirm Scores' }));
   await waitFor(() => expect(alert).toHaveBeenCalledWith(message));
   expect(screen.queryByText('0%')).toBeNull();
-  expect(screen.getAllByText('—')).toHaveLength(2);
+  // color_health is the one AI-blank metric: its AI tile reads "—"; its TECH
+  // tile is a fill-in input, not a second "—".
+  expect(screen.getAllByText('—')).toHaveLength(1);
   expect(screen.queryByRole('button', { name: 'Done' })).toBeNull();
   expect(screen.getByRole('button', { name: 'Retake' }).disabled).toBe(false);
   expect(screen.getByRole('button', { name: 'Confirm Scores' }).disabled).toBe(false);
@@ -71,14 +73,16 @@ it('allows explicit technician scores when analysis returned no scores', async (
     target: { files: [new File(['fixture'], 'lawn.jpg', { type: 'image/jpeg' })] },
   });
   fireEvent.click(await screen.findByRole('button', { name: /Analyze 1 Photo/ }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Increase Turf Density' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Decrease Fungus Control' }));
+  // Every metric is AI-blank here, so every TECH cell is a fill-in input.
+  fireEvent.change(await screen.findByLabelText('Enter Turf Density'), { target: { value: '5' } });
+  fireEvent.change(screen.getByLabelText('Enter Fungus Control'), { target: { value: '0' } });
   fireEvent.click(screen.getByRole('button', { name: 'Confirm Scores' }));
   await waitFor(() => expect(alert).toHaveBeenCalledWith(message));
   const sent = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
   expect(sent.adjustedScores).toEqual({ turf_density: 5, fungus_control: 0 });
-  // Untouched unavailable metrics remain unknown, never invented defaults.
-  expect(screen.getAllByText('—')).toHaveLength(8);
+  // Untouched unavailable metrics remain unknown, never invented defaults —
+  // every AI tile reads "—" regardless of which ones were filled.
+  expect(screen.getAllByText('—')).toHaveLength(5);
 });
 
 it('keeps a pending assessment out of closeout and allows a later completed confirmation', async () => {
@@ -114,16 +118,15 @@ it.each([null, 0])('preserves an unavailable or genuinely zero score when reload
   expect(sent.adjustedScores).toEqual(expected);
 });
 
-it('lets the technician supply every missing confirmation score without changing known AI components', async () => {
+it('lets the technician fill every AI-blank confirmation score without moving a known AI component', async () => {
   loadedAssessment = { ...assessment, color_health: 80, fungus_control: null, thatch_level: null };
   render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
   const confirm = await screen.findByRole('button', { name: 'Confirm assessment' });
   expect(screen.getAllByText('—')).toHaveLength(2);
-  fireEvent.click(screen.getByRole('button', { name: 'Increase Fungus control' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Increase Thatch condition' }));
+  fireEvent.change(screen.getByLabelText('Enter Fungus control'), { target: { value: '8' } });
+  fireEvent.change(screen.getByLabelText('Enter Thatch condition'), { target: { value: '5' } });
   // Both controls remain editable until saving, including correcting an entry.
-  fireEvent.click(screen.getByRole('button', { name: 'Increase Fungus control' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Decrease Fungus control' }));
+  fireEvent.change(screen.getByLabelText('Enter Fungus control'), { target: { value: '5' } });
   fireEvent.click(confirm);
   await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith('lawn-assessment/confirm'))).toBe(true));
   const sent = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
@@ -133,12 +136,17 @@ it('lets the technician supply every missing confirmation score without changing
   });
 });
 
-it('keeps known underlying scores out of the normal four-control workflow', async () => {
+it('keeps known underlying scores out of the normal four-control workflow, with no +/- controls left anywhere', async () => {
   render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
   await screen.findByRole('button', { name: 'Confirm assessment' });
-  expect(screen.queryByRole('button', { name: 'Increase Fungus control' })).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Increase Thatch condition' })).toBeNull();
-  expect(screen.getAllByRole('button', { name: /^Increase / })).toHaveLength(4);
+  // Owner ruling 2026-09-24: AI-known scores are read-only, so the +/-
+  // controls are gone entirely — the only editable metric left is
+  // color_health, the one AI-blank primary metric.
+  expect(screen.queryByRole('button', { name: /^Increase /i })).toBeNull();
+  expect(screen.queryByRole('button', { name: /^Decrease /i })).toBeNull();
+  expect(screen.queryByLabelText('Enter Fungus control')).toBeNull();
+  expect(screen.queryByLabelText('Enter Thatch condition')).toBeNull();
+  expect(screen.getByLabelText('Enter Color')).toBeTruthy();
 });
 
 const savedVisit = () => ({
