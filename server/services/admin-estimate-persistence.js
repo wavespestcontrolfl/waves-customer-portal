@@ -3104,6 +3104,14 @@ async function reviseAdminEstimate({
         // fan-out (markSprinklerSettingsMoved) takes that advisory lock
         // later, and the reverse order would deadlock (codex r33 P1).
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(synced.customer_id)]);
+        // …then the customer-comms fence, BEFORE any row lock (its lock-order
+        // contract, and the codebase-wide property-preferences → customer-
+        // comms → customer row order): website publication takes this same
+        // fence first and then locks estimate → customer, so without it a
+        // publication and a staff revision of a newly flagged draft could
+        // hold one row each and wait on the other (pre-push audit P1 after
+        // r41). Serialized here, the row order below no longer matters.
+        await require('../utils/customer-comms-lock').lockCustomerComms(trx, synced.customer_id);
         await trx('customers').where({ id: synced.customer_id }).whereNull('deleted_at').forUpdate().first('id');
       }
     }

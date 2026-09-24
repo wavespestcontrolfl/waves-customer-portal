@@ -36,3 +36,13 @@ describe('admin send: every link-visible group member carries the delivery claim
     expect(rel).toContain("- 'delivering_at' - 'delivering_token'");
   });
 });
+
+describe('staff revision of a flagged draft: customer-comms fence before the row locks (pre-push audit P1 after r41)', () => {
+  test('property-preferences advisory → customer-comms → customer row → estimate row', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/admin-estimate-persistence'), 'utf8');
+    const start = src.indexOf("['property-preferences', String(synced.customer_id)]");
+    const block = src.slice(start, src.indexOf('const lockedPrior = await trx', start));
+    expect(block).toContain(".lockCustomerComms(trx, synced.customer_id);");
+    expect(block.indexOf('.lockCustomerComms(')).toBeLessThan(block.indexOf(".forUpdate().first('id')"));
+  });
+});
