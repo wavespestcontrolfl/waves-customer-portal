@@ -1201,8 +1201,14 @@ router.post('/confirm', async (req, res, next) => {
         // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
         await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
 
-        // 3. Tech calibration — record AI vs tech score differences
-        if (adjustedScores) {
+        // 3. Tech calibration — record AI vs tech score differences. The
+        // drawer posts only typed keys now, so compare against the FINAL saved
+        // scores (the confirmed row), never the sparse request payload.
+        const confirmedScores = Object.fromEntries(
+          ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage']
+            .map((key) => [key, updated?.[key] ?? null]),
+        );
+        if (updated) {
           const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
           const aiScores = calibrationBaseline
             ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
@@ -1217,7 +1223,7 @@ router.post('/confirm', async (req, res, next) => {
             const parts = [f, t, 95].filter(Number.isFinite);
             if (parts.length > 1) aiScores.stress_damage = Math.min(...parts);
           }
-          await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
+          await LawnIntel.recordTechCalibration(assessmentId, aiScores, confirmedScores);
         }
 
         // 4. Lawn health → customer health signal

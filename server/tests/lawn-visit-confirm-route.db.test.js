@@ -287,6 +287,12 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     const { assessment } = await seed({ ...COMPLETE, fungus_control: 75, thatch_level: 85, stress_damage: null }, { run: false });
     const result = await request(assessment.id, { adjustedScores: {} });
     expect(result.body.assessment.stress_damage).toBe(75);
+    // Calibration compares against the final saved scores, not the sparse
+    // (typed-only) request payload.
+    await drain();
+    const [, , techScores] = intel.recordTechCalibration.mock.calls.at(-1);
+    expect(techScores).toMatchObject({ fungus_control: 75, thatch_level: 85, stress_damage: 75 });
+    expect(Object.values(techScores).every((v) => v !== undefined)).toBe(true);
   });
 
   test.each([false, true])('legacy confirmation works when the optional run table is missing: %s', async (missingTable) => {
