@@ -262,6 +262,12 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
         body: 'Synthetic question?', media: '[]', metadata: '{}', message_type: 'inbound',
         delivery_status: 'received', twilio_sid: sid, is_read: false, created_at: createdAt,
       });
+      const current = messages[messages.length - 1];
+      for (let history = 1; history <= 8; history += 1) messages.push({
+        ...current, id: randomUUID(), twilio_sid: null, direction: 'outbound',
+        body: 'Completed', message_type: 'manual', delivery_status: 'delivered',
+        created_at: new Date(createdAt.getTime() - history * 60000),
+      });
       logs.push({
         id: randomUUID(), customer_id: null, direction: 'inbound', from_phone: phone, to_phone: '+19415550190',
         message_body: 'Synthetic question?', metadata: '{}', message_type: 'inbound', status: 'received',
@@ -271,6 +277,7 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     await mockPg.batchInsert('conversations', conversations, 100);
     await mockPg.batchInsert('messages', messages, 100);
     await mockPg.batchInsert('sms_log', logs, 100);
+    await mockPg.raw('ANALYZE messages; ANALYZE conversations; ANALYZE sms_log');
     mockRawCalls.length = 0;
     await countUnreadInboundSms();
     const [sql, bindings] = mockRawCalls.find(([statement]) => statement.includes('WITH base_sms AS'));
@@ -279,6 +286,11 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     expect(plan.Plan).toBeTruthy();
     // Materialize once so the human-reply and STOP anti-joins do not rescan
     // the complete message history for every pending peer.
-    expect(JSON.stringify(plan.Plan)).toContain('CTE Scan');
+    const nodes = [];
+    const collect = node => { nodes.push(node); (node.Plans || []).forEach(collect); };
+    collect(plan.Plan);
+    const contextScans = nodes.filter(node => node['CTE Name'] === 'sms_events' && node.Alias === 'prev');
+    expect(contextScans).toHaveLength(1);
+    expect(contextScans[0]['Actual Loops']).toBe(1);
   });
 });

@@ -383,18 +383,22 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
           SELECT 1 FROM blocked_numbers b WHERE ${blockedPeer} = s.peer
         )
       ORDER BY s.peer, s.endpoint, s.created_at DESC, s.id DESC
+    ), prior_context AS MATERIALIZED (
+      SELECT DISTINCT ON (li.id) li.id, prev.message_body
+      FROM latest_inbound li
+      JOIN sms_events prev ON prev.peer = li.peer AND prev.endpoint = li.endpoint
+        AND prev.direction = 'outbound' AND li.endpoint <> ''
+        AND prev.delivery_status IN ('queued', 'sent', 'delivered')
+        AND prev.message_type <> 'internal_alert'
+        AND prev.created_at < li.created_at
+        AND prev.created_at > li.created_at - INTERVAL '24 hours'
+      ORDER BY li.id, prev.created_at DESC, prev.id DESC
     )
     SELECT li.id, li.peer, li.endpoint, li.customer_id, li.message_body,
            li.message_type, li.metadata, li.media, li.created_at,
-           (SELECT prev.message_body FROM sms_events prev
-            WHERE prev.direction = 'outbound' AND li.endpoint <> ''
-              AND prev.delivery_status IN ('queued', 'sent', 'delivered')
-              AND prev.message_type <> 'internal_alert'
-              AND prev.peer = li.peer AND prev.endpoint = li.endpoint
-              AND prev.created_at < li.created_at
-              AND prev.created_at > li.created_at - INTERVAL '24 hours'
-            ORDER BY prev.created_at DESC, prev.id DESC LIMIT 1) AS prior_outbound_body
+           prior_context.message_body AS prior_outbound_body
     FROM latest_inbound li
+    LEFT JOIN prior_context ON prior_context.id = li.id
     WHERE NOT EXISTS (
       SELECT 1 FROM sms_events os
       WHERE os.direction = 'outbound'
