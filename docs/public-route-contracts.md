@@ -1688,7 +1688,15 @@ open pest/lawn re-service never false-hits. A duplicate returns the same
 else on the lead changes — status/pipeline_stage/converted_at/member_since
 all stay untouched (`promoteCustomerOnBooking`'s own
 `isAssessmentServiceType` guard, matching `admin-leads.js`'s identical
-assessment posture). An unlinked lead whose phone matches an existing
+assessment posture). A lead that is ALREADY linked to a customer
+(`leads.customer_id`) is trusted only when the link is proven
+(`loadTrustedCustomer`): the lead's contact is verified (below) AND the
+linked customer's phone is the lead's own — `customer_id` alone is never
+proof, since public-quote.js links quote leads to existing customers from
+unverified submitted contact info. An unproven link is treated as no link:
+none of that customer's address, visits or reschedule links are returned,
+and a booking goes onto a separate prospect while the existing link is left
+untouched. An unlinked lead whose phone matches an existing
 customer (`leadContactVerified`) only reuses that customer when the phone
 is independently corroborated and still the lead's CURRENT phone — an
 inbound-call lead whose phone equals its originating `call_log.from_phone`,

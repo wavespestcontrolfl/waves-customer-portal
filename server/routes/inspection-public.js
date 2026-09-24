@@ -301,6 +301,25 @@ async function loadLead(dbConn, leadId) {
   return dbConn('leads').where({ id: leadId }).whereNull('deleted_at').first(...LEAD_ROW_FIELDS);
 }
 
+// The lead's EXISTING customer link, only when it is proven (Codex #4737 P0):
+// leads.customer_id can be set from unverified submitted contact info
+// (public-quote.js links a quote lead to an existing customer by phone/
+// email), so it is never proof of ownership on its own. Trusted only when
+// the link holder is verified for the lead's phone (leadContactVerified —
+// the originating call's caller ID, or a phone-bound SMS claim) AND that
+// phone is the linked customer's own. Anything else is treated as no link:
+// none of that customer's address, visits or reschedule links are exposed,
+// and a booking goes onto a separate prospect (the existing link is left
+// as it is).
+async function loadTrustedCustomer(dbConn, lead, token) {
+  if (!lead?.customer_id) return null;
+  const customer = await loadCustomer(dbConn, lead.customer_id);
+  if (!customer) return null;
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  if (!last10(customer.phone) || last10(customer.phone) !== last10(lead.phone)) return null;
+  return (await leadContactVerified(lead, token, dbConn)) ? customer : null;
+}
+
 async function loadCustomer(dbConn, customerId) {
   return dbConn('customers').where({ id: customerId }).whereNull('deleted_at').first(
     'id', 'first_name', 'last_name', 'phone', 'email',
@@ -850,7 +869,7 @@ router.get('/:token', async (req, res, next) => {
     const lead = await loadLead(db, verified.leadId);
     if (!lead) return res.json({ state: 'gone' });
 
-    const custRow = lead.customer_id ? await loadCustomer(db, lead.customer_id) : null;
+    const custRow = await loadTrustedCustomer(db, lead, verified);
     const leadPayload = buildLeadPayload(lead, custRow);
 
     const eligibility = await resolveEligibility(db, lead, custRow);
@@ -920,7 +939,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
   try {
     const lead = await loadLead(db, verified.leadId);
     if (!lead) return res.status(404).json({ error: 'not_found' });
-    const custRow = lead.customer_id ? await loadCustomer(db, lead.customer_id) : null;
+    const custRow = await loadTrustedCustomer(db, lead, verified);
 
     const resolved = await finalizeBookingLocation(lead, custRow, addressInput);
     if (resolved.failure) {
@@ -960,7 +979,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   try {
     const lead = await loadLead(db, verified.leadId);
     if (!lead) return res.status(404).json({ error: 'not_found' });
-    const custRow = lead.customer_id ? await loadCustomer(db, lead.customer_id) : null;
+    const custRow = await loadTrustedCustomer(db, lead, verified);
     // Routed through finalizeBookingLocation (not a raw resolveServiceAddress
     // call) so a directly-supplied out-of-area address can't be used to pull
     // slot availability for a location that would never survive the commit
@@ -1022,7 +1041,7 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
 
     const freshLead = await loadLead(trx, lead.id);
     if (!freshLead) return { eligibility: { state: 'gone', visit: null, rescheduleUrl: null } };
-    const freshCustRow = freshLead.customer_id ? await loadCustomer(trx, freshLead.customer_id) : null;
+    const freshCustRow = await loadTrustedCustomer(trx, freshLead, verified);
 
     // includeRescheduleUrl:false — see resolveEligibility's own docblock.
     const eligibility = await resolveEligibility(trx, freshLead, freshCustRow, { includeRescheduleUrl: false });
@@ -1050,7 +1069,12 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
       // technician dispatched for a different address (Codex pre-push
       // P1, 2026-09-24).
       if (linkResult.location) location = linkResult.location;
-      await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
+      // Only an UNLINKED lead gets linked here; an existing but unproven
+      // link is left exactly as it is (Codex #4737 P0) — this booking
+      // lives on its own prospect.
+      if (!freshLead.customer_id) {
+        await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
+      }
     } else {
       // Compare the fresh row's stored-address fields against the
       // PRE-LOCK custRow snapshot `resolved` was actually computed
@@ -1301,7 +1325,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const lead = await loadLead(db, verified.leadId);
     if (!lead) return res.status(404).json({ error: 'not_found' });
 
-    let custRow = lead.customer_id ? await loadCustomer(db, lead.customer_id) : null;
+    let custRow = await loadTrustedCustomer(db, lead, verified);
     const leadPayload = buildLeadPayload(lead, custRow);
 
     // Cheap pre-lock fast path: an obviously-ineligible lead (an existing

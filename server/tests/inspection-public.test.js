@@ -194,6 +194,11 @@ async function callFindSlots(token, body = {}) {
   return res;
 }
 
+beforeEach(() => {
+  // The originating call for LINKED_LEAD (caller ID = LEAD_ROW.phone).
+  firstResults.call_log = { from_phone: '+19415550101' };
+});
+
 afterEach(() => {
   for (const key of Object.keys(firstResults)) delete firstResults[key];
   for (const key of Object.keys(listResults)) delete listResults[key];
@@ -223,6 +228,10 @@ const LEAD_ROW = {
   id: LEAD_ID, first_name: 'Pat', last_name: 'Lee', phone: '9415550101', email: null,
   address: null, city: null, zip: null, status: 'new', customer_id: null, converted_at: null,
 };
+// A lead whose customer link is PROVEN (Codex #4737 P0): an inbound-call
+// lead whose phone still equals its originating call's caller ID (the
+// default call_log fixture below) and matches the linked customer's phone.
+const LINKED_LEAD = { ...LEAD_ROW, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
 
 describe('gate off', () => {
   test('every route 404s while GATE_LEAD_INSPECTION_LINK is off', async () => {
@@ -303,8 +312,8 @@ describe('GET /:token state shapes', () => {
   });
 
   test('already_booked: an open non-terminal Waves Assessment visit exists', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    firstResults.customers = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     listResults.scheduled_services = [
       { id: 'svc-1', scheduled_date: '2027-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok' },
     ];
@@ -327,8 +336,8 @@ describe('GET /:token state shapes', () => {
   });
 
   test('converted: a future booked NON-assessment visit exists', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    firstResults.customers = { id: 'cust-1' };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101' };
     listResults.scheduled_services = [
       { id: 'svc-2', scheduled_date: '2099-01-05', window_start: '10:00', window_end: '11:00', service_type: 'General Pest Control', reschedule_token: 'tok2' },
     ];
@@ -351,8 +360,8 @@ describe('GET /:token state shapes', () => {
   });
 
   test('ok: coords resolve from the linked customer row — availability built, phone masked', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    firstResults.customers = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     listResults.scheduled_services = [];
     mockBuildAvailability.mockResolvedValueOnce({ slots: [], days: [{ date: '2027-01-10', slots: [{ start_time: '09:00' }] }] });
     const token = mintLeadConsultationToken(LEAD_ID);
@@ -367,9 +376,9 @@ describe('GET /:token state shapes', () => {
   });
 
   test('out_of_area: a stored address resolves outside the service area (P1 :638)', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
     firstResults.customers = {
-      id: 'cust-1', address_line1: '1 Somewhere Rd', city: 'Wauchula', state: 'FL', zip: '33873',
+      id: 'cust-1', phone: '9415550101', address_line1: '1 Somewhere Rd', city: 'Wauchula', state: 'FL', zip: '33873',
       latitude: 27.5, longitude: -81.8,
     };
     listResults.scheduled_services = [];
@@ -383,9 +392,9 @@ describe('GET /:token state shapes', () => {
   });
 
   test('service_area_unavailable: county lookup fails on an otherwise-resolved stored address (P1 :638)', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
     firstResults.customers = {
-      id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209',
+      id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209',
       latitude: 27.4, longitude: -82.5,
     };
     listResults.scheduled_services = [];
@@ -397,6 +406,52 @@ describe('GET /:token state shapes', () => {
     expect(res.body.needs_address).toBe(false);
     expect(res.body.availability).toBe(null);
     expect(mockBuildAvailability).not.toHaveBeenCalled();
+  });
+});
+
+// Codex #4737 P0: leads.customer_id can come from unverified submitted
+// contact info (public-quote.js), so an unproven link must expose nothing of
+// that customer and must never book onto them.
+describe('an UNPROVEN existing lead→customer link', () => {
+  const VICTIM = {
+    id: 'cust-victim', phone: '9415550101', first_name: 'Vic', last_name: 'Tim',
+    address_line1: '9 Victim Way', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5,
+  };
+
+  test('GET: a web-form lead linked to a customer sees none of that customer\'s address, visit or reschedule link', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-victim' }; // no call provenance, no SMS claim
+    firstResults.customers = VICTIM;
+    listResults.scheduled_services = [
+      { id: 'ss-v', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'victim-tok' },
+    ];
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.state).not.toBe('already_booked');
+    expect(JSON.stringify(res.body)).not.toMatch(/Victim Way|victim-tok|reschedule/);
+  });
+
+  test('GET: the same link IS trusted once the lead is a verified call lead with the customer\'s phone', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-victim' };
+    firstResults.customers = VICTIM;
+    listResults.scheduled_services = [
+      { id: 'ss-v', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'victim-tok' },
+    ];
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.state).toBe('already_booked');
+  });
+
+  test('POST: an unproven link books onto a separate prospect and leaves the existing link untouched', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-victim' };
+    firstResults.customers = VICTIM;
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-new', existingCustomer: null, matchType: null });
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Any St, Bradenton, FL 34209' });
+    expect(res.statusCode).toBe(200);
+    expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).not.toBe('cust-victim');
+    expect(updateCalls.some((c) => c.table === 'leads' && 'customer_id' in c.payload)).toBe(false);
   });
 });
 
@@ -463,8 +518,8 @@ describe('POST /:token commit', () => {
   const okBody = () => ({ date: FUTURE_DATE, time: '09:00' });
 
   test('idempotent: an already-open assessment short-circuits BEFORE geocoding or booking', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    firstResults.customers = { id: 'cust-1', address_line1: '123 Palm Ave' };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave' };
     listResults.scheduled_services = [
       { id: 'svc-1', scheduled_date: '2027-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok' },
     ];
@@ -505,8 +560,8 @@ describe('POST /:token commit', () => {
   });
 
   test('out of area: 422, no booking', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    firstResults.customers = { id: 'cust-1', address_line1: '123 Somewhere Rd', city: 'Wauchula', state: 'FL', zip: '33873' };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Somewhere Rd', city: 'Wauchula', state: 'FL', zip: '33873' };
     listResults.scheduled_services = [];
     mockCounty.mockResolvedValueOnce('Hardee'); // not in SERVICE_AREA_COUNTIES
     const token = mintLeadConsultationToken(LEAD_ID);
@@ -522,8 +577,8 @@ describe('POST /:token commit', () => {
   // geocodeAddressWithStatus with requireInServiceArea:false (street-level
   // quality filtering stays on via serviceAddress:true).
   test('geocodes with requireInServiceArea:false — an out-of-box address reaches checkServiceArea, never silently "unresolved"', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    firstResults.customers = { id: 'cust-1', address_line1: '1 Rooftop Rd', city: 'Fort Worth', state: 'TX', zip: '76102' };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '1 Rooftop Rd', city: 'Fort Worth', state: 'TX', zip: '76102' };
     listResults.scheduled_services = [];
     mockCounty.mockResolvedValueOnce('Tarrant'); // real county, not in SERVICE_AREA_COUNTIES
     const token = mintLeadConsultationToken(LEAD_ID);
@@ -558,8 +613,8 @@ describe('POST /:token commit', () => {
   });
 
   test('slot_taken: the requested time is no longer in the fresh single-day rebuild', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    firstResults.customers = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209' };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209' };
     listResults.scheduled_services = [];
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
     // Day rebuild has no matching start_time.
@@ -574,8 +629,8 @@ describe('POST /:token commit', () => {
   });
 
   test('happy path: books through createSelfBooking with the assessment callbackVisit contract — never converts, no lead_id', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     firstResults.customers = custRow;
     listResults.scheduled_services = [];
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -622,8 +677,8 @@ describe('POST /:token commit', () => {
   // callbackVisit.dedupeLane test above and the round-5 tests below) — no
   // second lock of ours wraps the booking call.
   test('the commit takes ONE per-lead advisory lock, for provisioning only — the booking itself is NOT wrapped in a lock of ours', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     firstResults.customers = custRow;
     listResults.scheduled_services = [];
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -652,8 +707,8 @@ describe('POST /:token commit', () => {
   // fixed by never holding one open while it runs: prove createSelfBooking
   // is invoked only once NO db.transaction() call is currently open.
   test('createSelfBooking runs only after every one of our transactions has committed — never nested inside one (P1 :834)', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     firstResults.customers = custRow;
     listResults.scheduled_services = [];
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -680,8 +735,8 @@ describe('POST /:token commit', () => {
   // eligibility re-check under the lock is what stops a SECOND commit for
   // the same lead (any slot) once the first has actually booked.
   test('concurrent-commit dedupe: a second commit after the first booked short-circuits instead of double-booking', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     firstResults.customers = custRow;
     listResults.scheduled_services = [];
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -726,8 +781,8 @@ describe('POST /:token commit', () => {
   // booking.js throws this from inside its insert transaction — see
   // reservice-scheduler.js's laneForCallbackRow/openCallbackExistsForLane).
   test('two overlapping commits at different slots: exactly one createSelfBooking insert succeeds, the other maps ALREADY_BOOKED to already_booked with the survivor', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     firstResults.customers = custRow;
     listResults.scheduled_services = []; // BOTH commits' pre-checks see this — neither observes the other first
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -777,8 +832,8 @@ describe('POST /:token commit', () => {
   // supplied one, and the address that DOES resolve gets written back onto
   // the customer row so the lead isn't asked for it again.
   test('a supplied address wins when the stored one fails to geocode, and gets persisted onto the customer', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-    const custRow = { id: 'cust-1', address_line1: '1 Bad Rd', city: 'Nowhere', state: 'FL', zip: '00000', latitude: null, longitude: null };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', phone: '9415550101', address_line1: '1 Bad Rd', city: 'Nowhere', state: 'FL', zip: '00000', latitude: null, longitude: null };
     firstResults.customers = custRow;
     listResults.scheduled_services = [];
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -819,11 +874,11 @@ describe('POST /:token commit', () => {
   describe('a stored-address change detected under the lock (P1 :845, round 13)', () => {
     const LOC_A = { lat: 27.55, lng: -82.55 };
     const addresslessCustomer = () => ({
-      id: 'cust-1', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null,
+      id: 'cust-1', phone: '9415550101', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null,
     });
 
     test('another commit\'s address landing on the row between the pre-lock read and the lock aborts recoverably — never adopts it, never overwrites it, never re-geocodes under the lock', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
       firstResults.customers = addresslessCustomer();
       listResults.scheduled_services = [];
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -834,7 +889,7 @@ describe('POST /:token commit', () => {
           // under the lock, it no longer matches the addressless snapshot
           // the pre-lock resolution of B was computed against.
           firstResults.customers = {
-            id: 'cust-1', address_line1: '111 A St', address_line2: null,
+            id: 'cust-1', phone: '9415550101', address_line1: '111 A St', address_line2: null,
             city: 'Bradenton', state: 'FL', zip: '34209', latitude: LOC_A.lat, longitude: LOC_A.lng,
           };
           return { location: { lat: 27.7, lng: -82.7 } };
@@ -909,8 +964,8 @@ describe('POST /:token commit', () => {
   // isn't asked for again (this file's own header contract).
   describe('address write-back when the stored row is unchanged under the lock (P1 :845, round 13)', () => {
     test('stored address absent: the pre-lock validated supplied address is persisted, booking proceeds at that location', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-      firstResults.customers = { id: 'cust-1', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null };
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null };
       listResults.scheduled_services = [];
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       const LOC = { lat: 27.55, lng: -82.55 };
@@ -943,8 +998,8 @@ describe('POST /:token commit', () => {
     // supplied is KEPT when the booking attempt fails — no undo (undoing it
     // raced concurrent bookings that had adopted it, Codex #4737 r3/r4).
     test('a booking that fails after the write-back keeps the validated address', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-      firstResults.customers = { id: 'cust-1', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null };
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null };
       listResults.scheduled_services = [];
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       const LOC = { lat: 27.55, lng: -82.55 };
@@ -964,8 +1019,8 @@ describe('POST /:token commit', () => {
     });
 
     test('a stored address that geocodes but had no coordinates gets them persisted before booking', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-      firstResults.customers = { id: 'cust-1', address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null };
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null };
       listResults.scheduled_services = [];
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       mockGeocode.mockResolvedValueOnce({ location: { lat: 27.51, lng: -82.52 } });
@@ -981,9 +1036,9 @@ describe('POST /:token commit', () => {
     });
 
     test('stored address present but unresolvable, unchanged under the lock: the validated supplied replacement wins and is written back, fixing up the bad stored address', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
       firstResults.customers = {
-        id: 'cust-1', address_line1: '999 Existing Rd', address_line2: null,
+        id: 'cust-1', phone: '9415550101', address_line1: '999 Existing Rd', address_line2: null,
         city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null,
       };
       listResults.scheduled_services = [];
@@ -1029,9 +1084,9 @@ describe('POST /:token commit', () => {
   // was ever taken) is what wins, unconditionally, once the fresh row is
   // confirmed unchanged.
   test('stored address unresolvable pre-lock, unchanged under the lock: the pre-lock in-area supplied resolution wins, books successfully (P1 :839, :845)', async () => {
-    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
     firstResults.customers = {
-      id: 'cust-1', address_line1: '1 Rooftop Rd', address_line2: null,
+      id: 'cust-1', phone: '9415550101', address_line1: '1 Rooftop Rd', address_line2: null,
       city: 'Fort Worth', state: 'TX', zip: '76102', latitude: null, longitude: null,
     };
     listResults.scheduled_services = [];
@@ -1065,8 +1120,8 @@ describe('POST /:token commit', () => {
   // is the only place they're ever checked against the service area).
   describe('service-area verification failures (P1 :355)', () => {
     test('a Google key configured + reverseGeocodeCounty returns null: recoverable 503, no booking', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-      firstResults.customers = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
       listResults.scheduled_services = [];
       mockCounty.mockResolvedValueOnce(null); // provider timeout/outage — not "fine"
       const token = mintLeadConsultationToken(LEAD_ID);
@@ -1080,8 +1135,8 @@ describe('POST /:token commit', () => {
       delete process.env.GOOGLE_API_KEY;
       delete process.env.GOOGLE_MAPS_API_KEY;
       try {
-        firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
-        firstResults.customers = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4989, longitude: -82.5748 };
+        firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+        firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4989, longitude: -82.5748 };
         listResults.scheduled_services = [];
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockBuildAvailability.mockResolvedValueOnce({
@@ -1103,9 +1158,9 @@ describe('POST /:token commit', () => {
       delete process.env.GOOGLE_API_KEY;
       delete process.env.GOOGLE_MAPS_API_KEY;
       try {
-        firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+        firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
         // Fort Worth, TX — a real rooftop, just nowhere near SW Florida.
-        firstResults.customers = { id: 'cust-1', address_line1: '1 Rooftop Rd', city: 'Fort Worth', state: 'TX', zip: '76102', latitude: 32.7555, longitude: -97.3308 };
+        firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '1 Rooftop Rd', city: 'Fort Worth', state: 'TX', zip: '76102', latitude: 32.7555, longitude: -97.3308 };
         listResults.scheduled_services = [];
         const token = mintLeadConsultationToken(LEAD_ID);
         const res = await callPost(token, okBody());
@@ -1379,7 +1434,7 @@ describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightenin
   });
 
   test('no address to compare at all (address:null) → falls back to the primary/only live property', async () => {
-    const primary = { id: 'cust-1', is_primary_profile: true, address_line1: '1 Main St' };
+    const primary = { id: 'cust-1', phone: '9415550101', is_primary_profile: true, address_line1: '1 Main St' };
     listResults.customers = [primary, { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main St' }];
     const account = { accountId: 'acct-1', existingCustomer: primary };
     expect(await matchExistingAccountProfile(db, account, null, null)).toEqual(primary);
@@ -1393,7 +1448,7 @@ describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightenin
   // the primary profile for an un-normalizable address and dispatched the
   // visit to the wrong property.
   test('an address WAS supplied but streetKey yields no key → null (a new profile), never the primary-fallback', async () => {
-    const primary = { id: 'cust-1', is_primary_profile: true, address_line1: '1 Main St' };
+    const primary = { id: 'cust-1', phone: '9415550101', is_primary_profile: true, address_line1: '1 Main St' };
     listResults.customers = [primary];
     const account = { accountId: 'acct-1', existingCustomer: primary };
     // Punctuation-only line1 — streetKey strips every non-alphanumeric
@@ -1402,7 +1457,7 @@ describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightenin
   });
 
   test('an address with NO line1 but a truthy zip still falls back to the primary — only line1 gates the fallback', async () => {
-    const primary = { id: 'cust-1', is_primary_profile: true, address_line1: '1 Main St' };
+    const primary = { id: 'cust-1', phone: '9415550101', is_primary_profile: true, address_line1: '1 Main St' };
     listResults.customers = [primary];
     const account = { accountId: 'acct-1', existingCustomer: primary };
     expect(await matchExistingAccountProfile(db, account, { line1: '', zip: '34209' }, null)).toEqual(primary);
@@ -1410,8 +1465,8 @@ describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightenin
 
   test('street + zip both match (streetKey, suffix-normalized) → that profile, coordinates never checked', async () => {
     const match = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main Street', zip: '34209' };
-    listResults.customers = [{ id: 'cust-1', is_primary_profile: true, address_line1: '1 Elsewhere Rd', zip: '34209' }, match];
-    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    listResults.customers = [{ id: 'cust-1', phone: '9415550101', is_primary_profile: true, address_line1: '1 Elsewhere Rd', zip: '34209' }, match];
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1', phone: '9415550101' } };
     expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, null)).toEqual(match);
   });
 
@@ -1421,7 +1476,7 @@ describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightenin
   test('street matches but zip differs AND stored coordinates are far from the validated location → null, never reused', async () => {
     const wrongZip = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main Street', zip: '99999', latitude: 40.0, longitude: -100.0 };
     listResults.customers = [wrongZip];
-    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1', phone: '9415550101' } };
     const validated = { lat: 27.4, lng: -82.5 };
     expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, validated)).toBe(null);
   });
@@ -1429,7 +1484,7 @@ describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightenin
   test('street matches, zip differs, but stored coordinates ARE within tolerance of the validated location → matches anyway (stale zip on file)', async () => {
     const staleZip = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main Street', zip: '99999', latitude: 27.401, longitude: -82.501 };
     listResults.customers = [staleZip];
-    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1', phone: '9415550101' } };
     const validated = { lat: 27.4, lng: -82.5 };
     expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, validated)).toEqual(staleZip);
   });
@@ -1437,28 +1492,28 @@ describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightenin
   test('street matches, zip differs, stored coordinates JUST outside tolerance → null', async () => {
     const farRow = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main Street', zip: '99999', latitude: 27.41, longitude: -82.51 };
     listResults.customers = [farRow];
-    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1', phone: '9415550101' } };
     const validated = { lat: 27.4, lng: -82.5 };
     expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, validated)).toBe(null);
   });
 
   test('address matches no live profile at all → null, a genuinely new property', async () => {
-    listResults.customers = [{ id: 'cust-1', is_primary_profile: true, address_line1: '1 Elsewhere Rd', zip: '34209' }];
-    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    listResults.customers = [{ id: 'cust-1', phone: '9415550101', is_primary_profile: true, address_line1: '1 Elsewhere Rd', zip: '34209' }];
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1', phone: '9415550101' } };
     expect(await matchExistingAccountProfile(db, account, { line1: '99 Nowhere Ave', zip: '34209' }, null)).toBe(null);
   });
 
   test('local audit P1: same street + zip but a DIFFERENT unit → not that profile', async () => {
     const unit4 = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main St', address_line2: 'Apt 4', zip: '34209' };
     listResults.customers = [unit4];
-    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1', phone: '9415550101' } };
     expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', line2: 'Apt 7', zip: '34209' }, null)).toBe(null);
     expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St Apt 4', zip: '34209' }, null)).toEqual(unit4);
     expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, null)).toBe(null);
   });
 
   test('no live profiles come back from the query → falls back to the existingCustomer row itself', async () => {
-    const existingCustomer = { id: 'cust-1', address_line1: '5 Palm Ave', zip: '34209' };
+    const existingCustomer = { id: 'cust-1', phone: '9415550101', address_line1: '5 Palm Ave', zip: '34209' };
     listResults.customers = [];
     const account = { accountId: 'acct-1', existingCustomer };
     expect(await matchExistingAccountProfile(db, account, { line1: '5 Palm Ave', zip: '34209' }, null)).toEqual(existingCustomer);
