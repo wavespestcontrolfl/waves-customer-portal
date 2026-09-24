@@ -749,6 +749,8 @@ function supersededScenario(roots) {
     window_start: r.windowStart ?? null, window_end: r.windowEnd ?? null,
     // Only set for an UNLINKED root exercising the service-address fallback.
     service_address_line1: r.serviceAddressLine1 || null,
+    service_address_city: r.serviceAddressCity || null,
+    service_address_zip: r.serviceAddressZip || null,
   });
   const seriesDatesById = new Map(roots.map((r) => [r.id, new Set(r.latestDate ? [r.latestDate] : [])]));
   const conn = makeConn(({ table, calls, op, data }) => {
@@ -771,7 +773,14 @@ function supersededScenario(roots) {
           const targetId = idMatch ? idMatch[2] : null;
           const dates = seriesDatesById.get(targetId);
           if (!dates || !dates.size) return undefined;
-          return { scheduled_date: [...dates].sort().slice(-1)[0] };
+          const root = byId.get(targetId);
+          return {
+            scheduled_date: [...dates].sort().slice(-1)[0],
+            // Only set for a root exercising the cadence-position ranking
+            // fix (Codex GitHub r1 P1) — defaults to null/undefined so
+            // every other fixture's raw scheduled_date is unaffected.
+            date_exception_cadence_date: root?.dateExceptionCadenceDate || null,
+          };
         }
         if (idWhere) {
           const root = byId.get(idWhere[1].id);
@@ -890,6 +899,29 @@ describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Co
     expect(result.skipped).toBe('superseded_series');
   });
 
+  test('two UNLINKED roots sharing only city/ZIP — no street on either — are never treated as the same property (Codex GitHub #4782 r1 P2)', async () => {
+    // A street is required before an address counts as identifying a
+    // SPECIFIC property. City/ZIP alone is nowhere near specific enough —
+    // a city can hold thousands of properties on the same ZIP — so two
+    // unrelated roots that only happen to share a city/ZIP (no street on
+    // either) must resolve to an UNKNOWN property, never a coarse match
+    // that groups them as duplicates.
+    const roots = [
+      {
+        id: 10, familyKey: 'lawn_care', createdAt: '2020-01-01T00:00:00Z', latestDate: daysOut(0),
+        serviceAddressCity: 'Bradenton', serviceAddressZip: '34205',
+      },
+      {
+        id: 99, familyKey: 'lawn_care', createdAt: '2026-01-01T00:00:00Z', latestDate: daysOut(30),
+        serviceAddressCity: 'Bradenton', serviceAddressZip: '34205',
+      },
+    ];
+    const firstResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(firstResult.skipped).not.toBe('superseded_series');
+    const secondResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
+    expect(secondResult.skipped).not.toBe('superseded_series');
+  });
+
   test('a later-dated but statically UNBILLABLE sibling never wins — never suppresses a genuinely billable series (Codex GitHub guards follow-up P1)', async () => {
     // Without the billability check, root 99 (no invoice stamp, no price,
     // a coincidentally LATER live visit) would be crowned winner purely on
@@ -984,6 +1016,30 @@ describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Co
     // winning) and never neither (both losing).
     const outcomes = [asTen.skipped === 'superseded_series', asNinetyNine.skipped === 'superseded_series'];
     expect(outcomes.filter(Boolean)).toHaveLength(1);
+  });
+
+  test('ranks by cadence POSITION (COALESCE date_exception_cadence_date, scheduled_date), never the raw moved date (Codex GitHub #4782 r1 P1)', async () => {
+    // The legacy root's most recent LIVE visit was moved out to a later
+    // raw scheduled_date by a one-off "this visit only" exception, but its
+    // REAL cadence position (date_exception_cadence_date) is still well
+    // behind the replacement root's genuine booked-through date. Ranking
+    // on the raw scheduled_date alone would crown the legacy root winner
+    // on a date that doesn't reflect where its cadence actually is,
+    // wrongly superseding the replacement it was supposed to have lost to.
+    const roots = [
+      {
+        id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', createdAt: '2020-01-01T00:00:00Z',
+        latestDate: daysOut(90), dateExceptionCadenceDate: daysOut(30),
+      },
+      {
+        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', createdAt: '2026-01-01T00:00:00Z',
+        latestDate: daysOut(60),
+      },
+    ];
+    const legacyResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(legacyResult.skipped).toBe('superseded_series');
+    const replacementResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
+    expect(replacementResult.skipped).not.toBe('superseded_series');
   });
 });
 
@@ -1358,6 +1414,27 @@ describe('topUpRecurringSeriesLocked — horizon fill', () => {
     expect(result.skipped).toBe('at_horizon');
     expect(inserted).toHaveLength(0);
     expect(result.priorBookedThrough).toBe(daysOut(60));
+  });
+
+  test('the CURRENT booked-through date is still inside the horizon, but the next monthly occurrence falls past it — skipped: at_horizon, never the generic "already booked" warning (Codex GitHub r1 P2)', async () => {
+    // Distinct from the test above: there the series' latest visit is
+    // ALREADY past the horizon (the pre-loop latestStr >= effectiveHorizon
+    // check catches it before extendSeriesOnceLocked's candidate search
+    // ever runs). Here the latest visit is TODAY — comfortably inside a
+    // 5-day horizon — but a monthly cadence's next occurrence lands about
+    // a month out, past that horizon: extendSeriesOnceLocked's own search
+    // loop is what discovers this (every one of its 12 attempts hits the
+    // maxDate cap), and it must report the SAME honest at_horizon reason,
+    // not the generic "every candidate within 12 cadence steps already
+    // booked" warning that used to fire for this case.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'monthly' },
+      seriesDates: [daysOut(0)],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 5 });
+    expect(result.skipped).toBe('at_horizon');
+    expect(inserted).toHaveLength(0);
+    expect(result.priorBookedThrough).toBe(daysOut(0));
   });
 });
 

@@ -16875,6 +16875,13 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // avoid runaway loops on degenerate patterns.
     let attempt = 1;
     let nextStr = null;
+    // Set whenever the maxDate cap (top-up's horizon — never set by the
+    // completion path) rejects a candidate. Dates only advance forward as
+    // `attempt` climbs, so once one candidate falls past maxDate every
+    // later attempt does too — this loop can only exit with `nextStr`
+    // still null AND hitMaxDate true because the horizon, not a busy
+    // calendar, is why nothing more got booked (Codex GitHub r1 P2).
+    let hitMaxDate = false;
     while (attempt <= 12) {
       const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
       const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
@@ -16895,6 +16902,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // insert (never a compensating delete after the fact): a candidate
       // past the cap is not "the next date", it's "stop for this series".
       if (maxDate && candidate > maxDate) {
+        hitMaxDate = true;
         attempt++;
         continue;
       }
@@ -16937,7 +16945,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
         .first('recurring_ongoing');
       stillOngoing = !!(freshParent && freshParent.recurring_ongoing);
     }
-    if (!nextStr) {
+    if (!nextStr && hitMaxDate) {
+      // top-up only (maxDate is only ever set by topUpRecurringSeriesLocked):
+      // this is a correct, unremarkable stop at the horizon, not a busy
+      // calendar — reported through the SAME onSkip plumbing 'unbillable'
+      // already uses, never the generic "already booked" warning below,
+      // which would misreport why nothing was inserted (Codex GitHub r1 P2).
+      if (onSkip) onSkip('at_horizon');
+    } else if (!nextStr) {
       logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — every candidate within 12 cadence steps already booked`);
     } else if (!stillOngoing) {
       logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
@@ -17420,6 +17435,12 @@ async function seriesFamilyOf(conn, row) {
   return familyOfServiceRow({ ...row, service_key: svc?.service_key, service_name: svc?.name });
 }
 function seriesAddressPropertyKey(row) {
+  // A street line is required before trusting this as a property identity
+  // (Codex GitHub r1 P2) — city/zip alone is nowhere near specific enough
+  // (a city can hold thousands of properties sharing a ZIP), so without a
+  // street this must read as "unknown," never a coarse key two genuinely
+  // different properties could collide on.
+  if (!row.service_address_line1) return null;
   const { addressKey } = require('../services/customer-properties');
   return addressKey({
     address_line1: row.service_address_line1,
@@ -17454,7 +17475,13 @@ async function seriesPropertyKey(conn, row, cols) {
   const { addressKey } = require('../services/customer-properties');
   const customer = await conn('customers').where({ id: row.customer_id })
     .first('address_line1', 'address_line2', 'city', 'zip');
-  const customerAddress = customer ? addressKey(customer) : '';
+  // Same street-required rule as seriesAddressPropertyKey above (Codex
+  // GitHub r1 P2) — a customer record with only a city/zip on file is
+  // just as unable to identify a SPECIFIC property as a service address
+  // missing its street. No street anywhere ⇒ the property genuinely
+  // can't be determined, which falls through to `null` below — the
+  // documented fail-safe (skip the comparison rather than guess).
+  const customerAddress = customer?.address_line1 ? addressKey(customer) : '';
   return customerAddress ? `addr:${customerAddress}` : null;
 }
 // Mirrors extendSeriesOnceLocked's own candidate-date search — the SAME
@@ -17556,7 +17583,16 @@ async function pickTopUpWinnerId(conn, pool) {
     // Sequential, not parallel: pools here are tiny (2-3 candidates at
     // most even for the busiest customers).
     const latest = await latestLiveSeriesVisit(conn, row.id);
-    const latestDate = latest ? dateOnly(latest.scheduled_date) : null;
+    // The SAME cadence-position key latestLiveSeriesVisit itself orders
+    // by (COALESCE(date_exception_cadence_date, scheduled_date)), never
+    // the raw scheduled_date alone (Codex GitHub r1 P1): a "this visit
+    // only" exception row's scheduled_date can be moved well past its
+    // real cadence slot (rescheduleSeries.readSiblings /
+    // recurringCadenceDate treat this identically — ADMIN-BUG-R30). A
+    // legacy root whose October visit got a one-off move to December
+    // must not outrank a replacement root genuinely booked through
+    // November on the strength of that moved date alone.
+    const latestDate = latest ? dateOnly(latest.date_exception_cadence_date || latest.scheduled_date) : null;
     const createdAt = row.created_at ? new Date(row.created_at).getTime() : 0;
     const candidate = { id: row.id, latestDate, createdAt };
     if (!winner) { winner = candidate; continue; }
