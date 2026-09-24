@@ -19,12 +19,30 @@ const ORIGINAL = {
     '34116', '34117', '34119', '34120', '34140', '34141', '34142', '34145'],
 };
 
-describe('county-zips extraction is byte-for-byte unchanged', () => {
+// Deliberate additions since the extraction — every one listed here, so the
+// anchor above stays the extraction record and each later change is explicit.
+const ADDED_SINCE_EXTRACTION = {
+  SARASOTA_ZIPS: ['34285'], // Venice proper — was tax-invisible (fell back to 7%, no county)
+};
+const EXPECTED = Object.fromEntries(Object.entries(ORIGINAL).map(([key, zips]) => [
+  key, [...zips, ...(ADDED_SINCE_EXTRACTION[key] || [])].sort(),
+]));
+
+describe('county-zips = the extraction anchor plus the documented additions', () => {
   for (const key of Object.keys(ORIGINAL)) {
-    test(`${key} matches the original hardcoded array`, () => {
-      expect(countyZips[key]).toEqual(ORIGINAL[key]);
+    test(`${key} matches the original hardcoded array plus documented additions`, () => {
+      expect([...countyZips[key]].sort()).toEqual(EXPECTED[key]);
     });
   }
+  test('no ZIP appears in two tax counties', () => {
+    const seen = new Map();
+    for (const key of Object.keys(ORIGINAL)) {
+      for (const z of countyZips[key]) {
+        expect(seen.get(z)).toBeUndefined();
+        seen.set(z, key);
+      }
+    }
+  });
 });
 
 describe('tax-calculator.inferCountyFromZip is unchanged (5 counties, Capitalized)', () => {
@@ -47,6 +65,9 @@ describe('tax-calculator.inferCountyFromZip is unchanged (5 counties, Capitalize
     expect(TaxCalculator.inferCountyFromZip(null)).toBeNull();
     expect(TaxCalculator.inferCountyFromZip('34219-1234')).toBe('Manatee'); // uses first 5 digits
   });
+  test('34285 (Venice proper) → Sarasota — was null, so calculateTax fell back to 7% with no county', () => {
+    expect(TaxCalculator.inferCountyFromZip('34285')).toBe('Sarasota');
+  });
 });
 
 describe('compliance.inferCountyFromZipInternal is unchanged (3 counties, _county suffix)', () => {
@@ -66,5 +87,8 @@ describe('compliance.inferCountyFromZipInternal is unchanged (3 counties, _count
     expect(f('34102')).toBeNull(); // Collier
     expect(f('90210')).toBeNull();
     expect(f('')).toBeNull();
+  });
+  test('34285 (Venice proper) → sarasota_county (shares the tax set)', () => {
+    expect(f('34285')).toBe('sarasota_county');
   });
 });

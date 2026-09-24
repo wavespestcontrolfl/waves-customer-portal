@@ -6729,6 +6729,49 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // DAILY 1:50AM — Recurring-series top-up sweep.
+  //
+  // The completion-time auto-extend (runRecurringSeriesMaintenance) only
+  // fires when a visit is COMPLETED and only ever adds ONE visit — a tech
+  // who leaves a visit on_site/unclosed stalls it, so an ongoing plan can run
+  // dry with nothing booked ahead (prod audit 2026-09-24: 4 ongoing plans
+  // with nothing booked, 17 with one visit left). This sweep tops every
+  // eligible ongoing plan up to RECURRING_TOPUP_HORIZON_DAYS (default 365)
+  // by looping the SAME extend step the completion path uses — see
+  // services/recurring-series-topup.js and routes/admin-schedule.js's
+  // topUpRecurringSeries / extendSeriesOnceLocked. No customer
+  // communication beyond the ordinary 72h/24h reminder registration every
+  // spawned visit already gets.
+  //
+  // GATE_RECURRING_SERIES_TOPUP ships DARK (off unless exactly 'true'): off,
+  // this still runs a SHADOW pass (dryRun — the real eligibility + extend
+  // loop inside a transaction it rolls back) and logs only the count it
+  // would have inserted. runExclusive: a deploy overlap must not double-
+  // insert the same top-up pass.
+  // =========================================================================
+  cron.schedule('50 1 * * *', async () => {
+    try {
+      await runExclusive('recurring-series-topup', async () => {
+        const { recurringSeriesTopUpLive } = require('../config/feature-gates');
+        const { runRecurringSeriesTopUpSweep } = require('./recurring-series-topup');
+        const summary = await runRecurringSeriesTopUpSweep({ dryRun: !recurringSeriesTopUpLive() });
+        // Per-series isolation stays intact (each failure was already
+        // caught and tallied inside the sweep, so one bad series never
+        // stopped another) — but a summary with errors must not read as a
+        // clean run to job_health: throw an aggregate here so runExclusive
+        // records this tick as failed (Codex GitHub r2 P2) and the existing
+        // job-health/regression surfaces pick it up like any other failed
+        // cron.
+        if (summary.errors.length) {
+          throw new Error(`recurring-series-topup: ${summary.errors.length}/${summary.scanned} series failed — first: ${summary.errors[0].parentId}: ${summary.errors[0].error}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Recurring-series top-up sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — Orphaned-validated handoff sweeper
   //
   // Targets rows where /validate-handoff burned the jti but /payment-intent
