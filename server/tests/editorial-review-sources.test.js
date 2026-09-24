@@ -31,6 +31,15 @@ test('collapses source-formatting whitespace within rendered HTML text', () => {
   expect(htmlText('<p>Chinch bugs\n  feed on grass.</p>')).toBe('Chinch bugs feed on grass.');
 });
 
+test('preserves inline adjacency and separates unlisted block elements', () => {
+  expect(htmlText('<div>20<sup>%</sup> EPA-<em>registered</em>.</div><section>Next block.</section>'))
+    .toBe('20% EPA-registered.\nNext block.');
+});
+
+test('strips unterminated comments through the end of truncated HTML', () => {
+  expect(htmlText('<p>Useful evidence.</p><!-- hidden noise')).toBe('Useful evidence.');
+});
+
 test('falls back to the hostname when publisher metadata cleans to empty', () => {
   expect(publisherOf('<meta property="og:site_name" content="&nbsp;">', 'https://www.example.gov/article')).toBe('example.gov');
 });
@@ -119,6 +128,19 @@ test('preserves angle brackets in accepted plain-text evidence', async () => {
   const result = await fetchSources(['https://example.gov/range.txt']);
 
   expect(result.records[0].excerpt).toBe('x < 5 and y > 3');
+});
+
+test('derives plain-text publishers from the final hostname', async () => {
+  mockFetchPage.mockResolvedValue({
+    status: 200,
+    finalUrl: 'https://www.example.gov/source.txt',
+    contentType: 'text/plain',
+    html: '<meta property="og:site_name" content="Spoofed Publisher">',
+  });
+
+  const result = await fetchSources(['https://example.gov/source.txt']);
+
+  expect(result.records[0].publisher).toBe('example.gov');
 });
 
 test('rejects HTML challenge interstitials as source evidence', async () => {

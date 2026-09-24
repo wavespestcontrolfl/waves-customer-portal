@@ -9,13 +9,15 @@ const { LIMITS } = require('./editorial-review-contracts');
 function htmlText(html) {
   const withoutNoise = String(html || '')
     .replace(/<!--[^]*?-->/g, ' ')
+    .replace(/<!--[^]*$/g, ' ')
     .replace(/<(?:script|style|noscript|svg)\b[^>]*\/\s*>/gi, ' ')
     .replace(/<(script|style|noscript|svg)\b[^>]*>[^]*?<\/\1>/gi, ' ')
     .replace(/<(script|style|noscript|svg)\b[^>]*>[^]*$/gi, ' ')
     .replace(/\s+/g, ' ')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p\s*>|<\/li\s*>|<\/h[1-6]\s*>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ');
+    .replace(/<\/?(?:address|article|aside|blockquote|div|dl|dt|dd|fieldset|figcaption|figure|footer|form|header|hr|main|nav|ol|pre|section|table|tbody|thead|tfoot|tr|td|th|ul)\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '');
   return decodeHTML(withoutNoise).replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
 }
 
@@ -77,15 +79,9 @@ async function fetchSources(sourceUrls) {
       continue;
     }
     const finalUrl = page.finalUrl || url;
-    let normalizedFinalUrl;
-    try {
-      const parsed = new URL(finalUrl);
-      parsed.hash = '';
-      normalizedFinalUrl = parsed.toString();
-    } catch {
-      errors.push(`Source resolved to an invalid URL: ${url}`);
-      continue;
-    }
+    const parsedFinalUrl = new URL(finalUrl);
+    parsedFinalUrl.hash = '';
+    const normalizedFinalUrl = parsedFinalUrl.toString();
     if (seenFinalUrls.has(normalizedFinalUrl)) continue;
     const text = mediaType === 'text/plain'
       ? String(page.html || '').replace(/\u00a0/g, ' ').trim()
@@ -96,7 +92,7 @@ async function fetchSources(sourceUrls) {
     const excerpt = text.slice(0, excerptLength);
     records.push({
       url: normalizedFinalUrl,
-      publisher: publisherOf(page.html, normalizedFinalUrl),
+      publisher: publisherOf(mediaType === 'text/plain' ? '' : page.html, normalizedFinalUrl),
       retrievedAt: new Date().toISOString(),
       excerpt,
       contentHash: crypto.createHash('sha256').update(excerpt).digest('hex'),
