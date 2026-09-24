@@ -32,6 +32,7 @@ const db = require('../models/db');
 const {
   VOICE_AGENT_BOOKING_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+  CALL_FOLLOWUP_SOURCE_ACTION,
 } = require('../services/call-booking-source-actions');
 
 // ---- tiny in-memory knex-shim -------------------------------------------
@@ -368,6 +369,20 @@ describe('isQualifyingSaleBooking — the ONE positive-allow-list predicate for 
       ...BASE, status: 'pending', annual_prepay_term_id: 'term-uuid-0',
     }, false],
 
+    // Codex #4710 r14 P2 :460: an unquoted call follow-up (Visit 2 minted by
+    // callFollowUpBillingShape(null) — estimated_price null, followup_included
+    // false, create_invoice_on_complete false) survives every other check
+    // above and would otherwise read as a real new sale; it is the SAME
+    // follow-up visit the call already scheduled, not a second purchase.
+    ['an unquoted call-created follow-up (source_action ai_call_pipeline_followup, no price stamped)', {
+      ...BASE,
+      status: 'pending',
+      source_action: CALL_FOLLOWUP_SOURCE_ACTION,
+      estimated_price: null,
+      followup_included: false,
+      create_invoice_on_complete: false,
+    }, false],
+
     ['a null row', null, false],
   ])('%s → %s', (_label, row, expected) => {
     expect(isQualifyingSaleBooking(row)).toBe(expected);
@@ -425,6 +440,29 @@ describe('recordOutcome — validation', () => {
   test('rejects an unknown quotedCadence', async () => {
     await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', quotedCadence: 'decade' }, { trx: baseDb() }))
       .rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+  });
+
+  // Codex #4710 r14 P2 :839: the pre-fix rule (`p.quotedCadence &&
+  // !CADENCE_VALUES.includes(...)`) used truthiness, so a falsy-but-not-empty
+  // value (false, 0 — neither null/undefined/'') skipped the `&&` short
+  // circuit and reached the DB CHECK constraint raw, a 500 instead of a
+  // clean 400. null and '' must still pass through untouched (blankToNull
+  // turns '' into null and no cadence was quoted).
+  it.each([
+    [false, 'invalid'],
+    [0, 'invalid'],
+    ['decade', 'invalid'],
+    [null, 'valid'],
+    ['', 'valid'],
+    ['month', 'valid'],
+  ])('quotedCadence %p is %s', async (quotedCadence, expectation) => {
+    const promise = recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', quotedCadence }, { trx: baseDb() });
+    if (expectation === 'invalid') {
+      await expect(promise).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+    } else {
+      const saved = await promise;
+      expect(saved.quoted_cadence).toBe(quotedCadence === '' ? null : quotedCadence);
+    }
   });
 
   // Round 12 fix (codex P1, post-push): the pre-fix guard
@@ -1046,6 +1084,25 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
     expect(saved.outcome).toBe('won');
     expect(saved.won_via).toBe('office_booking');
+  });
+
+  test('Codex #4710 r14 P2 :625: a slot reservation graduated by estimate acceptance (source_estimate_id set) is excluded from BOOKING evidence — its hold-time created_at predates the estimate\'s accepted_at, so without the fix it would wrongly win office_booking dated at the hold', async () => {
+    const fakeDb = seededDb({
+      estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-09-15T00:00:00Z') }],
+    });
+    fakeDb.__store.scheduled_services.push({
+      id: 'visit-reserved', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
+      // Hold-time created_at — BEFORE the estimate's own accepted_at, and
+      // (without the fix) the earliest qualifying candidate, so it would
+      // win office_booking dated at the hold instead of estimate_accept
+      // dated at the real acceptance.
+      created_at: new Date(`${SCHEDULED_DATE}T11:00:00Z`),
+      status: 'confirmed', source_estimate_id: 'est-1',
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('estimate_accept');
+    expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-15T00:00:00Z').toISOString());
   });
 
   test('P1-2: evidence dated in the FUTURE relative to `now` does not count', async () => {

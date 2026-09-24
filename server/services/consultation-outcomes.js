@@ -39,7 +39,7 @@ const {
 } = require('../utils/datetime-et');
 const { isAssessmentBooking } = require('./assessment-booking');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
-const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS, CALL_FOLLOWUP_SOURCE_ACTION } = require('./call-booking-source-actions');
 
 const OUTCOME_VALUES = ['warm', 'cold', 'lost'];
 const LOST_REASON_VALUES = ['price', 'competitor', 'diy', 'not_ready', 'no_show', 'other'];
@@ -458,6 +458,14 @@ function isQualifyingSaleBooking(row) {
   if (!row) return false;
   if (!QUALIFYING_BOOKING_STATUSES.has(row.status)) return false;
   if (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) && !row.customer_confirmed) return false;
+  // Codex #4710 r14 P2 :460: a call-created follow-up (callFollowUpBillingShape,
+  // call-booking-catalog.js) stamps this source_action on Visit 2 whether or
+  // not a price was quoted — the unquoted shape (estimated_price null,
+  // followup_included false, create_invoice_on_complete false) survives every
+  // other check below and would otherwise read as a real new sale. It never
+  // is one: it is the SAME follow-up visit the call already scheduled, not a
+  // second purchase.
+  if (row.source_action === CALL_FOLLOWUP_SOURCE_ACTION) return false;
   if (row.is_callback) return false;
   if (row.recurring_parent_id) return false;
   if (row.followup_included) return false;
@@ -590,8 +598,19 @@ async function findSaleEvidenceForConsultation(database, {
   // must not exclude it before effectiveBookingTimestamp gets a chance to
   // read the right column. Each candidate row is re-checked against the
   // bounds below using its OWN effective timestamp before being accepted.
+  // Codex #4710 r14 P2 :625: a slot reservation graduated at estimate
+  // acceptance (slot-reservation.js commitReservation) keeps the
+  // scheduled_services row's ORIGINAL hold-time created_at — it is never
+  // rewritten to the acceptance moment — and stamps source_estimate_id on
+  // it. Left in this query that hold-time timestamp can predate (and so
+  // outrank) the estimate's own accepted_at as booking evidence, crediting
+  // the wrong moment for the same sale. Simpler-correct fix: exclude every
+  // source_estimate_id row from BOOKING evidence outright — the linked
+  // estimate's acceptance is already picked up as evidence source (a)
+  // above, so nothing is lost, and no row needs re-dating.
   const bookings = await database('scheduled_services')
     .where({ customer_id: customerId })
+    .whereNull('source_estimate_id')
     .where(function boundedByEitherTimestamp() {
       this.where(function createdInWindow() {
         this.where('created_at', '>=', lowerBound).where('created_at', '<=', upperBound);
@@ -836,7 +855,15 @@ const OUTCOME_INPUT_RULES = [
   // no_show is stamped only by the status transition (markNoShow) — a
   // technician never records it by hand (Codex #4710 r12 P2).
   { fails: (p) => p.lostReason === 'no_show', message: "lostReason 'no_show' is set only when the visit is marked no-show" },
-  { fails: (p) => p.quotedCadence && !CADENCE_VALUES.includes(p.quotedCadence), message: `quotedCadence must be one of ${CADENCE_VALUES.join(', ')}` },
+  // Codex #4710 r14 P2 :839: a truthy check lets a falsy-but-not-empty
+  // value (false, 0) straight through to the DB CHECK constraint (a 500,
+  // not a 400) since neither is null/undefined/''. Validate every value
+  // that survives blankToNull's own null/undefined/'' pass-through against
+  // CADENCE_VALUES instead.
+  {
+    fails: (p) => p.quotedCadence != null && p.quotedCadence !== '' && !CADENCE_VALUES.includes(p.quotedCadence),
+    message: `quotedCadence must be one of ${CADENCE_VALUES.join(', ')}`,
+  },
   { fails: (p) => p.interests != null && !Array.isArray(p.interests), message: 'interests must be an array' },
   {
     fails: (p) => !isValidFollowUpAt(p.followUpAt),
