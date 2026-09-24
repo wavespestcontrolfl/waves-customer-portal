@@ -317,6 +317,41 @@ describe('InspectionPage booking', () => {
     expect(screen.queryByText(/we don.t service this area yet/i)).not.toBeInTheDocument();
   });
 
+  // P1, 2026-09-24: eligibility can change between page load and commit
+  // (idempotent replay, or a race with another booking) — the commit's 200
+  // response then carries a terminal `state` other than 'ok'. Previously
+  // only ALREADY_BOOKED (via `code`) triggered a reload; converted and gone
+  // fell through to a generic "something went wrong" line. Both must now
+  // render the SAME terminal card GET itself would show, straight from the
+  // commit response — no reload, no generic error.
+  it('converted on commit: replaces the picker with the existing-visit card, not a generic error', async () => {
+    stubFetch({
+      post: jsonResponse({
+        state: 'converted',
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: null },
+        visit: { date: '2026-08-01', window: { start: '10:00', end: '11:00' }, serviceType: 'General Pest Control' },
+        rescheduleUrl: '/reschedule/abc123',
+      }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    expect(await screen.findByText(/already a Waves customer/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Move that visit/i })).toHaveAttribute('href', '/reschedule/abc123');
+    expect(screen.queryByText(/something went wrong/i)).not.toBeInTheDocument();
+  });
+
+  it('gone on commit: replaces the picker with the gone card, not a generic error', async () => {
+    stubFetch({
+      post: jsonResponse({ state: 'gone', lead: null, visit: null, rescheduleUrl: null }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    expect(await screen.findByText(/couldn.t find that lead/i)).toBeInTheDocument();
+    expect(screen.queryByText(/something went wrong/i)).not.toBeInTheDocument();
+  });
+
   it('the confirm button names the picked day and arrival window (brief copy contract)', async () => {
     stubFetch();
     renderPage();

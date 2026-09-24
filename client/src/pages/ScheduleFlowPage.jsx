@@ -1219,10 +1219,14 @@ const FLOWS = {
       // an address on file.
       ...(address ? { address } : {}),
     }),
-    // ALREADY_BOOKED (idempotent replay from a second commit): reload so the
-    // page picks up the fresh already_booked GET state via `blocked` above.
-    stateChangedCodes: ['ALREADY_BOOKED'],
-    stateChangedMessage: 'Your consultation is already on the calendar — here is the latest.',
+    // Every terminal state the commit can answer (already_booked/converted/
+    // gone — idempotent replay, or eligibility that changed since page
+    // load) is handled uniformly in confirm() itself, straight from the
+    // commit's own response body — never routed through stateChangedCodes
+    // (unused for this flow; kept as an empty array since confirm() reads
+    // it unconditionally for every flow).
+    stateChangedCodes: [],
+    stateChangedMessage: null,
     // ?slot= preselect fallback (email link): "we moved you" is a picked-slot
     // note like reschedule's ReanchorNote, sourced from page state via the
     // third ctx arg (this flow is the only one that uses it).
@@ -1451,6 +1455,20 @@ export default function ScheduleFlowPage({ flow }) {
       // stopping on the out-of-area card.
       if (flow === 'inspection' && body.error === 'service_area_unavailable') {
         setSubmitError("We couldn't confirm your service area just now. Please try again, or text or call us.");
+        return;
+      }
+      // Inspection only: the commit answers any of GET's own terminal
+      // states (already_booked/converted/gone) when eligibility changed
+      // since page load — idempotent replay, or a race with another
+      // booking. Replace `data` with the response body itself (it's the
+      // SAME shape GET returns) so the existing blocked() rendering path
+      // shows the right card immediately, uniformly for every terminal
+      // state — not just ALREADY_BOOKED, which previously left converted/
+      // gone falling through to a generic "something went wrong" line
+      // (Codex pre-push P1, 2026-09-24).
+      if (flow === 'inspection' && res.ok && body.state && body.state !== 'ok') {
+        setSelectedSlot(null);
+        setData(body);
         return;
       }
       if (body.code === 'SLOT_TAKEN') {

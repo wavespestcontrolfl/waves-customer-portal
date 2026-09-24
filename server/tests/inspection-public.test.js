@@ -95,7 +95,20 @@ jest.mock('../models/db', () => {
   };
   const dbFn = jest.fn((table) => mkChain(table));
   dbFn.raw = jest.fn((sql) => sql);
-  dbFn.transaction = jest.fn(async (fn) => fn(dbFn));
+  // Tracks whether a db.transaction() call is currently open (its callback
+  // has started but not yet returned) — Codex pre-push P1, 2026-09-24:
+  // proves createSelfBooking never runs while one of OUR transactions is
+  // still open (it opens its own, on a separate pooled connection; holding
+  // ours open across that call risks pool exhaustion under concurrency).
+  dbFn._openTransactions = 0;
+  dbFn.transaction = jest.fn(async (fn) => {
+    dbFn._openTransactions += 1;
+    try {
+      return await fn(dbFn);
+    } finally {
+      dbFn._openTransactions -= 1;
+    }
+  });
   return dbFn;
 });
 
@@ -556,14 +569,49 @@ describe('POST /:token commit', () => {
     const res = await callPost(token, okBody());
     expect(res.statusCode).toBe(200);
 
-    // Two lock-holding transactions (phase 1: provisioning, phase 2: the
-    // booking itself), each taking the SAME per-lead key.
+    // Two SHORT transactions (phase 1: provisioning, phase 2: the
+    // eligibility re-check only — see the :834 test below for proof
+    // createSelfBooking runs outside both), each taking the SAME
+    // per-lead key.
     expect(db.transaction).toHaveBeenCalledTimes(2);
     const lockCalls = db.raw.mock.calls.filter(([sql]) => String(sql).includes('pg_advisory_xact_lock'));
     expect(lockCalls).toHaveLength(2);
     for (const [, args] of lockCalls) {
       expect(args).toEqual([`inspection_commit:${LEAD_ID}`]);
     }
+  });
+
+  // P1 :834 — phase 2 used to hold a lock-owning transaction (one pooled
+  // connection) OPEN while createSelfBooking opened its OWN transaction on
+  // a SECOND pooled connection — under concurrent commits every pool slot
+  // could end up occupied by lock-waiters plus lock-holders waiting on a
+  // second connection, risking pool exhaustion. createSelfBooking's own
+  // payload has no `trx`/knex-handle param (confirmed against its
+  // signature in booking.js), so it cannot join an existing transaction —
+  // fixed by never holding one open while it runs: prove createSelfBooking
+  // is invoked only once NO db.transaction() call is currently open.
+  test('createSelfBooking runs only after every one of our transactions has committed — never nested inside one (P1 :834)', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    const custRow = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    firstResults.customers = custRow;
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    firstResults.scheduled_services = { id: 'ss-834', reschedule_token: 'tok-834' };
+
+    let openTransactionsAtCreateSelfBooking = null;
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      openTransactionsAtCreateSelfBooking = db._openTransactions;
+      return { ok: true, body: { booking: { id: 'sb-834' } } };
+    });
+
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, okBody());
+    expect(res.statusCode).toBe(200);
+    expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+    expect(openTransactionsAtCreateSelfBooking).toBe(0);
   });
 
   // P1 :532 — createSelfBooking's own dedupe only catches an exact repeat
@@ -579,13 +627,17 @@ describe('POST /:token commit', () => {
     mockBuildAvailability.mockResolvedValue({
       days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
     });
+    // Same row id in both fixtures (as the real DB would be — the self_
+    // booking_id lookup and findOpenVisit both read the ONE row the commit
+    // creates) so the post-booking safety-net recheck sees its own booking,
+    // not a false mismatch.
     firstResults.scheduled_services = { id: 'ss-1', reschedule_token: 'tok-1' };
 
     // The first booking's side effect: the lead's customer now has an open
     // assessment, same as a real commit would leave behind.
     mockCreateSelfBooking.mockImplementationOnce(async () => {
       listResults.scheduled_services = [
-        { id: 'svc-new', scheduled_date: FUTURE_DATE, window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok-new' },
+        { id: 'ss-1', scheduled_date: FUTURE_DATE, window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok-1' },
       ];
       return { ok: true, body: { booking: { id: 'sb-1' } } };
     });
@@ -635,6 +687,113 @@ describe('POST /:token commit', () => {
     expect(customerUpdate.payload.address_line1).toMatch(/456 Good Ave/);
     expect(customerUpdate.payload.latitude).toBe(27.5);
     expect(customerUpdate.payload.longitude).toBe(-82.6);
+  });
+
+  // P1 :800 — two concurrent submissions for an addressless lead can each
+  // resolve a DIFFERENT address before either takes the lock; without a
+  // fresh re-check under the lock the second would overwrite the first's
+  // just-persisted address with its own stale supplied one, and the
+  // first's own createSelfBooking (which reloads the customer fresh) would
+  // then book against the second's address. Simulated interleaving: the
+  // SECOND commit's geocode call for its OWN supplied address ("222 B St")
+  // is the moment (via a mockGeocode side effect) the FIRST commit's
+  // address lands on the customer row — by the time phase 1 re-reads the
+  // customer fresh under the lock, it sees A, not B.
+  describe('address-resolution interleaving under the lock (P1 :800)', () => {
+    const LOC_A = { lat: 27.55, lng: -82.55 };
+    const LOC_B = { lat: 27.7, lng: -82.7 };
+    const addresslessCustomer = () => ({
+      id: 'cust-1', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null,
+    });
+
+    test('the second commit sees the first\'s persisted address and books against it, never overwriting with its own supplied one', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.customers = addresslessCustomer();
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockImplementation(async (addressStr) => {
+        if (String(addressStr).includes('222 B St')) {
+          // The interleaving: while resolving B, the first commit's address
+          // lands on the customer row.
+          firstResults.customers = {
+            id: 'cust-1', address_line1: '111 A St', address_line2: null,
+            city: 'Bradenton', state: 'FL', zip: '34209', latitude: LOC_A.lat, longitude: LOC_A.lng,
+          };
+          return { location: LOC_B };
+        }
+        if (String(addressStr).includes('111 A St')) return { location: LOC_A };
+        return { location: null };
+      });
+      // Same valid slot at both locations — this test proves the address
+      // choice and the no-overwrite, not the slot-mismatch branch (see the
+      // 409 test below for that).
+      mockBuildAvailability.mockImplementation(async () => ({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      }));
+      firstResults.scheduled_services = { id: 'ss-800', reschedule_token: 'tok-800' };
+
+      const token = mintLeadConsultationToken(LEAD_ID);
+      // First commit: address A, addressless customer — persists A.
+      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '111 A St, Bradenton, FL 34209' });
+      expect(first.statusCode).toBe(200);
+      expect(first.body.success).toBe(true);
+      const firstUpdate = updateCalls.find((c) => c.table === 'customers');
+      expect(firstUpdate.payload.address_line1).toMatch(/111 A St/);
+
+      updateCalls.length = 0;
+      mockCreateSelfBooking.mockClear();
+
+      // Second commit: supplies B, but by the time phase 1 re-reads the
+      // customer under the lock, A is already there (the mockGeocode side
+      // effect above).
+      const second = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '222 B St, Bradenton, FL 34209' });
+      expect(second.statusCode).toBe(200);
+      expect(second.body.success).toBe(true);
+      // Books against A, not B — authedCustomer carries A's address.
+      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.address_line1).toBe('111 A St');
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(LOC_A.lat);
+      // Never overwrites the customer's now-persisted A with the supplied B.
+      expect(updateCalls.find((c) => c.table === 'customers')).toBeUndefined();
+    });
+
+    test('on a slot mismatch between the supplied and the fresh stored address, 409s with fresh availability instead of booking the wrong location', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.customers = addresslessCustomer();
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockImplementation(async (addressStr) => {
+        if (String(addressStr).includes('222 B St')) {
+          firstResults.customers = {
+            id: 'cust-1', address_line1: '111 A St', address_line2: null,
+            city: 'Bradenton', state: 'FL', zip: '34209', latitude: LOC_A.lat, longitude: LOC_A.lng,
+          };
+          return { location: LOC_B };
+        }
+        if (String(addressStr).includes('111 A St')) return { location: LOC_A };
+        return { location: null };
+      });
+      // Call sequence: (1) first commit's own anti-forgery check at A —
+      // succeeds; (2) second commit's pre-lock anti-forgery check at ITS
+      // supplied B — succeeds; (3) second commit's phase-1 re-check at the
+      // fresh stored A — this specific slot is gone there, forcing the 409.
+      const openSlot = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] };
+      mockBuildAvailability
+        .mockResolvedValueOnce(openSlot)
+        .mockResolvedValueOnce(openSlot)
+        .mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [] }] });
+      firstResults.scheduled_services = { id: 'ss-800b', reschedule_token: 'tok-800b' };
+
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '111 A St, Bradenton, FL 34209' });
+      expect(first.statusCode).toBe(200);
+
+      mockCreateSelfBooking.mockClear();
+      const second = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '222 B St, Bradenton, FL 34209' });
+      expect(second.statusCode).toBe(409);
+      expect(second.body.code).toBe('SLOT_TAKEN');
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    });
   });
 
   // P1 :355 — a null county (provider timeout/outage) must never silently
