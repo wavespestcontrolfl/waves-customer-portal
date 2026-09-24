@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
+const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const MAX_SEARCH_TERMS = 10;
@@ -49,10 +50,13 @@ const REPO_CONTEXT_FILE_LIMIT = 80;
 // README, ...) for the same 5-result cap in loadRepoContext below, and those
 // fixed/discovered files are scanned first — a misting question can lose the
 // one file that actually answers it before the loader ever reaches it. Guard
-// it in explicitly, but ONLY when a search term is actually about misting,
-// so an unrelated question (barrier, lawn, termite, ...) never pays for it.
+// it in explicitly, but ONLY when the question (or a service label in
+// context) is actually about the misting SYSTEM (the shared
+// isMistingSystemService predicate — bare "misting", the barrier program's
+// own "21-day misting" cycle-length wording, must NOT trigger this, or a
+// barrier customer's question would pull the wrong protocol), so an
+// unrelated question never pays for it.
 const MISTING_PROTOCOL_FILE = 'wiki/protocols/mosquito-misting-systems.md';
-const MISTING_TERM_PATTERN = /misting/i;
 
 const EXTERNAL_REFERENCES = {
   general: [
@@ -873,13 +877,19 @@ function snippetFromFile(relativePath, terms) {
   };
 }
 
-function loadRepoContext(terms) {
+function loadRepoContext(terms, question = '') {
   if (!terms.length) return [];
   const discovered = [];
   for (const dir of REPO_CONTEXT_DIRS) {
     discovered.push(...discoverMarkdownFiles(dir));
   }
-  const mistingRequested = terms.some((term) => MISTING_TERM_PATTERN.test(term));
+  // The raw question is checked too, not just `terms` — searchTermsFromContext
+  // tokenizes free-text question words individually ("misting" and "system"
+  // land as two separate single-word terms), so the two-word "misting
+  // system" phrase would never appear intact in `terms` unless a service
+  // LABEL already carries it verbatim.
+  const mistingRequested = isMistingSystemService({ text: question })
+    || terms.some((term) => isMistingSystemService({ text: term }));
 
   // Scored normally, the misting protocol can rank BEHIND five other
   // matches (barrier-program repo hits sharing "mosquito") and never survive
@@ -1033,7 +1043,7 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
     serviceLibrary: publicServiceLibrary,
     productCatalog: productCatalogResult.rows,
     productCatalogTruncated: productCatalogResult.truncated,
-    repositoryFiles: loadRepoContext(searchTerms),
+    repositoryFiles: loadRepoContext(searchTerms, question),
     externalSources: externalReferencesFor(serviceKeys),
   };
 }

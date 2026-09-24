@@ -1772,6 +1772,57 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     ]);
   });
 
+  test('the misting-system NAME alone (no serviceKey) suppresses the barrier program, primary and add-on; barrier rows are unchanged (Codex round-2 P1)', async () => {
+    // Real barrier program with a real treatment line, so a suppressed
+    // misting-system result and a resolved barrier result are distinguishable.
+    const protocols = {
+      mosquito: { visits: [{ visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal' }] },
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] },
+    };
+    const catalog = [{ id: 't', name: 'Talstar P' }, { id: 'd', name: 'Demand CS' }];
+
+    // Primary, name-only: the appointment carries no service_key_snapshot at
+    // all (a pre-catalog-link booking, or a snapshot that failed to persist)
+    // — the matcher already returns a null program for this name, but
+    // addonProgramKey's category fallback would otherwise still hand it the
+    // barrier program.
+    const primary = await jobCard.resolveVisitLines({
+      facts: { isLawn: false, serviceType: 'Mosquito Misting System Service', serviceCategory: 'mosquito', scheduledDate: '2026-09-04', addons: [] },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect([primary.lines, primary.note]).toEqual([[], 'No treatment protocol for this service (mosquito)']);
+
+    // Add-on, name-only.
+    const addon = await jobCard.resolveVisitLines({
+      facts: {
+        isLawn: false,
+        serviceType: 'Quarterly Pest Control',
+        serviceCategory: 'pest_control',
+        scheduledDate: '2026-09-04',
+        addons: [{ name: 'Mosquito Misting System Service', category: 'mosquito' }],
+      },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect(addon.addons).toMatchObject([
+      { name: 'Mosquito Misting System Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (mosquito)' },
+    ]);
+
+    // Barrier rows are unchanged: same category, also no key, but not the
+    // misting-system name — still resolves the real barrier program.
+    const barrier = await jobCard.resolveVisitLines({
+      facts: { isLawn: false, serviceType: 'Mosquito Control', serviceCategory: 'mosquito', scheduledDate: '2026-09-04', addons: [] },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect(barrier.lines.map((l) => l.product.id)).toEqual(['t']);
+    expect(barrier.visit).toMatchObject({ visit: 1, month: 'Any' });
+  });
+
   test('the tank search withholds every dose on a rodent sanitation appointment (r8 P1)', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };

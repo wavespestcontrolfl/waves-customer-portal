@@ -1,3 +1,5 @@
+const { isMistingSystemService } = require('../utils/mosquito-misting-system');
+
 // A rule's `serviceKeys` are the catalog service keys it claims: a booking
 // that carries one (service_key_snapshot) resolves to that rule's visit
 // regardless of its display name — "Termite Spot Treatment Service" names no
@@ -253,17 +255,12 @@ const MATCH_RULES = [
 // PROGRAM's mosquito_barrier rule (visit 1, terms include 'misting' for the
 // barrier program's own "21-day misting" cycle-length copy) — left alone, a
 // scheduled misting-system visit would resolve the barrier program's
-// foliage/backpack spray steps. Scoped narrowly on purpose (Codex P1, PR
-// #4762 follow-up): only the explicit catalog key or the two-word "misting
-// system" phrase suppresses — bare "misting" (the barrier program's own
-// cycle-length wording) and the plain word "mosquito" keep routing to the
-// barrier program exactly as before.
-const MOSQUITO_MISTING_SYSTEM_SERVICE_KEY = 'mosquito_misting_system';
-const MISTING_SYSTEM_NAME_PATTERN = /\bmisting\s+system\b/i;
-
+// foliage/backpack spray steps. isMistingSystemService (server/utils) is the
+// shared predicate every caller of this identity check uses — bare "misting"
+// and the plain word "mosquito" keep routing to the barrier program exactly
+// as before.
 function isMistingSystemConsultation(serviceType, serviceKey) {
-  if (serviceKey === MOSQUITO_MISTING_SYSTEM_SERVICE_KEY) return true;
-  return MISTING_SYSTEM_NAME_PATTERN.test(String(serviceType || ''));
+  return isMistingSystemService({ serviceKey, name: serviceType });
 }
 
 function normalize(value) {

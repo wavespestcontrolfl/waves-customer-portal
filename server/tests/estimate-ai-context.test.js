@@ -752,6 +752,29 @@ describe('estimate AI support context', () => {
     )).toBe(false);
   });
 
+  test('bare "misting" (a barrier customer\'s question) does not pull the misting-system protocol; "misting system" does', async () => {
+    // A barrier-program customer's question uses "misting" for the 21-day
+    // cycle wording — that must not route them to the misting SYSTEM's
+    // install/design-visit protocol. Only the two-word phrase does.
+    const bareMisting = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'How does the 21-day misting cycle work?',
+      context: { services: [{ label: 'Mosquito Control', detail: 'Barrier spray program' }] },
+    });
+    expect(bareMisting.repositoryFiles.some(
+      (file) => file.path === 'wiki/protocols/mosquito-misting-systems.md',
+    )).toBe(false);
+
+    const mistingSystem = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'How often do you refill the misting system?',
+      context: { services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', detail: 'Automatic misting system' }] },
+    });
+    expect(mistingSystem.repositoryFiles.some(
+      (file) => file.path === 'wiki/protocols/mosquito-misting-systems.md',
+    )).toBe(true);
+  });
+
   test('loads shaped support sources from knowledge tables and static references', async () => {
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({

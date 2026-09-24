@@ -5,6 +5,7 @@ const { WAVEGUARD } = require('./pricing-engine/constants');
 const { serviceCountsTowardWaveGuardTier } = require('./pricing-engine/discount-engine');
 const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFromText } = require('./estimate-ai-context');
 const { dispatch } = require('./llm/call');
+const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -1180,6 +1181,17 @@ function estimateContextHasBoraCare(context = {}) {
   return rows.some(isBoraCareContextRow);
 }
 
+// True when the estimate itself is the mosquito misting SYSTEM (lead-only,
+// quote-on-request — mosquito_misting_system) via the shared predicate on
+// either row's catalog key or label/name, mirroring estimateContextHasBoraCare.
+function estimateContextHasMistingSystem(context = {}) {
+  const rows = [
+    ...(Array.isArray(context.services) ? context.services : []),
+    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+  ];
+  return rows.some((row) => isMistingSystemService({ serviceKey: row?.service || row?.key, name: row?.label || row?.name }));
+}
+
 // A question is a Bora-Care intent only when it names Bora-Care/borate, or pairs
 // "wood" with a treatment/pest term. Bare "beetle"/"fungi" do NOT qualify, so on a
 // mixed estimate a lawn-fungus or shrub-beetle question still reaches the relevant
@@ -1209,6 +1221,18 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // question on a mixed estimate still reaches the relevant service branch.
   if (estimateContextHasBoraCare(context) && isBoraCareIntent(q)) {
     return `Bora-Care is a borate treatment applied to bare wood — attic framing and surface areas like the foundation and block. It treats the wood for termites, wood-boring beetles, and wood-decay fungi. Your technician follows the product label directions; for specifics on your home, call or text Waves at ${phone}.`;
+  }
+
+  // The mosquito misting SYSTEM (mosquito_misting_system) is lead-only and
+  // quote-required by design — no engine pricer exists yet, so every branch
+  // below that answers a normal quote-required estimate is wrong for it: the
+  // scheduling branch offers "pick a time to book online" and the system is
+  // NOT self-bookable (wiki/services/service-dispatch-rules.md), and no
+  // branch may ever state a price for it (pricing is owner-pending).
+  // Answered here, ahead of every other branch, so no phrasing of the
+  // question can reach the wrong copy.
+  if (context.billing?.quoteRequired && estimateContextHasMistingSystem(context)) {
+    return `The misting system is designed and priced at a free on-site design visit — there is no published price yet and it is not self-bookable online. The Waves team will call to schedule that visit; you can also call or text Waves at ${phone} any time.`;
   }
 
   if (/\b(include|included|cover|coverage|what.*get|plan)\b/.test(q)) {
