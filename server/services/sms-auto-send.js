@@ -796,41 +796,29 @@ async function recordAcceptedAutoSend({ claim, draftId, providerMessageId, accep
 // Refusals that apply to every gratitude candidate alike, so the rest of the
 // sweep would only repeat them.
 const SWEEP_WIDE_REFUSALS = new Set(['gate_off', 'mode_not_autosend', 'not_eligible', 'voice_profile_unresolved']);
+const SWEEP_PAGE_SIZE = 100;
 
 /**
- * Use a scheduler tick as delay storage: scan only recent live-webhook
- * gratitude shadow drafts, then hand each candidate to the same fully
- * revalidating executor. No queue state is created here.
- *
- * The bound cannot starve a candidate. Every claim is one-shot per inbound
- * (send-once idempotency key), and inbounds that already hold one are excluded
- * below, so no row can consume a claim twice. The remaining refusals are
- * read-only checks, and the default bound covers the whole eight-minute
- * window; a sweep that reaches it logs instead of silently truncating.
+ * One page of due gratitude drafts after the (inbound time, inbound id)
+ * cursor. The inbound clock owns both eligibility and the ten-minute
+ * deadline, so pages run oldest thread first; for duplicate drafts on one
+ * inbound, the latest generated copy leads and id makes an exact timestamp
+ * tie stable. Inbounds that already hold the send-once decision key can
+ * never be claimed again and are excluded.
  */
-async function processGratitudeAutoSendCandidates({ limit = 200, now = new Date() } = {}) {
-  const boundedLimit = Math.max(1, Math.min(Number(limit) || 200, 200));
-  if (!isEnabled('smsGratitudeReplies')) return { scanned: 0, attempted: 0, sent: 0, reason: 'gate_off' };
-  const activatedAt = gratitudeActivation();
-  if (!activatedAt || activatedAt.getTime() > now.getTime()) {
-    return { scanned: 0, attempted: 0, sent: 0, reason: 'activation_unset' };
-  }
-  const promptVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
-  const newestAllowed = new Date(now.getTime() - QUIET_WINDOW_MS);
-  const oldestAllowed = new Date(now.getTime() - MAX_REPLY_AGE_MS);
-  const scanLimit = boundedLimit * 4;
-  const rows = await db('message_drafts as md')
+function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
+  const q = db('message_drafts as md')
     .join('sms_log as s', 'md.sms_log_id', 's.id')
     .where({
       'md.status': 'shadow',
       'md.intent': GRATITUDE_INTENT,
-      'md.prompt_version': promptVersion,
+      'md.prompt_version': require('./sms-shadow-drafter').PROMPT_VERSION,
       's.direction': 'inbound',
     })
     .whereNotNull('md.model')
     .where('s.created_at', '>', activatedAt)
-    .where('s.created_at', '>=', oldestAllowed)
-    .where('s.created_at', '<=', newestAllowed)
+    .where('s.created_at', '>=', new Date(now.getTime() - MAX_REPLY_AGE_MS))
+    .where('s.created_at', '<=', new Date(now.getTime() - QUIET_WINDOW_MS))
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'source' = 'live_webhook'")
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'policy_version' = ?", [GRATITUDE_POLICY_VERSION])
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'actions_verified_safe' = 'true'")
@@ -840,65 +828,85 @@ async function processGratitudeAutoSendCandidates({ limit = 200, now = new Date(
       this.select(db.raw('1'))
         .from('agent_decisions as prior')
         .whereRaw('prior.idempotency_key = ? || s.id::text', [`${AUTOSEND_WORKFLOW}:inbound:`]);
-    })
-    // The inbound clock owns both eligibility and the ten-minute deadline.
-    // Drain the oldest eligible thread first so a steady stream of newer,
-    // ultimately-rejected drafts cannot consume every bounded sweep until an
-    // older valid reply expires. For duplicate drafts on one inbound, retain
-    // the latest generated copy; id makes an exact timestamp tie stable.
+    });
+  // The cursor re-reads its own timestamp: a JS Date would drop PostgreSQL's
+  // microseconds and re-match the cursor row.
+  if (cursor) {
+    q.whereRaw('(s.created_at, s.id) > ((SELECT created_at FROM sms_log WHERE id = ?), ?)', [cursor, cursor]);
+  }
+  return q
     .orderBy('s.created_at', 'asc')
+    .orderBy('s.id', 'asc')
     .orderBy('md.created_at', 'desc')
     .orderBy('md.id', 'asc')
-    .limit(scanLimit)
+    .limit(pageSize)
     .select(
       'md.id', 'md.sms_log_id', 'md.customer_id', 'md.inbound_message', 'md.draft_response',
       'md.intent', 'md.intent_confidence', 'md.model', 'md.prompt_version',
       'md.intended_actions', 'md.scheduling_intent'
     );
+}
 
-  const candidates = [];
+/** Hand one scanned draft to the fully revalidating executor. */
+function attemptGratitudeCandidate(row, metadata, gratitudeSourceDigest) {
+  return maybeAutoSend({
+    draftId: row.id,
+    customer: { id: row.customer_id },
+    smsLogId: row.sms_log_id,
+    inboundMessage: row.inbound_message,
+    reply: row.draft_response,
+    intent: row.intent,
+    intendedActions: metadata.actions,
+    actionsVerifiedSafe: true,
+    confidence: row.intent_confidence,
+    model: row.model,
+    promptVersion: row.prompt_version,
+    schedulingIntent: row.scheduling_intent === true,
+    voiceProfileVersion: metadata.voice_profile_version ?? null,
+    gratitudeSourceDigest,
+  });
+}
+
+/**
+ * Use a scheduler tick as delay storage: scan recent live-webhook gratitude
+ * shadow drafts and hand each inbound's latest draft to the same fully
+ * revalidating executor. No queue state is created here.
+ *
+ * Nothing can starve a candidate: the sweep pages through the WHOLE eligible
+ * window (the eight-minute window is the bound), each inbound is evaluated at
+ * most once per sweep, and claims are one-shot per inbound. It stops early
+ * only on a refusal that applies to every candidate.
+ */
+async function processGratitudeAutoSendCandidates({ now = new Date(), pageSize = SWEEP_PAGE_SIZE } = {}) {
+  if (!isEnabled('smsGratitudeReplies')) return { scanned: 0, attempted: 0, sent: 0, reason: 'gate_off' };
+  const activatedAt = gratitudeActivation();
+  if (!activatedAt || activatedAt.getTime() > now.getTime()) {
+    return { scanned: 0, attempted: 0, sent: 0, reason: 'activation_unset' };
+  }
+  const totals = { scanned: 0, attempted: 0, sent: 0 };
   const seenInbounds = new Set();
-  for (const row of rows) {
-    if (seenInbounds.has(row.sms_log_id)) continue;
-    seenInbounds.add(row.sms_log_id);
-    candidates.push(row);
-    if (candidates.length >= boundedLimit) break;
+  let gratitudeSourceDigest = null;
+  let cursor = null;
+  for (;;) {
+    const rows = await gratitudeCandidatePage({ activatedAt, now, cursor, pageSize });
+    totals.scanned += rows.length;
+    for (const row of rows) {
+      if (seenInbounds.has(row.sms_log_id)) continue;
+      seenInbounds.add(row.sms_log_id);
+      const metadata = jsonObject(row.intended_actions);
+      // Shape/provenance filtering above is only a cheap scan optimization. The
+      // executor reloads the name and checks the exact persisted reply.
+      if (!metadata || !Array.isArray(metadata.actions)) continue;
+      // Deployed sources cannot change within one sweep: hash them once.
+      gratitudeSourceDigest = gratitudeSourceDigest || require('./sms-gratitude-qualification').sourceSha256();
+      totals.attempted += 1;
+      const result = await attemptGratitudeCandidate(row, metadata, gratitudeSourceDigest);
+      if (result.sent) totals.sent += 1;
+      if (SWEEP_WIDE_REFUSALS.has(result.reason)) return totals;
+    }
+    if (rows.length < pageSize) return totals;
+    cursor = rows[rows.length - 1].sms_log_id;
   }
-  if (candidates.length >= boundedLimit) {
-    logger.warn(`[sms-gratitude] sweep reached its ${boundedLimit}-candidate bound; newer candidates wait for the next tick`);
-  }
-
-  let sent = 0;
-  let attempted = 0;
-  // Deployed sources cannot change within one sweep: hash them once.
-  const gratitudeSourceDigest = candidates.length
-    ? require('./sms-gratitude-qualification').sourceSha256() : null;
-  for (const row of candidates) {
-    const metadata = jsonObject(row.intended_actions);
-    // Shape/provenance filtering above is only a cheap scan optimization. The
-    // executor reloads the name and checks the exact persisted reply.
-    if (!metadata || !Array.isArray(metadata.actions)) continue;
-    attempted += 1;
-    const result = await maybeAutoSend({
-      draftId: row.id,
-      customer: { id: row.customer_id },
-      smsLogId: row.sms_log_id,
-      inboundMessage: row.inbound_message,
-      reply: row.draft_response,
-      intent: row.intent,
-      intendedActions: metadata.actions,
-      actionsVerifiedSafe: true,
-      confidence: row.intent_confidence,
-      model: row.model,
-      promptVersion: row.prompt_version,
-      schedulingIntent: row.scheduling_intent === true,
-      voiceProfileVersion: metadata.voice_profile_version ?? null,
-      gratitudeSourceDigest,
-    });
-    if (result.sent) sent += 1;
-    if (SWEEP_WIDE_REFUSALS.has(result.reason)) break;
-  }
-  return { scanned: rows.length, attempted, sent };
 }
 
 /**

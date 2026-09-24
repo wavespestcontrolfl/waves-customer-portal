@@ -21,6 +21,7 @@ const mockState = {
   candidateRows: [],
   candidateOrderBys: [],
   candidateExclusions: [],
+  candidateCursors: [],
 };
 
 jest.mock('../models/db', () => {
@@ -28,9 +29,17 @@ jest.mock('../models/db', () => {
     const q = {};
     let operation = null;
     for (const method of [
-      'whereNull', 'whereNotNull', 'whereRaw', 'whereNotIn', 'whereIn',
+      'whereNull', 'whereNotNull', 'whereNotIn', 'whereIn',
       'leftJoin', 'join', 'onConflict', 'ignore',
     ]) q[method] = jest.fn(() => q);
+    let candidateCursor = null;
+    q.whereRaw = jest.fn((sql, bindings) => {
+      if (table === 'message_drafts as md' && String(sql).startsWith('(s.created_at, s.id) >')) {
+        candidateCursor = bindings[1];
+        mockState.candidateCursors.push(candidateCursor);
+      }
+      return q;
+    });
     const orderBys = [];
     let queryLimit = null;
     q.orderBy = jest.fn((column, direction) => {
@@ -93,8 +102,14 @@ jest.mock('../models/db', () => {
       if (table === 'message_drafts as md') {
         const valueFor = (row, column) => column === 's.created_at'
           ? row.inbound_created_at
+          : column === 's.id' ? row.sms_log_id
           : column === 'md.created_at' ? row.created_at : row.id;
-        const rows = [...mockState.candidateRows].sort((left, right) => {
+        const anchor = candidateCursor && mockState.candidateRows.find(row => row.sms_log_id === candidateCursor);
+        const after = row => !anchor
+          || row.inbound_created_at > anchor.inbound_created_at
+          || (row.inbound_created_at.getTime() === anchor.inbound_created_at.getTime()
+            && row.sms_log_id > anchor.sms_log_id);
+        const rows = mockState.candidateRows.filter(after).sort((left, right) => {
           for (const [column, direction] of orderBys) {
             const a = valueFor(left, column);
             const b = valueFor(right, column);
@@ -199,6 +214,7 @@ function resetFixture() {
   mockState.candidateRows = [];
   mockState.candidateOrderBys = [];
   mockState.candidateExclusions = [];
+  mockState.candidateCursors = [];
   mockState.customers = [{ id: ID.customer, first_name: 'Dana', phone: '+19415550100' }];
   mockState.inbound = {
     id: ID.inbound, customer_id: ID.customer, direction: 'inbound',
@@ -437,10 +453,11 @@ test('candidate sweep drains the oldest inbound before more than 25 newer reject
   });
   mockState.candidateRows = [olderDuplicate, candidate(), ...newerRejected];
 
-  await expect(autoSend.processGratitudeAutoSendCandidates({ limit: 25, now }))
+  await expect(autoSend.processGratitudeAutoSendCandidates({ now }))
     .resolves.toEqual({ scanned: 32, attempted: 1, sent: 1 });
   expect(mockState.candidateOrderBys).toEqual([
     ['s.created_at', 'asc'],
+    ['s.id', 'asc'],
     ['md.created_at', 'desc'],
     ['md.id', 'asc'],
   ]);
@@ -495,6 +512,30 @@ test('older candidates refused after the prefilter cannot starve a valid newer o
 
   await expect(autoSend.processGratitudeAutoSendCandidates({ now }))
     .resolves.toEqual({ scanned: 31, attempted: 31, sent: 1 });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+});
+
+test('the sweep pages past a full page of refused older candidates to reach a valid one', async () => {
+  const now = new Date();
+  const refused = Array.from({ length: 5 }, (_, index) => {
+    const inboundAt = new Date(now.getTime() - (9 * 60 * 1000) + index * 1000);
+    return sweepCandidate({
+      id: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      sms_log_id: `20000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      draft_response: 'Not the approved reply',
+      inbound_created_at: inboundAt,
+      created_at: new Date(inboundAt.getTime() + 1000),
+    });
+  });
+  mockState.candidateRows = [...refused, sweepCandidate()];
+
+  await expect(autoSend.processGratitudeAutoSendCandidates({ now, pageSize: 2 }))
+    .resolves.toEqual({ scanned: 6, attempted: 6, sent: 1 });
+  expect(mockState.candidateCursors).toEqual([
+    '20000000-0000-4000-8000-000000000001',
+    '20000000-0000-4000-8000-000000000003',
+    ID.inbound,
+  ]);
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
 });
 
