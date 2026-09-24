@@ -297,6 +297,15 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       err.statusCode = 409;
       throw err;
     }
+    // The county-roll address block (and every other off-surface marker)
+    // is judged on the LOCKED anchor and reasserted on the write: a flag
+    // stamped after the public eligibility read must not revive the row
+    // and text a link that 404s (codex #4667 r22 P1).
+    if (require('../utils/estimate-claim-sql').estimateOffCustomerSurface({ estimate_data: anchor.estimate_data })) {
+      const err = new Error('Estimate changed while extending — retry.');
+      err.statusCode = 409;
+      throw err;
+    }
     if (await fixedBidBlocksExtension(trx, { ...estimate, estimate_data: anchor.estimate_data })) {
       const err = validationError('This bid or a grouped property has a fixed validity date. Contact the office to revise the proposal.');
       err.code = 'FIXED_BID_VALIDITY';
@@ -313,6 +322,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       // have preceded the hold. Zero rows → the same 409 as any other
       // concurrent change; the public route releases its burn on it.
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      .whereRaw("NOT COALESCE(estimate_data->'addressUnverified' = 'true'::jsonb, false)")
       .update(updates);
     if (!updated) {
       const err = new Error('Estimate changed while extending — retry.');

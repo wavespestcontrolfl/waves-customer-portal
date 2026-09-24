@@ -3253,7 +3253,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // New draft: nothing to lock (no row, no handoff token exists
             // yet), but the queued-obligation check still rides this trx.
             await applySetupFeeQuote(trx);
-            const [inserted] = await trx('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' }).returning('id');
+            // The NEW row gets the same lock-and-reconcile as a refresh: a
+            // flag a concurrent lookup committed since the reconciliation
+            // released its lock rides onto the inserted draft (codex r22
+            // P1).
+            await draftVerdictLock(trx);
+            const newerForInsert = await newerFlagUnderLock(trx);
+            if (newerForInsert) { draftAddressBlockCarried = true; carriedAddressFlag = newerForInsert; }
+            const [inserted] = await trx('estimates').insert({
+              ...estFields,
+              ...(newerForInsert ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: newerForInsert } } : {}),
+              status: 'draft',
+              source: 'quote_wizard',
+            }).returning('id');
             draftEstimateId = inserted?.id || inserted || null;
           }
         });

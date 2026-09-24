@@ -1660,7 +1660,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         </span>
                                       </div>{" "}
                                       {leadAddressUnverifiedNotice(lead) && (
-                                        <div className="mt-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-900">
+                                        <div className="mt-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-14 text-amber-900">
                                           {leadAddressUnverifiedNotice(lead)}
                                         </div>
                                       )}{" "}

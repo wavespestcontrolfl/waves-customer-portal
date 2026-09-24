@@ -3266,7 +3266,10 @@ async function reviseAdminEstimate({
       const priorParsed = parseDisplayAddress(lockedPrior?.address);
       const leadSameDoor = !leadRow || !String(leadRow.address || '').trim()
         || doorUnit(leadRow.address, null) === doorUnit(priorParsed.line1, priorParsed.unit);
-      const leadStillPrior = !!leadRow && leadSameDoor && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address));
+      // …with the COMPLETE locality on both sides, like the customer branch
+      // (codex r22 P1): a street-only estimate must not rewrite a lead a
+      // prefill lookup moved to the same number in another town.
+      const leadStillPrior = !!leadRow && leadSameDoor && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address, { requireLocality: true }));
       if (leadStillPrior) await trx('leads').where({ id: writtenData.lead_id }).update({
         extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
         ...(corrected && parsed.line1 ? {
