@@ -554,8 +554,12 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // another request committed since (a recordless county audit is
         // never cached, so nothing else could recover it) outranks this
         // run's clean answer when it is newer than this run's evidence.
+        // The reconciled clean verdict's own timestamp, kept when this
+        // lookup supplies no new county evidence (codex r30 P1).
+        let reconciledCleanAt = null;
         {
           const lockedCleanAt = await resolveStaffCleanAt(trx);
+          reconciledCleanAt = lockedCleanAt || null;
           // Evidence time ONLY for an actual county answer: an unanswered
           // lookup (outage, no record) has no clean evidence, so an older
           // matching flag on the contact pair must still win and carry the
@@ -629,6 +633,15 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
                 // equivalent premise (codex #4667 r16 P1).
                 const evidenceAt = result?.meta?.cache === 'hit' ? auditEvidenceAt(result) : null;
                 if (verdict.status === 'clean' && evidenceAt) verdict.at = evidenceAt;
+                // An UNANSWERED lookup (a county outage) that reattached to a
+                // lead the reconciliation found clean for this premise must
+                // not overwrite that clean verdict with 'unanswered' — an
+                // older flagged sibling lead would win the next /calculate
+                // and re-block the confirmed address. The reconciled verdict
+                // stands, at its original timestamp (codex r30 P1).
+                if (verdict.status === 'unanswered' && !addressUnverified && reconciledCleanAt) {
+                  return { ...buildAddressVerdict({ flag: null, enriched: { addressVerdict: 'audited' }, profileFound: true, address: normalizedAddress }), at: reconciledCleanAt };
+                }
                 return verdict;
               }
               // The staff verdict is the evidence, at ITS timestamp.
