@@ -607,6 +607,12 @@ function buildEstimateAssistantContext({
     recurringServices: recurringServices.map(rowWithSummary),
     setupFee,
     firstVisitFees,
+    // Identity-only (no amounts) quote-required one-time rows that the
+    // one-time block above hides, so a recurring-mode quote that also carries a
+    // lead-only line (e.g. mosquito_misting_system) still knows it's there.
+    quoteOnlyItems: quoteRequired && !exposeOneTimeContext
+      ? oneTimeServices.map((row) => ({ service: row.service || row.key || null, label: row.label || row.name || null }))
+      : [],
     oneTime: exposeOneTimeContext ? {
       amount: oneTimeContextAmount,
       amountText: oneTimeContextAmount ? fmtMoney(oneTimeContextAmount) : null,
@@ -1184,11 +1190,16 @@ function estimateContextHasBoraCare(context = {}) {
 // True when the estimate itself is the mosquito misting SYSTEM (lead-only,
 // quote-on-request — mosquito_misting_system) via the shared predicate on
 // either row's catalog key or label/name, mirroring estimateContextHasBoraCare.
-function estimateContextHasMistingSystem(context = {}) {
-  const rows = [
+function mistingContextRows(context = {}) {
+  return [
     ...(Array.isArray(context.services) ? context.services : []),
     ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+    ...(Array.isArray(context.quoteOnlyItems) ? context.quoteOnlyItems : []),
   ];
+}
+
+function estimateContextHasMistingSystem(context = {}) {
+  const rows = mistingContextRows(context);
   return rows.some((row) => isMistingSystemService({ serviceKey: row?.service || row?.key, name: row?.label || row?.name }));
 }
 
@@ -1196,10 +1207,7 @@ function estimateContextHasMistingSystem(context = {}) {
 // misting fallback when the question is about the misting system; questions
 // about the other service keep their own branches.
 function estimateContextIsMistingOnly(context = {}) {
-  const rows = [
-    ...(Array.isArray(context.services) ? context.services : []),
-    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
-  ];
+  const rows = mistingContextRows(context);
   return rows.length > 0 && rows.every((row) => isMistingSystemService({ serviceKey: row?.service || row?.key, name: row?.label || row?.name }));
 }
 
@@ -1222,7 +1230,7 @@ const MISTING_PRICE_INTENT_PATTERN = /\b(price|prices|pricing|cost|costs|quote|c
 const MISTING_BOOKING_INTENT_PATTERN = /\b(book|booking|schedule|scheduling|appointment|reschedule)\b|\bdesign\s*visit\b/i;
 // Weather + visit wording ("will you still come if it rains?") is about the
 // appointment, not about pausing installed spray cycles.
-const MISTING_VISIT_CONTEXT_PATTERN = /\b(design\s*visit|visit|appointment|come|coming|show\s+up|technician|tech)\b/i;
+const MISTING_VISIT_CONTEXT_PATTERN = /\b(design\s*visit|visit|appointment|technician|tech|show\s+up)\b|\b(you|you\s+guys|tech|team|someone|anyone)\s+(still\s+)?(come|coming)\b|\bcome\s+(out|by)\b/i;
 const MISTING_WEATHER_INTENT_PATTERN = /\b(weather|wind|windy|rain|rains|raining|rainy|storm|storms|hurricane|hurricanes|cold|freeze|freezing|temperature|temp)\b/i;
 const MISTING_SAFETY_INTENT_PATTERN = /\b(safe|safety|kids?|child(?:ren)?|pets?|dogs?|cats?|bees?|bee|pollinators?|fish|pond|pool|expos\w*|allerg\w*|sick|misted|outside|outdoors|spray\w*|re-?entry|breath\w*|inhal\w*|smell\w*|skin|lanai|patio)\b|\bgo\s+out\b/i;
 const MISTING_MAINTENANCE_INTENT_PATTERN = /\b(refill\w*|maintain\w*|maintenance|clog(?:ged|s)?|service\w*|nozzle\w*|filter\w*|clean\w*|repair\w*|broken|leak\w*)\b/i;

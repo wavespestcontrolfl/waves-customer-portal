@@ -147,6 +147,32 @@ describe('Ask Waves fallback — mosquito misting SYSTEM quote-required question
     });
   });
 
+  describe('Codex round-6: recurring-mode mixed quote keeps the misting row; "come on" is not a visit', () => {
+    test('recurring serviceMode + priced recurring + quote-required misting one-time: misting question still gets misting copy, no amounts leak', () => {
+      const context = buildEstimateAssistantContext({
+        pricingBundle: {
+          quoteRequired: true,
+          oneTimeBreakdown: { items: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', quoteRequired: true, amount: 4000 }] },
+        },
+        serviceMode: 'recurring',
+      });
+      expect(context.oneTime).toBeNull();
+      expect(context.quoteOnlyItems).toEqual([{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' }]);
+      expect(JSON.stringify(context.quoteOnlyItems)).not.toMatch(/4000|\$/);
+      const answer = answerEstimateQuestionFallback('How often do you clean the misting system nozzles?', context);
+      expect(answer.toLowerCase()).toContain('quarterly nozzle cleaning');
+    });
+    test('"Will it come on if it rains?" is about the system, not the visit', () => {
+      const answer = answerEstimateQuestionFallback('Will it come on if it rains?', mistingContext);
+      expect(answer.toLowerCase()).toContain('should be paused for rain');
+      expect(answer.toLowerCase()).not.toContain('reschedule');
+    });
+    test('"Will your tech still come if it rains?" is about the visit', () => {
+      const answer = answerEstimateQuestionFallback('Will your tech still come if it rains?', mistingContext);
+      expect(answer.toLowerCase()).toContain('reschedule');
+    });
+  });
+
   describe('intent order: price first, booking last (topic questions containing "when" stay on topic)', () => {
     test.each([
       ['When should I pause it before a storm?', 'should be paused for rain'],
