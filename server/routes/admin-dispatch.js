@@ -1808,6 +1808,17 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
+    // Same closed target allow-list as admin-schedule's PUT /:id/status
+    // (r1-sched-routes-2): this route handed 'pending' / 'rescheduled' / any
+    // string straight to transitionJobStatus too, so a technician could
+    // un-confirm or hand-stamp a reschedule on their own visit here after
+    // the schedule route refused it (pre-push fallback audit, PR #4673).
+    // Refused for every caller, before the row lookup; 'completed' still
+    // reaches its own USE_COMPLETION_FLOW refusal below.
+    const { STATUS_ROUTE_ALLOWED_TARGETS } = require('../services/job-status');
+    if (!STATUS_ROUTE_ALLOWED_TARGETS.has(toStatus)) {
+      return res.status(400).json({ error: `Invalid status '${toStatus}'`, code: 'invalid_status' });
+    }
     // Populated by the single-cancel branch when a cancellation text was
     // requested — surfaces send failures in the response.
     let cancelNoticeOutcome = null;

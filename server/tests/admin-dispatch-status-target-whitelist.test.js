@@ -1,26 +1,21 @@
 /**
- * ADMIN-BUG (audit repro r1-sched-routes-2): PUT /api/admin/schedule/:id/status
- * used to have no target-status allow-list. A TECHNICIAN token on its OWN
- * current visit could send { status: 'rescheduled' } (or 'pending' to
- * un-confirm), or any arbitrary string, and the route handed the value
- * straight to transitionJobStatus, which wrote it.
+ * Pre-push fallback audit on PR #4673 (P1): admin-schedule's PUT /:id/status
+ * gained a closed target allow-list (r1-sched-routes-2) but the sibling
+ * PUT /api/admin/dispatch/:serviceId/status did not — it handed 'pending' /
+ * 'rescheduled' / any string to transitionJobStatus, subject only to the
+ * terminal/day-of guards, so a technician refused on the schedule route
+ * could un-confirm or hand-stamp a reschedule on their own visit here.
  *
- * Fixed: STATUS_ROUTE_ALLOWED_TARGETS rejects any status outside the
- * scheduled_services enum this route actually commits (confirmed, en_route,
- * on_site, skipped, no_show, cancelled, completed) with 400 before the
- * ownership-scoped row lookup even runs — 'pending' and 'rescheduled' are
- * not among them (un-confirming or hand-stamping a reschedule outside the
- * reschedule engine's side effects is not a supported transition here).
+ * Fixed: both routes read STATUS_ROUTE_ALLOWED_TARGETS from
+ * services/job-status.js and refuse anything else with 400 invalid_status
+ * before the row lookup, for every caller. 'completed' still passes the
+ * list and reaches the route's own USE_COMPLETION_FLOW refusal.
  *
- * transitionJobStatus is spied (real module otherwise) so the assertion is
- * on what the route COMMITS to the shared writer; the db fake only serves
- * the ownership lookups (same shape as admin-tech-role-scoping.test.js).
+ * Mock shape copied from admin-schedule-status-target-whitelist.test.js.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
-
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-// Mutable so the admin-path case below can pin the contract for every caller.
 const actor = { role: 'technician' };
 jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
@@ -91,7 +86,7 @@ jest.mock('../models/db', () => {
 const express = require('express');
 const db = require('../models/db');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const scheduleRouter = require('../routes/admin-schedule');
+const dispatchRouter = require('../routes/admin-dispatch');
 
 const daysFromNow = (n) => etDateString(addETDays(new Date(), n));
 
@@ -99,7 +94,7 @@ let server; let baseUrl;
 beforeAll(() => new Promise((resolve) => {
   const app = express();
   app.use(express.json());
-  app.use('/api/admin/schedule', scheduleRouter);
+  app.use('/api/admin/dispatch', dispatchRouter);
   app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
   server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; resolve(); });
 }));
@@ -116,55 +111,33 @@ beforeEach(() => {
   mockTransitionJobStatus.mockClear();
   db.__state.writes = [];
   db.__state.scheduledServices = [
-    { id: 'svc-own-confirmed', technician_id: 'tech-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: daysFromNow(3), source_action: null, customer_confirmed: true },
-    { id: 'svc-own-pending', technician_id: 'tech-1', customer_id: 'cust-2', status: 'pending', scheduled_date: daysFromNow(3), source_action: null },
+    { id: 'svc-own-confirmed', technician_id: 'tech-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: daysFromNow(0), source_action: null, customer_confirmed: true },
   ];
 });
 
-test("technician's OWN confirmed visit — 'rescheduled' is rejected before it ever reaches the writer", async () => {
-  const { status, body } = await put('/api/admin/schedule/svc-own-confirmed/status', { status: 'rescheduled' });
+test.each(['rescheduled', 'pending', 'foo'])("technician's OWN visit — '%s' is refused with 400 before any lookup or write", async (target) => {
+  const { status, body } = await put('/api/admin/dispatch/svc-own-confirmed/status', { status: target });
+  expect(status).toBe(400);
+  expect(body).toEqual({ error: `Invalid status '${target}'`, code: 'invalid_status' });
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  expect(db.__state.writes).toHaveLength(0);
+});
+
+test("an ADMIN gets the same refusal — the allow-list is a route contract, not a role gate", async () => {
+  actor.role = 'admin';
+  const { status, body } = await put('/api/admin/dispatch/svc-own-confirmed/status', { status: 'rescheduled' });
   expect(status).toBe(400);
   expect(body).toEqual({ error: "Invalid status 'rescheduled'", code: 'invalid_status' });
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
 });
 
-test("technician's OWN confirmed visit — 'pending' (un-confirm) is rejected", async () => {
-  const { status, body } = await put('/api/admin/schedule/svc-own-confirmed/status', { status: 'pending' });
-  expect(status).toBe(400);
-  expect(body).toEqual({ error: "Invalid status 'pending'", code: 'invalid_status' });
-  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+test("'completed' passes the allow-list and still lands on the route's own USE_COMPLETION_FLOW refusal", async () => {
+  const { status, body } = await put('/api/admin/dispatch/svc-own-confirmed/status', { status: 'completed' });
+  expect(status).toBe(409);
+  expect(body.code).toBe('USE_COMPLETION_FLOW');
 });
 
-test("an arbitrary string ('foo') is rejected — the allow-list is a closed set, not a passthrough", async () => {
-  const { status, body } = await put('/api/admin/schedule/svc-own-pending/status', { status: 'foo' });
-  expect(status).toBe(400);
-  expect(body).toEqual({ error: "Invalid status 'foo'", code: 'invalid_status' });
-  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
-});
-
-test("a legitimate target ('confirmed') on the technician's OWN visit still works", async () => {
-  const { status } = await put('/api/admin/schedule/svc-own-pending/status', { status: 'confirmed' });
-  expect(status).toBe(200);
-  expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
-  expect(mockTransitionJobStatus.mock.calls[0][0]).toMatchObject({
-    jobId: 'svc-own-pending', fromStatus: 'pending', toStatus: 'confirmed', transitionedBy: 'tech-1',
-  });
-});
-
-// Pre-push fallback audit (PR #4673): the allow-list is deliberately enforced
-// for EVERY caller — no office surface sends 'pending' or 'rescheduled' to
-// this route (the V2 dispatch board sends en_route; reschedules go through
-// SmartRebooker) — so an admin gets the same 400, while an allowed target
-// still passes the list for an admin.
-test("admin-path contract: an ADMIN sending 'rescheduled' or 'pending' is refused the same way; 'confirmed' passes the allow-list", async () => {
-  actor.role = 'admin';
-  for (const target of ['rescheduled', 'pending']) {
-    const { status, body } = await put('/api/admin/schedule/svc-own-confirmed/status', { status: target });
-    expect(status).toBe(400);
-    expect(body).toEqual({ error: `Invalid status '${target}'`, code: 'invalid_status' });
-  }
-  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
-  const { status, body } = await put('/api/admin/schedule/svc-own-pending/status', { status: 'confirmed' });
-  expect(status).not.toBe(400);
-  expect(body.code).not.toBe('invalid_status');
+test('both status routes enforce the identical set', () => {
+  const { STATUS_ROUTE_ALLOWED_TARGETS } = jest.requireActual('../services/job-status');
+  expect([...STATUS_ROUTE_ALLOWED_TARGETS].sort()).toEqual(['cancelled', 'completed', 'confirmed', 'en_route', 'no_show', 'on_site', 'skipped']);
 });

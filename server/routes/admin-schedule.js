@@ -14959,12 +14959,12 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // syntactically valid but redirected to their own routes by the explicit
 // guards just below; every other enum member routes through this handler
 // (the V2 dispatch board's row actions, including Skip, run through here).
-const STATUS_ROUTE_ALLOWED_TARGETS = new Set([
-  'confirmed', 'en_route', 'on_site', 'skipped', 'no_show', 'cancelled', 'completed',
-]);
+// The set lives in services/job-status.js so the sibling dispatch status
+// route enforces the identical closed set (pre-push fallback audit, PR #4673).
 router.put('/:id/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, requestReview } = req.body;
+    const { STATUS_ROUTE_ALLOWED_TARGETS } = require('../services/job-status');
     if (!STATUS_ROUTE_ALLOWED_TARGETS.has(toStatus)) {
       return res.status(400).json({ error: `Invalid status '${toStatus}'`, code: 'invalid_status' });
     }
