@@ -62,7 +62,19 @@ jest.mock('../services/intelligence-bar/tools', () => ({
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/seo-tools', () => ({ SEO_TOOLS: [], executeSeoTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/procurement-tools', () => ({ PROCUREMENT_TOOLS: [], executeProcurementTool: jest.fn() }));
+jest.mock('../services/intelligence-bar/procurement-tools', () => ({
+  // Mirrors compare_vendor_pricing: a top-level anyOf the API rejects.
+  PROCUREMENT_TOOLS: [{
+    name: 'synthetic_either_or',
+    description: 'synthetic',
+    input_schema: {
+      type: 'object',
+      properties: { product_name: { type: 'string' }, product_id: { type: 'string' } },
+      anyOf: [{ required: ['product_name'] }, { required: ['product_id'] }],
+    },
+  }],
+  executeProcurementTool: jest.fn(),
+}));
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/tech-tools', () => ({ TECH_TOOLS: [], executeTechTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/review-tools', () => ({
@@ -177,6 +189,25 @@ describe('tool definitions handed to the model', () => {
     expect(tools.map((t) => t.name)).toContain('search_ib_history');
     for (const tool of tools) {
       expect(Object.keys(tool).filter((k) => k.startsWith('_'))).toEqual([]);
+    }
+  });
+
+  test('inventory context: a tool with a top-level anyOf is offered without it (compare_vendor_pricing prod 500, 2026-09-22)', async () => {
+    // Anthropic: "input_schema does not support oneOf, allOf, or anyOf at the
+    // top level". The module keeps the anyOf for the server-side validator;
+    // the wire copy must not carry it — on any tool, on any path.
+    scriptModelTurns([[{ type: 'text', text: 'OK' }]]);
+    await withServer(async (baseUrl) => {
+      const { status } = await postQuery(baseUrl, { prompt: 'compare bifen pricing', context: 'inventory' });
+      expect(status).toBe(200);
+    });
+    const { tools } = mockMessagesCreate.mock.calls[0][0];
+    const compare = tools.find((t) => t.name === 'synthetic_either_or');
+    expect(compare).toBeDefined();
+    expect(compare.input_schema.properties).toHaveProperty('product_name');
+    expect(compare.input_schema).not.toHaveProperty('anyOf');
+    for (const tool of tools) {
+      expect(['oneOf', 'anyOf', 'allOf'].filter((k) => k in tool.input_schema)).toEqual([]);
     }
   });
 
