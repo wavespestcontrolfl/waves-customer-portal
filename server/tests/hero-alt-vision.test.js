@@ -102,7 +102,7 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     const plain = buildScreenPrompt({});
     expect(plain).not.toMatch(/EXCEPTION|waves_logo_placements/);
     const p = buildScreenPrompt({ allowUniformLogo: true });
-    expect(p).toMatch(/"waves_logo_placements": string\[\], "technician_visible": boolean/);
+    expect(p).toMatch(/"waves_logo_placements": string\[\], "uniform_logo_lettering": string\[\], "technician_visible": boolean/);
     expect(p).toMatch(/"right chest" \(the wearer's right side/);
     expect(p).toMatch(/EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected/);
   });
@@ -147,11 +147,21 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(r.logos).toEqual([]);
   });
 
-  test('readable text is never filtered: a WAVES string that comes back is standalone lettering (Codex r1 P2 on #4761)', async () => {
+  test('a WAVES string in readable_text is standalone lettering unless the model ALSO attributed it to the uniform logo (Codex r1 P2 on #4761)', async () => {
     mockDispatch.mockResolvedValue(branded({ readable_text: ['WAVES'] }));
-    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
-    expect(r.ok).toBe(false);
-    expect(r.reasons).toEqual(['readable text: WAVES']);
+    const stray = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(stray.ok).toBe(false);
+    expect(stray.reasons).toEqual(['readable text: WAVES']);
+    // the badge's own lettering, attributed by the model → not stray
+    mockDispatch.mockResolvedValue(branded({ readable_text: ['WAVES', 'LAWN & PEST'], uniform_logo_lettering: ['WAVES', 'LAWN & PEST'] }));
+    const attributed = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(attributed).toMatchObject({ ok: true, reasons: [] });
+    // attribution cannot launder other text, and only the logo's own words qualify
+    mockDispatch.mockResolvedValue(branded({ readable_text: ['WAVES', 'DANGER'], uniform_logo_lettering: ['WAVES', 'DANGER'] }));
+    expect((await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true })).reasons).toEqual(['readable text: DANGER']);
+    // a second, un-attributed WAVES elsewhere still fails without the allowance
+    mockDispatch.mockResolvedValue(answer({ readable_text: ['WAVES'], logos_or_brand_marks: [], uniform_logo_lettering: ['WAVES'], forbidden_scenes: [], notes: '' }));
+    expect((await screenGeneratedImage({ buffer: PNG_BUFFER })).reasons).toEqual(['readable text: WAVES']);
   });
 
   test('an answer without the placement list or technician_visible is unusable → unchecked (fail-open), never clean', async () => {

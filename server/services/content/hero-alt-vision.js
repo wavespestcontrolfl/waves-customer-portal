@@ -117,13 +117,14 @@ function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniform
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
   const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
   const shape = allowUniformLogo
-    ? '{"readable_text": string[], "logos_or_brand_marks": string[], "waves_logo_placements": string[], "technician_visible": boolean, "forbidden_scenes": number[], "notes": string}'
+    ? '{"readable_text": string[], "logos_or_brand_marks": string[], "waves_logo_placements": string[], "uniform_logo_lettering": string[], "technician_visible": boolean, "forbidden_scenes": number[], "notes": string}'
     : '{"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": number[], "notes": string}';
   const uniformLogoRule = allowUniformLogo
     ? `
 - waves_logo_placements: every place ${UNIFORM_LOGO_DESCRIPTION} appears, each as one of exactly "cap", "right chest" (the wearer's right side, i.e. the side of their right arm), "left chest", or "elsewhere: <where>" (a vehicle, wall, sign, equipment, packaging, floating on its own). Empty array if it appears nowhere.
+- uniform_logo_lettering: the lettering you can read INSIDE that Waves logo on the technician's cap or chest ("WAVES", "LAWN & PEST"), listed here and NOT under readable_text. Empty array if none is legible.
 - technician_visible: true if a uniformed technician's cap front or shirt chest is in frame and can be judged.
-EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — do not list it under logos_or_brand_marks, and do not list its own lettering ("WAVES", "LAWN & PEST") under readable_text. Any OTHER lettering, and the Waves logo anywhere other than the cap or chest, must still be listed.`
+EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — do not list it under logos_or_brand_marks. Any OTHER lettering (including "WAVES" on a sign, vehicle or wall), and the Waves logo anywhere other than the cap or chest, must still be listed.`
     : '';
   return `Inspect this generated blog image and answer as strict JSON only, shape ${shape}.
 - readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.
@@ -152,6 +153,9 @@ function parseScreen(text, { requireForbidden = false, requirePlacements = false
     if (requirePlacements && (!Array.isArray(obj.waves_logo_placements) || typeof obj.technician_visible !== 'boolean')) return null;
     return {
       placements: Array.isArray(obj.waves_logo_placements) ? obj.waves_logo_placements.map((t) => String(t || '').trim()).filter(Boolean) : [],
+      // Lettering the model attributes to the uniform logo itself — only the
+      // logo's own words count (a model cannot launder arbitrary text here).
+      uniformLettering: Array.isArray(obj.uniform_logo_lettering) ? obj.uniform_logo_lettering.map((t) => String(t || '').trim()).filter(Boolean) : [],
       technicianVisible: obj.technician_visible === true,
       readableText: obj.readable_text.map((t) => String(t || '').trim()).filter(Boolean),
       logos: obj.logos_or_brand_marks.map((t) => String(t || '').trim()).filter(Boolean),
@@ -198,6 +202,14 @@ const UNIFORM_LOGO_WORDS = /\bwaves\b/i;
 const UNIFORM_LOCATION = /\b(cap|hat|chest|polo|shirt)\b/i;
 const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|sprayer|tank|packaging|bottle|box|background|floating|standalone|sky|ground|clipboard|tablet|backpack|bag|glove|gloves|tool|tools|mailbox|fence)\b/i;
 const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t);
+// The words inside the Waves logo. A readable_text entry is dropped only
+// when the model ALSO attributed that same string to the uniform logo under
+// uniform_logo_lettering — the model's own placement, not a blanket filter
+// (Codex r1 P2 on #4761). Vision models OCR the badge's "WAVES" into
+// readable_text often enough that, without this, a correct image burns its
+// screen retry (regen batch 2026-09-24).
+const LOGO_WORDS = new Set(['waves', 'lawn', 'pest', 'lawn pest', 'lawn and pest', 'waves lawn pest', 'waves lawn and pest']);
+const isLogoWord = (t) => LOGO_WORDS.has(normalizeText(t));
 // A reported placement → cap | right chest | left chest | elsewhere.
 function classifyPlacement(t) {
   const n = normalizeText(t);
@@ -251,6 +263,7 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     }
     const logoReasons = allowUniformLogo ? uniformLogoReasons(parsed) : [];
     if (allowUniformLogo) parsed.logos = parsed.logos.filter((t) => !isAllowedUniformLogo(t));
+    const attributedLettering = new Set(allowUniformLogo ? parsed.uniformLettering.filter(isLogoWord).map(normalizeText) : []);
     // An allowed caption may come back split ("1", "OFF") or joined. A
     // detected string is the caption's only when it is a contiguous, in-order
     // run of ONE allowed caption — never a superset ("1 OFF SALE"), never a
@@ -273,6 +286,7 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     const strayText = parsed.readableText.filter((t) => {
       const tokens = normalizeText(t).split(' ').filter(Boolean);
       if (!tokens.length) return false;
+      if (attributedLettering.has(tokens.join(' '))) return false; // the uniform logo's own lettering, by the model's attribution
       let matched = false;
       allowedSeqs.forEach((seq, c) => {
         const at = runAt(tokens, seq, cursor[c]);
@@ -311,4 +325,4 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
 }
 
 module.exports = { describeHeroForAlt, sanitizeAlt, buildAltPrompt, screenGeneratedImage, buildScreenPrompt, parseScreen };
-module.exports._internals = { isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, UNIFORM_LOGO_DESCRIPTION };
+module.exports._internals = { isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, isLogoWord, UNIFORM_LOGO_DESCRIPTION };
