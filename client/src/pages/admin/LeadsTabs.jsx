@@ -465,7 +465,7 @@ function LeadBadge({ label, tone = "neutral", className }) {
     </Badge>
   );
 }
-const CONTACT_EVIDENCE_LABELS = {
+const RECONCILIATION_EVIDENCE_LABELS = {
   live_conversation: "Live conversation",
   assessment_booked: "Assessment booked",
   assessment_completed: "Assessment completed",
@@ -503,7 +503,7 @@ function LeadStatusReviewPanel({ reconciliation }) {
           {finding.message}
           {finding.evidence && (
             <div className="mt-[3px] text-ink-secondary">
-              {CONTACT_EVIDENCE_LABELS[finding.evidence.type] ||
+              {RECONCILIATION_EVIDENCE_LABELS[finding.evidence.type] ||
                 finding.evidence.type}
               {finding.evidence.id ? ` · ${finding.evidence.id}` : ""}
               {finding.evidence.occurred_at
