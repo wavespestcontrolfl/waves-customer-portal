@@ -78,7 +78,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   const [actionKey, setActionKey] = useState("");
   const [latestLink, setLatestLink] = useState("");
   const listRequestRef = useRef(0);
-  const listPendingRef = useRef(new Set());
+  const listPendingRef = useRef(null);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ status, limit: "100" });
@@ -87,10 +87,11 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   }, [status, search]);
 
   const loadRequests = useCallback(async ({ background = false } = {}) => {
-    if (background && listPendingRef.current.size > 0) return;
+    if (background && listPendingRef.current === listRequestRef.current) return;
     const request = ++listRequestRef.current;
-    listPendingRef.current.add(request);
+    listPendingRef.current = request;
     if (!background) {
+      setError("");
       setLoading(true);
       setLoadError("");
     }
@@ -108,7 +109,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
         setLoadError(err.message || "Could not load document requests");
       }
     } finally {
-      listPendingRef.current.delete(request);
+      if (listPendingRef.current === request) listPendingRef.current = null;
       if (request === listRequestRef.current) {
         setLoading(false);
       }

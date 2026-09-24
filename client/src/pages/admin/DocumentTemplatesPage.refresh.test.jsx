@@ -163,7 +163,7 @@ it("does not let a successful background list refresh erase an operation error",
   adminFetch.mockImplementation((path, options = {}) => {
     if (path.startsWith("/admin/document-templates?") && !options.method) {
       listCalls += 1;
-      return Promise.resolve(response({ templates: [template("Operation template")] }));
+      return Promise.resolve(response({ templates: path.includes("category=wdo") ? [] : [template("Operation template")] }));
     }
     if (path === "/admin/document-templates/agreement.standard" && options.method === "PUT") {
       return Promise.resolve(response({ error: "Save rejected" }, { ok: false, status: 409 }));
@@ -183,6 +183,26 @@ it("does not let a successful background list refresh erase an operation error",
   await waitFor(() => expect(listCalls).toBe(2));
   expect(screen.getByRole("alert")).toHaveTextContent("Save rejected");
   expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "WDO", exact: true }));
+  await screen.findByText("No templates for this filter.");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("keeps a matching selection and draft when its category has a different first result", async () => {
+  const other = { ...template("Other agreement"), templateKey: "agreement.other" };
+  adminFetch.mockImplementation((path) => {
+    if (path.startsWith("/admin/document-templates?")) return Promise.resolve(response({
+      templates: path.includes("category=") ? [other, template("Selected agreement")] : [template("Selected agreement"), other],
+    }));
+    return Promise.resolve(response(path.endsWith("agreement.other") ? { template: other } : detail("Selected agreement")));
+  });
+  render(<DocumentTemplatesPage />);
+  await screen.findByDisplayValue("Selected agreement");
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Unsaved agreement" } });
+  fireEvent.click(screen.getByRole("button", { name: "Agreements", exact: true }));
+  await waitFor(() => expect(screen.queryByText("Loading templates…")).not.toBeInTheDocument());
+  expect(screen.getByLabelText("Name")).toHaveValue("Unsaved agreement");
+  expect(adminFetch.mock.calls.filter(([path]) => path === "/admin/document-templates/agreement.standard")).toHaveLength(1);
 });
 
 it("selects the recovered category result after that category initially fails", async () => {

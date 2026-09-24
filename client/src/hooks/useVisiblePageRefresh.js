@@ -6,17 +6,12 @@ const DEFAULT_INTERVAL_MS = 30_000;
 // ordering and decide which local UI state a background refresh may replace.
 export default function useVisiblePageRefresh(refresh) {
   const refreshRef = useRef(refresh);
-  const runningRef = useRef(false);
   refreshRef.current = refresh;
 
   useEffect(() => {
     const run = () => {
-      if (runningRef.current
-        || (typeof document !== "undefined" && document.visibilityState === "hidden")) return;
-      runningRef.current = true;
-      void Promise.resolve(refreshRef.current?.())
-        .catch(() => {})
-        .finally(() => { runningRef.current = false; });
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void Promise.resolve(refreshRef.current?.()).catch(() => {});
     };
     const resume = () => {
       if (document.visibilityState === "visible") run();

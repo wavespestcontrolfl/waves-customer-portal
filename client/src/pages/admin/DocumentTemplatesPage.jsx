@@ -218,7 +218,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   const [bulkLoading, setBulkLoading] = useState(false);
   const editorRef = useRef(null);
   const listRequestRef = useRef(0);
-  const listPendingRef = useRef(new Set());
+  const listPendingRef = useRef(null);
   const detailRequestRef = useRef(0);
   const lastLoadedCategoryRef = useRef(null);
   const newModeRef = useRef(newMode);
@@ -237,10 +237,11 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   }, []);
 
   const loadTemplates = useCallback(async ({ background = false, preserveSelection = background } = {}) => {
-    if (background && listPendingRef.current.size > 0) return;
+    if (background && listPendingRef.current === listRequestRef.current) return;
     const request = ++listRequestRef.current;
-    listPendingRef.current.add(request);
+    listPendingRef.current = request;
     if (!background) {
+      setError("");
       setLoading(true);
       setListError("");
     }
@@ -255,7 +256,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
       setSelectedKey((current) => {
         if (newModeRef.current) return current;
         if (preserveSelection && sameCategory && current) return current;
-        if (sameCategory && current && nextTemplates.some((template) => template.templateKey === current)) return current;
+        if (current && nextTemplates.some((template) => template.templateKey === current)) return current;
         return nextTemplates[0]?.templateKey || "";
       });
       if (!sameCategory && !newModeRef.current && nextTemplates.length === 0) {
@@ -276,7 +277,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         setListError(err.message || "Could not load document templates");
       }
     } finally {
-      listPendingRef.current.delete(request);
+      if (listPendingRef.current === request) listPendingRef.current = null;
       if (request === listRequestRef.current) {
         setLoading(false);
       }

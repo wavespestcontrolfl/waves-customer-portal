@@ -49,7 +49,7 @@ it("keeps fresh request data when an older overlapping load resolves later", asy
     }
     if (path.startsWith("/admin/contracts/requests?")) {
       listCalls += 1;
-      if (listCalls === 1) return old.promise;
+      if (listCalls === 2) return old.promise;
       return Promise.resolve(response({ requests: [request("fresh", "Fresh agreement")] }));
     }
     throw new Error(`Unexpected request: ${path}`);
@@ -57,9 +57,14 @@ it("keeps fresh request data when an older overlapping load resolves later", asy
 
   mount();
   await waitFor(() => expect(listCalls).toBe(1));
+  await screen.findByText("Fresh agreement");
+  fireEvent(window, new Event("focus"));
+  await waitFor(() => expect(listCalls).toBe(2));
   fireEvent.change(screen.getByLabelText("Search requests"), { target: { value: "fresh" } });
   await screen.findByText("Fresh agreement");
   expect(screen.queryByText("Loading document requests...")).not.toBeInTheDocument();
+  fireEvent(window, new Event("online"));
+  await waitFor(() => expect(listCalls).toBe(4));
 
   await act(async () => old.resolve(response({ requests: [request("stale", "Stale agreement")] })));
   expect(screen.getByText("Fresh agreement")).toBeInTheDocument();
@@ -70,11 +75,12 @@ it("keeps fresh request data when an older overlapping load resolves later", asy
 it("offers an in-page retry after a list refresh fails", async () => {
   let listCalls = 0;
   adminFetch.mockImplementation((path) => {
+    if (path.endsWith("/send-email")) return Promise.resolve(response({ error: "Delivery failed" }, { ok: false }));
     if (path === "/admin/contracts/requests/stats") return Promise.resolve(response({ stats: {} }));
     if (path.startsWith("/admin/contracts/requests?")) {
       listCalls += 1;
       if (listCalls === 1) return Promise.resolve(response({ error: "Temporary outage" }, { ok: false, status: 503 }));
-      return Promise.resolve(response({ requests: [request("retry", "Recovered agreement")] }));
+      return Promise.resolve(response({ requests: path.includes("search=empty") ? [] : [request("retry", "Recovered agreement")] }));
     }
     throw new Error(`Unexpected request: ${path}`);
   });
@@ -83,5 +89,13 @@ it("offers an in-page retry after a list refresh fails", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent("Temporary outage");
   fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await screen.findByText("Recovered agreement");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Email", exact: true }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Delivery failed");
+  fireEvent(window, new Event("focus"));
+  await waitFor(() => expect(listCalls).toBe(3));
+  expect(screen.getByRole("alert")).toHaveTextContent("Delivery failed");
+  fireEvent.change(screen.getByLabelText("Search requests"), { target: { value: "empty" } });
+  await screen.findByText("No document requests match this view.");
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
