@@ -17,6 +17,10 @@ const {
   previewTreeShrubAssessment,
   formatAssessmentScores,
   buildTreeShrubAssessmentReportData,
+  isCompleteVisionResult,
+  NUMERIC_SCORE_FIELDS,
+  SEVERITY_SCORE_FIELDS,
+  VISION_PROMPT,
 } = require('../services/tree-shrub-assessment');
 
 describe('toCategoryScores — severity → 0-100 health', () => {
@@ -331,5 +335,46 @@ describe('scoreAndStoreTreeShrubAssessment — auto-score + persist', () => {
   it('returns null with no photos or no loader (never throws)', async () => {
     expect(await scoreAndStoreTreeShrubAssessment({ service: { customer_id: 'c1' }, photos: [] })).toBeNull();
     expect(await scoreAndStoreTreeShrubAssessment({ service: {}, photos: [{ tag: 'x' }], loadImage })).toBeNull();
+  });
+});
+
+describe('isCompleteVisionResult — every schema field read, never a silent default', () => {
+  const full = {
+    foliage_fullness: 80, leaf_color_vigor: 70, pest_signals: 'minor',
+    disease_signals: 'none', water_heat_stress: 'moderate', pruning_mechanical: 'none', observations: 'x',
+  };
+  const result = (claude, gemini) => ({ claude, gemini, composite: averageScores(claude, gemini).composite });
+
+  it('the canonical field lists are exactly the vision prompt schema', () => {
+    for (const f of [...NUMERIC_SCORE_FIELDS, ...SEVERITY_SCORE_FIELDS]) expect(VISION_PROMPT).toContain(`"${f}"`);
+    expect(NUMERIC_SCORE_FIELDS.length + SEVERITY_SCORE_FIELDS.length).toBe(6);
+  });
+
+  it('accepts a full read from one or both providers', () => {
+    expect(isCompleteVisionResult(result(full, full))).toBe(true);
+    expect(isCompleteVisionResult(result(full, null))).toBe(true);
+    expect(isCompleteVisionResult(result(null, { ...full, pest_signals: 'Severe ' }))).toBe(true);
+  });
+
+  it('rejects a field both providers omitted, even though the composite defaults it to "none"', () => {
+    const { disease_signals: _d, ...partial } = full;
+    const r = result(partial, partial);
+    expect(r.composite.disease_signals).toBe('none'); // the silent default being guarded
+    expect(isCompleteVisionResult(r)).toBe(false);
+  });
+
+  it('rejects an invalid severity word or non-numeric score from any provider that sent it', () => {
+    expect(isCompleteVisionResult(result(full, { ...full, pest_signals: 'high' }))).toBe(false);
+    expect(isCompleteVisionResult(result({ ...full, foliage_fullness: 'lush' }, full))).toBe(false);
+  });
+
+  it('accepts one provider omitting a field the other read validly', () => {
+    const { water_heat_stress: _w, ...partial } = full;
+    expect(isCompleteVisionResult(result(full, partial))).toBe(true);
+  });
+
+  it('rejects null / composite-less results', () => {
+    expect(isCompleteVisionResult(null)).toBe(false);
+    expect(isCompleteVisionResult({ claude: full, gemini: null, composite: null })).toBe(false);
   });
 });

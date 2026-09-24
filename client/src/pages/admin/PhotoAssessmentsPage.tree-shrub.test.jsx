@@ -34,15 +34,19 @@ const treeShrubDetail = {
     scores: { overallScore: 75 },
     worst_signal: { key: "disease_leaf_spot", label: "Disease / Leaf Spot Signals", score: 50, status: "needs_attention" },
     categories: [
-      { key: "foliage_fullness", label: "Foliage Fullness", score: 82, status: "healthy", customerExplanation: "Good fullness overall with only minor thin spots." },
-      { key: "disease_leaf_spot", label: "Disease / Leaf Spot Signals", score: 50, status: "needs_attention", customerExplanation: "Leaf-spot signals we want to monitor and confirm next visit." },
+      { key: "foliage_fullness", label: "Foliage Fullness", score: 82, status: "healthy" },
+      { key: "disease_leaf_spot", label: "Disease / Leaf Spot Signals", score: 50, status: "needs_attention" },
     ],
     findings: [{ key: "disease_leaf_spot", label: "Leaf-spot / disease signals", status: "attention", detail: "Possible leaf-spot or disease-like signals.", score: 50 }],
     observations: "Leaf spotting on the lower hedge is consistent with fungal leaf spot.",
     ai_summary: "AI flagged 1 item to review.",
-    suggested_customer_action: "Monitor the flagged areas.",
-    scored_count: 1,
-    photo_count: 1,
+    photo_observations: [
+      { index: 0, observations: "Dense, even canopy across the front beds.", worst_signal: null },
+      { index: 1, observations: "Leaf spotting on the lower hedge is consistent with fungal leaf spot.", worst_signal: "disease_leaf_spot" },
+    ],
+    suggested_customer_action: "Recommend an on-site look to confirm the leaf-spot signals and quote treatment.",
+    scored_count: 2,
+    photo_count: 2,
   },
 };
 
@@ -105,7 +109,14 @@ it("tree & shrub detail: scores + observations, and no Get link / Send report", 
 
   fireEvent.click(screen.getByRole("tab", { name: "Tech" }));
   expect(await screen.findByText("Leaf-spot / disease signals")).toBeInTheDocument();
-  expect(screen.getByText("1 of 1")).toBeInTheDocument();
+  expect(screen.getByText("2 of 2")).toBeInTheDocument();
+  expect(screen.getByText("Suggested next step")).toBeInTheDocument();
+  expect(screen.getByText("Recommend an on-site look to confirm the leaf-spot signals and quote treatment.")).toBeInTheDocument();
+  // Every photo's own observation, in upload order, beside its own worst signal.
+  expect(screen.getByText("Observations by photo")).toBeInTheDocument();
+  expect(screen.getByText("Photo 1:")).toBeInTheDocument();
+  expect(screen.getByText("Dense, even canopy across the front beds.")).toBeInTheDocument();
+  expect(screen.getByText("Photo 2 · disease leaf spot:")).toBeInTheDocument();
 });
 
 it("pest detail still offers Get link + Send report when the server says it can release", async () => {

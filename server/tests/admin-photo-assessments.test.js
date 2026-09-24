@@ -79,12 +79,14 @@ jest.mock('../services/lawn-diagnostic-analyze', () => {
   };
 });
 jest.mock('../services/lawn-assessment', () => ({ getSeason: () => 'peak' }));
-// The tree & shrub engine's multi-photo preview (dual vision + merge) —
-// mocked at the module boundary; the five-category builder stays real so
-// the stored categories/labels are the production copy.
-const mockTreeShrubPreview = jest.fn();
+// The tree & shrub engine's per-photo dual-vision call is mocked at the
+// module boundary; everything else in the engine (completeness check,
+// merge, scoring, findings) and the five-category builder stay REAL, so the
+// stored scores/labels are production behavior.
+const mockAnalyzeTreeShrub = jest.fn();
 jest.mock('../services/tree-shrub-assessment', () => ({
-  previewTreeShrubAssessment: (...args) => mockTreeShrubPreview(...args),
+  ...jest.requireActual('../services/tree-shrub-assessment'),
+  analyzePhoto: (...args) => mockAnalyzeTreeShrub(...args),
 }));
 const mockIdentifyPest = jest.fn();
 jest.mock('../services/pest-identification', () => {
@@ -1000,27 +1002,32 @@ describe('tree & shrub — third assessment type', () => {
   const CUSTOMER_ID = 'ffffffff-0000-4111-8222-333333333333';
   const INBOUND_KEY = 'sms-media/inbound/abc123';
 
-  // What previewTreeShrubAssessment returns for a hedge with light pest
-  // signals and a stronger leaf-spot read.
-  function previewResult(overrides = {}) {
-    return {
-      scores: {
-        foliageFullness: 82,
-        leafColorVigor: 74,
-        pestActivity: 75,
-        diseaseLeafSpot: 50,
-        waterHeatStress: 95,
-        overallScore: 75,
-      },
-      observations: 'Leaf spotting on the lower hedge is consistent with fungal leaf spot.',
-      scoredCount: 1,
-      photoCount: 1,
-      aiSummary: 'AI flagged 1 item to review.',
-      suggestedCustomerAction: 'Monitor the flagged areas; we’ll recheck on the next visit.',
-      findings: [{ key: 'disease_leaf_spot', label: 'Leaf-spot / disease signals', status: 'attention', detail: 'Possible leaf-spot or disease-like signals.', score: 50, defaultAction: 'monitor' }],
-      ...overrides,
-    };
-  }
+  // One provider's raw read of a photo (the vision prompt's JSON schema).
+  // HEDGE_CLOSEUP: light pest signals, a strong leaf-spot read.
+  const HEDGE_CLOSEUP = {
+    foliage_fullness: 82,
+    leaf_color_vigor: 74,
+    pest_signals: 'minor',
+    disease_signals: 'moderate',
+    water_heat_stress: 'none',
+    pruning_mechanical: 'none',
+    observations: 'Leaf spotting on the lower hedge is consistent with fungal leaf spot.',
+  };
+  const CLEAN_OVERVIEW = {
+    foliage_fullness: 90,
+    leaf_color_vigor: 90,
+    pest_signals: 'none',
+    disease_signals: 'none',
+    water_heat_stress: 'none',
+    pruning_mechanical: 'none',
+    observations: 'Dense, even canopy across the front beds with healthy new growth.',
+  };
+  // analyzePhoto's return shape: both providers agree, composite = the read.
+  const visionResult = (raw) => ({ claude: raw, gemini: raw, composite: raw, divergenceFlags: [] });
+  const STORED_SCORES = {
+    foliageFullness: 82, leafColorVigor: 74, pestActivity: 75, diseaseLeafSpot: 50, waterHeatStress: 95, overallScore: 75,
+  };
+  const STORED_FINDINGS = [{ key: 'disease_leaf_spot', label: 'Leaf-spot / disease signals', status: 'attention', detail: 'Possible leaf-spot or disease-like signals.', score: 50, defaultAction: 'monitor' }];
 
   function treeShrubRow(overrides = {}) {
     return {
@@ -1031,13 +1038,14 @@ describe('tree & shrub — third assessment type', () => {
       overall_score: 75,
       worst_signal: 'disease_leaf_spot',
       report_contract: {
-        scores: previewResult().scores,
-        categories: [{ key: 'disease_leaf_spot', label: 'Disease / Leaf Spot Signals', score: 50, status: 'needs_attention', customerExplanation: 'Leaf-spot signals we want to monitor and confirm next visit.' }],
+        scores: STORED_SCORES,
+        categories: [{ key: 'disease_leaf_spot', label: 'Disease / Leaf Spot Signals', score: 50, status: 'needs_attention' }],
         worst_signal: { key: 'disease_leaf_spot', label: 'Disease / Leaf Spot Signals', score: 50, status: 'needs_attention' },
         observations: 'Leaf spotting on the lower hedge is consistent with fungal leaf spot.',
-        findings: previewResult().findings,
+        photo_observations: [{ index: 0, observations: 'Leaf spotting on the lower hedge is consistent with fungal leaf spot.', worst_signal: 'disease_leaf_spot' }],
+        findings: STORED_FINDINGS,
         ai_summary: 'AI flagged 1 item to review.',
-        suggested_customer_action: 'Monitor the flagged areas.',
+        suggested_customer_action: 'Recommend an on-site look to confirm the leaf-spot signals and quote treatment.',
         scored_count: 1,
         photo_count: 1,
       },
@@ -1053,7 +1061,7 @@ describe('tree & shrub — third assessment type', () => {
   }
 
   beforeEach(() => {
-    mockTreeShrubPreview.mockResolvedValue(previewResult());
+    mockAnalyzeTreeShrub.mockResolvedValue(visionResult(HEDGE_CLOSEUP));
   });
 
   test('TYPES config: own tables, treeshrub photo prefix, no report page', () => {
@@ -1225,40 +1233,36 @@ describe('tree & shrub — third assessment type', () => {
     });
   });
 
+  const postTreeShrub = (base, body) => fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
   test('POST /tree_shrub with uploaded photos runs the engine and stores scores + signals — the note never reaches the model', async () => {
     await withServer(async (base) => {
-      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          photos: [{ data: 'aGVsbG8=', mimeType: 'image/jpeg' }],
-          contact: { first_name: 'Robin', phone: '941-555-0100' },
-          note: 'hedge by the pool is thinning',
-        }),
+      const res = await postTreeShrub(base, {
+        photos: [{ data: 'aGVsbG8=', mimeType: 'image/jpeg' }],
+        contact: { first_name: 'Robin', phone: '941-555-0100' },
+        note: 'hedge by the pool is thinning',
       });
       expect(res.status).toBe(201);
       const body = await res.json();
       expect(body.type).toBe('tree_shrub');
 
-      // Engine got the normalized photos + an inline loader, nothing else.
-      expect(mockTreeShrubPreview).toHaveBeenCalledTimes(1);
-      const engineArgs = mockTreeShrubPreview.mock.calls[0][0];
-      expect(Object.keys(engineArgs).sort()).toEqual(['loadImage', 'photos']);
-      expect(JSON.stringify(engineArgs.photos)).not.toContain('hedge by the pool');
-      await expect(engineArgs.loadImage(engineArgs.photos[0])).resolves.toEqual({ base64: 'aGVsbG8=', mimeType: 'image/jpeg' });
-      await expect(engineArgs.loadImage({ data: null })).resolves.toBeNull();
+      // The engine sees only the photo bytes + mime type — never the note.
+      expect(mockAnalyzeTreeShrub).toHaveBeenCalledTimes(1);
+      expect(mockAnalyzeTreeShrub.mock.calls[0]).toEqual(['aGVsbG8=', 'image/jpeg']);
 
       const stored = inserts.tree_shrub_identifications[0];
       expect(stored).toMatchObject({ mode: 'prospect', status: 'analyzed', source: 'admin', overall_score: 75, worst_signal: 'disease_leaf_spot' });
       const contract = JSON.parse(stored.report_contract);
-      expect(contract.scores).toMatchObject({ foliageFullness: 82, diseaseLeafSpot: 50, overallScore: 75 });
+      expect(contract.scores).toEqual(STORED_SCORES);
       expect(contract.categories.map((c) => c.key)).toEqual([
         'foliage_fullness', 'leaf_color_vigor', 'pest_activity', 'disease_leaf_spot', 'water_heat_mechanical_stress',
       ]);
-      expect(contract.worst_signal).toMatchObject({ key: 'disease_leaf_spot', label: 'Disease / Leaf Spot Signals' });
-      // Customer-safe category copy: signals language, never a confirmed diagnosis.
-      const copy = contract.categories.map((c) => c.customerExplanation).join(' ');
-      expect(copy).not.toMatch(/infestation|diseased/i);
+      expect(contract.worst_signal).toEqual({ key: 'disease_leaf_spot', label: 'Disease / Leaf Spot Signals', score: 50, status: 'needs_attention' });
+      expect(contract.findings).toEqual([expect.objectContaining({ key: 'disease_leaf_spot', status: 'attention' })]);
+      expect(contract.scored_count).toBe(1);
+      expect(contract.photo_count).toBe(1);
       expect(JSON.parse(stored.ai_analysis).prospect_note).toBe('hedge by the pool is thinning');
       expect(stored.ai_summary).toContain('consistent with');
       expect(inserts.leads).toBeUndefined();
@@ -1272,6 +1276,71 @@ describe('tree & shrub — third assessment type', () => {
     });
   });
 
+  test('stored contract carries no visit promises or confirmed-diagnosis words (standalone lane, signals only)', async () => {
+    await withServer(async (base) => {
+      await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] });
+      const contract = JSON.parse(inserts.tree_shrub_identifications[0].report_contract);
+      const text = JSON.stringify(contract);
+      expect(text).not.toMatch(/next visit|recheck|documented today|treated today/i);
+      expect(text).not.toMatch(/infestation|diseased/i);
+      // The report builder's visit-written category copy is not stored.
+      expect(contract.categories.every((c) => !('customerExplanation' in c))).toBe(true);
+      expect(contract.suggested_customer_action).toBe(adminRouter._test.TREE_SHRUB_NEXT_STEPS.disease_leaf_spot);
+    });
+  });
+
+  test('TREE_SHRUB_NEXT_STEPS: one prospect-safe next step per category plus the clean case, none promising a visit', () => {
+    const { TREE_SHRUB_NEXT_STEPS } = adminRouter._test;
+    const { buildTreeShrubVisualCategories } = require('../services/service-report/tree-shrub-visual-categories');
+    const categoryKeys = buildTreeShrubVisualCategories({}).map((c) => c.key);
+    expect(Object.keys(TREE_SHRUB_NEXT_STEPS).sort()).toEqual([...categoryKeys, 'none'].sort());
+    for (const copy of Object.values(TREE_SHRUB_NEXT_STEPS)) {
+      expect(copy).not.toMatch(/next visit|recheck|we'll|we’ll|today/i);
+      expect(copy).not.toMatch(/infestation|diseased/i);
+    }
+    expect(TREE_SHRUB_NEXT_STEPS.none).toMatch(/No treatment signals/);
+    for (const key of categoryKeys) expect(TREE_SHRUB_NEXT_STEPS[key]).toMatch(/^Recommend an on-site look/);
+  });
+
+  test('a clean assessment gets the no-signals next step and no worst signal', async () => {
+    mockAnalyzeTreeShrub.mockResolvedValue(visionResult(CLEAN_OVERVIEW));
+    await withServer(async (base) => {
+      expect((await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] })).status).toBe(201);
+      const stored = inserts.tree_shrub_identifications[0];
+      const contract = JSON.parse(stored.report_contract);
+      expect(stored.worst_signal).toBeNull();
+      expect(contract.worst_signal).toBeNull();
+      expect(contract.suggested_customer_action).toBe('No treatment signals in these photos — offer a seasonal check.');
+    });
+  });
+
+  test('clean overview + flagged close-up: every photo’s observations are kept, and the headline comes from the flagged photo', async () => {
+    // Upload order: overview FIRST (the engine merge would keep its text),
+    // close-up second (the one that drives the worst signal).
+    mockAnalyzeTreeShrub.mockImplementation(async (data) => visionResult(data === 'b3ZlcnZpZXc=' ? CLEAN_OVERVIEW : HEDGE_CLOSEUP));
+    await withServer(async (base) => {
+      const res = await postTreeShrub(base, { photos: [{ data: 'b3ZlcnZpZXc=' }, { data: 'Y2xvc2V1cA==' }] });
+      expect(res.status).toBe(201);
+      const stored = inserts.tree_shrub_identifications[0];
+      const contract = JSON.parse(stored.report_contract);
+      expect(contract.photo_observations).toEqual([
+        { index: 0, observations: CLEAN_OVERVIEW.observations, worst_signal: null },
+        { index: 1, observations: HEDGE_CLOSEUP.observations, worst_signal: 'disease_leaf_spot' },
+      ]);
+      expect(contract.observations).toBe(HEDGE_CLOSEUP.observations);
+      expect(stored.ai_summary).toBe(HEDGE_CLOSEUP.observations);
+      expect(contract.worst_signal.key).toBe('disease_leaf_spot');
+    });
+  });
+
+  test('headlineTreeShrubPhoto falls back to the first photo when nothing is flagged', () => {
+    const { headlineTreeShrubPhoto } = adminRouter._test;
+    const first = { index: 0, categories: [{ key: 'pest_activity', score: 95 }] };
+    const second = { index: 1, categories: [{ key: 'pest_activity', score: 90 }] };
+    expect(headlineTreeShrubPhoto([first, second], null)).toBe(first);
+    expect(headlineTreeShrubPhoto([first, second], 'pest_activity')).toBe(second);
+  });
+
   test('POST /tree_shrub with message_photos feeds the resized inbound MMS photo to the engine and links the thread customer', async () => {
     mockMessagesById[MESSAGE_ID] = {
       id: MESSAGE_ID,
@@ -1283,16 +1352,10 @@ describe('tree & shrub — third assessment type', () => {
     mockConversationsById[CONVERSATION_ID] = { id: CONVERSATION_ID, customer_id: CUSTOMER_ID };
     mockCustomerRow = { id: CUSTOMER_ID, first_name: 'Robin', last_name: 'Lee', email: 'robin@example.com', phone: '9415550100' };
     await withServer(async (base) => {
-      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] }),
-      });
+      const res = await postTreeShrub(base, { message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] });
       expect(res.status).toBe(201);
       expect(mockGetPhotoBuffer).toHaveBeenCalledTimes(1);
-      const { photos, loadImage } = mockTreeShrubPreview.mock.calls[0][0];
-      expect(photos).toHaveLength(1);
-      await expect(loadImage(photos[0])).resolves.toEqual({ base64: mockResizedJpeg.toString('base64'), mimeType: 'image/jpeg' });
+      expect(mockAnalyzeTreeShrub.mock.calls).toEqual([[mockResizedJpeg.toString('base64'), 'image/jpeg']]);
       const stored = inserts.tree_shrub_identifications[0];
       expect(stored.customer_id).toBe(CUSTOMER_ID);
       expect(JSON.parse(stored.contact_snapshot).first_name).toBe('Robin');
@@ -1300,45 +1363,75 @@ describe('tree & shrub — third assessment type', () => {
   });
 
   test('a photo the engine could not score fails the whole request (503) — no partial row, no photo storage', async () => {
-    // Both providers failed on one of the two photos: the engine drops it
-    // and merges the rest, which must not be persisted as a full analysis.
-    mockTreeShrubPreview.mockResolvedValue(previewResult({ scoredCount: 1, photoCount: 2 }));
+    // Both providers failed on the second photo (analyzePhoto → null): the
+    // rest must not be persisted as a full analysis.
+    mockAnalyzeTreeShrub.mockImplementation(async (data) => (data === 'd29ybGQ=' ? null : visionResult(HEDGE_CLOSEUP)));
     await withServer(async (base) => {
-      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ photos: [{ data: 'aGVsbG8=' }, { data: 'd29ybGQ=' }] }),
-      });
+      const res = await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }, { data: 'd29ybGQ=' }] });
       expect(res.status).toBe(503);
       expect((await res.json()).error).toMatch(/Could not analyze every photo/);
-      expect(mockTreeShrubPreview.mock.calls[0][0].photos).toHaveLength(2);
+      expect(mockAnalyzeTreeShrub).toHaveBeenCalledTimes(2);
       expect(inserts.tree_shrub_identifications).toBeUndefined();
       expect(storeFunnelPhotos).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a provider result missing a schema field (e.g. pest signals) counts as unscored → 503, no row', async () => {
+    // Syntactically valid JSON with pest_signals omitted by BOTH providers:
+    // the engine's averaging would default it to a clean "none"/95.
+    const { pest_signals: _omitted, ...incomplete } = HEDGE_CLOSEUP;
+    mockAnalyzeTreeShrub.mockResolvedValue(visionResult(incomplete));
+    await withServer(async (base) => {
+      const res = await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] });
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toMatch(/Could not analyze every photo/);
+      expect(inserts.tree_shrub_identifications).toBeUndefined();
+      expect(storeFunnelPhotos).not.toHaveBeenCalled();
+    });
+  });
+
+  test('an unrecognized severity word or a non-numeric score also counts as unscored → 503', async () => {
+    await withServer(async (base) => {
+      mockAnalyzeTreeShrub.mockResolvedValue(visionResult({ ...HEDGE_CLOSEUP, disease_signals: 'high' }));
+      expect((await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] })).status).toBe(503);
+      mockAnalyzeTreeShrub.mockResolvedValue(visionResult({ ...HEDGE_CLOSEUP, foliage_fullness: 'lush' }));
+      expect((await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] })).status).toBe(503);
+      expect(inserts.tree_shrub_identifications).toBeUndefined();
+    });
+  });
+
+  test('one provider omitting a field the other read is still complete (the engine uses the available read)', async () => {
+    const { pest_signals: _omitted, ...geminiRead } = HEDGE_CLOSEUP;
+    mockAnalyzeTreeShrub.mockResolvedValue({ claude: HEDGE_CLOSEUP, gemini: geminiRead, composite: HEDGE_CLOSEUP, divergenceFlags: [] });
+    await withServer(async (base) => {
+      expect((await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] })).status).toBe(201);
     });
   });
 
   test('a data-less photo entry is not sent to the engine and does not count against completeness', async () => {
     await withServer(async (base) => {
-      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ photos: [{ data: 'aGVsbG8=' }, { mimeType: 'image/jpeg' }] }),
-      });
+      const res = await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }, { mimeType: 'image/jpeg' }] });
       expect(res.status).toBe(201);
-      expect(mockTreeShrubPreview.mock.calls[0][0].photos).toHaveLength(1);
+      expect(mockAnalyzeTreeShrub).toHaveBeenCalledTimes(1);
       expect(inserts.tree_shrub_identifications).toHaveLength(1);
     });
   });
 
-  test('engine outage (no photo scored) degrades to 503, no row, no photo storage', async () => {
-    mockTreeShrubPreview.mockResolvedValue(null);
+  test('engine outage (no provider answers) degrades to 503, no row, no photo storage', async () => {
+    mockAnalyzeTreeShrub.mockResolvedValue(null);
     await withServer(async (base) => {
-      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ photos: [{ data: 'aGVsbG8=' }] }),
-      });
+      const res = await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] });
       expect(res.status).toBe(503);
       expect(inserts.tree_shrub_identifications).toBeUndefined();
       expect(storeFunnelPhotos).not.toHaveBeenCalled();
+    });
+  });
+
+  test('an analyzePhoto throw is contained as unscored → 503', async () => {
+    mockAnalyzeTreeShrub.mockRejectedValue(new Error('vision boom'));
+    await withServer(async (base) => {
+      expect((await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] })).status).toBe(503);
+      expect(inserts.tree_shrub_identifications).toBeUndefined();
     });
   });
 });

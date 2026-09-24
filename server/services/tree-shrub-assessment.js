@@ -96,6 +96,11 @@ const SEVERITY_DISPLAY = { none: 95, minor: 75, moderate: 50, severe: 20 };
 const SEVERITY_INDEX = { none: 0, minor: 1, moderate: 2, severe: 3 };
 const SEVERITY_REVERSE = ['none', 'minor', 'moderate', 'severe'];
 
+// The vision prompt's score schema — the canonical field lists every merge
+// below iterates and isCompleteVisionResult validates against.
+const NUMERIC_SCORE_FIELDS = ['foliage_fullness', 'leaf_color_vigor'];
+const SEVERITY_SCORE_FIELDS = ['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical'];
+
 function num(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
@@ -212,14 +217,14 @@ function averageScores(claude, gemini) {
   if (!gemini) return { composite: claude, divergenceFlags };
 
   const composite = {};
-  for (const f of ['foliage_fullness', 'leaf_color_vigor']) {
+  for (const f of NUMERIC_SCORE_FIELDS) {
     const c = num(claude[f]); const g = num(gemini[f]);
     if (c != null && g != null) {
       composite[f] = Math.round((c + g) / 2);
       if (Math.abs(c - g) > 20) divergenceFlags.push({ metric: f, claude: c, gemini: g, gap: Math.abs(c - g) });
     } else composite[f] = c ?? g;
   }
-  for (const f of ['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical']) {
+  for (const f of SEVERITY_SCORE_FIELDS) {
     // Mirror the numeric fields: a MISSING field (model omitted it) must not be
     // counted as a clean "none" read that averages a real signal down — use the
     // available model's value. An explicit "none" still counts as a real read.
@@ -240,6 +245,32 @@ function averageScores(claude, gemini) {
   // stands in when Gemini has no read; SCORES stay dual-model averaged.
   composite.observations = (gemini?.observations || claude?.observations || '').trim();
   return { composite, divergenceFlags };
+}
+
+// A provider's reading of one field is valid when it is a finite number (0-100
+// fields) or an exact severity word — never the "none"/95 default the scorers
+// fall back to for an omitted or unrecognized value.
+function isValidScoreReading(field, value) {
+  return NUMERIC_SCORE_FIELDS.includes(field)
+    ? num(value) != null
+    : SEVERITY_INDEX[String(value).trim().toLowerCase()] != null;
+}
+
+/**
+ * True when an analyzePhoto result read EVERY schema field: at least one
+ * provider returned it, and every provider that returned it returned a valid
+ * value. averageScores fills a field both providers omitted with "none" (a
+ * clean 95), so completeness has to be judged on the raw provider results,
+ * not the composite. Callers that must not persist a silently-defaulted
+ * score (the admin assessment lane) gate on this.
+ */
+function isCompleteVisionResult(result) {
+  if (!result || !result.composite) return false;
+  const readings = [result.claude, result.gemini].filter(Boolean);
+  return [...NUMERIC_SCORE_FIELDS, ...SEVERITY_SCORE_FIELDS].every((field) => {
+    const present = readings.map((raw) => raw[field]).filter((value) => value != null && value !== '');
+    return present.length > 0 && present.every((value) => isValidScoreReading(field, value));
+  });
 }
 
 /**
@@ -313,11 +344,11 @@ function mergePhotoComposites(composites = []) {
   const list = composites.filter(Boolean);
   if (!list.length) return null;
   const merged = {};
-  for (const f of ['foliage_fullness', 'leaf_color_vigor']) {
+  for (const f of NUMERIC_SCORE_FIELDS) {
     const vals = list.map((c) => num(c[f])).filter((v) => v != null);
     merged[f] = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
   }
-  for (const f of ['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical']) {
+  for (const f of SEVERITY_SCORE_FIELDS) {
     const worst = Math.max(...list.map((c) => SEVERITY_INDEX[normalizeSeverity(c[f])]));
     merged[f] = SEVERITY_REVERSE[worst];
   }
@@ -716,6 +747,9 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
 module.exports = {
   VISION_PROMPT,
   SEVERITY_DISPLAY,
+  NUMERIC_SCORE_FIELDS,
+  SEVERITY_SCORE_FIELDS,
+  isCompleteVisionResult,
   toCategoryScores,
   calculateOverall,
   averageScores,

@@ -360,7 +360,8 @@ const TREE_SHRUB_STATUS_LABELS = {
 
 // Admin-side tree & shrub report: there is no customer report page for this
 // type yet, so this is the whole "report" — the five 0-100 health scores
-// with their signal-language copy and the model's observation paragraph.
+// with their status, and the observation paragraph from the photo that
+// drives the worst signal.
 function TreeShrubReportView({ techView }) {
   const categories = techView?.categories || [];
   return (
@@ -378,7 +379,6 @@ function TreeShrubReportView({ techView }) {
               {c.score != null ? `${c.score}/100` : "—"} · {TREE_SHRUB_STATUS_LABELS[c.status] || c.status}
             </span>
           </div>
-          {c.customerExplanation ? <div className="text-[14px] text-zinc-600 mt-1">{c.customerExplanation}</div> : null}
         </div>
       ))}
       {techView?.observations ? (
@@ -391,15 +391,18 @@ function TreeShrubReportView({ techView }) {
   );
 }
 
-// Tree & shrub tech view: the flagged findings the visit closeout would show
-// a tech (signals, never a confirmed pest/disease) plus scoring coverage.
+// Tree & shrub tech view: the flagged findings (signals, never a confirmed
+// pest/disease), the admin next step, scoring coverage, and each photo's own
+// observation paragraph beside its own worst signal.
+// The server always sends tech_view for this type, filled over defaults
+// (treeShrubTechView), so no per-field fallbacks here.
 function TreeShrubTechView({ techView }) {
-  const findings = techView?.findings || [];
+  const findings = techView.findings;
   return (
     <div className="space-y-3">
-      <Row label="AI summary">{techView?.ai_summary}</Row>
-      <Row label="Suggested action">{techView?.suggested_customer_action}</Row>
-      <Row label="Photos scored">{techView?.photo_count != null ? `${techView.scored_count ?? 0} of ${techView.photo_count}` : null}</Row>
+      <Row label="AI summary">{techView.ai_summary}</Row>
+      <Row label="Suggested next step">{techView.suggested_customer_action}</Row>
+      <Row label="Photos scored">{techView.photo_count != null ? `${techView.scored_count ?? 0} of ${techView.photo_count}` : null}</Row>
       {findings.map((f) => (
         <div key={f.key} className="border border-hairline border-zinc-200 rounded-md p-3">
           <div className="flex items-center gap-2 flex-wrap">
@@ -408,6 +411,25 @@ function TreeShrubTechView({ techView }) {
             {f.score != null ? <Badge tone="neutral">{f.score}/100</Badge> : null}
           </div>
           {f.detail ? <div className="mt-1 text-[14px] text-zinc-600">{f.detail}</div> : null}
+        </div>
+      ))}
+      <TreeShrubPhotoObservations entries={techView.photo_observations} />
+    </div>
+  );
+}
+
+// Each scored photo's own observation paragraph, in upload order. The merge
+// takes the worst signal across photos, so a clean overview and a flagged
+// close-up can read differently — both are kept.
+function TreeShrubPhotoObservations({ entries = [] }) {
+  if (!entries.length) return null;
+  return (
+    <div>
+      <div className="text-[14px] text-zinc-500 mb-1">Observations by photo</div>
+      {entries.map((entry) => (
+        <div key={entry.index} className="text-[14px] text-zinc-700 mb-1">
+          <span className="text-zinc-900">Photo {entry.index + 1}{entry.worst_signal ? ` · ${entry.worst_signal.replace(/_/g, " ")}` : ""}:</span>{" "}
+          {entry.observations || "—"}
         </div>
       ))}
     </div>
