@@ -519,7 +519,10 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(helperEnd).toBeGreaterThan(helper);
     const helperBody = src.slice(helper, helperEnd);
     expect(helperBody).toContain(".whereNotIn('status', ['cancelled', 'rescheduled'])");
-    expect(helperBody).toContain(".orderBy('scheduled_date', 'desc')");
+    // Orders by cadence POSITION (COALESCE date_exception_cadence_date,
+    // scheduled_date), not the raw date — a "this visit only" exception row
+    // must not out-rank its own cadence slot (ADMIN-BUG-R30).
+    expect(helperBody).toContain("COALESCE(date_exception_cadence_date, scheduled_date)");
     expect(helperBody).toContain(".where('is_recurring', true)");
     // 4th consumer: planUpdateDetailsRecurrenceDates (update-details' pre-trx
     // rung-1 date peek) anchors its extend plan on the same helper.

@@ -548,7 +548,17 @@ function fastForwardCadenceAnchor(baseDateStr, pattern, rOpts) {
 }
 
 function seriesExtendAnchor(latest, pattern, rOpts) {
-  const latestStr = dateOnly(latest?.scheduled_date) || '';
+  // A "this visit only" exception row (rebooker.dateExceptionStamp) still
+  // occupies its ORIGINAL cadence slot — date_exception_cadence_date — even
+  // though scheduled_date has moved to wherever the customer/rain-out/board
+  // move actually put it. Projecting from the raw moved date here (instead
+  // of the cadence position rescheduleSeries.readSiblings and
+  // recurring-schedule-audit.recurringCadenceDate already use) would anchor
+  // every later extension on the one-off move and permanently shift the
+  // plan's cadence (ADMIN-BUG-R30). Ignore the exception's raw date and
+  // project from the cadence slot it deviated from instead.
+  const anchorDate = latest?.date_exception ? latest.date_exception_cadence_date : latest?.scheduled_date;
+  const latestStr = dateOnly(anchorDate) || '';
   if (!latestStr) return etDateString();
   return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
 }
@@ -13960,7 +13970,13 @@ function latestLiveSeriesVisit(conn, parentId) {
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .where('is_recurring', true)
     .whereNotIn('status', ['cancelled', 'rescheduled'])
-    .orderBy('scheduled_date', 'desc')
+    // Order by cadence POSITION, not the raw (possibly one-off-moved) date —
+    // a "this visit only" exception row occupies date_exception_cadence_date
+    // in the series, same as rescheduleSeries.readSiblings (rebooker.js) and
+    // recurring-schedule-audit.recurringCadenceDate already treat it
+    // (ADMIN-BUG-R30). Matters only when 2+ live rows compete for "latest"
+    // (e.g. a booster sitting past an exception's raw moved date).
+    .orderBy(conn.raw('COALESCE(date_exception_cadence_date, scheduled_date)'), 'desc')
     .first();
 }
 
