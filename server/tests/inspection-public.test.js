@@ -452,6 +452,40 @@ describe('Codex #4737 r5 P2: a retired assessment catalog row is not bookable', 
 });
 
 describe('Codex #4737 r5 P1: a verified phone shared by several accounts', () => {
+  test('local audit P1: two LEGACY profiles (no account yet) sharing the phone count as two households — no unique match → a separate new account', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: null };
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    listResults.customers = [
+      { id: 'legacy-1', account_id: null, address_line1: '1 One St', zip: '34209' },
+      { id: 'legacy-2', account_id: null, address_line1: '2 Two St', zip: '34209' },
+    ];
+    listResults.scheduled_services = [];
+    mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-new', existingCustomer: null, matchType: null });
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '77 Elsewhere St, Bradenton, FL 34209' });
+    expect(res.statusCode).toBe(200);
+    expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ forceNewAccount: true }));
+  });
+
+  test('local audit P1: a legacy profile whose address uniquely matches is reused', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: null };
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    listResults.customers = [
+      { id: 'legacy-1', account_id: null, address_line1: '1 One St', zip: '34209', latitude: 27.4, longitude: -82.5 },
+      { id: 'legacy-2', account_id: null, address_line1: '2 Two St', zip: '34209' },
+    ];
+    listResults.scheduled_services = [];
+    mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-new', existingCustomer: null, matchType: null });
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '1 One St, Bradenton, FL 34209' });
+    expect(res.statusCode).toBe(200);
+    expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe('legacy-1');
+  });
+
   test('no unique address match across the phone-matched accounts → a SEPARATE new account, never an additional property under one of them', async () => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: null };
     firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };

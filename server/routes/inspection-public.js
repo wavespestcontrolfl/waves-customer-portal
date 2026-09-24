@@ -821,29 +821,31 @@ function coordsClose(a, b) {
 // caller rather than reused.
 async function matchExistingAccountProfile(dbConn, account, address, location) {
   if (!account?.existingCustomer) return null;
-  const { streetKey, normalizeZip, unitKey, streetEmbeddedUnitKey } = require('../services/customer-properties');
-  // Units must agree too (local audit P1): streetKey strips apartment/suite
-  // designators, so two units at one street + zip would otherwise match the
-  // first profile and book the wrong unit.
-  const unitOf = (line1, line2) => unitKey(line2 || '') || streetEmbeddedUnitKey(line1);
   const profiles = await dbConn('customers')
     .where({ account_id: account.accountId })
     .whereNull('deleted_at')
     .orderBy('is_primary_profile', 'desc')
     .orderBy('created_at', 'asc');
   const rows = profiles.length ? profiles : [account.existingCustomer];
-  const addressLine1 = address?.line1;
-  if (!addressLine1) return rows[0];
-  const key = streetKey(addressLine1);
-  if (!key) return null;
-  const zip = normalizeZip(address?.zip);
-  const unit = unitOf(addressLine1, address?.line2);
-  return rows.find((row) => {
-    if (streetKey(row.address_line1) !== key) return false;
-    if (unitOf(row.address_line1, row.address_line2) !== unit) return false;
-    if (zip && normalizeZip(row.zip) === zip) return true;
-    return coordsClose({ lat: row.latitude, lng: row.longitude }, location);
-  }) || null;
+  if (!address?.line1) return rows[0];
+  return rows.find((row) => profileMatchesAddress(row, address, location)) || null;
+}
+
+// Whether ONE customer profile is the lead's validated property: the same
+// canonical street (streetKey) AND the same unit (local audit P1 —
+// streetKey strips apartment/suite designators, so two units at one street
+// + zip would otherwise match), and the same zip or stored coordinates
+// within tolerance. An address whose street does not normalize never
+// matches.
+function profileMatchesAddress(row, address, location) {
+  const { streetKey, normalizeZip, unitKey, streetEmbeddedUnitKey } = require('../services/customer-properties');
+  const unitOf = (line1, line2) => unitKey(line2 || '') || streetEmbeddedUnitKey(line1);
+  const key = streetKey(address.line1);
+  if (!key || streetKey(row.address_line1) !== key) return false;
+  if (unitOf(row.address_line1, row.address_line2) !== unitOf(address.line1, address.line2)) return false;
+  const zip = normalizeZip(address.zip);
+  if (zip && normalizeZip(row.zip) === zip) return true;
+  return coordsClose({ lat: row.latitude, lng: row.longitude }, location);
 }
 
 // The ONE place an unlinked lead gets attached to a customer record. Resolves
@@ -868,28 +870,39 @@ async function matchExistingAccountProfile(dbConn, account, address, location) {
 // non-ok short-circuit — the caller returns it as-is, same shape every
 // other eligibility short-circuit in this file uses) or `{ customer,
 // location? }`.
-// The distinct live accounts whose customers carry this phone (last ten
-// digits).
-async function phoneMatchedAccountIds(dbConn, phone) {
+// The live customers carrying this phone (last ten digits), grouped into
+// households: an account, or — for a legacy profile with no account yet —
+// the profile itself (local audit P1: ensureCustomerAccount still matches
+// and attaches those, so they count toward ambiguity).
+async function phoneMatchedHouseholds(dbConn, phone) {
   const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
   if (last10.length !== 10) return [];
   const rows = await dbConn('customers')
     .whereNull('deleted_at')
-    .whereNotNull('account_id')
     .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-    .distinct('account_id');
-  return [...new Set(rows.map((r) => r.account_id).filter(Boolean))];
+    .select('id', 'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+  const households = new Map();
+  for (const row of rows) {
+    const key = row.account_id ? `account:${row.account_id}` : `legacy:${row.id}`;
+    if (!households.has(key)) households.set(key, { accountId: row.account_id || null, legacy: row.account_id ? null : row });
+  }
+  return [...households.values()];
 }
 
-// The ONE profile across these accounts whose address matches the lead's
+// The ONE profile across these households whose address matches the lead's
 // validated address, or null when none or more than one does (a supplied
-// address is required — "no address" never picks a household).
-async function uniqueProfileAcrossAccounts(dbConn, accountIds, resolved) {
+// address is required — "no address" never picks a household). An account
+// household searches all its profiles; a legacy one is its single profile.
+async function uniqueProfileAcrossAccounts(dbConn, households, resolved) {
   if (!resolved.address?.line1) return null;
   const matches = [];
-  for (const accountId of accountIds) {
+  for (const household of households) {
+    if (household.legacy) {
+      if (profileMatchesAddress(household.legacy, resolved.address, resolved.location)) matches.push(household.legacy);
+      continue;
+    }
      
-    const hit = await matchExistingAccountProfile(dbConn, { accountId, existingCustomer: { id: null } }, resolved.address, resolved.location);
+    const hit = await matchExistingAccountProfile(dbConn, { accountId: household.accountId, existingCustomer: { id: null } }, resolved.address, resolved.location);
     if (hit?.id) matches.push(hit);
   }
   return matches.length === 1 ? matches[0] : null;
@@ -904,7 +917,7 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   // phone-matched account: a unique address match is reused; none or
   // several get a separate new account, never an "Additional property"
   // under an arbitrarily chosen household.
-  const sharedPhoneAccounts = verifiedContact ? await phoneMatchedAccountIds(trx, freshLead.phone) : [];
+  const sharedPhoneAccounts = verifiedContact ? await phoneMatchedHouseholds(trx, freshLead.phone) : [];
   const multiAccount = sharedPhoneAccounts.length > 1;
   const account = await ensureCustomerAccount(trx, {
     firstName: freshLead.first_name || 'New Lead',
