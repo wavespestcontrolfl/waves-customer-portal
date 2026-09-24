@@ -778,8 +778,12 @@ describe('POST /:token commit', () => {
 
     expect(db.transaction).toHaveBeenCalledTimes(1);
     const lockCalls = db.raw.mock.calls.filter(([sql]) => String(sql).includes('pg_advisory_xact_lock'));
-    expect(lockCalls).toHaveLength(1);
+    // The per-lead key first; then (Codex #4737 r5 P1) the shared
+    // customer-comms fence for the already-linked customer, before its row
+    // and the lead row are locked — admin-leads' lock order.
+    expect(lockCalls).toHaveLength(2);
     expect(lockCalls[0][1]).toEqual([`inspection_commit:${LEAD_ID}`]);
+    expect(lockCalls[1][1]).toEqual(['customer-comms:cust-1']);
   });
 
   // P1 :834 — phase 2 used to hold a lock-owning transaction (one pooled

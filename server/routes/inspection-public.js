@@ -191,6 +191,7 @@ const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
 const { verifyLeadConsultationToken, smsChannelFor } = require('../utils/lead-consultation-token');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
@@ -1130,14 +1131,28 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${COMMIT_LOCK_NS}:${lead.id}`]);
 
-    // Row-locked (Codex #4737 r5 P1): the advisory key is private to this
-    // route, but admin-leads' conversion/booking locks and updates the same
+    // Lock order = admin-leads' (utils/customer-comms-lock.js contract #1):
+    // for the customer already known pre-lock, the customer-comms fence
+    // FIRST, then that customer's row, then the lead row (Codex #4737 r5 P1).
+    // The customer's address can then neither change under the comparison
+    // and write-back below nor slip past booking.js's own fenced
+    // expectedLocation check.
+    if (custRow?.id) {
+      await lockCustomerComms(trx, custRow.id);
+      await trx('customers').where({ id: custRow.id }).forNoKeyUpdate().first('id');
+    }
+    // Row-locked: admin-leads' conversion/booking locks and updates the same
     // lead row — FOR UPDATE makes this read wait for it and see its
-    // committed customer link / converted_at, never a stale null. Lock
-    // order leads → customers, the same as admin-leads.
+    // committed customer link / converted_at, never a stale null.
     const freshLead = await loadLead(trx, lead.id, { forUpdate: true });
     if (!freshLead) return { eligibility: { state: 'gone', visit: null, rescheduleUrl: null } };
     const freshCustRow = await loadTrustedCustomer(trx, freshLead, verified);
+    // The trusted customer changed between the pre-lock read and the locks
+    // (a conversion or merge landed): its row is not the one locked above,
+    // so nothing is written — the client retries against the new state.
+    if ((freshCustRow?.id || null) !== (custRow?.id || null) && freshCustRow) {
+      return { locationFailure: 'address_unresolved' };
+    }
 
     // includeRescheduleUrl:false — see resolveEligibility's own docblock.
     const eligibility = await resolveEligibility(trx, freshLead, freshCustRow, { includeRescheduleUrl: false });
