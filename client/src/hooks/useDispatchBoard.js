@@ -258,11 +258,16 @@ export function useDispatchBoard() {
   // (2) a refresh replaces techs/jobs wholesale, so a tech_status or
   //     job_update that arrived while the request was pending (and may
   //     post-date the server's read) would be clobbered — those payloads
-  //     are buffered while any refresh is in flight and replayed after
-  //     the latest response applies. They are ALSO applied live, so the
+  //     are buffered while the LATEST refresh is pending and replayed
+  //     after its response applies. They are ALSO applied live, so the
   //     board never lags; the replay is idempotent (merge by id).
+  // The buffer belongs to the latest refresh only: a new refresh starts
+  // it empty (events before its request are already in its server read)
+  // and only the latest one's settle drains it. A superseded refresh
+  // neither buffers nor drains, so nothing is left behind for a later
+  // refresh to replay over a newer snapshot.
   const refreshSeqRef = useRef(0);
-  const refreshInFlightRef = useRef(0);
+  const latestRefreshPendingRef = useRef(false);
   const pendingSocketRef = useRef([]);
 
   const replayPendingSocket = useCallback(() => {
@@ -276,7 +281,8 @@ export function useDispatchBoard() {
 
   const refreshTechs = useCallback(async () => {
     const seq = ++refreshSeqRef.current;
-    refreshInFlightRef.current += 1;
+    latestRefreshPendingRef.current = true;
+    pendingSocketRef.current = [];
     try {
       const res = await fetch(`${API_BASE}/admin/dispatch/board`, {
         headers: adminAuthHeaders(),
@@ -299,11 +305,13 @@ export function useDispatchBoard() {
       // refresh here just leaves the roster as it was — the next
       // broadcast or manual reopen catches it up.
     } finally {
-      refreshInFlightRef.current -= 1;
-      // Only the latest refresh drains the buffer (success or failure):
-      // an older one returning last must not replay over a newer read,
-      // and the buffer must not outlive the request it was held for.
-      if (seq === refreshSeqRef.current) replayPendingSocket();
+      // Only the latest refresh stops the buffering and drains it
+      // (success or failure): an older one returning last must not
+      // replay over a newer read, and must not leave buffering armed.
+      if (seq === refreshSeqRef.current) {
+        latestRefreshPendingRef.current = false;
+        replayPendingSocket();
+      }
     }
   }, [replayPendingSocket]);
 
@@ -331,14 +339,14 @@ export function useDispatchBoard() {
     // Buffer while a refresh is pending (see refreshTechs) AND apply
     // live — the replay after the refresh re-applies the same payload.
     function handleTechStatus(payload) {
-      if (refreshInFlightRef.current > 0) pendingSocketRef.current.push({ type: 'tech_status', payload });
+      if (latestRefreshPendingRef.current) pendingSocketRef.current.push({ type: 'tech_status', payload });
       applyTechStatus(payload);
     }
 
     socket.on('dispatch:tech_status', handleTechStatus);
 
     function handleJobUpdate(payload) {
-      if (refreshInFlightRef.current > 0) pendingSocketRef.current.push({ type: 'job_update', payload });
+      if (latestRefreshPendingRef.current) pendingSocketRef.current.push({ type: 'job_update', payload });
       applyJobUpdate(payload);
     }
 

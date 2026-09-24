@@ -215,3 +215,64 @@ describe('refresh ordering + socket replay (pre-push auditor P1 on PR #4678)', (
     expect(result.current.jobs[0].technician_id).toBe('tech-1');
   });
 });
+
+describe('superseded refresh leaves no buffer behind (pre-push auditor P1 on PR #4678, round 3)', () => {
+  it('B settles, a socket update arrives, A (older) settles, then C refreshes: C\'s snapshot wins', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    const snapshot = (techId, stamp) => ({
+      techs: [{ id: 'tech-1', name: 'Tech One', status: 'idle', out_today: false, updated_at: stamp }],
+      jobs: [{ id: 'job-1', technician_id: techId, status: 'confirmed', address: '123 Main St' }],
+    });
+    const a = deferredResponse(snapshot('tech-1', 'tA'));
+    const b = deferredResponse(snapshot('tech-1', 'tB'));
+    fetch.mockResolvedValueOnce(a.response).mockResolvedValueOnce(b.response);
+    let pA; let pB;
+    await act(async () => { pA = result.current.refreshTechs(); pB = result.current.refreshTechs(); });
+    await act(async () => { b.release(); await pB; });
+    expect(result.current.techs[0].updated_at).toBe('tB');
+
+    // Nothing is pending from the board's point of view now (A is
+    // superseded), so this update is applied live and NOT buffered.
+    await act(async () => {
+      socketHandlers['dispatch:job_update']({ job_id: 'job-1', tech_id: 'tech-2', status: 'confirmed', address: '123 Main St' });
+    });
+    expect(result.current.jobs[0].technician_id).toBe('tech-2');
+
+    await act(async () => { a.release(); await pA; });
+    expect(result.current.techs[0].updated_at).toBe('tB');
+    expect(result.current.jobs[0].technician_id).toBe('tech-2');
+
+    // C's server read is the newest truth: the tech-2 event must not be
+    // replayed over it.
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => snapshot('tech-3', 'tC') });
+    await act(async () => { await result.current.refreshTechs(); });
+    expect(result.current.techs[0].updated_at).toBe('tC');
+    expect(result.current.jobs[0].technician_id).toBe('tech-3');
+  });
+
+  it('a refresh that starts while another is pending discards what the older one buffered', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    const a = deferredResponse({ techs: [], jobs: [{ id: 'job-1', technician_id: 'tech-1', status: 'confirmed', address: '123 Main St' }] });
+    fetch.mockResolvedValueOnce(a.response);
+    let pA;
+    await act(async () => { pA = result.current.refreshTechs(); });
+    // Buffered for A …
+    await act(async () => {
+      socketHandlers['dispatch:job_update']({ job_id: 'job-1', tech_id: 'tech-2', status: 'confirmed', address: '123 Main St' });
+    });
+    // … but B starts afterwards; its server read (tech-3) already
+    // post-dates that event, so B must not replay it.
+    const b = deferredResponse({ techs: [], jobs: [{ id: 'job-1', technician_id: 'tech-3', status: 'confirmed', address: '123 Main St' }] });
+    fetch.mockResolvedValueOnce(b.response);
+    let pB;
+    await act(async () => { pB = result.current.refreshTechs(); });
+    await act(async () => { a.release(); await pA; b.release(); await pB; });
+    expect(result.current.jobs[0].technician_id).toBe('tech-3');
+  });
+});
