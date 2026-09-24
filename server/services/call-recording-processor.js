@@ -10378,7 +10378,27 @@ const CallRecordingProcessor = {
                   // secondary property (knownIndependentProperty) keeps the
                   // card's original ask — only a record that validated the
                   // on-file number re-points it there (codex r34 P1).
-                  if (!onFileAddress?.address_line1 || knownIndependentProperty) return trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [merged]);
+                  // …and ONLY when this pass positively validated the on-file
+                  // premise itself (same street, unit and ZIP-wins locality as
+                  // the validated address): a pass whose validated street or
+                  // ZIP simply differs from the card's clears the disagreement
+                  // without vouching for the on-file number, so the original
+                  // ask stands (codex r35 P1).
+                  const validatedLine = String(avNormalized?.street_line_1 || '');
+                  const onFileValidated = !!validatedLine && sameHouseNumberStreet(validatedLine, String(onFileAddress.address_line1 || ''))
+                    && (() => {
+                      const { normalizeUnitLine: nu, splitStreetLineUnit: su } = require('../utils/address-normalizer');
+                      const validatedUnit = String(nu(String(avNormalized?.street_line_2 || '')) || su(validatedLine).unit || '').toLowerCase();
+                      const onFileUnit = String(nu(String(onFileAddress.address_line2 || '')) || su(String(onFileAddress.address_line1 || '')).unit || '').toLowerCase();
+                      if (validatedUnit !== onFileUnit) return false;
+                      const vz = (String(avNormalized?.postal_code || '').match(/\d{5}/) || [''])[0];
+                      const oz = (String(onFileAddress.zip || '').match(/\d{5}/) || [''])[0];
+                      if (vz && oz) return vz === oz;
+                      const vc = String(avNormalized?.city || '').toLowerCase().replace(/[^a-z]/g, '');
+                      const oc = String(onFileAddress.city || '').toLowerCase().replace(/[^a-z]/g, '');
+                      return !vc || !oc || vc === oc;
+                    })();
+                  if (!onFileAddress?.address_line1 || knownIndependentProperty || !onFileValidated) return trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [merged]);
                   const resolvedAddress = JSON.stringify({
                     street_line_1: onFileAddress.address_line1,
                     street_line_2: onFileAddress.address_line2 || null,
