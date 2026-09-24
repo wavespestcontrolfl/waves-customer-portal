@@ -329,6 +329,11 @@ describe('pre-push audit after r48', () => {
     expect(lock).toBeGreaterThan(0);
     expect(lock).toBeLessThan(body.indexOf('const context = await loadContext(input, trx, true);'));
     expect(lock).toBeLessThan(body.indexOf('lockEstimateGroupAddressRevision'));
+    // …then property-preferences and customer-comms, still before loadContext.
+    const prefs = body.indexOf("['property-preferences', String(input.customer_id)]");
+    expect(prefs).toBeGreaterThan(lock);
+    expect(prefs).toBeLessThan(body.indexOf('lockCustomerComms(trx, input.customer_id)'));
+    expect(body.indexOf('lockCustomerComms(trx, input.customer_id)')).toBeLessThan(body.indexOf('const context = await loadContext(input, trx, true);'));
   });
   test('a live clean lookup persists the newest accepted clean timestamp', () => {
     const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');

@@ -263,6 +263,16 @@ async function saveCustomerEstimate(input, actionContext) {
       for (const key of [...pairKeys].sort()) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
       }
+      // …then the property-preferences and customer-comms advisories the
+      // persistence save takes for a flagged row's correction fan-out —
+      // BEFORE loadContext locks the customer row, the codebase-wide
+      // property-preferences → customer-comms → customer-row order
+      // (pre-push audit P1 after r49): Customer 360 holds
+      // property-preferences while waiting on the customer row.
+      if (input.customer_id) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(input.customer_id)]);
+        await require('../../utils/customer-comms-lock').lockCustomerComms(trx, input.customer_id);
+      }
     }
     // Lock order: customer (and its properties) FIRST, then the estimate.
     // updateCustomer locks the customers row and its fanout then touches the
