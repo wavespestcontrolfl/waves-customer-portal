@@ -2392,7 +2392,7 @@ const PROSPECT_VIEWS = [
   // outreach drafts → send (M3b)
   {
     key: "outreach",
-    label: "Outreach",
+    label: "Contacting",
     statuses: ["prospect", "contacted", "negotiating"],
   },
   {
