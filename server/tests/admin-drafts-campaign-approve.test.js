@@ -44,8 +44,14 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
+jest.mock('../services/messaging/send-manual-customer-sms', () => ({
+  sendManualCustomerSms: jest.fn((...args) => (
+    require('../services/messaging/send-customer-message').sendCustomerMessage(...args)
+  )),
+  manualSmsDeliveryState: (value) => value?.manualSmsInterlock?.deliveryState || null,
+}));
 // Controllable campaign gate; every other gate defaults open.
-const mockGates = { campaignDrafts: true };
+const mockGates = { campaignDrafts: true, smsGratitudeReplies: false };
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => mockGates[gate] !== false),
 }));
@@ -65,6 +71,7 @@ const express = require('express');
 const db = require('../models/db');
 const draftsRouter = require('../routes/admin-drafts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { evaluateCampaignSendGate } = require('../services/campaign-drafts-gate');
 
 // ---------------------------------------------------------------------------
@@ -142,6 +149,7 @@ beforeEach(() => {
   db.transaction = jest.fn(async (fn) => fn(db));
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_real_sid' });
   mockGates.campaignDrafts = true;
+  mockGates.smsGratitudeReplies = false;
   evaluateCampaignSendGate.mockResolvedValue({
     ok: true,
     customer: { id: 'cust-1', nearest_location_id: 'loc-9' },
@@ -211,6 +219,7 @@ describe('PUT /admin/drafts/:id/approve', () => {
       expect(res.status).toBe(200);
     });
 
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     const input = sendCustomerMessage.mock.calls[0][0];
     expect(input.audience).toBe('lead');
@@ -404,6 +413,31 @@ describe('PUT /admin/drafts/:id/approve', () => {
     expect(release.payload.approved_by).toBeNull();
   });
 
+  test('an uncertain approve result returns no-retry guidance and retains the claimed draft', async () => {
+    const draft = campaignDraft();
+    enqueueApproveHappyPath(draft);
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      deliveryOutcome: 'uncertain',
+      code: 'PROVIDER_FAILURE',
+      manualSmsInterlock: { deliveryState: 'uncertain' },
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        code: 'SMS_DELIVERY_UNCERTAIN', mayHaveSent: true, retryable: false,
+      });
+    });
+
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
+    expect(updates.find((u) => u.payload.status === 'pending')).toBeUndefined();
+    expect(updates.find((u) => u.payload.sent_at)).toBeUndefined();
+  });
+
   test('template-disabled sentinel is NOT a send: 422, claim released, draft not finalized, no pitched flip', async () => {
     const draft = campaignDraft();
     enqueueApproveHappyPath(draft);
@@ -545,6 +579,56 @@ describe('PUT /admin/drafts/:id/revise', () => {
     expect(release).toBeTruthy();
     expect(release.payload.revised_response).toBeNull();
     expect(release.payload.final_response).toBeNull();
+  });
+
+  test('an uncertain thrown revise retains the claim and edited response', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    sendCustomerMessage.mockRejectedValue(Object.assign(new Error('provider timeout'), {
+      manualSmsInterlock: { deliveryState: 'uncertain' },
+    }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Edited copy.' }),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        code: 'SMS_DELIVERY_UNCERTAIN', mayHaveSent: true, retryable: false,
+      });
+    });
+
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
+    expect(updates.find((u) => u.payload.status === 'pending')).toBeUndefined();
+    expect(updates.find((u) => u.payload.revised_response === null)).toBeUndefined();
+  });
+
+  test('a definite revise miss releases the claim and clears edited fields', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      deliveryOutcome: 'not_sent',
+      code: 'SMS_OPTED_OUT',
+      manualSmsInterlock: { deliveryState: 'not_sent' },
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Edited copy.' }),
+      });
+      expect(res.status).toBe(422);
+      expect((await res.json()).code).toBe('SMS_OPTED_OUT');
+    });
+
+    const release = updates.find((u) => u.payload.status === 'pending');
+    expect(release.payload).toMatchObject({ revised_response: null, final_response: null });
   });
 
   test('template-disabled sentinel on revise: 422 SEND_SUPPRESSED, draft restored to pending, no pitched flip', async () => {
