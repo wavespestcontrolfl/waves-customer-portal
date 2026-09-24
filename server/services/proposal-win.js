@@ -250,6 +250,10 @@ async function promoteLinkedCustomerForProposalWin({ trx, customerId, today = et
   // for the customer — settle any open warm/cold consultation outcome
   // within its 90-day window. Best-effort, savepoint-isolated inside
   // markWonForCustomer (waves-db §5b); never blocks the win.
+  // `estimate_accept` is accurate: a proposal win runs through
+  // estimate-manual-acceptance.js, which marks the estimate row
+  // status='accepted' — the same evidence findSaleEvidenceForConsultation's
+  // sweep re-reads, so this win is sweep-covered like any accepted estimate.
   await require('./consultation-outcomes')
     .markWonForCustomer(customerId, { via: 'estimate_accept', trx });
 }
