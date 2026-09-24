@@ -983,11 +983,22 @@ stamp outranks it. A flag on the visitor's own lookup-stage lead is recovered by
 alone (a negative verdict, so a corrected email does not drop it); a
 premise correction on the estimate moves the lead's address columns with
 it; every send claim and the final pre-provider check reassert the block.
-Withdrawn-publication verdicts are superseded only after
-the locked reconciliation, and a flagged rerun withdraws website publications in
+The locked reconciliation runs both ways: a newer
+clean verdict (a staff confirmation, a clean lookup) supersedes a recovered
+flag and a newer flag supersedes a recovered clean verdict, judged by
+timestamps under the contact-pair lock; the visitor's own lead's clean
+verdict is judged on the unit-insensitive premise alone (its locality may
+be incomplete), other leads' need the complete locality. Withdrawn-publication
+verdicts are superseded only after the locked reconciliation, and a flagged rerun withdraws website publications in
 every non-terminal delivery state (sent, viewed, scheduled, sending,
 send_failed) and stamps the block on matching legacy quote-wizard rows
-(any of those states or draft) without archiving them. A roll that never answered (GIS
+(any of those states or draft) without archiving them; the lookup stage
+applies the same quarantine when it persists a flagged verdict
+(`services/website-quote-withdrawal.js`). A premise correction on the
+estimate moves the linked customer through the established address-change
+path (coordinates cleared, primary property synced, snapshots fanned out,
+guarded re-geocode after commit) when that customer still lived at the
+rejected premise. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
 answers clean, and an existing draft's own `addressUnverified` marker is

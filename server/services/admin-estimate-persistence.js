@@ -3252,18 +3252,30 @@ async function reviseAdminEstimate({
       // too — never a customer already living somewhere else.
       if (corrected && parsed.line1 && row.customer_id) {
         const { samePremiseDisplay } = require('./lead-address-unverified');
-        const cust = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').first('id', 'address_line1', 'address_line2', 'city', 'zip');
-        const custDisplay = cust ? [cust.address_line1, cust.address_line2, cust.city, cust.zip].filter(Boolean).join(', ') : '';
-        if (cust && custDisplay && samePremiseDisplay(custDisplay, lockedPrior?.address)) {
-          // The COMPLETE corrected door replaces the old one — line 2 is
-          // replaced too, never left as the previous unit (codex r14 P1).
-          await trx('customers').where({ id: cust.id }).update({
+        const before = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first();
+        const custDisplay = before ? [before.address_line1, before.address_line2, before.city, before.zip].filter(Boolean).join(', ') : '';
+        if (before && custDisplay && samePremiseDisplay(custDisplay, lockedPrior?.address)) {
+          // The repository's established address-change path, not a bare
+          // column write (codex r17 P1): coordinates cleared atomically
+          // with the address (the async re-geocode refills them), the
+          // primary customer_properties row synced, matching lead /
+          // estimate snapshots fanned out, then the guarded re-geocode
+          // after commit — exactly what the Customer 360 edit does.
+          await trx('customers').where({ id: before.id }).update({
             address_line1: parsed.line1,
             address_line2: parsed.unit,
             ...(parsed.city ? { city: parsed.city } : {}),
             ...(parsed.zip ? { zip: parsed.zip } : {}),
+            latitude: null,
+            longitude: null,
             updated_at: now(),
           });
+          const after = await trx('customers').where({ id: before.id }).first();
+          await require('./customer-properties').syncPrimaryAddress(after, trx, { explicitLine2: true });
+          await require('./customer-address-fanout').propagateCustomerAddressChange({ before, after }, trx);
+          const committed = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+          const regeocode = () => require('./geocoder').regeocodeCustomerAddressGuarded(before.id).catch(() => {});
+          if (committed) committed.then(regeocode).catch(() => {}); else regeocode();
         }
       }
     }

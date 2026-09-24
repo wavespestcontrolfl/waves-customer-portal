@@ -521,6 +521,16 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       // (pre-push audit P1).
       await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(email, normPhone)]);
+        // A FLAGGED verdict quarantines the visitor's earlier publications
+        // for this premise right here — a visitor who abandons before
+        // /calculate must not keep an acceptable link from a clean run
+        // (codex r17 P1). Same transaction and lock as the verdict.
+        if (addressUnverified) {
+          const { withdrawFlaggedPublications } = require('../services/website-quote-withdrawal');
+          await withdrawFlaggedPublications(trx, {
+            leadId: lead.id, contactEmail: email, contactPhone: normPhone, fullAddress: normalizedAddress.fullAddress || lookupAddress, flag: addressUnverified,
+          });
+        }
         await trx('leads').where({ id: lead.id }).update({
           extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
             address_unverified: addressUnverified,

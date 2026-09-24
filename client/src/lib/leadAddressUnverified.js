@@ -40,10 +40,19 @@ const UNIT_TAIL = /\s+(?:#|(?:apt|apartment|unit|ste|suite|bldg|building|lot|rm|
 // Suffix aliases mirror the server's canonical forms (St == Street).
 // Mirrors server/utils/address-normalizer STREET_SUFFIX_ALIASES (keep in
 // step): the geocoder abbreviates Loop as "Lp".
+// The COMPLETE server table (codex #4667 r17 P2) — every alias the server
+// treats as the same premise must read the same here.
 const SUFFIX_ALIASES = {
-  street: 'st', avenue: 'ave', drive: 'dr', road: 'rd', lane: 'ln', court: 'ct', boulevard: 'blvd',
-  circle: 'cir', place: 'pl', terrace: 'ter', trail: 'trl', parkway: 'pkwy', highway: 'hwy', way: 'way',
-  lp: 'loop',
+  street: 'st', st: 'st', avenue: 'ave', ave: 'ave', road: 'rd', rd: 'rd', drive: 'dr', dr: 'dr',
+  boulevard: 'blvd', blvd: 'blvd', lane: 'ln', ln: 'ln', court: 'ct', ct: 'ct', circle: 'cir', cir: 'cir',
+  way: 'way', place: 'pl', pl: 'pl', terrace: 'ter', ter: 'ter', trail: 'trl', trl: 'trl', parkway: 'pkwy',
+  pkwy: 'pkwy', highway: 'hwy', hwy: 'hwy', loop: 'loop', lp: 'loop', pass: 'pass', path: 'path', run: 'run',
+  walk: 'walk', point: 'pt', pt: 'pt', cove: 'cv', cv: 'cv', beach: 'bch', bch: 'bch', harbor: 'hbr',
+  hbr: 'hbr', shore: 'shr', shores: 'shrs', isle: 'isle', island: 'is', islands: 'iss', key: 'ky',
+  keys: 'kys', causeway: 'cswy', cswy: 'cswy', crossing: 'xing', xing: 'xing', plaza: 'plz', plz: 'plz',
+  ridge: 'rdg', rdg: 'rdg', glen: 'gln', glens: 'glns', green: 'grn', greens: 'grns', grove: 'grv',
+  groves: 'grvs', lake: 'lk', lakes: 'lks', estate: 'est', estates: 'ests', manor: 'mnr', manors: 'mnrs',
+  village: 'vlg', villages: 'vlgs', vista: 'vis', vis: 'vis',
 };
 const streetKeyNoUnit = (v) => lineKey(String(v || '').replace(UNIT_TAIL, ''))
   .split(' ')
