@@ -9,24 +9,33 @@ const {
   draftReplyToMessageIdSql,
 } = require('./sms-response-policy');
 
-// Shared query for the Messages needs-response badge and filtered inbox.
-async function countPendingSmsConversations({
-  excludePhones = [], customerId = null, includePending = false,
+// Shared source for the Messages needs-response badge, filtered inbox, and
+// unanswered-text watcher. The watcher opts into legacy-only rows so a failed
+// canonical write cannot erase historical work; badge IDs remain canonical.
+async function loadPendingSmsConversations({
+  excludePhones = [],
+  customerId = null,
+  includeLegacyOnly = false,
+  cutoff = null,
+  includeExpired = true,
+  limit = null,
 } = {}) {
   const eventPeer = phoneIdentitySql('base.contact_phone');
   const eventEndpoint = phoneIdentitySql('base.our_endpoint_id');
   const blockedPeer = phoneIdentitySql('b.number');
+  const customerPeer = phoneIdentitySql('candidate_customer.phone');
+  const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
   const stopPeer = phoneIdentitySql("COALESCE(NULLIF(stop_conversation.contact_phone, ''), stop_customer.phone, '')");
   const legacyStopPeer = phoneIdentitySql('stop_log.from_phone');
-  const draftId = draftIdSql("COALESCE(audit.metadata->>'draft_id', legacy.metadata->>'draft_id', s.canonical_metadata->>'draft_id')");
+  const receiptStopPeer = phoneIdentitySql('receipt_stop.phone');
+  const draftId = draftIdSql("COALESCE(audit.metadata->>'draft_id', s.metadata_draft_id)");
   const draftReplyToMessageId = draftReplyToMessageIdSql('response_draft.sms_log_id');
   const { rows = [] } = await db.raw(`
-    WITH base_sms AS MATERIALIZED (
-      SELECT m.id, m.direction, m.body AS message_body, m.created_at,
-             m.twilio_sid, m.message_type AS canonical_message_type,
+    WITH canonical_sms AS MATERIALIZED (
+      SELECT 'canonical'::text AS source, m.id, m.direction, m.body AS message_body,
+             m.created_at, m.twilio_sid, m.message_type AS canonical_message_type,
              m.delivery_status AS canonical_delivery_status,
-             m.metadata AS canonical_metadata,
-             COALESCE(m.media, '[]'::jsonb) AS media,
+             m.metadata AS canonical_metadata, COALESCE(m.media, '[]'::jsonb) AS media,
              c.customer_id,
              COALESCE(NULLIF(c.contact_phone, ''), cu.phone, '') AS contact_phone,
              COALESCE(c.our_endpoint_id, '') AS our_endpoint_id
@@ -38,29 +47,63 @@ async function countPendingSmsConversations({
         AND NOT (COALESCE(c.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(c.contact_phone, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(cu.phone, '') = ANY(CAST(:excludePhones AS text[])))
+    ), legacy_only_sms AS MATERIALIZED (
+      SELECT 'legacy'::text AS source, sl.id, sl.direction, sl.message_body,
+             sl.created_at, sl.twilio_sid, sl.message_type AS canonical_message_type,
+             sl.status AS canonical_delivery_status, sl.metadata AS canonical_metadata,
+             '[]'::jsonb AS media, sl.customer_id,
+             CASE WHEN sl.direction = 'inbound' THEN sl.from_phone ELSE sl.to_phone END AS contact_phone,
+             CASE WHEN sl.direction = 'inbound' THEN sl.to_phone ELSE sl.from_phone END AS our_endpoint_id
+      FROM sms_log sl
+      LEFT JOIN customers cu ON cu.id = sl.customer_id
+      WHERE CAST(:includeLegacyOnly AS boolean)
+        AND (CAST(:customerId AS uuid) IS NULL OR sl.customer_id = CAST(:customerId AS uuid))
+        AND NOT EXISTS (
+          SELECT 1 FROM messages twin
+          WHERE twin.channel = 'sms' AND twin.twilio_sid = sl.twilio_sid
+            AND twin.direction = sl.direction
+        )
+        AND NOT (COALESCE(sl.to_phone, '') = ANY(CAST(:excludePhones AS text[]))
+          OR COALESCE(sl.from_phone, '') = ANY(CAST(:excludePhones AS text[]))
+          OR COALESCE(cu.phone, '') = ANY(CAST(:excludePhones AS text[])))
+    ), base_sms AS MATERIALIZED (
+      SELECT * FROM canonical_sms
+      UNION ALL
+      SELECT * FROM legacy_only_sms
     ), sms_events AS MATERIALIZED (
       SELECT base.*, ${eventPeer} AS peer, ${eventEndpoint} AS endpoint
       FROM base_sms base
-    ), inbound_events AS MATERIALIZED (
+    ), projected_events AS MATERIALIZED (
       SELECT s.*,
+             CASE WHEN s.source = 'legacy' THEN s.id ELSE legacy.id END AS legacy_id,
              CASE WHEN optout_receipt.message_sid IS NOT NULL THEN 'opt_out'
                ELSE COALESCE(legacy.message_type, s.canonical_message_type, '') END AS message_type,
+             COALESCE(legacy.status, s.canonical_delivery_status, '') AS delivery_status,
              COALESCE(s.canonical_metadata, '{}'::jsonb)
-               || COALESCE(legacy.metadata, '{}'::jsonb) AS metadata
+               || COALESCE(legacy.metadata, '{}'::jsonb) AS metadata,
+             COALESCE(legacy.metadata->>'draft_id',
+               s.canonical_metadata->>'draft_id') AS metadata_draft_id,
+             CASE WHEN s.source = 'legacy' THEN s.created_at
+               ELSE COALESCE(legacy.created_at, s.created_at) END AS response_created_at
       FROM sms_events s
       LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.metadata
+        SELECT sl.id, sl.message_type, sl.status, sl.metadata, sl.created_at
         FROM sms_log sl
-        WHERE sl.twilio_sid = s.twilio_sid AND sl.direction = s.direction
+        WHERE s.source = 'canonical' AND sl.twilio_sid = s.twilio_sid
+          AND sl.direction = s.direction
         ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
       ) legacy ON true
       LEFT JOIN inbound_sms_optout_receipts optout_receipt
-        ON optout_receipt.message_sid = s.twilio_sid
+        ON s.direction = 'inbound' AND optout_receipt.message_sid = s.twilio_sid
+    ), inbound_events AS MATERIALIZED (
+      SELECT * FROM projected_events s
       WHERE s.direction = 'inbound'
+        AND (CAST(:cutoff AS timestamptz) IS NULL OR s.created_at <= CAST(:cutoff AS timestamptz))
+        AND (CAST(:includeExpired AS boolean) OR s.created_at >= now() - interval '30 days')
     ), latest_inbound AS MATERIALIZED (
       SELECT DISTINCT ON (s.peer, s.endpoint)
-        s.id, s.peer, s.endpoint, s.customer_id, s.message_body,
-        s.message_type, s.metadata, s.media, s.created_at, s.twilio_sid
+        s.id, s.source, s.legacy_id, s.peer, s.endpoint, s.customer_id,
+        s.message_body, s.message_type, s.metadata, s.media, s.created_at, s.twilio_sid
       FROM inbound_events s
       WHERE s.peer <> '' AND s.endpoint <> ''
         AND s.message_type <> ALL(CAST(:ignoredInboundTypes AS text[]))
@@ -78,21 +121,13 @@ async function countPendingSmsConversations({
       ) audit ON true
     ), outbound_events AS MATERIALIZED (
       SELECT s.*, li.id AS inbound_id, li.created_at AS inbound_created_at,
-             COALESCE(legacy.created_at, s.created_at) AS response_created_at,
-             COALESCE(legacy.message_type, s.canonical_message_type, '') AS message_type,
-             COALESCE(legacy.status, s.canonical_delivery_status, '') AS delivery_status,
              response_draft.intent AS draft_intent,
-             ${draftReplyToMessageId} AS draft_reply_to_message_id
+             CASE WHEN li.source = 'legacy' THEN response_draft.sms_log_id
+               ELSE ${draftReplyToMessageId} END AS draft_reply_to_event_id
       FROM enriched_inbound li
-      JOIN sms_events s ON s.peer = li.peer AND s.endpoint = li.endpoint
+      JOIN projected_events s ON s.peer = li.peer AND s.endpoint = li.endpoint
         AND s.direction = 'outbound'
         AND s.created_at > li.created_at - INTERVAL '24 hours'
-      LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status, sl.metadata, sl.created_at
-        FROM sms_log sl
-        WHERE sl.twilio_sid = s.twilio_sid AND sl.direction = s.direction
-        ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
-      ) legacy ON true
       LEFT JOIN LATERAL (
         SELECT mal.metadata
         FROM messaging_audit_log mal
@@ -115,7 +150,7 @@ async function countPendingSmsConversations({
         AND os.delivery_status IN ('queued', 'sent', 'delivered')
         AND os.response_created_at > os.inbound_created_at
         AND (os.message_type <> ALL(CAST(:draftReplyTypes AS text[]))
-          OR os.draft_reply_to_message_id = os.inbound_id)
+          OR os.draft_reply_to_event_id = os.inbound_id)
         AND os.draft_intent IS DISTINCT FROM 'click_followup'
     ), all_stop_events AS MATERIALIZED (
       SELECT ${stopPeer} AS peer,
@@ -134,45 +169,79 @@ async function countPendingSmsConversations({
       LEFT JOIN inbound_sms_optout_receipts stop_receipt
         ON stop_receipt.message_sid = stop_message.twilio_sid
       WHERE stop_message.channel = 'sms' AND stop_message.direction = 'inbound'
-        AND (stop_receipt.message_sid IS NOT NULL OR stop_message.message_type = 'opt_out' OR EXISTS (
-          SELECT 1 FROM sms_log stop_candidate
-          WHERE stop_candidate.twilio_sid = stop_message.twilio_sid
-            AND stop_candidate.direction = stop_message.direction
-            AND stop_candidate.message_type = 'opt_out'
-        ))
         AND (stop_receipt.message_sid IS NOT NULL
           OR COALESCE(stop_legacy.message_type, stop_message.message_type, '') = 'opt_out')
         AND NOT (COALESCE(stop_conversation.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(stop_conversation.contact_phone, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(stop_customer.phone, '') = ANY(CAST(:excludePhones AS text[])))
       UNION ALL
-      SELECT ${legacyStopPeer}, stop_log.created_at
+      SELECT ${legacyStopPeer},
+             CASE WHEN stop_receipt.message_sid IS NOT NULL
+               THEN LEAST(stop_log.created_at, stop_receipt.applied_at)
+               ELSE stop_log.created_at END
       FROM sms_log stop_log
       LEFT JOIN customers stop_log_customer ON stop_log_customer.id = stop_log.customer_id
-      WHERE stop_log.direction = 'inbound' AND stop_log.message_type = 'opt_out'
+      LEFT JOIN inbound_sms_optout_receipts stop_receipt
+        ON stop_receipt.message_sid = stop_log.twilio_sid
+      WHERE stop_log.direction = 'inbound'
+        AND (stop_log.message_type = 'opt_out' OR stop_receipt.message_sid IS NOT NULL)
         AND NOT EXISTS (
           SELECT 1 FROM messages stop_twin
-          WHERE stop_twin.twilio_sid = stop_log.twilio_sid
+          WHERE stop_twin.channel = 'sms' AND stop_twin.twilio_sid = stop_log.twilio_sid
             AND stop_twin.direction = stop_log.direction
         )
         AND NOT (COALESCE(stop_log.to_phone, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(stop_log.from_phone, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(stop_log_customer.phone, '') = ANY(CAST(:excludePhones AS text[])))
+      UNION ALL
+      SELECT ${receiptStopPeer}, receipt_stop.applied_at
+      FROM inbound_sms_optout_receipts receipt_stop
+      WHERE NOT (COALESCE(receipt_stop.phone, '') = ANY(CAST(:excludePhones AS text[])))
+        AND NOT EXISTS (
+          SELECT 1 FROM messages receipt_message
+          WHERE receipt_message.channel = 'sms' AND receipt_message.direction = 'inbound'
+            AND receipt_message.twilio_sid = receipt_stop.message_sid
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM sms_log receipt_log
+          WHERE receipt_log.direction = 'inbound'
+            AND receipt_log.twilio_sid = receipt_stop.message_sid
+        )
     ), latest_stop AS MATERIALIZED (
       SELECT peer, MAX(created_at) AS stopped_at
       FROM all_stop_events WHERE peer <> '' GROUP BY peer
     )
-    SELECT li.id, li.peer, li.endpoint, li.message_body, li.enriched_metadata AS metadata,
-           li.media, prior_context.message_body AS prior_outbound_body
+    SELECT li.id, li.source, li.peer, li.endpoint, li.message_body, li.created_at,
+           li.enriched_metadata AS metadata, li.media,
+           prior_context.message_body AS prior_outbound_body,
+           customer_match.id AS customer_id,
+           NULLIF(TRIM(COALESCE(customer_match.first_name, '') || ' '
+             || COALESCE(customer_match.last_name, '')), '') AS customer_name
     FROM enriched_inbound li
     LEFT JOIN prior_context ON prior_context.id = li.id
     LEFT JOIN answered_inbound answered ON answered.inbound_id = li.id
     LEFT JOIN latest_stop stop ON stop.peer = li.peer
+    LEFT JOIN LATERAL (
+      SELECT candidate_customer.id, candidate_customer.first_name, candidate_customer.last_name
+      FROM customers candidate_customer
+      WHERE candidate_customer.deleted_at IS NULL
+        AND ${customerPeer} = li.peer
+        AND NOT EXISTS (
+          SELECT 1 FROM customers duplicate_customer
+          WHERE duplicate_customer.deleted_at IS NULL
+            AND duplicate_customer.id <> candidate_customer.id
+            AND ${duplicateCustomerPeer} = li.peer
+        )
+      LIMIT 1
+    ) customer_match ON true
     WHERE answered.inbound_id IS NULL
       AND (stop.stopped_at IS NULL OR stop.stopped_at <= li.created_at)
   `, {
     customerId: customerId || null,
     excludePhones,
+    includeLegacyOnly,
+    cutoff: cutoff || null,
+    includeExpired,
     ignoredInboundTypes: NON_ACTIONABLE_INBOUND_TYPES,
     humanReplyTypes: HUMAN_REPLY_TYPES,
     draftReplyTypes: DRAFT_REPLY_TYPES,
@@ -182,13 +251,26 @@ async function countPendingSmsConversations({
     direction: 'inbound', body: row.message_body,
     priorOutboundBody: row.prior_outbound_body,
     media: row.media, metadata: row.metadata,
-  }));
+  })).sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
+  const totalCount = actionable.length;
+  const capped = Number.isInteger(limit) && limit >= 0 ? actionable.slice(0, limit) : actionable;
+  return capped.map((row) => ({ ...row, total_count: String(totalCount) }));
+}
+
+async function countPendingSmsConversations({
+  excludePhones = [], customerId = null, includePending = false,
+} = {}) {
+  const actionable = await loadPendingSmsConversations({ excludePhones, customerId });
   const result = {
     conversations: new Set(actionable.map((row) => row.peer)).size,
     messages: actionable.length,
   };
-  if (includePending) result.pendingMessageIds = actionable.map((row) => row.id);
+  if (includePending) {
+    result.pendingMessageIds = actionable
+      .filter((row) => row.source === 'canonical')
+      .map((row) => row.id);
+  }
   return result;
 }
 
-module.exports = { countPendingSmsConversations };
+module.exports = { loadPendingSmsConversations, countPendingSmsConversations };
