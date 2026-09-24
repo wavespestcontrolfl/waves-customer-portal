@@ -438,6 +438,48 @@ test('candidate sweep drains the oldest inbound before more than 25 newer reject
 
 // Simulate provider preparation before the distinct final SMS predicate.
 // The provider mock is reached only after the caller's boundary verdict.
+test.each([false, true])('the final thread lock covers the SDK and observes publication while waiting (%s)', async (publishWhileWaiting) => {
+  const originalTransaction = db.transaction.getMockImplementation();
+  const originalLock = suggest.lockSuggestThread.getMockImplementation();
+  let held = false;
+  let lockCount = 0;
+  const provider = jest.fn(() => { expect(held).toBe(true); });
+  db.transaction.mockImplementation(async (work) => {
+    held = true;
+    try { return await work(db); } finally { held = false; }
+  });
+  suggest.lockSuggestThread.mockImplementation(async (_trx, key) => {
+    expect(key).toBe('9415550100');
+    lockCount += 1;
+    if (lockCount === 2 && publishWhileWaiting) mockState.threadAdvanced = true;
+  });
+  sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff, providerPreSendCheck }) => {
+    let result;
+    await withSmsHandoff(async (trx) => {
+      expect(held).toBe(true);
+      expect(trx).toBe(db);
+      const verdict = await providerPreSendCheck({ dbi: trx });
+      if (!verdict.ok) {
+        result = { sent: false, deliveryOutcome: 'not_sent', code: verdict.code };
+        return;
+      }
+      provider();
+      result = { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'d'.repeat(32)}` };
+    });
+    return result;
+  });
+  try {
+    await expect(attempt()).resolves.toMatchObject(publishWhileWaiting
+      ? { sent: false, reason: 'thread_advanced' } : { sent: true });
+    expect(lockCount).toBe(2);
+    expect(provider).toHaveBeenCalledTimes(publishWhileWaiting ? 0 : 1);
+    expect(held).toBe(false);
+  } finally {
+    db.transaction.mockImplementation(originalTransaction);
+    suggest.lockSuggestThread.mockImplementation(originalLock);
+  }
+});
+
 test.each([
   ['new inbound', () => { mockState.threadAdvanced = true; }, 'thread_advanced'],
   ['gate disabled', () => { mockState.gratitudeGate = false; }, 'gate_off'],

@@ -374,6 +374,7 @@ async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Dat
       inboundFromPhone: inbound.from_phone,
       inboundToPhone: inbound.to_phone,
       threadKey: checked.threadKey,
+      threadLast10,
       parkedIds: [],
       reservationId,
     };
@@ -645,7 +646,17 @@ async function maybeAutoSend(params = {}) {
         customerId,
         identityTrustLevel: 'phone_matches_customer',
         entryPoint: 'sms_auto_send_executor',
-        ...(gratitudeLane ? { providerPreSendCheck: checkGratitudeHandoff } : {}),
+        ...(gratitudeLane ? {
+          providerPreSendCheck: checkGratitudeHandoff,
+          // Generic sends publish their holding row under this same lock.
+          // Keep it through the final checks and SDK call so publication
+          // cannot slip between a clear-thread verdict and the handoff.
+          withSmsHandoff: dispatch => db.transaction(async (trx) => {
+            await suggest.lockSuggestThread(trx, claim.threadLast10);
+            await dispatch(trx);
+            return { ok: true };
+          }),
+        } : {}),
         // Send-window inbound-reply provenance: the auto-send executor only
         // dispatches green-judged replies to a message the customer just
         // texted into an active thread — the send class the window
