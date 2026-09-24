@@ -3567,6 +3567,20 @@ async function createSelfBooking(payload = {}) {
           await acquireOccupancyLocks(trx, lockedSeedDates);
           const lockedSeedDateSet = new Set(lockedSeedDates);
           await lockCustomerComms(trx, custId);
+          // Customer row lock BEFORE any scheduled_services row lock/write in
+          // this transaction (Codex #4716 r2 P1): the parent-row FOR UPDATE
+          // just below (lockedParent) used to run first, with the customer
+          // row only locked later (the bookedCustomerRow read, further
+          // down) — the opposite of executeMerge's order (customer row
+          // FOR UPDATE first, THEN its scheduled_services FK/address
+          // sweep). A concurrent merge holding the customer row while
+          // waiting on THIS parent row, alongside this activation holding
+          // the parent row while waiting on the customer row, is a
+          // deadlock Postgres resolves by aborting one side. Taking it
+          // here, before lockedParent, puts this transaction on the same
+          // customer -> row order as the merge and every other creator in
+          // this file.
+          await trx('customers').where({ id: custId }).forUpdate().first('id');
           // Duplicate-confirmation idempotency (codex #3504 r2 P1): a replay
           // can observe the pricing draft still live BEFORE the winner's
           // activation commits, pass the replay pre-checks, and wait here on
@@ -3717,15 +3731,16 @@ async function createSelfBooking(payload = {}) {
           // THAT property — otherwise the activation would seed, scope,
           // and stamp a series for a property the customer did not book.
           // Uncertain parses read as a different property (fail closed).
-          // FOR UPDATE (codex #3504 r19): this read doubles as the CUSTOMER
-          // ROW LOCK, taken here — BEFORE the recurring-series advisory
-          // guard below — to keep the estimate-converter's customer→series
-          // lock order (it locks customers FOR UPDATE first, then takes the
-          // same advisory). The activation used to acquire the advisory
-          // first and the customer row only later (the setup-fee stamp), so
-          // a concurrent accept for the same family could deadlock; with
-          // the converter's guard savepoint as the victim its fail-open
-          // guard would proceed and BOTH would seed billable series.
+          // FOR UPDATE (codex #3504 r19): re-acquires the same customer row
+          // this transaction already locked at its top (Codex #4716 r2 —
+          // re-entrant no-op within one transaction), still BEFORE the
+          // recurring-series advisory guard below, to keep the
+          // estimate-converter's customer→series lock order (it locks
+          // customers FOR UPDATE first, then takes the same advisory). This
+          // query's own job is the address columns for the property compare
+          // below; FOR UPDATE stays on it deliberately so the read never
+          // regresses to unlocked if the top-of-transaction lock is ever
+          // refactored away.
           const bookedCustomerRow = await trx('customers')
             .where({ id: custId })
             .forUpdate()

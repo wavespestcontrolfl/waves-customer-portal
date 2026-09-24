@@ -10873,6 +10873,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id, false);
       }
       if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
+      // Customer row lock THIRD (Codex #4716 r2 P1), completing the order
+      // the comment above documents (maintenance/comms, customer row, then
+      // stop locks) — this trx previously never actually took it here, only
+      // deep inside the make-recurring spawn block, well AFTER this route
+      // had already locked and written the edited scheduled_services row
+      // (the occupancy re-check's own row lock, then the details write
+      // further down) and after lockAppointmentAddress's own
+      // customer-row-then-stop-locks call (only on an address-changing
+      // save). executeMerge (customer-dedupe.js) locks the customer row
+      // FOR UPDATE first and then sweeps scheduled_services (FK repoint +
+      // address stamp); this route was doing the reverse — locking/writing
+      // the appointment row first and only reaching a customer lock later,
+      // deep in one conditional branch. Taking it HERE, before any
+      // scheduled_services row lock or write in this transaction, whether
+      // spawn/duplicate-guard runs or not, is the fix: whichever side (this
+      // save or a concurrent merge) gets to the customer row first now runs
+      // to completion before the other can proceed.
+      if (commsPeek) await trx('customers').where({ id: commsPeek.customer_id }).forUpdate().first('id');
       // Payer activation shares comms → combined → customer/appointment rows
       // with customer editors and combined-payment setup. Take this before
       // address locking too; the later release reacquires it re-entrantly.
@@ -12178,21 +12196,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (!['pending', 'confirmed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
             throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from an upcoming pending or confirmed visit.`);
           }
-          // Customer row lock BEFORE the series-advisory guard below (Codex
-          // #4716 r1 follow-up P1): this trx's only other 'customers' touch
-          // (the Bill-To FOR SHARE peek above) is conditional on
-          // payer_id/self_pay_override and does not run on a plain
-          // make-recurring save, so nothing else here establishes the
-          // customer -> series-advisory order admin-schedule.js's POST
-          // creator (~7186) and booking.js already use. executeMerge
-          // (customer-dedupe.js) holds this customer's row FOR UPDATE while
-          // waiting on the recurring-series-create advisory lock; the child
-          // inserts below take a key-share lock on this same customer row
-          // via their customer_id FK. Locking the row first here means
-          // whichever side gets there first runs to completion before the
-          // other can proceed, instead of each holding what the other waits
-          // on.
-          await trx('customers').where({ id: parent.customer_id }).forUpdate().first('id');
+          // Customer row lock: taken up front in this transaction's
+          // comms-lock section (Codex #4716 r2 P1 — moved off its original
+          // r1 position here, which ran AFTER this route had already
+          // locked and written the SAME scheduled_services row, e.g. the
+          // occupancy re-check's own row lock and the details write below
+          // it — an ABBA against executeMerge, which locks the customer
+          // row first and THEN sweeps scheduled_services). See the
+          // comms-lock section for the reasoning; nothing further to do
+          // here.
           // Race-safe duplicate-series backstop (P0), mirroring the POST
           // creator's in-trx guard: the child-date preload above only dedupes
           // rows already attached to THIS parent — it never sees a DIFFERENT
