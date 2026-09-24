@@ -302,6 +302,10 @@ calling booking scheduling planning noticing nothing everything anything somethi
 // word — "Calling us was easy" on a "Great service" review invents a call
 // (Codex #4713 r12).
 const INTERACTION_OPENERS = new Set(['calling', 'booking', 'scheduling', 'planning', 'reaching', 'answering', 'explaining', 'arriving', 'sending', 'coming', 'showing', 'checking', 'walking', 'texting', 'emailing', 'talking', 'speaking', 'meeting']);
+// The core interaction gerunds are gated in EVERY position, not just as a
+// capitalized opener: "We appreciate that scheduling your appointment was
+// easy" invents a booking just the same (Codex #4713 r13).
+const INTERACTION_GERUND_RE = /\b(?:calling|booking|scheduling|planning|texting|emailing)\b/gi;
 // …and a listed opener is exempt only with POSITIVE ordinary-word syntax
 // directly after it: a plural-only verb ("Ants are / love / need"), a
 // determiner ("Finding a", "Skipping the"), or a pronoun.
@@ -332,7 +336,7 @@ const DATE_CLAIM_RE = /\b(?:noon|midnight|\d{1,2}(?::\d{2})?\s?(?:am|pm|a\.m\.|p
 // Service / treatment / relationship claims. Each is a factual assertion
 // about what we did or who the customer is; it must come from the review
 // text or from an allowed account fact, never from the model.
-const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|did (?:its|their) job|doing (?:its|their) job|does (?:its|their) job|did the trick|does the trick|made (?:a|all the) (?:\w+ )?difference|makes? (?:a|all the) (?:\w+ )?difference|paid off|kicked in|took effect|(?<!hard[- ])working(?!\s+(?:around|with|on|hard|together|through|toward|towards|to)\b)|keeps? working|holding up|held up|paying off|(?:kept|keeps|keeping) (?:them|it|those|the \w+) (?:away|out|at bay)|at bay|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|(?:your|our|their) plans?|on (?:a|the|our|your|their) plans?|membership|members?|programs?|waveguard)\b/gi;
+const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|success(?:ful(?:ly)?)?|reliefs?|relieved|did (?:its|their) job|doing (?:its|their) job|does (?:its|their) job|did the trick|does the trick|made (?:a|all the) (?:\w+ )?difference|makes? (?:a|all the) (?:\w+ )?difference|paid off|kicked in|took effect|(?<!hard[- ])working(?!\s+(?:around|with|on|hard|together|through|toward|towards|to)\b)|keeps? working|holding up|held up|paying off|(?:kept|keeps|keeping) (?:them|it|those|the \w+) (?:away|out|at bay)|at bay|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|(?:your|our|their) plans?|on (?:a|the|our|your|their) plans?|membership|members?|programs?|waveguard)\b/gi;
 // Membership/plan-status terms within SERVICE_CLAIM_RE (2026-09-25 P1 fix,
 // pre-push round 2) — an identity/relationship claim, not an outcome, so
 // deliberately absent from OUTCOME_TERM_RE. Bare "plan" is NOT a claim
@@ -350,7 +354,7 @@ const MEMBERSHIP_TERM_RE = /^(?:(?:service|membership|maintenance|protection|rec
 // Outcome / result phrases within SERVICE_CLAIM_RE — the ones a negation
 // in the review flips ("did not get rid of", "never eliminated", "not under
 // control"). Topic nouns (ants, treatment, lawn) are deliberately absent.
-const OUTCOME_TERM_RE = /^(?:behind (?:you|us|them)|did (?:its|their) job|doing (?:its|their) job|does (?:its|their) job|did the trick|does the trick|made (?:a|all the) (?:\w+ )?difference|makes? (?:a|all the) (?:\w+ )?difference|paid off|kicked in|took effect|working|keeps? working|holding up|held up|paying off|(?:kept|keeps|keeping) (?:them|it|those|the \w+) (?:away|out|at bay)|at bay|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
+const OUTCOME_TERM_RE = /^(?:behind (?:you|us|them)|success(?:ful(?:ly)?)?|reliefs?|relieved|did (?:its|their) job|doing (?:its|their) job|does (?:its|their) job|did the trick|does the trick|made (?:a|all the) (?:\w+ )?difference|makes? (?:a|all the) (?:\w+ )?difference|paid off|kicked in|took effect|working|keeps? working|holding up|held up|paying off|(?:kept|keeps|keeping) (?:them|it|those|the \w+) (?:away|out|at bay)|at bay|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
 // Staff credential / award modifiers: nothing in the grounding proves them,
 // so they need the reviewer's own words (codex r52).
 const CREDENTIAL_CLAIM_RE = /\b(?:certified|licen[cs]ed|insured|bonded|background[- ]checked|vetted|accredited|award[- ]winning|trained|state[- ]licen[cs]ed|screened|degreed|qualified|experts?|specialists?|master|veteran|senior|lead|head|top[- ]rated)\b/gi;
@@ -605,7 +609,10 @@ function serviceFrameViolation(body, spans, reviewLower) {
   const sSpans = sentenceSpans(body);
   for (const [a, b] of spans) {
     const phrase = body.slice(a, b);
-    if (reviewLower.replace(/[^a-z0-9]+/g, ' ').includes(phrase.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim())) continue;
+    // Whole words only: "important treatment" must not source "Ant
+    // Treatment" (Codex #4713 r13).
+    const reviewFlat = ` ${reviewLower.replace(/[^a-z0-9]+/g, ' ').trim()} `;
+    if (reviewFlat.includes(` ${phrase.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `)) continue;
     const sentence = sentenceTextAt(body, sSpans, a)
       .replace(/^\s*(?:hi|hello|hey|dear)\s+[^,\n]{1,40},\s*/i, '')
       .trim();
@@ -796,6 +803,10 @@ function checkExperienceClaims(ctx) {
   // EXPERIENCE_CLAIM_RE's own provenance check above instead).
   // Only a COMPLETED service proves a visit: a linked customer row with no
   // completed scheduled_services has account.relationship === null (round-8 P1).
+  for (const gm of body.matchAll(INTERACTION_GERUND_RE)) {
+    const gs = stemOf(gm[0].toLowerCase());
+    if (![...reviewWords].some((rw) => stemOf(rw) === gs)) return reject('unlisted_experience_claim', gm[0]);
+  }
   if (!grounding.review.hasText && !grounding.account?.relationship) {
     const interactionMatch = body.match(INTERACTION_TERM_RE);
     if (interactionMatch) return reject('unlisted_experience_claim', interactionMatch[0]);

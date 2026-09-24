@@ -813,6 +813,25 @@ describe('2026-09-24 round-6 P1 fixes: outcome idioms, negated membership, reply
     const g = genericGrounding('Scheduling was easy and the tech was great.');
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nScheduling should always be that easy.'), g)).toBeNull();
   });
+  test('a service phrase inside a longer review word is not the reviewer naming it (round 13)', () => {
+    const g = genericGrounding('Important treatment and great company.');
+    g.allow.servicePhrases = ['ant treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the Ant Treatment was successful for you.'), g)).toBe('unlisted_service_claim');
+  });
+  test.each([
+    'We appreciate that scheduling your appointment was easy.',
+    'We appreciate hearing that calling our office was easy.',
+  ])('interaction gerunds need review words in any position (round 13): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding('Great company and friendly people.'))).toBe('unlisted_experience_claim');
+  });
+  test.each([
+    'Glad the Ant Treatment was successful for you.',
+    'We are glad the Ant Treatment brought relief.',
+  ])('a review that names the service but negates its success cannot source success (round 13): %s', (line) => {
+    const g = genericGrounding('The ant treatment was not successful, but the staff were friendly.');
+    g.allow.servicePhrases = ['ant treatment'];
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), g)).toMatch(/^(?:negated_review_claim|unlisted_service_claim)$/);
+  });
   test('REPLY_VERSION moved past reply-v1 so stored safe-copy drafts are never reused on a publish retry', () => {
     expect(Drafter.REPLY_VERSION).not.toBe('reply-v1');
   });
