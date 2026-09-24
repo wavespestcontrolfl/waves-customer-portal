@@ -42,6 +42,11 @@ describe('on_file_house_number_conflict', () => {
     expect(n.heard).toBe('1250 Example Street, Apt 4');
   });
 
+  it('shows the caller\'s own street first when Address Validation corrected the number', () => {
+    const n = notice(ask('on_file_house_number_conflict', { stated_street: '1250 Example Street', spoken_street: '1240 Example Street' }, 7, 3));
+    expect(n.heard).toBe('1240 Example Street (validated as 1250 Example Street)');
+  });
+
   it('is picked over an older same-rank card that carries no evidence', () => {
     const n = notice(
       ask('address_unverified', {}, 5, 1),

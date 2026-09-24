@@ -1025,7 +1025,10 @@ const CLASSIFY_RULES = [
   { rule: 'house_number_adopted', action: 'resolve',
     when: (item, ev) => item.reason_code === 'on_file_house_number_conflict'
       && !item.customer_deleted_at
-      && recordCarriesStatedStreet(item)
+      // …or the processor cleared the disagreement durably (the record's
+      // own number validated on a later pass) and the card stands only for
+      // its scheduling ask (codex r23 P1).
+      && (recordCarriesStatedStreet(item) || !!parseMaybeJson(item.payload)?.address_dispute_cleared_at)
       && !cardConfirmedUnbooked(item, ev)
       // A card that also records a PROMISED follow-up (visit 2 the hold
       // kept from booking) is settled by staff: booking evidence for the

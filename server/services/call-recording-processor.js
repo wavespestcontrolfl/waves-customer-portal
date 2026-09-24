@@ -9789,6 +9789,10 @@ const CallRecordingProcessor = {
           .where('created_at', '>=', cardsFiledSince)
           .update({ payload: db.raw("jsonb_set(COALESCE(payload, '{}'::jsonb), '{on_file_address}', ?::jsonb, true)", [JSON.stringify(onFileAddressSnapshot(canonical))]) });
       } catch (e) {
+        // The preliminary customer's snapshot must not stand in for the
+        // canonical customer's: a detector fed another customer's address
+        // would file a conflict against the wrong premise (codex r23 P2).
+        onFileAddress = null;
         logger.warn(`[call-proc] on-file address re-stamp skipped for ${maskSid(callSid)}: ${e.message}`);
       }
     }
@@ -10055,7 +10059,13 @@ const CallRecordingProcessor = {
                 .first('payload');
               const claimedPayload = typeof claimed?.payload === 'string' ? (() => { try { return JSON.parse(claimed.payload); } catch { return null; } })() : claimed?.payload;
               const sameStreet = sameHouseNumberStreet(claimedPayload?.stated_street, parsedCard.stated_street);
-              if (!sameStreet) return 'claimed_unrecorded';
+              // …the SAME dispute on both sides and the same service ask,
+              // not only the caller's street (codex r23 P1).
+              const sameOnFile = sameHouseNumberStreet(claimedPayload?.on_file_address?.address_line1, parsedCard.on_file_address?.address_line1)
+                || (!claimedPayload?.on_file_address?.address_line1 && !parsedCard.on_file_address?.address_line1);
+              const serviceKey = (p) => JSON.stringify(p?.scheduling_window?.service_request || p?.service_request || null);
+              const sameService = serviceKey(claimedPayload) === serviceKey(parsedCard);
+              if (!sameStreet || !sameOnFile || !sameService) return 'claimed_unrecorded';
               if (!newlyConfirmed) return 'filed';
               const claimedConfirmed = claimedPayload?.scheduling_window?.status === 'confirmed' || claimedPayload?.scheduling_status === 'confirmed';
               const sameStart = String(claimedPayload?.scheduling_window?.confirmed_start_at || '') === String(parsedCard.scheduling_window?.confirmed_start_at || '');
@@ -10113,6 +10123,19 @@ const CallRecordingProcessor = {
             .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
             .whereIn('status', ['open', 'in_progress'])
             .first('id');
+          if (kept) {
+            // A DURABLE marker: the disagreement is cleared (the record's
+            // own number validated), the card stands only for its
+            // scheduling ask — the nightly rule closes it once a booking
+            // covers that ask, without the record having to carry the
+            // obsolete stated street (codex r23 P1).
+            await trx('triage_items')
+              .where({ id: kept.id })
+              .update({
+                payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_dispute_cleared_at: new Date().toISOString(), cleared_on_file_street: onFileAddress?.address_line1 || null })]),
+                updated_at: new Date(),
+              });
+          }
           return kept ? 'kept' : 'nothing';
         });
         if (outcome === 'retired' || outcome === 'kept') disputePositivelyResolved = true;
@@ -14273,13 +14296,30 @@ const CallRecordingProcessor = {
                   // was promised (codex r20 P1). Best-effort stamp.
                   if (callFollowUpPlan) {
                     try {
-                      await trx('triage_items')
+                      // Under the triage-call lock, and on a MISS (the card
+                      // was settled meanwhile) the owed visit 2 gets its own
+                      // card — never silently lost (codex r23 P1).
+                      await lockTriageCall(trx, call.id);
+                      const followUpPlanPayload = { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null };
+                      const stamped = await trx('triage_items')
                         .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
                         .whereIn('status', ['open', 'in_progress'])
                         .update({
-                          payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ follow_up_plan: { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null } })]),
+                          payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ follow_up_plan: followUpPlanPayload })]),
                           updated_at: new Date(),
                         });
+                      if (!stamped) {
+                        await trx('triage_items')
+                          .insert(buildTriageItem({
+                            callLogId: call.id,
+                            flag: 'attached_booking_followup_unbooked',
+                            extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
+                            severity: 'advisory',
+                            extraPayload: { skipped_reason: 'house_number_disputed', follow_up_plan: followUpPlanPayload },
+                          }))
+                          .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                          .ignore();
+                      }
                     } catch (planErr) {
                       logger.warn(`[call-proc] could not note the promised follow-up on the conflict card for ${maskSid(callSid)}: ${planErr.code || planErr.name || 'db_error'}`);
                     }

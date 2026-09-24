@@ -630,7 +630,12 @@ function liveAddressIsReviewedPremise(payload, liveOnFile) {
   const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
   const liveLine = String(liveOnFile?.address_line1 || '').trim();
   if (!liveLine) return false;
-  const unitOfPair = (line1, line2) => unitKey(line2) || unitKey(splitStreetLineUnit(String(line1 || '')).unit) || '';
+  // Unit-first legacy lines ("Apt 4, 1260 Main St") peel through the same
+  // parser the detector uses (codex r23 P1).
+  const { splitUnitFirstLine } = require('../utils/address-normalizer');
+  const unitOfPair = (line1, line2) => unitKey(line2)
+    || unitKey(splitUnitFirstLine(String(line1 || ''))?.unit)
+    || unitKey(splitStreetLineUnit(String(line1 || '')).unit) || '';
   const liveUnit = unitOfPair(liveLine, liveOnFile?.address_line2);
   const samePremise = (line1, unit, city, zip) => sameHouseNumberStreet(liveLine, line1)
     && liveUnit === unitOfPair(line1, unit)
@@ -900,10 +905,15 @@ router.post('/:id/verdict', async (req, res) => {
       const heldConflict = await trx('triage_items')
         .where({ call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict' })
         .whereIn('status', OPEN_STATES)
-        .first('payload');
-      const heldConflictPayload = typeof heldConflict?.payload === 'string'
+        .first('id', 'payload');
+      // Only the conflict card's OWN (version-bound) verdict settles it: a
+      // verdict clicked on a sibling card leaves the conflict card open
+      // for its own review instead of bulk-resolving evidence the operator
+      // never saw (codex r23 P1).
+      const conflictLeftForOwnVerdict = !!heldConflict && String(heldConflict.id) !== String(id);
+      const heldConflictPayload = (!heldConflict || conflictLeftForOwnVerdict) ? null : (typeof heldConflict.payload === 'string'
         ? (() => { try { return JSON.parse(heldConflict.payload); } catch { return null; } })()
-        : heldConflict?.payload;
+        : heldConflict.payload);
       conflictCardSettled = !!heldConflictPayload;
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
@@ -914,6 +924,7 @@ router.post('/:id/verdict', async (req, res) => {
         // created: settling the address dispute answers nothing about
         // visit 2, so its card survives the call verdict (codex r10 P1).
         .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked'])
+        .modify((q) => { if (conflictLeftForOwnVerdict) q.whereNot({ id: heldConflict.id }); })
         .whereRaw("payload->'reschedule_proposal' IS NULL")
         .whereIn('status', OPEN_STATES)
         .update({
