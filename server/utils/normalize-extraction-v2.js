@@ -154,11 +154,40 @@ function normalizePriceEntry(entry) {
   return { ...entry, accepted };
 }
 
+// Same stated price, by identity (amount + range end + unit) — the fields
+// prices[] entries are asked to agree on when they're the same price
+// described twice, once in `price` and once in its own `prices[]` slot.
+function priceIdentityMatches(a, b) {
+  if (!a || !b) return false;
+  const norm = (o, k) => (o[k] === undefined ? null : o[k]);
+  return norm(a, 'amount_usd') === norm(b, 'amount_usd')
+    && norm(a, 'amount_max_usd') === norm(b, 'amount_max_usd')
+    && norm(a, 'unit') === norm(b, 'unit');
+}
+
+// codex #4722 r2 P1: the model's top-level `price` can carry detail
+// (stated_by, evidence_quote, tier_mentioned, prepay_term...) that its own
+// echo in `prices[]` leaves out — a wholesale replacement would discard
+// that detail even though both describe the same price. `overlay`'s
+// non-null fields win; `base`'s non-null fields fill whatever overlay
+// leaves null/absent.
+function mergePriceEntries(base, overlay) {
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value !== null && value !== undefined) merged[key] = value;
+  }
+  return merged;
+}
+
 // Primary-price compatibility contract: `price` is always the single
 // PRIMARY entry — the accepted one in `prices[]` if any (first such), else
 // `prices[0]` — so a reader of `price` alone never sees a stale/disagreeing
-// value. A `price` with no `prices` array (the common single-price case) is
-// left alone beyond its own accepted derivation above.
+// value. When the selected prices[] entry describes the SAME price as the
+// existing `price` (same amount_usd/amount_max_usd/unit), they're merged
+// rather than one wholesale-replacing the other, so neither side's detail
+// is lost. A different price replaces outright, as before. A `price` with
+// no `prices` array (the common single-price case) is left alone beyond
+// its own accepted derivation above.
 function normalizeServiceRequestPricing(serviceRequest) {
   if (!serviceRequest || typeof serviceRequest !== 'object') return serviceRequest;
   if (serviceRequest.price === undefined && !Array.isArray(serviceRequest.prices)) return serviceRequest;
@@ -177,7 +206,10 @@ function normalizeServiceRequestPricing(serviceRequest) {
       // fall through to prices[0], demoting a genuinely accepted price
       // (codex #4722 r1 push-gate P1).
       const accepted = result.prices.find((p) => p && p.accepted === true);
-      result.price = accepted || result.prices[0];
+      const selected = accepted || result.prices[0];
+      result.price = (result.price && priceIdentityMatches(result.price, selected))
+        ? mergePriceEntries(result.price, selected)
+        : selected;
     }
   }
   return result;

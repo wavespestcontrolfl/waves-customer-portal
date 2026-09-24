@@ -763,6 +763,81 @@ describe('normalize extraction v2', () => {
       expect(result.service_request.price).toMatchObject({ amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true });
     });
 
+    // codex #4722 r2 P1: when the selected prices[] entry describes the
+    // SAME price as the existing `price` (same amount_usd/amount_max_usd/
+    // unit), merge rather than replace wholesale — a wholesale replacement
+    // would discard richer fields (stated_by, evidence_quote,
+    // tier_mentioned, prepay_term...) the top-level price carried and the
+    // sparser prices[] echo omitted.
+    describe('primary price merge vs replace (codex #4722 r2 P1)', () => {
+      test('merges when the selected entry describes the same price, filling its gaps from the existing richer price', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65,
+          amount_max_usd: null,
+          unit: 'one_time',
+          caller_response: 'accepted',
+          accepted: true,
+          stated_by: 'agent',
+          prepay_term: 'none',
+          tier_mentioned: 'gold',
+          evidence_quote: 'it is sixty five dollars, one time',
+        };
+        // The prices[] echo of the SAME price, but sparser — only what the
+        // model repeated when listing every distinct price.
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({
+          amount_usd: 65,
+          unit: 'one_time',
+          caller_response: 'accepted',
+          accepted: true,
+          // Preserved from the existing price — the sparser prices[] entry
+          // never carried these, so they must survive the merge.
+          stated_by: 'agent',
+          prepay_term: 'none',
+          tier_mentioned: 'gold',
+          evidence_quote: 'it is sixty five dollars, one time',
+        });
+      });
+
+      test('the selected entry\'s non-null fields win over the existing price\'s on a genuine conflict', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent', tier_mentioned: 'silver',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted', stated_by: 'caller', tier_mentioned: 'gold' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', stated_by: 'caller', tier_mentioned: 'gold' });
+      });
+
+      test('a different price (amount or unit mismatch) still replaces outright, never merges', () => {
+        const sameAmountDifferentUnit = validModelOutput();
+        sameAmountDifferentUnit.service_request.price = { amount_usd: 65, unit: 'per_month', stated_by: 'agent', tier_mentioned: 'gold' };
+        sameAmountDifferentUnit.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+        ];
+        const result = normalizeExtractionV2(sameAmountDifferentUnit);
+        expect(result.service_request.price).toEqual({ amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true });
+        expect(result.service_request.price).not.toHaveProperty('tier_mentioned');
+      });
+
+      test('an amount_max_usd mismatch (range vs single) also replaces outright', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = { amount_usd: 90, amount_max_usd: 100, unit: 'per_quarter', stated_by: 'agent', tier_mentioned: 'gold' };
+        extraction.service_request.prices = [
+          { amount_usd: 90, amount_max_usd: null, unit: 'per_quarter', caller_response: 'accepted' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toEqual({ amount_usd: 90, amount_max_usd: null, unit: 'per_quarter', caller_response: 'accepted', accepted: true });
+        expect(result.service_request.price).not.toHaveProperty('tier_mentioned');
+      });
+    });
+
     test('a single price with no prices array is left alone (only accepted derivation applies)', () => {
       const extraction = validModelOutput();
       extraction.service_request.price = { amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: false };

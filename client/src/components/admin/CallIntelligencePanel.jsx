@@ -63,14 +63,19 @@ function humanize(value) {
   return value ? String(value).replace(/_/g, " ") : null;
 }
 
-// One service_request.prices[] entry (schema 1.13.0, codex #4722 r1 P2) as
-// a compact "amount unit · caller response · tier" fragment.
+// One service_request.prices[] entry (schema 1.13.0) as a compact
+// "Agent/Caller: amount unit · caller response · tier" fragment. The
+// Agent/Caller label (codex #4722 r2 P2) comes from stated_by, defaulting
+// to Agent when absent, so a competitor/online price the CALLER mentioned
+// is never mistaken for a Waves quote.
 function formatPriceEntry(p) {
   if (!p) return null;
   const amount = p.amount_usd != null
     ? (p.amount_max_usd != null ? `$${p.amount_usd}-$${p.amount_max_usd}` : `$${p.amount_usd}`)
     : null;
-  return [amount, humanize(p.unit), humanize(p.caller_response), p.tier_mentioned ? humanize(p.tier_mentioned) : null].filter(Boolean).join(" · ");
+  const rest = [amount, humanize(p.unit), humanize(p.caller_response), p.tier_mentioned ? humanize(p.tier_mentioned) : null].filter(Boolean).join(" · ");
+  if (!rest) return null;
+  return `${p.stated_by === "caller" ? "Caller" : "Agent"}: ${rest}`;
 }
 
 function Row({ label, children }) {

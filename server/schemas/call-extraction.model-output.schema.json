@@ -900,7 +900,7 @@
         "price": {
           "type": "object",
           "additionalProperties": false,
-          "description": "The PRIMARY price stated on the call by either party (the accepted one if any, else the first stated) — distinct from quoted_price_usd, which stays the narrower accepted-total-only field. When more than one distinct price was stated (e.g. a one-time price AND a monthly price), every one of them also goes in the sibling `prices` array, most consequential first, and this field is a copy of that array's primary entry. Optional: omit or leave every field null when no price was discussed.",
+          "description": "The PRIMARY price stated on the call by either party (the accepted one if any, else the first stated) — distinct from quoted_price_usd, which stays the narrower accepted-total-only field. When more than one distinct price was stated (e.g. a one-time price AND a monthly price), every one of them also goes in the sibling `prices` array with the primary entry FIRST (prices[0]), and this field is always a copy of that entry — the two fields agree by construction, never by a separate ordering rule. Optional: omit or leave every field null when no price was discussed.",
           "properties": {
             "amount_usd": {
               "type": [
@@ -1003,7 +1003,7 @@
         "prices": {
           "type": "array",
           "maxItems": 6,
-          "description": "EVERY DISTINCT price stated on the call (one-time, monthly, a competitor's price, etc.), most consequential first — additive alongside `price`, which stays the single PRIMARY entry (the accepted one if any, else the first stated) so every existing reader of `price` keeps working unchanged. A call with only one price mentioned may leave this empty or omit it; `price` alone still carries it. Each entry has the same shape as `price`. This schema does not itself enforce that `price` matches the accepted (or first) entry here — normalizeExtractionV2 (server/utils/normalize-extraction-v2.js) canonicalizes `price` from a nonempty `prices` before persistence, so a model that returns a disagreeing pair is corrected rather than trusted as-is.",
+          "description": "EVERY DISTINCT price stated on the call (one-time, monthly, a competitor's price, etc.), ordered with the PRIMARY entry FIRST — the accepted one if any, else the first price stated on the call — followed by the remaining distinct prices in the order stated. `price` (the sibling field above) is always a copy of prices[0] under this ordering — a single ordering rule, not two that can disagree. A call with only one price mentioned may leave this empty or omit it; `price` alone still carries it. Each entry has the same shape as `price`. This schema does not itself enforce that `price` matches prices[0] — normalizeExtractionV2 (server/utils/normalize-extraction-v2.js) canonicalizes `price` from a nonempty `prices` before persistence (merging rather than replacing when they describe the same price), so a model that returns a disagreeing pair is corrected rather than trusted as-is.",
           "items": {
             "type": "object",
             "additionalProperties": false,

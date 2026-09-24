@@ -109,8 +109,22 @@ describe('v2 extraction prompt', () => {
   test('includes the prices[] multi-price rule and keeps price as the primary', () => {
     const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
     expect(prompt).toContain('- prices:');
-    expect(prompt).toContain('list EVERY distinct price here, most consequential first');
-    expect(prompt).toContain('The PRIMARY price stated on the call — the accepted one if any, else the first stated.');
+    expect(prompt).toContain('list EVERY distinct price here');
+    expect(prompt).toContain('The PRIMARY price stated on the call — a copy of prices[0] below');
+  });
+
+  // codex #4722 r2 P1: one ordering contract, not two that can disagree —
+  // the prompt used to say price falls back to "the first stated" price
+  // while ALSO telling the model to order prices[] by "most consequential",
+  // so the normalizer's prices[0] fallback could pick a different entry
+  // than what "first stated" meant. Now prices[] itself is ordered primary
+  // (accepted, else first stated) first, and price is defined as a copy of
+  // prices[0] — the normalizer's rule then agrees with the prompt by
+  // construction.
+  test('prices[] orders the primary entry first, and price is defined as a copy of prices[0] (single ordering contract)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('the PRIMARY entry FIRST — the accepted one if any (caller_response "accepted"), else the first price stated on the call — followed by the remaining distinct prices in the order they were stated');
+    expect(prompt).not.toContain('most consequential first');
   });
 
   test('extractionPromptVersion appends an order-sensitive catalog hash', () => {
