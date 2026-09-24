@@ -473,6 +473,13 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   if (!silent) {
     try {
       claimHeld = await db.transaction(async (trx) => {
+        // Group advisory lock BEFORE the anchor row lock (pre-push audit P1
+        // after r42): concurrent extensions on two members of one group
+        // would otherwise each hold their anchor and wait on the other's
+        // sibling stamp; the grouped send's claim takes the same lock.
+        if (estimate.estimate_group_id) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['estimate-group-send', String(estimate.estimate_group_id)]);
+        }
         const row = await trx('estimates')
           .where({ id: estimate.id })
           .whereNull('archived_at')

@@ -77,3 +77,26 @@ describe('codex r42: the proposal editor lifts the hold it is the only path to c
     expect(src).toContain('adminEstimates.clearGroupSiblingDeliveryClaims(estimate, deliveryClaimToken)');
   });
 });
+
+describe('pre-push audit after r42: group lock before claim rows; proposal clear reaches the leads', () => {
+  test('both grouped delivery-claim transactions take estimate-group-send before the anchor row lock', () => {
+    const ext = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+    const claim = ext.slice(ext.indexOf('const deliveryClaimToken = '), ext.indexOf('let smsResult = '));
+    expect(claim.indexOf("'estimate-group-send'")).toBeGreaterThan(0);
+    expect(claim.indexOf("'estimate-group-send'")).toBeLessThan(claim.indexOf('.forUpdate()'));
+    const adm = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    const start = adm.indexOf('const invalidatedNow = await db.transaction');
+    const send = adm.slice(start, adm.indexOf('if (invalidatedNow) {', start));
+    expect(send.indexOf("'estimate-group-send'")).toBeGreaterThan(0);
+    expect(send.indexOf("'estimate-group-send'")).toBeLessThan(send.indexOf('.forUpdate()'));
+  });
+  test('the proposal save locks the contact pair first and stamps contact-matched leads through the shared helper', () => {
+    const adm = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    const start = adm.indexOf('const { updatedCount, editVersion: committedEditVersion } = await db.transaction');
+    const trxBody = adm.slice(start, adm.indexOf('// A pending send is judged at the first scheduler tick', start));
+    expect(trxBody.indexOf("['address-verdict', contactPairLockKey(estimate.customer_email, estimate.customer_phone)]")).toBeLessThan(trxBody.indexOf("['estimate-group-send', String(groupId)]"));
+    expect(trxBody).toContain('await stampContactMatchedLeadsClean(trx, {');
+    const persistence = require('../services/admin-estimate-persistence');
+    expect(typeof persistence.stampContactMatchedLeadsClean).toBe('function');
+  });
+});

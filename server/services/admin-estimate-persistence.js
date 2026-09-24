@@ -2592,6 +2592,52 @@ const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'schedul
 // ZIP) is a correction too — the premise comparison treats an absent
 // value as a wildcard, which must not leave the completed address blocked
 // and unsendable (codex #4667 r27 P1).
+// The SHARED lead-verdict reconciliation for a staff clear on a row with no
+// direct lead link: every flagged lead under the row's contact pair whose
+// flag covers the row's premise takes the clean verdict (the residential
+// revise and the commercial proposal editor both land here — codex #4667
+// r42 / pre-push audit). Caller holds the contact-pair advisory lock.
+// Best-effort: a failure here never rolls back the staff write.
+async function stampContactMatchedLeadsClean(trx, { row, clearedBy, premiseAddress = null, now = () => new Date() }) {
+  if (!row?.customer_email || !row?.customer_phone) return 0;
+  const parseJson = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
+  try {
+    const { parseDisplayAddress, recoverAddressUnverified: recoverLeadFlag, flagCoversAddress } = require('./lead-address-unverified');
+    const parsedRow = parseDisplayAddress(premiseAddress || row.address);
+    const premise = { line1: parsedRow.line1, city: parsedRow.city, state: parsedRow.state, zip: parsedRow.zip };
+    const verdict = {
+      status: 'clean',
+      address_line1: parsedRow.streetLine || null,
+      city: parsedRow.city || null,
+      state: parsedRow.state || 'FL',
+      zip: parsedRow.zip || null,
+      at: new Date().toISOString(),
+      source: `staff:${clearedBy}`,
+    };
+    const flaggedLeads = await trx('leads')
+      .whereNull('deleted_at')
+      .whereRaw('LOWER(email) = ?', [String(row.customer_email).toLowerCase().trim()])
+      .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(row.customer_phone).replace(/\D/g, '').slice(-10)])
+      .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
+      .forUpdate()
+      .select('id', 'extracted_data');
+    const targets = flaggedLeads.filter((lead) => {
+      const flag = recoverLeadFlag(parseJson(lead.extracted_data));
+      return flag && (!flag.address_line1 || flagCoversAddress(flag, premise));
+    }).map((lead) => lead.id);
+    if (targets.length) {
+      await trx('leads').whereIn('id', targets).update({
+        extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
+        updated_at: now(),
+      });
+    }
+    return targets.length;
+  } catch (leadErr) {
+    logger.warn(`[admin-estimate-persistence] contact-matched lead verdict not stamped: ${leadErr.code || leadErr.name || 'error'}`);
+    return 0;
+  }
+}
+
 function premiseChanged(priorAddress, nextAddress) {
   if (nextAddress === undefined) return false;
   const { samePremiseDisplay, parseDisplayAddress } = require('./lead-address-unverified');
@@ -3275,41 +3321,8 @@ async function reviseAdminEstimate({
     // draft staff cleared earlier and a lookup re-flagged still carries
     // that stale key (pre-push audit P1).
     const clearedByThisWrite = priorLockedData?.addressUnverified === true && writtenData?.addressUnverified !== true && !!writtenData?.addressUnverifiedClearedBy;
-    if (clearedByThisWrite && !writtenData.lead_id
-      && row.customer_email && row.customer_phone) {
-      try {
-        const { parseDisplayAddress, recoverAddressUnverified: recoverLeadFlag, flagCoversAddress } = require('./lead-address-unverified');
-        const parsedRow = parseDisplayAddress(row.address);
-        const premise = { line1: parsedRow.line1, city: parsedRow.city, state: parsedRow.state, zip: parsedRow.zip };
-        const verdict = {
-          status: 'clean',
-          address_line1: parsedRow.streetLine || null,
-          city: parsedRow.city || null,
-          state: parsedRow.state || 'FL',
-          zip: parsedRow.zip || null,
-          at: new Date().toISOString(),
-          source: `staff:${writtenData.addressUnverifiedClearedBy}`,
-        };
-        const flaggedLeads = await trx('leads')
-          .whereNull('deleted_at')
-          .whereRaw('LOWER(email) = ?', [String(row.customer_email).toLowerCase().trim()])
-          .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(row.customer_phone).replace(/\D/g, '').slice(-10)])
-          .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
-          .forUpdate()
-          .select('id', 'extracted_data');
-        const targets = flaggedLeads.filter((lead) => {
-          const flag = recoverLeadFlag(parseJson(lead.extracted_data));
-          return flag && (!flag.address_line1 || flagCoversAddress(flag, premise));
-        }).map((lead) => lead.id);
-        if (targets.length) {
-          await trx('leads').whereIn('id', targets).update({
-            extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
-            updated_at: now(),
-          });
-        }
-      } catch (leadErr) {
-        logger.warn(`[admin-estimate-persistence] contact-matched lead verdict not stamped: ${leadErr.code || leadErr.name || 'error'}`);
-      }
+    if (clearedByThisWrite && !writtenData.lead_id) {
+      await stampContactMatchedLeadsClean(trx, { row, clearedBy: writtenData.addressUnverifiedClearedBy, now });
     }
     // Runs with OR without a direct lead link (codex r28 P1): a contact-
     // matched legacy row with a customer_id but no estimate_data.lead_id
@@ -3544,3 +3557,4 @@ module.exports.assertLiveRowMayJoinGroup = assertLiveRowMayJoinGroup;
 module.exports.liveGroupMoveDestinationIds = liveGroupMoveDestinationIds;
 module.exports.revisionGroupLockIds = revisionGroupLockIds;
 module.exports.expiredRowRecoverableUnderGate = expiredRowRecoverableUnderGate;
+module.exports.stampContactMatchedLeadsClean = stampContactMatchedLeadsClean;

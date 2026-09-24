@@ -2594,6 +2594,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // can slip in between this lock releasing and the provider handoff —
     // the lock itself is never held across provider calls.
     const invalidatedNow = await db.transaction(async (trx) => {
+      // Group advisory lock BEFORE any row lock when siblings are claimed
+      // below (pre-push audit P1 after r42): two grouped sends / extensions
+      // on different members would otherwise each hold their anchor and
+      // wait on the other's. Reentrant when the caller already holds it.
+      if (estimate.estimate_group_id && linkVisibleGroupIds.length > 1) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['estimate-group-send', String(estimate.estimate_group_id)]);
+      }
       const verdictRow = await trx('estimates')
         .where({ id: estimate.id })
         .forUpdate()
@@ -4377,6 +4384,15 @@ router.put('/:id/proposal', async (req, res, next) => {
     // leaves 'sending' while the automated link is still being delivered.
     const retry = (message) => { const err = new Error(message); err.statusCode = 409; return err; };
     const { updatedCount, editVersion: committedEditVersion } = await db.transaction(async (trx) => {
+    // The county-roll ADDRESS-VERDICT contact-pair lock FIRST (before the
+    // group and row locks — the order every other verdict writer uses): a
+    // save that lifts the hold below stamps the linked leads' verdicts
+    // under it, so a concurrent /calculate cannot overwrite that clean
+    // verdict with its stale flagged read (pre-push audit P1 after r42).
+    if (estimate.customer_email && estimate.customer_phone) {
+      const { contactPairLockKey } = require('../services/lead-address-unverified');
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(estimate.customer_email, estimate.customer_phone)]);
+    }
     const observed = await trx('estimates').where({ id: estimate.id }).first('id', 'estimate_group_id');
     if (!observed) throw retry('This estimate changed while you were editing — reload and retry.');
     const groupId = observed.estimate_group_id || null;
@@ -4425,6 +4441,20 @@ router.put('/:id/proposal', async (req, res, next) => {
         nextData.addressUnverifiedFlag = null;
         nextData.addressUnverifiedClearedBy = addressCorrected ? 'address_corrected' : 'staff_confirmed';
         delete nextData.addressUnverifiedSupersededAt;
+        // …and the SHARED lead-verdict reconciliation (pre-push audit P1
+        // after r42): the leads under this row's contact pair whose flag
+        // covers the resolved premise take the clean verdict, or a later
+        // lookup / outage recovers the old flag and blocks this proposal
+        // again. Judged on the premise the proposal now names; the base
+        // address column stays immutable on this path by design.
+        const { stampContactMatchedLeadsClean } = require('../services/admin-estimate-persistence');
+        await stampContactMatchedLeadsClean(trx, {
+          row: locked,
+          clearedBy: nextData.addressUnverifiedClearedBy,
+          premiseAddress: addressCorrected ? normalized.propertyAddress : (lockedData.addressUnverifiedFlag?.address_line1
+            ? [lockedData.addressUnverifiedFlag.address_line1, lockedData.addressUnverifiedFlag.city, lockedData.addressUnverifiedFlag.zip].filter(Boolean).join(', ')
+            : null),
+        });
       }
     }
     // A pending send is judged at the first scheduler tick it can reach,
