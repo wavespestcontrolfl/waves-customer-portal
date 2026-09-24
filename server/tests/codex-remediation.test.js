@@ -1198,6 +1198,11 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
   const FAQ_MD = `---\n${JSON.stringify(TERMITE_FM, null, 2)}\n---\nBait stations target the colony itself.\n\n## Frequently Asked Questions\n\n### How long does bait last?\n\nStations stay in service as long as they are monitored.`;
   const gateDeps = { factCheckEvaluate: async () => ({ pass: true }) };
 
+  test('mandatory editorial fact checking rejects an unchecked pass', async () => {
+    const result = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true, requireFactCheck: true }, gateDeps);
+    expect(result).toEqual({ ok: false, reason: 'factcheck did not complete' });
+  });
+
   test('validateFixedBlogFile: termite post with a pre-existing FAQ blocks without the flag, passes with it', async () => {
     const strict = await rem.validateFixedBlogFile(FAQ_MD, {}, gateDeps);
     expect(strict.ok).toBe(false);

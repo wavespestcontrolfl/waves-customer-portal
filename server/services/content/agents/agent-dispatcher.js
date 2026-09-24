@@ -22,7 +22,7 @@
 const logger = require('../../logger');
 const { isSessionTerminal, isSessionError } = require('../../agent-control/session-events');
 const { readSessionFrames } = require('../../agent-control/session-stream');
-const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint } = require('./brief-driven-tools');
+const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint, registerSessionEditorial } = require('./brief-driven-tools');
 const { recordSessionUsage } = require('../../llm-dispatch-metrics');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -215,6 +215,7 @@ class AgentDispatcher {
     // module gate 3c uses, so the lint can never disagree with the gate
     // that parks runs. Cleared with clearDraft below.
     if (selfLintOptions) registerSessionLint(sessionId, selfLintOptions);
+    registerSessionEditorial(sessionId, brief);
     // Call ledger (never throws): one session row per created session, on
     // every exit from here on — a failed initial message, a streaming
     // failure or timeout, a session that never emitted a draft, and success

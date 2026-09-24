@@ -142,13 +142,14 @@ async function deleteFile({ path, message, branch, sha }) {
 //
 // Return shape matches what publish callers read off putFile:
 // `{ commit: { sha } }`.
-async function commitFiles({ branch, message, files = [], deletes = [] }) {
+async function commitFiles({ branch, message, files = [], deletes = [], expectedHeadSha = null }) {
   const { owner, repo } = env();
   if (!branch) throw new Error('commitFiles requires branch');
   if (!files.length && !deletes.length) throw new Error('commitFiles requires at least one file or delete');
 
   const headSha = await getBranchSha(branch);
   if (!headSha) throw new Error(`branch not found: ${branch}`);
+  if (expectedHeadSha && headSha !== expectedHeadSha) throw new Error('branch changed since content was reviewed');
   const baseCommit = await ghFetch(`/repos/${owner}/${repo}/git/commits/${headSha}`);
   const baseTreeSha = baseCommit?.tree?.sha;
   if (!baseTreeSha) throw new Error(`could not resolve tree for ${branch}@${headSha}`);

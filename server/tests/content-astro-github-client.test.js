@@ -93,6 +93,13 @@ describe('commitFiles — atomic multi-file commit via the git data API', () => 
     jest.clearAllMocks();
   });
 
+  test('rejects a moved expected head before creating blobs or a commit', async () => {
+    global.fetch = jest.fn().mockResolvedValueOnce(jsonResponse({ object: { sha: 'new-head' } }));
+    await expect(gh.commitFiles({ branch: 'content/test', message: 'evidence', expectedHeadSha: 'reviewed-head',
+      files: [{ path: 'evidence.json', content: '{}' }] })).rejects.toThrow('branch changed');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   test('text + binary + delete land as ONE commit: blob for bytes, inline content for text, sha:null delete, force:false ref update', async () => {
     const calls = [];
     global.fetch = jest.fn(async (url, init) => {

@@ -590,7 +590,7 @@ class AutonomousRunner {
       });
     }
 
-    const draft = dispatchResult.draft;
+    let draft = dispatchResult.draft;
     // Routes check_existing_content showed this session are legitimate link
     // targets (the prompt mandates linking the existing post on a
     // differentiated angle). They ride ON the draft payload so the
@@ -602,6 +602,20 @@ class AutonomousRunner {
     if (!draft) {
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       return finalize(run, t0, { outcome: 'failed_agent', failure_message: 'no draft from agent' });
+    }
+
+    // Editorial repairs precede ALL existing content gates. No human hold:
+    // errors and exhausted repair attempts use the bounded retry/skip policy.
+    try {
+      draft = await require('./editorial-evidence').prepareDraft(draft, brief);
+      run.draft_payload = draft;
+    } catch (err) {
+      if (!['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
+        err = require('./editorial-evidence').reviewError(null);
+      }
+      return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+        claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
+      });
     }
 
     // Bucket C: clamp the draft's title/meta to the gate limits BEFORE any gate
@@ -1310,6 +1324,11 @@ class AutonomousRunner {
     try {
       publishOutcome = await this._publishAndDistribute(draft, brief, run);
     } catch (err) {
+      if (['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
+        return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+          claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
+        });
+      }
       if (isDeterministicPublishError(err)) {
         const finalized = await finalize(run, t0, {
           outcome: 'completed_pending_review',

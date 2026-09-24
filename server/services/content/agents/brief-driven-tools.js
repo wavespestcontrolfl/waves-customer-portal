@@ -59,6 +59,13 @@ const getGateRetryDirectives = lazy('gate-retry-directives', '../gate-retry-dire
  * sessionDrafts[sessionId] after the agent completes.
  */
 const sessionDrafts = new Map();
+const sessionEditorial = new Map();
+function registerSessionEditorial(sessionId, brief) {
+  if (sessionId && require('../editorial-evidence').enabled()
+      && ['supporting-blog', 'customer-question', 'refresh'].includes(brief?.page_type)) {
+    sessionEditorial.set(sessionId, { title: brief.working_title || brief.target_keyword || '', attempts: 0, plan: null });
+  }
+}
 
 // Routes each session was SHOWN by check_existing_content. The writer
 // prompt mandates linking the existing post when writing a differentiated
@@ -90,6 +97,7 @@ function getCheckedRoutes(sessionId) {
 
 function clearDraft(sessionId) {
   sessionDrafts.delete(sessionId);
+  sessionEditorial.delete(sessionId);
   sessionCheckedRoutes.delete(sessionId);
   sessionLintOptions.delete(sessionId);
   sessionLintAttempts.delete(sessionId);
@@ -363,10 +371,26 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       }
     }
 
+    case 'validate_answer_plan': {
+      const context = sessionEditorial.get(sessionId);
+      if (!context) return { pass: true, skipped: 'editorial_gate_not_applicable' };
+      context.plan = null;
+      if (++context.attempts > 3) return { pass: false, error: 'Answer-plan attempt budget exhausted; stop this draft.' };
+      try {
+        const result = await require('../editorial-review').reviewPlan({ title: context.title, sections: input?.sections });
+        if (result?.pass === true) context.plan = input.sections;
+        return result;
+      } catch (_) { return { pass: false, error: 'Answer-plan reviewer unavailable; retry within the attempt budget.' }; }
+    }
+
     case 'emit_draft': {
       if (!sessionId) return { error: 'session context missing — dispatcher must pass sessionId' };
       const { frontmatter, body, schema, claims_ledger, notes_for_reviewer } = input || {};
       if (!frontmatter || !body) return { error: 'frontmatter and body required' };
+      const editorialContext = sessionEditorial.get(sessionId);
+      if (editorialContext && !editorialContext.plan) {
+        return { draft_rejected: true, directives: ['Call validate_answer_plan with each informational section question and its direct first answer. Obtain pass:true before writing and submitting the full draft.'] };
+      }
       // Deterministic pre-gate repair: strip unambiguous citation artifacts
       // (<cite> wrappers, citeturn/oaicite tokens, PUA glyphs) from every
       // publishable string at capture, so the CITATION_TOKEN_RESIDUE gate
@@ -797,6 +821,7 @@ module.exports = {
   getCheckedRoutes,
   clearDraft,
   registerSessionLint,
+  registerSessionEditorial,
   // exposed for tests:
   _internals: { sessionDrafts, sessionCheckedRoutes, sessionLintOptions, sessionLintAttempts, urlToAstroPath, parseJsonbColumns },
 };
