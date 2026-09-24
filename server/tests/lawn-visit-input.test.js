@@ -66,12 +66,25 @@ describe('photo contract', () => {
     expect(visit.validateVisitPhotos([]).error).toMatch(/at least one/i);
     expect(visit.validateVisitPhotos(Array.from({ length: 7 }, () => photo('a'))).error).toMatch(/at most 6/i);
     expect(visit.validateVisitPhotos([photo('')]).error).toMatch(/base64/i);
-    expect(visit.validateVisitPhotos([photo('a', 'garage')]).error).toMatch(/front, back, side/);
-    expect(visit.validateVisitPhotos([photo('a', 'Front'), photo('b'), photo('c', 'side')])).toEqual({ error: null, zones: ['front', null, 'side'] });
+    expect(visit.validateVisitPhotos([photo('a', 'garage')]).error).toMatch(/front, close_up, trouble/);
+    expect(visit.validateVisitPhotos([photo('a', 'Front'), photo('b'), photo('c', 'trouble')])).toEqual({ error: null, zones: ['front', null, 'trouble'] });
+    // Retired zone labels (pre 2026-09-24 rename) are no longer accepted for a
+    // NEW photo upload — no live caller sends them.
+    expect(visit.validateVisitPhotos([photo('a', 'back')]).error).toMatch(/front, close_up, trouble/);
+  });
+
+  test('normalizeDetailZone accepts the current picker plus retired back/side (technician-detail round-trip), never an arbitrary string', () => {
+    expect(visit.normalizeDetailZone('Front')).toBe('front');
+    expect(visit.normalizeDetailZone('back')).toBe('back');
+    expect(visit.normalizeDetailZone('Side')).toBe('side');
+    expect(visit.normalizeDetailZone('roof')).toBeNull();
+    expect(visit.normalizeDetailZone(null)).toBeNull();
   });
 
   test('zone labels drive the stored photo type; the label is the only zone claim', () => {
     expect(visit.photoTypeForZone('front')).toBe('front_yard');
+    expect(visit.photoTypeForZone('close_up')).toBe('close_up');
+    expect(visit.photoTypeForZone('trouble')).toBe('trouble_spot');
     expect(visit.photoTypeForZone(null)).toBe('general');
     expect(visit.photoLabel(0, 'front')).toBe('Photo 1 (front)');
     expect(visit.photoLabel(1, null)).toBe('Photo 2');

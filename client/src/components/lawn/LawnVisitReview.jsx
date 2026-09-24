@@ -13,7 +13,14 @@ import {
 
 const TECH_TEXT_MAX = 500;
 const DETAIL_MAX = 10;
-const PHOTO_ZONES = ['front', 'back', 'side'];
+// Owner ruling 2026-09-24: front / close_up / trouble (server/services/lawn-visit-input.js).
+const PHOTO_ZONES = ['front', 'close_up', 'trouble'];
+const PHOTO_ZONE_LABELS = { front: 'Front', close_up: 'Close-up', trouble: 'Trouble / watch area' };
+// back/side are the retired zone labels — no longer offered in the picker,
+// but a technician detail already saved under one keeps it (not silently
+// nulled) the next time this same review is loaded and resubmitted.
+const LEGACY_ZONES = ['back', 'side'];
+const isAcceptedZone = (zone) => PHOTO_ZONES.includes(zone) || LEGACY_ZONES.includes(zone);
 
 // Keep this list in parity with CONDITION_LABEL_VALUES in
 // server/services/lawn-diagnostic-report.js. The larger shared lawn finding
@@ -70,7 +77,7 @@ export function createVisitReview(visitAssessment, assessmentObservations) {
     addedDetails: list(visitAssessment.addedDetails).slice(0, DETAIL_MAX).map((detail) => ({
       finding_id: typeof detail?.finding_id === 'string' ? detail.finding_id : null,
       text: text(detail?.name || detail?.text),
-      zone: PHOTO_ZONES.includes(detail?.zone) ? detail.zone : '',
+      zone: isAcceptedZone(detail?.zone) ? detail.zone : '',
     })),
     observationText: text(assessmentObservations === undefined
       ? visitAssessment.observations
@@ -97,7 +104,7 @@ export function visitReviewPayload(draft) {
   const addedDetails = list(draft.addedDetails).slice(0, DETAIL_MAX)
     .map((detail) => ({
       text: technicianText(detail?.text),
-      zone: PHOTO_ZONES.includes(detail?.zone) ? detail.zone : null,
+      zone: isAcceptedZone(detail?.zone) ? detail.zone : null,
     }))
     .filter((detail) => detail.text);
   return {
@@ -295,7 +302,10 @@ export default function LawnVisitReview({ visitAssessment, value, onChange, disa
                   onChange={(event) => updateDetail(index, { zone: event.target.value })}
                 >
                   <option value="">Not specified</option>
-                  {PHOTO_ZONES.map((zone) => <option key={zone} value={zone}>{displayText(zone)}</option>)}
+                  {PHOTO_ZONES.map((zone) => <option key={zone} value={zone}>{PHOTO_ZONE_LABELS[zone] || displayText(zone)}</option>)}
+                  {/* A retired zone value already saved on this detail keeps showing
+                      selected (never silently reset) but isn't offered as a new pick. */}
+                  {LEGACY_ZONES.includes(detail.zone) ? <option value={detail.zone}>{displayText(detail.zone)}</option> : null}
                 </Select>
               </Field>
               <Button

@@ -2557,6 +2557,15 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // fall back to best-vs-best; when both sides record zones but none match,
     // drop the photo pair (the score delta still reports) rather than show a
     // false comparison.
+    //
+    // Owner ruling 2026-09-24: the technician zone vocabulary is now front /
+    // close_up / trouble. Only 'front' is the same spot every visit, so only
+    // 'front' pairs across visits going forward. 'close_up' and 'trouble' are
+    // a different spot each time and must NEVER pair, even when both sides
+    // happen to record the same zone value. Legacy 'back'/'side' rows
+    // (recorded before this rename, no longer accepted as new input) still
+    // pair with each other — a same-legacy-zone match is still a real
+    // same-location comparison, so history keeps its existing pairs.
     const photosFor = (assessmentId) => knex('lawn_assessment_photos')
       .where({ assessment_id: assessmentId, customer_visible: true })
       .orderBy('is_best_photo', 'desc')
@@ -2573,7 +2582,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // keying on it would falsely pair two arbitrary first-selected photos as
     // the same area (codex P1 #3038 r3). Photos without real zones fall back
     // to best-vs-best, same as before this change.
-    const zoneKey = (p) => String(p?.zone || '').trim().toLowerCase();
+    // PAIRABLE_ZONES excludes 'close_up'/'trouble' — a non-pairable zone value
+    // is treated the same as no zone at all, both for finding a match and for
+    // the "both sides zoned but disjoint" check below.
+    const PAIRABLE_ZONES = new Set(['front', 'back', 'side']);
+    const zoneKey = (p) => {
+      const zone = String(p?.zone || '').trim().toLowerCase();
+      return PAIRABLE_ZONES.has(zone) ? zone : '';
+    };
     let beforePhoto = null;
     let afterPhoto = null;
     for (const candidate of beforeCandidates) {

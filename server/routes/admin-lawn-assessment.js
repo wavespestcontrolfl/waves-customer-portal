@@ -369,7 +369,7 @@ router.post('/assess', async (req, res, next) => {
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
     // Gate on: up to six photos, each optionally labeled with the zone the
-    // technician shot (front / back / side) — the only source of a zone claim.
+    // technician shot (front / close_up / trouble) — the only source of a zone claim.
     const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos) : null;
     if (visitPhotos?.error) return res.status(400).json({ error: visitPhotos.error });
 

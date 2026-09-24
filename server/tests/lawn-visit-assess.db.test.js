@@ -29,7 +29,7 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
   let protocol;
   const oldVisitGate = process.env.GATE_LAWN_VISIT_ASSESSMENT;
   const oldHistoryGate = process.env.GATE_LAWN_PROPERTY_HISTORY;
-  const photos = [photo('YQ==', 'front'), photo('Yg==', 'back'), photo('Yw==')];
+  const photos = [photo('YQ==', 'front'), photo('Yg==', 'close_up'), photo('Yw==')];
   const complete = (extra = {}) => ({
     ...answer({ grass_type: 'unknown', findings: [finding({ photo_refs: [1, 3] })] }),
     photo_quality: [{ photo: 1, quality: 'adequate', issue: '' }, { photo: 2, quality: 'poor', issue: 'blurred' }, { photo: 3, quality: 'limited', issue: 'glare' }],
@@ -99,8 +99,8 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     expect(body.visitAssessment).toEqual(runs.responseForRun(run));
     expect(body.visitAssessment).not.toHaveProperty('raw_response');
     expect(body.visitAssessment).not.toHaveProperty('vision_context');
-    expect(photoRows.map((row) => row.photo_type)).toEqual(['front_yard', 'back_yard', 'general']);
-    expect(photoRows.map((row) => row.zone)).toEqual(['front', 'back', null]);
+    expect(photoRows.map((row) => row.photo_type)).toEqual(['front_yard', 'close_up', 'general']);
+    expect(photoRows.map((row) => row.zone)).toEqual(['front', 'close_up', null]);
     expect(photoRows.map((row) => row.customer_visible)).toEqual([true, false, true]);
     expect(photoRows.map((row) => row.is_best_photo)).toEqual([true, false, false]);
   });

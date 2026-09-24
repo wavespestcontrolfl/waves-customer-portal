@@ -1131,6 +1131,7 @@ function formatEnumLabel(value) {
     front_yard: 'Front yard',
     back_yard: 'Back yard',
     side_yard: 'Side yard',
+    close_up: 'Close-up',
     trouble_spot: 'Trouble spot',
   };
   const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
