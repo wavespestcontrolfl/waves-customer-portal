@@ -145,6 +145,14 @@ describe('lead consultation token', () => {
   // unsalted digest would let anyone with the claim brute-force the
   // remaining 6 digits offline (10^6 guesses) and recover the full phone.
   describe('smsChannelFor is secret-keyed, not a bare phone digest', () => {
+  // Codex #4737 r13 pre-push P0: full phone identity — an international
+  // number sharing a US number's last ten digits gets a different claim.
+  test('an international number never shares a US number\'s SMS claim', () => {
+    const { smsChannelFor } = require('../utils/lead-consultation-token');
+    expect(smsChannelFor('+19415550101')).toBe(smsChannelFor('9415550101'));
+    expect(smsChannelFor('+449415550101')).not.toBe(smsChannelFor('9415550101'));
+  });
+
     const PHONE = '9415550101';
 
     test('differs from a plain unsalted sha256 of the phone (not brute-forceable from the claim alone)', () => {

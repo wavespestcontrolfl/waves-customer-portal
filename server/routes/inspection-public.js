@@ -435,7 +435,10 @@ async function latestProvenance(dbConn, leadId) {
 // (ensureCustomerAccount + matchExistingAccountProfile), so a reused
 // secondary profile with its own phone is found again on reload.
 async function verifiedForCustomer(lead, customer, token, dbConn) {
-  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  // Full phone identity, never a last-10 suffix (Codex #4737 r13 pre-push
+  // P0): an international number sharing a US number's last ten digits is a
+  // different phone.
+  const { phoneIdentityKey: last10 } = require('../utils/phone');
   const leadPhone = last10(lead.phone);
   if (!leadPhone) return false;
   let onLeadPhone = last10(customer.phone) === leadPhone;
@@ -927,11 +930,11 @@ async function createCustomerForLead(dbConn, lead, address, location, account) {
 // (smsChannelFor) is of this exact phone. Reads run on the caller's trx.
 async function leadContactVerified(lead, token, dbConn = db) {
   if (!lead || !lead.phone) return false;
-  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const { phoneIdentityKey: last10 } = require('../utils/phone');
   if (token?.channel && token.channel === smsChannelFor(lead.phone)) return true;
   if (lead.first_contact_channel !== 'call' || !lead.twilio_call_sid) return false;
   const call = await dbConn('call_log').where({ twilio_call_sid: lead.twilio_call_sid }).first('from_phone');
-  return Boolean(call?.from_phone) && last10(call.from_phone) === last10(lead.phone);
+  return Boolean(call?.from_phone) && Boolean(last10(lead.phone)) && last10(call.from_phone) === last10(lead.phone);
 }
 
 // Round 11 (Codex pre-push P1, 2026-09-24): a "small tolerance" for two
@@ -1030,9 +1033,13 @@ async function phoneMatchedHouseholds(dbConn, phone) {
   const rows = await dbConn('customers')
     .whereNull('deleted_at')
     .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-    .select('id', 'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+    .select('id', 'account_id', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+  // The SQL suffix match is only a prefilter: the full phone identity
+  // decides (Codex #4737 r13 pre-push P0 — +44… never matches a US number).
+  const { phoneIdentityKey } = require('../utils/phone');
+  const leadKey = phoneIdentityKey(phone);
   const households = new Map();
-  for (const row of rows) {
+  for (const row of rows.filter((r) => phoneIdentityKey(r.phone) === leadKey)) {
     const key = row.account_id ? `account:${row.account_id}` : `legacy:${row.id}`;
     if (!households.has(key)) households.set(key, { accountId: row.account_id || null, legacy: row.account_id ? null : row });
   }

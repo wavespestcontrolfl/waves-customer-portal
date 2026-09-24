@@ -89,8 +89,10 @@ function verifyLeadConsultationToken(token, nowSec = Math.floor(Date.now() / 100
 // (rather than a new env var) keeps this fail-closed the same way `sign()`
 // is: no secret configured, no channel claim.
 function smsChannelFor(phone) {
-  const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
-  if (last10.length !== 10 || !secret()) return null;
+  // Full phone identity (Codex #4737 r13 pre-push P0): a US number keys by
+  // its ten digits, an international one keeps its country code.
+  const last10 = require('./phone').phoneIdentityKey(phone);
+  if (!last10 || !secret()) return null;
   const key = crypto.createHmac('sha256', secret()).update('sms-channel-key').digest();
   return `sms-${crypto.createHmac('sha256', key).update(`lead-consultation-sms:${last10}`).digest('hex').slice(0, 16)}`;
 }
