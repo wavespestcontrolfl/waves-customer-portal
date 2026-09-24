@@ -524,4 +524,30 @@ describe('topUpRecurringSeries — the writing wrapper', () => {
     expect(inserted).toHaveLength(0);
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
   });
+
+  test('defers to the next tick when a merge-undo repoints the parent to a new customer TWICE under the comms fence', async () => {
+    // Rung-6 re-lock (mirrors runRecurringSeriesMaintenanceLocked): the
+    // comms lock must fence the CURRENT owner, not whoever owned the row
+    // when this call started waiting on it. A row that keeps moving even
+    // under the second lock defers the whole run rather than inserting
+    // under a still-stale owner's fence.
+    const customerIdReads = [{ customer_id: 'cust-A' }, { customer_id: 'cust-B' }, { customer_id: 'cust-C' }];
+    let readIndex = 0;
+    const handler = ({ table, op, calls }) => {
+      if (table === 'scheduled_services' && op === 'first') {
+        const firstCall = calls.find((c) => c[0] === 'first');
+        if (firstCall[1] === 'customer_id') {
+          const row = customerIdReads[Math.min(readIndex, customerIdReads.length - 1)];
+          readIndex += 1;
+          return row;
+        }
+      }
+      return null;
+    };
+    const conn = makeConn(handler);
+    const result = await topUpRecurringSeries(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('owner_changed_under_fence');
+    expect(result.spawnedVisits).toEqual([]);
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
 });

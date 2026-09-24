@@ -15241,7 +15241,24 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
   const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
     const parentRow = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
-    if (parentRow) await lockCustomerComms(trx, parentRow.customer_id);
+    if (!parentRow) return topUpRecurringSeriesLocked(trx, parentId, opts);
+    await lockCustomerComms(trx, parentRow.customer_id);
+    // Rung-6 re-lock (mirrors runRecurringSeriesMaintenanceLocked's own
+    // comment): a merge undo can repoint the parent to a different customer
+    // while this call waited on the comms lock above. Re-read and lock the
+    // FRESH owner too, so the insert loop below is fenced against THAT
+    // customer's undo/offboarding, not a stale one. A row that moved AGAIN
+    // under the second lock defers this whole run to the next tick rather
+    // than inserting under a still-stale owner's fence.
+    const relocked = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
+    if (relocked && relocked.customer_id !== parentRow.customer_id) {
+      await lockCustomerComms(trx, relocked.customer_id);
+      const relockedAgain = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
+      if (!relockedAgain || relockedAgain.customer_id !== relocked.customer_id) {
+        logger.warn(`[recurring-topup] parent ${parentId} owner changed under the comms fence (merge-undo) — deferring top-up to the next tick`);
+        return { spawnedVisits: [], skipped: 'owner_changed_under_fence' };
+      }
+    }
     return topUpRecurringSeriesLocked(trx, parentId, opts);
   };
   const result = conn.isTransaction ? await runLocked(conn) : await conn.transaction(runLocked);
