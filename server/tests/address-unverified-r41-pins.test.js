@@ -252,6 +252,8 @@ describe('pre-push audit after r45: linked-draft reuse keeps the county hold', (
     const whole = src.slice(start, src.indexOf('await recordPreSendRevision({ priorEstimate: existingEstimate, trx });', start));
     expect(whole.indexOf("['address-verdict', contactPairLockKey(writeFields.customer_email, writeFields.customer_phone)]")).toBeLessThan(whole.indexOf('lockScheduledGroupGuardGroups(trx'));
     expect(whole).toContain('if (reuseClearedHold) {');
+    expect(whole).toContain(".where({ id: existingEstimate.id, status: 'draft' })\n            // Never over a LIVE delivery claim");
+    expect(whole).toContain(".whereRaw(require('../utils/estimate-claim-sql').DELIVERY_CLAIM_NOT_LIVE_SQL)\n            .update({\n              ...writeFields,");
     expect(whole).toContain('reuseClearedHold = lockedReuseData.addressUnverified === true\n              && reuseData.addressUnverified !== true\n              && !!reuseData.addressUnverifiedClearedBy;');
     expect(whole).toContain('await stampContactMatchedLeadsClean(trx, { row: updated, clearedBy, now });');
   });

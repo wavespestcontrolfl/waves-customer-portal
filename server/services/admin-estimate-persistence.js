@@ -2234,6 +2234,11 @@ async function createOrReuseAdminEstimate({
           });
           const [updated] = await trx('estimates')
             .where({ id: existingEstimate.id, status: 'draft' })
+            // Never over a LIVE delivery claim (pre-push audit P1 after r45):
+            // /calculate holds one on a wizard draft across its sends, and
+            // this whole-blob write would erase it. Zero rows → the 409
+            // retry below, as the revise and wizard-refresh paths answer.
+            .whereRaw(require('../utils/estimate-claim-sql').DELIVERY_CLAIM_NOT_LIVE_SQL)
             .update({
               ...writeFields,
               expires_at: expiresAt,
