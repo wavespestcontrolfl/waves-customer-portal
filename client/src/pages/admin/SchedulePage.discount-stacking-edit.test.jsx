@@ -271,9 +271,13 @@ const writes = () => fetch.mock.calls.filter(([url, options]) => (
 // This modal's <label>s are visual-only siblings of their control (no
 // htmlFor/id pair, no wrapping) — getByLabelText can't associate them.
 function labeledControl(text) {
-  return screen.getByText(text, { selector: 'label' }).parentElement.querySelector('select, input');
+  return screen.getByText(text, { selector: 'label' }).parentElement.querySelector('select, input, textarea');
 }
 const apptDiscountSelect = () => labeledControl('Discount');
+// The "Create invoice on completion" checkbox IS wrapped by its <label>
+// (unlike the visual-only siblings above), so its text sits inside a
+// <span> next to the <input> — walk up to the label, then back down.
+const invoiceCheckbox = () => screen.getByText('Create invoice on completion').closest('label').querySelector('input[type="checkbox"]');
 
 beforeEach(() => {
   __resetDiscountStackingCache();
@@ -2002,4 +2006,89 @@ it('round 16 P2 (:5318): a CONFIRMED preview of a legitimately unpriced visit re
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
   expect(totalText()).toBe('Not priced');
   expect(screen.queryByText('Confirming…')).not.toBeInTheDocument();
+});
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 19 P2 (#4657, :3737): createInvoice seeds from the
+// visit's own stored create_invoice_on_complete, so `!!createInvoice`
+// alone kept saveTouchesMoney true for the ENTIRE life of the modal on a
+// visit invoicing was already on for — never re-derived from an actual
+// change. Paired with a permanently-failed preview (r14's
+// previewErroredForLatest path), that left Save disabled forever on an
+// edit (notes, scheduling) that never touched money at all.
+// ---------------------------------------------------------------------
+
+const undiscountedVisitWithInvoice = {
+  ...undiscountedVisit,
+  create_invoice_on_complete: true,
+};
+
+it('round 19 P2 (:3737): preview permanently down on an undiscounted visit with invoicing already on — a notes-only edit still saves, then toggling the invoice checkbox re-blocks Save', async () => {
+  vi.stubGlobal('fetch', previewDownFetch(undiscountedVisitWithInvoice));
+  render(<Harness service={undiscountedVisitWithInvoice} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getByText(/Could not confirm the totals/)).toBeInTheDocument());
+  fireEvent.change(labeledControl('Appointment notes'), { target: { value: 'Rescheduled per customer request' } });
+  // Nothing money-bearing changed (notes isn't part of moneyEditKey, and
+  // createInvoice is untouched from its mount-time seed) — Save must be
+  // enabled despite the permanently-failed preview.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+  fireEvent.click(invoiceCheckbox());
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled());
+});
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 19 P2 (#4657, :3768): displayPrimaryGross falls back
+// to the (net) form seed when neither the preview's own primaryLinePrice
+// nor the visit's stored primaryLinePrice is known. For a zero-add-on
+// legacy visit with NO recorded gross and a STORED discount, that seed IS
+// the net, and rendering it as "Subtotal" produces an itemization no
+// arithmetic ever creates (Subtotal $90 / Discount ($10) / Total $90).
+// ---------------------------------------------------------------------
+
+const legacyNoGrossDiscountedVisit = {
+  ...baseService,
+  serviceAddons: [],
+  primaryLinePrice: null,
+  estimatedPrice: 90,
+  discountType: 'fixed_amount', discountAmount: 10,
+};
+
+function legacyNoGrossPreviewFetch({ appointmentDiscountDollars }) {
+  return vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return {
+        ok: true,
+        json: async () => ({
+          total: 90, primaryLinePrice: null, appointmentDiscountDollars,
+          primaryLineDiscountDollars: null, primaryLineDiscountName: null, addons: [],
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  });
+}
+
+it('round 19 P2 (:3768): a legacy visit with NO recorded gross and a stored discount renders Subtotal as "—" with a note, never the net as if it were the gross', async () => {
+  vi.stubGlobal('fetch', legacyNoGrossPreviewFetch({ appointmentDiscountDollars: 10 }));
+  render(<Harness service={legacyNoGrossDiscountedVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  expect(screen.getByText('Subtotal').nextElementSibling.textContent).toBe('—');
+  const note = screen.getByText('Original price not recorded');
+  expect(note.style.fontSize).toBe('14px');
+  expect(screen.getByText('Custom Discount').nextElementSibling.textContent).toBe('($10.00)');
+  expect(screen.getByText('Total').nextElementSibling.textContent).toBe('$90.00');
+});
+
+it('round 19 P2 (:3768): the same shape with NO stored discount still falls back to the (net) seed — nothing to correct', async () => {
+  const legacyNoGrossUndiscountedVisit = { ...legacyNoGrossDiscountedVisit, discountType: undefined, discountAmount: undefined };
+  vi.stubGlobal('fetch', legacyNoGrossPreviewFetch({ appointmentDiscountDollars: null }));
+  render(<Harness service={legacyNoGrossUndiscountedVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  expect(screen.getByText('Subtotal').nextElementSibling.textContent).toBe('$90.00');
+  expect(screen.queryByText('Original price not recorded')).not.toBeInTheDocument();
 });

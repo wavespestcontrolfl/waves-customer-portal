@@ -3728,13 +3728,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     ]),
   });
   const moneyEditSeedRef = useRef(moneyEditKey);
+  // GitHub Codex round 19 P2 (#4657, :3737): createInvoice initializes
+  // from the visit's own stored create_invoice_on_complete, so it reads
+  // true for the whole life of the modal on a visit that already has
+  // invoicing on — `!!createInvoice` alone made saveTouchesMoney true on
+  // every such visit's edit, even a notes-only or scheduling change that
+  // never touched money. Combined with a permanently-failed preview (the
+  // r14 previewErroredForLatest path), that left Save disabled forever
+  // although nothing money-bearing changed. Only a CHANGE to the checkbox
+  // from its mount-time value touches money; the seed is captured once,
+  // like moneyEditSeedRef, and never updated.
+  const createInvoiceSeedRef = useRef(createInvoice);
   const saveTouchesMoney =
     moneyEditKey !== moneyEditSeedRef.current
     || appointmentDiscountSelected
     || serviceLines.some((l) => !!effectiveLineDiscount(l))
     || !!service.lineDiscountType
     || (service.prepaidAmount != null && Number(service.prepaidAmount) > 0)
-    || !!createInvoice;
+    || createInvoice !== createInvoiceSeedRef.current;
   const moneyPreviewBlocksSave =
     moneyPreviewLoading || (!moneyPreviewFresh && !(previewErroredForLatest && !saveTouchesMoney));
   // null (not 0, not a stale figure) while unconfirmed — the render below
@@ -3766,6 +3777,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       : service.primaryLinePrice != null
         ? Number(service.primaryLinePrice)
         : primaryPrice;
+  // GitHub Codex round 19 P2 (#4657, :3768): the fallback above lands on
+  // the (net) seed only when BOTH the preview and the stored visit are
+  // silent on the gross. That's broader than "net already equals gross" —
+  // a zero-add-on legacy visit with primary_line_price NULL and a STORED
+  // discount hits it too, and there the seed is genuinely the NET
+  // post-discount figure, not the gross. Track that fallback distinctly
+  // so the Subtotal row can say the gross is unknown instead of quietly
+  // asserting a wrong number as if it were confirmed.
+  const primaryGrossGenuinelyUnknown =
+    !(moneyPreviewFresh && moneyPreview.primaryLinePrice != null)
+    && service.primaryLinePrice == null;
   // cleanServiceLines mirrors buildAddonsPayload's own filter exactly (the
   // same "trimmed serviceType" test) — the server's addons[] is ordered
   // and filtered identically, so a brand-new (id-less) line correlates by
@@ -3877,6 +3899,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }),
       ].filter((row) => row.dollars > 0)
     : [];
+  // GitHub Codex round 19 P2 (#4657, :3768): only worth flagging when a
+  // discount is actually being reported alongside the unknown gross — an
+  // undiscounted visit with no stored gross is the ordinary "net equals
+  // gross, nothing to correct" shape the fallback above already handles.
+  const primaryGrossDisplayUnresolvedWithDiscount =
+    primaryGrossGenuinelyUnknown
+    && (manualDiscount > 0 || lineDiscountRows.some((row) => row.dollars > 0));
   const appointmentHistory = customerPanelHistory(customerData, service?.id);
   const cards = Array.isArray(customerData?.cards) ? customerData.cards : [];
 
@@ -5273,8 +5302,23 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 >
                   {" "}
                   <span>Subtotal</span>
-                  <strong>${displaySubtotal.toFixed(2)}</strong>{" "}
+                  <strong>
+                    {primaryGrossDisplayUnresolvedWithDiscount
+                      ? "—"
+                      : `$${displaySubtotal.toFixed(2)}`}
+                  </strong>{" "}
                 </div>
+                {primaryGrossDisplayUnresolvedWithDiscount && (
+                  // GitHub Codex round 19 P2 (#4657, :3768): the gross is
+                  // genuinely unknown here (neither the preview nor the
+                  // stored visit has it) while a discount is being
+                  // reported — showing a number for Subtotal would assert
+                  // a pre-discount figure this visit never recorded.
+                  // 14px floor (AGENTS.md/CLAUDE.md).
+                  <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                    Original price not recorded
+                  </div>
+                )}
                 {/* Codex pre-push audit P1 (round 1, #4657): routine
                     financial info, not a warning — no color override, so
                     this inherits the same neutral tone Subtotal/Total use
