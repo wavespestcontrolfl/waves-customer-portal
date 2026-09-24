@@ -904,6 +904,71 @@ describe('POST /:token commit', () => {
     });
   });
 
+  // Codex pre-push P1 :858, round 6, 2026-09-24 — the fresh re-resolve under
+  // the lock can itself FAIL (geocoder error/timeout), distinct from
+  // "another commit's address won" above. Never combine coordinates from
+  // one resolution with a customer row whose stored address differs.
+  describe('address re-resolve failure under the lock (P1 :858)', () => {
+    test('stored address absent: the pre-lock validated supplied address is persisted, booking proceeds at that location', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null };
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const LOC = { lat: 27.55, lng: -82.55 };
+      mockGeocode
+        .mockResolvedValueOnce({ location: LOC }) // pre-lock: supplied address resolves
+        .mockResolvedValueOnce({ location: null }); // phase-1 re-resolve: fails (timeout)
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      firstResults.scheduled_services = { id: 'ss-858a', reschedule_token: 'tok-858a' };
+
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '123 Any St, Bradenton, FL 34209' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+      // The customer row passed to createSelfBooking carries the SAME
+      // location the slot was validated against — never left addressless
+      // while the booking proceeds at the pre-lock location.
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(LOC.lat);
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.longitude).toBe(LOC.lng);
+
+      const customerUpdate = updateCalls.find((c) => c.table === 'customers');
+      expect(customerUpdate).toBeTruthy();
+      expect(customerUpdate.payload.latitude).toBe(LOC.lat);
+      expect(customerUpdate.payload.longitude).toBe(LOC.lng);
+    });
+
+    test('a DIFFERING stored address on file: recoverable address_unresolved, no booking, no customer update', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.customers = {
+        id: 'cust-1', address_line1: '999 Existing Rd', address_line2: null,
+        city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null,
+      };
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const LOC = { lat: 27.55, lng: -82.55 };
+      mockGeocode
+        .mockResolvedValueOnce({ location: null }) // pre-lock: stored "999 Existing Rd" fails
+        .mockResolvedValueOnce({ location: LOC })   // pre-lock: supplied replacement resolves
+        .mockResolvedValueOnce({ location: null }) // phase-1: stored fails again
+        .mockResolvedValueOnce({ location: null }); // phase-1: supplied ALSO fails this attempt (transient)
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '456 Replacement Ave, Bradenton, FL 34209' });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.body).toEqual({ error: 'address_unresolved' });
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+      expect(updateCalls.find((c) => c.table === 'customers')).toBeUndefined();
+    });
+  });
+
   // P1 :355 — a null county (provider timeout/outage) must never silently
   // pass a booking through, including for a customer's STORED coordinates
   // (which never touch the geocoder's own box test at all — checkServiceArea

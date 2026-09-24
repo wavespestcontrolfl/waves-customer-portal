@@ -95,7 +95,18 @@
  *   different location, not just the start_time — Codex pre-push P1,
  *   2026-09-24) → COMMIT, releasing the lock) makes the customer row a
  *   durable, visible fact, and the slot correct, before anything calls
- *   createSelfBooking (key convention matches admin-agents.js/admin-
+ *   createSelfBooking. If the fresh re-resolve itself FAILS (geocoder
+ *   error/timeout — distinct from "another commit's address won"): a
+ *   customer row that's STILL addressless is safe to persist the pre-lock
+ *   VALIDATED address onto (nothing stored to conflict with); a customer
+ *   row that already has a DIFFERENT stored address we simply couldn't
+ *   re-resolve this attempt is never touched and never combined with the
+ *   pre-lock location — that pairing is exactly what would let
+ *   createSelfBooking's fresh reload dispatch to whatever's actually
+ *   stored while the slot was validated for a different address (Codex
+ *   pre-push P1, 2026-09-24) — the commit answers 422 `address_unresolved`
+ *   instead, recoverable, no booking, no customer update. (key convention
+ *   matches admin-agents.js/admin-
  *   dashboard.js's single-hashtext-arg form).
  *
  *   Booking itself goes through booking.js's createSelfBooking with the
@@ -855,12 +866,43 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             latitude: freshResolved.location.lat, longitude: freshResolved.location.lng,
           };
           location = freshResolved.location;
+        } else if (freshCustRow.address_line1) {
+          // Fresh resolution failed (geocoder error/timeout) and the
+          // customer has a DIFFERENT stored address on file that we simply
+          // couldn't re-resolve on this attempt — never combine the
+          // pre-lock LOCATION (validated for the supplied address) with
+          // this customer ROW (whose stored address might describe a
+          // different property): createSelfBooking reloads the customer
+          // fresh and would dispatch to whatever's actually in the DB, not
+          // the location the slot was checked against (Codex pre-push P1,
+          // 2026-09-24). We can't tell here whether the stored address is
+          // still good (a transient blip) or genuinely broken, so refuse
+          // recoverably rather than guess — the client can retry.
+          return { addressUnresolved: true };
         } else {
-          // Fresh resolution failed even though the pre-lock one succeeded
-          // (would require the address to have changed underneath us
-          // mid-request) — fall back to the pre-lock result rather than
-          // failing a commit that was fine a moment ago.
-          provisioned = freshCustRow;
+          // Fresh resolution failed even though the pre-lock one succeeded,
+          // but the customer STILL has no stored address at all (nothing to
+          // conflict with) — safe to persist the address that WAS validated
+          // pre-lock, so createSelfBooking's fresh reload sees the SAME
+          // location the slot was checked against.
+          await trx('customers').where({ id: freshCustRow.id }).update({
+            address_line1: resolved.address.line1,
+            address_line2: resolved.address.line2,
+            city: resolved.address.city,
+            state: resolved.address.state,
+            zip: resolved.address.zip,
+            latitude: resolved.location.lat,
+            longitude: resolved.location.lng,
+            updated_at: new Date(),
+          });
+          provisioned = {
+            ...freshCustRow,
+            address_line1: resolved.address.line1, address_line2: resolved.address.line2,
+            city: resolved.address.city, state: resolved.address.state, zip: resolved.address.zip,
+            latitude: resolved.location.lat, longitude: resolved.location.lng,
+          };
+          // `location` already defaults to resolved.location at the top of
+          // this callback — unchanged, now backed by a matching customer row.
         }
       }
 
@@ -885,6 +927,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
     if (phase1.eligibility) {
       return res.json(eligibilityResponse(phase1.eligibility, leadPayload));
+    }
+    if (phase1.addressUnresolved) {
+      return res.status(422).json({ error: 'address_unresolved' });
     }
     if (!phase1.slot) {
       let refreshed = null;
