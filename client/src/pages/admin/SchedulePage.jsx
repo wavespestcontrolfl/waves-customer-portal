@@ -958,11 +958,28 @@ export function formatReentryStepperMinutes(min) {
   return rem ? `${hr} hr ${rem} min` : `${hr} hr`;
 }
 
+const DEFAULT_PEST_RATING_SCALE = ["none", "very low", "low", "moderate", "elevated", "high"];
+
+// "0 = none · 1 = very low · … · 5 = high" from the active labels (the
+// tech-rating-allowed gate resolves each integer against them).
+export function pestRatingScaleCaptionText(labels) {
+  const names = [0, 1, 2, 3, 4, 5].map((n) => {
+    const name = Array.isArray(labels) && typeof labels[n] === "string" && labels[n].trim()
+      ? labels[n].trim().toLowerCase()
+      : DEFAULT_PEST_RATING_SCALE[n];
+    return `${n} = ${name}`;
+  });
+  return `${names.join(" · ")}.`;
+}
+
 export function completionPreferencesNeedDraft({
   sendSms = true,
   includePayLink = true,
   requestReview = true,
   clientPestRating = null,
+  // First visits start the picker at 5 (owner ruling 2026-09-24): the
+  // prefilled default is not tech input, but clearing it is.
+  clientPestRatingDefault = null,
   backfillCloseout = false,
   backfillCloseoutDefault = false,
   backfillTimeOnSite = "",
@@ -974,7 +991,7 @@ export function completionPreferencesNeedDraft({
   return sendSms !== true
     || includePayLink !== true
     || requestReview !== true
-    || clientPestRating != null
+    || (clientPestRating ?? null) !== (clientPestRatingDefault ?? null)
     // The inspection-credit opt-out is default-ON: a cleared box that does
     // not survive the billing/draft detour silently records a credit
     // promise the tech explicitly declined (Codex #3178 r25 P2).
@@ -11467,6 +11484,17 @@ export function CompletionPanel({
   // hides the UI rather than letting the tech enter data the backend
   // will silently drop.
   const [techRatingAllowed, setTechRatingAllowed] = useState(null);
+  // Owner ruling 2026-09-24: on a customer's first visit on this service
+  // line the picker starts at 5 and the tech lowers it if they saw less.
+  const [clientPestRatingDefault, setClientPestRatingDefault] = useState(null);
+  // Set once the rating came from the tech (a tap) or a restored draft;
+  // the late first-visit prefill must never overwrite either. A dedicated
+  // ref — the draft snapshot ref is replaced on every autosave.
+  const clientPestRatingSetByTechRef = useRef(false);
+  // Active label names for 0..5 from the gate, so the caption never
+  // contradicts labels edited in Settings; falls back to the default scale.
+  const [pestRatingScaleLabels, setPestRatingScaleLabels] = useState(null);
+  const pestRatingScaleCaption = pestRatingScaleCaptionText(pestRatingScaleLabels);
   useEffect(() => {
     let cancelled = false;
     // Per-service `allowed` boolean from the server. The endpoint
@@ -11486,7 +11514,15 @@ export function CompletionPanel({
     adminFetch(`/admin/dispatch/${service.id}/tech-rating-allowed`)
       .then((body) => {
         if (cancelled) return;
-        setTechRatingAllowed(!!(body && body.allowed === true));
+        const allowed = !!(body && body.allowed === true);
+        setTechRatingAllowed(allowed);
+        if (allowed && Array.isArray(body.scaleLabels)) setPestRatingScaleLabels(body.scaleLabels);
+        if (allowed && body.firstVisit === true) {
+          setClientPestRatingDefault(5);
+          // Never over a value the tech already tapped or a restored draft
+          // (including a draft where the tech cleared the default).
+          if (!clientPestRatingSetByTechRef.current) setClientPestRating(5);
+        }
       })
       .catch(() => {
         // Fetch failure — keep the picker hidden so the tech can still
@@ -13064,6 +13100,7 @@ export function CompletionPanel({
         includePayLink,
         requestReview,
         clientPestRating,
+        clientPestRatingDefault,
         backfillCloseout,
         backfillCloseoutDefault,
         backfillTimeOnSite,
@@ -13114,6 +13151,9 @@ export function CompletionPanel({
         includePayLink,
         requestReview,
         clientPestRating,
+        // Tells restore whether a null rating was a deliberate clear or an
+        // untouched picker (pre-2026-09-24 drafts never set it).
+        clientPestRatingTouched: clientPestRatingSetByTechRef.current,
         reviewTiming,
         reviewCustomAt,
         oneTimeRecapOnly,
@@ -13242,6 +13282,7 @@ export function CompletionPanel({
     includePayLink,
     requestReview,
     clientPestRating,
+    clientPestRatingDefault,
     reviewTiming,
     reviewCustomAt,
     oneTimeRecapOnly,
@@ -13363,11 +13404,22 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
-    setClientPestRating(
-      Number.isInteger(savedDraft.clientPestRating)
-        ? savedDraft.clientPestRating
-        : null,
-    );
+    // An untouched picker (legacy drafts stored null for it) keeps whatever
+    // is showing now — including the first-visit 5; a tap or a deliberate
+    // clear is restored and locks out the late prefill.
+    // Drafts since 2026-09-24 record whether the tech touched the picker;
+    // an untouched prefill restores as a prefill (the server re-checks it).
+    // Older drafts have no marker: a number there was the tech's choice.
+    const draftRating = Number.isInteger(savedDraft.clientPestRating) ? savedDraft.clientPestRating : null;
+    const draftTouched = typeof savedDraft.clientPestRatingTouched === "boolean"
+      ? savedDraft.clientPestRatingTouched
+      : draftRating != null;
+    if (draftTouched) {
+      clientPestRatingSetByTechRef.current = true;
+      setClientPestRating(draftRating);
+    } else if (draftRating != null) {
+      setClientPestRating(draftRating);
+    }
     setReviewTiming(normalizeReviewTiming(savedDraft.reviewTiming));
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
     // Bed bug hides the recap-only control (typed-era billing parity) — a
@@ -15819,6 +15871,18 @@ export function CompletionPanel({
       // strict validation passes.
       if (clientPestRating != null && Number.isInteger(clientPestRating)) {
         body.clientPestRating = clientPestRating;
+        // A rating the tech never set can only be the first-visit prefill
+        // (live or restored from a draft). Mark it regardless of what the
+        // gate says now — the server re-checks first-visit status, since
+        // another visit may have completed since the prefill.
+        if (!clientPestRatingSetByTechRef.current) {
+          body.clientPestRatingPrefilled = true;
+        }
+      } else if (clientPestRatingSetByTechRef.current) {
+        // A deliberate clear. Without this the server applies the
+        // first-visit 5 (owner ruling 2026-09-24) — which it also does when
+        // the picker's gate hadn't answered before submit.
+        body.clientPestRatingCleared = true;
       }
       // Typed specialty findings payload. Skipped on incomplete visits —
       // the server ignores typed findings for them anyway.
@@ -18408,9 +18472,10 @@ export function CompletionPanel({
                       <button
                         key={n}
                         type="button"
-                        onClick={() =>
-                          setClientPestRating(selected ? null : n)
-                        }
+                        onClick={() => {
+                          clientPestRatingSetByTechRef.current = true;
+                          setClientPestRating(selected ? null : n);
+                        }}
                         style={{
                           minWidth: 44,
                           height: 44,
@@ -18442,7 +18507,12 @@ export function CompletionPanel({
                     textAlign: "center",
                   }}
                 >
-                  0 = none, 5 = severe. Tap a number again to clear.
+                  {pestRatingScaleCaption} Tap a number again to clear.
+                  {clientPestRatingDefault === 5 && (
+                    <div style={{ marginTop: 4 }}>
+                      First visit — starts at 5. Lower it if you saw less.
+                    </div>
+                  )}
                 </div>
               </Field>
             )}
@@ -20789,9 +20859,10 @@ export function CompletionPanel({
                     <button
                       key={n}
                       type="button"
-                      onClick={() =>
-                        setClientPestRating(selected ? null : n)
-                      }
+                      onClick={() => {
+                        clientPestRatingSetByTechRef.current = true;
+                        setClientPestRating(selected ? null : n);
+                      }}
                       style={{
                         minWidth: 44,
                         height: 40,
@@ -20819,7 +20890,12 @@ export function CompletionPanel({
                   color: D.muted,
                 }}
               >
-                0 = none, 5 = severe. Tap a number again to clear.
+                {pestRatingScaleCaption} Tap a number again to clear.
+                {clientPestRatingDefault === 5 && (
+                  <div style={{ marginTop: 4 }}>
+                    First visit — starts at 5. Lower it if you saw less.
+                  </div>
+                )}
               </div>
             </div>
           )}
