@@ -5092,6 +5092,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         // (409, re-submit) instead.
         rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), visit_id: job.visit_id };
       } else if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
+        // Blast-radius: under this gate, a date-changing move on an
+        // ungrouped recurring anchor widens to every future occurrence
+        // exactly like an explicit scope='series' request — a technician
+        // sending scope='this_only' must not reach that widening by
+        // acknowledging the preview (codex-review P0: seriesAck/seriesAckIds
+        // was the one path this route's admin-only series check missed).
+        if (req.techRole !== 'admin') {
+          return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+        }
         let preview = null;
         try {
           preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
