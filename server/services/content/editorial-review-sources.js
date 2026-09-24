@@ -72,7 +72,7 @@ async function fetchSources(sourceUrls) {
       excerpt,
       contentHash: crypto.createHash('sha256').update(excerpt).digest('hex'),
     });
-    remaining -= excerptLength;
+    remaining -= excerpt.length;
   }
   return { records, errors };
 }
@@ -83,4 +83,3 @@ module.exports = {
   normalizeRequestedSources,
   publisherOf,
 };
-
