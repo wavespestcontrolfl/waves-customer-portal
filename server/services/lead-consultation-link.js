@@ -92,54 +92,60 @@ const CONSULTATION_SMS_TEMPLATE_KEY = 'lead_consultation_link';
  * `standalone: true` so a caller inserting it into a composer (rather than
  * sending it directly) knows to use it as-is instead of wrapping it in a
  * generic greeting — same reason and shape as Auto Pay's rendered setup
- * text (composer-customer-links.js buildAutopaySetupLink). Falls back to
- * the bare buildLeadConsultationLink clause (no `standalone`) when the
- * template row is inactive or missing, per admin-sms-templates'
- * isTemplateActive/getTemplate semantics (a deliberate admin toggle, not a
- * defect — never a hardcoded stand-in for an admin-disabled template).
+ * text (composer-customer-links.js buildAutopaySetupLink).
  *
  * firstName: the lead's first name for the {first_name} placeholder — the
  * caller supplies it (this module's own DB reads intentionally select only
  * id/phone for buildLeadConsultationLink's stale-object-mistrust rule
  * above).
  *
- * An admin-DISABLED template (is_active: false) is a deliberate kill
- * switch, not a render defect (pre-push Codex P1): it must never fall back
- * to the bare buildLeadConsultationLink clause, which has no "Reply STOP
- * to opt out." footer — sending it to a first-contact lead is a keep-list
- * violation as well as bypassing the toggle. Checked BEFORE getTemplate
- * (same is_active pre-check composer-customer-links.js's autopaySmsLever
- * uses for the same reason): a disabled template returns an unavailable
- * result, url null, same as any other "nothing to insert" outcome. A
- * MISSING template row (never seeded) is a different case — getTemplate's
- * own audit trail catches that — and still falls back below, unchanged.
+ * NO fallback to a hardcoded/bare clause on ANY template failure — an
+ * admin-DISABLED template (is_active: false, checked BEFORE getTemplate,
+ * same pre-check composer-customer-links.js's autopaySmsLever uses), a
+ * MISSING template row, a body that lost its required {consultation_url}
+ * placeholder, or a render that throws all return the same shape a
+ * missing lead does: { url: null, line: '', reason }. This is the SAME
+ * class of bug as the disabled-template case (pre-push Codex P1 x2): the
+ * old bare buildLeadConsultationLink clause has no "Reply STOP to opt
+ * out." footer, so falling back to it for ANY template defect — not just
+ * a deliberate disable — was a keep-list violation on a first-contact
+ * lead text. The admin-editable template plus the keep-list is the ONLY
+ * source of this copy; there is no second, hardcoded stand-in for it.
+ * Both callers (buildConsultationLink's composer path and the Leads-page
+ * GET /:id/consultation-link route) already treat `url: null` as "nothing
+ * to insert" and surface `reason` — no caller change needed.
  */
 async function buildLeadConsultationSmsLine(leadOrId, firstName) {
   const built = await buildLeadConsultationLink(leadOrId);
   if (!built.url) return built;
+  const unavailable = (reason) => ({ url: null, line: '', reason });
   try {
     const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');
     if (row && row.is_active === false) {
-      return { url: null, line: '', reason: 'template disabled' };
+      return unavailable('template disabled');
     }
     const templates = require('../routes/admin-sms-templates');
     const body = await templates.getTemplate(CONSULTATION_SMS_TEMPLATE_KEY, {
       first_name: firstName || 'there',
       consultation_url: built.url,
     }, {}, { requiredVars: ['consultation_url'] });
-    if (body) {
-      return {
-        url: built.url,
-        line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
-        standalone: true,
-        expiresAt: built.expiresAt || null,
-        immediateOnly: built.immediateOnly,
-      };
+    if (!body) {
+      // getTemplate itself already audited WHY (missing table/row, a body
+      // that lost {consultation_url}, or unresolved placeholders) — this
+      // is the composer-facing reason, not a duplicate of that audit.
+      return unavailable('Consultation text template is unavailable');
     }
+    return {
+      url: built.url,
+      line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
+      standalone: true,
+      expiresAt: built.expiresAt || null,
+      immediateOnly: built.immediateOnly,
+    };
   } catch (err) {
     logger.warn(`[lead-consultation-link] template render failed: ${err.message}`);
+    return unavailable('Could not render the consultation text template');
   }
-  return built;
 }
 
 module.exports = { buildLeadConsultationLink, buildLeadConsultationSmsLine, consultationUrlForLead, consultationSmsLineFor };

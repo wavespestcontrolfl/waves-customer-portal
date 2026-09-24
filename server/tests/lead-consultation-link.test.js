@@ -196,22 +196,47 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(getTemplate).toHaveBeenCalledWith('lead_consultation_link', expect.objectContaining({ first_name: 'there' }), {}, expect.objectContaining({ requiredVars: ['consultation_url'] }));
   });
 
-  test('a missing template row (never seeded) falls back to the bare builder clause, no standalone flag', async () => {
+  // Pre-push Codex P1 (round 2 — same class as the disabled-template P1
+  // below): there is NO bare-clause fallback on ANY template failure. The
+  // old bare buildLeadConsultationLink clause has no "Reply STOP to opt
+  // out." footer, so falling back to it for a missing row, a missing
+  // required placeholder, or a render throw is a keep-list violation on a
+  // first-contact lead text exactly like the admin-disabled case is — the
+  // template + keep-list is the single source of this copy, never a
+  // hardcoded stand-in. Every one of these returns { url: null, line: '',
+  // reason } instead.
+  test('a missing template row (never seeded) is unavailable — no bare fallback clause, no standalone flag', async () => {
     mockBuilders = {
       leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
       sms_templates: chainBuilder({ firstRow: null }),
     };
     getTemplate.mockResolvedValue(null);
     const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
-    expect(result.url).toBe('https://waves.link/l/abc123');
-    expect(result.line).toBe(`Pick a time for us to stop by for a free consultation: ${result.url}\n\n`);
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toBeTruthy();
     expect(result.standalone).toBeUndefined();
   });
 
-  // Pre-push Codex P1: an admin-disabled template is a deliberate kill
-  // switch — it must never fall back to the bare clause (no "Reply STOP to
-  // opt out." footer, a keep-list violation on a first-contact lead text)
-  // and getTemplate must never even be asked to render it.
+  test('a body that lost its required {consultation_url} placeholder is unavailable — getTemplate already refused to render it', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    // getTemplate's own opts.requiredVars check returns null for a body an
+    // admin edited to drop {consultation_url} — this module never
+    // re-implements that check, it just refuses to fall back on a null.
+    getTemplate.mockResolvedValue(null);
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toBeTruthy();
+    expect(result.standalone).toBeUndefined();
+  });
+
+  // An admin-disabled template is a deliberate kill switch — it must never
+  // fall back to the bare clause and getTemplate must never even be asked
+  // to render it.
   test('a DISABLED template returns an unavailable result — never the bare fallback clause, never rendered', async () => {
     mockBuilders = {
       leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
@@ -224,15 +249,29 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(getTemplate).not.toHaveBeenCalled();
   });
 
-  test('a template render that throws falls back to the bare builder clause', async () => {
+  test('a template render that throws is unavailable — no bare fallback clause', async () => {
     mockBuilders = {
       leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
       sms_templates: chainBuilder({ firstRow: { is_active: true } }),
     };
     getTemplate.mockRejectedValue(new Error('render exploded'));
     const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
-    expect(result.url).toBe('https://waves.link/l/abc123');
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toBeTruthy();
     expect(result.standalone).toBeUndefined();
+  });
+
+  test('the sms_templates lookup itself throwing is unavailable — no bare fallback clause', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      sms_templates: { where: jest.fn(() => ({ first: jest.fn(async () => { throw new Error('db down'); }) })) },
+    };
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toBeTruthy();
+    expect(getTemplate).not.toHaveBeenCalled();
   });
 
   test('gate off / no link to build: the reason passes through untouched, getTemplate never called', async () => {
