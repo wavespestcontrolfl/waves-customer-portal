@@ -899,7 +899,8 @@ function ReviewIncentivesPanel() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [markingPaid, setMarkingPaid] = useState(false);
-  const [error, setError] = useState(null);
+  const [readError, setReadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [queue, setQueue] = useState([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [activeRepairId, setActiveRepairId] = useState(null);
@@ -918,14 +919,14 @@ function ReviewIncentivesPanel() {
     const gen = ++loadGen.current;
     if (!background) setLoading(true);
     if (!background) setQueueLoading(true);
-    if (!background) setError(null);
+    if (!background) setReadError(null);
     return Promise.all([
       adminFetch(`/admin/reviews/incentives?days=${days}`),
       adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`),
     ])
       .then(([d, q]) => {
         if (gen !== loadGen.current) return;
-        setError(null);
+        setReadError(null);
         setData(d);
         setQueue(q.items || []);
         setLoading(false);
@@ -933,7 +934,7 @@ function ReviewIncentivesPanel() {
       })
       .catch((e) => {
         if (gen !== loadGen.current) return;
-        setError(e.message);
+        setReadError(e.message);
         setLoading(false);
         setQueueLoading(false);
       });
@@ -953,7 +954,7 @@ function ReviewIncentivesPanel() {
     setLoading(false);
     setQueueLoading(false);
     setRunning(true);
-    setError(null);
+    setActionError(null);
     try {
       const d = await adminFetch("/admin/reviews/incentives/sync", {
         method: "POST",
@@ -962,8 +963,9 @@ function ReviewIncentivesPanel() {
       const q = await adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`);
       setData(d);
       setQueue(q.items || []);
+      setReadError(null);
     } catch (e) {
-      setError(e.message);
+      setActionError(e.message);
     } finally {
       setRunning(false);
     }
@@ -977,7 +979,7 @@ function ReviewIncentivesPanel() {
     setLoading(false);
     setQueueLoading(false);
     setMarkingPaid(true);
-    setError(null);
+    setActionError(null);
     try {
       await adminFetch("/admin/reviews/incentives/mark-paid", {
         method: "POST",
@@ -985,12 +987,13 @@ function ReviewIncentivesPanel() {
       });
       load();
     } catch (e) {
-      setError(e.message);
+      setActionError(e.message);
     } finally {
       setMarkingPaid(false);
     }
   };
   const downloadCsv = async () => {
+    setActionError(null);
     try {
       const res = await fetch(
         `${API_BASE}/admin/reviews/incentives/export?days=${days}`,
@@ -1011,7 +1014,7 @@ function ReviewIncentivesPanel() {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
-      setError(e.message);
+      setActionError(e.message);
     }
   };
   const openRepair = (review) => {
@@ -1033,7 +1036,7 @@ function ReviewIncentivesPanel() {
   const searchCandidates = async (review, qOverride) => {
     const reqId = ++candidateReqRef.current;
     setCandidateLoading(true);
-    setError(null);
+    setActionError(null);
     try {
       // The box opens holding the reviewer name; sent untouched it would be
       // an explicit q and lose the surname expansion — only what the admin
@@ -1051,7 +1054,7 @@ function ReviewIncentivesPanel() {
       setCandidateResults(result.candidates || []);
       setLikelyReviewers(result.likelyReviewers || []);
     } catch (e) {
-      if (candidateReqRef.current === reqId) setError(e.message);
+      if (candidateReqRef.current === reqId) setActionError(e.message);
     } finally {
       if (candidateReqRef.current === reqId) setCandidateLoading(false);
     }
@@ -1067,7 +1070,7 @@ function ReviewIncentivesPanel() {
       ...prev,
       [matchKey]: true,
     }));
-    setError(null);
+    setActionError(null);
     try {
       await adminFetch("/admin/reviews/incentives/attribute", {
         method: "POST",
@@ -1086,7 +1089,7 @@ function ReviewIncentivesPanel() {
       setCandidateResults([]);
       load();
     } catch (e) {
-      setError(e.message);
+      setActionError(e.message);
     } finally {
       setMatching((prev) => ({
         ...prev,
@@ -1166,12 +1169,17 @@ function ReviewIncentivesPanel() {
         </div>
       </div>
 
-      {error && (
+      {readError && (
         <Card className="text-alert-fg p-[12px] mb-[14px] text-ui-body flex items-center justify-between gap-[12px]">
-          <span>{error}</span>
+          <span>{readError}</span>
           <Button onClick={() => load()} disabled={loading || running} variant="secondary">
             Retry
           </Button>
+        </Card>
+      )}
+      {actionError && (
+        <Card className="text-alert-fg p-[12px] mb-[14px] text-ui-body">
+          {actionError}
         </Card>
       )}
 

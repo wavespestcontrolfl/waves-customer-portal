@@ -106,3 +106,37 @@ it('ignores the first StrictMode events response after the second setup has load
  expect(screen.getByText('Current event')).toBeInTheDocument();
  expect(screen.queryByText('Stale event')).not.toBeInTheDocument();
 });
+
+
+it.each(['bulk', 'merge'])('recovers inbox polling after a failed %s action cancels a foreground read', async (action) => {
+ const events=[{id:'event-a',title:'First event',adminStatus:'pending'}, {id:'event-b',title:'Second event',adminStatus:'pending'}];
+ let reads=0;
+ let cancelledSignal;
+ const original=fetch.getMockImplementation();
+ vi.stubGlobal('confirm',vi.fn(()=>true));
+ vi.stubGlobal('alert',vi.fn());
+ fetch.mockImplementation((url,options)=>{
+  if(String(url).includes('/events/inbox')){
+   reads+=1;
+   if(reads===2){
+    cancelledSignal=options.signal;
+    return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new DOMException('Cancelled','AbortError'))));
+   }
+   return Promise.resolve(response({events:reads>2?[{...events[0],title:'Refreshed event'}]:events,counts:{pending:2}}));
+  }
+  if(String(url).endsWith('/events/bulk-action')||String(url).endsWith('/events/merge'))return Promise.reject(new Error('Synthetic action failure'));
+  return original(url,options);
+ });
+ render(<MemoryRouter initialEntries={['/admin/newsletter?tab=events']}><NewsletterPage/></MemoryRouter>);
+ fireEvent.click(within((await screen.findByText('First event')).closest('tr')).getByRole('checkbox'));
+ fireEvent.click(within(screen.getByText('Second event').closest('tr')).getByRole('checkbox'));
+ fireEvent.change(screen.getByRole('combobox',{name:'Freshness'}),{target:{value:'fresh'}});
+ await screen.findByText('Loading events...');
+ fireEvent.click(action==='merge'?screen.getByRole('button',{name:'Merge 2'}):screen.getByRole('button',{name:'Approve',exact:true}));
+ if(action==='bulk')await screen.findByText('Bulk approve failed: Synthetic action failure');
+ else await waitFor(()=>expect(alert).toHaveBeenCalledWith('Merge failed: Synthetic action failure'));
+ expect(cancelledSignal.aborted).toBe(true);
+ expect(screen.queryByText('Loading events...')).not.toBeInTheDocument();
+ fireEvent(window,new Event('online'));
+ expect(await screen.findByText('Refreshed event')).toBeInTheDocument();
+});

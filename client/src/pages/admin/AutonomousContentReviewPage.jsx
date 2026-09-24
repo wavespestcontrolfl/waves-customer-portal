@@ -68,14 +68,18 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState("all");
   const [detailVersion, setDetailVersion] = useState(0);
+  const [linkDetailVersion, setLinkDetailVersion] = useState(0);
   const listRequest = useRef(0);
   const linksRequest = useRef(0);
+  const linkDetailRequest = useRef(0);
   const impactRequest = useRef(0);
   const listInFlight = useRef(null);
   const currentLoad = useRef(null);
   const detailInFlight = useRef(null);
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const selectedLinkIdRef = useRef(selectedLinkId);
+  selectedLinkIdRef.current = selectedLinkId;
   const actionType = view === "review" ? "other" : "new_supporting_blog";
 
   const load = useCallback(
@@ -124,6 +128,9 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       const next = await adminFetch("/admin/content/internal-links?status=all&limit=100");
       if (request !== linksRequest.current) return;
       setLinkData(next);
+      if (next.items?.some((item) => item.id === selectedLinkIdRef.current)) {
+        setLinkDetailVersion((version) => version + 1);
+      }
       setSelectedLinkId((current) =>
         next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null,
       );
@@ -202,28 +209,33 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   }, [selectedId, detailVersion]);
 
   useEffect(() => {
+    const request = ++linkDetailRequest.current;
     if (!selectedLinkId) {
       setLinkDetail(null);
+      setLinkDetailLoading(false);
       return undefined;
     }
-    let stale = false;
-    setLinkDetail(null);
+    setLinkDetail((current) => (current?.id === selectedLinkId ? current : null));
     setLinkDetailLoading(true);
     adminFetch(`/admin/content/internal-links/${selectedLinkId}`)
       .then((next) => {
-        if (stale) return;
+        if (request !== linkDetailRequest.current || selectedLinkIdRef.current !== selectedLinkId) return;
         setLinkDetail(next.item);
       })
       .catch((err) => {
-        if (!stale) setLinkError(err.message);
+        if (request === linkDetailRequest.current && selectedLinkIdRef.current === selectedLinkId) {
+          setLinkError(err.message);
+        }
       })
       .finally(() => {
-        if (!stale) setLinkDetailLoading(false);
+        if (request === linkDetailRequest.current && selectedLinkIdRef.current === selectedLinkId) {
+          setLinkDetailLoading(false);
+        }
       });
     return () => {
-      stale = true;
+      if (linkDetailRequest.current === request) linkDetailRequest.current += 1;
     };
-  }, [selectedLinkId]);
+  }, [selectedLinkId, linkDetailVersion]);
 
   const submitDecision = async (decision) => {
     if (view !== "review" || selected?.action_type === "new_supporting_blog" || !selectedId || actionPending || loading)
@@ -251,16 +263,22 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
   const submitLinkDecision = async (decision) => {
     if (!selectedLinkId || linkActionPending) return;
+    const actionLinkId = selectedLinkId;
     linksRequest.current += 1;
+    linkDetailRequest.current += 1;
+    setLinkLoading(false);
+    setLinkDetailLoading(false);
     setLinkActionPending(decision);
     setLinkError("");
     try {
-      const next = await adminFetch(`/admin/content/internal-links/${selectedLinkId}/decision`, {
+      const next = await adminFetch(`/admin/content/internal-links/${actionLinkId}/decision`, {
         method: "POST",
         body: { decision, note: linkReviewNote },
       });
-      setLinkDetail(next.item);
-      setLinkReviewNote("");
+      if (selectedLinkIdRef.current === actionLinkId) {
+        setLinkDetail(next.item);
+        setLinkReviewNote("");
+      }
       await loadLinks();
     } catch (err) {
       setLinkError(err.message);
@@ -272,7 +290,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const items = data?.items || [];
   const linkItems = linkData?.items || [];
   const selected = detail || items.find((item) => item.id === selectedId);
-  const selectedLink = linkDetail || linkItems.find((item) => item.id === selectedLinkId);
+  const selectedLink = (linkDetail?.id === selectedLinkId ? linkDetail : null)
+    || linkItems.find((item) => item.id === selectedLinkId);
 
   const busy = loading || linkLoading || impactLoading;
 

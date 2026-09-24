@@ -810,6 +810,7 @@ function EventInboxView({ onDraftFromEvent }) {
   const cancelPendingEventRead = () => {
     eventsRequestRef.current += 1;
     eventsAbortRef.current?.abort();
+    setLoading(false);
   };
   const patchEvent = async (id, body) => {
     cancelPendingEventRead();
