@@ -824,6 +824,9 @@ const OUTCOME_INPUT_RULES = [
   { fails: (p) => !OUTCOME_VALUES.includes(p.outcome), message: `outcome must be one of ${OUTCOME_VALUES.join(', ')}` },
   { fails: (p) => p.outcome === 'lost' && !p.lostReason, message: 'lostReason is required when outcome is lost' },
   { fails: (p) => p.lostReason && !LOST_REASON_VALUES.includes(p.lostReason), message: `lostReason must be one of ${LOST_REASON_VALUES.join(', ')}` },
+  // no_show is stamped only by the status transition (markNoShow) — a
+  // technician never records it by hand (Codex #4710 r12 P2).
+  { fails: (p) => p.lostReason === 'no_show', message: "lostReason 'no_show' is set only when the visit is marked no-show" },
   { fails: (p) => p.quotedCadence && !CADENCE_VALUES.includes(p.quotedCadence), message: `quotedCadence must be one of ${CADENCE_VALUES.join(', ')}` },
   { fails: (p) => p.interests != null && !Array.isArray(p.interests), message: 'interests must be an array' },
   {
@@ -1632,8 +1635,11 @@ async function consultationStats({ from, to, trx } = {}) {
   const closeDurations = [];
 
   for (const v of visits) {
-    const showed = v.status === 'completed';
     const outcome = countedOutcome(v);
+    // A valid recorded outcome on a live visit is show evidence too (Codex
+    // #4710 r12 P2): the recording guards allow it once the window opens,
+    // before the visit is marked completed.
+    const showed = v.status === 'completed' || (Boolean(outcome) && !DEAD_CONSULTATION_STATUSES.includes(v.status));
     if (showed) stats.showed += 1;
     if (v.status === 'no_show') stats.no_show += 1;
     if (outcome) {

@@ -114,6 +114,8 @@ router.get('/stats', adminAuthenticate, requireAdmin, async (req, res, next) => 
     // a bad value must be a 400, never a Postgres invalid-date 500.
     const isCalendarDate = (v) => {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+      // PostgreSQL has no year 0 (Codex #4710 r12 P2) — 0001 onward only.
+      if (v.startsWith('0000')) return false;
       const d = new Date(`${v}T12:00:00Z`);
       return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
     };

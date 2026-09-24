@@ -253,6 +253,8 @@ describe('GET /stats — admin only', () => {
     ['?from=bad', /from must be a real/],
     ['?from=2026-02-31', /from must be a real/],
     ['?to=2026-13-01', /to must be a real/],
+    // Codex #4710 r12 P2: PostgreSQL has no year zero.
+    ['?from=0000-01-01', /from must be a real/],
     ['?from=2026-03-01&to=2026-02-01', /on or before/],
     // Codex #4710 r4 P2: reversed against the DEFAULTED endpoint too.
     ['?from=2099-01-01', /on or before/],

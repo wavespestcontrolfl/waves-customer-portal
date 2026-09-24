@@ -519,6 +519,11 @@ describe('recordOutcome — success + upsert', () => {
     expect(fakeDb.__store.consultation_outcomes || []).toHaveLength(0);
   });
 
+  test('Codex #4710 r12 P2: a technician cannot record lostReason no_show — the status transition owns it', async () => {
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'lost', lostReason: 'no_show' }, { trx: seededDb() }))
+      .rejects.toMatchObject({ code: 'VALIDATION' });
+  });
+
   test('cold defaults follow_up_at to +30 ET days; lost has none', async () => {
     const coldSaved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'cold' }, { trx: seededDb() });
     expect(etDateString(new Date(coldSaved.follow_up_at))).toBe(etDateString(addETDays(new Date(), 30)));
@@ -1908,6 +1913,16 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
     expect(stats.warm).toBe(0);
     expect(stats.lost).toBe(1);
     expect(stats.lost_by_reason).toEqual({ no_show: 1 });
+  });
+
+  test('Codex #4710 r12 P2: a recorded outcome on a still-confirmed visit counts as a show, overall and per group', async () => {
+    const visits = [
+      { status: 'confirmed', scheduled_date: '2026-09-10', technician_id: 't1', technician_name: 'Adam', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T16:00:00Z') },
+      { status: 'confirmed', scheduled_date: '2026-09-11', technician_id: 't1', technician_name: 'Adam', outcome: null },
+    ];
+    const stats = await consultationStats({ trx: statsDb(visits) });
+    expect(stats.showed).toBe(1);
+    expect(stats.by_technician[0]).toMatchObject({ showed: 1, won: 1 });
   });
 
   test('Codex #4710 r3 P2: an even cohort reports the arithmetic midpoint (2 and 3 days → 2.5), not a rounded value', async () => {
