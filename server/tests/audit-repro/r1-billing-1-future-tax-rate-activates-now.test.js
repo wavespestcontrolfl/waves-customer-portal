@@ -20,6 +20,7 @@ const express = require('express');
 const db = require('../../models/db');
 const router = require('../../routes/admin-tax');
 const TaxCalculator = require('../../services/tax-calculator');
+const { etDateString } = require('../../utils/datetime-et');
 
 jest.setTimeout(30000);
 
@@ -32,7 +33,12 @@ async function withServer(fn) {
   try { return await fn(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise((r) => server.close(r)); }
 }
 
-const FUTURE = '2027-01-01';
+// Always at least 5 ET years past today, never a fixed calendar year (codex
+// P1, round 3): a hardcoded '2027-01-01' would itself become "today or
+// earlier" once 2027 arrives, silently flipping this test's own scenario
+// from staged-future to immediate.
+const FUTURE_YEAR = Number(etDateString().slice(0, 4)) + 5;
+const FUTURE = `${FUTURE_YEAR}-01-01`;
 
 (process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('future-dated county tax rate (real PG)', () => {
   const customerId = randomUUID();
@@ -62,7 +68,7 @@ const FUTURE = '2027-01-01';
     expect(r.amount).toBe(7);
   });
 
-  test('POST /rates with effectiveDate 2027-01-01 must NOT change the rate charged today', async () => {
+  test('POST /rates with a future effectiveDate must NOT change the rate charged today', async () => {
     const res = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ county: 'Sarasota', stateRate: 0.06, countySurtax: 0.015, effectiveDate: FUTURE, notes: 'surtax change next year' }),
@@ -72,12 +78,12 @@ const FUTURE = '2027-01-01';
     const rows = await db('tax_rates').where({ county: 'Sarasota' }).orderBy('effective_date');
     const yr = (d) => (d instanceof Date ? d.getFullYear() : Number(String(d).slice(0, 4)));
     const current = rows.find((r) => yr(r.effective_date) === 2025);
-    const future = rows.find((r) => yr(r.effective_date) === 2027);
+    const future = rows.find((r) => yr(r.effective_date) === FUTURE_YEAR);
     // Diagnostic dump so the failure output shows exactly what the route wrote.
-     
+
     console.log('tax_rates(Sarasota) after POST:', rows.map((r) => ({ eff: yr(r.effective_date), exp: r.expiry_date && yr(r.expiry_date), active: r.active, rate: r.combined_rate })));
 
-    // EXPECTED: the 2025 row is still the active, unexpired row until 2027-01-01.
+    // EXPECTED: the 2025 row is still the active, unexpired row until the future date.
     expect(current.active).toBe(true);
     expect(current.expiry_date).toBeNull();
     expect(future).toBeDefined();
