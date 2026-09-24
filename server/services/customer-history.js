@@ -1,5 +1,9 @@
 const { phoneIdentityKey } = require('../utils/phone');
-const { draftIdSql, loadPriorOutboundBodies } = require('./sms-response-policy');
+const {
+  draftIdSql,
+  draftReplyToMessageIdSql,
+  loadPriorOutboundBodies,
+} = require('./sms-response-policy');
 const { signMediaForClient } = require('./sms-media');
 
 const TIMELINE_TYPES = new Set([
@@ -365,13 +369,15 @@ function mapCommsMessage(message, customer, twilioNumbers) {
   const responseIsAnswer = require('./sms-response-policy').outboundIsAnswer({
     direction: message.direction, messageType: responseMessageType, status: responseStatus,
     isClickFollowup: message.response_is_click_followup === true,
-    hasDraftProvenance: message.response_has_draft_provenance === true,
+    replyToMessageId: message.response_reply_to_message_id,
   });
   return {
     id: message.id, conversationId: message.conversation_id, channel: message.channel,
     direction: message.direction, body: message.body, aiSummary: message.ai_summary,
     messageType: message.message_type, durationSeconds: message.duration_seconds, media,
     responseMessageType, responseStatus, responseIsAnswer,
+    responseReplyToMessageId: message.response_reply_to_message_id || null,
+    responseCreatedAt: message.response_created_at || message.created_at,
     answeredBy: message.answered_by, isRead: !!message.is_read,
     courtesyOnly, spamEnforced,
     deliveryStatus: message.delivery_status, recordingSid: message.recording_sid,
@@ -398,9 +404,10 @@ async function listCustomerComms(db, customer, query = {}) {
   const parsed = parseCommsRequest(query, customerId);
   const readBefore = parsed.cursor?.readBefore || new Date().toISOString();
   const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', m.metadata->>'draft_id')");
+  const responseReplyToMessageId = draftReplyToMessageIdSql('mdx.sms_log_id');
   const selectCommsColumns = queryBuilder => queryBuilder
     .joinRaw(`LEFT JOIN LATERAL (
-      SELECT sl.message_type, sl.status, sl.metadata
+      SELECT sl.message_type, sl.status, sl.metadata, sl.created_at
       FROM sms_log sl
       WHERE sl.twilio_sid = m.twilio_sid AND sl.direction = m.direction
       ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
@@ -412,8 +419,8 @@ async function listCustomerComms(db, customer, query = {}) {
       ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
     ) sms_audit ON true`)
     .joinRaw(`LEFT JOIN LATERAL (
-      SELECT true AS has_draft_provenance,
-             mdx.intent = 'click_followup' AS is_click_followup
+      SELECT mdx.intent = 'click_followup' AS is_click_followup,
+             ${responseReplyToMessageId} AS reply_to_message_id
       FROM message_drafts mdx
       WHERE mdx.id = ${responseDraftId}
       LIMIT 1
@@ -428,9 +435,10 @@ async function listCustomerComms(db, customer, query = {}) {
       'sms_response.message_type as response_message_type',
       'sms_response.status as response_status',
       'sms_response.metadata as response_metadata',
+      'sms_response.created_at as response_created_at',
       'sms_audit.metadata as response_audit_metadata',
       'sms_answer.is_click_followup as response_is_click_followup',
-      'sms_answer.has_draft_provenance as response_has_draft_provenance',
+      'sms_answer.reply_to_message_id as response_reply_to_message_id',
     );
   const rowsQuery = selectCommsColumns(db('messages as m')
     .leftJoin('conversations as c', 'm.conversation_id', 'c.id')

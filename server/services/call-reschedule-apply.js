@@ -518,6 +518,74 @@ async function stampSkipOnCards(conn, callLogId, plan) {
     .update({ payload: conn.raw('COALESCE(payload, \'{}\'::jsonb) || ?::jsonb', [stamp]), updated_at: new Date() });
 }
 
+// The ONE request/visit-matching predicate for "does a call_reschedule_
+// applied activity row for this call still describe the LIVE call and its
+// destination visit" — shared by applyCallReschedule's own retry branch
+// below and by callers elsewhere that only need to know whether a call's
+// reschedule ask is resolved, not re-run the move itself (Codex #4721 r3
+// P1: one function, so a future change to accepted visit statuses, the
+// source snapshot, or the destination checks can't update one caller and
+// leave the other permissive).
+//
+// `requireSameGeneration` is the one axis callers legitimately differ on:
+//   - true (applyCallReschedule's own retry check): the LIVE call's
+//     processing_generation must match the one the activity row itself
+//     recorded — a retry within the SAME pass.
+//   - false (a caller like call-recording-processor.js's post-move
+//     disposition correction, via priorApplicationStillMatchesLiveCall
+//     below): a fresh reprocess pass having bumped the generation is
+//     EXPECTED and must not by itself read as a mismatch — every other
+//     check (source hash, visit identity/status/date/window) still applies
+//     in full.
+//
+// `proof`, when the caller already holds the parsed activity_log metadata
+// (applyCallReschedule's retry branch does — it needs `prior` itself to
+// decide whether to enter this path at all), skips a redundant lookup;
+// otherwise this reads it itself. Returns null when there is no prior
+// application for this call at all (a caller with requireSameGeneration
+// always passes proof and never sees null, since it already gated on
+// `prior` existing).
+async function priorApplicationMatchesLiveCall(conn, call, { requireSameGeneration = true, proof = undefined } = {}) {
+  let resolvedProof = proof;
+  if (resolvedProof === undefined) {
+    const prior = await conn('activity_log').where({ action: ACTIVITY_ACTION })
+      .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('metadata');
+    if (!prior) return null;
+    resolvedProof = typeof prior.metadata === 'string' ? JSON.parse(prior.metadata) : prior.metadata;
+  }
+  const liveCall = await conn('call_log').where({ id: call.id }).first();
+  const liveVisit = resolvedProof?.scheduled_service_id
+    ? await conn('scheduled_services').where({ id: resolvedProof.scheduled_service_id }).forShare().first() : null;
+  // The caller-supplied call.customer_id is what applyCallReschedule's own
+  // retry branch effectively compared against (settled.customer_id, proven
+  // equal to call.customer_id earlier in this function) — a caller with no
+  // customer_id on hand skips this particular check rather than comparing
+  // liveCall against itself.
+  const referenceCustomerId = call.customer_id ?? liveCall?.customer_id;
+  const sameDecision = Boolean(liveCall) && !liveCall.processing_token && liveCall.customer_id === referenceCustomerId
+    && liveCall.v2_extraction_status === 'valid'
+    && (!requireSameGeneration || Number(liveCall.processing_generation) === Number(resolvedProof?.processing_generation))
+    && createHash('sha256').update(JSON.stringify([liveCall.transcription, liveCall.ai_extraction_enriched])).digest('hex') === resolvedProof?.source_hash;
+  const sameVisit = Boolean(liveVisit) && liveVisit.customer_id === referenceCustomerId && MOVABLE_STATUSES.includes(liveVisit.status)
+    && dateOnly(liveVisit.scheduled_date) === resolvedProof?.to?.date && hhmm(liveVisit.window_start) === resolvedProof?.to?.start
+    && hhmm(liveVisit.window_end) === resolvedProof?.to?.end;
+  return sameDecision && sameVisit;
+}
+
+// Read-only, no locks beyond what priorApplicationMatchesLiveCall itself
+// takes, no side effects — for a caller that only needs to know "was this
+// call's reschedule resolved", not re-run the move itself. Exported for
+// call-recording-processor.js's post-move disposition correction (Codex
+// #4721 r2 P1 on this lookup, r3 P1 on unifying it with the predicate
+// below): an activity row existing is not proof by itself when the CURRENT
+// extraction or destination visit no longer matches what it recorded (a
+// corrected reprocess, a since-cancelled or re-moved visit) — only the
+// generation is allowed to differ.
+async function priorApplicationStillMatchesLiveCall(conn, call) {
+  if (!conn || !call?.id) return false;
+  return (await priorApplicationMatchesLiveCall(conn, call, { requireSameGeneration: false })) === true;
+}
+
 /**
  * Entry point for the processor. Runs after finalization; `procGeneration`
  * fences the pass (a peer that reclaimed the call owns the outcome). Never
@@ -545,19 +613,11 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   const prior = await conn('activity_log').where({ action: ACTIVITY_ACTION })
     .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('metadata');
   if (prior) {
+    const proof = typeof prior.metadata === 'string' ? JSON.parse(prior.metadata) : prior.metadata;
     return conn.transaction(async (trx) => {
       await beforeMove(trx);
-      const liveCall = await trx('call_log').where({ id: call.id }).first();
-      const proof = typeof prior.metadata === 'string' ? JSON.parse(prior.metadata) : prior.metadata;
-      const liveVisit = proof?.scheduled_service_id
-        ? await trx('scheduled_services').where({ id: proof.scheduled_service_id }).forShare().first() : null;
-      const sameDecision = liveCall && !liveCall.processing_token && liveCall.customer_id === settled.customer_id
-        && liveCall.v2_extraction_status === 'valid' && Number(liveCall.processing_generation) === Number(proof?.processing_generation)
-        && createHash('sha256').update(JSON.stringify([liveCall.transcription, liveCall.ai_extraction_enriched])).digest('hex') === proof?.source_hash;
-      const sameVisit = liveVisit && liveVisit.customer_id === settled.customer_id && LIVE_STATUSES.includes(liveVisit.status)
-        && dateOnly(liveVisit.scheduled_date) === proof?.to?.date && hhmm(liveVisit.window_start) === proof?.to?.start
-        && hhmm(liveVisit.window_end) === proof?.to?.end;
-      if (!sameDecision || !sameVisit) return { outcome: 'skipped', reason: 'prior_application_requires_review' };
+      const matches = await priorApplicationMatchesLiveCall(trx, call, { requireSameGeneration: true, proof });
+      if (!matches) return { outcome: 'skipped', reason: 'prior_application_requires_review' };
       const cardsResolved = await resolveRescheduleCards(trx, call.id, 'This request was already applied from the call.');
       return { outcome: 'skipped', reason: 'already_applied', cardsResolved };
     });
@@ -752,4 +812,6 @@ module.exports = {
   humanHandledRescheduleCard,
   RESCHEDULE_REASON_CODE,
   INITIATED_BY,
+  priorApplicationStillMatchesLiveCall,
+  priorApplicationMatchesLiveCall,
 };

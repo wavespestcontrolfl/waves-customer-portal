@@ -3,21 +3,30 @@
  * heroes + social squares.
  *
  * Provider chain via env BLOG_IMAGE_PROVIDER (default:
- * "gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1").
- * Each provider is tried in order; on 404 / model-not-found / 5xx we fall
- * through to the next. On the first 2xx with image bytes we return.
+ * "gpt-image-2,gpt-image-1.5,gpt-image-1"). Each provider is tried in
+ * order; on 404 / model-not-found / 5xx we fall through to the next. On the
+ * first 2xx with image bytes we return.
  *
- * Chain rationale (bake-off 2026-09-05): gpt-image-2 is the top-ranked
- * image model overall; Nano Banana Pro (gemini-3-pro-image, its OWN
- * selector MODEL_GEMINI_IMAGE_PRO) is a close second and cheaper; the
- * remaining Gemini legs are the flash Nano Banana line from
- * config/models.js (MODEL_GEMINI_IMAGE / MODEL_GEMINI_IMAGE_STABLE — do not
- * point those at the Pro model, that only duplicates the Pro leg).
- * gpt-image-1 stays as the LAST
- * OpenAI fallback — an account without the newer models and no
- * GEMINI_API_KEY must not lose its only working provider. The legacy
- * 'gemini' slug (gemini-2.5-flash text model with image modality) is out
- * of the default but stays in MODEL_MAP for env overrides.
+ * ⛔ NO PIXEL-WATERMARKED PROVIDERS (owner directive 2026-09-24): every
+ * Gemini image model (the Nano Banana line and the legacy text-model slug)
+ * embeds Google's SynthID watermark in the PIXELS. Unlike the C2PA manifest
+ * (metadata, stripped by the webp re-encode), SynthID survives re-encoding
+ * and is not removable — so those providers are never used, not even as a
+ * fallback. MODEL_MAP tags them `pixelWatermark`; parseChain drops them from
+ * ANY chain (default or env) unless ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true
+ * is set on purpose. OpenAI's gpt-image line attaches C2PA metadata only.
+ * When the OpenAI ladder is exhausted the call throws and the slot parks /
+ * retries — it never quietly falls through to a watermarking model. With the
+ * override set and no env chain, the pre-09-24 chain (Gemini legs interleaved)
+ * is the default again, so the kill switch alone restores the old fallbacks.
+ *
+ * Chain rationale: gpt-image-2 is the top-ranked image model overall
+ * (bake-off 2026-09-05); gpt-image-1.5 and gpt-image-1 are the OpenAI
+ * fallbacks — an account without the newer models must not lose its only
+ * working provider. The Gemini legs (Nano Banana Pro = MODEL_GEMINI_IMAGE_PRO,
+ * the flash line = MODEL_GEMINI_IMAGE / MODEL_GEMINI_IMAGE_STABLE, and the
+ * legacy 'gemini' text-model slug) stay in MODEL_MAP only for the explicit
+ * override above — they are SynthID-watermarked.
  * Google's Imagen line retired 2026-08-17 — never add imagen-* here.
  *
  * Output shape — `data:` URL — matches the legacy generateFeaturedImage
@@ -43,11 +52,15 @@ const { GEMINI_IMAGE_PRO, GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('..
 
 // Chain order (bake-off 2026-09-05, the same three prompts on every provider):
 // gpt-image-2 best on photo, cartoon and infographic (it honored an exact
-// caption list; ~75–90 s, ~$0.17); Nano Banana Pro (gemini-3-pro-image)
-// second — photo and cartoon close behind, ~16 s, ~$0.13, but it added
-// unrequested labels to the infographic; gpt-image-1.5 third (~35–40 s);
-// the flash Nano Banana fourth (~8 s, cheapest, weakest); gpt-image-1 last.
-const DEFAULT_CHAIN = 'gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
+// caption list; ~75–90 s, ~$0.17); gpt-image-1.5 next (~35–40 s); gpt-image-1
+// last. The Gemini legs that used to sit between them were removed 2026-09-24
+// (SynthID pixel watermark — see the header); OpenAI-only by design.
+const DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1';
+// The pre-2026-09-24 chain (bake-off order, Gemini legs interleaved). Used as
+// the default ONLY while ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true, so the
+// documented kill switch restores the old fallback legs during an OpenAI
+// outage without also requiring a BLOG_/SOCIAL_IMAGE_PROVIDER change.
+const WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
 
 const MODEL_MAP = {
   'gpt-image-2':   { api: 'openai', model: 'gpt-image-2',   quality: 'high' },
@@ -57,11 +70,19 @@ const MODEL_MAP = {
   // accept generationConfig.imageConfig.aspectRatio; the legacy 'gemini' slug
   // below is a text model with image modality and 400s on imageConfig, so
   // aspect stays prompt-only there (imageAspect flag gates the field).
-  'gemini-image-pro':  { api: 'gemini', model: GEMINI_IMAGE_PRO, imageAspect: true },
-  'gemini-image-best': { api: 'gemini', model: GEMINI_IMAGE_BEST, imageAspect: true },
-  'gemini-image':      { api: 'gemini', model: GEMINI_IMAGE_STABLE, imageAspect: true },
-  'gemini':        { api: 'gemini', model: 'gemini-2.5-flash' },
+  // ALL Gemini image output carries Google's SynthID pixel watermark —
+  // `pixelWatermark` keeps them out of every chain unless explicitly allowed.
+  'gemini-image-pro':  { api: 'gemini', model: GEMINI_IMAGE_PRO, imageAspect: true, pixelWatermark: 'synthid' },
+  'gemini-image-best': { api: 'gemini', model: GEMINI_IMAGE_BEST, imageAspect: true, pixelWatermark: 'synthid' },
+  'gemini-image':      { api: 'gemini', model: GEMINI_IMAGE_STABLE, imageAspect: true, pixelWatermark: 'synthid' },
+  'gemini':        { api: 'gemini', model: 'gemini-2.5-flash', pixelWatermark: 'synthid' },
 };
+
+// Owner directive 2026-09-24: no invisible watermarks on any published image.
+// The override exists only so a deliberate operator run (never prod defaults)
+// can reach a watermarking model; it must be the literal string 'true'.
+const PIXEL_WATERMARK_OVERRIDE_ENV = 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS';
+function pixelWatermarkAllowed() { return process.env[PIXEL_WATERMARK_OVERRIDE_ENV] === 'true'; }
 
 const MODE_SIZES = {
   'blog-hero':     { openai: '1536x1024', gemini: '1536x1024' },
@@ -83,12 +104,25 @@ const RETRYABLE_OPENAI_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
 // ── pure helpers (test-friendly) ─────────────────────────────────────
 
-function parseChain(envValue) {
-  const raw = String(envValue || DEFAULT_CHAIN);
-  return raw
+// { allowPixelWatermark } defaults to the env override; every chain — the
+// default AND an env/constructor override — is filtered, so a stale
+// BLOG_IMAGE_PROVIDER / SOCIAL_IMAGE_PROVIDER naming a Gemini slug cannot
+// reintroduce a watermarking provider. Dropped slugs are logged once per
+// distinct chain string so the operator sees why a leg vanished.
+const warnedChains = new Set();
+function parseChain(envValue, { allowPixelWatermark = pixelWatermarkAllowed() } = {}) {
+  const raw = String(envValue || (allowPixelWatermark ? WATERMARK_ALLOWED_DEFAULT_CHAIN : DEFAULT_CHAIN));
+  const known = raw
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter((s) => MODEL_MAP[s]);
+  if (allowPixelWatermark) return known;
+  const dropped = known.filter((s) => MODEL_MAP[s].pixelWatermark);
+  if (dropped.length && !warnedChains.has(raw)) {
+    warnedChains.add(raw);
+    logger.warn(`[image-generator] dropped pixel-watermarked provider(s) from the chain: ${dropped.join(', ')} (owner directive 2026-09-24 — set ${PIXEL_WATERMARK_OVERRIDE_ENV}=true only for a deliberate run)`);
+  }
+  return known.filter((s) => !MODEL_MAP[s].pixelWatermark);
 }
 
 function isFatalOpenAIError(status) {
@@ -353,9 +387,12 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
     : '';
+  const editorial = mode === 'blog-hero' || mode === 'blog-body'
+    ? 'Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.'
+    : '';
   const uniform = WAVES_UNIFORM_LINE;
   const van = plan && plan.van && !isInfographic ? VAN_LINE : '';
-  return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct].filter(Boolean).join(' ');
+  return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
@@ -496,13 +533,13 @@ async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch, tim
 // ── public API ───────────────────────────────────────────────────────
 
 class ImageGenerator {
-  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now } = {}) {
-    this.chain = parseChain(envChain);
+  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed() } = {}) {
+    this.chain = parseChain(envChain, { allowPixelWatermark });
     this._chainBudgetMs = chainBudgetMs;
     this._now = now;
     if (!this.chain.length) {
       logger.warn('[image-generator] no valid providers in BLOG_IMAGE_PROVIDER; falling back to defaults');
-      this.chain = parseChain(DEFAULT_CHAIN);
+      this.chain = parseChain(undefined, { allowPixelWatermark });
     }
     this._fetchFn = fetchFn;
     this._capabilityChecked = false;
@@ -633,6 +670,7 @@ module.exports.planFor = planFor;
 module.exports.retryStyleFor = retryStyleFor;
 module.exports.IMAGE_CHAIN_BUDGET_MS = IMAGE_CHAIN_BUDGET_MS;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
+module.exports.pixelWatermarkAllowed = pixelWatermarkAllowed;
 module.exports._internals = {
   stylePermutation,
   retryStyleFor,
@@ -652,6 +690,9 @@ module.exports._internals = {
   IMAGE_LEG_FLOOR_MS,
   legTimeoutMs,
   parseChain,
+  pixelWatermarkAllowed,
+  PIXEL_WATERMARK_OVERRIDE_ENV,
+  WATERMARK_ALLOWED_DEFAULT_CHAIN,
   isFatalOpenAIError,
   sizeFor,
   buildPrompt,

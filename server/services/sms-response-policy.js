@@ -10,7 +10,6 @@ const HUMAN_REPLY_TYPES = Object.freeze([
   'ai_revised',
   'ai_assistant',
   'ai_assistant_reply',
-  'follow_up',
 ]);
 const DRAFT_REPLY_TYPES = Object.freeze(['ai_approved', 'ai_revised']);
 
@@ -34,6 +33,21 @@ function draftIdSql(metadataExpression) {
   const value = `(${metadataExpression})`;
   return `(CASE WHEN ${value} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     THEN ${value}::uuid ELSE NULL END)`;
+}
+
+// Resolve a draft's legacy inbound anchor to the canonical message id used by
+// the inbox. Missing or duplicate canonical twins fail closed so an approved
+// draft cannot be credited to the wrong customer question.
+function draftReplyToMessageIdSql(draftSmsLogIdExpression) {
+  return `(SELECT CASE WHEN COUNT(canonical_inbound.id) = 1
+    THEN MIN(canonical_inbound.id::text)::uuid ELSE NULL END
+    FROM sms_log draft_inbound
+    JOIN messages canonical_inbound
+      ON canonical_inbound.twilio_sid = draft_inbound.twilio_sid
+     AND canonical_inbound.channel = 'sms'
+     AND canonical_inbound.direction = 'inbound'
+    WHERE draft_inbound.id = (${draftSmsLogIdExpression})
+      AND draft_inbound.direction = 'inbound')`;
 }
 
 async function loadPriorOutboundBodies(db, messages, {
@@ -80,18 +94,19 @@ async function loadPriorOutboundBodies(db, messages, {
              max(inbound_at) AS latest
       FROM thread_candidates GROUP BY conversation_id
     ), accepted_outbound AS MATERIALIZED (
-      SELECT prior.id, prior.conversation_id, prior.body, prior.created_at
+      SELECT prior.id, prior.conversation_id, prior.body,
+             COALESCE(prior_legacy.created_at, prior.created_at) AS response_created_at
       FROM relevant_threads
       JOIN messages prior ON prior.conversation_id = relevant_threads.conversation_id
         AND prior.created_at > relevant_threads.earliest
-        AND prior.created_at < relevant_threads.latest
       LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status
+        SELECT sl.message_type, sl.status, sl.created_at
         FROM sms_log sl
         WHERE sl.twilio_sid = prior.twilio_sid AND sl.direction = prior.direction
         ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
       ) prior_legacy ON true
       WHERE prior.channel = 'sms' AND prior.direction = 'outbound'
+        AND COALESCE(prior_legacy.created_at, prior.created_at) < relevant_threads.latest
         AND COALESCE(prior_legacy.status, prior.delivery_status, '') IN ('queued', 'sent', 'delivered')
         AND COALESCE(prior_legacy.message_type, prior.message_type, '') <> 'internal_alert'
     )
@@ -99,9 +114,9 @@ async function loadPriorOutboundBodies(db, messages, {
            thread_candidates.message_id, accepted_outbound.body
     FROM thread_candidates
     JOIN accepted_outbound ON accepted_outbound.conversation_id = thread_candidates.conversation_id
-      AND accepted_outbound.created_at < thread_candidates.inbound_at
-      AND accepted_outbound.created_at > thread_candidates.inbound_at - interval '24 hours'
-    ORDER BY thread_candidates.message_id, accepted_outbound.created_at DESC, accepted_outbound.id DESC
+      AND accepted_outbound.response_created_at < thread_candidates.inbound_at
+      AND accepted_outbound.response_created_at > thread_candidates.inbound_at - interval '24 hours'
+    ORDER BY thread_candidates.message_id, accepted_outbound.response_created_at DESC, accepted_outbound.id DESC
   `, [JSON.stringify(contexts)]);
   return new Map((result.rows || result).map((row) => [String(row.message_id), row.body]));
 }
@@ -169,13 +184,13 @@ function outboundIsAnswer({
   messageType,
   status,
   isClickFollowup = false,
-  hasDraftProvenance = false,
+  replyToMessageId = null,
 } = {}) {
   return direction === 'outbound'
     && HUMAN_REPLY_TYPES.includes(messageType)
     && ['queued', 'sent', 'delivered'].includes(status)
     && !isClickFollowup
-    && (!DRAFT_REPLY_TYPES.includes(messageType) || hasDraftProvenance);
+    && (!DRAFT_REPLY_TYPES.includes(messageType) || Boolean(replyToMessageId));
 }
 
 module.exports = {
@@ -184,6 +199,7 @@ module.exports = {
   NON_ACTIONABLE_INBOUND_TYPES,
   phoneIdentitySql,
   draftIdSql,
+  draftReplyToMessageIdSql,
   loadPriorOutboundBodies,
   responseFlags,
   inboundNeedsResponse,
