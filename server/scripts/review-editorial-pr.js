@@ -24,9 +24,14 @@ async function readArticles(pr) {
     try { manifest = JSON.parse(evidence?.content); } catch { /* fresh review required */ }
     const input = { document: original.content, path: file.filename, domain: 'wavespestcontrol.com', manifest,
       publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY };
+    const fresh = contract.verifyManifest(input).pass;
+    // Freshness is the only relaxed property: this second verification still
+    // authenticates the signature, exact document bytes, path, domain, policy,
+    // sources, and every required passing check.
+    const previouslyVerified = contract.verifyManifest({ ...input, requireFresh: false }).pass;
     files.push({ path: file.filename, previousPath: file.previous_filename || null,
       status: file.status, document: original.content,
-      fresh: contract.verifyManifest(input).pass });
+      fresh, previouslyVerified });
   }
   return files;
 }
@@ -49,35 +54,39 @@ async function reviewPr(number) {
   for (const file of files.filter((item) => !item.fresh)) {
     try {
       let document = file.document;
-      // Grade metadata changes against the immutable base revision on every
-      // stale article. A branch name is not proof of portal ownership and can
-      // never waive the publishing policy.
-      let originalMetaDescription = '';
-      if (file.status !== 'added') {
-        const basePath = file.previousPath || file.path;
-        const baseFile = await gh.getFile(basePath, pr.base.sha);
-        if (!baseFile?.content) throw new Error(`Cannot read ${basePath} at the reviewed base`);
-        let baseParsed;
-        try { baseParsed = fm.parse(baseFile.content); }
-        catch (err) { throw new Error(`Cannot parse ${basePath} at the reviewed base: ${err.message}`); }
-        const baseMeta = baseParsed.data?.metaDescription ?? baseParsed.data?.meta_description;
-        originalMetaDescription = typeof baseMeta === 'string' ? baseMeta : '';
-      }
-      const parsed = fm.parse(document);
-      // Reserve content/* body repairs for the portal's mirror workflow to
-      // avoid changing article bytes without updating its DB-backed state.
-      if (!pr.head.ref.startsWith('content/')) {
-        const draft = await editorial.prepareDraft({ frontmatter: parsed.data, body: parsed.content }, { page_type: 'supporting-blog' });
-        if (draft.body.trim() !== parsed.content.trim()) {
-          document = fm.stringify(parsed.data, draft.body);
-          commits.push({ path: file.path, content: document });
+      // A still-valid signature over these exact bytes proves the legacy
+      // publishing policy already ran. Expiry alone requires a new independent
+      // review/signature, not a context-free replay of those older gates.
+      if (!file.previouslyVerified) {
+        // Grade metadata changes against the immutable base revision on every
+        // unsigned/tampered article. A branch name can never waive policy.
+        let originalMetaDescription = '';
+        if (file.status !== 'added') {
+          const basePath = file.previousPath || file.path;
+          const baseFile = await gh.getFile(basePath, pr.base.sha);
+          if (!baseFile?.content) throw new Error(`Cannot read ${basePath} at the reviewed base`);
+          let baseParsed;
+          try { baseParsed = fm.parse(baseFile.content); }
+          catch (err) { throw new Error(`Cannot parse ${basePath} at the reviewed base: ${err.message}`); }
+          const baseMeta = baseParsed.data?.metaDescription ?? baseParsed.data?.meta_description;
+          originalMetaDescription = typeof baseMeta === 'string' ? baseMeta : '';
         }
+        const parsed = fm.parse(document);
+        // Reserve content/* body repairs for the portal's mirror workflow to
+        // avoid changing article bytes without updating its DB-backed state.
+        if (!pr.head.ref.startsWith('content/')) {
+          const draft = await editorial.prepareDraft({ frontmatter: parsed.data, body: parsed.content }, { page_type: 'supporting-blog' });
+          if (draft.body.trim() !== parsed.content.trim()) {
+            document = fm.stringify(parsed.data, draft.body);
+            commits.push({ path: file.path, content: document });
+          }
+        }
+        const check = await require('../services/content/codex-remediation').validateFixedBlogFile(document, {
+          originalMetaDescription, requireFactCheck: true,
+        });
+        if (check.requiresHumanReview) throw new Error('Document is outside the autonomous publishing policy; leave unpublished');
+        if (!check.ok) throw new Error(`Document failed existing publishing checks: ${check.reason}`);
       }
-      const check = await require('../services/content/codex-remediation').validateFixedBlogFile(document, {
-        originalMetaDescription, requireFactCheck: true,
-      });
-      if (check.requiresHumanReview) throw new Error('Document is outside the autonomous publishing policy; leave unpublished');
-      if (!check.ok) throw new Error(`Document failed existing publishing checks: ${check.reason}`);
       commits.push(...await editorial.filesForDocument({ document, path: file.path }));
     } catch (err) {
       failures.push({ path: file.path, reason: err.message });

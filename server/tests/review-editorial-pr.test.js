@@ -50,7 +50,21 @@ test('freshly signed managed bytes need no repeat validation or base read', asyn
   expect(gh.getFile).not.toHaveBeenCalledWith(path, 'base-sha');
   expect(gh.commitFiles).not.toHaveBeenCalled();
 });
-test('a content-prefixed same-repository branch cannot bypass publishing policy', async () => {
+test('expired authenticated exact bytes skip legacy gates but receive a new independent review and signature', async () => {
+  contract.verifyManifest.mockImplementation(({ requireFresh }) => ({ pass: requireFresh === false }));
+
+  expect(await reviewPr(1)).toMatchObject({ pass: true, requiresFreshBuild: true });
+  expect(contract.verifyManifest).toHaveBeenCalledWith(expect.objectContaining({ requireFresh: false }));
+  expect(editorial.prepareDraft).not.toHaveBeenCalled();
+  expect(validateFixedBlogFile).not.toHaveBeenCalled();
+  expect(gh.getFile).not.toHaveBeenCalledWith(path, 'base-sha');
+  expect(editorial.filesForDocument).toHaveBeenCalledWith(expect.objectContaining({
+    document: expect.stringContaining('Test body'),
+    path,
+  }));
+  expect(gh.commitFiles).toHaveBeenCalledTimes(1);
+});
+test('an invalid or unsigned sidecar on content/foo cannot waive publishing policy', async () => {
   validateFixedBlogFile.mockResolvedValue({ ok: false, requiresHumanReview: false, reason: 'guardrails BLOG_META_SALESY' });
 
   await expect(reviewPr(1)).resolves.toEqual(expect.objectContaining({
@@ -58,6 +72,7 @@ test('a content-prefixed same-repository branch cannot bypass publishing policy'
     deferred: true,
     failures: [expect.objectContaining({ reason: expect.stringContaining('BLOG_META_SALESY') })],
   }));
+  expect(contract.verifyManifest).toHaveBeenCalledWith(expect.objectContaining({ requireFresh: false }));
   expect(editorial.prepareDraft).not.toHaveBeenCalled();
   expect(editorial.filesForDocument).not.toHaveBeenCalled();
   expect(gh.commitFiles).not.toHaveBeenCalled();
