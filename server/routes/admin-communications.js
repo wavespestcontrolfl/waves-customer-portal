@@ -12,6 +12,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
+const { phoneIdentitySql } = require('../services/sms-response-policy');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -1663,6 +1664,10 @@ router.post('/call', async (req, res, next) => {
 router.get('/log', async (req, res, next) => {
   try {
     const { customerId, direction, messageType, page, limit, search } = req.query;
+    const currentPeer = phoneIdentitySql("COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '')");
+    const currentEndpoint = phoneIdentitySql("COALESCE(conversations.our_endpoint_id, '')");
+    const priorPeer = phoneIdentitySql("COALESCE(NULLIF(prior_conversation.contact_phone, ''), prior_customer.phone, '')");
+    const priorEndpoint = phoneIdentitySql("COALESCE(prior_conversation.our_endpoint_id, '')");
 
     let query = db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
@@ -1689,12 +1694,20 @@ router.get('/log', async (req, res, next) => {
       .joinRaw(`LEFT JOIN LATERAL (
         SELECT prior.body
         FROM messages prior
-        WHERE messages.direction = 'inbound'
-          AND prior.channel = 'sms'
-          AND prior.conversation_id = messages.conversation_id
+        JOIN conversations prior_conversation ON prior_conversation.id = prior.conversation_id
+        LEFT JOIN customers prior_customer ON prior_customer.id = prior_conversation.customer_id
+        LEFT JOIN LATERAL (
+          SELECT sl.message_type, sl.status
+          FROM sms_log sl
+          WHERE sl.twilio_sid = prior.twilio_sid AND sl.direction = prior.direction
+          ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
+        ) prior_legacy ON true
+        WHERE messages.direction = 'inbound' AND prior.channel = 'sms'
           AND prior.direction = 'outbound'
-          AND prior.delivery_status IN ('queued', 'sent', 'delivered')
-          AND COALESCE(prior.message_type, '') <> 'internal_alert'
+          AND COALESCE(prior_legacy.status, prior.delivery_status, '') IN ('queued', 'sent', 'delivered')
+          AND COALESCE(prior_legacy.message_type, prior.message_type, '') <> 'internal_alert'
+          AND ${currentPeer} <> '' AND ${currentEndpoint} <> ''
+          AND ${priorPeer} = ${currentPeer} AND ${priorEndpoint} = ${currentEndpoint}
           AND prior.created_at < messages.created_at
           AND prior.created_at > messages.created_at - interval '24 hours'
         ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1
