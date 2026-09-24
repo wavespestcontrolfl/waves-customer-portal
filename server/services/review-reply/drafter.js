@@ -877,6 +877,25 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     const interactionMatch = body.match(INTERACTION_TERM_RE);
     if (interactionMatch) return reject('unlisted_experience_claim', interactionMatch[0]);
   }
+  // A TEXT review does not need to positively source an interaction term
+  // ("the visit went well" is ordinary prose either way), but a review that
+  // NEGATES the same root — "he never explained anything", "did not answer
+  // my questions" — must not be answered with the un-negated claim: "Glad we
+  // explained everything and answered your questions" (2026-09-25 P1 fix,
+  // pre-push round 3). Root-matched the same way SERVICE_CLAIM_RE terms are,
+  // via rootSupported; a root the review never uses at all is left alone.
+  if (grounding.review.hasText) {
+    for (const term of body.match(INTERACTION_TERM_RE) || []) {
+      const t = term.toLowerCase().replace(/\s+/g, ' ');
+      const flat = t.replace(/[- ]+/g, ' ');
+      const stem = stemOf(flat);
+      const rooted = reviewWords.has(flat) || reviewWords.has(stem)
+        || (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); }));
+      if (!rooted) continue;
+      const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
+      if (rootSupport === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
+    }
+  }
 
   // The mandated greeting, deterministically: "Hi <reviewer first name>,"
   // or "Hello there," — nothing else may open a public reply.

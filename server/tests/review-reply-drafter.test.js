@@ -757,6 +757,18 @@ describe('2026-09-25 pre-push round: legacy labels / greedy exemption / composab
     const g = grounding({ text: 'Adam explained everything.', mentionedTechNames: ['Adam'], topics: ['technician'], account: null });
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went well.'), g)).toBeNull();
   });
+  test('a TEXT review that NEGATES an interaction still blocks the un-negated claim (2026-09-25 P1 fix, pre-push round 3)', () => {
+    const g = grounding({ text: 'He never explained anything and did not answer my questions.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad we explained everything and answered your questions.'), g)).toBe('negated_review_claim');
+  });
+  test('the same root, un-negated in the review, passes', () => {
+    const g = grounding({ text: 'Adam explained everything clearly.', mentionedTechNames: ['Adam'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad Adam explained everything.'), g)).toBeNull();
+  });
+  test('a root the review never mentions at all is left alone (ordinary prose)', () => {
+    const g = grounding({ text: 'Great service', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went well.'), g)).toBeNull();
+  });
 });
 
 describe('draftReviewReply — fallback ladder', () => {
