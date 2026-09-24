@@ -72,7 +72,8 @@ export default function DataHygienePage({ embedded = false } = {}) {
   const [revealed, setRevealed] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [revertTarget, setRevertTarget] = useState(null);
   const [revertError, setRevertError] = useState("");
 
@@ -81,7 +82,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
   const load = useCallback(async ({ background = false } = {}) => {
     const seq = ++loadSeq.current;
     if (!background) foregroundRead.current = seq;
-    if (!background) { setLoading(true); setError(""); }
+    if (!background) { setLoading(true); setReadError(""); }
     try {
       const [next, nextMetrics] = await Promise.all([
         adminFetch(`/admin/data-hygiene/proposals?status=${encodeURIComponent(status)}&limit=100`),
@@ -90,11 +91,12 @@ export default function DataHygienePage({ embedded = false } = {}) {
       if (seq !== loadSeq.current) return;
       setData(next);
       setMetrics(nextMetrics);
+      setReadError("");
       setSelectedId((current) => (
         next.proposals?.some((p) => p.id === current) ? current : next.proposals?.[0]?.id || null
       ));
     } catch (err) {
-      if (seq === loadSeq.current) setError(err.message);
+      if (seq === loadSeq.current) setReadError(err.message);
     } finally {
       if (!background && seq === foregroundRead.current) setLoading(false);
     }
@@ -127,7 +129,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
   const runScan = useCallback(async (mode) => {
     setScanning(true);
     setNotice("");
-    setError("");
+    setActionError("");
     try {
       const result = await adminFetch("/admin/data-hygiene/scan", {
         method: "POST",
@@ -136,7 +138,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
       setNotice(`Scan ${result.status}: run ${result.run_id || "-"}`);
       await load();
     } catch (err) {
-      setError(err.message);
+      setActionError(err.message);
     } finally {
       setScanning(false);
     }
@@ -145,13 +147,13 @@ export default function DataHygienePage({ embedded = false } = {}) {
   const approve = useCallback(async (proposal) => {
     if (!proposal) return;
     setBusyId(proposal.id);
-    setError("");
+    setActionError("");
     try {
       await adminFetch(`/admin/data-hygiene/proposals/${proposal.id}/approve`, { method: "POST", body: "{}" });
       setNotice("Proposal approved and applied.");
       await load();
     } catch (err) {
-      setError(err.message);
+      setActionError(err.message);
     } finally {
       setBusyId("");
     }
@@ -160,7 +162,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
   const reject = useCallback(async (proposal, reason = "other") => {
     if (!proposal) return;
     setBusyId(proposal.id);
-    setError("");
+    setActionError("");
     try {
       await adminFetch(`/admin/data-hygiene/proposals/${proposal.id}/reject`, {
         method: "POST",
@@ -169,7 +171,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
       setNotice("Proposal rejected.");
       await load();
     } catch (err) {
-      setError(err.message);
+      setActionError(err.message);
     } finally {
       setBusyId("");
     }
@@ -179,7 +181,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
     if (!proposal) return;
     setRevertError("");
     setBusyId(proposal.id);
-    setError("");
+    setActionError("");
     try {
       await adminFetch(`/admin/data-hygiene/proposals/${proposal.id}/revert`, {
         method: "POST",
@@ -202,7 +204,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
       return;
     }
     setRevealingId(proposal.id);
-    setError("");
+    setActionError("");
     try {
       const result = await adminFetch(`/admin/data-hygiene/proposals/${proposal.id}/reveal`, {
         method: "POST",
@@ -211,7 +213,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
       setRevealed(result);
       setNotice("Sensitive value revealed. This access was audited.");
     } catch (err) {
-      setError(err.message);
+      setActionError(err.message);
     } finally {
       setRevealingId("");
     }
@@ -255,7 +257,8 @@ export default function DataHygienePage({ embedded = false } = {}) {
           </div>
         </div>
 
-        {error && <ActionFeedback error onRetry={busyId || scanning ? undefined : load}>{error}</ActionFeedback>}
+        {readError && <ActionFeedback error onRetry={busyId || scanning ? undefined : load}>{readError}</ActionFeedback>}
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
         {notice && <ActionFeedback>{notice}</ActionFeedback>}
 
         <MetricsPanel metrics={metrics} />

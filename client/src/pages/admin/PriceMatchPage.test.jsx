@@ -125,3 +125,35 @@ it("reconciles a completed poll against the operator's latest selection", async 
   );
   expect(screen.getByRole("button", { name: "Send to rep…" })).toBeInTheDocument();
 });
+
+it("clears a recovered poll error without hiding an action failure", async () => {
+  let failRead = false;
+  adminFetch.mockImplementation((path, options) => {
+    if (options?.method === "POST") {
+      return Promise.reject(new Error("Synthetic scan failure"));
+    }
+    if (path === "/admin/price-match/drafts?status=active") {
+      return failRead
+        ? Promise.reject(new Error("Synthetic read failure"))
+        : Promise.resolve(list([]));
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+
+  render(<PriceMatchPage />);
+  expect(await screen.findByText("No drafts in this view.")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Preview scan" }));
+  expect(await screen.findByText("Synthetic scan failure")).toBeInTheDocument();
+
+  failRead = true;
+  await act(async () => refresh.callback());
+  expect(screen.getByText("Synthetic read failure")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+
+  failRead = false;
+  await act(async () => refresh.callback());
+  expect(screen.queryByText("Synthetic read failure")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  expect(screen.getByText("Synthetic scan failure")).toBeInTheDocument();
+});

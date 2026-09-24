@@ -82,7 +82,8 @@ export default function DuplicateCustomersPage() {
   const [groups, setGroups] = useState([]);
   const [merges, setMerges] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [toast, setToast] = useState("");
   const [actionKey, setActionKey] = useState("");
 
@@ -91,7 +92,7 @@ export default function DuplicateCustomersPage() {
   const load = useCallback(async ({ background = false } = {}) => {
     const seq = ++loadSeq.current;
     if (!background) foregroundRead.current = seq;
-    if (!background) { setLoading(true); setError(""); }
+    if (!background) { setLoading(true); setReadError(""); }
     try {
       const data = await api("/admin/customer-duplicates");
 
@@ -101,8 +102,9 @@ export default function DuplicateCustomersPage() {
       if (seq !== loadSeq.current) return;
       setGroups(data.groups || []);
       setMerges(journal.merges || []);
+      setReadError("");
     } catch (err) {
-      if (seq === loadSeq.current) setError(err.message || "Could not load duplicate customers");
+      if (seq === loadSeq.current) setReadError(err.message || "Could not load duplicate customers");
     } finally {
       if (!background && seq === foregroundRead.current) setLoading(false);
     }
@@ -118,17 +120,17 @@ export default function DuplicateCustomersPage() {
     if (confirmText && !window.confirm(confirmText)) return;
     loadSeq.current += 1;
     setActionKey(key);
-    setError("");
+    setActionError("");
     setToast("");
     try {
       const result = await api(endpoint, { method: "POST", body: JSON.stringify(body) });
-      // Reload FIRST — load() clears the error banner, so a partial-failure
-      // message from onResult must be applied after it, not wiped by it.
+      // Reload first so onResult can report a partial mutation failure after
+      // the updated records have been applied.
       await load();
       if (onResult) onResult(result);
       else setToast(successText);
     } catch (err) {
-      setError(err.message || "Action failed");
+      setActionError(err.message || "Action failed");
     } finally {
       setActionKey("");
     }
@@ -153,7 +155,8 @@ export default function DuplicateCustomersPage() {
         as an additional property on the kept customer.
       </div>
 
-      {error && <ActionFeedback error onRetry={actionKey ? undefined : load} className="mb-3">{error}</ActionFeedback>}
+      {readError && <ActionFeedback error onRetry={actionKey ? undefined : load} className="mb-3">{readError}</ActionFeedback>}
+      {actionError && <ActionFeedback error className="mb-3">{actionError}</ActionFeedback>}
       {toast && <ActionFeedback className="mb-3">{toast}</ActionFeedback>}
 
       {loading && !groups.length && (
@@ -241,7 +244,7 @@ export default function DuplicateCustomersPage() {
                               // unless the server says it was.
                               onResult: (res) => {
                                 if (res?.propertyLinked) setToast("Merged — address saved as a property");
-                                else setError("Merged, but the address could NOT be saved as a property — add it to the kept customer manually.");
+                                else setActionError("Merged, but the address could NOT be saved as a property — add it to the kept customer manually.");
                               },
                             })}
                           >
@@ -325,7 +328,7 @@ export default function DuplicateCustomersPage() {
                             // the kept customer — report the partial outcome.
                             onResult: (res) => {
                               if (res?.skipped?.length) {
-                                setError(`Merge undone, but ${res.skipped.length} item(s) could not be restored automatically — details in the admin notification.`);
+                                setActionError(`Merge undone, but ${res.skipped.length} item(s) could not be restored automatically — details in the admin notification.`);
                               } else {
                                 setToast("Merge undone");
                               }

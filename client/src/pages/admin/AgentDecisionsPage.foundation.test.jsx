@@ -116,6 +116,45 @@ it('clears and disables reply training when the next decision context fails', as
   expect(adminFetch.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(0);
 });
 
+it('initializes reply fields when a correction is edited while context is loading', async () => {
+  let resolveContext;
+  adminFetch.mockImplementation((url) => {
+    if (url.endsWith('/context')) {
+      return new Promise((resolve) => { resolveContext = resolve; });
+    }
+    return Promise.resolve({
+      decisions: [{
+        id: 'decision-a',
+        customerName: 'Customer A',
+        recommendedActions: ['call_customer'],
+        suggestedMessage: 'Suggested reply',
+      }],
+    });
+  });
+
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  const reason = await screen.findByLabelText('Review reason');
+  await waitFor(() => expect(resolveContext).toBeTypeOf('function'));
+  fireEvent.change(reason, { target: { value: 'Keep this correction' } });
+
+  await act(async () => resolveContext({
+    context: { actualHumanReply: { body: 'Human reply' } },
+    replyTraining: {
+      actualHumanReply: 'Recorded human reply',
+      outboundBody: 'Recorded final reply',
+      reviewNote: 'Recorded review note',
+      scenarioLabel: 'scheduling',
+    },
+  }));
+
+  expect(reason).toHaveValue('Keep this correction');
+  expect(screen.getByLabelText('Actual human reply')).toHaveValue('Recorded human reply');
+  expect(screen.getByLabelText('Final / rewrite reply')).toHaveValue('Recorded final reply');
+  expect(screen.getByLabelText('Review note')).toHaveValue('Recorded review note');
+  expect(screen.getByLabelText('Scenario label')).toHaveValue('scheduling');
+  expect(screen.getByRole('button', { name: 'Edit & save' })).toBeEnabled();
+});
+
 it('clears a decision refresh error after a successful automatic poll', async () => {
   adminFetch.mockImplementation(async (url) => url.endsWith('/context')
     ? { context: {} }

@@ -228,7 +228,11 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     || actualReply !== draftBaselineRef.current.actualReply
     || replyReviewNote !== draftBaselineRef.current.replyReviewNote
     || replyScenarioLabel !== draftBaselineRef.current.replyScenarioLabel;
-  const updateDraft = (setter, value) => {
+  const updateDecisionDraft = (setter, value) => {
+    editEpochRef.current += 1;
+    setter(value);
+  };
+  const updateReplyDraft = (setter, value) => {
     editEpochRef.current += 1;
     const current = detailEditRef.current;
     detailEditRef.current = {
@@ -598,7 +602,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                         <Textarea
                           disabled={!replyContextReady}
                           value={actualReply}
-                          onChange={(event) => updateDraft(setActualReply, event.target.value)}
+                          onChange={(event) => updateReplyDraft(setActualReply, event.target.value)}
                           rows={5}
                           placeholder="If you replied, paste or adjust the actual reply here."
                         />
@@ -607,7 +611,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                         <Textarea
                           disabled={!replyContextReady}
                           value={idealReply}
-                          onChange={(event) => updateDraft(setIdealReply, event.target.value)}
+                          onChange={(event) => updateReplyDraft(setIdealReply, event.target.value)}
                           rows={5}
                           placeholder="Accepted draft, edited version, or your replacement reply."
                         />
@@ -618,7 +622,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       <Input
                         disabled={!replyContextReady}
                         value={replyScenarioLabel}
-                        onChange={(event) => updateDraft(setReplyScenarioLabel, event.target.value)}
+                        onChange={(event) => updateReplyDraft(setReplyScenarioLabel, event.target.value)}
                         placeholder="scenario, e.g. scheduling"
                       />
                       </FormField>
@@ -626,7 +630,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       <Input
                         disabled={!replyContextReady}
                         value={replyReviewNote}
-                        onChange={(event) => updateDraft(setReplyReviewNote, event.target.value)}
+                        onChange={(event) => updateReplyDraft(setReplyReviewNote, event.target.value)}
                         placeholder="What should the agent learn from this reply?"
                       />
                       </FormField>
@@ -701,14 +705,14 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                   <FormField label="Corrected actions">
                   <Textarea
                     value={correctedActions}
-                    onChange={(event) => updateDraft(setCorrectedActions, event.target.value)}
+                    onChange={(event) => updateDecisionDraft(setCorrectedActions, event.target.value)}
                     rows={4}
                   />
                   </FormField>
                   <FormField label="Review reason">
                   <Textarea
                     value={correctionNote}
-                    onChange={(event) => updateDraft(setCorrectionNote, event.target.value)}
+                    onChange={(event) => updateDecisionDraft(setCorrectionNote, event.target.value)}
                     rows={3}
                     placeholder="Why was this accepted, corrected, or dismissed?"
                   />
