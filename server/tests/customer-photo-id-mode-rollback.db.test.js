@@ -1,20 +1,29 @@
 /**
  * 20260924000110_customer_photo_id_mode_rollback.js — rollback-safety
- * companion to the frozen 20260924000100_customer_photo_id_columns.js.
+ * companion to the frozen 20260924000100_customer_photo_id_columns.js — and
+ * 20260924000111_customer_photo_id_mode_restore.js, its OWN round-trip-safety
+ * companion (000110 is frozen too, already pushed as part of PR #4752, so
+ * the up()-restore logic (codex r7 P1) lives in a third, newer file rather
+ * than an edit to 000110).
  *
  * Two layers:
- *  - Always-on mocked-knex unit tests: up() is inert, down() remaps every
+ *  - Always-on mocked-knex unit tests: 000110's down() remaps every
  *    mode='customer' row to 'internal' (leaving `source='portal'` intact)
- *    on both tables, untouched rows/tables are left alone.
+ *    on both tables; 000111's up() restores mode='customer' for every
+ *    source='portal' row (the round-trip safety net), and untouched
+ *    rows/tables are left alone in both.
  *  - A real-PostgreSQL proof (skipped without DATABASE_URL, matching this
  *    repo's `.db.test.js` convention — see tests/lawn-assessment-history.db.test.js):
  *    reproduces the exact bug (ADD CONSTRAINT throws while a mode='customer'
- *    row exists) in an isolated schema, then proves this migration's down()
- *    run FIRST (as it does in a real rollback — newer stamp rolls back
- *    before older) makes the narrower CHECK constraint addable again.
+ *    row exists) in an isolated schema, then proves 000110's down() run
+ *    FIRST (as it does in a real rollback — newer stamp rolls back before
+ *    older) makes the narrower CHECK constraint addable again, and that a
+ *    full rollback + reapply cycle (000100 down/up, 000110 down, 000111 up)
+ *    restores the row exactly.
  */
 
 const rollbackMigration = require('../models/migrations/20260924000110_customer_photo_id_mode_rollback');
+const restoreMigration = require('../models/migrations/20260924000111_customer_photo_id_mode_restore');
 
 // ── Always-on: mocked knex ──────────────────────────────────────────────
 
@@ -47,11 +56,60 @@ function makeMockKnex(tables) {
 }
 
 describe('customer photo-id mode rollback migration (mocked knex)', () => {
-  test('up() is an inert no-op — no knex calls at all', async () => {
-    const knex = makeMockKnex({});
-    await rollbackMigration.up(knex);
-    expect(knex.__updateCalls).toHaveLength(0);
-    expect(knex.__hasTableCalls).toHaveLength(0);
+  test('up() restores mode=customer for every source=portal row, on both tables', async () => {
+    const tables = {
+      pest_identifications: [
+        { id: 'p1', mode: 'internal', source: 'portal' }, // rolled back by a prior down()
+        { id: 'p2', mode: 'internal', source: 'tech' }, // real tech row — never touched
+        { id: 'p3', mode: 'customer', source: 'portal' }, // already correct — untouched value
+      ],
+      lawn_diagnostics: [
+        { id: 'l1', mode: 'internal', source: 'portal' },
+        { id: 'l2', mode: 'prospect', source: 'public_funnel' },
+      ],
+    };
+    const knex = makeMockKnex(tables);
+    await restoreMigration.up(knex);
+
+    expect(tables.pest_identifications[0].mode).toBe('customer');
+    expect(tables.pest_identifications[1].mode).toBe('internal'); // real tech row unaffected
+    expect(tables.pest_identifications[2].mode).toBe('customer');
+    expect(tables.lawn_diagnostics[0].mode).toBe('customer');
+    expect(tables.lawn_diagnostics[1].mode).toBe('prospect'); // real prospect row unaffected
+
+    expect(knex.__updateCalls).toEqual([
+      { table: 'pest_identifications', filter: { source: 'portal' }, patch: { mode: 'customer' } },
+      { table: 'lawn_diagnostics', filter: { source: 'portal' }, patch: { mode: 'customer' } },
+    ]);
+  });
+
+  test('up() is a no-op when a table does not exist', async () => {
+    const knex = makeMockKnex({ pest_identifications: [{ id: 'p1', mode: 'internal', source: 'portal' }] });
+    await expect(restoreMigration.up(knex)).resolves.not.toThrow();
+    expect(knex.__updateCalls).toEqual([
+      { table: 'pest_identifications', filter: { source: 'portal' }, patch: { mode: 'customer' } },
+    ]);
+  });
+
+  test('round trip: down() then up() restores every customer-mode row exactly', async () => {
+    const tables = {
+      pest_identifications: [
+        { id: 'p1', mode: 'customer', source: 'portal' },
+        { id: 'p2', mode: 'internal', source: 'tech' },
+      ],
+      lawn_diagnostics: [
+        { id: 'l1', mode: 'customer', source: 'portal' },
+      ],
+    };
+    const knex = makeMockKnex(tables);
+    await rollbackMigration.down(knex);
+    expect(tables.pest_identifications[0].mode).toBe('internal');
+    expect(tables.lawn_diagnostics[0].mode).toBe('internal');
+
+    await restoreMigration.up(knex);
+    expect(tables.pest_identifications[0].mode).toBe('customer');
+    expect(tables.pest_identifications[1].mode).toBe('internal'); // still untouched throughout
+    expect(tables.lawn_diagnostics[0].mode).toBe('customer');
   });
 
   test('down() flips every mode=customer row to internal on both tables, leaving source untouched', async () => {
@@ -190,8 +248,18 @@ describeDb('customer photo-id mode rollback — real Postgres constraint proof',
       // too (both absent from this isolated schema, so those branches no-op
       // via their own hasTable guards).
       await expect(columnsMigration.down(knex)).resolves.not.toThrow();
+      const afterOldDown = await knex(table).where({ id: row.id }).first();
+      expect(afterOldDown.mode).toBe('internal');
+
+      // Full rollback + REAPPLY cycle (codex r7 P1): 20260924000100's up()
+      // re-widens the CHECK, then 20260924000111's up() restores the row —
+      // a real customer submission must not permanently vanish from Photo ID
+      // history after an operator rolls back and reapplies.
+      await expect(columnsMigration.up(knex)).resolves.not.toThrow();
+      await restoreMigration.up(knex);
       const finalRow = await knex(table).where({ id: row.id }).first();
-      expect(finalRow.mode).toBe('internal');
+      expect(finalRow.mode).toBe('customer');
+      expect(finalRow.source).toBe('portal');
     });
   });
 
@@ -217,8 +285,14 @@ describeDb('customer photo-id mode rollback — real Postgres constraint proof',
       expect(after.source).toBe('portal');
 
       await expect(columnsMigration.down(knex)).resolves.not.toThrow();
+      const afterOldDown = await knex(table).where({ id: row.id }).first();
+      expect(afterOldDown.mode).toBe('internal');
+
+      await expect(columnsMigration.up(knex)).resolves.not.toThrow();
+      await restoreMigration.up(knex);
       const finalRow = await knex(table).where({ id: row.id }).first();
-      expect(finalRow.mode).toBe('internal');
+      expect(finalRow.mode).toBe('customer');
+      expect(finalRow.source).toBe('portal');
     });
   });
 });

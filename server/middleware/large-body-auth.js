@@ -46,9 +46,41 @@ function requireStaffTokenForLargeBody(req, res, next) {
   return res.status(401).json({ error: 'Authentication required' });
 }
 
+// A valid CUSTOMER access token — signature-only (no DB lookup, kept out of
+// the hot path; the route's own `authenticate` middleware does the full,
+// DB-backed check afterward). Customer tokens carry no `type` claim at all
+// (only a refresh token does, `type: 'refresh'` — see middleware/auth.js
+// generateToken / authenticateCore), so "not a refresh token, and it claims
+// to be SOME customer" is the whole signature-only contract here.
+function hasValidCustomerToken(authorizationHeader) {
+  const header = authorizationHeader || '';
+  if (!header.startsWith('Bearer ')) return false;
+  try {
+    const decoded = jwt.verify(header.slice(7), config.jwt.secret);
+    return decoded.type !== 'refresh' && !!decoded.customerId;
+  } catch {
+    return false;
+  }
+}
+
+// Guards server/routes/photo-id.js's 30 MB body parser (codex GH r1 P1): an
+// anonymous caller could otherwise force parsing of up to 30 MB per request
+// even while GATE_CUSTOMER_PHOTO_ID is off, and a malformed/oversized
+// anonymous request would surface the PARSER's 400/413 instead of the
+// route's promised dark 404. Mounted with the gate check ahead of it (see
+// server/index.js) so an unauthenticated OR dark-gate request never reaches
+// the large parser at all.
+function requireCustomerTokenForLargeBody(req, res, next) {
+  if (bodyProvenSmall(req)) return next();
+  if (hasValidCustomerToken(req.headers.authorization)) return next();
+  return res.status(401).json({ error: 'Authentication required' });
+}
+
 module.exports = {
   requireStaffTokenForLargeBody,
+  requireCustomerTokenForLargeBody,
   bodyProvenSmall,
   hasValidStaffToken,
+  hasValidCustomerToken,
   STAFF_LARGE_BODY_AUTH_MIN,
 };

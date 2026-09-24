@@ -108,8 +108,12 @@ function cleanString(value, max = 200) {
 }
 
 // The admin lane = prospect-mode rows. Internal tech diagnostics (mode
-// 'internal') belong to the tech portal flow, not this list.
-function scopeLawn(qb) {
+// 'internal') belong to the tech portal flow, not this list — and neither
+// does a customer's own Photo ID submission (mode 'customer', source
+// 'portal', server/routes/photo-id.js): those have no contact/lead to
+// claim and none of this queue's actions (relink, generate/send an
+// expiring report) apply to them (codex GH r1 P2 on PR #4752).
+function scopeProspects(qb) {
   return qb.where({ mode: 'prospect' });
 }
 
@@ -161,7 +165,10 @@ async function fetchListRows(type, { status, limit, offset }) {
     // correctly — the merged top (offset+limit) is always contained in the
     // union of each table's top (offset+limit).
     .limit(offset + limit);
-  if (type === 'lawn') qb = scopeLawn(qb);
+  // Prospect-only for BOTH types (codex GH r1 P2) — a customer's own Photo ID
+  // submission (mode 'customer') must never surface in this lead-magnet
+  // queue, same as an internal tech diagnostic already didn't.
+  qb = scopeProspects(qb);
   if (status && status !== 'all') qb = qb.where(`${config.table}.status`, status);
   const rows = await qb;
   return rows.map((row) => listRowShape(type, row));
@@ -196,7 +203,7 @@ async function funnelCounts(type, sinceDate) {
   // admin-created phone-prospect assessments never saw the teaser → unlock
   // funnel and would skew unlock/booking rates. They're reported separately.
   let qb = db(config.table).where({ source: 'public_funnel' });
-  if (type === 'lawn') qb = scopeLawn(qb);
+  if (type === 'lawn') qb = scopeProspects(qb);
   if (sinceDate) qb = qb.where('created_at', '>=', sinceDate);
   const [counts] = await qb
     .select(
@@ -209,7 +216,7 @@ async function funnelCounts(type, sinceDate) {
   let adminCreated = 0;
   try {
     let adminQb = db(config.table).where({ source: 'admin' });
-    if (type === 'lawn') adminQb = scopeLawn(adminQb);
+    if (type === 'lawn') adminQb = scopeProspects(adminQb);
     if (sinceDate) adminQb = adminQb.where('created_at', '>=', sinceDate);
     const [row] = await adminQb.count('* as n');
     adminCreated = Number(row?.n || 0);
@@ -253,8 +260,11 @@ router.get('/funnel', async (req, res, next) => {
 
 async function loadRow(config, id) {
   if (!UUID_RE.test(String(id || ''))) return null;
+  // Both types (codex GH r1 P2) — a customer's own photo-id row must 404
+  // here too, not just fall out of the list: this is what the relink /
+  // generate-link / send-report actions all load.
   let qb = db(config.table).where({ id });
-  if (config.table === 'lawn_diagnostics') qb = scopeLawn(qb);
+  qb = scopeProspects(qb);
   return qb.first();
 }
 

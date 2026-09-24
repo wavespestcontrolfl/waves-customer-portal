@@ -28,6 +28,13 @@ function matches(row, filters) {
   return Object.keys(filters).every((k) => row[k] === filters[k]);
 }
 
+// Mirrors applyPropertyPredicate's mock above (q.__propertyId set only when
+// the resolved scope is actually scoped) — unset means "no property filter
+// applied", matching every existing (unscoped) test unchanged.
+function propertyMatches(q, row) {
+  return q.__propertyId === undefined || row.property_id === q.__propertyId;
+}
+
 function projectRow(row, cols) {
   if (!cols || !cols.length) return { ...row };
   const out = {};
@@ -49,7 +56,7 @@ function makeQuery(table) {
     limit(n) { limitN = n; return q; },
     select(...cols) {
       selectCols = cols;
-      let rows = (TABLES[table] || []).filter((r) => matches(r, filters));
+      let rows = (TABLES[table] || []).filter((r) => matches(r, filters) && propertyMatches(q, r));
       if (orderCol) {
         rows = [...rows].sort((a, b) => {
           const av = a[orderCol]; const bv = b[orderCol];
@@ -61,7 +68,7 @@ function makeQuery(table) {
       return Promise.resolve(rows.map((r) => projectRow(r, selectCols)));
     },
     first(...cols) {
-      const rows = (TABLES[table] || []).filter((r) => matches(r, filters));
+      const rows = (TABLES[table] || []).filter((r) => matches(r, filters) && propertyMatches(q, r));
       const row = rows[0];
       return Promise.resolve(row ? projectRow(row, cols.length ? cols : null) : undefined);
     },
@@ -87,6 +94,13 @@ const mockIdentifyPest = jest.fn();
 const mockLawnAnalyzePhoto = jest.fn();
 const mockPreviewTreeShrub = jest.fn();
 const mockReserviceAccess = jest.fn(async () => null);
+// Unscoped by default (gate off / single-home) — matches every existing test
+// (property_id stamped null, no read filtering). codex GH r1 P1 tests below
+// override this to exercise the scoped path.
+const mockResolveSessionScope = jest.fn(async () => ({
+  enabled: false, multi: false, scoped: false, closed: false, property: null,
+}));
+const mockApplyPropertyPredicateCalls = [];
 const mockStoreFunnelPhotos = jest.fn(async () => {});
 const mockStoreTreeShrubPhotos = jest.fn(async () => {});
 
@@ -111,6 +125,19 @@ jest.mock('../services/lawn-grass-context', () => ({
   grassTypeLabel: (v) => (v ? String(v).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) : null),
 }));
 jest.mock('../services/reservice-link', () => ({ reserviceStreamlineAccess: (...args) => mockReserviceAccess(...args) }));
+jest.mock('../services/account-properties', () => ({
+  resolveSessionScope: (...args) => mockResolveSessionScope(...args),
+  // Real behavior for the ONE thing these tests need to verify (the row
+  // must match the scoped property), without needing the fake db's simple
+  // .where(cond) to support a knex function-form predicate: apply the
+  // resolved property directly onto our own filter object instead of
+  // building real SQL, and record every call for assertion.
+  applyPropertyPredicate: (qb, scope) => {
+    mockApplyPropertyPredicateCalls.push(scope);
+    if (scope && scope.enabled && scope.scoped && scope.property) qb.__propertyId = scope.property.id;
+    return qb;
+  },
+}));
 jest.mock('../utils/funnel-photos', () => ({
   storeFunnelPhotos: (...args) => mockStoreFunnelPhotos(...args),
   storeTreeShrubCustomerPhotos: (...args) => mockStoreTreeShrubPhotos(...args),
@@ -185,6 +212,10 @@ beforeEach(() => {
   mockScopeCustomerId = `auto-customer-${testCounter}`;
   mockGateState.customerPhotoId = true;
   mockReserviceAccess.mockResolvedValue(null);
+  mockResolveSessionScope.mockResolvedValue({
+    enabled: false, multi: false, scoped: false, closed: false, property: null,
+  });
+  mockApplyPropertyPredicateCalls.length = 0;
   mockIdentifyPest.mockResolvedValue(pestResultFor('ghost-ant'));
   mockLawnAnalyzePhoto.mockResolvedValue({
     composite: {
@@ -303,6 +334,11 @@ describe('POST /api/photo-id/:type happy paths', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.next_step.kind).toBe('unclear');
+      // codex GH r1 P1: the successful photo's healthy scores must not stand
+      // in the result alongside the unclear warning.
+      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.result.signals).toEqual([]);
+      expect(body.result.observations).not.toContain('Looks healthy');
     });
   });
 
@@ -395,6 +431,11 @@ describe('next_step branches', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.next_step.kind).toBe('unclear');
+      // codex GH r1 P1: the benign identification's label/not_a_pest/
+      // recommendation must not stand alongside the unclear warning.
+      expect(body.result.label).toBeNull();
+      expect(body.result.not_a_pest).toBe(false);
+      expect(body.result.recommendation).toBeNull();
     });
   });
 
@@ -417,6 +458,21 @@ describe('next_step branches', () => {
       const res = await post(base, '/api/photo-id/pest', photoBody());
       const body = await res.json();
       expect(body.next_step.kind).toBe('none');
+    });
+  });
+
+  test('pest: moderate-confidence not_a_pest read ("Likely a Lovebug") is still hedged -> unclear, not none', async () => {
+    // codex GH r1 P1 — moderate confidence is hedged but still NAMED
+    // (specificity 'named', "Likely X"), so the generic-only guard alone
+    // never catches it.
+    mockIdentifyPest.mockResolvedValue(pestResultFor('lovebug', 'moderate', false));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      const body = await res.json();
+      expect(body.result.hedged).toBe(true);
+      expect(body.result.not_a_pest).toBe(true);
+      expect(body.next_step.kind).toBe('unclear');
+      expect(body.next_step.title).not.toMatch(/nothing to worry about/i);
     });
   });
 
@@ -482,8 +538,10 @@ describe('next_step branches', () => {
     });
   });
 
-  test('tree_shrub: one photo failing to score forces unclear even with a usable overall score', async () => {
-    // codex r3 P1 — scoredCount < photoCount must not read as a complete result.
+  test('tree_shrub: one photo failing to score forces unclear AND suppresses the successful subset\'s scores', async () => {
+    // codex r3 P1 — scoredCount < photoCount must not read as a complete
+    // next_step. codex GH r1 P1 — it must not leave the successful subset's
+    // healthy-looking scores standing in the result either.
     mockReserviceAccess.mockResolvedValue({ token: 'tok-y', lanes: ['lawn'] }); // would otherwise win as 'reservice'
     mockPreviewTreeShrub.mockResolvedValue({
       scores: {
@@ -498,7 +556,31 @@ describe('next_step branches', () => {
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
       const body = await res.json();
-      expect(body.result.scores.overall).toBe(85);
+      expect(body.result.scores.overall).toBeNull();
+      expect(body.result.signals).toEqual([]);
+      expect(body.next_step.kind).toBe('unclear');
+    });
+  });
+
+  test('tree_shrub: a valid-JSON response missing severity data ("synthesized" healthy scores) reads unclear, not healthy', async () => {
+    // codex GH r1 P1 — toCategoryScores defaults a MISSING severity field to
+    // 'none' (95), so an all-photos-"succeeded" batch with no real evidence
+    // still produces a non-null, healthy-looking overallScore. Only
+    // foliageFullness/leafColorVigor stay genuinely null with no evidence.
+    mockPreviewTreeShrub.mockResolvedValue({
+      scores: {
+        foliageFullness: null, leafColorVigor: null, pestActivity: 95, diseaseLeafSpot: 95, waterHeatStress: 95, overallScore: 95,
+      },
+      observations: '',
+      aiSummary: 'No urgent visible plant issues found.',
+      findings: [],
+      scoredCount: 1,
+      photoCount: 1,
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
+      const body = await res.json();
+      expect(body.result.scores.overall).toBeNull();
       expect(body.next_step.kind).toBe('unclear');
     });
   });
@@ -623,6 +705,50 @@ describe('GET /api/photo-id', () => {
       const res = await fetch(`${base}/api/photo-id`, { headers: { 'x-test-customer-id': CUSTOMER_ID } });
       const body = await res.json();
       expect(body.items).toHaveLength(0);
+    });
+  });
+});
+
+// ── Property scope (codex GH r1 P1) ──────────────────────────────────────
+describe('property scope (GATE_APP_PROPERTY_SCOPE)', () => {
+  test('POST stamps property_id from the resolved session scope', async () => {
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-1', is_primary: false },
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(200);
+      expect(TABLES.pest_identifications[0].property_id).toBe('prop-1');
+    });
+  });
+
+  test('POST stamps property_id null when unscoped (gate off / single home)', async () => {
+    await withServer(async (base) => {
+      await post(base, '/api/photo-id/lawn', photoBody());
+      expect(TABLES.lawn_diagnostics[0].property_id).toBeNull();
+    });
+  });
+
+  test('GET / applies the property predicate to all three type queries', async () => {
+    await withServer(async (base) => {
+      await fetch(`${base}/api/photo-id`);
+      expect(mockApplyPropertyPredicateCalls.length).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  test('GET /:type/:id 404s a row scoped to a DIFFERENT property than the one currently selected', async () => {
+    // Row was written while scoped to prop-1...
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-1', is_primary: false },
+    });
+    const created = await withServer((base) => post(base, '/api/photo-id/pest', photoBody()).then((r) => r.json()));
+    // ...customer switches the selected property to prop-2 before reading it back.
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-2', is_primary: false },
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/photo-id/pest/${created.id}`);
+      expect(res.status).toBe(404);
     });
   });
 });

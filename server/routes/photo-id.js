@@ -51,6 +51,7 @@ const {
 } = require('../services/tree-shrub-assessment');
 const { storeFunnelPhotos, storeTreeShrubCustomerPhotos } = require('../utils/funnel-photos');
 const { reserviceStreamlineAccess } = require('../services/reservice-link');
+const { resolveSessionScope, applyPropertyPredicate } = require('../services/account-properties');
 const { etDateString } = require('../utils/datetime-et');
 
 const OFFICE_PHONE = '(941) 297-5749';
@@ -87,8 +88,18 @@ const perCustomerLimiter = rateLimit({
 });
 
 // Shared daily vision-spend ceiling across every customer and every type —
-// same rationale and skip-outside-prod posture as index.js's
-// photoAssessmentDailyLimiter for the public funnels.
+// same MECHANISM (express-rate-limit, skip-outside-prod, a shared-bucket
+// keyGenerator) as index.js's photoAssessmentDailyLimiter for the public
+// funnels, but deliberately a SEPARATE budget/store (AGENTS.md "extend the
+// existing mechanism" — documented here per that rule's own escape hatch,
+// codex GH r1 P1): photoAssessmentDailyLimiter's cap is sized for
+// anonymous, unauthenticated MARKETING lead-magnet spend (public/
+// lawn-assessment, public/pest-identifier) — a spend class the business
+// treats as ad budget. This route is a value-add for EXISTING signed-in
+// customers; folding it into the same 40/day marketing bucket would let a
+// slow lead-magnet day 429 real customers using their own feature, and a
+// busy customer day would silently starve the public funnels' ad spend.
+// Same mechanism, same posture, independently sized/tuned budget.
 const sharedDailyLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000,
   max: Number(process.env.PHOTO_ID_DAILY_MAX) || 200,
@@ -170,6 +181,25 @@ function prefillFor(type, { location, note } = {}) {
   return { category: REQUEST_CATEGORY[type], location: location || null, note: note || null };
 }
 
+// codex GH r1 P1: honor the customer's selected saved property (portal
+// multi-property model, GATE_APP_PROPERTY_SCOPE) the same way every other
+// property-aware read does — resolveSessionScope / applyPropertyPredicate
+// are the ONE rule (services/account-properties.js). Gate off, or a
+// single-home customer, or the lookup failing: resolves to the unscoped
+// default (today's customer-wide behavior), never a 500 or a wrong-property
+// leak — a lookup failure fails toward the SAME customer-wide reading
+// everyone already gets pre-scoping, not toward any other customer's data.
+async function resolvePropertyScope(req) {
+  try {
+    return await resolveSessionScope(req);
+  } catch (err) {
+    logger.warn(`[photo-id] property scope resolution failed: ${err.message}`);
+    return {
+      customerId: req.customerId, enabled: false, multi: false, scoped: false, closed: false, property: null,
+    };
+  }
+}
+
 // ── Pest ─────────────────────────────────────────────────────────────────
 
 function pestPublicResult(contract) {
@@ -185,6 +215,31 @@ function pestPublicResult(contract) {
     about: publicReport.about,
     recommendation: publicReport.recommendation,
   };
+}
+
+// codex GH r1 P1: when any submitted photo failed to contribute (`partial`),
+// the response must not still carry the successfully-scored subset's
+// confident/reassuring content (a benign label, `not_a_pest: true`, a
+// recommendation) alongside the `unclear` next_step — the two would
+// contradict each other. This neutral, allowlisted placeholder replaces the
+// whole result whenever partial is true, in the POST response AND on every
+// later GET read of the same row (partial is persisted).
+const PEST_PARTIAL_RESULT = {
+  label: null,
+  hedged: true,
+  confidence: 'low',
+  category: 'other',
+  not_a_pest: false,
+  urgency: 'low',
+  safety: {
+    stinging: false, venomous: false, disease_vector: false, structural_threat: false,
+  },
+  about: "We couldn't get a clear enough read from all of your photos to say anything for certain.",
+  recommendation: null,
+};
+
+function pestResultForResponse(pestResult, partial) {
+  return partial ? PEST_PARTIAL_RESULT : pestResult;
 }
 
 // Order matters (codex r1 P1): a contested or low-confidence "not a pest"
@@ -210,7 +265,11 @@ function pestNextStepKind(result, idLabel, lane, access, partial) {
   if (result.recommendation && result.recommendation.inspection_required) return 'inspection';
   if (partial) return 'unclear';
   if (idLabel.hedged && idLabel.specificity === 'generic') return 'unclear';
-  if (result.not_a_pest) return 'none';
+  // codex GH r1 P1: a MODERATE-confidence not_a_pest call is hedged ("Likely
+  // a Lovebug") but still NAMED (specificity 'named'), so the generic-only
+  // guard above never catches it — only an unhedged, high-confidence call
+  // may read as the reassuring 'none'.
+  if (result.not_a_pest) return idLabel.hedged ? 'unclear' : 'none';
   return laneOutcomeKind(lane, access);
 }
 
@@ -219,7 +278,7 @@ function pestReserviceLane(contract) {
   return line === 'pest' || line === 'lawn' ? line : null;
 }
 
-async function handlePest(req, res, { note, location }) {
+async function handlePest(req, res, { note, location, propertyId }) {
   const photoInputs = req._photoInputs;
   const result = await identifyPest(photoInputs);
   if (!result.ok) {
@@ -233,6 +292,7 @@ async function handlePest(req, res, { note, location }) {
     status: 'analyzed',
     source: 'portal',
     customer_id: req.customer.id,
+    property_id: propertyId,
     ai_analysis: JSON.stringify({
       customer_note: note,
       partial,
@@ -272,7 +332,7 @@ async function handlePest(req, res, { note, location }) {
   });
 
   return res.status(200).json({
-    id: row.id, type: 'pest', created_at: row.created_at, result: pestResult, next_step: nextStep,
+    id: row.id, type: 'pest', created_at: row.created_at, result: pestResultForResponse(pestResult, partial), next_step: nextStep,
   });
 }
 
@@ -367,7 +427,22 @@ function lawnPublicResult(merged) {
   };
 }
 
-async function handleLawn(req, res, { note, location }) {
+// codex GH r1 P1 — same partial-suppression rule as pest: a failed photo
+// must not leave the successful subset's (possibly all-healthy) scores and
+// "No urgent lawn issues" copy standing next to the `unclear` next_step.
+const LAWN_PARTIAL_RESULT = {
+  grass_type: null,
+  scores: { turf_density: null, weed_coverage: null, color_health: null },
+  signals: [],
+  overwatering_signal: false,
+  observations: "We couldn't analyze every photo you sent — send these to our team and we'll take a personal look.",
+};
+
+function lawnResultForResponse(lawnResult, partial) {
+  return partial ? LAWN_PARTIAL_RESULT : lawnResult;
+}
+
+async function handleLawn(req, res, { note, location, propertyId }) {
   const photoInputs = req._photoInputs;
   const grassContext = await loadCustomerGrassContext(req.customer.id).catch(() => null);
   const context = grassContext
@@ -395,6 +470,7 @@ async function handleLawn(req, res, { note, location }) {
     status: 'analyzed',
     source: 'portal',
     customer_id: req.customer.id,
+    property_id: propertyId,
     ai_analysis: JSON.stringify({ customer_note: note, composite: merged, partial }),
     report_contract: JSON.stringify({ contract_version: 'lawn_photo_id_v1', result: lawnResult, partial }),
     ai_summary: lawnResult.observations ? String(lawnResult.observations).slice(0, 2000) : null,
@@ -419,13 +495,25 @@ async function handleLawn(req, res, { note, location }) {
   });
 
   return res.status(200).json({
-    id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResult, next_step: nextStep,
+    id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResultForResponse(lawnResult, partial), next_step: nextStep,
   });
+}
+
+// codex GH r1 P1 — same partial/unreliable suppression as pest and lawn.
+const TREE_PARTIAL_RESULT = {
+  plant_groups: [],
+  scores: { foliage_fullness: null, leaf_color_vigor: null, overall: null },
+  signals: [],
+  summary: "We couldn't get a reliable read from these photos — send them to our team and we'll take a personal look.",
+};
+
+function treeResultForResponse(treeResult, unreliable) {
+  return unreliable ? TREE_PARTIAL_RESULT : treeResult;
 }
 
 // ── Tree & shrub ─────────────────────────────────────────────────────────
 
-async function handleTreeShrub(req, res, { note, location }) {
+async function handleTreeShrub(req, res, { note, location, propertyId }) {
   const photoInputs = req._photoInputs;
   const preview = await previewTreeShrubAssessment({
     photos: photoInputs,
@@ -441,14 +529,29 @@ async function handleTreeShrub(req, res, { note, location }) {
   // must not let the successfully-scored subset present as a complete read.
   const partial = preview.scoredCount != null && preview.photoCount != null
     && preview.scoredCount < preview.photoCount;
+  // codex GH r1 P1: toCategoryScores normalizes a MISSING severity field to
+  // 'none' (the healthiest reading) rather than null, so a vision response
+  // that's valid JSON but omits pest/disease/water-heat entirely still
+  // produces three scores of 95 and a healthy-looking overallScore — the
+  // `overall == null` check below can never catch this (those three fields
+  // are never actually null). foliageFullness/leafColorVigor are the only
+  // two fields toCategoryScores leaves genuinely null when absent (no
+  // synthetic default exists for them), so both being null is the signal
+  // that this response carried little to no real evidence.
+  const synthesized = preview.scores?.foliageFullness == null && preview.scores?.leafColorVigor == null;
+  const unreliable = partial || synthesized;
 
   const [row] = await db('tree_shrub_assessments').insert({
     customer_id: req.customer.id,
+    property_id: propertyId,
     service_date: etDateString(),
     source: 'portal',
     mode: 'customer',
     composite_scores: JSON.stringify({
-      ...(preview.scores || {}), scored_count: preview.scoredCount ?? null, photo_count: preview.photoCount ?? null,
+      ...(preview.scores || {}),
+      scored_count: preview.scoredCount ?? null,
+      photo_count: preview.photoCount ?? null,
+      unreliable,
     }),
     foliage_fullness: preview.scores?.foliageFullness ?? null,
     leaf_color_vigor: preview.scores?.leafColorVigor ?? null,
@@ -476,14 +579,14 @@ async function handleTreeShrub(req, res, { note, location }) {
   // explicitly excludes it from both 'pest' and 'lawn' — codex r5 P1) — a
   // null lane always resolves to 'request', whatever the customer's plan
   // covers.
-  const kind = (noUsableScores || partial) ? 'unclear' : laneOutcomeKind(null, access);
+  const kind = (noUsableScores || unreliable) ? 'unclear' : laneOutcomeKind(null, access);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('tree_shrub', { location, note }),
   });
 
   return res.status(200).json({
-    id: row.id, type: 'tree_shrub', created_at: row.created_at, result: treeResult, next_step: nextStep,
+    id: row.id, type: 'tree_shrub', created_at: row.created_at, result: treeResultForResponse(treeResult, unreliable), next_step: nextStep,
   });
 }
 
@@ -516,7 +619,12 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
     if (!photoInputs.length) return res.status(400).json({ error: 'Photos could not be read.' });
     req._photoInputs = photoInputs;
 
-    return await handler(req, res, { note, location });
+    const scope = await resolvePropertyScope(req);
+    const propertyId = scope.scoped && scope.property ? scope.property.id : null;
+
+    return await handler(req, res, {
+      note, location, propertyId,
+    });
   } catch (err) {
     return next(err);
   }
@@ -558,13 +666,17 @@ function lawnNextStepKindFromRow(row, access) {
   return (noScores || contract.partial) ? 'unclear' : laneOutcomeKind('lawn', access);
 }
 
-function treeShrubIsPartial(row) {
+// True for a partial photo batch OR a "synthesized" (little-to-no real
+// evidence) read — see handleTreeShrub's `unreliable` computation, persisted
+// here so a later GET reconstructs the exact same classification.
+function treeShrubIsUnreliable(row) {
   const meta = parseJsonSafe(row.composite_scores);
+  if (meta.unreliable === true) return true;
   return meta.scored_count != null && meta.photo_count != null && meta.scored_count < meta.photo_count;
 }
 
 function treeNextStepKindFromRow(row, access) {
-  if (row.overall_score == null || treeShrubIsPartial(row)) return 'unclear';
+  if (row.overall_score == null || treeShrubIsUnreliable(row)) return 'unclear';
   return laneOutcomeKind(null, access); // tree & shrub is never reservice-eligible — see handleTreeShrub
 }
 
@@ -572,13 +684,17 @@ function treeNextStepKindFromRow(row, access) {
 router.get('/', async (req, res, next) => {
   try {
     const customerId = req.customer.id;
+    const scope = await resolvePropertyScope(req);
+    const pestQuery = db('pest_identifications').where({ customer_id: customerId, mode: 'customer' });
+    const lawnQuery = db('lawn_diagnostics').where({ customer_id: customerId, mode: 'customer' });
+    const treeQuery = db('tree_shrub_assessments').where({ customer_id: customerId, mode: 'customer' });
+    applyPropertyPredicate(pestQuery, scope, 'pest_identifications');
+    applyPropertyPredicate(lawnQuery, scope, 'lawn_diagnostics');
+    applyPropertyPredicate(treeQuery, scope, 'tree_shrub_assessments');
     const [pestRows, lawnRows, treeRows] = await Promise.all([
-      db('pest_identifications').where({ customer_id: customerId, mode: 'customer' })
-        .orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract', 'ai_analysis'),
-      db('lawn_diagnostics').where({ customer_id: customerId, mode: 'customer' })
-        .orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract'),
-      db('tree_shrub_assessments').where({ customer_id: customerId, mode: 'customer' })
-        .orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'overall_score', 'composite_scores'),
+      pestQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract', 'ai_analysis'),
+      lawnQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract'),
+      treeQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'overall_score', 'composite_scores'),
     ]);
 
     const access = await reserviceStreamlineAccess(customerId);
@@ -611,7 +727,10 @@ router.get('/:type/:id', async (req, res, next) => {
     const table = TYPE_TABLE[type];
     if (!table || !UUID_RE.test(String(id || ''))) return res.status(404).json({ error: 'Not found' });
 
-    const row = await db(table).where({ id, customer_id: req.customer.id, mode: 'customer' }).first();
+    const scope = await resolvePropertyScope(req);
+    const rowQuery = db(table).where({ id, customer_id: req.customer.id, mode: 'customer' });
+    applyPropertyPredicate(rowQuery, scope, table);
+    const row = await rowQuery.first();
     if (!row) return res.status(404).json({ error: 'Not found' });
 
     const access = await reserviceStreamlineAccess(req.customer.id);
@@ -627,20 +746,21 @@ router.get('/:type/:id', async (req, res, next) => {
         prefill: prefillFor('pest', { location: row.location, note: row.note }),
       });
       return res.status(200).json({
-        id: row.id, type: 'pest', created_at: row.created_at, result: pestResult, next_step: nextStep,
+        id: row.id, type: 'pest', created_at: row.created_at, result: pestResultForResponse(pestResult, partial), next_step: nextStep,
       });
     }
 
     if (type === 'lawn') {
       const contract = parseJsonSafe(row.report_contract);
       const lawnResult = contract.result || lawnPublicResult({});
+      const lawnPartial = !!contract.partial;
       const kind = lawnNextStepKindFromRow(row, access);
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
         prefill: prefillFor('lawn', { location: row.location, note: row.note }),
       });
       return res.status(200).json({
-        id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResult, next_step: nextStep,
+        id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResultForResponse(lawnResult, lawnPartial), next_step: nextStep,
       });
     }
 
@@ -657,7 +777,7 @@ router.get('/:type/:id', async (req, res, next) => {
       prefill: prefillFor('tree_shrub', { location: row.location, note: row.note }),
     });
     return res.status(200).json({
-      id: row.id, type: 'tree_shrub', created_at: row.created_at, result: treeResult, next_step: nextStep,
+      id: row.id, type: 'tree_shrub', created_at: row.created_at, result: treeResultForResponse(treeResult, treeShrubIsUnreliable(row)), next_step: nextStep,
     });
   } catch (err) {
     return next(err);

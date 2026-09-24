@@ -17,7 +17,9 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const jwt = require('jsonwebtoken');
-const { requireStaffTokenForLargeBody, STAFF_LARGE_BODY_AUTH_MIN } = require('../middleware/large-body-auth');
+const {
+  requireStaffTokenForLargeBody, requireCustomerTokenForLargeBody, STAFF_LARGE_BODY_AUTH_MIN,
+} = require('../middleware/large-body-auth');
 
 function run(headers = {}) {
   const req = { headers };
@@ -29,6 +31,19 @@ function run(headers = {}) {
     json(payload) { body = payload; return this; },
   };
   requireStaffTokenForLargeBody(req, res, () => { nexted = true; });
+  return { status, body, nexted };
+}
+
+function runCustomer(headers = {}) {
+  const req = { headers };
+  let status = null;
+  let body = null;
+  let nexted = false;
+  const res = {
+    status(code) { status = code; return this; },
+    json(payload) { body = payload; return this; },
+  };
+  requireCustomerTokenForLargeBody(req, res, () => { nexted = true; });
   return { status, body, nexted };
 }
 
@@ -75,5 +90,57 @@ describe('requireStaffTokenForLargeBody', () => {
     expect(run({ 'content-length': LARGE, authorization: 'Bearer garbage' }).status).toBe(401);
     expect(run({ 'content-length': LARGE, authorization: `Bearer ${wrongSecret}` }).status).toBe(401);
     expect(run({ 'content-length': LARGE, authorization: `Bearer ${expired}` }).status).toBe(401);
+  });
+});
+
+/**
+ * codex GH r1 P1 on PR #4752: server/routes/photo-id.js's 30 MB parser ran
+ * before the router's own `authenticate`, so an anonymous caller could force
+ * a 30 MB parse even while GATE_CUSTOMER_PHOTO_ID is off. Same guard
+ * pattern as the staff one above, for a CUSTOMER access token instead
+ * (customer tokens carry no `type`/`tokenVersion` claim at all — only a
+ * `type: 'refresh'` token does).
+ */
+describe('requireCustomerTokenForLargeBody', () => {
+  const customerToken = (extra = {}) => jwt.sign({ customerId: 'cust-1', ...extra }, 'test-secret');
+
+  test('bodiless and small requests pass with no auth', () => {
+    expect(runCustomer({}).nexted).toBe(true);
+    expect(runCustomer({ 'content-length': String(500 * 1024) }).nexted).toBe(true);
+  });
+
+  test('large body with no token is rejected before parsing', () => {
+    const r = runCustomer({ 'content-length': LARGE });
+    expect(r.nexted).toBe(false);
+    expect(r.status).toBe(401);
+    expect(r.body).toEqual({ error: 'Authentication required' });
+  });
+
+  test('chunked/unknown-length body without a token is rejected (no Content-Length bypass)', () => {
+    expect(runCustomer({ 'transfer-encoding': 'chunked' }).status).toBe(401);
+  });
+
+  test('large body with a valid customer token passes to the parser', () => {
+    const r = runCustomer({ 'content-length': LARGE, authorization: `Bearer ${customerToken()}` });
+    expect(r.nexted).toBe(true);
+    expect(r.status).toBeNull();
+  });
+
+  test('a refresh token is rejected — access only', () => {
+    const refresh = jwt.sign({ customerId: 'cust-1', type: 'refresh' }, 'test-secret');
+    expect(runCustomer({ 'content-length': LARGE, authorization: `Bearer ${refresh}` }).status).toBe(401);
+  });
+
+  test('a token with no customerId claim is rejected (e.g. a staff token)', () => {
+    const staff = jwt.sign({ technicianId: 't1', type: 'access', tokenVersion: 1 }, 'test-secret');
+    expect(runCustomer({ 'content-length': LARGE, authorization: `Bearer ${staff}` }).status).toBe(401);
+  });
+
+  test('forged, wrong-secret, and expired tokens are rejected', () => {
+    const wrongSecret = jwt.sign({ customerId: 'cust-1' }, 'other-secret');
+    const expired = jwt.sign({ customerId: 'cust-1' }, 'test-secret', { expiresIn: -10 });
+    expect(runCustomer({ 'content-length': LARGE, authorization: 'Bearer garbage' }).status).toBe(401);
+    expect(runCustomer({ 'content-length': LARGE, authorization: `Bearer ${wrongSecret}` }).status).toBe(401);
+    expect(runCustomer({ 'content-length': LARGE, authorization: `Bearer ${expired}` }).status).toBe(401);
   });
 });
