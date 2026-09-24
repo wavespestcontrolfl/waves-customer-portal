@@ -555,7 +555,9 @@ function suppliedAddressFields(suppliedAddress) {
 
 // The linked customer's stored coordinates as a resolution, or null.
 function storedCoordsResolution(custRow) {
-  if (custRow?.latitude == null || custRow?.longitude == null) return null;
+  // Coordinates without street text are not a usable service address
+  // (Codex #4737 r13 P1): the visit's dispatch address is read from it.
+  if (custRow?.latitude == null || custRow?.longitude == null || !String(custRow.address_line1 || '').trim()) return null;
   return {
     location: { lat: parseFloat(custRow.latitude), lng: parseFloat(custRow.longitude) },
     address: {
@@ -805,6 +807,11 @@ async function mergedProspectHoldsAssessment(dbConn, lead) {
 }
 
 async function resolveEligibility(dbConn, lead, custRow, { includeRescheduleUrl = true } = {}) {
+  // A lead staff closed (disqualified, spam, duplicate, lost) is gone —
+  // checked FIRST, before any customer visit is read or returned (Codex
+  // #4737 r12 pre-push P1 + r13 P0). A converted lead is not "closed" here:
+  // its converted state (and visit) is still the lead's own answer.
+  if (!lead.converted_at && !isOpenLeadRow(lead)) return { state: 'gone', visit: null, rescheduleUrl: null };
   if (custRow) {
     const openAssessment = await findOpenVisit(dbConn, custRow.id, { assessmentOnly: true });
     if (openAssessment) {
@@ -838,10 +845,6 @@ async function resolveEligibility(dbConn, lead, custRow, { includeRescheduleUrl 
       };
     }
   }
-  // A lead staff closed (disqualified, spam, duplicate, lost) no longer
-  // books, even without converted_at (Codex #4737 r12 pre-push P1) — the
-  // same open-lead predicate the link mint uses.
-  if (!isOpenLeadRow(lead)) return { state: 'gone', visit: null, rescheduleUrl: null };
   return { state: 'ok', visit: null, rescheduleUrl: null };
 }
 

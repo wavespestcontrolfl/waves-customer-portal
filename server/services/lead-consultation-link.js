@@ -251,7 +251,10 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
     logger.warn(`[lead-consultation-link] template pre-check failed: ${err.message}`);
     return unavailable('Consultation text template is unavailable');
   }
-  const built = await buildLeadConsultationLink(leadOrId);
+  // The SMS helper mints the phone-bound SMS claim (Codex #4737 r13 P1):
+  // every production text goes through here, so the page can treat the
+  // token's delivery to this phone as verification.
+  const built = await buildLeadConsultationLink(leadOrId, { channel: 'sms' });
   if (!built.url) return built;
   try {
     const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');

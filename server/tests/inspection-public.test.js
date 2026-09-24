@@ -649,6 +649,29 @@ describe('Codex #4737 r11 P2s: availability eligibility; race refresh never at a
 });
 
 describe('Codex #4737 r12 pre-push: closed leads stop; untrusted sibling properties are never reused', () => {
+  // Codex #4737 r13 P0: checked BEFORE any visit is read — a closed lead
+  // whose customer has an open assessment reveals nothing.
+  test('P0: a closed lead with a trusted customer holding an open assessment answers gone, with no visit or reschedule link', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1', status: 'lost' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [
+      { id: 'ss-open', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'open-tok' },
+    ];
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body).toMatchObject({ state: 'gone' });
+    expect(JSON.stringify(res.body)).not.toContain('open-tok');
+    expect(res.body.visit ?? null).toBeNull();
+  });
+
+  // Codex #4737 r13 P1: coordinates without street text are not an address.
+  test('P1: a trusted customer with coordinates but a blank street asks for an address', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '', city: null, state: 'FL', zip: null, latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body).toMatchObject({ state: 'ok', needs_address: true });
+  });
+
   test('P1: a lead staff closed (no converted_at) answers gone and offers no booking', async () => {
     firstResults.leads = { ...LEAD_ROW, status: 'spam' };
     listResults.scheduled_services = [];
@@ -2939,7 +2962,7 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
       activityRows: [{ metadata: JSON.stringify({ customer_id: 'loser-1' }) }],
       openVisitsByCustomer: { 'winner-1': [{ id: 'ss-w', scheduled_date: '2099-01-05', window_start: '09:00', service_type: 'Waves Assessment', reschedule_token: 'w-tok' }] },
     });
-    const eligibility = await resolveEligibility(fakeDb, { id: 'lead-1', phone: '9415551234', converted_at: null }, null);
+    const eligibility = await resolveEligibility(fakeDb, { id: 'lead-1', phone: '9415551234', status: 'new', converted_at: null }, null);
     expect(eligibility).toEqual({ state: 'already_booked', visit: null, rescheduleUrl: null });
   });
 });
