@@ -168,6 +168,41 @@ function excludeUnresolvedSendReservations(query, table = 'sms_log') {
   );
 }
 
+// An accepted reply reservation is itself the durable provider receipt when
+// Twilio's ordinary sms_log insert failed. A cleanup may remove it only after
+// a different, non-reservation row proves the same provider handoff. Prefer
+// exact SID identity; the manual wrapper currently promotes without passing
+// its SID, so its conservative fallback is the same endpoints/body at or after
+// the reservation began. Every candidate needs a real SID.
+function preserveSoleAcceptedReplyReceipts(query) {
+  const nonReservation = SEND_RESERVATION_MARKERS
+    .map(marker => `COALESCE(receipt.metadata->>'${marker}', 'false') <> 'true'`)
+    .join(' AND ');
+  return query.whereRaw(`NOT (
+    sms_log.status IN ('sent', 'delivered')
+    AND COALESCE(sms_log.metadata->>'provider_outcome', '') = 'accepted'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM sms_log receipt
+      WHERE receipt.id <> sms_log.id
+        AND receipt.direction = 'outbound'
+        AND receipt.status IN ('queued', 'sent', 'delivered')
+        AND receipt.twilio_sid ~ '^SM[0-9A-Fa-f]{32}$'
+        AND ${nonReservation}
+        AND (
+          (sms_log.twilio_sid IS NOT NULL AND receipt.twilio_sid = sms_log.twilio_sid)
+          OR (
+            sms_log.twilio_sid IS NULL
+            AND receipt.from_phone = sms_log.from_phone
+            AND receipt.to_phone = sms_log.to_phone
+            AND receipt.message_body IS NOT DISTINCT FROM sms_log.message_body
+            AND receipt.created_at >= sms_log.created_at
+          )
+        )
+    )
+  )`);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Lifecycle: create / release / promote a review-ask reservation.
 //
@@ -407,6 +442,7 @@ module.exports = {
   isUnresolvedReviewAskReservation,
   isUnresolvedSendReservation,
   excludeUnresolvedSendReservations,
+  preserveSoleAcceptedReplyReceipts,
   SEND_RESERVATION_MARKERS,
   REPLY_RESERVATION_HOLD_HOURS,
   REVIEW_ASK_RESERVATION_HOLD_HOURS,

@@ -85,6 +85,18 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     return id;
   }
 
+  async function acceptedReservation({ kind, body, providerMessageId = null }) {
+    const id = await suggest.createReplyHoldingReservation(trx, {
+      to: '+12025550101', fromNumber: '+19413529161', body,
+      reservationKind: kind, uncertain: true,
+    });
+    expect(await suggest.settleReplyHoldingReservation({
+      reservationId: id,
+      acceptedResult: providerMessageId ? { providerMessageId } : {},
+    })).toBe(true);
+    return id;
+  }
+
   test.each([
     ['ordinary unmarked uncertainty keeps the old 30-minute cleanup behavior', 31, false, 1, false],
     ['wrapper uncertainty survives cleanup inside the 24-hour retry hold', 31, true, 0, true],
@@ -96,6 +108,78 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
       .toMatchObject({ reservationsCleared });
     const row = await trx('sms_log').where({ id: reservationId }).first('id');
     expect(Boolean(row)).toBe(survives);
+  });
+
+  test('a sent reservation without accepted provider evidence remains cleanup eligible', async () => {
+    const reservationId = await noCardManualReservation({ ageMinutes: 31, wrapper: false });
+    await trx('sms_log').where({ id: reservationId }).update({ status: 'sent' });
+
+    expect(await autoSend.reconcileAutoSendClaims({ orphanMinutes: 30 }))
+      .toMatchObject({ reservationsCleared: 1 });
+    expect(await trx('sms_log').where({ id: reservationId }).first('id')).toBeUndefined();
+  });
+
+  test.each([
+    ['manual acceptance without a copied SID', 'manual', null],
+    ['auto-send acceptance with an exact SID', 'auto', `SM${'a'.repeat(32)}`],
+  ])('sole %s survives explicit cleanup and the sweep past 24 hours', async (_label, kind, providerMessageId) => {
+    const reservationId = await acceptedReservation({
+      kind, providerMessageId, body: `Sole accepted receipt ${kind}`,
+    });
+
+    await suggest.settleReplyHoldingReservation({ reservationId });
+    expect(await trx('sms_log').where({ id: reservationId }).first('status', 'twilio_sid'))
+      .toMatchObject({ status: 'sent', twilio_sid: providerMessageId });
+
+    const agedAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    await trx('sms_log').where({ id: reservationId }).update({ created_at: agedAt, updated_at: agedAt });
+    expect(await autoSend.reconcileAutoSendClaims({ orphanMinutes: 30, uncertainReconciliationHours: 1 }))
+      .toMatchObject({ reservationsCleared: 0 });
+    expect(await trx('sms_log').where({ id: reservationId }).first('status'))
+      .toMatchObject({ status: 'sent' });
+  });
+
+  test.each([
+    ['exact provider SID', 'auto', `SM${'b'.repeat(32)}`],
+    ['post-reservation endpoint/body fallback', 'manual', null],
+  ])('%s lets explicit cleanup remove only the duplicate reservation', async (_label, kind, reservationSid) => {
+    const body = `Ordinary provider receipt ${kind}`;
+    const reservationId = await suggest.createReplyHoldingReservation(trx, {
+      to: '+12025550101', fromNumber: '+19413529161', body,
+      reservationKind: kind, uncertain: true,
+    });
+    const reservation = await trx('sms_log').where({ id: reservationId }).first('created_at');
+    const providerId = randomUUID();
+    const providerSid = reservationSid || `SM${randomUUID().replaceAll('-', '')}`;
+    await trx('sms_log').insert({
+      id: providerId, direction: 'outbound', from_phone: '+19413529161', to_phone: '+12025550101',
+      message_body: body, twilio_sid: providerSid, status: 'sent', message_type: kind === 'auto' ? 'ai_autosent' : 'manual',
+      created_at: new Date(new Date(reservation.created_at).getTime() + 1000), metadata: {},
+    });
+    expect(await suggest.settleReplyHoldingReservation({
+      reservationId,
+      acceptedResult: reservationSid ? { providerMessageId: reservationSid } : {},
+    })).toBe(true);
+
+    await suggest.settleReplyHoldingReservation({ reservationId });
+    expect(await trx('sms_log').where({ id: reservationId }).first('id')).toBeUndefined();
+    expect(await trx('sms_log').where({ id: providerId }).first('twilio_sid'))
+      .toMatchObject({ twilio_sid: providerSid });
+  });
+
+  test('a suppression sentinel cannot replace a sole accepted receipt', async () => {
+    const body = 'Accepted provider receipt';
+    const reservationId = await acceptedReservation({ kind: 'manual', body });
+    const reservation = await trx('sms_log').where({ id: reservationId }).first('created_at');
+    await trx('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: '+19413529161', to_phone: '+12025550101',
+      message_body: body, twilio_sid: 'gate-blocked', status: 'sent', message_type: 'manual',
+      created_at: new Date(new Date(reservation.created_at).getTime() + 1000), metadata: {},
+    });
+
+    await suggest.settleReplyHoldingReservation({ reservationId });
+    expect(await trx('sms_log').where({ id: reservationId }).first('status'))
+      .toMatchObject({ status: 'sent' });
   });
 
   test('manual returned/thrown uncertainty survives both sweeps, then sent evidence settles used and parked decisions', async () => {
@@ -186,7 +270,8 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
 
     expect(await trx('agent_decisions').where({ id: used.id }).first('status')).toMatchObject({ status: autoSend.SENT_STATUS });
     expect(await trx('agent_decisions').where({ id: parked.id }).first('status')).toMatchObject({ status: 'ignored' });
-    expect(await trx('sms_log').where({ id: reservationId }).first('id')).toBeUndefined();
+    expect(await trx('sms_log').where({ id: reservationId }).first('status', 'twilio_sid'))
+      .toMatchObject({ status: 'sent', twilio_sid: `SM${'a'.repeat(32)}` });
   });
 
   async function reviewReservation({ createdAt, status = 'sending' }) {

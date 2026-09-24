@@ -33,7 +33,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { REPLY_RESERVATION_HOLD_HOURS } = require('./messaging/review-ask-reservation');
+const {
+  REPLY_RESERVATION_HOLD_HOURS,
+  preserveSoleAcceptedReplyReceipts,
+} = require('./messaging/review-ask-reservation');
 const { phoneIdentityKey } = require('../utils/phone');
 const { phoneIdentitySql } = require('./sms-response-policy');
 
@@ -778,7 +781,9 @@ async function settleReplyHoldingReservation({ reservationId, uncertain = false,
         });
       return updated > 0;
     }
-    await db('sms_log').where({ id: reservationId }).del();
+    await preserveSoleAcceptedReplyReceipts(
+      db('sms_log').where({ id: reservationId })
+    ).del();
     return true;
   } catch (err) {
     // Recovery keeps a linked reservation while its decisions remain held and
