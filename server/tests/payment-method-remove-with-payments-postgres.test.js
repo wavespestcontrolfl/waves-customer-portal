@@ -31,6 +31,18 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
   });
   afterAll(async () => { await db.destroy(); });
 
+  test('the snapshot trigger is installed by a migration that sorts before the SET NULL flip (GH codex r6 P2)', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    const files = fs.readdirSync(path.join(__dirname, '../models/migrations')).sort();
+    const guard = files.indexOf('20260924000019_payments_method_snapshot_before_set_null.js');
+    const flip = files.indexOf('20260924000021_payments_payment_method_set_null.js');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(flip);
+    const { rows } = await db.raw(`SELECT 1 FROM pg_trigger WHERE tgname = 'payment_methods_snapshot_before_delete'`);
+    expect(rows).toHaveLength(1);
+  });
+
   test('payments_payment_method_id_foreign is ON DELETE SET NULL', async () => {
     const { rows } = await db.raw(`
       SELECT pg_get_constraintdef(oid) AS def
