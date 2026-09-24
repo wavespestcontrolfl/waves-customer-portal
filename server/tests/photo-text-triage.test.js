@@ -18,6 +18,7 @@ function resetState() {
     inserts: {},
     updates: [],
     pendingWhere: [],
+    raws: [],
   });
 }
 resetState();
@@ -67,7 +68,7 @@ mockDb.fn = { now: () => 'NOW' };
 mockDb.raw = jest.fn(async () => ({}));
 mockDb.transaction = jest.fn(async (fn) => {
   const trx = (table) => mockQuery(table);
-  trx.raw = jest.fn(async () => ({}));
+  trx.raw = jest.fn(async (sql, bindings) => { mockState.raws.push([sql, bindings]); return {}; });
   return fn(trx);
 });
 
@@ -259,8 +260,13 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
     const result = await triageInboundPhotoText(input());
     expect(result).toEqual({ status: 'drafted', draftId: 'draft-1', assessmentId: 'assess-1', type: 'lawn' });
 
-    // Claim stamped the inbound message before the vision call.
+    // Claim stamped the inbound message before the vision call (under the
+    // global cap lock); the draft parked under the per-contact lock.
     expect(mockState.updates).toEqual([{ table: 'messages', patch: { photo_triage_at: 'NOW' } }]);
+    expect(mockState.raws.map(([, bindings]) => bindings)).toEqual([
+      ['photo_triage_daily_cap'],
+      ['photo_triage_contact', '2025550101'],
+    ]);
     // S3 fetch of THIS message's own key, then the lawn ladder.
     expect(mockGetPhotoBuffer).toHaveBeenCalledWith(INBOUND_KEY);
     expect(mockLadder).toHaveBeenCalledTimes(1);

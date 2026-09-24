@@ -129,3 +129,64 @@ postgres('photo-text triage guards on PostgreSQL', () => {
     await expect(triage.isOptedOut('+12025550101', null)).resolves.toBe(false);
   });
 });
+
+// Committed (not rollback-scoped) tables so two pooled connections can race
+// the way two webhook deliveries would; the schema is dropped afterwards.
+postgres('photo-text triage draft parking under concurrency', () => {
+  const knex = require('knex');
+  let schema;
+  let pooled;
+
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    const local = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!local && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    schema = `photo_triage_race_${randomUUID().replaceAll('-', '')}`;
+    const admin = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    await admin.raw('CREATE SCHEMA ??', [schema]);
+    for (const table of ['message_drafts', 'sms_log']) {
+      await admin.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
+    }
+    // Widen the check→commit window so an unlocked check-then-insert would
+    // deterministically double-park (verified by removing the lock).
+    await admin.raw(`CREATE FUNCTION ??.slow_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN PERFORM pg_sleep(0.3); RETURN NEW; END $$`, [schema]);
+    await admin.raw('CREATE TRIGGER slow_insert BEFORE INSERT ON ??.message_drafts FOR EACH ROW EXECUTE FUNCTION ??.slow_insert()', [schema, schema]);
+    await admin.destroy();
+    pooled = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema, 'public'], pool: { min: 0, max: 4 } });
+    db.connection = pooled;
+  });
+
+  afterAll(async () => {
+    await pooled?.destroy();
+    if (!schema) return;
+    const admin = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    await admin.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
+    await admin.destroy();
+  });
+
+  test('two photo texts from one contact finishing together park exactly one draft', async () => {
+    const phone = '+12025550101';
+    const anchors = await pooled('sms_log').insert([1, 2].map(() => ({
+      id: randomUUID(), direction: 'inbound', from_phone: phone, to_phone: '+19415550000',
+    }))).returning(['id']);
+    const park = (anchor) => triage.parkDraftUnlessPending({
+      from: phone,
+      smsLogId: anchor.id,
+      customer: null,
+      body: 'what is this',
+      text: 'Thanks for the photo.',
+      created: { type: 'lawn', id: randomUUID() },
+      messageId: randomUUID(),
+      method: 'regex',
+    });
+    const results = await Promise.all(anchors.map(park));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const rows = await pooled('message_drafts').where({ intent: 'photo_triage', status: 'pending' });
+    expect(rows).toHaveLength(1);
+    // A third attempt after the fact is refused by the same check.
+    await expect(park(anchors[0])).resolves.toBeNull();
+  });
+});

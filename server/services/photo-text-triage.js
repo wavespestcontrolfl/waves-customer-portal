@@ -19,7 +19,9 @@
  *   - an opted-out / suppressed number is skipped (the canonical
  *     messaging_suppression check + notification_prefs.sms_enabled); an
  *     unknown suppression state fails closed;
- *   - a conversation that already has a pending draft is skipped;
+ *   - a conversation that already has a pending draft is skipped, and the
+ *     check is repeated atomically with the draft insert under a per-contact
+ *     advisory lock (two photo texts finishing together park one draft);
  *   - one triage per message (messages.photo_triage_at claim) and at most
  *     PHOTO_TRIAGE_DAILY_CAP claims (= vision runs) per ET day, both decided
  *     in one transaction under an advisory lock.
@@ -55,6 +57,7 @@ const ASSESSMENT_SOURCE = 'auto_triage';
 const DEFAULT_DAILY_CAP = 20;
 const MAX_DRAFT_SEGMENTS = 2;
 const CAP_LOCK_KEY = 'photo_triage_daily_cap';
+const CONTACT_LOCK_KEY = 'photo_triage_contact';
 const LAST10_SQL = (column) => `RIGHT(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10)`;
 
 function dailyCap() {
@@ -100,9 +103,9 @@ async function isOptedOut(from, customerId) {
 // Any pending draft already queued for this contact: one anchored to an
 // inbound text from this phone, one whose flags name this phone, or one on
 // the same customer. One pending draft per conversation.
-async function hasPendingDraft(from, customerId) {
+async function hasPendingDraft(from, customerId, conn = db) {
   const key = phoneKey(from);
-  const row = await db('message_drafts as md')
+  const row = await conn('message_drafts as md')
     .leftJoin('sms_log as sl', 'sl.id', 'md.sms_log_id')
     .where('md.status', 'pending')
     .where(function sameContact() {
@@ -159,24 +162,32 @@ function buildDraftText({ firstName, findingLabel }) {
   return countSegments(named).segmentCount <= MAX_DRAFT_SEGMENTS ? named : compose(null);
 }
 
-async function insertDraft({ smsLogId, customer, body, text, created, messageId, method }) {
-  const [draft] = await db('message_drafts').insert({
-    sms_log_id: smsLogId,
-    customer_id: customer?.id || null,
-    inbound_message: body || null,
-    draft_response: text,
-    intent: DRAFT_INTENT,
-    status: 'pending',
-    context_summary: `Photo triage ran a ${created.type} assessment on this text's photo. Review the assessment before approving.`,
-    flags: JSON.stringify({
-      origin: DRAFT_INTENT,
-      assessment_type: created.type,
-      assessment_id: created.id,
-      message_id: messageId,
-      classifier_method: method,
-    }),
-  }).returning(['id']);
-  return draft.id;
+// The final pending-draft check and the insert commit together under a
+// per-contact advisory lock, so two photo texts from one contact whose vision
+// calls finish at the same moment can never both park a draft. Returns the
+// draft id, or null when a pending draft already exists.
+async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method }) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', [CONTACT_LOCK_KEY, phoneKey(from)]);
+    if (await hasPendingDraft(from, customer?.id, trx)) return null;
+    const [draft] = await trx('message_drafts').insert({
+      sms_log_id: smsLogId,
+      customer_id: customer?.id || null,
+      inbound_message: body || null,
+      draft_response: text,
+      intent: DRAFT_INTENT,
+      status: 'pending',
+      context_summary: `Photo triage ran a ${created.type} assessment on this text's photo. Review the assessment before approving.`,
+      flags: JSON.stringify({
+        origin: DRAFT_INTENT,
+        assessment_type: created.type,
+        assessment_id: created.id,
+        message_id: messageId,
+        classifier_method: method,
+      }),
+    }).returning(['id']);
+    return draft.id;
+  });
 }
 
 async function runGuards({ messageId, smsLogId, from, numberType, isAiNumber, customer, images }) {
@@ -222,18 +233,17 @@ async function triageInboundPhotoText({
     return { status: 'skipped', reason: 'assessment_failed' };
   }
 
-  // Re-check right before parking: a second photo text from the same
-  // contact may have drafted while this one's vision call ran.
-  if (await hasPendingDraft(from, customer?.id)) {
-    logger.info(`[photo-triage] ${created.type} assessment ${created.id} kept; draft skipped (pending draft appeared)`);
-    return { status: 'skipped', reason: 'pending_draft' };
-  }
-
   const text = buildDraftText({
     firstName: customer?.first_name,
     findingLabel: teaserFindingLabel(created.type, created.analysis),
   });
-  const draftId = await insertDraft({ smsLogId, customer, body, text, created, messageId, method: intent.method });
+  // A second photo text from the same contact may have drafted while this
+  // one's vision call ran — the assessment is kept, the draft is not.
+  const draftId = await parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method: intent.method });
+  if (!draftId) {
+    logger.info(`[photo-triage] ${created.type} assessment ${created.id} kept; draft skipped (pending draft appeared)`);
+    return { status: 'skipped', reason: 'pending_draft' };
+  }
   logger.info(`[photo-triage] message ${messageId} → ${created.type} assessment ${created.id}, pending draft ${draftId}`);
   return { status: 'drafted', draftId, assessmentId: created.id, type: created.type };
 }
@@ -248,6 +258,7 @@ module.exports = {
     isOptedOut,
     hasPendingDraft,
     claimTriage,
+    parkDraftUnlessPending,
     teaserFindingLabel,
     buildDraftText,
   },
