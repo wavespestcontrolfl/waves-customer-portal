@@ -218,6 +218,13 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(isAllowedUniformLogo('wave pattern on the shirt')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo on the glove and cap')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo on left chest')).toBe(false);
+    // explicit cap/chest only: another garment location is a forbidden mark (Codex r5 P2 on #4761)
+    expect(isAllowedUniformLogo('Waves logo on shirt sleeve')).toBe(false);
+    expect(isAllowedUniformLogo('Waves logo on the back of the polo')).toBe(false);
+    expect(isAllowedUniformLogo('Waves logo on the shirt collar')).toBe(false);
+    expect(isAllowedUniformLogo('Waves logo on the shirt')).toBe(false);
+    expect(isAllowedUniformLogo('Waves logo on the polo')).toBe(false);
+    expect(isAllowedUniformLogo('Waves logo on the right chest of the polo')).toBe(true);
     expect(isAllowedUniformLogo("Waves logo on the technician's left chest")).toBe(false);
   });
 

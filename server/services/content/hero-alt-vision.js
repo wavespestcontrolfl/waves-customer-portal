@@ -243,8 +243,10 @@ function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUni
 // out of readable_text, so any "WAVES" string that does come back is
 // standalone lettering somewhere else (Codex r1 P2 on #4761).
 const UNIFORM_LOGO_WORDS = /\bwaves\b/i;
-const UNIFORM_LOCATION = /\b(cap|hat|chest|polo|shirt)\b/i;
-const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|sprayer|tank|packaging|bottle|box|background|floating|standalone|sky|ground|clipboard|tablet|backpack|bag|glove|gloves|tool|tools|mailbox|fence)\b/i;
+// Explicit cap or chest only — 'shirt'/'polo' alone would pass a sleeve, back
+// or collar mark (Codex r5 P2 on #4761).
+const UNIFORM_LOCATION = /\b(cap|hat|chest)\b/i;
+const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|sprayer|tank|packaging|bottle|box|background|floating|standalone|sky|ground|clipboard|tablet|backpack|bag|glove|gloves|tool|tools|mailbox|fence|sleeve|sleeves|back|collar|pocket|hem|shoulder)\b/i;
 // A LEFT-chest detection is never allowed: it is a misplaced mark, kept for
 // the reasons and the ranking (Codex r4 P2 on #4761).
 const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t) && !/\bleft\b/i.test(t);
