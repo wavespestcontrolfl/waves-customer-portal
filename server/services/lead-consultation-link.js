@@ -103,6 +103,47 @@ async function buildLeadConsultationLink(leadOrId) {
 const CONSULTATION_SMS_TEMPLATE_KEY = 'lead_consultation_link';
 
 /**
+ * Availability probe for the Leads-page row expand (GET
+ * /:id/consultation-link) — reports whether a consultation link COULD be
+ * minted, without minting one. createShortCode is a real DB insert that
+ * hands out a live 14-day bearer token; simply expanding a lead row to
+ * look at it must not spend one (pre-push Codex P2) — the mint only
+ * happens from the Send consultation link click (POST
+ * /:id/consultation-link, buildLeadConsultationSmsLine below).
+ *
+ * Checks the same four things buildLeadConsultationLink /
+ * buildLeadConsultationSmsLine gate a real mint on — gate live, the lead
+ * exists/is still open/has a phone, the template is active — but never
+ * calls createShortCode. consultationUrlForLead (token mint) IS safe to
+ * call here: it is pure HMAC computation with no DB write, unlike the
+ * short_codes insert that follows it in the real builder.
+ */
+async function consultationLinkAvailable(leadOrId) {
+  if (!leadInspectionLinkLive()) {
+    return { available: false, reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)' };
+  }
+  const leadId = typeof leadOrId === 'string' ? leadOrId : leadOrId?.id;
+  if (!leadId) return { available: false, reason: 'No lead to build a consultation link for' };
+  const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
+  if (!lead) return { available: false, reason: 'Lead not found' };
+  if (!isOpenLeadRow(lead)) return { available: false, reason: 'That lead has already converted or closed' };
+  if (!lead.phone) return { available: false, reason: 'Lead has no phone number' };
+  if (!consultationUrlForLead(lead.id)) {
+    return { available: false, reason: 'Could not build a consultation link (no signing secret configured)' };
+  }
+  try {
+    const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');
+    if (row && row.is_active === false) {
+      return { available: false, reason: 'template disabled' };
+    }
+  } catch (err) {
+    logger.warn(`[lead-consultation-link] availability check failed: ${err.message}`);
+    return { available: false, reason: 'Could not check consultation link availability' };
+  }
+  return { available: true };
+}
+
+/**
  * Same contract as buildLeadConsultationLink — { url, line, reason } — but
  * `line` is the full lead_consultation_link SMS template body (greeting +
  * "Reply STOP to opt out." disclosure already included) rendered with
@@ -153,6 +194,14 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
       // is the composer-facing reason, not a duplicate of that audit.
       return unavailable('Consultation text template is unavailable');
     }
+    // Render-time re-check of the keep-list disclosure (pre-push Codex
+    // P1): save-time validation (admin-sms-templates.js) already refuses
+    // an edit that drops it, but a row written before that check existed,
+    // or edited directly, must not silently render without it — the SAME
+    // hasStopLine function both points use, so they can never disagree.
+    if (!templates.hasStopLine(body)) {
+      return unavailable('Consultation text is missing the required "Reply STOP to opt out." disclosure');
+    }
     return {
       url: built.url,
       line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
@@ -166,4 +215,4 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
   }
 }
 
-module.exports = { buildLeadConsultationLink, buildLeadConsultationSmsLine, consultationUrlForLead, consultationSmsLineFor };
+module.exports = { buildLeadConsultationLink, buildLeadConsultationSmsLine, consultationUrlForLead, consultationSmsLineFor, consultationLinkAvailable };

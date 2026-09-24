@@ -103,21 +103,36 @@ describe('Pipeline queue navigation', () => {
   // appendDraft (joined onto whatever draft already exists) instead of
   // initialDraft, and still carry leadId so the send gets the leads-page
   // audit trail (lead_activities row, new→contacted transition).
-  it('Send consultation link appends via appendDraft (not initialDraft), and carries leadId', async () => {
+  // Pre-push Codex P2: row expand fetches AVAILABILITY only (GET) — never
+  // mints a short code; the actual mint (POST, a real DB insert handing
+  // out a live 14-day bearer token) fires only on the Send click.
+  it('row expand only checks availability (GET); Send consultation link mints (POST) on click, appends via appendDraft, and carries leadId', async () => {
     const base = fetch.getMockImplementation();
-    fetch.mockImplementation(async (url, opts) => (String(url).includes('/consultation-link')
-      ? { ok: true, json: async () => ({ url: 'https://waves.link/l/abc123', line: "Hi QA, it's Waves. Pick a time...\n\n", standalone: true } ) }
-      : base(url, opts)));
+    fetch.mockImplementation(async (url, opts) => {
+      if (String(url).includes('/consultation-link')) {
+        calls.push({ path: String(url), options: opts });
+        if (opts?.method === 'POST') {
+          return { ok: true, json: async () => ({ url: 'https://waves.link/l/abc123', line: "Hi QA, it's Waves. Pick a time...\n\n", standalone: true }) };
+        }
+        return { ok: true, json: async () => ({ available: true }) };
+      }
+      return base(url, opts);
+    });
     mount();
     fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
     const sendLinkBtn = await screen.findByRole('button', { name: 'Send consultation link' });
     await waitFor(() => expect(sendLinkBtn).not.toBeDisabled());
+    const consultationCalls = () => calls.filter(({ path }) => path.includes('/admin/leads/lead-qa/consultation-link'));
+    expect(consultationCalls()).toHaveLength(1);
+    expect(consultationCalls()[0].options?.method).not.toBe('POST');
     fireEvent.click(sendLinkBtn);
-    expect(openMessages).toHaveBeenCalled();
+    await waitFor(() => expect(openMessages).toHaveBeenCalled());
     const [, options] = openMessages.mock.calls.at(-1);
     expect(options.leadId).toBe('lead-qa');
     expect(options.appendDraft).toBe("Hi QA, it's Waves. Pick a time...\n\n");
     expect(options.initialDraft).toBeUndefined();
+    // The mint (POST) fired exactly once, only after the click.
+    expect(consultationCalls().filter((c) => c.options?.method === 'POST')).toHaveLength(1);
   });
 
   // Pre-push Codex P2: the ?lead= deep-link expansion path skipped the

@@ -238,6 +238,107 @@ describe('admin SMS template routes', () => {
     });
   });
 
+  // Pre-push Codex P1: lead_consultation_link's keep-list membership
+  // (docs/sms-stop-line-policy.md — a first-contact lead text) makes
+  // "Reply STOP to opt out." a required literal, not just a default an
+  // admin happens to have kept — an edit that drops it must be rejected
+  // at write time the same way a dropped {consultation_url} already is.
+  test('rejects lead_consultation_link edits that drop "Reply STOP to opt out." — the keep-list disclosure', async () => {
+    const updateQuery = chain();
+    setDbQueues({
+      sms_templates: [
+        chain({
+          first: {
+            id: 'sms-4',
+            template_key: 'lead_consultation_link',
+            category: 'leads',
+            variables: JSON.stringify(['first_name', 'consultation_url']),
+          },
+        }),
+        updateQuery,
+      ],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/sms-templates/sms-4`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ body: "Hi {first_name}, it's Waves. Pick a time: {consultation_url}" }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toMatch(/Reply STOP to opt out/);
+      expect(updateQuery.update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('accepts a lead_consultation_link edit that keeps "Reply STOP to opt out."', async () => {
+    const updateQuery = chain();
+    setDbQueues({
+      sms_templates: [
+        chain({
+          first: {
+            id: 'sms-4',
+            template_key: 'lead_consultation_link',
+            category: 'leads',
+            variables: JSON.stringify(['first_name', 'consultation_url']),
+          },
+        }),
+        updateQuery,
+      ],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/sms-templates/sms-4`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ body: "Hi {first_name}, it's Waves. Pick a time: {consultation_url}\n\nReply STOP to opt out." }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(updateQuery.update).toHaveBeenCalled();
+    });
+  });
+
+  // Same validator, so a variant body is held to the same keep-list rule
+  // (the task's "base + variants").
+  test('rejects a lead_consultation_link VARIANT that drops "Reply STOP to opt out."', async () => {
+    setDbQueues({
+      sms_templates: [
+        chain({
+          first: {
+            id: 'sms-4',
+            template_key: 'lead_consultation_link',
+            category: 'leads',
+            variables: JSON.stringify(['first_name', 'consultation_url']),
+          },
+        }),
+      ],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/sms-templates/lead_consultation_link/variants`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ variantKey: 'friendlier', body: "Hi {first_name}! Pick a time: {consultation_url}" }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toMatch(/Reply STOP to opt out/);
+    });
+  });
+
   test('accepts template body updates when placeholders are declared', async () => {
     const updateQuery = chain();
     setDbQueues({

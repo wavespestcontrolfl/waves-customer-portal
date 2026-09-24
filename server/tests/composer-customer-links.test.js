@@ -38,7 +38,12 @@ jest.mock('../routes/estimate-public', () => ({
 jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn(), setupLinkIneligibility: jest.fn(), KIND: 'customer' }));
 // Only the Auto Pay and receipt picker gates read true — every other gate (the
 // pricing-authority send gate the estimate builder consults) stays off.
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => ['autopayCustomerSms', 'composerReceiptLinks'].includes(g)) }));
+// leadInspectionLinkLive defaults true — checkConsultationLinkSend's own
+// describe block below controls it per test.
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn((g) => ['autopayCustomerSms', 'composerReceiptLinks'].includes(g)),
+  leadInspectionLinkLive: jest.fn(() => true),
+}));
 jest.mock('../services/appointment-card-request', () => ({
   claimCardLinkSend: jest.fn(),
   markCardLinkSendOutcome: jest.fn(),
@@ -2631,5 +2636,87 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(await markCardRequestSends({ stamp, cards })).toBe(false);
       expect(markCardLinkSendOutcome).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+// Pre-push Codex P1: a consultation short code re-checked at the actual SEND
+// boundary — distinct from immediateOnlyLinkSendCheck (which only fences
+// SCHEDULING it). Called both from this file's own bearerLinkSendCheck
+// (POST /admin/communications/sms) and directly from admin-leads.js's POST
+// /:id/send-sms (which has no other bearer kind to check).
+describe('checkConsultationLinkSend (send-time re-check of a consultation short code)', () => {
+  const { checkConsultationLinkSend, bearerLinkSendCheck } = require('../services/composer-customer-links');
+  const { leadInspectionLinkLive } = require('../config/feature-gates');
+  const BODY = 'Pick a time: wavespest.co/l/cons1';
+  const LEAD_ROW = { id: 'lead-1', phone: '+19415550100', status: 'new', converted_at: null };
+  const CODE_ROW = { code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' };
+
+  function wireConsultation({ codeRows = [CODE_ROW], leadRow = LEAD_ROW } = {}) {
+    mockBuilders = {
+      short_codes: chainBuilder({ rows: codeRows }),
+      leads: chainBuilder({ firstRow: leadRow }),
+    };
+  }
+
+  beforeEach(() => {
+    leadInspectionLinkLive.mockReturnValue(true);
+  });
+
+  test('no /l/ run in the body → null, no queries', async () => {
+    wireConsultation();
+    expect(await checkConsultationLinkSend('Hi there, see you Tuesday.', '9415550100')).toBeNull();
+  });
+
+  test('an /l/ code that is not a consultation short code (no matching row) → null', async () => {
+    wireConsultation({ codeRows: [] });
+    expect(await checkConsultationLinkSend(BODY, '9415550100')).toBeNull();
+  });
+
+  test('a live, open, matching-phone consultation link → null (passes)', async () => {
+    wireConsultation();
+    expect(await checkConsultationLinkSend(BODY, '9415550100')).toBeNull();
+  });
+
+  test('the gate went off since the insert → refused', async () => {
+    wireConsultation();
+    leadInspectionLinkLive.mockReturnValue(false);
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/switched off|GATE_LEAD_INSPECTION_LINK/);
+  });
+
+  test('the short code itself expired since the insert → refused', async () => {
+    wireConsultation({ codeRows: [{ ...CODE_ROW, expires_at: new Date(Date.now() - 1000) }] });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/expired/);
+  });
+
+  test('the lead converted or closed since the insert → refused', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, status: 'won', converted_at: new Date('2026-01-01') } });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/converted or closed/);
+  });
+
+  test('the lead was deleted since the insert → refused', async () => {
+    wireConsultation({ leadRow: null });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/converted or closed/);
+  });
+
+  test('the destination phone is not this lead\'s own phone → refused (never a different lead\'s invite)', async () => {
+    wireConsultation();
+    const refusal = await checkConsultationLinkSend(BODY, '9995551234');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different lead/);
+  });
+
+  test('wired into bearerLinkSendCheck — the generic /admin/communications/sms route inherits the same re-check', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, status: 'won', converted_at: new Date('2026-01-01') } });
+    const result = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/converted or closed/);
   });
 });

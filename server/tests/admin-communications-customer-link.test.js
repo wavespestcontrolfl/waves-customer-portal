@@ -304,6 +304,12 @@ describe('POST /admin/communications/customer-link', () => {
         expect(body.firstName).toBe('PersonA');
         expect(body.url).toContain('waves.link/l/abc123');
         expect(body.standalone).toBe(true);
+        // Pre-push Codex P1: consultation is in OWNER_RIDES_BACK_KINDS — an
+        // operator who typed the phone without picking the search result
+        // still gets the resolved customerId back, so the eventual /sms
+        // send carries it and applies that customer's own consent policy
+        // instead of going out as an unverified conversational lead.
+        expect(body.customerId).toBe(CUSTOMER_UUID);
       });
     });
 
@@ -1035,7 +1041,7 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test.each(['appointment', 'service_report'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1)', async (kind) => {
+  test.each(['appointment', 'service_report', 'consultation'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1 / pre-push Codex P1 for consultation)', async (kind) => {
     wireDb({ customers: makeCustomersBuilder({
       selectResults: [
         [{ id: CUSTOMER_UUID, account_id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002', account_id: CUSTOMER_UUID }], // number → one account

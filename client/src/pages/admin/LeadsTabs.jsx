@@ -901,9 +901,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
   // Consultation link (lead-inspection-link-scope.md §4), dark behind
-  // GATE_LEAD_INSPECTION_LINK — { [leadId]: { loading, url, line, reason } },
-  // fetched once per expanded lead so the button can show its disabled
-  // reason as a tooltip rather than only failing on click.
+  // GATE_LEAD_INSPECTION_LINK — { [leadId]: { loading, available, reason,
+  // minting } }, fetched once per expanded lead so the button can show its
+  // disabled reason as a tooltip rather than only failing on click. This is
+  // an AVAILABILITY probe only (pre-push Codex P2): the GET route never
+  // mints a short code, so it carries no url/line — those only exist once
+  // sendConsultationLink below actually mints one, on the Send click.
   const [consultationLinks, setConsultationLinks] = useState({});
   const loadConsultationLink = useCallback(async (leadId) => {
     setConsultationLinks((m) => ({ ...m, [leadId]: { loading: true } }));
@@ -913,10 +916,35 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     } catch (e) {
       setConsultationLinks((m) => ({
         ...m,
-        [leadId]: { loading: false, url: null, reason: e.message || "Could not load the consultation link" },
+        [leadId]: { loading: false, available: false, reason: e.message || "Could not load the consultation link" },
       }));
     }
   }, []);
+  // The actual mint (POST — a real DB insert handing out a live 14-day
+  // bearer token) fires only here, on the Send click, never on row expand
+  // (pre-push Codex P2). A failure (a race since the availability probe —
+  // the gate flipped off, the lead closed) updates the SAME per-lead entry
+  // so the button's tooltip picks up the fresh reason.
+  const sendConsultationLink = useCallback(async (lead) => {
+    setConsultationLinks((m) => ({ ...m, [lead.id]: { ...m[lead.id], minting: true } }));
+    try {
+      const data = await adminFetch(`/admin/leads/${lead.id}/consultation-link`, { method: "POST" });
+      setConsultationLinks((m) => ({ ...m, [lead.id]: { ...m[lead.id], minting: false } }));
+      if (!data.url) {
+        setConsultationLinks((m) => ({
+          ...m,
+          [lead.id]: { ...m[lead.id], available: false, reason: data.reason || "Consultation link unavailable" },
+        }));
+        return;
+      }
+      messageLead(lead, data.line || "", { append: true });
+    } catch (e) {
+      setConsultationLinks((m) => ({
+        ...m,
+        [lead.id]: { ...m[lead.id], minting: false, available: false, reason: e.message || "Could not build the consultation link" },
+      }));
+    }
+  }, [messageLead]);
   useEffect(() => {
     if (!newLeadRequest) return;
     setFormData({});
@@ -2044,23 +2072,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     variant={"secondary"}
                                     disabled={
                                       consultationLinks[lead.id]?.loading ||
-                                      !consultationLinks[lead.id]?.url
+                                      consultationLinks[lead.id]?.minting ||
+                                      !consultationLinks[lead.id]?.available
                                     }
                                     title={
                                       consultationLinks[lead.id]?.loading
                                         ? "Loading…"
-                                        : consultationLinks[lead.id]?.url
-                                          ? undefined
-                                          : consultationLinks[lead.id]?.reason ||
-                                            "Consultation link unavailable"
+                                        : consultationLinks[lead.id]?.minting
+                                          ? "Building the link…"
+                                          : consultationLinks[lead.id]?.available
+                                            ? undefined
+                                            : consultationLinks[lead.id]?.reason ||
+                                              "Consultation link unavailable"
                                     }
-                                    onClick={() =>
-                                      messageLead(
-                                        lead,
-                                        consultationLinks[lead.id]?.line || "",
-                                        { append: true },
-                                      )
-                                    }
+                                    onClick={() => sendConsultationLink(lead)}
                                   >
                                     Send consultation link
                                   </Button>{" "}

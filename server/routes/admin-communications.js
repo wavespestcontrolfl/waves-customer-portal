@@ -2720,7 +2720,15 @@ const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_g
 // A receipt link is account-scoped like the pay link but its text is a
 // customer bearer too — the owner rides back so /sms applies the recipient's
 // own consent policy, never the unverified-lead one (GH Codex #3893 r3 P1).
-const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report', 'receipt'];
+// Consultation resolves against ONE row (primaryId, like the
+// STRICT_OWNER_KINDS above — buildConsultationLink is called with primaryId,
+// never the whole account id set) but is not itself strict: when the
+// operator typed a phone with no explicit customerId pick, the resolved
+// owner must still ride back so the eventual /sms send carries customerId
+// and applies that customer's own consent policy — without it the send
+// goes out as an unverified conversational lead (pre-push Codex P1, same
+// class of gap appointment/service_report/receipt were already fixed for).
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report', 'receipt', 'consultation'];
 
 // The row a /customer-link kind targets: the operator-selected row first,
 // else the account row whose phone matches the number, else the first

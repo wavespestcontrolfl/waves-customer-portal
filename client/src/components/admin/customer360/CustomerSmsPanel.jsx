@@ -125,6 +125,21 @@ function MessageBubble({ m }) {
   );
 }
 
+// The first http(s) URL a text contains, and the host it points at (scheme
+// + path ignored) — used to recognize "this line is a previously-inserted
+// bearer link" the same way CommunicationsPageV2.jsx's stripLinkLines does,
+// generalized to "same short-link host" rather than "the exact same URL":
+// each consultation mint is a FRESH short code (a new 14-day token), so a
+// second insert never matches the first insert's literal URL the way a
+// static link would.
+function firstUrlIn(text) {
+  const match = String(text || "").match(/https?:\/\/\S+/);
+  return match ? match[0] : null;
+}
+function urlHost(url) {
+  try { return new URL(url).host.toLowerCase(); } catch { return null; }
+}
+
 // initialDraft only SEEDS an empty draft — an existing per-identity draft
 // (sessionStorage) wins over it, same as opening the panel fresh. A caller
 // whose text must actually land in the box regardless of what's already
@@ -132,10 +147,30 @@ function MessageBubble({ m }) {
 // whatever draft already exists (existing, matching how the Communications
 // composer's own Insert Link actions add a clause to the current body
 // rather than silently losing it — CommunicationsPageV2 insertCustomerLinkLine).
+//
+// A stored draft already carrying an earlier consultation insert (the
+// operator collapsed and re-expanded the row, or clicked the button twice)
+// must not get a SECOND copy of the same invite appended below it
+// (pre-push Codex P2) — this is the only appendDraft caller in this
+// component today, so "an existing line whose URL shares the new
+// addition's short-link host" is unambiguously the prior consultation
+// clause; that line (and any blank line it left) is replaced in place
+// rather than appended twice.
 function combineAppendedDraft(existing, addition) {
   if (!addition) return existing;
-  const base = String(existing || "").replace(/\s+$/, "");
-  return base ? `${base}\n\n${addition}` : addition;
+  const base = String(existing || "");
+  const newHost = urlHost(firstUrlIn(addition));
+  if (newHost) {
+    const withoutPriorClause = base
+      .split("\n")
+      .filter((line) => urlHost(firstUrlIn(line)) !== newHost)
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    return withoutPriorClause ? `${withoutPriorClause}\n\n${addition}` : addition;
+  }
+  const trimmedBase = base.replace(/\s+$/, "");
+  return trimmedBase ? `${trimmedBase}\n\n${addition}` : addition;
 }
 
 export default function CustomerSmsPanel({ customer, open, onClose, onSent, leadId, initialDraft = "", appendDraft = "" }) {

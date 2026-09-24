@@ -1353,6 +1353,60 @@ async function checkContractLinks(ctx, contracts) {
   return null;
 }
 
+// Consultation short codes, re-checked at the actual SEND boundary (pre-push
+// Codex P1) — distinct from immediateOnlyLinkSendCheck/scheduledSmsLinkRefusal,
+// which only fence SCHEDULING it (never re-run at delivery, since the
+// scheduler and draft approve/revise dispatch straight into
+// sendCustomerMessage). An immediate send still needs the insert-time mint
+// re-verified now: the gate can flip off, the lead can close/convert, or
+// (rare, given the 14-day TTL) the token itself can expire between insert
+// and send. Exported and called from BOTH routes that can carry one — this
+// file's own bearerLinkSendCheck (POST /admin/communications/sms) and
+// admin-leads.js's POST /:id/send-sms, which has no OTHER bearer link kind
+// to check and so calls this directly rather than the whole
+// bearerLinkSendCheck (which needs customer/account context this route
+// doesn't have). Always short-wrapped (buildLeadConsultationLink never
+// hands out the long /inspection/:token form), so presence is judged by
+// short_codes.kind like the scheduling fence judges it, never a long-form
+// path regex. Binds by the LAST TEN DIGITS of the recipient — the same
+// primitive every other bearer check in this file binds by — rather than a
+// customerId/leadId param, so the identical check works unmodified from
+// either route: the consultation lead's OWN phone must be the destination.
+async function checkConsultationLinkSend(body, toLast10) {
+  const runs = decodedRuns(body);
+  const hosts = ownedPortalHosts();
+  const codes = [...new Set(
+    linkRuns(runs, /\/l\//i)
+      .map((run) => canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, ANY_SCHEME))
+      .filter(Boolean)
+      .map((code) => code.toLowerCase())
+  )];
+  if (!codes.length) return null;
+  const rows = await db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id');
+  if (!rows.length) return null;
+  const { leadInspectionLinkLive } = require('../config/feature-gates');
+  if (!leadInspectionLinkLive()) {
+    return refuseSend('Consultation links are switched off (GATE_LEAD_INSPECTION_LINK) — remove the link before sending.');
+  }
+  const { isOpenLeadRow } = require('./lead-statuses');
+  for (const row of rows) {
+    if (expiredShortRow(row)) {
+      return refuseSend('This consultation link has expired — remove it and insert a fresh one.');
+    }
+    if (!row.lead_id) {
+      return refuseSend('This consultation link no longer resolves to a lead — remove it and insert a fresh one.');
+    }
+    const lead = await db('leads').where({ id: row.lead_id }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
+    if (!lead || !isOpenLeadRow(lead)) {
+      return refuseSend('This lead has already converted or closed — remove the consultation link before sending.');
+    }
+    if (digitsLast10(lead.phone) !== String(toLast10 || '')) {
+      return refuseSend('This consultation link belongs to a different lead — remove it before sending.');
+    }
+  }
+  return null;
+}
+
 // Visit-lane card request links (kind 'visit'; the Auto Pay seam judges kind
 // 'customer'): status must still be pending, never texted, owned by the
 // recipient, AND the canonical funnel (requestCardForAppointment, inline)
@@ -1428,6 +1482,11 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     () => checkStatementLinks(ctx, statements),
     () => checkAccountBoundLinks(ctx, projectReports),
     () => checkCardLinks(ctx, cards),
+    // Pre-push Codex P1: consultation is lead-bound, not account-bound —
+    // checked by destination phone alone (ctx.toLast10), independent of
+    // ctx.trustedCustomerId, so this same check works unmodified from the
+    // lead-only /admin/leads/:id/send-sms route too (see that route).
+    () => checkConsultationLinkSend(ctx.body, ctx.toLast10),
   ];
   for (const check of checks) {
     const refusal = await check();
@@ -2378,6 +2437,7 @@ module.exports = {
   autopayLinkSendCheck,
   immediateOnlyLinkSendCheck,
   bearerLinkSendCheck,
+  checkConsultationLinkSend,
   markStatementsSent,
   markPrepGuidesSent,
   recheckPrepLinks,

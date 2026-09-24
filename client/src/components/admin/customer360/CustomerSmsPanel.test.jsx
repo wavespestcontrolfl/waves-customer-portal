@@ -115,6 +115,44 @@ describe("CustomerSmsPanel", () => {
       .toHaveValue("Pick a time: https://waves.link/l/abc\n\n");
   });
 
+  // Pre-push Codex P2: a stored draft that already carries an earlier
+  // consultation insert (the operator collapsed/re-expanded the lead row,
+  // or clicked Send consultation link twice) must not get a SECOND copy —
+  // each mint is a fresh short code, so the new URL never literally
+  // matches the old one; the stale line (same short-link host) is
+  // replaced in place instead of appended alongside it.
+  it("appendDraft REPLACES an earlier consultation clause already in the stored draft, instead of appending a second one", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem(
+      "c360:sms-draft:staff-a:cust-a",
+      "Hi Jamie, it's Waves. Pick a time: https://waves.link/l/old111\n\nReply STOP to opt out.",
+    );
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Hi Jamie, it's Waves. Pick a time: https://waves.link/l/new222\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    expect(box.value).not.toContain("old111");
+    expect(box.value).toContain("new222");
+    expect((box.value.match(/waves\.link/g) || []).length).toBe(1);
+  });
+
+  it("appendDraft leaves unrelated typed text alone while replacing only the stale consultation line", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem(
+      "c360:sms-draft:staff-a:cust-a",
+      "Also, we'll need someone home.\n\nPick a time: https://waves.link/l/old111\n\n",
+    );
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Pick a time: https://waves.link/l/new222\n\n"} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    expect(box.value).toContain("Also, we'll need someone home.");
+    expect(box.value).not.toContain("old111");
+    expect(box.value).toContain("new222");
+  });
+
   it("sends once per click through the canonical route, pinned to the customer, and keeps the draft on failure", async () => {
     const send = deferred();
     adminFetch.mockImplementation(async (path, options = {}) => {

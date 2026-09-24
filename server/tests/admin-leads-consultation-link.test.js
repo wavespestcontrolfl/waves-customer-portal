@@ -1,9 +1,14 @@
 /**
- * GET /api/admin/leads/:id/consultation-link (lead-inspection-link-scope.md
- * §4) — Virginia's "Send consultation link" action. Same admin-only router
- * gate as every other /admin/leads route; returns { url, line, reason },
- * rendered via buildLeadConsultationSmsLine (mocked here — its own render/
- * fallback contract is lead-consultation-link.test.js's).
+ * GET /api/admin/leads/:id/consultation-link and POST of the same path
+ * (lead-inspection-link-scope.md §4) — Virginia's "Send consultation link"
+ * action. Same admin-only router gate as every other /admin/leads route.
+ *
+ * Split (pre-push Codex P2): GET is a read-only AVAILABILITY probe —
+ * { available, reason } — that never mints a short code (delegates to
+ * consultationLinkAvailable, mocked here — its own eligibility contract is
+ * lead-consultation-link.test.js's). POST is the actual mint — { url, line,
+ * reason }, via buildLeadConsultationSmsLine (also mocked here — its own
+ * render/fallback contract is lead-consultation-link.test.js's too).
  */
 
 jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(async () => ({})); return db; });
@@ -27,11 +32,12 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/lead-consultation-link', () => ({
   buildLeadConsultationSmsLine: jest.fn(),
+  consultationLinkAvailable: jest.fn(),
 }));
 
 const express = require('express');
 const db = require('../models/db');
-const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+const { buildLeadConsultationSmsLine, consultationLinkAvailable } = require('../services/lead-consultation-link');
 const router = require('../routes/admin-leads');
 
 let lead;
@@ -49,7 +55,7 @@ beforeEach(() => {
   });
 });
 
-async function get(leadId = 'lead-qa', token = 'admin') {
+async function request(method, leadId = 'lead-qa', token = 'admin') {
   const app = express();
   app.use(express.json());
   app.use('/admin/leads', router);
@@ -57,6 +63,7 @@ async function get(leadId = 'lead-qa', token = 'admin') {
   const server = app.listen(0);
   try {
     const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/leads/${leadId}/consultation-link`, {
+      method,
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     return { status: res.status, body: await res.json() };
@@ -64,69 +71,111 @@ async function get(leadId = 'lead-qa', token = 'admin') {
     await new Promise((resolve) => server.close(resolve));
   }
 }
+const get = (leadId, token) => request('GET', leadId, token);
+const post = (leadId, token) => request('POST', leadId, token);
 
-test('403 for technicians — same router-wide admin gate as every other /admin/leads route', async () => {
-  const { status, body } = await get('lead-qa', 'tech');
-  expect(status).toBe(403);
-  expect(body.error).toMatch(/Admin access required/);
-  expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
-});
-
-test('404 for a missing or deleted lead', async () => {
-  lead = null;
-  const { status, body } = await get('lead-gone');
-  expect(status).toBe(404);
-  expect(body.error).toBe('Lead not found');
-  expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
-});
-
-test('gate off (or otherwise unavailable): passes the builder\'s reason straight through, 200 not 404', async () => {
-  buildLeadConsultationSmsLine.mockResolvedValue({
-    url: null,
-    line: '',
-    reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)',
+describe('GET /:id/consultation-link — availability probe, never mints', () => {
+  test('403 for technicians — same router-wide admin gate as every other /admin/leads route', async () => {
+    const { status, body } = await get('lead-qa', 'tech');
+    expect(status).toBe(403);
+    expect(body.error).toMatch(/Admin access required/);
+    expect(consultationLinkAvailable).not.toHaveBeenCalled();
   });
-  const { status, body } = await get();
-  expect(status).toBe(200);
-  expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-qa', 'Pat');
-  expect(body).toEqual({
-    url: null,
-    line: '',
-    reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)',
+
+  test('delegates to consultationLinkAvailable and returns its result verbatim', async () => {
+    consultationLinkAvailable.mockResolvedValue({ available: true });
+    const { status, body } = await get();
+    expect(status).toBe(200);
+    expect(consultationLinkAvailable).toHaveBeenCalledWith('lead-qa');
+    expect(body).toEqual({ available: true });
+    // The read-only probe never touches the builder — no short code minted.
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+  });
+
+  test('gate off (or otherwise unavailable): passes the reason straight through, 200 not 404', async () => {
+    consultationLinkAvailable.mockResolvedValue({
+      available: false,
+      reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)',
+    });
+    const { status, body } = await get();
+    expect(status).toBe(200);
+    expect(body).toEqual({
+      available: false,
+      reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)',
+    });
+  });
+
+  test('a closed/converted lead: available:false with the specific reason, straight from the service', async () => {
+    consultationLinkAvailable.mockResolvedValue({ available: false, reason: 'That lead has already converted or closed' });
+    const { status, body } = await get();
+    expect(status).toBe(200);
+    expect(body).toEqual({ available: false, reason: 'That lead has already converted or closed' });
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
   });
 });
 
-// Pre-push Codex P1: the third caller with the same eligibility gap
-// (buildConsultationLink and resolveConsultationLeadOnly were already
-// fixed) — a closed or converted lead must show unavailable up front, with
-// no short code minted for a doomed link (the builder is never even
-// called).
-test('a CLOSED lead (e.g. disqualified) is unavailable up front — no link minted, builder never called', async () => {
-  lead.status = 'disqualified';
-  const { status, body } = await get();
-  expect(status).toBe(200);
-  expect(body).toEqual({ url: null, line: '', reason: 'That lead has already converted or closed' });
-  expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
-});
-
-test('a CONVERTED lead (converted_at set) is unavailable up front — no link minted, builder never called', async () => {
-  lead.status = 'won';
-  lead.converted_at = new Date('2026-01-01');
-  const { status, body } = await get();
-  expect(status).toBe(200);
-  expect(body).toEqual({ url: null, line: '', reason: 'That lead has already converted or closed' });
-  expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
-});
-
-test('gate on: returns the rendered url/line for the Leads-page composer to insert', async () => {
-  buildLeadConsultationSmsLine.mockResolvedValue({
-    url: 'https://waves.link/l/abc123',
-    line: "Hi Pat, it's Waves. Pick a time for us to stop by for a free consultation: https://waves.link/l/abc123\n\nOr reply here and we'll set it up.\n\nReply STOP to opt out.\n\n",
-    standalone: true,
+describe('POST /:id/consultation-link — the actual mint, fired only on Send', () => {
+  test('403 for technicians — same router-wide admin gate as every other /admin/leads route', async () => {
+    const { status, body } = await post('lead-qa', 'tech');
+    expect(status).toBe(403);
+    expect(body.error).toMatch(/Admin access required/);
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
   });
-  const { status, body } = await get();
-  expect(status).toBe(200);
-  expect(body.url).toBe('https://waves.link/l/abc123');
-  expect(body.line).toContain("Hi Pat, it's Waves.");
-  expect(body.standalone).toBe(true);
+
+  test('404 for a missing or deleted lead', async () => {
+    lead = null;
+    const { status, body } = await post('lead-gone');
+    expect(status).toBe(404);
+    expect(body.error).toBe('Lead not found');
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+  });
+
+  test('gate off (or otherwise unavailable): passes the builder\'s reason straight through, 200 not 404', async () => {
+    buildLeadConsultationSmsLine.mockResolvedValue({
+      url: null,
+      line: '',
+      reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)',
+    });
+    const { status, body } = await post();
+    expect(status).toBe(200);
+    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-qa', 'Pat');
+    expect(body).toEqual({
+      url: null,
+      line: '',
+      reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)',
+    });
+  });
+
+  // Pre-push Codex P1 (an earlier round): the same early filter this route
+  // already had before the GET/POST split — a closed or converted lead is
+  // unavailable up front, with no short code minted for a doomed link.
+  test('a CLOSED lead (e.g. disqualified) is unavailable up front — no link minted, builder never called', async () => {
+    lead.status = 'disqualified';
+    const { status, body } = await post();
+    expect(status).toBe(200);
+    expect(body).toEqual({ url: null, line: '', reason: 'That lead has already converted or closed' });
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+  });
+
+  test('a CONVERTED lead (converted_at set) is unavailable up front — no link minted, builder never called', async () => {
+    lead.status = 'won';
+    lead.converted_at = new Date('2026-01-01');
+    const { status, body } = await post();
+    expect(status).toBe(200);
+    expect(body).toEqual({ url: null, line: '', reason: 'That lead has already converted or closed' });
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+  });
+
+  test('gate on: returns the rendered url/line for the Leads-page composer to insert', async () => {
+    buildLeadConsultationSmsLine.mockResolvedValue({
+      url: 'https://waves.link/l/abc123',
+      line: "Hi Pat, it's Waves. Pick a time for us to stop by for a free consultation: https://waves.link/l/abc123\n\nOr reply here and we'll set it up.\n\nReply STOP to opt out.\n\n",
+      standalone: true,
+    });
+    const { status, body } = await post();
+    expect(status).toBe(200);
+    expect(body.url).toBe('https://waves.link/l/abc123');
+    expect(body.line).toContain("Hi Pat, it's Waves.");
+    expect(body.standalone).toBe(true);
+  });
 });

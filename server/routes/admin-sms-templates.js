@@ -6,6 +6,13 @@ const { formatSmsTemplateVars } = require('../utils/sms-time-format');
 const { TEMPLATES: CLEAN_DEFAULT_SMS_TEMPLATES } = require('../models/migrations/20260514000002_tighten_sms_template_copy');
 const SmsTemplateVariants = require('../services/sms-template-variants');
 const { auditNotificationTemplateIssue } = require('../services/audit-log');
+// Reuses the STOP-line sweep's own strip helper as the detector (docs/
+// sms-stop-line-policy.md, "existing test/helper" — server/tests/
+// stop-line-off-remaining-transactional-migration.test.js imports this
+// same export) rather than a fresh copy of the literal 'Reply STOP to opt
+// out.' — same require-from-a-migration pattern this file already uses
+// for CLEAN_DEFAULT_SMS_TEMPLATES above.
+const { _dropStop: dropStop } = require('../models/migrations/20260911000010_stop_line_off_remaining_transactional');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -41,6 +48,24 @@ function extractTemplatePlaceholders(body) {
   }
   return [...placeholders];
 }
+
+// A body "carries" the disclosure iff stripping it actually removes
+// something — dropStop is the sweep migrations' own regex
+// (/\n{1,2}Reply STOP to opt out\.?/ / / ?Reply STOP to opt out\.?/), so
+// this stays byte-identical to what those migrations (and their pinning
+// test) already treat as "has the line" — never a second, independently
+// maintained copy of the literal.
+function hasStopLine(body) {
+  const raw = String(body || '');
+  return dropStop(raw) !== raw;
+}
+// Template keys whose keep-list membership (docs/sms-stop-line-policy.md)
+// makes "Reply STOP to opt out." a REQUIRED literal, not just a default —
+// an admin edit that drops it is a keep-list violation on a first-contact
+// text, rejected at write time the same way a dropped required
+// {placeholder} is (pre-push Codex P1). lead_consultation_link is the
+// consultation-link lane's own first-contact-lead text.
+const REQUIRED_STOP_LINE_KEYS = new Set(['lead_consultation_link']);
 
 // Placeholders a specific template's FLOW depends on — the render path
 // refuses a body without them (getTemplate opts.requiredVars), so accepting
@@ -80,6 +105,14 @@ function validateTemplateBody(body, variables, templateKey = null) {
         missing_placeholders: missing,
       };
     }
+  }
+  // Keep-list literal (docs/sms-stop-line-policy.md) — applies to the base
+  // template AND every variant, since both go through this same validator
+  // (POST/PUT /:templateKey/variants call it too).
+  if (REQUIRED_STOP_LINE_KEYS.has(templateKey) && !hasStopLine(body)) {
+    return {
+      error: `${templateKey} is a first-contact lead text and must keep "Reply STOP to opt out." — the keep-list requires it (docs/sms-stop-line-policy.md)`,
+    };
   }
   // Double-brace tokens are the email/newsletter syntax — in an SMS body the
   // renderer substitutes the INNER {token} and the leftover braces then read
@@ -492,5 +525,10 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
 // map, so save-time and render-time can never disagree about what a
 // template must keep.
 router.REQUIRED_TEMPLATE_PLACEHOLDERS = REQUIRED_TEMPLATE_PLACEHOLDERS;
+// Same reason: lead-consultation-link.js's buildLeadConsultationSmsLine
+// re-checks the RENDERED body with this exact function (pre-push Codex
+// P1) so save-time and render-time can never disagree about whether the
+// keep-list disclosure survived.
+router.hasStopLine = hasStopLine;
 
 module.exports = router;

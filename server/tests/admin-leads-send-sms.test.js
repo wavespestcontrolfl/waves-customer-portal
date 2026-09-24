@@ -164,3 +164,80 @@ describe('attachments and fromNumber reach the sender (same shape as /admin/comm
     }));
   });
 });
+
+// Pre-push Codex P1: a consultation short code inserted into a draft can go
+// stale by the time the operator actually sends it (gate flipped off, the
+// lead closed/converted, or the 14-day token expired) — checkConsultationLinkSend
+// (composer-customer-links.js) is re-checked at THIS send boundary too, not
+// only the generic /admin/communications/sms route.
+describe('a consultation short code in the message is re-checked at THIS send boundary too (pre-push Codex P1)', () => {
+  const originalGate = process.env.GATE_LEAD_INSPECTION_LINK;
+  let shortCodeRows;
+
+  function wireConsultationDb() {
+    db.mockImplementation((table) => {
+      if (table === 'short_codes') {
+        const q = {
+          whereIn: jest.fn(() => q),
+          where: jest.fn(() => q),
+          select: jest.fn(async () => shortCodeRows),
+        };
+        return q;
+      }
+      const builder = {
+        where: jest.fn(() => builder), whereNull: jest.fn(() => builder),
+        first: jest.fn(async () => ({ ...lead })), update,
+        insert: jest.fn(async (row) => { if (table === 'lead_activities') activities.push(row); }),
+      };
+      return builder;
+    });
+  }
+
+  beforeEach(() => {
+    process.env.GATE_LEAD_INSPECTION_LINK = 'true';
+    shortCodeRows = [{ code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-qa' }];
+    wireConsultationDb();
+  });
+
+  afterEach(() => {
+    if (originalGate === undefined) delete process.env.GATE_LEAD_INSPECTION_LINK;
+    else process.env.GATE_LEAD_INSPECTION_LINK = originalGate;
+  });
+
+  test('a live, open, matching-phone consultation link sends normally', async () => {
+    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1', to: '+19415550103' });
+    expect(response.status).toBe(200);
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
+  test('the gate went off since the insert → 409, never sent', async () => {
+    process.env.GATE_LEAD_INSPECTION_LINK = 'false';
+    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1', to: '+19415550103' });
+    expect(response.status).toBe(409);
+    expect(response.body.error).toMatch(/switched off|GATE_LEAD_INSPECTION_LINK/);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the short code itself expired since the insert → 409, never sent', async () => {
+    shortCodeRows = [{ code: 'cons1', expires_at: new Date(Date.now() - 1000), lead_id: 'lead-qa' }];
+    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1', to: '+19415550103' });
+    expect(response.status).toBe(409);
+    expect(response.body.error).toMatch(/expired/);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the lead converted or closed since the insert → 409, never sent', async () => {
+    lead.status = 'won';
+    lead.converted_at = new Date('2026-01-01');
+    const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1', to: '+19415550103' });
+    expect(response.status).toBe(409);
+    expect(response.body.error).toMatch(/converted or closed/);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('no consultation link in the body: unaffected, sends normally', async () => {
+    const response = await send({ message: 'Synthetic outreach, no link here', to: '+19415550103' });
+    expect(response.status).toBe(200);
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+});

@@ -1237,19 +1237,30 @@ router.post('/:id/assign', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/leads/:id/consultation-link — Virginia's "Send consultation
-// link" action (lead-inspection-link-scope.md §4), dark behind
-// GATE_LEAD_INSPECTION_LINK. Returns { url, line, reason }: url null + a
-// reason when the gate is off, the lead has already converted or closed
-// (isOpenLeadRow, lead-statuses.js — early filter here so the button
-// disables with the specific reason up front, without minting a short
-// code first; the same rule is enforced again at the chokepoint,
-// buildLeadConsultationLink itself, pre-push Codex P1), or the lead has no
-// phone/token; `line` is the admin-editable lead_consultation_link SMS
-// template body, rendered and ready to drop straight into the existing
-// text composer for the unchanged POST /:id/send-sms below — no new send
-// path.
+// GET /api/admin/leads/:id/consultation-link — availability probe for the
+// Leads-page row expand (lead-inspection-link-scope.md §4), dark behind
+// GATE_LEAD_INSPECTION_LINK. Read-only (pre-push Codex P2): simply
+// expanding a lead row must not mint a live 14-day bearer short code —
+// this reports { available, reason } (gate live, lead still open, has a
+// phone, template active) without ever calling buildLeadConsultationLink's
+// createShortCode. The actual mint is POST /:id/consultation-link below,
+// fired only on the Send consultation link click.
 router.get('/:id/consultation-link', async (req, res, next) => {
+  try {
+    const { consultationLinkAvailable } = require('../services/lead-consultation-link');
+    const availability = await consultationLinkAvailable(req.params.id);
+    res.json(availability);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/leads/:id/consultation-link — mints (or reuses, per
+// short-url.js's own existing-code lookup) the actual consultation link,
+// rendered via the admin-editable lead_consultation_link SMS template and
+// ready to drop straight into the existing text composer for the
+// unchanged POST /:id/send-sms below — no new send path there. Separate
+// from the read-only GET above precisely so the mint only happens on the
+// Send click, not on every row expand.
+router.post('/:id/consultation-link', async (req, res, next) => {
   try {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first('id', 'first_name', 'status', 'converted_at');
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
@@ -1302,6 +1313,20 @@ router.post('/:id/send-sms', async (req, res, next) => {
     const TWILIO_NUMBERS = require('../config/twilio-numbers');
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
+    }
+
+    // A consultation link inserted here can go stale by the time the
+    // operator actually sends (gate flipped off, the lead closed/converted,
+    // or the 14-day token itself expired) — re-checked at THIS send
+    // boundary the same way the generic /admin/communications/sms route's
+    // bearerLinkSendCheck re-checks every other bearer kind (pre-push
+    // Codex P1). Shared function, called directly here rather than the
+    // whole bearerLinkSendCheck, which needs customer/account context this
+    // route doesn't have.
+    const { checkConsultationLinkSend } = require('../services/composer-customer-links');
+    const consultationRefusal = await checkConsultationLinkSend(message, String(lead.phone || '').replace(/\D/g, '').slice(-10));
+    if (consultationRefusal) {
+      return res.status(409).json({ error: consultationRefusal.error });
     }
 
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');

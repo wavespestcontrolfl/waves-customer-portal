@@ -13,7 +13,13 @@ jest.mock('../services/short-url', () => ({
 // buildLeadConsultationSmsLine's template render — getTemplate stubbed per
 // test; admin-sms-templates' own inactive/missing/fallback semantics are
 // admin-sms-templates-render.test.js's contract, not this file's.
-jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
+// hasStopLine is real (a pure function, the SAME one admin-sms-templates.js's
+// own save-time validator uses — pre-push Codex P1: this file's render-time
+// re-check must exercise the actual detector, not a re-mocked stand-in).
+jest.mock('../routes/admin-sms-templates', () => ({
+  getTemplate: jest.fn(),
+  hasStopLine: jest.requireActual('../routes/admin-sms-templates').hasStopLine,
+}));
 
 let mockBuilders = {};
 const mockDb = jest.fn((table) => mockBuilders[table]);
@@ -34,6 +40,7 @@ const {
   buildLeadConsultationSmsLine,
   consultationUrlForLead,
   consultationSmsLineFor,
+  consultationLinkAvailable,
 } = require('../services/lead-consultation-link');
 
 const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
@@ -222,6 +229,25 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(getTemplate).not.toHaveBeenCalled();
   });
 
+  // Pre-push Codex P1: save-time validation (admin-sms-templates.js) now
+  // refuses an edit that drops the keep-list disclosure, but a row that
+  // slipped through before that guard existed (or was edited directly at
+  // the DB) must not silently render without it either.
+  test('a rendered body missing "Reply STOP to opt out." is unavailable — never sent without the disclosure', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    getTemplate.mockResolvedValue(
+      "Hi Pat, it's Waves. Pick a time for us to stop by for a free consultation: https://waves.link/l/abc123\n\nOr reply here and we'll set it up.",
+    );
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toMatch(/Reply STOP to opt out/);
+    expect(result.standalone).toBeUndefined();
+  });
+
   test('missing first name falls back to "there"', async () => {
     mockBuilders = {
       leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
@@ -316,5 +342,64 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(result.url).toBeNull();
     expect(result.reason).toMatch(/switched off/i);
     expect(getTemplate).not.toHaveBeenCalled();
+  });
+});
+
+// Pre-push Codex P2: expanding a lead row on the Leads page must not mint a
+// live 14-day bearer short code — this probe reports the same eligibility
+// buildLeadConsultationLink gates a real mint on, WITHOUT ever calling
+// createShortCode.
+describe('consultationLinkAvailable (read-only probe — never mints)', () => {
+  test('gate off: unavailable, no DB touched', async () => {
+    process.env.GATE_LEAD_INSPECTION_LINK = 'false';
+    const result = await consultationLinkAvailable(LEAD_ID);
+    expect(result).toEqual({ available: false, reason: expect.stringMatching(/switched off/i) });
+    expect(mockDb).not.toHaveBeenCalled();
+    expect(createShortCode).not.toHaveBeenCalled();
+  });
+
+  test('an open lead with a phone and an active template: available, and createShortCode is NEVER called', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    const result = await consultationLinkAvailable(LEAD_ID);
+    expect(result).toEqual({ available: true });
+    expect(createShortCode).not.toHaveBeenCalled();
+  });
+
+  test('missing lead: unavailable, "Lead not found"', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: null }) };
+    const result = await consultationLinkAvailable(LEAD_ID);
+    expect(result).toEqual({ available: false, reason: 'Lead not found' });
+  });
+
+  test('a closed/converted lead: unavailable with the specific reason', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'won', converted_at: new Date('2026-01-01') } }) };
+    const result = await consultationLinkAvailable(LEAD_ID);
+    expect(result).toEqual({ available: false, reason: 'That lead has already converted or closed' });
+  });
+
+  test('a lead with no phone: unavailable', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: null, status: 'new', converted_at: null } }) };
+    const result = await consultationLinkAvailable(LEAD_ID);
+    expect(result).toEqual({ available: false, reason: expect.stringMatching(/no phone/i) });
+  });
+
+  test('no signing secret configured: unavailable (checked without minting — pure HMAC, no DB write)', async () => {
+    delete process.env.LEAD_PREFILL_SECRET;
+    delete process.env.JWT_SECRET;
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }) };
+    const result = await consultationLinkAvailable(LEAD_ID);
+    expect(result).toEqual({ available: false, reason: expect.stringMatching(/secret/i) });
+  });
+
+  test('an admin-DISABLED template: unavailable with the same reason the render-time check uses', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: false } }),
+    };
+    const result = await consultationLinkAvailable(LEAD_ID);
+    expect(result).toEqual({ available: false, reason: 'template disabled' });
   });
 });
