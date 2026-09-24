@@ -432,3 +432,28 @@ describe('category-seed-seeder: affiliate_products (pilot briefs)', () => {
     expect(new Set(manifest.briefs.flatMap((b) => b.affiliate_products.map((p) => p.product_id))).size).toBe(6);
   });
 });
+
+
+describe('regional service-diversity manifest', () => {
+  const manifest = seeder.loadManifest(path.join(__dirname, '../data/service-diversity-briefs-20260924.json'));
+  test.each(['BG01', 'BG03', 'BG04'])('%s accepts a real served-city link without inventing a regional route', (id) => {
+    const payload = manifest.briefs.find((brief) => brief.id === id);
+    const opportunity = seeder._internals.rowForBrief(payload, manifest);
+    const overlay = seeder.buildCategoryOverlay({ opportunity, pageType: 'supporting-blog' });
+    const brief = { service: opportunity.service, voice_constraints: { operator_brief: overlay.operator_brief } };
+    const { checkHubLinkPresent } = require('../services/content/content-quality-gate')._internals;
+    const route = opportunity.service === 'lawn' ? '/lawn-care-bradenton-fl/' : '/tree-and-shrub-care-bradenton-fl/';
+    expect(checkHubLinkPresent({ body: `[service](${route})` }, brief)).toEqual({ ok: true });
+    expect(overlay.operator_brief.binding_instructions.join(' ')).toContain('Southwest-Florida-regional');
+  });
+  test.each(['BG01', 'BG02', 'BG03'])('%s carries its own pinned listicle architecture', (id) => {
+    const payload = manifest.briefs.find((brief) => brief.id === id);
+    const opportunity = seeder._internals.rowForBrief(payload, manifest);
+    const overlay = seeder.buildCategoryOverlay({ opportunity, pageType: 'supporting-blog' });
+    const plan = overlay.required_sections.join(' ');
+    expect(plan).toContain('first 60 words naming every list item');
+    expect(plan).toContain('numbered H2 count');
+    expect(plan).toContain('Last updated: [Month Year]');
+    expect(plan).toContain('How we put this list together');
+  });
+});

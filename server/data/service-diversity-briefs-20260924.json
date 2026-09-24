@@ -11,7 +11,6 @@
       "id": "BG01",
       "action": "new_supporting_blog",
       "slug": "/tree-shrub/photos-for-plant-problem-assessment-swfl/",
-      "city": "Southwest Florida",
       "working_title": "5 Photos to Take Before Asking About a Struggling Southwest Florida Shrub",
       "primary_kw": "5 photos to take before asking about a struggling southwest florida shrub",
       "secondary_kws": [],
@@ -26,14 +25,16 @@
       ],
       "thesis": "Help readers collect useful context for a plant assessment without diagnosing from a single leaf.",
       "outline": [
-        "Quick answer naming all five views; explain this is an editorial checklist informed by Extension guidance, not a tested diagnosis protocol",
+        "Quick answer within the first 60 words naming every list item; keep the title count and numbered H2 count equal, with what it is, why it matters, and what to do for each item",
+        "Visible Last updated: [Month Year] line below the title, using the actual current month and year when the article is prepared for publication",
         "1. The whole plant",
         "2. The surrounding bed and site",
         "3. A close-up of affected leaves",
         "4. A comparison with unaffected growth",
         "5. The visible base and nearby watering conditions",
         "Record onset and recent maintenance; explain why identification or a sample may still be needed",
-        "Visual: customize PestEvidenceGrid to these five photo views; use a whole-plant composition and a close-up framing demonstration, not fabricated diseased-species evidence."
+        "Visual: customize PestEvidenceGrid to these five photo views; use a whole-plant composition and a close-up framing demonstration, not fabricated diseased-species evidence.",
+        "How we put this list together: two or three sentences identifying the cited primary guidance and the editorial selection criteria; no invented product testing, field research, rankings, or claim that the source publishes this exact list"
       ],
       "sources": [
         "https://blogs.ifas.ufl.edu/duvalco/2025/07/03/a-picture-is-worth-a-thousand-words-help-with-landscape-problem-identification/"
@@ -53,7 +54,6 @@
       "id": "BG02",
       "action": "new_supporting_blog",
       "slug": "/mosquito/standing-water-checklist-swfl-patio/",
-      "city": "Southwest Florida",
       "working_title": "7 Water-Holding Spots to Check Around a Southwest Florida Patio",
       "primary_kw": "7 water-holding spots to check around a southwest florida patio",
       "secondary_kws": [],
@@ -68,7 +68,8 @@
       ],
       "thesis": "Turn CDC container-management guidance into a practical patio checklist; do not promise a mosquito-free yard.",
       "outline": [
-        "Quick answer naming the seven spots and the CDC weekly container-check recommendation",
+        "Quick answer within the first 60 words naming every list item; keep the title count and numbered H2 count equal, with what it is, why it matters, and what to do for each item",
+        "Visible Last updated: [Month Year] line below the title, using the actual current month and year when the article is prepared for publication",
         "1. Plant saucers",
         "2. Buckets",
         "3. Outdoor toys",
@@ -77,7 +78,8 @@
         "6. Stored tires",
         "7. Small unused pools",
         "Explain emptying and scrubbing where appropriate, plus limits for water that cannot be removed; no pesticide product recommendations",
-        "Visual: custom HomeZoneMap with patio/container locations as an illustrative checklist, not a treatment map; two distinct views demonstrating inspection and an emptied container."
+        "Visual: custom HomeZoneMap with patio/container locations as an illustrative checklist, not a treatment map; two distinct views demonstrating inspection and an emptied container.",
+        "How we put this list together: two or three sentences identifying the cited primary guidance and the editorial selection criteria; no invented product testing, field research, rankings, or claim that the source publishes this exact list"
       ],
       "sources": [
         "https://www.cdc.gov/mosquitoes/mosquito-control/mosquito-control-at-home.html"
@@ -97,7 +99,6 @@
       "id": "BG03",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/sprinkler-water-waste-checklist-swfl/",
-      "city": "Southwest Florida",
       "working_title": "4 Checks for Sprinkler Water Waste in Southwest Florida",
       "primary_kw": "4 checks for sprinkler water waste in southwest florida",
       "secondary_kws": [],
@@ -112,13 +113,15 @@
       ],
       "thesis": "Help readers record observable irrigation problems and distinguish an observation from a repair diagnosis.",
       "outline": [
-        "Quick answer explaining EPA inspect, connect, direct, and select guidance",
+        "Quick answer within the first 60 words naming every list item; keep the title count and numbered H2 count equal, with what it is, why it matters, and what to do for each item",
+        "Visible Last updated: [Month Year] line below the title, using the actual current month and year when the article is prepared for publication",
         "1. Inspect for damaged parts and visible leaks",
         "2. Check connections visually and leave repairs beyond homeowner skill to a qualified professional",
         "3. Look for water directed onto pavement rather than landscape",
         "4. Review the controller and current local watering requirements",
         "Keep a zone log; no universal watering minutes or promised savings",
-        "Visual: customized PestEvidenceGrid for leak, connection, overspray and controller observations; two instructional images showing overspray and a blank zone-recording sheet without invented readings."
+        "Visual: customized PestEvidenceGrid for leak, connection, overspray and controller observations; two instructional images showing overspray and a blank zone-recording sheet without invented readings.",
+        "How we put this list together: two or three sentences identifying the cited primary guidance and the editorial selection criteria; no invented product testing, field research, rankings, or claim that the source publishes this exact list"
       ],
       "sources": [
         "https://www.epa.gov/watersense/sprinkler-spruce-up"
@@ -138,7 +141,6 @@
       "id": "BG04",
       "action": "new_supporting_blog",
       "slug": "/tree-shrub/mulch-placement-around-shrubs-swfl/",
-      "city": "Southwest Florida",
       "working_title": "Mulch Around Southwest Florida Shrubs: Placement, Depth, and Common Mistakes",
       "primary_kw": "mulch around southwest florida shrubs: placement, depth, and common mistakes",
       "secondary_kws": [],
@@ -179,7 +181,6 @@
       "id": "BG05",
       "action": "new_supporting_blog",
       "slug": "/mosquito/screens-vs-standing-water-swfl-home/",
-      "city": "Southwest Florida",
       "working_title": "Screens and Standing Water: Two Different Parts of a Southwest Florida Mosquito Plan",
       "primary_kw": "screens and standing water: two different parts of a southwest florida mosquito plan",
       "secondary_kws": [],
@@ -219,7 +220,6 @@
       "id": "BG06",
       "action": "new_supporting_blog",
       "slug": "/pest-control/property-pest-observation-log-swfl/",
-      "city": "Southwest Florida",
       "working_title": "A Pest Observation Log for Southwest Florida Property Managers",
       "primary_kw": "a pest observation log for southwest florida property managers",
       "secondary_kws": [],
