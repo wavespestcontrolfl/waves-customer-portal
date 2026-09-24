@@ -581,16 +581,16 @@ function eligibilityResponse(eligibility, leadPayload) {
 // promoteCustomerOnBooking's own isAssessmentServiceType guard). Takes an
 // explicit `dbConn` so the commit path can run this inside its phase-1 lock
 // transaction (committed before phase 2 ever calls createSelfBooking — see
-// the file header).
-async function createCustomerForLead(dbConn, lead, address, location) {
-  const { ensureCustomerAccount } = require('./admin-customers');
+// the file header). `account` is the ALREADY-RESOLVED ensureCustomerAccount
+// result — never re-derived here. resolveOrLinkCustomerForLead (the one
+// caller) resolves it once, decides whether an existing property already
+// covers this lead, and only calls this when none does (Codex pre-push P1,
+// 2026-09-24: this used to call ensureCustomerAccount itself and always
+// inserted a new property, even when the phone match already had one at
+// the same address, or an open assessment this lead should have hit
+// already_booked against instead).
+async function createCustomerForLead(dbConn, lead, address, location, account) {
   const { createDefaultCustomerRows } = require('../services/customer-default-rows');
-  const account = await ensureCustomerAccount(dbConn, {
-    firstName: lead.first_name || 'New Lead',
-    lastName: lead.last_name || '',
-    phone: lead.phone || '',
-    email: lead.email || null,
-  });
   const [created] = await dbConn('customers').insert({
     account_id: account.accountId,
     is_primary_profile: !account.existingCustomer,
@@ -612,6 +612,59 @@ async function createCustomerForLead(dbConn, lead, address, location) {
   }).returning('*');
   await createDefaultCustomerRows(dbConn, created.id);
   return created;
+}
+
+// Which of an existing phone-matched account's LIVE properties an unlinked
+// lead actually belongs to: the one whose address matches (streetKey —
+// the same canonical, suffix-normalized comparison admin-customers.js's
+// own duplicate-profile confirm gate uses, services/customer-properties.js),
+// or, when the lead has no address text to compare at all, the account's
+// primary (or only) property. Returns null when ensureCustomerAccount found
+// no existing customer (ordinary new-account create applies), or when an
+// address WAS supplied but matches none of the account's live properties —
+// a genuinely different property, created under the SAME account by the
+// caller rather than reused.
+async function matchExistingAccountProfile(dbConn, account, addressLine1) {
+  if (!account?.existingCustomer) return null;
+  const { streetKey } = require('../services/customer-properties');
+  const profiles = await dbConn('customers')
+    .where({ account_id: account.accountId })
+    .whereNull('deleted_at')
+    .orderBy('is_primary_profile', 'desc')
+    .orderBy('created_at', 'asc');
+  const rows = profiles.length ? profiles : [account.existingCustomer];
+  const key = addressLine1 ? streetKey(addressLine1) : null;
+  if (!key) return rows[0];
+  return rows.find((row) => streetKey(row.address_line1) === key) || null;
+}
+
+// The ONE place an unlinked lead gets attached to a customer record. Resolves
+// ensureCustomerAccount exactly once (it can WRITE — attaching a legacy
+// row's account, or minting a fresh customer_accounts row — so it must never
+// run twice for the same commit), then either reuses a matching existing
+// property (re-running eligibility against ITS OWN visits under the lead
+// lock before anything else, so an existing open assessment short-circuits
+// to already_booked instead of being missed) or provisions a new property
+// under the same account (Codex pre-push P1, 2026-09-24). Returns
+// `{ eligibility }` (a non-ok short-circuit — the caller returns it as-is,
+// same shape every other eligibility short-circuit in this file uses) or
+// `{ customer }`.
+async function resolveOrLinkCustomerForLead(trx, freshLead, resolved) {
+  const { ensureCustomerAccount } = require('./admin-customers');
+  const account = await ensureCustomerAccount(trx, {
+    firstName: freshLead.first_name || 'New Lead',
+    lastName: freshLead.last_name || '',
+    phone: freshLead.phone || '',
+    email: freshLead.email || null,
+  });
+  const matched = await matchExistingAccountProfile(trx, account, resolved.address?.line1);
+  if (matched) {
+    const eligibility = await resolveEligibility(trx, freshLead, matched);
+    if (eligibility.state !== 'ok') return { eligibility };
+    return { customer: matched };
+  }
+  const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
+  return { customer: created };
 }
 
 router.get('/:token', async (req, res, next) => {
@@ -883,7 +936,15 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       let location = resolved.location;
 
       if (!freshCustRow) {
-        provisioned = await createCustomerForLead(trx, lead, resolved.address, resolved.location);
+        // ensureCustomerAccount may resolve an EXISTING customer by phone
+        // even though this lead itself was never linked to one — see
+        // resolveOrLinkCustomerForLead's docblock (Codex pre-push P1,
+        // 2026-09-24). Its eligibility short-circuit (already_booked on
+        // the MATCHED customer's own open assessment) takes priority over
+        // ever linking or inserting anything.
+        const linkResult = await resolveOrLinkCustomerForLead(trx, freshLead, resolved);
+        if (linkResult.eligibility) return { eligibility: linkResult.eligibility };
+        provisioned = linkResult.customer;
         await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
       } else {
         // finalizeBookingLocation (not raw resolveServiceAddress) — the
@@ -1181,6 +1242,7 @@ router._test = {
   findOpenVisit,
   resolveEligibility,
   buildAvailabilityForLead,
+  matchExistingAccountProfile,
   COMMIT_LOCK_NS,
 };
 
