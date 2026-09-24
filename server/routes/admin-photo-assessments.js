@@ -1,8 +1,17 @@
 /**
- * Admin API for photo assessments (lawn assessment + pest identification).
+ * Admin API for photo assessments (lawn assessment, pest identification,
+ * tree & shrub assessment).
  *
- * One surface over both funnel tables — lawn_diagnostics (mode='prospect')
- * and pest_identifications — backing /admin/lawn-assessments:
+ * One surface over the three assessment tables — lawn_diagnostics
+ * (mode='prospect'), pest_identifications, and tree_shrub_identifications —
+ * backing /admin/lawn-assessments. Tree & shrub has no public funnel and no
+ * tokenized customer report page yet: its rows are admin-created only,
+ * generate-link / send-report refuse it (TYPES.tree_shrub.reportPath = null),
+ * it is not in /funnel, and its table has no report/claim/funnel columns
+ * (report_token, report_expires_at, claim_token, claimed_at,
+ * report_first_viewed_at, pricing_snapshot, last_sent_at — dropped by
+ * 20260924010100). The shared list/detail shaping reads those columns
+ * generically, so on a tree_shrub row they are simply absent (null/false).
  *
  *   GET  /                      unified list (type/status filters, newest first)
  *   GET  /funnel                per-type funnel counts (analyzed → claimed → viewed → booked)
@@ -17,8 +26,9 @@
  *
  * Assessments are standalone-but-linkable: unlock auto-links the lead the
  * public claim created; this API adds the manual link path and admin-created
- * rows (source='admin') that never touched the public funnel. The create path
- * is services/photo-assessment-create.js, shared with the inbound photo-text
+ * rows (source='admin') that never touched the public funnel. The per-type
+ * config (TYPES / configFor) and the create path live in
+ * services/photo-assessment-create.js, shared with the inbound photo-text
  * triage (source='auto_triage').
  */
 
@@ -29,18 +39,14 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { buildPublicLawnReport } = require('./public-lawn-diagnostic');
-const {
-  buildPublicPestReport,
-  PEST_LIBRARY,
-} = require('../services/pest-identification');
 const { sendAssessmentReportEmail } = require('../services/assessment-report-email');
-const { overallStatusLabel } = require('../utils/public-report-egress');
 const { portalUrl } = require('../utils/portal-url');
 const {
   TYPES,
+  TYPE_KEYS,
   UUID_RE,
   cleanString,
+  configFor,
   createAdminAssessment,
 } = require('../services/photo-assessment-create');
 
@@ -50,10 +56,15 @@ try { PhotoService = require('../services/photos'); } catch { PhotoService = nul
 router.use(adminAuthenticate, requireAdmin);
 
 const REPORT_TTL_DAYS = 30;
-const LIBRARY_BY_SLUG = new Map(PEST_LIBRARY.map((e) => [e.slug, e]));
+// Types with a public lead-magnet funnel (teaser → claim → report). Only
+// these have the claim/view/report columns funnelCounts counts; tree_shrub
+// has neither the funnel nor the columns. (TYPES, TYPE_KEYS and configFor —
+// the per-type config — live in services/photo-assessment-create.js with
+// the create path that inserts through it.)
+const FUNNEL_TYPE_KEYS = ['lawn', 'pest'];
 
 function typeConfig(req, res) {
-  const config = TYPES[String(req.params.type || '')];
+  const config = configFor(req.params.type);
   if (!config) {
     res.status(404).json({ error: 'Unknown assessment type' });
     return null;
@@ -70,12 +81,6 @@ function parseJson(value, fallback = {}) {
   } catch {
     return fallback;
   }
-}
-
-// The admin lane = prospect-mode rows. Internal tech diagnostics (mode
-// 'internal') belong to the tech portal flow, not this list.
-function scopeLawn(qb) {
-  return qb.where({ mode: 'prospect' });
 }
 
 function listRowShape(type, row) {
@@ -101,17 +106,8 @@ function listRowShape(type, row) {
       phone: contact.phone || null,
     },
   };
-  if (type === 'lawn') {
-    return { ...shared, headline: overallStatusLabel(row.overall_score) };
-  }
-  const item = row.species_slug ? LIBRARY_BY_SLUG.get(row.species_slug) : null;
-  return {
-    ...shared,
-    headline: item ? item.label : (row.category || 'Unidentified'),
-    category: row.category || null,
-    urgency: row.urgency || null,
-    service_line: row.service_line || null,
-  };
+  const typeFields = configFor(type).listFields(row);
+  return { ...shared, ...typeFields };
 }
 
 async function fetchListRows(type, { status, limit, offset }) {
@@ -126,21 +122,21 @@ async function fetchListRows(type, { status, limit, offset }) {
     // correctly — the merged top (offset+limit) is always contained in the
     // union of each table's top (offset+limit).
     .limit(offset + limit);
-  if (type === 'lawn') qb = scopeLawn(qb);
+  if (config.scope) qb = config.scope(qb);
   if (status && status !== 'all') qb = qb.where(`${config.table}.status`, status);
   const rows = await qb;
   return rows.map((row) => listRowShape(type, row));
 }
 
-// GET /api/admin/photo-assessments?type=lawn|pest|all&status=analyzed|sent|archived|all
+// GET /api/admin/photo-assessments?type=lawn|pest|tree_shrub|all&status=analyzed|sent|archived|all
 router.get('/', async (req, res, next) => {
   try {
-    const type = ['lawn', 'pest'].includes(req.query.type) ? req.query.type : 'all';
+    const type = configFor(req.query.type) ? req.query.type : 'all';
     const status = cleanString(req.query.status, 20) || 'all';
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
 
-    const typesToFetch = type === 'all' ? ['lawn', 'pest'] : [type];
+    const typesToFetch = type === 'all' ? TYPE_KEYS : [type];
     const lists = await Promise.all(typesToFetch.map((t) => fetchListRows(t, { status, limit, offset })));
     const merged = lists.flat().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     res.json({
@@ -161,7 +157,7 @@ async function funnelCounts(type, sinceDate) {
   // admin-created phone-prospect assessments never saw the teaser → unlock
   // funnel and would skew unlock/booking rates. They're reported separately.
   let qb = db(config.table).where({ source: 'public_funnel' });
-  if (type === 'lawn') qb = scopeLawn(qb);
+  if (config.scope) qb = config.scope(qb);
   if (sinceDate) qb = qb.where('created_at', '>=', sinceDate);
   const [counts] = await qb
     .select(
@@ -174,7 +170,7 @@ async function funnelCounts(type, sinceDate) {
   let adminCreated = 0;
   try {
     let adminQb = db(config.table).where({ source: 'admin' });
-    if (type === 'lawn') adminQb = scopeLawn(adminQb);
+    if (config.scope) adminQb = config.scope(adminQb);
     if (sinceDate) adminQb = adminQb.where('created_at', '>=', sinceDate);
     const [row] = await adminQb.count('* as n');
     adminCreated = Number(row?.n || 0);
@@ -202,15 +198,14 @@ async function funnelCounts(type, sinceDate) {
 }
 
 // GET /api/admin/photo-assessments/funnel?days=30 (days=0 → all time)
+// One key per funnel type (lawn, pest) — tree_shrub has no public funnel.
 router.get('/funnel', async (req, res, next) => {
   try {
     const days = Math.min(Math.max(Number(req.query.days ?? 30), 0), 365);
     const sinceDate = days > 0 ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : null;
-    const [lawn, pest] = await Promise.all([
-      funnelCounts('lawn', sinceDate),
-      funnelCounts('pest', sinceDate),
-    ]);
-    res.json({ days, lawn, pest });
+    const types = FUNNEL_TYPE_KEYS;
+    const counts = await Promise.all(types.map((type) => funnelCounts(type, sinceDate)));
+    res.json({ days, ...Object.fromEntries(types.map((type, i) => [type, counts[i]])) });
   } catch (err) {
     next(err);
   }
@@ -219,7 +214,7 @@ router.get('/funnel', async (req, res, next) => {
 async function loadRow(config, id) {
   if (!UUID_RE.test(String(id || ''))) return null;
   let qb = db(config.table).where({ id });
-  if (config.table === 'lawn_diagnostics') qb = scopeLawn(qb);
+  if (config.scope) qb = config.scope(qb);
   return qb.first();
 }
 
@@ -238,32 +233,6 @@ async function loadPhotos(config, rowId) {
     }
     return { id: photo.id, photo_index: photo.photo_index, mime_type: photo.mime_type, url };
   }));
-}
-
-function pestTechView(row, contract) {
-  const ident = contract.identification || {};
-  const item = ident.slug ? LIBRARY_BY_SLUG.get(ident.slug) : null;
-  const alternates = (Array.isArray(contract.alternate_slugs) ? contract.alternate_slugs : [])
-    .map((slug) => LIBRARY_BY_SLUG.get(slug))
-    .filter(Boolean)
-    .map((alt) => ({ slug: alt.slug, label: alt.label, tech_notes: alt.tech_notes }));
-  return {
-    identification: {
-      slug: ident.slug || null,
-      label: item ? item.label : null,
-      category: ident.category || null,
-      confidence: ident.confidence || null,
-      contested: !!ident.contested,
-    },
-    urgency: contract.urgency || null,
-    safety: contract.safety || {},
-    service: contract.service || {},
-    tech_notes: item ? item.tech_notes : null,
-    differentials: alternates,
-    // Raw model observations — internal only; never rendered on a customer surface.
-    observations: Array.isArray(contract.observations) ? contract.observations : [],
-    distinguishing_features: Array.isArray(contract.distinguishing_features) ? contract.distinguishing_features : [],
-  };
 }
 
 // GET /api/admin/photo-assessments/:type/:id
@@ -298,8 +267,13 @@ router.get('/:type/:id', async (req, res, next) => {
         // Copy-link is only offered for links a customer can actually open.
         // Mirror the public readers' exact contract (status='sent' + non-null
         // FUTURE expiry) — archived rows and missing-expiry tokens 404 there,
-        // so handing staff those URLs would ship dead links.
-        report_url: row.status === 'sent' && row.report_token && row.report_expires_at
+        // so handing staff those URLs would ship dead links. A type with no
+        // report page (tree_shrub) never has one.
+        report_available: config.reportPath !== null,
+        // The SAME gate generate-link / send-report enforce, so the sheet
+        // offers Get link / Send report only when the server would accept.
+        can_release: releaseRefusal(config, row, 'release a report') === null,
+        report_url: config.reportPath && row.status === 'sent' && row.report_token && row.report_expires_at
           && new Date(row.report_expires_at).getTime() > Date.now()
           ? portalUrl(config.reportPath(row.report_token))
           : null,
@@ -310,9 +284,10 @@ router.get('/:type/:id', async (req, res, next) => {
       customer: customer || null,
       // Internal treatment-oriented view (confirmation steps, tech notes,
       // raw observations) — admin/tech eyes only.
-      tech_view: type === 'lawn' ? { contract } : pestTechView(row, contract),
-      // Exactly what the customer sees at the tokenized report URL.
-      customer_preview: type === 'lawn' ? buildPublicLawnReport(row) : buildPublicPestReport(row),
+      tech_view: config.techView(row, contract),
+      // Exactly what the customer sees at the tokenized report URL (null
+      // for a type with no customer report page).
+      customer_preview: config.customerPreview(row),
     });
   } catch (err) {
     next(err);
@@ -379,6 +354,19 @@ function isReleasable(row) {
 }
 const UNCLAIMED_ERROR = 'This prospect has not unlocked the report yet — sending now would skip lead capture and permanently block their claim. Link or create the lead via their unlock instead.';
 
+// The one release gate generate-link and send-report share: a type with no
+// customer report page, a non-releasable status, or an unclaimed public
+// funnel row all refuse (409) before anything is minted or sent. Returns
+// the refusal message, or null when the row may be released.
+function releaseRefusal(config, row, action) {
+  if (!config.reportPath) {
+    return `There is no customer report for ${config.label.toLowerCase()} yet — review it here and follow up directly.`;
+  }
+  if (!['analyzed', 'sent'].includes(row.status)) return `Cannot ${action} for a ${row.status} assessment`;
+  if (!isReleasable(row)) return UNCLAIMED_ERROR;
+  return null;
+}
+
 // Atomic mint: COALESCE keeps the FIRST token under concurrent mints /
 // double-submits (both requests read back the same persisted token, so
 // neither caller carries a link the other invalidated). Every mint refreshes
@@ -410,10 +398,8 @@ router.post('/:type/:id/generate-link', async (req, res, next) => {
     if (!config) return undefined;
     const row = await loadRow(config, req.params.id);
     if (!row) return res.status(404).json({ error: 'Assessment not found' });
-    if (!['analyzed', 'sent'].includes(row.status)) {
-      return res.status(409).json({ error: `Cannot generate a report link for a ${row.status} assessment` });
-    }
-    if (!isReleasable(row)) return res.status(409).json({ error: UNCLAIMED_ERROR });
+    const refusal = releaseRefusal(config, row, 'generate a report link');
+    if (refusal) return res.status(409).json({ error: refusal });
     const { reportToken, expiresAt } = await mintReportToken(config, row.id);
     return res.json({ success: true, reportUrl: portalUrl(config.reportPath(reportToken)), expiresAt });
   } catch (err) {
@@ -432,10 +418,8 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
     if (!config) return undefined;
     const row = await loadRow(config, req.params.id);
     if (!row) return res.status(404).json({ error: 'Assessment not found' });
-    if (!['analyzed', 'sent'].includes(row.status)) {
-      return res.status(409).json({ error: `Cannot send a report for a ${row.status} assessment` });
-    }
-    if (!isReleasable(row)) return res.status(409).json({ error: UNCLAIMED_ERROR });
+    const refusal = releaseRefusal(config, row, 'send a report');
+    if (refusal) return res.status(409).json({ error: refusal });
 
     const contact = parseJson(row.contact_snapshot, {});
     // Recipient resolution: explicit override → snapshot → linked lead →
@@ -554,4 +538,5 @@ router.post('/:type', async (req, res, next) => {
 module.exports = router;
 module.exports._test = {
   listRowShape,
+  releaseRefusal,
 };

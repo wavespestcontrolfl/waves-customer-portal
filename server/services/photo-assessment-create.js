@@ -1,9 +1,14 @@
 /**
- * Admin photo-assessment create path (lawn assessment + pest identification)
- * as a service, so it runs without an HTTP request: one implementation, two
- * callers — the admin route (POST /api/admin/photo-assessments/:type,
- * source 'admin') and the inbound photo-text triage
- * (services/photo-text-triage.js, source 'auto_triage').
+ * Admin photo assessments — the per-type config (TYPES: lawn assessment,
+ * pest identification, tree & shrub assessment; its tables, list/detail
+ * shaping, and analysis) and the create path, as a service so it runs
+ * without an HTTP request. TYPES lives here, beside the one insert that
+ * reads it (the lead-writer registry validates its table literals in this
+ * file). One implementation, two callers of the create path — the admin
+ * route (POST /api/admin/photo-assessments/:type, source 'admin'), which
+ * also reads TYPES/configFor for its list/detail/report routes, and the
+ * inbound photo-text triage (services/photo-text-triage.js, source
+ * 'auto_triage'; lawn/pest only for now).
  *
  * createAdminAssessment({ type, source, photos, message_photos, lead_id,
  * customer_id, contact, address, note }) resolves the photos (base64 uploads
@@ -30,7 +35,23 @@ const {
   applyWriterSummary,
   deriveOverallScore,
 } = require('./lawn-diagnostic-analyze');
-const { identifyPest, buildPestReportContract } = require('./pest-identification');
+const {
+  identifyPest,
+  buildPestReportContract,
+  buildPublicPestReport,
+  PEST_LIBRARY,
+} = require('./pest-identification');
+const {
+  analyzePhoto,
+  isCompleteVisionResult,
+  mergePhotoComposites,
+  toCategoryScores,
+  calculateOverall,
+  buildTreeShrubTechFindings,
+} = require('./tree-shrub-assessment');
+const { buildTreeShrubVisualCategories } = require('./service-report/tree-shrub-visual-categories');
+const { buildPublicLawnReport } = require('../routes/public-lawn-diagnostic');
+const { overallStatusLabel } = require('../utils/public-report-egress');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
 const { etParts } = require('../utils/datetime-et');
 
@@ -40,6 +61,14 @@ try { PhotoService = require('./photos'); } catch { PhotoService = null; }
 const MAX_PHOTOS = 5;
 const MAX_PHOTO_CHARS = 6_000_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LIBRARY_BY_SLUG = new Map(PEST_LIBRARY.map((e) => [e.slug, e]));
+// Category key → customer-safe label ("Pest Activity Signals", never
+// "infestation"), taken from the same five-category builder the tree & shrub
+// visit report uses so the admin list and the report never name a signal
+// differently.
+const TREE_SHRUB_SIGNAL_LABELS = Object.fromEntries(
+  buildTreeShrubVisualCategories({}).map((category) => [category.key, category.label]),
+);
 
 // Inbound MMS photos pulled into an assessment: resized to this max
 // dimension and re-encoded as JPEG so every downstream consumer (vision
@@ -159,6 +188,12 @@ const TYPES = {
     photoKeyPrefix: 'lawnfunnel',
     reportPath: (token) => `/lawn-report/${token}`,
     label: 'Lawn Assessment',
+    // Admin lane = prospect-mode rows only (see scopeLawn).
+    scope: (qb) => scopeLawn(qb),
+    listFields: (row) => ({ headline: overallStatusLabel(row.overall_score) }),
+    techView: (row, contract) => ({ contract }),
+    customerPreview: (row) => buildPublicLawnReport(row),
+    analyze: (photos, prospectNote, source) => runLawnAnalysis(photos, prospectNote, source),
   },
   pest: {
     table: 'pest_identifications',
@@ -167,8 +202,121 @@ const TYPES = {
     photoKeyPrefix: 'pestid',
     reportPath: (token) => `/pest-report/${token}`,
     label: 'Pest Identification',
+    scope: null,
+    listFields: (row) => pestListFields(row),
+    techView: (row, contract) => pestTechView(row, contract),
+    customerPreview: (row) => buildPublicPestReport(row),
+    analyze: (photos, prospectNote) => runPestAnalysis(photos, prospectNote),
+  },
+  tree_shrub: {
+    table: 'tree_shrub_identifications',
+    photoTable: 'tree_shrub_identification_photos',
+    photoFk: 'identification_id',
+    photoKeyPrefix: 'treeshrub',
+    // No tokenized customer report page exists for tree & shrub yet — a null
+    // reportPath makes generate-link / send-report refuse (releaseRefusal)
+    // BEFORE any report/claim column would be read or written (the table has
+    // none), and keeps report_url null, so no dead link is ever shown.
+    reportPath: null,
+    label: 'Tree & Shrub Assessment',
+    scope: null,
+    listFields: (row) => treeShrubListFields(row),
+    techView: (row, contract) => treeShrubTechView(contract),
+    customerPreview: () => null,
+    analyze: (photos, prospectNote, source) => runTreeShrubAnalysis(photos, prospectNote, source),
   },
 };
+
+// Every assessment type, in list/funnel order. A literal list rather than
+// the keys of TYPES: TYPES is the governed insert-table config
+// (tests/lead-writer-registry.test.js) and may not be handed whole to an
+// uninspectable callee. The allowlist also keeps a prototype key
+// (?type=toString, /constructor/:id) from resolving to a config.
+const TYPE_KEYS = ['lawn', 'pest', 'tree_shrub'];
+
+// Returns TYPES[type] itself (written as a plain `return TYPES[...]` so the
+// lead-writer registry test follows the governed config through this call).
+function configFor(type) {
+  if (!TYPE_KEYS.includes(String(type || ''))) return null;
+  return TYPES[type];
+}
+
+// The admin lane = prospect-mode rows. Internal tech diagnostics (mode
+// 'internal') belong to the tech portal flow, not this list.
+function scopeLawn(qb) {
+  return qb.where({ mode: 'prospect' });
+}
+
+function pestListFields(row) {
+  const item = row.species_slug ? LIBRARY_BY_SLUG.get(row.species_slug) : null;
+  return {
+    headline: item ? item.label : (row.category || 'Unidentified'),
+    category: row.category || null,
+    urgency: row.urgency || null,
+    service_line: row.service_line || null,
+  };
+}
+
+// Overall 0-100 health score + the worst flagged signal, e.g.
+// "62/100 · Pest Activity Signals" or "91/100 · No flagged signals".
+function treeShrubListFields(row) {
+  const overall = row.overall_score == null ? null : Number(row.overall_score);
+  const worstLabel = TREE_SHRUB_SIGNAL_LABELS[row.worst_signal] || null;
+  return {
+    headline: `${overall == null ? 'Unscored' : `${overall}/100`} · ${worstLabel || 'No flagged signals'}`,
+    overall_score: overall,
+    worst_signal: worstLabel ? row.worst_signal : null,
+    worst_signal_label: worstLabel,
+  };
+}
+
+function pestTechView(row, contract) {
+  const ident = contract.identification || {};
+  const item = ident.slug ? LIBRARY_BY_SLUG.get(ident.slug) : null;
+  const alternates = (Array.isArray(contract.alternate_slugs) ? contract.alternate_slugs : [])
+    .map((slug) => LIBRARY_BY_SLUG.get(slug))
+    .filter(Boolean)
+    .map((alt) => ({ slug: alt.slug, label: alt.label, tech_notes: alt.tech_notes }));
+  return {
+    identification: {
+      slug: ident.slug || null,
+      label: item ? item.label : null,
+      category: ident.category || null,
+      confidence: ident.confidence || null,
+      contested: !!ident.contested,
+    },
+    urgency: contract.urgency || null,
+    safety: contract.safety || {},
+    service: contract.service || {},
+    tech_notes: item ? item.tech_notes : null,
+    differentials: alternates,
+    // Raw model observations — internal only; never rendered on a customer surface.
+    observations: Array.isArray(contract.observations) ? contract.observations : [],
+    distinguishing_features: Array.isArray(contract.distinguishing_features) ? contract.distinguishing_features : [],
+  };
+}
+
+// Admin view of a tree & shrub assessment: the five 0-100 health scores and
+// statuses, the flagged findings, the headline + per-photo observations, and
+// the admin next step. The contract is written only by runTreeShrubAnalysis
+// and holds nothing but admin-safe fields, so the view is the contract over
+// empty defaults (older/partial rows still render). Admin eyes only — there
+// is no customer report page for this type yet.
+const TREE_SHRUB_VIEW_DEFAULTS = {
+  scores: {},
+  categories: [],
+  worst_signal: null,
+  findings: [],
+  observations: '',
+  photo_observations: [],
+  ai_summary: null,
+  suggested_customer_action: null,
+  scored_count: null,
+  photo_count: null,
+};
+function treeShrubTechView(contract) {
+  return { ...TREE_SHRUB_VIEW_DEFAULTS, ...contract };
+}
 
 function normalizePhotos(rawPhotos) {
   const photos = Array.isArray(rawPhotos) ? rawPhotos.filter(Boolean) : [];
@@ -246,6 +394,118 @@ async function runPestAnalysis(photos, prospectNote) {
       service_line: contract.service.line,
       urgency: contract.urgency,
       ai_summary: (result.observations || []).join(' ').slice(0, 2000) || null,
+    },
+  };
+}
+
+// Tree & shrub runs the SAME dual-vision engine the tech visit closeout uses
+// — its per-photo analyzePhoto (Claude + Gemini), mergePhotoComposites
+// (worst signal across photos), and deterministic 0-100 health scoring — so
+// there is no second analysis implementation. It composes those pieces here
+// rather than calling previewTreeShrubAssessment because this lane needs what
+// the preview discards: each photo's own reading. The prospect note is
+// stored for the admin view only and never passed to the model (same rule as
+// lawn/pest).
+
+// Admin next step keyed by the worst flagged signal. This lane is standalone
+// (a prospect, or a customer with no visit booked), so unlike the closeout
+// helper's "we'll recheck on the next visit" it never promises a visit. Admin
+// view only — tree & shrub has no customer report egress.
+const TREE_SHRUB_NEXT_STEPS = {
+  none: 'No treatment signals in these photos — offer a seasonal check.',
+  foliage_fullness: 'Recommend an on-site look to confirm what is thinning the canopy and quote a plan.',
+  leaf_color_vigor: 'Recommend an on-site look to confirm the discoloration pattern and quote treatment.',
+  pest_activity: 'Recommend an on-site look to confirm the pest-pressure signals and quote treatment.',
+  disease_leaf_spot: 'Recommend an on-site look to confirm the leaf-spot signals and quote treatment.',
+  water_heat_mechanical_stress: 'Recommend an on-site look at watering and pruning before quoting treatment.',
+};
+
+// The five categories as the admin lane stores them: key/label/score/status
+// only. The report builder's customerExplanation copy is written for a
+// completed visit ("documented today", "confirm next visit"), which a
+// standalone assessment must not carry.
+function treeShrubCategories(scores) {
+  return buildTreeShrubVisualCategories({ scores })
+    .map(({ key, label, score, status }) => ({ key, label, score, status }));
+}
+
+// Lowest-scoring flagged (watch / needs_attention) category, or null when
+// nothing is flagged.
+function worstTreeShrubSignal(categories) {
+  return categories
+    .filter((category) => category.status === 'watch' || category.status === 'needs_attention')
+    .reduce((worst, category) => (!worst || category.score < worst.score ? category : worst), null);
+}
+
+// One photo through the engine. A result that did not read every schema
+// field (isCompleteVisionResult — an omitted or invalid field would
+// otherwise default to a clean "none"/95) counts as unscored: null.
+async function scoreTreeShrubPhoto({ photo, index }) {
+  const result = await analyzePhoto(photo.data, photo.mimeType).catch(() => null);
+  if (!isCompleteVisionResult(result)) return null;
+  const categories = treeShrubCategories(toCategoryScores(result.composite));
+  return {
+    index,
+    composite: result.composite,
+    observations: String(result.composite.observations || '').trim(),
+    worst: worstTreeShrubSignal(categories),
+    categories,
+  };
+}
+
+// The scored photo whose own reading drives the merged worst signal (the
+// lowest score on that category), so the headline observation describes the
+// trouble spot rather than whichever photo happened to come first. No
+// flagged signal → the first photo.
+function headlineTreeShrubPhoto(scored, worstKey) {
+  const scoreOn = (entry) => entry.categories.find((category) => category.key === worstKey)?.score ?? Infinity;
+  return scored.reduce((best, entry) => (scoreOn(entry) < scoreOn(best) ? entry : best), scored[0]);
+}
+
+// Every photo that carries data must score completely, or nothing is
+// persisted: a dropped photo would silently leave the operator's pick
+// (possibly the trouble spot) out of the worst-signal merge.
+async function runTreeShrubAnalysis(photos, prospectNote, source) {
+  const analyzable = photos.map((photo, index) => ({ photo, index })).filter(({ photo }) => photo.data);
+  const scored = await Promise.all(analyzable.map(scoreTreeShrubPhoto));
+  if (!scored.every(Boolean)) return { error: 'Could not analyze every photo — try again in a few minutes.' };
+
+  const merged = mergePhotoComposites(scored.map((entry) => entry.composite));
+  const scores = toCategoryScores(merged);
+  scores.overallScore = calculateOverall(scores);
+  const categories = treeShrubCategories(scores);
+  const worst = worstTreeShrubSignal(categories);
+  const worstKey = worst ? worst.key : null;
+  const headline = headlineTreeShrubPhoto(scored, worstKey);
+  const { aiSummary, findings } = buildTreeShrubTechFindings({ scores });
+  const contract = {
+    scores,
+    categories,
+    worst_signal: worst,
+    // Headline paragraph: the photo driving the worst signal. Every photo's
+    // own paragraph is kept, in upload order, beside its own worst signal.
+    observations: headline.observations,
+    photo_observations: scored.map((entry) => ({
+      index: entry.index,
+      observations: entry.observations,
+      worst_signal: entry.worst && entry.worst.key,
+    })),
+    findings,
+    ai_summary: aiSummary,
+    suggested_customer_action: TREE_SHRUB_NEXT_STEPS[worstKey ?? 'none'],
+    scored_count: scored.length,
+    photo_count: analyzable.length,
+  };
+  return {
+    insert: {
+      ai_analysis: JSON.stringify({
+        prospect_note: prospectNote,
+        provenance: { source, engine: 'tree-shrub-assessment' },
+      }),
+      report_contract: JSON.stringify(contract),
+      overall_score: scores.overallScore,
+      worst_signal: worstKey,
+      ai_summary: cleanString(headline.observations, 2000),
     },
   };
 }
@@ -381,7 +641,7 @@ function buildSnapshots(body, customerContact = null) {
 // 'auto_triage' for inbound photo-text triage) — never read from a request
 // body. No lead, attribution row, or email is ever created here.
 async function createAdminAssessment({ type, source, ...body }) {
-  const config = TYPES[String(type || '')];
+  const config = configFor(type);
   if (!config) return { error: 'Unknown assessment type', status: 404 };
 
   const requestPhotos = await resolveRequestPhotos(body);
@@ -411,9 +671,7 @@ async function createAdminAssessment({ type, source, ...body }) {
 async function analyzeAndStore({
   type, source, config, photos, prospectNote, leadId, customerId, contactSnapshot, addressSnapshot,
 }) {
-  const analysis = type === 'lawn'
-    ? await runLawnAnalysis(photos, prospectNote, source)
-    : await runPestAnalysis(photos, prospectNote);
+  const analysis = await config.analyze(photos, prospectNote, source);
   if (analysis.error) return { error: analysis.error, status: 503, analysisStarted: true };
 
   const [row] = await db(config.table).insert({
@@ -445,6 +703,8 @@ async function analyzeAndStore({
 
 module.exports = {
   TYPES,
+  TYPE_KEYS,
+  configFor,
   UUID_RE,
   MAX_PHOTOS,
   MESSAGE_PHOTO_ALLOWED_MIME,
@@ -452,6 +712,10 @@ module.exports = {
   createAdminAssessment,
   _test: {
     normalizePhotos,
+    runTreeShrubAnalysis,
+    worstTreeShrubSignal,
+    headlineTreeShrubPhoto,
+    TREE_SHRUB_NEXT_STEPS,
     resolveRequestPhotos,
     resolveAssociations,
     lookupAssociation,

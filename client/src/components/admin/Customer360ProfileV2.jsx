@@ -146,6 +146,7 @@ import {
   CONSENT_TEXT,
   CONSENT_VERSION,
 } from "../../lib/paymentMethodConsentText";
+import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
@@ -5270,7 +5271,7 @@ function CustomerWorkspaceHeader({
             {unreadConversations > 0 && (
               <span
                 className="c360-unread-count"
-                aria-label={`${unreadConversations} unread conversations`}
+                aria-label={`${unreadConversations} conversations needing a reply`}
               >
                 {unreadConversations}
               </span>
@@ -7430,9 +7431,7 @@ function CustomerProfileEditor({
                     .filter(Boolean)
                     .join(" ")
                     .trim() || "this customer";
-                const ok = window.confirm(
-                  `Delete ${name}?\n\nThis removes them from the active customer list. Their history (services, invoices, payments) is preserved and can be restored.`,
-                );
+                const ok = window.confirm(archiveConfirmMessage(name));
                 if (!ok) return;
                 setDeletingCustomer(true);
                 setEditErr("");

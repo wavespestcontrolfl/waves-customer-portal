@@ -9,7 +9,9 @@ function withWeights(overrides = {}) {
 }
 
 describe('calculatePestPressureScore', () => {
-  test('all components zero returns 0.0 / Very Low', () => {
+  test('all components zero returns 0.0 / None', () => {
+    // Six-band scheme (owner ruling 2026-09-24): 0.0 falls in the new
+    // 'none' band (0-0.4), not 'very_low'.
     const result = calculatePestPressureScore({
       clientRating: 0,
       technicianRating: 0,
@@ -20,8 +22,8 @@ describe('calculatePestPressureScore', () => {
     }, DEFAULT_CONFIG);
 
     expect(result.score).toBe(0);
-    expect(result.label.key).toBe('very_low');
-    expect(result.label.name).toBe('Very Low');
+    expect(result.label.key).toBe('none');
+    expect(result.label.name).toBe('None');
     expect(result.dataCompleteness).toBe('complete');
     expect(result.trend).toBe('first_marker');
     expect(result.trendDelta).toBeNull();
@@ -29,6 +31,7 @@ describe('calculatePestPressureScore', () => {
 
   test('mixed low values return expected rounded score', () => {
     // 1*0.25 + 2*0.30 + 0*0.20 + 1*0.15 + 0*0.10 = 0.25 + 0.60 + 0 + 0.15 + 0 = 1.00
+    // Six-band scheme: 1.0 falls in 'very_low' (0.5-1.4), not 'low'.
     const result = calculatePestPressureScore({
       clientRating: 1,
       technicianRating: 2,
@@ -39,7 +42,7 @@ describe('calculatePestPressureScore', () => {
     }, DEFAULT_CONFIG);
 
     expect(result.score).toBe(1.0);
-    expect(result.label.key).toBe('low');
+    expect(result.label.key).toBe('very_low');
     expect(result.dataCompleteness).toBe('complete');
   });
 
@@ -73,7 +76,9 @@ describe('calculatePestPressureScore', () => {
     expect(result.score).toBe(2.3);
     expect(result.dataCompleteness).toBe('partial');
     expect(result.missingComponents).toEqual(['clientRating']);
-    expect(result.label.key).toBe('moderate');
+    // Six-band scheme (owner ruling 2026-09-24): 2.3 falls in 'low'
+    // (1.5-2.4), not 'moderate'.
+    expect(result.label.key).toBe('low');
   });
 
   test('insufficient data returns no score and insufficient_data trend', () => {
@@ -169,17 +174,19 @@ describe('calculatePestPressureScore', () => {
     expect(result.trend).toBe('significant_increase');
   });
 
-  test('label thresholds resolve correctly across all bands', () => {
+  test('label thresholds resolve correctly across all bands (six-band scheme, owner ruling 2026-09-24)', () => {
     const bands = [
-      { value: 0.0, key: 'very_low' },
-      { value: 0.9, key: 'very_low' },
-      { value: 1.0, key: 'low' },
-      { value: 1.9, key: 'low' },
-      { value: 2.0, key: 'moderate' },
-      { value: 2.9, key: 'moderate' },
-      { value: 3.0, key: 'elevated' },
-      { value: 3.9, key: 'elevated' },
-      { value: 4.0, key: 'high' },
+      { value: 0.0, key: 'none' },
+      { value: 0.4, key: 'none' },
+      { value: 0.5, key: 'very_low' },
+      { value: 1.4, key: 'very_low' },
+      { value: 1.5, key: 'low' },
+      { value: 2.4, key: 'low' },
+      { value: 2.5, key: 'moderate' },
+      { value: 3.4, key: 'moderate' },
+      { value: 3.5, key: 'elevated' },
+      { value: 4.4, key: 'elevated' },
+      { value: 4.5, key: 'high' },
       { value: 5.0, key: 'high' },
     ];
 
@@ -291,20 +298,23 @@ describe('calculatePestPressureScore', () => {
       riskFactorRating: 0,
       previousScore: 0.3,
     }, DEFAULT_CONFIG);
-    // 1*0.30 = 0.3, delta 0 → stable, label very_low → stable_low copy
+    // 1*0.30 = 0.3, delta 0 → stable. Six-band scheme: label is 'none'
+    // (0-0.4), which isLowOrVeryLow also treats as low → stable_low copy.
     expect(lowStable.summary).toMatch(/remains low/);
 
     const moderateStable = calculatePestPressureScore({
       clientRating: 3,
       technicianRating: 3,
-      reServiceImpact: 1,
-      recurringIssueRating: 1,
-      riskFactorRating: 1,
-      previousScore: 2.2,
+      reServiceImpact: 3,
+      recurringIssueRating: 3,
+      riskFactorRating: 3,
+      previousScore: 3.3,
     }, DEFAULT_CONFIG);
-    // 3*0.25 + 3*0.30 + 1*0.20 + 1*0.15 + 1*0.10 = 0.75 + 0.90 + 0.20 + 0.15 + 0.10 = 2.1
-    // delta -0.1 → stable, label moderate → stable_other
-    expect(moderateStable.score).toBe(2.1);
+    // All components equal 3 → weighted average is 3.0 regardless of
+    // weights. delta -0.3 → stable. Six-band scheme: 3.0 falls in
+    // 'moderate' (2.5-3.4), outside isLowOrVeryLow's none/very_low/low
+    // set, so stable_other copy applies.
+    expect(moderateStable.score).toBe(3.0);
     expect(moderateStable.label.key).toBe('moderate');
     expect(moderateStable.trend).toBe('stable');
     expect(moderateStable.summary).toMatch(/stable compared/);

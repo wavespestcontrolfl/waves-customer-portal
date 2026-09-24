@@ -1,8 +1,10 @@
 /**
  * Pest Identification Service
  *
- * Dual-vision (Claude + Gemini) species/category identification from prospect
- * photos, for the public pest-identifier funnel and the admin assessment view.
+ * Gemini-first species/category identification from prospect photos, for the
+ * public pest-identifier funnel and the admin assessment view. Owner ruling
+ * 2026-09-24: no more Claude+Gemini fan-out — each photo tries Gemini first;
+ * Claude runs ONLY when Gemini returns nothing (HTTP/parse/empty miss).
  *
  * Trust model mirrors the lawn diagnostic stack:
  *  - Model output NEVER reaches a prospect directly. Every customer-facing
@@ -10,15 +12,18 @@
  *    below; an unmatched identification degrades to a generic category label.
  *  - Confidence gates naming: only a high-confidence, library-matched,
  *    model-agreeing ID names a pest plainly; moderate reads "likely", low
- *    reads as a category ("an ant species") with an in-person confirm.
+ *    reads as a category ("an ant species") with an in-person confirm. A
+ *    single-model result (Gemini alone, or Claude as its fallback) always
+ *    goes through mergeModelResults' single_model path, which downgrades
+ *    confidence a notch — so one model alone can never read "high".
  *  - Termite/WDO photo ID is SUGGESTIVE ONLY: the library forces
  *    inspection_required and copy that routes to a free inspection. Photo ID
  *    must never read like a WDO inspection finding.
  *
- * Vision goes to MODELS.VISION (Claude) + the Gemini vision scorer directly —
- * the same pattern as lawn-assessment.js. Vision does NOT route through
- * llm/deep.js (DEEP is text-only lanes). No sampling controls on the request —
- * current Anthropic models reject them.
+ * Vision goes to the Gemini vision scorer, falling back to MODELS.VISION
+ * (Claude) — the same pattern as lawn-assessment.js. Vision does NOT route
+ * through llm/deep.js (DEEP is text-only lanes). No sampling controls on the
+ * request — current Anthropic models reject them.
  */
 
 const logger = require('./logger');
@@ -367,6 +372,34 @@ Rules:
 - If the photo is too blurry/dark/distant to identify, use category "other", confidence "low", best_match "unidentifiable".
 - Never invent species not plausible in Florida.`;
 
+// Codex P1 class (#4730 r1, lawn-assessment): a parseable but empty response
+// (`{}`) is still a truthy object and would skip the Claude fallback. Require
+// the three fields the merge actually reads before accepting a model's answer.
+function isValidPestIdentification(parsed) {
+  if (!parsed || typeof parsed !== 'object') return false;
+  if (typeof parsed.best_match !== 'string' || !parsed.best_match.trim()) return false;
+  if (!clampEnum(parsed.category, CATEGORIES)) return false;
+  if (!clampEnum(parsed.confidence, CONFIDENCES)) return false;
+  // mergeModelResults reads not_a_pest; a missing flag would read as "is a
+  // pest" and offer a consultation for a harmless bug (Codex r3).
+  if (typeof parsed.not_a_pest !== 'boolean' && !['true', 'false'].includes(String(parsed.not_a_pest).trim().toLowerCase())) return false;
+  return true;
+}
+
+// Store the accepted flag as a real boolean so mergeModelResults can't misread
+// a padded " true " as false (Codex r4).
+function normalizePestIdentification(parsed) {
+  if (typeof parsed.not_a_pest === 'string') parsed.not_a_pest = parsed.not_a_pest.trim().toLowerCase() === 'true';
+  return parsed;
+}
+
+function parseVisionJson(text, source) {
+  const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+  if (isValidPestIdentification(parsed)) return normalizePestIdentification(parsed);
+  logger.warn(`[pest-identification] ${source} vision response failed schema validation`);
+  return null;
+}
+
 async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
@@ -384,7 +417,7 @@ async function callClaudeVision(base64Image, mimeType) {
     });
     const text = anthropicText(response);
     if (!text) { logger.warn('[pest-identification] Claude returned empty content'); return null; }
-    return JSON.parse(text.replace(/```json|```/g, '').trim());
+    return parseVisionJson(text, 'Claude');
   } catch (err) {
     logger.error(`Pest identification Claude vision failed: ${err.message}`);
     return null;
@@ -413,7 +446,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
   const data = await response.json();
   const text = geminiText(data);
   if (!text) return null;
-  return JSON.parse(text.replace(/```json|```/g, '').trim());
+  return parseVisionJson(text, `Gemini (${model})`);
 }
 
 async function callGeminiVision(base64Image, mimeType) {
@@ -446,11 +479,15 @@ function lowerConfidenceOf(a, b) {
 }
 
 /**
- * Merge one photo's two model results into a single per-photo identification.
+ * Merge one photo's model result(s) into a single per-photo identification.
  * Agreement (same library slug) keeps the ID at the models' LOWER confidence;
  * one-model-only results are downgraded a notch; slug disagreement collapses
- * to a category-level result at low confidence. Raw model text is preserved
- * only for the internal record, never for egress.
+ * to a category-level result at low confidence. Since 2026-09-24 identifyPest
+ * only ever hands this ONE result per photo (Gemini, or Claude as its
+ * fallback) — the single_model branch is the live path; the two-result
+ * agreement/conflict branches are kept for this function's own shape and any
+ * direct caller that passes both. Raw model text is preserved only for the
+ * internal record, never for egress.
  */
 function mergeModelResults(claude, gemini) {
   const results = [claude, gemini].filter(Boolean);
@@ -552,9 +589,22 @@ function aggregateIdentification(perPhoto) {
 }
 
 /**
+ * Analyze one photo — Gemini first (owner ruling 2026-09-24); Claude runs
+ * ONLY when Gemini returns nothing (HTTP/parse/empty miss). Returns
+ * { claude, gemini } with the unused side null, same shape mergeModelResults
+ * already expects from its two-argument callers.
+ */
+async function analyzePhoto(base64Image, mimeType) {
+  const gemini = await callGeminiVision(base64Image, mimeType);
+  const claude = gemini ? null : await callClaudeVision(base64Image, mimeType);
+  return { claude, gemini };
+}
+
+/**
  * Identify from a set of photos (the funnel sends 1–5 of the same subject).
- * Per-photo dual-vision, then a cross-photo vote: the most-supported library
- * entry wins; cross-photo disagreement caps confidence at moderate.
+ * Per-photo Gemini-first vision (Claude only on a Gemini miss), then a
+ * cross-photo vote: the most-supported library entry wins; cross-photo
+ * disagreement caps confidence at moderate.
  */
 async function identifyPest(photos = []) {
   const usable = photos.filter((p) => p && p.data);
@@ -562,14 +612,8 @@ async function identifyPest(photos = []) {
 
   const perPhoto = [];
   for (const photo of usable) {
-    const [claudeResult, geminiResult] = await Promise.allSettled([
-      callClaudeVision(photo.data, photo.mimeType || 'image/jpeg'),
-      callGeminiVision(photo.data, photo.mimeType || 'image/jpeg'),
-    ]);
-    const merged = mergeModelResults(
-      claudeResult.status === 'fulfilled' ? claudeResult.value : null,
-      geminiResult.status === 'fulfilled' ? geminiResult.value : null,
-    );
+    const { claude, gemini } = await analyzePhoto(photo.data, photo.mimeType || 'image/jpeg');
+    const merged = mergeModelResults(claude, gemini);
     if (merged) perPhoto.push(merged);
   }
 
@@ -753,6 +797,7 @@ module.exports = {
   URGENCIES,
   resolveLibraryMatch,
   mergeModelResults,
+  analyzePhoto,
   identifyPest,
   buildPestReportContract,
   buildPublicPestReport,

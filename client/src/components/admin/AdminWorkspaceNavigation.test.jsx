@@ -98,9 +98,10 @@ describe('workspace navigation', () => {
     expect(screen.getByRole('button', { name: 'Expand Sales' })).toHaveAttribute('aria-expanded', 'false');
   });
 
-  it('announces unread conversations and renders no workspace menu when disabled', () => {
+  it('announces conversations needing a reply and renders no workspace menu when disabled', () => {
     const view = render(<Fixture />);
-    const communications = screen.getByRole('link', { name: 'Communications , 5 unread conversations' });
+    const communications = screen.getByRole('link', { name: 'Communications , 5 conversations needing a reply' });
+    expect(communications).toHaveAttribute('href', '/admin/communications?needsResponse=true');
     expect(within(communications).getByText('5')).toHaveAttribute('aria-hidden');
     view.rerender(<Fixture enabled={false} />);
     expect(screen.queryByRole('navigation', { name: 'Admin workspaces' })).not.toBeInTheDocument();

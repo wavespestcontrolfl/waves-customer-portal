@@ -344,6 +344,10 @@ const CONTACT_EVIDENCE_TYPES = new Set([
   'assessment_completed',
 ]);
 
+function isContactEvidenceType(value) {
+  return CONTACT_EVIDENCE_TYPES.has(value);
+}
+
 /**
  * Move one exactly identified lead from new -> contacted after live contact.
  *
@@ -368,7 +372,7 @@ async function markLeadContactedFromEvidence(options = {}) {
   if (!Object.prototype.hasOwnProperty.call(options, 'customerId')) {
     return { contacted: false, reason: 'missing_customer_identity' };
   }
-  if (!CONTACT_EVIDENCE_TYPES.has(evidenceType)) {
+  if (!isContactEvidenceType(evidenceType)) {
     return { contacted: false, reason: 'ineligible_evidence' };
   }
 
@@ -2158,6 +2162,7 @@ module.exports = {
   settleRepeatFunnelRow,
   stampFirstResponseByContact,
   markLeadContactedFromEvidence,
+  isContactEvidenceType,
   resolveEstimateEventLeads,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,

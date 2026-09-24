@@ -68,8 +68,9 @@ describe('runRedPairAutoDismissSweep', () => {
     pipeline_stage: 'new_lead', created_at: '2026-07-09',
   };
 
-  function install({ customers, lockedCustomers = null, dismissalsError = false }) {
+  function install({ customers, lockedCustomers = null, dismissalsError = false, existingDismissals = [] }) {
     const inserted = [];
+    const updated = [];
     const router = (table, q) => {
       if (table === 'customers') {
         // The FOR UPDATE re-read at write time can see different rows than
@@ -82,8 +83,19 @@ describe('runRedPairAutoDismissSweep', () => {
           inserted.push({ row: q.args('insert')[0], onConflict: q.called('onConflict'), ignored: q.called('ignore') });
           return 1;
         }
+        if (q.called('update')) {
+          updated.push({ where: q.args('where')[0], patch: q.args('update')[0] });
+          return 1;
+        }
         if (dismissalsError) throw new Error('relation is unreadable');
-        return [];
+        // The under-lock pair read (`.where({a,b}).select('reason')`) sees
+        // the rows that landed since the snapshot; the detection read
+        // sees the same rows (an undo sentinel is visible to this sweep).
+        if (q.called('where')) {
+          const w = q.args('where')[0];
+          return existingDismissals.filter((d) => d.customer_id_a === w.customer_id_a && d.customer_id_b === w.customer_id_b);
+        }
+        return existingDismissals;
       }
       return [];
     };
@@ -94,6 +106,7 @@ describe('runRedPairAutoDismissSweep', () => {
       trx.raw = jest.fn(async () => ({ rows: [] }));
       return fn(trx);
     });
+    inserted.updated = updated;
     return inserted;
   }
 
@@ -148,6 +161,58 @@ describe('runRedPairAutoDismissSweep', () => {
     expect(result.skippedStale).toBe(1);
     expect(inserted).toHaveLength(0);
     // Nothing dismissed → no digest bell.
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // Codex round 3 P2: revertMerge's undo sentinel is deliberately visible to
+  // this sweep's read, so an undone pair that is red is selected every day.
+  // An ignored conflict would leave the sentinel in place yet report
+  // 'dismissed' — a repeated false digest. The sentinel is REPLACED by the
+  // real red verdict (the pair leaves the queue like any red pair).
+  it('replaces an undo-merge sentinel with the real red verdict instead of ignoring the conflict', async () => {
+    const [a, b] = [personA.id, personB.id].sort();
+    const inserted = install({
+      customers: [personA, personB],
+      existingDismissals: [{ customer_id_a: a, customer_id_b: b, reason: dedupe.UNDO_MERGE_DISMISSAL_REASON }],
+    });
+    const result = await dedupe.runRedPairAutoDismissSweep();
+    expect(result.dismissed).toHaveLength(1);
+    expect(inserted).toHaveLength(0);
+    expect(inserted.updated).toHaveLength(1);
+    expect(inserted.updated[0].where).toEqual({ customer_id_a: a, customer_id_b: b, reason: dedupe.UNDO_MERGE_DISMISSAL_REASON });
+    expect(inserted.updated[0].patch.reason).toMatch(/red tier/);
+    expect(inserted.updated[0].patch.created_by).toBe('auto:red-tier');
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a real dismissal that raced in since the snapshot as already handled — no write, no digest', async () => {
+    const [a, b] = [personA.id, personB.id].sort();
+    // The detection read (module db) still returns the pair; the locked
+    // pair read sees an operator's verdict that landed in between.
+    const inserted = install({
+      customers: [personA, personB],
+      existingDismissals: [],
+    });
+    // Swap the router's dismissal answer for the locked read only.
+    const seen = [];
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => makeChain(table, (q) => {
+        if (table === 'customers') return [personA, personB];
+        if (table === 'customer_duplicate_dismissals') {
+          if (q.called('insert') || q.called('update')) { seen.push(q._calls); return 1; }
+          return [{ customer_id_a: a, customer_id_b: b, reason: 'operator: separate tenants' }];
+        }
+        return [];
+      }));
+      trx.fn = { now: () => 'NOW' };
+      trx.raw = jest.fn(async () => ({ rows: [] }));
+      return fn(trx);
+    });
+    const result = await dedupe.runRedPairAutoDismissSweep();
+    expect(result.dismissed).toHaveLength(0);
+    expect(result.alreadyDismissed).toBe(1);
+    expect(seen).toHaveLength(0);
+    expect(inserted).toHaveLength(0);
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 

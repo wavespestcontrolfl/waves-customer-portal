@@ -1,13 +1,15 @@
 /**
  * Pest Pressure display helpers.
  *
- * customerVisiblePressureIndex applies the 0.3 display floor so customer
- * reports never show a literal "0.0" — relocated from the legacy
- * service-report/pressure-index.js module so callers can depend on it
- * without pulling in the deprecated scoring functions.
+ * customerVisiblePressureIndex normalizes a stored pressure index for
+ * customer reports — relocated from the legacy service-report/
+ * pressure-index.js module so callers can depend on it without pulling in
+ * the deprecated scoring functions. The old 0.3 display floor is gone
+ * (owner ruling 2026-09-24): a technician's 0 means no pests and reads
+ * 0.0 everywhere, matching the Pest Pressure gauge.
  */
 
-const PRESSURE_INDEX_DISPLAY_FLOOR = 0.3;
+const PRESSURE_INDEX_DISPLAY_FLOOR = 0;
 
 function roundPressure(value) {
   return Math.round(Number(value) * 10) / 10;

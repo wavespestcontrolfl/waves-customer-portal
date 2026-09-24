@@ -1,11 +1,14 @@
 /**
  * Tree & Shrub Health Assessment Service
  *
- * Dual-vision analysis (Claude + Gemini) that scores landscape-plant health from
- * the visit's tree/shrub photos, mirroring lawn-assessment.js. Produces the five
- * customer-facing diagnosis categories as 0-100 "health" scores (higher = healthier
- * / fewer problem signals), persists a tree_shrub_assessments row, and exposes the
- * report loader (buildTreeShrubAssessmentReportData) that shapes a stored assessment
+ * Gemini-first vision analysis that scores landscape-plant health from the
+ * visit's tree/shrub photos, mirroring lawn-assessment.js. Owner ruling
+ * 2026-09-24: no more Claude+Gemini fan-out — analyzePhoto tries Gemini
+ * first; Claude runs ONLY when Gemini returns nothing (HTTP/parse/empty/
+ * schema-invalid miss). Produces the five customer-facing diagnosis
+ * categories as 0-100 "health" scores (higher = healthier / fewer problem
+ * signals), persists a tree_shrub_assessments row, and exposes the report
+ * loader (buildTreeShrubAssessmentReportData) that shapes a stored assessment
  * into the payload buildTreeShrubReportV2 consumes.
  *
  * GUARDRAIL: the vision models rate the SEVERITY of visible signals (none → severe);
@@ -55,6 +58,65 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
+// Severity word → 0-100 "health" display (higher = healthier). Same ramp as the
+// lawn scorer's FUNGUS_DISPLAY so the two reports agree on how a signal reads.
+const SEVERITY_DISPLAY = { none: 95, minor: 75, moderate: 50, severe: 20 };
+const SEVERITY_INDEX = { none: 0, minor: 1, moderate: 2, severe: 3 };
+const SEVERITY_REVERSE = ['none', 'minor', 'moderate', 'severe'];
+
+// Shortest observation paragraph accepted as a real read. The prompt asks for
+// 2-3 homeowner sentences; 20 characters is below any real sentence and above
+// placeholder replies ("n/a", "none", "ok", "see photo").
+const OBSERVATIONS_MIN_LENGTH = 20;
+
+// THE declared shape of one vision provider's JSON reply — the single source
+// for the prompt's "Return this exact JSON structure" block (VISION_JSON_SHAPE),
+// the field lists every merge below iterates (NUMERIC_SCORE_FIELDS /
+// SEVERITY_SCORE_FIELDS), and validation — both the per-provider gate that
+// decides the Claude fallback (isValidTreeShrubScores) and the admin lane's
+// completeness gate (isCompleteVisionResult). A field added here is prompted
+// for, merged, and validated with no other edit.
+const VISION_RESULT_SCHEMA = {
+  foliage_fullness: { kind: 'score', min: 0, max: 100 },
+  leaf_color_vigor: { kind: 'score', min: 0, max: 100 },
+  pest_signals: { kind: 'severity', values: SEVERITY_REVERSE },
+  disease_signals: { kind: 'severity', values: SEVERITY_REVERSE },
+  water_heat_stress: { kind: 'severity', values: SEVERITY_REVERSE },
+  pruning_mechanical: { kind: 'severity', values: SEVERITY_REVERSE },
+  observations: { kind: 'text', minLength: OBSERVATIONS_MIN_LENGTH },
+};
+
+const schemaFieldsOfKind = (kind) => Object.keys(VISION_RESULT_SCHEMA)
+  .filter((field) => VISION_RESULT_SCHEMA[field].kind === kind);
+const NUMERIC_SCORE_FIELDS = schemaFieldsOfKind('score');
+const SEVERITY_SCORE_FIELDS = schemaFieldsOfKind('severity');
+
+// Per-kind rendering of a schema field in the prompt's JSON block, and the
+// per-kind validator for a provider's value. Every kind in the schema has one
+// of each (pinned by tests), so neither the prompt nor the validator can
+// drift from the schema.
+const SCHEMA_PROMPT_SHAPES = {
+  score: (spec) => `<number ${spec.min}-${spec.max}>`,
+  severity: (spec) => `<${spec.values.map((word) => `"${word}"`).join(' | ')}>`,
+  text: () => '"<one concise paragraph>"',
+};
+const SCHEMA_VALIDATORS = {
+  // A real number in range — not num()'s coercion (false → 0) and not
+  // clampScore's rescue of 250 / -5. NaN/Infinity fail the range. Quoted
+  // numbers ("82") are formatting noise normalizeTreeShrubScores converts
+  // BEFORE a provider reply is validated; an unconverted string fails.
+  score: (value, spec) => typeof value === 'number' && value >= spec.min && value <= spec.max,
+  // An exact severity word (case/whitespace-insensitive, as normalizeSeverity
+  // reads it) — never the "none" default an unknown word falls back to.
+  severity: (value, spec) => typeof value === 'string' && spec.values.includes(value.trim().toLowerCase()),
+  // Real prose: whitespace-only or placeholder-short text is not a read.
+  text: (value, spec) => typeof value === 'string' && value.trim().length >= spec.minLength,
+};
+
+const VISION_JSON_SHAPE = `{\n${Object.entries(VISION_RESULT_SCHEMA)
+  .map(([field, spec]) => `  "${field}": ${SCHEMA_PROMPT_SHAPES[spec.kind](spec)}`)
+  .join(',\n')}\n}`;
+
 const VISION_PROMPT = `You are a tree & shrub (landscape ornamental) plant-health assessment tool for a professional lawn & pest company in Southwest Florida. Analyze the provided photo of shrubs, hedges, palms, trees, or landscape beds and return ONLY a JSON object with the scores below. Base your analysis strictly on what is visible.
 
 You flag SIGNALS, never a confirmed diagnosis. Report pest-pressure and disease-like SIGNALS — never assert an "infestation" or a confirmed "disease".
@@ -80,21 +142,8 @@ Agronomic tells to weigh:
 Write "observations" as ONE concise, plain-English paragraph for a homeowner — 2-3 sentences, no contradictions, no lists.
 
 Return this exact JSON structure and nothing else — no markdown, no backticks, no preamble:
-{
-  "foliage_fullness": <number 0-100>,
-  "leaf_color_vigor": <number 0-100>,
-  "pest_signals": <"none" | "minor" | "moderate" | "severe">,
-  "disease_signals": <"none" | "minor" | "moderate" | "severe">,
-  "water_heat_stress": <"none" | "minor" | "moderate" | "severe">,
-  "pruning_mechanical": <"none" | "minor" | "moderate" | "severe">,
-  "observations": "<one concise paragraph>"
-}`;
+${VISION_JSON_SHAPE}`;
 
-// Severity word → 0-100 "health" display (higher = healthier). Same ramp as the
-// lawn scorer's FUNGUS_DISPLAY so the two reports agree on how a signal reads.
-const SEVERITY_DISPLAY = { none: 95, minor: 75, moderate: 50, severe: 20 };
-const SEVERITY_INDEX = { none: 0, minor: 1, moderate: 2, severe: 3 };
-const SEVERITY_REVERSE = ['none', 'minor', 'moderate', 'severe'];
 
 function num(v) {
   if (v === null || v === undefined || v === '') return null;
@@ -114,6 +163,40 @@ function tsScoreValue(v) {
 function normalizeSeverity(v) {
   const s = String(v || '').trim().toLowerCase();
   return SEVERITY_INDEX[s] != null ? s : 'none';
+}
+
+// ── Schema validation (mirrors lawn-assessment.js's isValidVisionScores) ────────
+// Codex P1 (2026-09-24, #4730): a syntactically valid but incomplete/malformed
+// response (e.g. `{}`, or a score outside 0-100) is still a truthy object —
+// without this check it reads as a real result, skips the Claude fallback, and
+// lets a missing field become a false "zero health" finding. Validates the
+// VISION_PROMPT contract, i.e. VISION_RESULT_SCHEMA (which renders it).
+
+// Models sometimes quote numbers ("82") or capitalize enums ("None"). Coerce
+// those in place first so the validator rejects only genuinely missing or
+// out-of-range fields, not formatting noise. Field lists come from
+// VISION_RESULT_SCHEMA.
+function normalizeTreeShrubScores(parsed) {
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  for (const field of NUMERIC_SCORE_FIELDS) {
+    const v = parsed[field];
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) parsed[field] = Number(v);
+  }
+  for (const field of SEVERITY_SCORE_FIELDS) {
+    if (typeof parsed[field] === 'string') parsed[field] = parsed[field].trim().toLowerCase();
+  }
+  return parsed;
+}
+
+// One provider reply against VISION_RESULT_SCHEMA — the same per-kind
+// SCHEMA_VALIDATORS walk isCompleteVisionResult uses, so the provider gate
+// (which decides the Claude fallback) and the admin lane's completeness gate
+// can never disagree about what a valid reply is. Every schema field must be
+// present and valid, including a real observations paragraph.
+function isValidTreeShrubScores(parsed) {
+  if (!parsed || typeof parsed !== 'object') return false;
+  return Object.entries(VISION_RESULT_SCHEMA)
+    .every(([field, spec]) => SCHEMA_VALIDATORS[spec.kind](parsed[field], spec));
 }
 
 // Raw model scores → the five customer-facing 0-100 health categories.
@@ -160,7 +243,13 @@ async function callClaudeVision(base64Image, mimeType) {
     });
     const text = anthropicText(response);
     if (!text) { logger.warn('[tree-shrub-assessment] Claude returned empty content'); return null; }
-    return JSON.parse(text.replace(/```json|```/g, '').trim());
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    normalizeTreeShrubScores(parsed);
+    if (!isValidTreeShrubScores(parsed)) {
+      logger.warn('[tree-shrub-assessment] Claude vision response failed schema validation');
+      return null;
+    }
+    return parsed;
   } catch (err) {
     logger.error(`Tree-shrub assessment Claude vision failed: ${err.message}`);
     return null;
@@ -184,7 +273,13 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
   const data = await response.json();
   const text = geminiText(data);
   if (!text) return null;
-  return JSON.parse(text.replace(/```json|```/g, '').trim());
+  const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+  normalizeTreeShrubScores(parsed);
+  if (!isValidTreeShrubScores(parsed)) {
+    logger.warn(`Tree-shrub assessment Gemini vision response failed schema validation (${model})`);
+    return null;
+  }
+  return parsed;
 }
 
 async function callGeminiVision(base64Image, mimeType) {
@@ -212,14 +307,14 @@ function averageScores(claude, gemini) {
   if (!gemini) return { composite: claude, divergenceFlags };
 
   const composite = {};
-  for (const f of ['foliage_fullness', 'leaf_color_vigor']) {
+  for (const f of NUMERIC_SCORE_FIELDS) {
     const c = num(claude[f]); const g = num(gemini[f]);
     if (c != null && g != null) {
       composite[f] = Math.round((c + g) / 2);
       if (Math.abs(c - g) > 20) divergenceFlags.push({ metric: f, claude: c, gemini: g, gap: Math.abs(c - g) });
     } else composite[f] = c ?? g;
   }
-  for (const f of ['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical']) {
+  for (const f of SEVERITY_SCORE_FIELDS) {
     // Mirror the numeric fields: a MISSING field (model omitted it) must not be
     // counted as a clean "none" read that averages a real signal down — use the
     // available model's value. An explicit "none" still counts as a real read.
@@ -237,22 +332,47 @@ function averageScores(claude, gemini) {
   // Gemini's prose wins the observations slot (owner 2026-07-21: on real
   // field photos Gemini produced the named-diagnosis specificity we want —
   // K-deficiency patterns, fungal genera, tomentum-vs-scale calls). Claude
-  // stands in when Gemini has no read; SCORES stay dual-model averaged.
+  // stands in when Gemini has no read. Since 2026-09-24 analyzePhoto only
+  // ever hands this function ONE result (Gemini, or Claude as its fallback)
+  // — the both-present branch above only runs for a direct caller that passes
+  // two results itself (e.g. dual-input unit tests); live scoring no longer
+  // averages two models.
   composite.observations = (gemini?.observations || claude?.observations || '').trim();
   return { composite, divergenceFlags };
 }
 
 /**
- * Analyze one photo with both vision models in parallel.
+ * True when an analyzePhoto result satisfies VISION_RESULT_SCHEMA: for EVERY
+ * schema field, at least one provider returned it, and every provider that
+ * returned it passes that field kind's validator. One generic walk over the
+ * schema — no per-field checks. averageScores fills a field both providers
+ * omitted with "none" (a clean 95) and falls back to "" observations, so
+ * completeness is judged on the raw provider results, not the composite.
+ * "Present" matches averageScores (!= null): a blank string IS a reading
+ * there, so it is judged (and fails) here, not skipped. Callers that must not
+ * persist a silently-defaulted read (the admin assessment lane) gate on this.
+ * Since 2026-09-24 analyzePhoto hands back ONE provider's read that already
+ * passed isValidTreeShrubScores (the same schema walk), so for live results
+ * this is belt-and-braces; it still guards any other result shape.
+ */
+function isCompleteVisionResult(result) {
+  if (!result || !result.composite) return false;
+  const readings = [result.claude, result.gemini].filter(Boolean);
+  return Object.entries(VISION_RESULT_SCHEMA).every(([field, spec]) => {
+    const present = readings.map((raw) => raw[field]).filter((value) => value != null);
+    return present.length > 0 && present.every((value) => SCHEMA_VALIDATORS[spec.kind](value, spec));
+  });
+}
+
+/**
+ * Analyze one photo with Gemini vision — Gemini-only per owner ruling
+ * 2026-09-24 (no more Claude+Gemini averaging/fan-out). Claude runs ONLY as a
+ * fallback when Gemini returns nothing (empty/error/schema-invalid).
  * @returns {Promise<{claude, gemini, composite, divergenceFlags}|null>}
  */
 async function analyzePhoto(base64Image, mimeType = 'image/jpeg') {
-  const [claudeResult, geminiResult] = await Promise.allSettled([
-    callClaudeVision(base64Image, mimeType),
-    callGeminiVision(base64Image, mimeType),
-  ]);
-  const claude = claudeResult.status === 'fulfilled' ? claudeResult.value : null;
-  const gemini = geminiResult.status === 'fulfilled' ? geminiResult.value : null;
+  const gemini = await callGeminiVision(base64Image, mimeType);
+  const claude = gemini ? null : await callClaudeVision(base64Image, mimeType);
   if (!claude && !gemini) return null;
   const { composite, divergenceFlags } = averageScores(claude, gemini);
   return { claude, gemini, composite, divergenceFlags };
@@ -313,11 +433,11 @@ function mergePhotoComposites(composites = []) {
   const list = composites.filter(Boolean);
   if (!list.length) return null;
   const merged = {};
-  for (const f of ['foliage_fullness', 'leaf_color_vigor']) {
+  for (const f of NUMERIC_SCORE_FIELDS) {
     const vals = list.map((c) => num(c[f])).filter((v) => v != null);
     merged[f] = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
   }
-  for (const f of ['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical']) {
+  for (const f of SEVERITY_SCORE_FIELDS) {
     const worst = Math.max(...list.map((c) => SEVERITY_INDEX[normalizeSeverity(c[f])]));
     merged[f] = SEVERITY_REVERSE[worst];
   }
@@ -716,9 +836,18 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
 module.exports = {
   VISION_PROMPT,
   SEVERITY_DISPLAY,
+  VISION_RESULT_SCHEMA,
+  SCHEMA_PROMPT_SHAPES,
+  SCHEMA_VALIDATORS,
+  OBSERVATIONS_MIN_LENGTH,
+  NUMERIC_SCORE_FIELDS,
+  SEVERITY_SCORE_FIELDS,
+  isCompleteVisionResult,
   toCategoryScores,
   calculateOverall,
   averageScores,
+  isValidTreeShrubScores,
+  normalizeTreeShrubScores,
   analyzePhoto,
   treeShrubReviewSignature,
   treeShrubPhotosHash,

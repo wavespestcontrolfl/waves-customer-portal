@@ -105,6 +105,7 @@ const POLICY_SELECTOR = {
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   visionAnalysis: { primary: 'VISION', fallback: 'OPENAI_BALANCED' },
+  photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
@@ -200,7 +201,7 @@ const secondImageChainModel = nthImageChainModel(1);
 // resolves to the same model as the one before it is not called: it is emitted
 // with `skipped: true` (kept for dependency math, hidden by the card); ladders
 // without the flag call every leg.
-const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by seven photo lanes';
+const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by eight photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
 // adapter (llm/call.js) folds the system prompt into the user turn, so moving
@@ -238,21 +239,36 @@ const LANES = [
   L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine categories on the flagship tier' }),
 
   // ── Multimodal ──
-  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  // Sequential ladder, not a fan-out (owner ruling 2026-09-24: no more
+  // Claude+Gemini fan-out): identifyPest's analyzePhoto tries Gemini, then
+  // the prior Gemini, and reaches Claude VISION only when both miss.
+  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-first (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
+  // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
+  // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
+  // not a fan-out: Gemini live, then the prior Gemini model, then Claude
+  // VISION only when both Gemini rungs miss.
+  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-only (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   L('lawn_visit_assessment', 'Lawn visit assessment', 'lawn-visit-assessment.js', 'multimodal', P('lawnVisitAssessment', 'primary'), P('lawnVisitAssessment', 'fallback'), { inbound: true, note: 'All visit photos in one chain; GATE_LAWN_VISIT_ASSESSMENT; technician review before publication' }),
-  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  // Sequential ladder, not a fan-out (owner ruling 2026-09-24): analyzePhoto
+  // tries Gemini, then the prior Gemini, and reaches Claude VISION only when
+  // both miss (with schema validation gating each rung's acceptance).
+  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-first (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   // Sequential ladder like the caption read: Gemini, then the prior Gemini,
   // then Claude VISION only when both miss (treatment-zone-suggest.js attempts).
   L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
   // Sequential ladder, not a fan-out: analyzePhoto tries Gemini, then the
   // prior Gemini, and reaches Claude VISION only when both miss.
   L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
-  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · one Gemini model (owner 2026-09-02): the retry leg resolves to the same id unless GEMINI_VISION_FALLBACK_MODEL splits them' }),
+  // Ladder, not a fan-out (owner ruling 2026-09-24): Gemini first, then
+  // Claude (FLAGSHIP — the trio's heavier reasoning leg), then OpenAI as the
+  // true last resort — stopping at the first schema-valid result. No more
+  // three-way parallel fan-out / agreement-based confidence; a single-source
+  // result always reads 'single_model', never 'high'.
+  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('FLAGSHIP'), { retry: D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } }), note: 'Gemini → Claude → OpenAI ladder (owner 2026-09-24), stopping at the first schema-valid result' }),
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), E('GEMINI_PROPERTY_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
   L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: SHARED_GEMINI_PIN }),
   L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', E('GEMINI_TURF_OCR_MODEL', T('GEMINI_VISION_BEST')), null, { fanout: true, inbound: true, also: [T('VISION')], note: 'Claude + Gemini in parallel; consensus of both readings' }),
-  L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'drives customer-facing health scores (owner 2026-07-21)' }),
+  L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('photoCaptions', 'fallback'), { inbound: true, note: `drives customer-facing health scores (owner 2026-07-21); Gemini-first, Claude fallback (owner 2026-09-24) · ${SHARED_GEMINI_PIN}` }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
@@ -804,7 +820,7 @@ function getSwitchboard() {
     // On a `skipsEqualLeg` lane the implementation guards `FALLBACK !== MODEL`
     // and never calls a leg that resolves to the same model as the one before
     // it. The leg is MARKED, not dropped: its selector still moves the lane (a
-    // split GEMINI_VISION_FALLBACK_MODEL re-arms six photo ladders), so the
+    // split GEMINI_VISION_FALLBACK_MODEL re-arms five photo ladders), so the
     // change composer and previews keep the dependency; the card hides
     // `skipped` legs from the chain sentence. Ladders without the flag (e.g.
     // video_gen) call every leg regardless, so nothing is marked there.

@@ -17,6 +17,15 @@ const {
   previewTreeShrubAssessment,
   formatAssessmentScores,
   buildTreeShrubAssessmentReportData,
+  isCompleteVisionResult,
+  isValidTreeShrubScores,
+  VISION_RESULT_SCHEMA,
+  SCHEMA_PROMPT_SHAPES,
+  SCHEMA_VALIDATORS,
+  OBSERVATIONS_MIN_LENGTH,
+  NUMERIC_SCORE_FIELDS,
+  SEVERITY_SCORE_FIELDS,
+  VISION_PROMPT,
 } = require('../services/tree-shrub-assessment');
 
 describe('toCategoryScores — severity → 0-100 health', () => {
@@ -331,5 +340,135 @@ describe('scoreAndStoreTreeShrubAssessment — auto-score + persist', () => {
   it('returns null with no photos or no loader (never throws)', async () => {
     expect(await scoreAndStoreTreeShrubAssessment({ service: { customer_id: 'c1' }, photos: [] })).toBeNull();
     expect(await scoreAndStoreTreeShrubAssessment({ service: {}, photos: [{ tag: 'x' }], loadImage })).toBeNull();
+  });
+});
+
+describe('VISION_RESULT_SCHEMA — one declared shape for the prompt, the merge lists, and validation', () => {
+  it('every schema kind has a prompt renderer and a validator (nothing can be prompted but unvalidated)', () => {
+    const kinds = [...new Set(Object.values(VISION_RESULT_SCHEMA).map((spec) => spec.kind))].sort();
+    expect(Object.keys(SCHEMA_PROMPT_SHAPES).sort()).toEqual(kinds);
+    expect(Object.keys(SCHEMA_VALIDATORS).sort()).toEqual(kinds);
+  });
+
+  it('the prompt\'s JSON block is exactly the schema, field by field, in order', () => {
+    const block = VISION_PROMPT.slice(VISION_PROMPT.lastIndexOf('{'));
+    const lines = block.split('\n').slice(1, -1).map((line) => line.trim().replace(/,$/, ''));
+    expect(lines).toEqual(Object.entries(VISION_RESULT_SCHEMA)
+      .map(([field, spec]) => `"${field}": ${SCHEMA_PROMPT_SHAPES[spec.kind](spec)}`));
+    expect(VISION_PROMPT).toContain('"foliage_fullness": <number 0-100>');
+    expect(VISION_PROMPT).toContain('"pest_signals": <"none" | "minor" | "moderate" | "severe">');
+    expect(VISION_PROMPT).toContain('"observations": "<one concise paragraph>"');
+  });
+
+  it('the merge field lists are derived from the schema', () => {
+    expect(NUMERIC_SCORE_FIELDS).toEqual(['foliage_fullness', 'leaf_color_vigor']);
+    expect(SEVERITY_SCORE_FIELDS).toEqual(['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical']);
+    expect(VISION_RESULT_SCHEMA.observations).toEqual({ kind: 'text', minLength: OBSERVATIONS_MIN_LENGTH });
+    expect(OBSERVATIONS_MIN_LENGTH).toBe(20);
+  });
+});
+
+describe('isCompleteVisionResult — generic walk over VISION_RESULT_SCHEMA', () => {
+  // A valid value for every field, built from the schema itself.
+  const VALID_BY_KIND = {
+    score: (spec) => Math.round((spec.min + spec.max) / 2),
+    severity: (spec) => spec.values[1],
+    text: (spec) => 'Canopy looks full with even color. '.padEnd(spec.minLength + 5, '.'),
+  };
+  // Invalid values per kind, parameterized by the field's own spec.
+  const INVALID_BY_KIND = {
+    score: (spec) => [
+      ['a numeric string', String(spec.min + 1)],
+      ['a boolean (num(false) → 0)', false],
+      ['above range', spec.max + 1],
+      ['below range', spec.min - 1],
+      ['NaN', NaN],
+      ['Infinity', Infinity],
+    ],
+    severity: (spec) => [
+      ['a number', 1],
+      ['a boolean', false],
+      ['an unknown word', 'high'],
+      ['blank', ''],
+    ],
+    text: (spec) => [
+      ['a number', 42],
+      ['empty', ''],
+      ['whitespace only', ' '.repeat(spec.minLength + 5)],
+      ['one char too short', 'x'.repeat(spec.minLength - 1)],
+    ],
+  };
+  const fullRead = () => Object.fromEntries(Object.entries(VISION_RESULT_SCHEMA)
+    .map(([field, spec]) => [field, VALID_BY_KIND[spec.kind](spec)]));
+  // analyzePhoto's shape. averageScores itself throws on a non-string
+  // observation (.trim()) — analyzePhoto would reject and the admin lane
+  // treats that as unscored — so the helper falls back to a bare composite
+  // to let the validator judge the raw reads directly.
+  const result = (claude, gemini) => {
+    let composite;
+    try { ({ composite } = averageScores(claude, gemini)); } catch { composite = {}; }
+    return { claude, gemini, composite };
+  };
+  const cases = Object.entries(VISION_RESULT_SCHEMA).flatMap(([field, spec]) => [
+    [field, 'missing from both providers', undefined],
+    ...INVALID_BY_KIND[spec.kind](spec).map(([label, value]) => [field, label, value]),
+  ]);
+
+  it('the valid-value and invalid-value tables cover every schema kind', () => {
+    const kinds = Object.keys(SCHEMA_VALIDATORS).sort();
+    expect(Object.keys(VALID_BY_KIND).sort()).toEqual(kinds);
+    expect(Object.keys(INVALID_BY_KIND).sort()).toEqual(kinds);
+  });
+
+  it('a full valid read (from one or both providers) is complete', () => {
+    expect(isCompleteVisionResult(result(fullRead(), fullRead()))).toBe(true);
+    expect(isCompleteVisionResult(result(fullRead(), null))).toBe(true);
+    expect(isCompleteVisionResult(result(null, { ...fullRead(), pest_signals: ' Severe ' }))).toBe(true);
+  });
+
+  it.each(cases)('%s %s → incomplete', (field, _label, value) => {
+    if (value === undefined) {
+      const { [field]: _omitted, ...partial } = fullRead();
+      expect(isCompleteVisionResult(result(partial, partial))).toBe(false);
+      return;
+    }
+    // Bad from ONE provider while the other is valid still fails: every
+    // provider that sent a field must have sent a valid value.
+    expect(isCompleteVisionResult(result({ ...fullRead(), [field]: value }, fullRead()))).toBe(false);
+    expect(isCompleteVisionResult(result(fullRead(), { ...fullRead(), [field]: value }))).toBe(false);
+  });
+
+  it('the per-provider gate (isValidTreeShrubScores, which decides the Claude fallback) walks the SAME schema', () => {
+    expect(isValidTreeShrubScores(fullRead())).toBe(true);
+    for (const [field, _label, value] of cases) {
+      const bad = { ...fullRead(), [field]: value };
+      if (value === undefined) delete bad[field];
+      expect({ field, value, valid: isValidTreeShrubScores(bad) }).toEqual({ field, value, valid: false });
+    }
+  });
+
+  it.each(Object.entries(VISION_RESULT_SCHEMA))('%s: one provider omitting it while the other read it validly is complete', (field) => {
+    const { [field]: _omitted, ...partial } = fullRead();
+    expect(isCompleteVisionResult(result(fullRead(), partial))).toBe(true);
+  });
+
+  it('boundary values are accepted: score min/max, observations at exactly the minimum length', () => {
+    for (const field of NUMERIC_SCORE_FIELDS) {
+      const { min, max } = VISION_RESULT_SCHEMA[field];
+      expect(isCompleteVisionResult(result({ ...fullRead(), [field]: min }, null))).toBe(true);
+      expect(isCompleteVisionResult(result({ ...fullRead(), [field]: max }, null))).toBe(true);
+    }
+    expect(isCompleteVisionResult(result({ ...fullRead(), observations: 'y'.repeat(OBSERVATIONS_MIN_LENGTH) }, null))).toBe(true);
+  });
+
+  it('the guarded silent defaults are real: an omitted severity averages to "none", a blank dilutes a signal', () => {
+    const { disease_signals: _d, ...partial } = fullRead();
+    expect(result(partial, partial).composite.disease_signals).toBe('none');
+    expect(result({ ...fullRead(), pest_signals: 'severe' }, { ...fullRead(), pest_signals: '' }).composite.pest_signals).toBe('moderate');
+  });
+
+  it('rejects null / composite-less results', () => {
+    expect(isCompleteVisionResult(null)).toBe(false);
+    expect(isCompleteVisionResult({ claude: fullRead(), gemini: null, composite: null })).toBe(false);
   });
 });
