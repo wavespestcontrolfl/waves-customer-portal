@@ -164,7 +164,10 @@ describe('admin pest-pressure: PUT /config validation', () => {
 
   test('rejects overlapping label ranges', async () => {
     await withServer(async (baseUrl) => {
-      const badLabels = DEFAULT_CONFIG.labels.map((l, i) => (i === 1 ? { ...l, min: 0.5 } : l));
+      // labels[1] ('very_low') already starts at 0.5 under the six-band
+      // default (owner ruling 2026-09-24) — push it into labels[0]'s
+      // ('none') range instead to force a genuine overlap.
+      const badLabels = DEFAULT_CONFIG.labels.map((l, i) => (i === 1 ? { ...l, min: 0.2 } : l));
       const res = await fetch(`${baseUrl}/admin/pest-pressure/config`, {
         method: 'PUT',
         headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },

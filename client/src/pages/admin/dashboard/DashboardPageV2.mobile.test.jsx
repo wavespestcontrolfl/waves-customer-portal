@@ -125,7 +125,7 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     expect(screen.queryByText(falseEmpty)).not.toBeInTheDocument();
     adminFetch.mockImplementation((url) => String(url).split("?")[0] === path
       ? Promise.resolve(value) : fetchFixture(url));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Try again" })[0]).toBeEnabled());
     fireEvent.click(screen.getAllByRole("button", { name: "Try again" })[0]);
     await screen.findByText(loadedText);
     expect(screen.queryByText(`${label} is unavailable.`)).not.toBeInTheDocument();

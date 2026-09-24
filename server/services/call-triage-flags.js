@@ -1686,9 +1686,23 @@ function restatementStreetParts(line) {
   const tokens = normalizeStreetLine(line).toLowerCase().split(/\s+/).filter(Boolean)
     .map(token => String(STREET_SUFFIX_ALIASES[token] || DIRECTIONAL_ALIASES[token] || token).toLowerCase());
   const house = /^\d+$/.test(tokens[0]) ? tokens.shift() : '';
+  return { house, ...streetNameParts(tokens) };
+}
+
+// Name + suffix-less name of an already house-less token list — a numbered
+// street ("42 St") keeps its number (pre-push audit P1: re-parsing the
+// remainder as a house number made 42 St and 43 St the same street).
+const DIRECTIONAL_TOKENS = new Set(Object.values(DIRECTIONAL_ALIASES));
+function streetNameParts(tokens) {
   const name = tokens.join(' ');
-  if (STREET_SUFFIX_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
-  return { house, name, withoutSuffix: tokens.join(' ') };
+  const rest = [...tokens];
+  // The suffix may sit BEFORE a trailing post-directional ("Main St N" vs
+  // the suffixless "Main N") — strip the recognized suffix ahead of an
+  // optional directional run (codex r6 P2).
+  const tail = [];
+  while (rest.length > 1 && DIRECTIONAL_TOKENS.has(rest[rest.length - 1])) tail.unshift(rest.pop());
+  if (STREET_SUFFIX_WORDS.has(rest[rest.length - 1])) rest.pop();
+  return { name, withoutSuffix: [...rest, ...tail].join(' ') };
 }
 
 function restatesOnFileAddress(sa, knownCustomer) {
@@ -1767,6 +1781,92 @@ function restatesOnFileAddress(sa, knownCustomer) {
 }
 
 /**
+ * A validated call address that disagrees with the linked customer's on-file
+ * street by HOUSE NUMBER ONLY (same street name, same locality where both
+ * sides carry one). live incident, 2026-09-16: the web form saved 1260
+ * Example Street (a number that does not exist), the call validated 1250
+ * at premise level, and the never-overwrite-a-filled-field rule kept the
+ * profile as it was — correctly — while nothing surfaced the disagreement.
+ * The correction lane only acts on correction language ("actually", "wrong"),
+ * and stating an address while asking for a quote is a mention by design, so
+ * this is the one shape that had no owner: a typo'd number on the RIGHT
+ * street. A different street is a second property (multi_property_call /
+ * second_service_address own that); a different ZIP or city is not a typo.
+ * Returns the evidence for an advisory review card, or null. Pure.
+ */
+// A fractional premise ("12 1/2 Main St") is ONE house token: without the
+// fraction 12 1/2 reads as 12 (no conflict) or leaves "1/2" in the street
+// name (a different street) — codex r16 P2.
+const HOUSE_TOKEN = /^(\d+[a-z]?(?:-\d+[a-z]?)?(?:\s+\d\/\d)?)\b\s*/i;
+function houseAndName(line) {
+  const text = String(line || '').trim();
+  const m = text.match(HOUSE_TOKEN);
+  if (!m) return { house: '', name: '', withoutSuffix: '' };
+  const tokens = normalizeStreetLine(text.slice(m[0].length)).toLowerCase().split(/\s+/).filter(Boolean)
+    .map(token => String(STREET_SUFFIX_ALIASES[token] || DIRECTIONAL_ALIASES[token] || token).toLowerCase());
+  return { house: m[1].toLowerCase().replace(/\s+/g, ' '), ...streetNameParts(tokens) };
+}
+
+// Do two street lines name the SAME house on the same street by the
+// detector's own rules: equal house token, and the street names equal with
+// or without a trailing suffix ("1250 Main" == "1250 Main St") — codex
+// #4666 P2. False when either side carries no house token.
+function sameHouseNumberStreet(a, b) {
+  // Unit-first legacy lines ("Apt 4, 1250 Main St") are peeled on both
+  // sides before the trailing-unit split (codex r9 P2).
+  const peel = (line) => {
+    const text = String(line || '');
+    const rest = (splitUnitFirstLine(text) || {}).rest || text;
+    return splitStreetLineUnit(rest).street || rest;
+  };
+  const x = houseAndName(peel(a));
+  const y = houseAndName(peel(b));
+  if (!x.house || !y.house || x.house !== y.house || !x.name || !y.name) return false;
+  return [y.name, y.withoutSuffix].includes(x.name) || [x.name, x.withoutSuffix].includes(y.name);
+}
+
+function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = null } = {}) {
+  const av = addressValidation;
+  if (!av || !(av.status === 'validated_accept' || av.status === 'corrected')) return null;
+  const stated = String(av.normalized?.street_line_1 || '').trim();
+  const onFile = String(onFileAddress?.address_line1 || '').trim();
+  if (!stated || !onFile) return null;
+  // House tokens may be alphanumeric or hyphenated (1250A, 12-14) — the
+  // restatement parser's digits-only house would leave those unkeyed and
+  // this exact disagreement unsurfaced (codex r2 P2).
+  // A legacy unit-FIRST on-file line ("Apt 4, 1260 Main St") is peeled the
+  // same way the restatement path peels it before the trailing-unit split
+  // (codex r8 P2).
+  const onFileStreetLine = (splitUnitFirstLine(onFile) || {}).rest || onFile;
+  const a = houseAndName(splitStreetLineUnit(stated).street || stated);
+  const b = houseAndName(splitStreetLineUnit(onFileStreetLine).street || onFileStreetLine);
+  if (!a.house || !b.house || a.house === b.house) return null;
+  if (!a.name || !b.name) return null;
+  const sameStreet = [b.name, b.withoutSuffix].includes(a.name) || [a.name, a.withoutSuffix].includes(b.name);
+  if (!sameStreet) return null;
+  const statedZip = zip5Of(av.normalized?.postal_code);
+  const onFileZip = zip5Of(onFileAddress.zip);
+  if (statedZip && onFileZip && statedZip !== onFileZip) return null;
+  const statedCity = cityKey(av.normalized?.city);
+  const onFileCity = cityKey(onFileAddress.city);
+  // Postal-city names alias (Bradenton / Lakewood Ranch share 34211) — the
+  // same rule the address comparison above applies: a city mismatch vetoes
+  // the conflict only when no ZIP pair already positively agreed (codex r30
+  // P1).
+  if (!(statedZip && onFileZip) && statedCity && onFileCity && statedCity !== onFileCity) return null;
+  return {
+    stated_street: stated,
+    on_file_street: onFile,
+    stated_house_number: a.house,
+    on_file_house_number: b.house,
+    // The stated locality rides along so the auto-resolve rule can hold the
+    // record to the SAME premise, not just the same leading digits.
+    stated_city: String(av.normalized?.city || '').trim() || null,
+    stated_zip: statedZip || null,
+  };
+}
+
+/**
  * Would this booking dispatch to the customer's ON-FILE (already Google-
  * verified) address rather than one stated on this call? That is the only
  * shape the address fail-open covers: a known customer who did not restate
@@ -1787,6 +1887,8 @@ function dispatchesToOnFileAddress(extraction, opts = {}) {
 }
 
 module.exports = {
+  onFileHouseNumberConflict,
+  sameHouseNumberStreet,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
   computeDeterministicTriageFlags,
