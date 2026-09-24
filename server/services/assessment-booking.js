@@ -19,6 +19,7 @@
 
 const db = require('../models/db');
 
+const ASSESSMENT_DISPLAY_NAME = 'Waves Assessment';
 const ASSESSMENT_NAME_RE = /^waves assessment$/i;
 const ASSESSMENT_SERVICE_KEY = 'lawn_inspection';
 
@@ -32,6 +33,14 @@ function isAssessmentServiceRow(serviceRow) {
     || isAssessmentServiceType(serviceRow.name);
 }
 
+function scopeToAssessmentBookings(query, bookingAlias = 'scheduled_services', serviceAlias = 'services') {
+  return query.where(function assessmentIdentity() {
+    this.whereRaw('LOWER(TRIM(??)) = ?', [`${bookingAlias}.service_type`, ASSESSMENT_DISPLAY_NAME.toLowerCase()])
+      .orWhere(`${serviceAlias}.service_key`, ASSESSMENT_SERVICE_KEY)
+      .orWhereRaw('LOWER(TRIM(??)) = ?', [`${serviceAlias}.name`, ASSESSMENT_DISPLAY_NAME.toLowerCase()]);
+  });
+}
+
 // A scheduled_services-shaped row: the denormalized name first, then the
 // catalog FK when the name alone doesn't say.
 async function isAssessmentBooking(booking, database = db) {
@@ -43,9 +52,11 @@ async function isAssessmentBooking(booking, database = db) {
 }
 
 module.exports = {
+  ASSESSMENT_DISPLAY_NAME,
   ASSESSMENT_NAME_RE,
   ASSESSMENT_SERVICE_KEY,
   isAssessmentServiceType,
   isAssessmentServiceRow,
+  scopeToAssessmentBookings,
   isAssessmentBooking,
 };

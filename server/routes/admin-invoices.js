@@ -2992,9 +2992,17 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
     // apply-credit completed the follow-up sequence (stopOnPayment); the invoice
     // is collectible again, so re-arm reminders. resumeSequence reactivates an
     // existing (completed) row; scheduleForInvoice creates one if none exists.
+    // ADMIN-BUG-R54: stopOnPayment no-ops on an already-'stopped' row, so an
+    // admin who stopped dunning BEFORE the credit was applied still has a
+    // 'stopped' row here — resumeSequence has no status guard (the operator's
+    // own /followup/resume route needs it to lift an admin stop on request),
+    // so calling it unconditionally would silently re-arm a stop the office
+    // chose and erase who stopped it and why. resumeSequenceIfSystemResumable
+    // checks eligibility and resumes under one lock, so a concurrent admin
+    // stop can never land in the gap between the check and the write.
     try {
       const FollowUps = require('../services/invoice-followups');
-      await FollowUps.resumeSequence(id);
+      await FollowUps.resumeSequenceIfSystemResumable(id);
       await FollowUps.scheduleForInvoice(id);
     } catch (err) {
       logger.warn(`[admin-invoices:reverse-prepaid] follow-up re-arm failed: ${err.message}`);

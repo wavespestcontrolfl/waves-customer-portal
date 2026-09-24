@@ -103,6 +103,18 @@ async function gatherInputs(knex, serviceRecord, config) {
     }),
   ]);
 
+  // Owner ruling 2026-09-24: a technician-sourced client_pest_rating IS the
+  // report score, not one of the five blended components. `client` here is
+  // the extractClientRating() result — it reads the same
+  // service_records.client_pest_rating column the customer-facing capture
+  // writes to, distinguished only by client_pest_rating_source. A
+  // customer-submitted (or legacy/null-source) rating keeps feeding the
+  // ordinary clientRating component untouched.
+  const technicianDirectRating = client && client.present && client.source === 'technician'
+    && Number.isInteger(client.value)
+    ? client.value
+    : null;
+
   return {
     serviceLine,
     window,
@@ -113,6 +125,7 @@ async function gatherInputs(knex, serviceRecord, config) {
       recurringIssueRating: pickValue(recurring),
       riskFactorRating: pickValue(risk),
       previousScore: previous.value,
+      technicianDirectRating,
     },
     extractorResults: { client, technician, reService, recurring, risk, previous },
   };

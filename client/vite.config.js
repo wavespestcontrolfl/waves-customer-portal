@@ -50,7 +50,7 @@ export default defineConfig({
       });
     },
   }],
-  resolve: { alias: { ...capShimAlias, '@proposal-bid': fileURLToPath(new URL('../shared/proposal-bid.cjs', import.meta.url)), '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)), '@legacy-visit-money-submission': fileURLToPath(new URL('../shared/legacy-visit-money-submission.cjs', import.meta.url)) } },
+  resolve: { alias: { ...capShimAlias, '@proposal-bid': fileURLToPath(new URL('../shared/proposal-bid.cjs', import.meta.url)), '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)), '@legacy-visit-money-submission': fileURLToPath(new URL('../shared/legacy-visit-money-submission.cjs', import.meta.url)), '@pricing-regime-marker': fileURLToPath(new URL('../shared/pricing-regime-marker.cjs', import.meta.url)) } },
   // Vitest reads this block. The global setup shims window.matchMedia (jsdom
   // omits it) so tests can mount the liquid-glass scene, which now renders on
   // every customer surface.
@@ -131,7 +131,7 @@ export default defineConfig({
   // Rollup's static analysis to fail with "X is not exported by …" errors.
   // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
   optimizeDeps: {
-    include: ['@proposal-bid', '@lawn-scores', '@legacy-visit-money-submission', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
+    include: ['@proposal-bid', '@lawn-scores', '@legacy-visit-money-submission', '@pricing-regime-marker', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
   },
   build: {
     outDir: 'dist',
@@ -143,7 +143,7 @@ export default defineConfig({
     // Ensure @rollup/plugin-commonjs also processes the linked CJS package
     // during production builds, complementing the optimizeDeps.include above.
     commonjsOptions: {
-      include: [/shared\/proposal-bid\.cjs$/, /shared\/lawn-scores\.cjs$/, /shared\/legacy-visit-money-submission\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
+      include: [/shared\/proposal-bid\.cjs$/, /shared\/lawn-scores\.cjs$/, /shared\/legacy-visit-money-submission\.cjs$/, /shared\/pricing-regime-marker\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
     },
   },
 });

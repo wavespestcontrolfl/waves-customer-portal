@@ -57,9 +57,21 @@ postgres('SMS spam guard and digest SQL', () => {
       CREATE TEMP TABLE customers (id uuid PRIMARY KEY, phone text, first_name text, last_name text, deleted_at timestamptz);
       CREATE TEMP TABLE leads (id uuid PRIMARY KEY, phone text, first_name text, last_name text, status text, converted_at timestamptz, deleted_at timestamptz);
       CREATE TEMP TABLE blocked_numbers (number text PRIMARY KEY, block_type text, blocked_by uuid, reason text, auto_blocked boolean);
-      CREATE TEMP TABLE sms_log (customer_id uuid, direction text, from_phone text, to_phone text, message_body text,
-        metadata jsonb, created_at timestamptz, message_type text, status text);
-      CREATE TEMP TABLE message_drafts (sms_log_id uuid, customer_id uuid, flags jsonb, sent_at timestamptz);
+      CREATE TEMP TABLE conversations (id uuid PRIMARY KEY, customer_id uuid, channel text,
+        contact_phone text, our_endpoint_id text);
+      CREATE TEMP TABLE messages (id uuid PRIMARY KEY, conversation_id uuid, channel text, direction text,
+        body text, media jsonb DEFAULT '[]', metadata jsonb DEFAULT '{}', message_type text,
+        delivery_status text, twilio_sid text, is_read boolean, created_at timestamptz);
+      CREATE TEMP TABLE sms_log (id uuid DEFAULT gen_random_uuid(), customer_id uuid, direction text,
+        from_phone text, to_phone text, message_body text, metadata jsonb, created_at timestamptz,
+        message_type text, status text, twilio_sid text);
+      CREATE TEMP TABLE message_drafts (id uuid PRIMARY KEY, sms_log_id uuid, customer_id uuid,
+        flags jsonb, intent text, sent_at timestamptz);
+      CREATE TEMP TABLE messaging_audit_log (id uuid DEFAULT gen_random_uuid(), provider_message_id text,
+        channel text, metadata jsonb, created_at timestamptz DEFAULT now());
+      CREATE TEMP TABLE inbound_sms_optout_receipts (
+        message_sid text PRIMARY KEY, phone text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()
+      );
     `);
   });
   afterAll(async () => {
@@ -67,7 +79,8 @@ postgres('SMS spam guard and digest SQL', () => {
     await mockPg?.rollback(); await database?.destroy();
   });
   beforeEach(async () => {
-    await mockPg.raw('TRUNCATE leads, blocked_numbers, sms_log');
+    await mockPg.raw(`TRUNCATE leads, blocked_numbers, messages, conversations, sms_log,
+      message_drafts, messaging_audit_log, inbound_sms_optout_receipts`);
     findKnownCallerCustomer.mockResolvedValue(null);
   });
 

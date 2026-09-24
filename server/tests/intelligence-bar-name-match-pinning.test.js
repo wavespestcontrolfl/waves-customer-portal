@@ -31,11 +31,18 @@ jest.mock('../services/lead-attribution', () => ({
   settleWonFunnelRow: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn().mockResolvedValue({ success: true, message_sid: 'SM-test' }),
+  sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true, providerMessageId: 'SM-test' }),
+}));
+jest.mock('../services/messaging/send-manual-customer-sms', () => ({
+  sendManualCustomerSms: jest.fn((...args) => (
+    require('../services/messaging/send-customer-message').sendCustomerMessage(...args)
+  )),
+  manualSmsDeliveryState: (value) => value?.manualSmsInterlock?.deliveryState || null,
 }));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { resolveCustomer, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate } = require('../services/intelligence-bar/leads-tools');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../services/lead-funnel-bridge');
@@ -61,6 +68,8 @@ const LEAD_B = { id: 'lead-2', first_name: 'Testd', last_name: 'Beta', status: '
 
 beforeEach(() => {
   jest.clearAllMocks();
+  sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-test' });
+  sendManualCustomerSms.mockImplementation((...args) => sendCustomerMessage(...args));
 });
 
 describe('resolveCustomer (comms)', () => {
@@ -132,7 +141,77 @@ describe('resolveCustomer (comms)', () => {
 
     const res = await executeCommsTool('send_sms', { customer_id: 'cust-1', phone: '+19415551111', message: 'hello' });
     expect(res.preview_changed).toBeUndefined();
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415551111', customerId: null }));
+  });
+
+  test('an uncertain send tells the operator it may have sent and forbids a retry', async () => {
+    db.mockReturnValue(chain({ first: CUST_A }));
+    sendManualCustomerSms.mockResolvedValueOnce({
+      sent: false,
+      deliveryOutcome: 'uncertain',
+      code: 'PROVIDER_OUTCOME_UNCERTAIN',
+    });
+
+    const result = await executeCommsTool('send_sms', {
+      customer_id: CUST_A.id, phone: CUST_A.phone, message: 'Synthetic message',
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      blocked: true,
+      code: 'PROVIDER_OUTCOME_UNCERTAIN',
+      mayHaveSent: true,
+      retry: false,
+      retryable: false,
+    });
+    expect(result.error).toMatch(/do not retry/i);
+  });
+
+  test('a thrown uncertain outcome has the same non-retry response', async () => {
+    db.mockReturnValue(chain({ first: CUST_A }));
+    sendManualCustomerSms.mockRejectedValueOnce(Object.assign(new Error('receipt unavailable'), {
+      code: 'SMS_DELIVERY_UNCERTAIN',
+      providerOutcome: { sent: false, deliveryOutcome: 'uncertain' },
+    }));
+
+    const result = await executeCommsTool('send_sms', {
+      customer_id: CUST_A.id, phone: CUST_A.phone, message: 'Synthetic message',
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      blocked: true,
+      code: 'SMS_DELIVERY_UNCERTAIN',
+      mayHaveSent: true,
+      retry: false,
+      retryable: false,
+    });
+    expect(result.error).toMatch(/do not retry/i);
+  });
+
+  test('a retry blocked by the retained reservation gets explicit reconciliation guidance', async () => {
+    db.mockReturnValue(chain({ first: CUST_A }));
+    sendManualCustomerSms.mockResolvedValueOnce({
+      sent: false,
+      blocked: true,
+      code: 'MANUAL_REPLY_OUTCOME_UNRESOLVED',
+      manualSmsInterlock: { deliveryState: 'uncertain' },
+    });
+
+    const result = await executeCommsTool('send_sms', {
+      customer_id: CUST_A.id, phone: CUST_A.phone, message: 'Synthetic message',
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      blocked: true,
+      code: 'MANUAL_REPLY_OUTCOME_UNRESOLVED',
+      mayHaveSent: true,
+      retry: false,
+      retryable: false,
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('provider acceptance survives a later audit failure and keeps its provider receipt', async () => {

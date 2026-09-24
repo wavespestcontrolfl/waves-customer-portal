@@ -17,12 +17,31 @@ function resolveLabel(score, labels) {
       return { key: row.key, name: row.name, description: row.description };
     }
   }
-  if (score < sorted[0].min) {
-    const row = sorted[0];
-    return { key: row.key, name: row.name, description: row.description };
+  // Nearest band — a score in the sliver between two bands (e.g. 0.45
+  // between 0.4 and 0.5) lands next to its neighbours, never at the top.
+  let row = sorted[0];
+  let best = Infinity;
+  for (const candidate of sorted) {
+    const distance = score < candidate.min ? candidate.min - score : score - candidate.max;
+    if (distance < best) {
+      best = distance;
+      row = candidate;
+    }
   }
-  const row = sorted[sorted.length - 1];
   return { key: row.key, name: row.name, description: row.description };
 }
 
-module.exports = { resolveLabel };
+// Lower-case label names for the integer ratings 0..5 against a label set
+// (active config), e.g. ['none', 'very low', …, 'high'] — what AI copy
+// prompts call each rating so they match the gauge. Missing labels fall back
+// to the caller-supplied default names.
+const DEFAULT_ACTIVITY_SCALE = Object.freeze(['none', 'very low', 'low', 'moderate', 'elevated', 'high']);
+
+function activityScaleNames(labels) {
+  return [0, 1, 2, 3, 4, 5].map((n) => {
+    const name = resolveLabel(n, labels)?.name;
+    return typeof name === 'string' && name.trim() ? name.trim().toLowerCase() : DEFAULT_ACTIVITY_SCALE[n];
+  });
+}
+
+module.exports = { resolveLabel, activityScaleNames, DEFAULT_ACTIVITY_SCALE };

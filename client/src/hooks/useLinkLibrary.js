@@ -5,6 +5,7 @@ import { adminFetch } from "../utils/admin-fetch";
 export default function useLinkLibrary(open) {
   const [links, setLinks] = useState(null);
   const [receiptLinksEnabled, setReceiptLinksEnabled] = useState(false);
+  const [consultationLinksEnabled, setConsultationLinksEnabled] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [attempt, setAttempt] = useState(0);
@@ -23,6 +24,7 @@ export default function useLinkLibrary(open) {
         if (!cancelled) {
           setLinks(Array.isArray(data.links) ? data.links : []);
           setReceiptLinksEnabled(data.receiptLinksEnabled === true);
+          setConsultationLinksEnabled(data.consultationLinksEnabled === true);
         }
       })
       .catch((err) => {
@@ -34,5 +36,5 @@ export default function useLinkLibrary(open) {
     return () => { cancelled = true; };
   }, [open, links, attempt]);
 
-  return { links, loading, error, retry, receiptLinksEnabled };
+  return { links, loading, error, retry, receiptLinksEnabled, consultationLinksEnabled };
 }

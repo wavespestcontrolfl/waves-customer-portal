@@ -3,7 +3,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TurfHeightReviewPage from './TurfHeightReviewPage';
 
@@ -68,6 +68,26 @@ describe('TurfHeightReviewPage confirm reading', () => {
 
 
 describe('Turf height shared controls', () => {
+  it('keeps readings visible during automatic refresh and ignores a read started before confirmation', async () => {
+    let finishRead;
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_url, options = {}) => {
+      if (options.method === 'PATCH') return { ok: true };
+      reads += 1;
+      if (reads === 1) return { ok: true, json: async () => ({ items: [ITEM] }) };
+      return new Promise((resolve) => { finishRead = resolve; });
+    }));
+    render(<MemoryRouter><TurfHeightReviewPage /></MemoryRouter>);
+    await screen.findByText('Pat Customer');
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(screen.getByText('Pat Customer')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm reading' }));
+    await waitFor(() => expect(screen.queryByText('Pat Customer')).not.toBeInTheDocument());
+    await act(async () => finishRead({ ok: true, json: async () => ({ items: [ITEM] }) }));
+    expect(screen.queryByText('Pat Customer')).not.toBeInTheDocument();
+  });
+
   it('keeps concurrent pending rows disabled and sends one unchanged request per reading', async () => {
     const pending = {};
     vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
@@ -106,7 +126,7 @@ describe('Turf height shared controls', () => {
     render(<MemoryRouter><TurfHeightReviewPage /></MemoryRouter>);
     expect(await screen.findByRole('alert')).toHaveTextContent('Failed to load');
     expect(screen.queryByText(/Nothing to review/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText('0″')).toBeInTheDocument();
     expect(screen.getByText('—')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();

@@ -107,6 +107,18 @@ function assignMethodPayload(payload, method, prefix = 'payment_method') {
   return parts;
 }
 
+// The payment's own tender snapshot — the only identity left once its
+// saved method is removed (payment_method_id is ON DELETE SET NULL; the
+// delete trigger fills payment_method_type/bank_name/card_* first).
+function paymentTenderSnapshot(payment = {}) {
+  return {
+    method_type: payment.method_type || payment.payment_method_type,
+    card_brand: payment.card_brand,
+    last_four: payment.card_last_four || payment.last_four,
+    bank_name: payment.bank_name,
+  };
+}
+
 async function loadCustomer(customerId) {
   if (!customerId) return null;
   return db('customers')
@@ -475,7 +487,7 @@ async function sendPaymentRetryNotice({
     retry_date: displayDate(effectiveRetryDate),
     pay_url: payUrl,
   };
-  assignMethodPayload(payload, method || {});
+  assignMethodPayload(payload, method || paymentTenderSnapshot(payment));
   const effectiveCustomerId = customerId || payment.customer_id;
   return sendLifecycleTemplate({
     customerId: effectiveCustomerId,
@@ -519,12 +531,7 @@ async function sendPaymentFailed({
   const payUrl = invoice?.token
     ? `${publicPortalUrl()}/pay/${invoice.token}`
     : portalBillingUrl();
-  const method = payment ? methodParts({
-    method_type: payment.method_type,
-    card_brand: payment.card_brand,
-    brand: payment.card_brand,
-    last_four: payment.card_last_four || payment.last_four,
-  }) : null;
+  const method = payment ? methodParts(paymentTenderSnapshot(payment)) : null;
   const payload = {
     payment_url: payUrl,
     invoice_title: invoice?.title || invoice?.service_type || clean(payment?.description).replace(/\s+[-\u2014]\s+FAILED$/i, '') || '',
@@ -653,11 +660,7 @@ async function sendRefundIssued({
     original_payment_date: displayDate(payment.payment_date),
     receipt_url: clean(payment.receipt_url),
   };
-  assignMethodPayload(payload, method || {
-    card_brand: payment.card_brand,
-    last_four: payment.card_last_four,
-    method_type: payment.method_type,
-  });
+  assignMethodPayload(payload, method || paymentTenderSnapshot(payment));
   return sendLifecycleTemplate({
     customerId: effectiveCustomerId,
     templateKey: 'payment.refund_issued',

@@ -20,6 +20,8 @@
  *   GATE_CALL_RESEARCH_MINER=true (nightly voice-of-customer call-research mining)
  *   GATE_SHADOW_JUDGE=true      (nightly shadow-draft vs human-reply scoring)
  *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
+ *   GATE_SMS_GRATITUDE_REPLIES=true (allow the delayed gratitude-only auto-reply lane; independent of GATE_SMS_AUTO_SEND)
+ *   SMS_GRATITUDE_ACTIVATED_AT=<ISO timestamp with offset> (strict live-webhook cutoff for gratitude replies)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
@@ -38,6 +40,7 @@
  *   GATE_OPS_DIGESTS_IN_APP=true (owner ops digests become ops_digest bell rows in the Activity feed instead of contact@ emails; dark in dev AND prod)
  *   GATE_CLOSEOUT_MONEY_COMMS_ALERTS=true (closeout alerts also map the comms / invoice / invoiceDelivery facts — failed completion notice, invoice owed but not minted, invoice or receipt delivery incomplete — as per-visit cards + closeout_gaps_today members; their outage holds the floor; read-only, no comms; dark in dev AND prod)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
+ *   GATE_PHOTO_TRIAGE=true      (inbound photo texts that read like a lawn/plant/pest "what is this" run the admin photo assessment and park ONE pending reply draft for owner approval — never sends; paid vision capped by PHOTO_TRIAGE_DAILY_CAP per ET day, default 20, and the paid caption classifier by PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP, default = the vision cap; a triage candidate skips the legacy AI draft; read at call time; dark in dev AND prod)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
  *   GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE=true (portal GET /api/billing/cards stamps holdsAppointment on a card holding a future secured visit, so Remove opens the call-us disclaimer; removal itself is never blocked — off = field absent, payload unchanged)
@@ -112,6 +115,7 @@ const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
   // Admin-only fixed test pair for one explicitly configured customer; opt-in everywhere.
+  editorialEvidence: gateEnvValue('GATE_EDITORIAL_EVIDENCE'),
   customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
   // Customer iOS icon count; opt-in everywhere, with request-time route checks.
   customerNativeBadges: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES'),
@@ -900,6 +904,13 @@ const gates = {
   // has to earn each intent.
   smsAutoSend: process.env.GATE_SMS_AUTO_SEND === 'true',
 
+  // Narrow gratitude-only autonomous replies. This is deliberately separate
+  // from the general Phase-E gate: enabling either switch cannot open the
+  // other lane. The activation timestamp is checked at call/send time by the
+  // executor so an old shadow draft or replay can never ride a later flip.
+  // Customer-facing communication: explicit opt-in in every environment.
+  smsGratitudeReplies: process.env.GATE_SMS_GRATITUDE_REPLIES === 'true',
+
   // SMS Sealed Eval (brand-voice loop measurement) — a locked exam for the
   // house-voice drafter: frozen (inbound, day-of facts, human reply) items
   // replayed through the current drafter per provider leg and graded by the
@@ -1233,6 +1244,14 @@ const gates = {
   // re-checks this gate before putting anything on the wire. Off → dead
   // ends keep today's operator-bell-only behavior.
   estimateClarifyAsks: process.env.GATE_ESTIMATE_CLARIFY_ASKS === 'true',
+
+  // Photo-text auto-triage (services/photo-text-triage.js) — an inbound
+  // text with a photo that reads like a lawn/plant/pest "what is this" runs
+  // the admin photo-assessment pipeline (source 'auto_triage') and parks ONE
+  // pending message_drafts reply (intent 'photo_triage') in /admin/drafts.
+  // The lane never sends; approval does. logGateStatus only — the service
+  // reads gateEnvValue('GATE_PHOTO_TRIAGE') at CALL time.
+  photoTriage: gateEnvValue('GATE_PHOTO_TRIAGE'),
 
   // Clarify unit write-back — when the customer texts back the apartment/
   // unit the completed-call clarify ask requested, write it into the record:

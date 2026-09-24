@@ -64,20 +64,20 @@ describe('service report v1', () => {
     else process.env[name] = value;
   }
 
-  test('dynamic pressure trend floors persisted zero values at 0.3', () => {
+  test('dynamic pressure trend keeps persisted zero values at 0.0 (owner ruling 2026-09-24: no display floor)', () => {
     const context = buildPressureTrendContextFromRows({
       record: { id: 'service-current', service_date: '2026-05-16', pressure_index: 0 },
       priorRows: [{ id: 'service-1', service_date: '2026-04-16', pressure_index: 0 }],
       findings: [],
     });
 
-    expect(context.points.map((point) => point.pressureIndex)).toEqual([0.3, 0.3]);
-    expect(context.baseline.pressureIndex).toBe(0.3);
-    expect(context.current.pressureIndex).toBe(0.3);
-    expect(context.customerSummary).toBe('Pest pressure remains low at 0.3.');
+    expect(context.points.map((point) => point.pressureIndex)).toEqual([0, 0]);
+    expect(context.baseline.pressureIndex).toBe(0);
+    expect(context.current.pressureIndex).toBe(0);
+    expect(context.customerSummary).toBe('Pest pressure remains low at 0.0.');
   });
 
-  test('since-last-visit pressure copy uses the customer pressure floor', async () => {
+  test('since-last-visit pressure copy shows a zero pressure as 0.0 (owner ruling 2026-09-24)', async () => {
     const fixtures = {
       service_records: [
         {
@@ -133,7 +133,7 @@ describe('service report v1', () => {
       knex,
     });
 
-    expect(context.pressureLine).toBe('Pressure: 0.3 -> 0.3');
+    expect(context.pressureLine).toBe('Pressure: 0.0 -> 0.0');
   });
 
   test('since-last-visit activity line reports the real finding, never a fabricated ant-trail claim', () => {
@@ -796,6 +796,61 @@ describe('service report v1', () => {
     });
   });
 
+  test('property-defense Pressure row uses the report\'s six-band labels (owner ruling 2026-09-24)', () => {
+    const findPressureRow = (node) => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.key === 'pressure' && node.label === 'Pressure') return node;
+      for (const value of Object.values(node)) {
+        const hit = findPressureRow(value);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const cases = [[1, 'Very Low'], [2, 'Low'], [3, 'Moderate'], [4, 'Elevated'], [5, 'High']];
+    for (const [score, name] of cases) {
+      const context = buildPremiumExperienceContextFromRows({
+        record: { id: 'service-current', pressure_index: score },
+        dynamicContext: { pressureTrend: { current: { pressureIndex: score } } },
+      });
+      expect(findPressureRow(context)?.detail).toBe(`${name} · ${score.toFixed(1)} / 5`);
+    }
+  });
+
+  test('property-defense Pressure row prefers the report\'s persisted label for its own score', () => {
+    const findPressureRow = (node) => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.key === 'pressure' && node.label === 'Pressure') return node;
+      for (const value of Object.values(node)) {
+        const hit = findPressureRow(value);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const build = (pressureScoreRow) => buildPremiumExperienceContextFromRows({
+      record: { id: 'service-current', pressure_index: 5 },
+      pressureScoreRow,
+      dynamicContext: { pressureTrend: { current: { pressureIndex: 5 } } },
+    });
+    expect(findPressureRow(build({ displayed_score: '5.0', label_name: 'Severe' }))?.detail).toBe('Severe · 5.0 / 5');
+    // A stale row for a different number never labels this one.
+    expect(findPressureRow(build({ displayed_score: '2.0', label_name: 'Low' }))?.detail).toBe('High · 5.0 / 5');
+    // An override keeps the calculated label_name; never show it for the
+    // overridden number (codex r6 P2).
+    expect(findPressureRow(build({ displayed_score: '5.0', label_name: 'Low', is_overridden: true }))?.detail).toBe('High · 5.0 / 5');
+    // …and resolves it against the scale the score was calculated with.
+    const customScale = [
+      { key: 'calm', name: 'Calm', min: 0, max: 2.4 },
+      { key: 'busy', name: 'Busy', min: 2.5, max: 4.4 },
+      { key: 'severe', name: 'Severe', min: 4.5, max: 5 },
+    ];
+    expect(findPressureRow(build({
+      displayed_score: '5.0', label_name: 'Calm', is_overridden: true, config_snapshot: { labels: customScale },
+    }))?.detail).toBe('Severe · 5.0 / 5');
+    expect(findPressureRow(build({
+      displayed_score: '5.0', label_name: 'Calm', is_overridden: true, config_snapshot: JSON.stringify({ labels: customScale }),
+    }))?.detail).toBe('Severe · 5.0 / 5');
+  });
+
   test('premium experience builds customer-facing modules from service facts', () => {
     const context = buildPremiumExperienceContextFromRows({
       record: {
@@ -1233,7 +1288,7 @@ describe('service report v1', () => {
     expect(buildNoActivityFinding('palm').detail).toMatch(/palms/i);
   });
 
-  test('v1 data auto-inserts a positive clean finding and pressure floor for clean visits', async () => {
+  test('v1 data auto-inserts a positive clean finding and keeps a clean visit at 0.0 pressure (owner ruling 2026-09-24)', async () => {
     const fixtures = {
       service_products: [],
       property_geometries: [],
@@ -1267,8 +1322,8 @@ describe('service report v1', () => {
       pressure_index: 0,
     }, 'token-clean', knex);
 
-    expect(data.pressureIndex).toBe(0.3);
-    expect(data.metrics.find((metric) => metric.key === 'pressure_index')).toMatchObject({ value: 0.3 });
+    expect(data.pressureIndex).toBe(0);
+    expect(data.metrics.find((metric) => metric.key === 'pressure_index')).toMatchObject({ value: 0 });
     expect(data.findings).toHaveLength(1);
     expect(data.findings[0]).toMatchObject({
       category: 'no_activity',

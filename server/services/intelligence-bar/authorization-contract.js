@@ -234,6 +234,15 @@ const CUSTOMER_UPDATE_TOOL_NAMES = new Set(['update_customer', 'bulk_update_cust
 // it carries the same derived-effect disclosure.
 const ADDRESS_UPDATE_KEYS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 
+// One entry per excluded terminal stop, as assign_technician /
+// swap_tech_assignments report them (`{ id, status, customer? }`): the card
+// names WHICH stops stay behind, never just how many (Codex round 3 P1).
+function describeSkippedTerminal(skipped) {
+  return skipped
+    .map((st) => `${st.customer ? `${st.customer} ` : ''}#${st.id} (${st.status || 'terminal'})`)
+    .join(', ');
+}
+
 // Derived writes the lead-status executors perform BESIDE the status column
 // (GH r10 P2): the transition mirrors onto the lead's ad_service_attribution
 // funnel row via the monotonic bridge (attribution reporting moves), and a
@@ -477,6 +486,17 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // (grouped_visit_id), so joining/leaving a group mid-pending is drift,
   // and the executor re-asserts it pre-lock and under the tech-day locks.
   if (toolName === 'assign_technician' && Array.isArray(preview?.stops)) {
+    // Terminal exclusions (Codex round 1 P1): assignTechnician's preview
+    // already drops completed/cancelled/skipped/no_show stops out of
+    // `preview.stops` and reports them separately as `skipped_terminal` —
+    // without this, the operator-facing card never said so, even though
+    // the model-facing preview text did.
+    // Named, not counted (Codex round 3 P1): the operator approves leaving
+    // these exact stops behind, so the card lists each one — the same
+    // entries the fingerprint binds.
+    if (Array.isArray(preview?.skipped_terminal) && preview.skipped_terminal.length) {
+      push('operational', `${preview.skipped_terminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be reassigned — ${describeSkippedTerminal(preview.skipped_terminal)}`);
+    }
     const grouped = preview.stops.filter((st) => st && st.grouped_visit_id);
     if (grouped.length) {
       const who = grouped.map((st) => String(st.customer || st.id)).join(', ');
@@ -497,6 +517,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // grouped_visit_id, which also binds the fingerprint and the executor's
   // under-lock membership compare.
   if (toolName === 'swap_tech_assignments' && preview?.stops && typeof preview.stops === 'object' && !Array.isArray(preview.stops)) {
+    // Terminal exclusions (Codex round 1 P1): swapTechAssignments now
+    // collects the terminal rows it excludes from both techs' swappable
+    // sets and reports them as `skipped_terminal` — disclose them the same
+    // way assign_technician's card does.
+    if (Array.isArray(preview?.skipped_terminal) && preview.skipped_terminal.length) {
+      push('operational', `${preview.skipped_terminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be swapped — ${describeSkippedTerminal(preview.skipped_terminal)}`);
+    }
     const allSwap = Object.values(preview.stops).flat().filter(Boolean);
     const grouped = allSwap.filter((st) => st.grouped_visit_id);
     if (grouped.length) {

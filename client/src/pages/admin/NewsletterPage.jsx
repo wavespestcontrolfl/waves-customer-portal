@@ -18,7 +18,7 @@
 // /admin/newsletter when newsletter-v1 was rolled out). Automations
 // renders EmailAutomationsPanelV2 directly.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
@@ -36,6 +36,7 @@ import {
   TBody,
   TD,
   UiSurface,
+  ActionFeedback,
 } from "../../components/ui";
 import {
   Users,
@@ -54,13 +55,13 @@ import {
   X,
   Star,
   Search,
-  RefreshCw,
   GitMerge,
 } from "lucide-react";
 import { ComposeView, HistoryView, SubscribersView } from "./NewsletterTabs";
 import EmailAutomationsPanelV2 from "./EmailAutomationsPanelV2";
 import { NEWSLETTER_UI_COPY } from "./newsletterUiCopy";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -537,22 +538,35 @@ function DashboardView({
   };
   const [events, setEvents] = useState([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
-  useEffect(() => {
-    let ignore = false;
-    adminFetch("/admin/newsletter/events?days=14&limit=12")
+  const [eventsError, setEventsError] = useState("");
+  const eventsRequest = useRef(0);
+  const loadEvents = useCallback((background = false) => {
+    const request = ++eventsRequest.current;
+    if (!background) setLoadingEvents(true);
+    return adminFetch("/admin/newsletter/events?days=14&limit=12")
       .then((d) => {
-        if (!ignore) {
-          setEvents(d.events || []);
-          setLoadingEvents(false);
-        }
+        if (request !== eventsRequest.current) return;
+        setEvents(d.events || []);
+        setEventsError("");
       })
-      .catch(() => {
-        if (!ignore) setLoadingEvents(false);
+      .catch((error) => {
+        if (request !== eventsRequest.current) return;
+        setEventsError(error.message || "Upcoming events could not be loaded.");
+      })
+      .finally(() => {
+        if (request === eventsRequest.current) setLoadingEvents(false);
       });
-    return () => {
-      ignore = true;
-    };
   }, []);
+  useEffect(() => {
+    void loadEvents();
+    return () => {
+      eventsRequest.current += 1;
+    };
+  }, [loadEvents]);
+  useVisiblePageRefresh(
+    () => (loadingEvents ? undefined : loadEvents(true)),
+    { intervalMs: 120_000 },
+  );
   return (
     <div>
       {/* Stats strip */}
@@ -601,11 +615,20 @@ function DashboardView({
           title="Upcoming events worth writing about"
           hint="Pulled from local SWFL feeds (Tampa.gov, Bay News 9, Manatee Chamber, Sarasota Magazine, The Gabber, Lakewood Ranch). Refreshes daily 4am ET."
         />
-        {loadingEvents ? (
+        {eventsError && (
+          <ActionFeedback
+            error
+            onRetry={loadingEvents ? undefined : () => loadEvents()}
+            className="mb-3"
+          >
+            {eventsError}
+          </ActionFeedback>
+        )}
+        {loadingEvents && events.length === 0 ? (
           <div className="text-ui-body text-ink-tertiary p-3">
             Loading events…
           </div>
-        ) : events.length === 0 ? (
+        ) : events.length === 0 && !eventsError ? (
           <Card>
             {" "}
             <CardBody className="text-center">
@@ -619,7 +642,7 @@ function DashboardView({
               </div>{" "}
             </CardBody>{" "}
           </Card>
-        ) : (
+        ) : events.length > 0 ? (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
             {events.map((e) => (
               <EventCard
@@ -629,7 +652,7 @@ function DashboardView({
               />
             ))}
           </div>
-        )}
+        ) : null}
       </div>
       {/* Recent posts */}
       <div className="mb-6">
@@ -735,15 +758,21 @@ function EventInboxView({ onDraftFromEvent }) {
   const [freshnessFilter, setFreshnessFilter] = useState("");
   const [zoneFilter, setZoneFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const searchQueryRef = useRef(searchQuery);
+  searchQueryRef.current = searchQuery;
   const [selected, setSelected] = useState(new Set());
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const eventsAbortRef = useRef(null);
+  const eventsRequestRef = useRef(0);
   const [actionStatus, setActionStatus] = useState("");
-  const fetchEvents = () => {
+  const [loadError, setLoadError] = useState("");
+  const fetchEvents = useCallback((background = false) => {
+    const request = ++eventsRequestRef.current;
     eventsAbortRef.current?.abort();
     const controller = new AbortController();
     eventsAbortRef.current = controller;
-    setLoading(true);
+    if (!background) setLoading(true);
+    setLoadError("");
     const params = new URLSearchParams({
       limit: "100",
     });
@@ -751,33 +780,56 @@ function EventInboxView({ onDraftFromEvent }) {
       params.set("status", statusFilter);
     if (freshnessFilter) params.set("freshness", freshnessFilter);
     if (zoneFilter) params.set("zone", zoneFilter);
-    if (searchQuery) params.set("q", searchQuery);
-    adminFetch(`/admin/newsletter/events/inbox?${params}`, { signal: controller.signal })
+    if (searchQueryRef.current) params.set("q", searchQueryRef.current);
+    return adminFetch(`/admin/newsletter/events/inbox?${params}`, { signal: controller.signal })
       .then((d) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || request !== eventsRequestRef.current) return;
         setEvents(d.events || []);
         setCounts(d.counts || {});
-        setSelected(new Set());
+        const visibleIds = new Set((d.events || []).map((event) => event.id));
+        setSelected((current) => background
+          ? new Set([...current].filter((id) => visibleIds.has(id)))
+          : new Set());
       })
       .catch((e) => {
-        if (e.name !== "AbortError") setEvents([]);
+        if (request !== eventsRequestRef.current) return;
+        if (e.name !== "AbortError") {
+          if (!background) setEvents([]);
+          setLoadError(e.message || "Events could not be loaded.");
+        }
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted && request === eventsRequestRef.current) setLoading(false);
       });
-  };
-  const fetchSources = () => {
-    adminFetch("/admin/newsletter/events/sources")
+  }, [freshnessFilter, statusFilter, zoneFilter]);
+  const fetchSources = useCallback(() => {
+    return adminFetch("/admin/newsletter/events/sources")
       .then((d) => setSources(d.sources || []))
       .catch(() => {});
-  };
+  }, []);
   useEffect(() => {
-    fetchEvents();
-    fetchSources();
-    return () => eventsAbortRef.current?.abort();
-  }, [statusFilter, freshnessFilter, zoneFilter]);
+    void fetchEvents();
+    void fetchSources();
+    return () => {
+      eventsRequestRef.current += 1;
+      eventsAbortRef.current?.abort();
+    };
+  }, [fetchEvents, fetchSources]);
+  useVisiblePageRefresh(
+    () => {
+      if (loading || actionStatus === "Saving event…" || actionStatus.endsWith("in progress…")) return undefined;
+      return Promise.all([fetchEvents(true), fetchSources()]);
+    },
+    { intervalMs: 120_000 },
+  );
   const doSearch = () => fetchEvents();
+  const cancelPendingEventRead = () => {
+    eventsRequestRef.current += 1;
+    eventsAbortRef.current?.abort();
+    setLoading(false);
+  };
   const patchEvent = async (id, body) => {
+    cancelPendingEventRead();
     setActionStatus("Saving event…");
     try {
       await adminFetch(`/admin/newsletter/events/${id}`, {
@@ -799,6 +851,7 @@ function EventInboxView({ onDraftFromEvent }) {
       )
     )
       return;
+    cancelPendingEventRead();
     setActionStatus(`${action} in progress…`);
     try {
       await adminFetch("/admin/newsletter/events/bulk-action", {
@@ -839,6 +892,7 @@ function EventInboxView({ onDraftFromEvent }) {
       )
     )
       return;
+    cancelPendingEventRead();
     try {
       await adminFetch("/admin/newsletter/events/merge", {
         method: "POST",
@@ -1001,16 +1055,6 @@ function EventInboxView({ onDraftFromEvent }) {
               </Button>
             </div>
           </div>
-          <Button
-            type="button"
-            onClick={fetchEvents}
-            className=""
-            title="Refresh"
-            variant="secondary"
-            aria-label="Refresh"
-          >
-            <RefreshCw size={13} strokeWidth={1.75} />
-          </Button>
         </div>
 
         {/* Bulk actions */}
@@ -1057,6 +1101,15 @@ function EventInboxView({ onDraftFromEvent }) {
       {actionStatus && (
         <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-2 text-ui-body text-ink-secondary">
           {actionStatus}
+        </div>
+      )}
+
+      {loadError && (
+        <div className="flex items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-alert-fg">
+          <span>{loadError}</span>
+          <Button type="button" onClick={() => fetchEvents()} variant="secondary">
+            Retry
+          </Button>
         </div>
       )}
 
@@ -1615,12 +1668,13 @@ export default function NewsletterPage() {
   const [sendsLoading, setSendsLoading] = useState(true);
   const [subscribersActive, setSubscribersActive] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const summaryRequest = useRef(0);
   useEffect(() => {
-    let ignore = false;
+    const request = ++summaryRequest.current;
     setSendsLoading(true);
     adminFetch("/admin/newsletter/sends")
       .then((d) => {
-        if (!ignore) {
+        if (request === summaryRequest.current) {
           setSendsData(
             d || {
               sends: [],
@@ -1634,25 +1688,50 @@ export default function NewsletterPage() {
       // showing stale History counts and recent-post data — the badge/stats
       // disappearance signals to the admin that the refresh didn't land.
       .catch(() => {
-        if (!ignore) {
+        if (request === summaryRequest.current) {
           setSendsData(null);
           setSendsLoading(false);
         }
       });
     adminFetch("/admin/newsletter/subscribers?limit=1")
       .then((d) => {
-        if (!ignore) setSubscribersActive(d.counts?.active ?? 0);
+        if (request === summaryRequest.current) setSubscribersActive(d.counts?.active ?? 0);
       })
       // Clear on error for the same reason as /sends — a failed refresh
       // would otherwise keep the prior count in both the stats tile and
       // the Subscribers tab badge with no signal that the refresh failed.
       .catch(() => {
-        if (!ignore) setSubscribersActive(null);
+        if (request === summaryRequest.current) setSubscribersActive(null);
       });
     return () => {
-      ignore = true;
+      if (request === summaryRequest.current) summaryRequest.current += 1;
     };
   }, [refreshKey]);
+
+  useVisiblePageRefresh(
+    () => {
+      if (sendsLoading) return undefined;
+      const request = ++summaryRequest.current;
+      return Promise.allSettled([
+        adminFetch("/admin/newsletter/sends"),
+        adminFetch("/admin/newsletter/subscribers?limit=1"),
+      ]).then(([sends, subscribers]) => {
+        if (request !== summaryRequest.current) return;
+        setSendsLoading(false);
+        setSendsData(
+          sends.status === "fulfilled"
+            ? sends.value || { sends: [], counts: {} }
+            : null,
+        );
+        setSubscribersActive(
+          subscribers.status === "fulfilled"
+            ? subscribers.value.counts?.active ?? 0
+            : null,
+        );
+      });
+    },
+    { intervalMs: 120_000 },
+  );
 
   // Refetch on Dashboard re-entry — mirrors the prior per-tab DashboardView
   // remount so a campaign sent in Compose or a subscriber added in Subscribers
