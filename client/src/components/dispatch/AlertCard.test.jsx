@@ -97,3 +97,54 @@ describe('communication-based dispatch warnings', () => {
     expect(screen.queryByText('Unassigned')).toBeNull();
   });
 });
+
+describe('tech_out_overflow alert', () => {
+  it('renders the "Needs a decision" header label, bump order, and bump reason', () => {
+    render(<AlertCard alert={{
+      id: 'alert', type: 'tech_out_overflow', severity: 'warn', created_at: new Date().toISOString(),
+      tech_name: 'Tech One', customer_first_name: 'Test', customer_last_name: 'Customer',
+      service_type: 'General pest', window_start: '09:00:00', window_end: '11:00:00',
+      payload: {
+        date: '2026-09-23', reason: 'sick', absent_tech_name: 'Tech One',
+        customer_name: 'Test Customer', service_type: 'General pest',
+        window_start: '09:00:00', window_end: '11:00:00',
+        bump_order: 2, bump_total: 5, bump_reason: 'Recurring service, unconfirmed window',
+        near_misses: [{ technician_id: 'tech-x', technician_name: 'Tech X', conflict_reason: 'already at capacity' }],
+      },
+    }} />);
+    expect(screen.getByText('Needs a decision')).toBeTruthy();
+    expect(screen.getByText('Tech One')).toBeTruthy();
+    expect(screen.getByText(/bump #2 of 5/)).toBeTruthy();
+    expect(screen.getByText('Recurring service, unconfirmed window')).toBeTruthy();
+    expect(screen.getByText(/Test C\./)).toBeTruthy();
+    expect(screen.getByText(/General pest/)).toBeTruthy();
+    expect(screen.getByText(/9:00–11:00/)).toBeTruthy();
+    expect(screen.getByText(/Closest fits: Tech X \(already at capacity\)/)).toBeTruthy();
+  });
+
+  it('falls back to payload identity fields on a bare live-socket row', () => {
+    render(<AlertCard alert={{
+      id: 'alert', type: 'tech_out_overflow', severity: 'warn', created_at: new Date().toISOString(),
+      tech_id: 'tech-b', job_id: 'visit-1',
+      payload: {
+        date: '2026-09-23', reason: 'emergency', absent_tech_name: 'Jordan Reyes',
+        customer_name: 'Demo Customer', service_type: 'Lawn', bump_order: 1, bump_total: 3,
+      },
+    }} />);
+    expect(screen.getByText('Jordan Reyes')).toBeTruthy();
+    expect(screen.getByText(/is out \(emergency\)/)).toBeTruthy();
+    expect(screen.getByText(/Demo Customer/)).toBeTruthy();
+  });
+});
+
+describe('unknown alert type', () => {
+  it('falls back to GenericBody with the default uppercase label', () => {
+    render(<AlertCard alert={{
+      id: 'alert', type: 'some_future_type', severity: 'info', created_at: new Date().toISOString(),
+      tech_name: 'Tech One', payload: { foo: 'bar' },
+    }} />);
+    expect(screen.getByText('some_future_type')).toBeTruthy();
+    expect(screen.getByText('Tech One')).toBeTruthy();
+    expect(screen.getByText('bar')).toBeTruthy();
+  });
+});

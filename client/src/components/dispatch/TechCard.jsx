@@ -11,7 +11,7 @@
  * No D palette. See AGENTS.md / CLAUDE.md for the V2 contract.
  */
 import React, { useEffect, useState } from 'react';
-import { Card, cn } from '../ui';
+import { Badge, Card, cn } from '../ui';
 
 // Status → color token mapping. Kept narrow: only the dot color
 // changes by status; surrounding text is always zinc. Avoids the
@@ -77,7 +77,9 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
 
   const currentJob = tech.current_job_id ? jobs.get(tech.current_job_id) : null;
   const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
-  const dotColor = STATUS_DOT[tech.status] || STATUS_DOT.idle;
+  // A tech marked out today shows the idle dot regardless of their last
+  // reported status — they aren't actually working the board.
+  const dotColor = tech.out_today ? STATUS_DOT.idle : (STATUS_DOT[tech.status] || STATUS_DOT.idle);
   const statusTextColor = STATUS_TEXT[tech.status] || STATUS_TEXT.idle;
   const gpsLabel = gpsAgeLabel(tech.location_updated_at, now);
   const gpsTone = gpsAgeTone(tech.location_updated_at, now);
@@ -137,8 +139,13 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
             </div>
           )}
           <div className="flex-1 min-w-0">
-            <div className="text-14 font-medium text-ink-primary truncate">
-              {tech.name}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <div className="text-14 font-medium text-ink-primary truncate">
+                {tech.name}
+              </div>
+              {tech.out_today && (
+                <Badge tone="neutral" className="flex-shrink-0">Out</Badge>
+              )}
             </div>
             <div className={cn('flex items-center gap-1.5 mt-0.5')}>
               <span className={cn('inline-block w-1.5 h-1.5 rounded-full', dotColor)} />
@@ -177,14 +184,18 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
 }
 
 // React.memo with a custom equality fn. The triple [id, updated_at,
-// current_job_id] is the dirty key. If any external prop other than
-// `tech` changes (selected, jobs reference, onSelect, isDropTarget),
-// we re-render regardless via the secondary checks below.
+// current_job_id] is the dirty key, plus eta_minutes and out_today — both
+// can change without updated_at advancing (eta recomputes off a live GPS
+// tick; out_today flips via the tech-out endpoint, not a board broadcast).
+// If any external prop other than `tech` changes (selected, jobs
+// reference, onSelect, isDropTarget), we re-render regardless via the
+// secondary checks below.
 export default React.memo(TechCardImpl, (prev, next) => {
   if (prev.tech.id !== next.tech.id) return false;
   if (prev.tech.updated_at !== next.tech.updated_at) return false;
   if (prev.tech.current_job_id !== next.tech.current_job_id) return false;
   if (prev.tech.eta_minutes !== next.tech.eta_minutes) return false;
+  if (prev.tech.out_today !== next.tech.out_today) return false;
   if (prev.selected !== next.selected) return false;
   if (prev.jobs !== next.jobs) return false;
   if (prev.onSelect !== next.onSelect) return false;

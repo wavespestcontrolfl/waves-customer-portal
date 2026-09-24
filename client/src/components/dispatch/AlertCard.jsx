@@ -264,12 +264,77 @@ function TrackingBody({ alert }) {
   );
 }
 
+const TECH_OUT_REASON_LABEL = {
+  sick: 'sick',
+  emergency: 'emergency',
+  no_show: 'no-show',
+  other: 'other',
+};
+
+// tech_out_overflow payload carries its own date/window/reason/near_miss
+// fields as a fallback for the same bare-live-socket-row gap TrackingBody
+// handles above — the row-level (joined) field wins when both are present.
+function formatRawWindow(start, end) {
+  if (!start && !end) return null;
+  const s = (start || '').slice(0, 5);
+  const e = (end || '').slice(0, 5);
+  if (s && e) return `${s}–${e}`;
+  return s || e;
+}
+
+function TechOutOverflowBody({ alert }) {
+  const payload = alert.payload || {};
+  const techName = alert.tech_name || payload.absent_tech_name;
+  const reasonLabel = TECH_OUT_REASON_LABEL[payload.reason] || payload.reason;
+  const customer = customerLine(alert) || payload.customer_name || null;
+  const serviceType = alert.service_type || payload.service_type;
+  const windowLabel = formatRawWindow(
+    alert.window_start || payload.window_start,
+    alert.window_end || payload.window_end
+  );
+  const nearMisses = payload.near_misses || [];
+  const detailLine = [customer, serviceType].filter(Boolean).join(' · ')
+    + (windowLabel ? ` (${windowLabel})` : '');
+  return (
+    <div className="text-14 text-ink-primary space-y-1">
+      <div>
+        {techName ? (
+          <span className="font-medium">{techName}</span>
+        ) : (
+          <span className="text-ink-tertiary italic">Unknown tech</span>
+        )}
+        {' '}is out{reasonLabel ? ` (${reasonLabel})` : ''}
+        {payload.bump_order != null && payload.bump_total != null && (
+          <> · bump #{payload.bump_order} of {payload.bump_total}</>
+        )}
+      </div>
+      {detailLine && <div className="text-ink-secondary">{detailLine}</div>}
+      {payload.bump_reason && (
+        <p className="text-ink-secondary">{payload.bump_reason}</p>
+      )}
+      {nearMisses.length > 0 && (
+        <p className="text-ink-tertiary text-12">
+          Closest fits: {nearMisses.map((n) => `${n.technician_name} (${n.conflict_reason})`).join(', ')}
+        </p>
+      )}
+    </div>
+  );
+}
+
 const TYPE_RENDERERS = {
   tech_late: TechLateBody,
   unassigned_overdue: UnassignedOverdueBody,
   missed_photo: MissedPhotoBody,
   moa_violation: MoaViolationBody,
   schedule_route_quality: RouteQualityBody,
+  tech_out_overflow: TechOutOverflowBody,
+};
+
+// Header label for types that get a plain-English sentence instead of the
+// default uppercase type-slug treatment (text-14, not text-11 label case).
+const PRETTY_HEADER_LABEL = {
+  schedule_route_quality: 'Route needs review',
+  tech_out_overflow: 'Needs a decision',
 };
 
 export default function AlertCard({ alert, onResolve }) {
@@ -310,8 +375,8 @@ export default function AlertCard({ alert, onResolve }) {
           >
             {alert.severity}
           </span>
-          <span className={cn('font-medium text-ink-tertiary truncate', alert.type === 'schedule_route_quality' ? 'text-14' : 'text-11 uppercase tracking-label')}>
-            {alert.type === 'schedule_route_quality' ? 'Route needs review' : tracking ? 'Missing tracking' : alert.type}
+          <span className={cn('font-medium text-ink-tertiary truncate', PRETTY_HEADER_LABEL[alert.type] ? 'text-14' : 'text-11 uppercase tracking-label')}>
+            {PRETTY_HEADER_LABEL[alert.type] || (tracking ? 'Missing tracking' : alert.type)}
           </span>
         </div>
         <span className="text-11 text-ink-tertiary flex-shrink-0">

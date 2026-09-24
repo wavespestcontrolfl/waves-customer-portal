@@ -2740,6 +2740,13 @@ const gates = {
   controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
   // Field Team Program rev 2b: evidence and simulation only; never payroll.
   fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
+  // "Tech out today": mark a technician absent for a date, redistribute
+  // their stops onto another eligible tech at the same promised arrival
+  // window, park the rest as ranked dispatch alerts. Sends no customer
+  // communication. This entry is for logGateStatus only; consumers
+  // (services/tech-out.js, routes/admin-tech-out.js) read gateEnvValue at
+  // CALL time.
+  techOutRedistribute: gateEnvValue('GATE_TECH_OUT_REDISTRIBUTE'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

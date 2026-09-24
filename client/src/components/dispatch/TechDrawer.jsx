@@ -27,6 +27,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Sheet, SheetHeader, SheetBody, Badge, Button, Card, cn } from '../ui';
+import TechOutSection from './TechOutSection';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -235,6 +236,8 @@ export default function TechDrawer({ techId, onClose }) {
                 </div>
               </Card>
             </div>
+
+            <TechOutSection techId={techId} techName={tech.name} />
 
             <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary mb-2">
               Today's route
