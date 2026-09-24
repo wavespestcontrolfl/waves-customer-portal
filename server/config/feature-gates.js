@@ -2759,6 +2759,13 @@ const gates = {
   // the canonical CALL-TIME reader is leadInspectionLinkLive() below, same
   // discountStackingLive() convention, so a flip needs no redeploy.
   leadInspectionLink: process.env.GATE_LEAD_INSPECTION_LINK === 'true',
+  // "Tech out today": mark a technician absent for a date, redistribute
+  // their stops onto another eligible tech at the same promised arrival
+  // window, park the rest as ranked dispatch alerts. Sends no customer
+  // communication. This entry is for logGateStatus only; consumers
+  // (services/tech-out.js, routes/admin-tech-out.js) read gateEnvValue at
+  // CALL time.
+  techOutRedistribute: gateEnvValue('GATE_TECH_OUT_REDISTRIBUTE'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

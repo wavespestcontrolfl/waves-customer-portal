@@ -250,6 +250,9 @@ const LANE_RUNTIME = {
   review_gate_text: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // customer_visible + M3 (Codex r18): the autonomous publisher stamps the alt text into blog frontmatter the PR poller can auto-merge.
   hero_alt: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
+  editorial_review: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
+  editorial_repair: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
+  editorial_plan_review: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
   fact_check_gate: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
   compliance_gate: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
   // irreversible_external + M3: with AUTONOMOUS_CODEX_REMEDIATION on, it pushes fixes to the Astro PR branch via gh.putFile and re-tags Codex (Codex r14).

@@ -791,10 +791,48 @@ async function handleLeadInquiry(email, classification) {
   }
 
   if (existingLead) {
-    await db('emails').where({ id: email.id }).update({
-      lead_id: existingLead.id,
-      auto_action: 'linked_to_existing_lead',
-      updated_at: new Date(),
+    await db.transaction(async (trx) => {
+      // Serialize retries on the lead and re-check the match before either
+      // row is written. A lead closed/deleted after the lookup must not gain
+      // fresh activity or have another email attached to it.
+      const liveLead = await trx('leads')
+        .where({ id: existingLead.id })
+        .whereNotIn('status', ['won', 'lost'])
+        .whereNull('deleted_at')
+        .forUpdate()
+        .first();
+      if (!liveLead) throw new Error('Matched lead is no longer available');
+      const identityChanged = ['customer_id', 'phone', 'email']
+        .some((field) => (liveLead[field] ?? null) !== (existingLead[field] ?? null));
+      if (identityChanged) throw new Error('Matched lead identity changed before commit');
+
+      // The conditional link is replay-safe and refuses to overwrite a
+      // linkage changed by another worker or an admin after the match read.
+      const linked = await trx('emails')
+        .where({ id: email.id })
+        .where((q) => q.whereNull('lead_id').orWhere('lead_id', liveLead.id))
+        .update({
+          lead_id: liveLead.id,
+          auto_action: 'linked_to_existing_lead',
+          updated_at: new Date(),
+        });
+      if (linked !== 1) throw new Error('Email lead linkage changed before commit');
+
+      const existingActivity = await trx('lead_activities')
+        .where({ lead_id: liveLead.id, activity_type: 'email_received' })
+        .whereRaw("metadata->>'emailId' = ?", [String(email.id)])
+        .first();
+      if (!existingActivity) {
+        await trx('lead_activities').insert({
+          lead_id: liveLead.id,
+          activity_type: 'email_received',
+          description: 'Inbound email linked to existing lead',
+          performed_by: 'Email Classifier',
+          metadata: JSON.stringify({ emailId: email.id }),
+          // Staleness reflects when the inquiry arrived, not a later retry.
+          created_at: email.received_at || new Date(),
+        });
+      }
     });
     // A follow-up email often supplies exactly what the first lacked (phone,
     // address, concrete service) — behind the gate, try the same draft path

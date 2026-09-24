@@ -2945,7 +2945,7 @@ async function createSelfBooking(payload = {}) {
       // miss here is a "pick another slot" outcome, so it rides the SLOT_TAKEN
       // recovery below (just-created profile rolled back, generic message).
       try {
-        await assertAssignableTechnician(technician_id || null, { conn: trx });
+        await assertAssignableTechnician(technician_id || null, { conn: trx, date: String(slotDateStr).slice(0, 10) });
       } catch (eligErr) {
         if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
         const err = new Error('That time slot is no longer available. Please pick another.');

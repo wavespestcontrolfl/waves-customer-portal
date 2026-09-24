@@ -54,6 +54,17 @@ function socketOrigin() {
   }
 }
 
+// Same-timestamp tie-break (one tech-out batch): lower bump_order first;
+// rows without one keep their relative order.
+export function bumpOrderTieBreak(a, b) {
+  const ao = Number(a?.payload?.bump_order);
+  const bo = Number(b?.payload?.bump_order);
+  if (Number.isFinite(ao) && Number.isFinite(bo)) return ao - bo;
+  if (Number.isFinite(ao)) return -1;
+  if (Number.isFinite(bo)) return 1;
+  return 0;
+}
+
 export function useDispatchAlerts() {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -88,7 +99,9 @@ export function useDispatchAlerts() {
           for (const a of prev) byId.set(a.id, a);
           for (const a of fetched) byId.set(a.id, a);
           return Array.from(byId.values()).sort(
-            (a, b) => new Date(b.created_at) - new Date(a.created_at)
+            // Newest first; a tech-out batch shares one created_at (one
+            // transaction), so its cards fall back to bump_order (#1 first).
+            (a, b) => (new Date(b.created_at) - new Date(a.created_at)) || bumpOrderTieBreak(a, b)
           );
         });
         setLoading(false);

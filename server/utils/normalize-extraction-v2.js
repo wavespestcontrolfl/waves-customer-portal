@@ -134,6 +134,125 @@ function normalizeSecondaryContacts(list) {
   return out;
 }
 
+// price / prices[] (schema 1.13.0, codex #4722 r1 P1s): the model can
+// return a price object that disagrees with itself or with its siblings —
+// caller_response 'accepted' alongside accepted: false, or a top-level
+// price that doesn't match the accepted entry in prices[]. Both are
+// corrected here, before persistence, so no reader has to reconcile them.
+
+// accepted is DERIVED from caller_response (schema description + prompt
+// rule) — when caller_response is present (even null), it wins; when the
+// key is genuinely ABSENT (a pre-1.13.0 shape, or a field the model simply
+// omitted), the model's own accepted value is preserved unchanged.
+function normalizePriceEntry(entry) {
+  if (!entry || typeof entry !== 'object') return entry;
+  if (!('caller_response' in entry)) return entry;
+  let accepted;
+  if (entry.caller_response === 'accepted') accepted = true;
+  else if (entry.caller_response === 'declined' || entry.caller_response === 'no_response') accepted = false;
+  else accepted = null; // 'not_at_issue' or null
+  return { ...entry, accepted };
+}
+
+// Same stated price, by identity (amount + range end + unit) — the fields
+// prices[] entries are asked to agree on when they're the same price
+// described twice, once in `price` and once in its own `prices[]` slot.
+function priceIdentityMatches(a, b) {
+  if (!a || !b) return false;
+  const norm = (o, k) => (o[k] === undefined ? null : o[k]);
+  return norm(a, 'amount_usd') === norm(b, 'amount_usd')
+    && norm(a, 'amount_max_usd') === norm(b, 'amount_max_usd')
+    && norm(a, 'unit') === norm(b, 'unit');
+}
+
+// codex #4722 r2 P1: the model's top-level `price` can carry detail
+// (stated_by, evidence_quote, tier_mentioned, prepay_term...) that its own
+// echo in `prices[]` leaves out — a wholesale replacement would discard
+// that detail even though both describe the same price. `overlay`'s
+// non-null fields win; `base`'s non-null fields fill whatever overlay
+// leaves null/absent.
+//
+// caller_response / accepted are handled as ONE unit, separately from the
+// generic non-null-wins rule (codex #4722 r2 push-gate P1s): by the time
+// this runs, both `base` and `overlay` already went through
+// normalizePriceEntry, so each one's own (caller_response, accepted) pair
+// is already internally consistent. Splitting them back apart — e.g.
+// re-deriving `accepted` from whichever `caller_response` the merge
+// happens to end up with — can resurrect a stale value that never came
+// from the side that's actually supposed to win:
+//   - overlay sets caller_response (even null): its own already-derived
+//     accepted travels WITH it, never re-derived from an unrelated
+//     caller_response inherited from base.
+//   - overlay omits caller_response but sets its own accepted key — even
+//     to null (a legacy accepted-only shape, "acceptance never discussed"
+//     included): that accepted wins outright, and any caller_response
+//     inherited from base is cleared rather than left contradicting it.
+//   - overlay contributes neither key: base's pair is untouched.
+function mergePriceEntries(base, overlay) {
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(overlay)) {
+    if (key === 'caller_response' || key === 'accepted') continue; // handled below
+    if (value !== null && value !== undefined) merged[key] = value;
+  }
+  if ('caller_response' in overlay) {
+    merged.caller_response = overlay.caller_response;
+    merged.accepted = 'accepted' in overlay ? overlay.accepted : normalizePriceEntry(merged).accepted;
+  } else if ('accepted' in overlay) {
+    // Present even when null — a legacy-shape overlay that explicitly says
+    // "acceptance was never discussed" for THIS entry is still overlay's
+    // own claim, not something to backfill from an inherited caller_response.
+    merged.accepted = overlay.accepted;
+    delete merged.caller_response;
+  }
+  return merged;
+}
+
+// Primary-price compatibility contract: `price` is always the single
+// PRIMARY entry — the accepted one in `prices[]` if any (first such), else
+// `prices[0]` — so a reader of `price` alone never sees a stale/disagreeing
+// value. When the selected prices[] entry describes the SAME price as the
+// existing `price` (same amount_usd/amount_max_usd/unit), they're merged
+// rather than one wholesale-replacing the other, so neither side's detail
+// is lost. A different price replaces outright, as before. The merged/
+// selected primary is then written back into `prices[]` itself, at index
+// 0 (the canonical position the schema/prompt document), so a reader of
+// `prices[]` alone — never touching the sibling `price` field — sees the
+// SAME enriched entry rather than a sparser, stale echo (codex #4722 r2
+// push-gate P1: the Calls tab "All prices" row reads prices[] directly,
+// and a stale entry there could misrepresent a caller-mentioned price's
+// stated_by). A `price` with no `prices` array (the common single-price
+// case) is left alone beyond its own accepted derivation above.
+function normalizeServiceRequestPricing(serviceRequest) {
+  if (!serviceRequest || typeof serviceRequest !== 'object') return serviceRequest;
+  if (serviceRequest.price === undefined && !Array.isArray(serviceRequest.prices)) return serviceRequest;
+
+  const result = { ...serviceRequest };
+  if (result.price !== undefined) {
+    result.price = normalizePriceEntry(result.price);
+  }
+  if (Array.isArray(result.prices)) {
+    result.prices = result.prices.map(normalizePriceEntry);
+    if (result.prices.length > 0) {
+      // Select on the NORMALIZED accepted, not caller_response directly:
+      // caller_response is optional, and an entry that omits it keeps its
+      // own (already-correct) accepted value from normalizePriceEntry
+      // above — checking caller_response alone would miss that entry and
+      // fall through to prices[0], demoting a genuinely accepted price
+      // (codex #4722 r1 push-gate P1).
+      const acceptedIndex = result.prices.findIndex((p) => p && p.accepted === true);
+      const selectedIndex = acceptedIndex >= 0 ? acceptedIndex : 0;
+      const selected = result.prices[selectedIndex];
+      const primary = (result.price && priceIdentityMatches(result.price, selected))
+        ? mergePriceEntries(result.price, selected)
+        : selected;
+      result.price = primary;
+      const rest = result.prices.filter((_, i) => i !== selectedIndex);
+      result.prices = [primary, ...rest];
+    }
+  }
+  return result;
+}
+
 function normalizeExtractionV2(extraction) {
   if (!extraction || typeof extraction !== 'object') return extraction;
 
@@ -151,6 +270,9 @@ function normalizeExtractionV2(extraction) {
     ...(extraction.secondary_contacts !== undefined
       ? { secondary_contacts: normalizeSecondaryContacts(extraction.secondary_contacts) }
       : {}),
+    ...(extraction.service_request !== undefined
+      ? { service_request: normalizeServiceRequestPricing(extraction.service_request) }
+      : {}),
   };
 }
 
@@ -164,4 +286,6 @@ module.exports = {
   normalizeZip,
   normalizeState,
   cleanValidEmail,
+  normalizePriceEntry,
+  normalizeServiceRequestPricing,
 };

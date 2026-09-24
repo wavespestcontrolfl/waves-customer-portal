@@ -6739,6 +6739,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — Tech-out absent-day sweep (GATE_TECH_OUT_REDISTRIBUTE)
+  //
+  // The safety net behind every writer that can land a stop on a marked-out
+  // technician's day besides markTechOut itself and the date-aware recurring
+  // -child seed (server/services/tech-out.js#sweepAbsentTechDays). For every
+  // still-open technician_absences row today or later, parks whatever open
+  // stops that tech-day carries and aren't already covered by an existing
+  // tech_out_overflow alert. Gate-read at call time inside the function
+  // (unset = a fast no-op {skipped:'gate_off'}), so this registration is
+  // unconditional and safe to leave on cronJobs alone.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { sweepAbsentTechDays } = require('./tech-out');
+      await sweepAbsentTechDays();
+    } catch (err) {
+      logger.error(`[tech-out] sweep tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — Unassigned-overdue detector (second alert generator)
   //
   // Same shape as tech-late-detector but scopes to jobs with

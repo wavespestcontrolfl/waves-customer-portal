@@ -432,7 +432,7 @@ async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, d
 async function assertCapacityEligibility(conn, context, serviceTypes) {
   const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('../technician-eligibility');
   try {
-    await assertAssignableTechnician(context.target.technician_id, { conn });
+    await assertAssignableTechnician(context.target.technician_id, { conn, date: context.date });
   } catch (error) {
     if (error.code !== NOT_ASSIGNABLE) throw error;
     throw capacityError('technician_unavailable');
