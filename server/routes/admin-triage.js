@@ -812,7 +812,11 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
         extraction: { meta: { call_summary: taskSummary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
         extraPayload: {
           skipped_reason: retained ? 'address_correction_needed_on_retained_visit' : decision.skippedReason,
-          ...(retained ? { retained_service_id: retained.id, retained_scheduled_date: retained.scheduled_date || null } : {}),
+          // Explicit nulls when no visit qualifies any more: the merge onto a
+          // standing task would otherwise keep an obsolete retained visit
+          // (cancelled / completed since) in the instructions (codex r31 P1).
+          retained_service_id: retained ? retained.id : null,
+          retained_scheduled_date: retained ? (retained.scheduled_date || null) : null,
           // The promised follow-up (visit 2) the hold kept from being booked
           // rides on the task with the primary ask (codex r20 P1).
           ...(heldConflictPayload?.follow_up_plan ? { follow_up_plan: heldConflictPayload.follow_up_plan } : {}),
@@ -954,7 +958,10 @@ router.post('/:id/verdict', async (req, res) => {
       // into the same open row, so a verdict judged on what the inbox
       // rendered must not settle evidence it never displayed (codex r22
       // P1). Checked under the call lock.
-      if (item.reason_code === 'on_file_house_number_conflict') {
+      // …and recovery tasks, whose window / retained visit a settlement
+      // refreshes in place (codex r31 P1): Accept / Deny on them is
+      // version-bound the same way.
+      if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {
         const liveCard = await trx('triage_items').where({ id }).first('updated_at');
         const expectedUpdatedAt = req.body?.expected_updated_at || null;
         if (!liveCard || !expectedUpdatedAt
@@ -1002,6 +1009,10 @@ router.post('/:id/verdict', async (req, res) => {
         // visit 2, so its card survives the call verdict (codex r10 P1).
         .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked'])
         .modify((q) => { if (conflictLeftForOwnVerdict) q.whereNot({ id: heldConflict.id }); })
+        // A recovery task (its window / retained visit refreshed in place by
+        // a settlement) is settled only by ITS OWN version-bound verdict,
+        // never swept by a sibling card's verdict (codex r31 P1).
+        .modify((q) => { if (item.reason_code !== 'auto_booking_skipped_after_approval') q.whereNot({ reason_code: 'auto_booking_skipped_after_approval' }); })
         .whereRaw("payload->'reschedule_proposal' IS NULL")
         .whereIn('status', OPEN_STATES)
         .update({

@@ -323,6 +323,10 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(guard).toContain('no recovery task filed');
     // The retained visit is looked up by the column scheduled_services actually carries (codex local audit).
     expect(src).toContain("where({ id: retainedId, source_call_log_id: item.call_log_id })");
+    // Recovery tasks: version-bound on /verdict, never swept by a sibling verdict, obsolete retained fields nulled (codex r31 P1).
+    expect(src).toContain("if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {");
+    expect(src).toContain("if (item.reason_code !== 'auto_booking_skipped_after_approval') q.whereNot({ reason_code: 'auto_booking_skipped_after_approval' });");
+    expect(src).toContain("retained_service_id: retained ? retained.id : null,");
     const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     // A reprocess re-binds the identity only for a LINKED call; an unlink keeps the filing identity (codex r29 P2).
     expect(processor).toContain("...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),");
