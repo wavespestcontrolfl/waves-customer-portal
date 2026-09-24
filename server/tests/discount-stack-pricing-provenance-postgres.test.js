@@ -47,6 +47,7 @@ const {
   resolveUpdateDetailsAddonFinancials, legacyEconomicsPreservationDecision, calculateVisitFinancialsForAddons,
   insertScheduledServiceAddons, legacyPreservationSnapshotStale, loadDiscountCapsById,
   assertDueAddonsWithinDiscountCapUniverse, computeUpdateDetailsFinancialPlan,
+  addonRowIdsDrifted, financialStateDrifted,
 } = adminScheduleRouter._test;
 
 const connection = process.env.DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL;
@@ -1696,5 +1697,118 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     });
     expect(plan.replaceAddons).toHaveLength(1);
     expect(plan.replaceAddons[0].price).toBe(30);
+  });
+
+  // GitHub Codex round 21 P1 (#4657, :12301), END TO END through real
+  // Postgres rows: addonRowIdsDrifted (round 14's own fix, above) proves
+  // only that the add-on ROW SET a plan was built against is still on
+  // disk — it is blind to a concurrent caller that reprices this visit
+  // WITHOUT replacing any add-on row at all. MobileServiceEditModal's own
+  // primary-price-only save is exactly this shape: it updates
+  // estimated_price and NULLS every add-on's stored discount columns in
+  // place (:12444-12455), leaving every id untouched. This plans a
+  // desktop request's save first — capturing financialCasSnapshot from
+  // the SAME `existing`/existingAddonDiscountRows reads the planner
+  // already does — then lands that concurrent mobile write BEFORE running
+  // the route's own locked recheck (the exact sequence the route runs at
+  // :12297-12325: re-read under FOR UPDATE, addonRowIdsDrifted, THEN
+  // financialStateDrifted). The id set is untouched (addonRowIdsDrifted
+  // alone would pass, proving the pre-fix gap), but the money moved, so
+  // financialStateDrifted must catch it.
+  test('PUT /:id/update-details (planner, real rows): a concurrent mobile primary-price save that clears an add-on discount WITHOUT touching its id drifts the financial CAS even though addonRowIdsDrifted alone would pass', async () => {
+    const id = randomUUID();
+    const addonRowId = randomUUID();
+    const discountId = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-25', service_type: 'Fixture Round-21 Financial CAS',
+      primary_line_price: 100, estimated_price: 190,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Discounted Add-On', base_price: 100, estimated_price: 90,
+      discount_id: discountId, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+    });
+
+    // The DESKTOP request's plan — round-trips the add-on's own stamp
+    // verbatim (SchedulePage.jsx's convention for an unchanged discounted
+    // line); this save never touches the money at all.
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100,
+      addons: [{
+        id: addonRowId, serviceName: 'Fixture Discounted Add-On', basePrice: 100,
+        discountId, discountType: 'percentage', discountAmount: 10,
+      }],
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.financialCasSnapshot).toBeTruthy();
+    expect(plan.financialCasSnapshot.addons).toHaveLength(1);
+    expect(plan.financialCasSnapshot.addons[0].discount_id).toBe(discountId);
+
+    // Concurrent MOBILE save lands before the desktop request reaches the
+    // lock: a primary-price-only edit updates estimated_price/
+    // primary_line_price and clears the add-on's discount columns IN
+    // PLACE — same row, same add-on id.
+    await mockPg('scheduled_services').where({ id }).update({ estimated_price: 150, primary_line_price: 150 });
+    await mockPg('scheduled_service_addons').where({ id: addonRowId }).update({
+      discount_id: null, discount_type: null, discount_amount: null, discount_dollars: null, estimated_price: 100,
+    });
+
+    // The route's own locked recheck: re-read the SAME fields the
+    // snapshot carries, under the row's lock.
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    // The id-only check ALONE would pass — same row, same id, no rows
+    // added or removed. This is exactly the gap round 21 found.
+    expect(addonRowIdsDrifted(plan.expectedAddonRowIds, freshAddonRows.map((r) => r.id))).toBe(false);
+    // financialStateDrifted (the fix) catches the money move the id check
+    // cannot see. This assertion FAILS WITHOUT THE FIX: a pre-fix planner
+    // never returns a financialCasSnapshot at all, so the route would have
+    // nothing to compare here and the stale desktop save would proceed.
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(true);
+  });
+
+  test('PUT /:id/update-details (planner, real rows): no concurrent write — the SAME locked recheck proceeds (financial CAS not drifted)', async () => {
+    const id = randomUUID();
+    const addonRowId = randomUUID();
+    const discountId = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-26', service_type: 'Fixture Round-21 Financial CAS Control',
+      primary_line_price: 100, estimated_price: 190,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Discounted Add-On', base_price: 100, estimated_price: 90,
+      discount_id: discountId, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+    });
+
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100,
+      addons: [{
+        id: addonRowId, serviceName: 'Fixture Discounted Add-On', basePrice: 100,
+        discountId, discountType: 'percentage', discountAmount: 10,
+      }],
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.financialCasSnapshot).toBeTruthy();
+
+    // Nothing else touched this visit — the locked recheck re-reads the
+    // SAME state the plan was built from.
+    const parentRecheckFields = Array.from(new Set(['id', ...Object.keys(plan.financialCasSnapshot.parent)]));
+    const freshParentRow = await mockPg('scheduled_services').where({ id }).forUpdate().first(...parentRecheckFields);
+    const freshAddonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id })
+      .select('id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
+
+    expect(addonRowIdsDrifted(plan.expectedAddonRowIds, freshAddonRows.map((r) => r.id))).toBe(false);
+    expect(financialStateDrifted(plan.financialCasSnapshot, { parent: freshParentRow, addons: freshAddonRows })).toBe(false);
+
+    // The save proceeds exactly as the route would.
+    await mockPg('scheduled_services').where({ id }).update(updates);
+    const rowAfter = await mockPg('scheduled_services').where({ id }).first();
+    expect(Number(rowAfter.estimated_price)).toBe(updates.estimated_price);
   });
 });

@@ -1512,6 +1512,67 @@ function addonRowIdsDrifted(expectedIds, freshIds) {
   return false;
 }
 
+// GitHub Codex round 21 P1 (#4657, :12301): addonRowIdsDrifted (above)
+// only proves the add-on ROW SET this plan was built against is still on
+// disk — it can't see a concurrent caller that updates this visit's money
+// WITHOUT replacing any add-on row at all (MobileServiceEditModal's
+// primary-price-only save is exactly this: it can update estimated_price
+// and null out every add-on's own discount columns in place, leaving every
+// id untouched). `snapshot` is computeUpdateDetailsFinancialPlan's own
+// financialCasSnapshot (the parent + add-on money fields it read and
+// priced against); `fresh` is the same shape re-read under the row lock
+// immediately before the write. An identity field (a discount id/type) is
+// compared by string, treating null/undefined/'' as the same "no value";
+// a money/amount field is compared with moneyValuesDiffer (Number +
+// cent-rounding tolerance, null/undefined equal to each other but not to
+// 0); pricing_provenance is compared by its marker + caps ONLY (via the
+// same hasPricingRegimeMarker/frozenCapsFromRow readers the rest of this
+// route uses), never the raw JSON, so an irrelevant provenance field can't
+// manufacture a false drift. An add-on id present in `snapshot` but
+// missing from `fresh` counts as drift too, though in practice
+// addonRowIdsDrifted (checked first, same call site) already catches that
+// case.
+function identityValuesDiffer(a, b) {
+  return String(a || '') !== String(b || '');
+}
+
+function provenanceCompareKey(rawProvenance) {
+  const row = { pricing_provenance: rawProvenance };
+  return JSON.stringify({
+    marker: hasPricingRegimeMarker(row),
+    caps: frozenCapsFromRow(row) || null,
+  });
+}
+
+function financialStateDrifted(snapshot, fresh) {
+  if (!snapshot) return false;
+  const freshParent = fresh?.parent || {};
+  for (const key of Object.keys(snapshot.parent || {})) {
+    const before = snapshot.parent[key];
+    const after = freshParent[key];
+    if (key === 'pricing_provenance') {
+      if (provenanceCompareKey(before) !== provenanceCompareKey(after)) return true;
+    } else if (key === 'discount_type' || key === 'discount_id'
+      || key === 'line_discount_id' || key === 'line_discount_type') {
+      if (identityValuesDiffer(before, after)) return true;
+    } else if (moneyValuesDiffer(before, after)) {
+      return true;
+    }
+  }
+  const freshAddonById = new Map((fresh?.addons || []).map((r) => [String(r.id), r]));
+  for (const before of (snapshot.addons || [])) {
+    const after = freshAddonById.get(String(before.id));
+    if (!after) return true;
+    if (moneyValuesDiffer(before.base_price, after.base_price)) return true;
+    if (moneyValuesDiffer(before.estimated_price, after.estimated_price)) return true;
+    if (identityValuesDiffer(before.discount_id, after.discount_id)) return true;
+    if (identityValuesDiffer(before.discount_type, after.discount_type)) return true;
+    if (moneyValuesDiffer(before.discount_amount, after.discount_amount)) return true;
+    if (moneyValuesDiffer(before.discount_dollars, after.discount_dollars)) return true;
+  }
+  return false;
+}
+
 // GitHub Codex round 15 P1 (#4657, :3019); extended GitHub Codex round 20 P1
 // (#4657, :3330): the client gates Save on a server preview (POST
 // /:id/update-details/preview returns `total: updates.estimated_price ?? null`),
@@ -10073,9 +10134,14 @@ async function normalizeUpdateDetailsAddons({
       // unconditionally whenever addons is an array, matching the
       // stack-group check's own "unconditional" contract just below (which
       // reuses isNewAddonDiscount again).
+      // GitHub Codex round 21 P1 (#4657, :12301): estimated_price and
+      // discount_dollars are read here too (never a new query) so this same
+      // set of rows can also serve as computeUpdateDetailsFinancialPlan's
+      // financialCasSnapshot — the under-lock financial re-check needs every
+      // add-on's own priced/discounted state, not just its id.
       const existingAddonDiscountRows = await db('scheduled_service_addons')
         .where({ scheduled_service_id: id })
-        .select('id', 'discount_id', 'discount_type', 'discount_amount', 'base_price', 'service_id');
+        .select('id', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars', 'base_price', 'estimated_price', 'service_id');
       const existingAddonDiscountById = new Map(existingAddonDiscountRows.map((r) => [r.id, r]));
       // Codex pre-push audit P1 (round 4 on #4657, :9542): the terms alone
       // (id/type/amount) are not enough — removing and reselecting the
@@ -10436,6 +10502,19 @@ async function computeUpdateDetailsFinancialPlan({
   let replaceAddons = null;
   let canonicalRestackedAddonDollars = null;
   let legacyPreservationCasSnapshot = null;
+  // GitHub Codex round 21 P1 (#4657, :12301): addonRowIdsDrifted only
+  // compares row IDENTITIES — a concurrent save that updates this visit's
+  // money WITHOUT replacing add-on rows (e.g. MobileServiceEditModal's
+  // primary-price-only edit, which can clear every add-on's stored
+  // discount columns in place) leaves every ID unchanged and slips past it.
+  // `financialCasSnapshot`, captured HERE from the same `existing`/
+  // `existingAddonDiscountRows` reads the planner already does, lets the
+  // route's under-lock recheck compare the actual MONEY this plan was
+  // built from against what's on the row now (financialStateDrifted),
+  // catching that class of drift too. null whenever this save never
+  // planned money (a schedule-only save) — see the `hasAnyPrice` guard
+  // below, which is this snapshot's only producer.
+  let financialCasSnapshot = null;
   // Round 14 P1: the add-on row ids this plan was computed against, for
   // the route's under-lock recheck (addonRowIdsDrifted). null when the
   // save does not replace add-ons at all.
@@ -10517,6 +10596,43 @@ async function computeUpdateDetailsFinancialPlan({
           .where({ id: id })
           .first(...existingFields)
           .catch(() => null);
+
+        // GitHub Codex round 21 P1 (#4657, :12301): captured from the SAME
+        // `existing` read above and `existingAddonDiscountRows` (loaded by
+        // normalizeUpdateDetailsAddons before this function was even
+        // called) — every field this plan is about to price against, so
+        // the route's under-lock recheck can tell a genuinely unchanged row
+        // apart from one another caller repriced without touching an
+        // add-on's id. Parent fields are included only when the column
+        // actually exists (existingFields already guards the optional
+        // ones above); estimated_price/primary_line_price/discount_type/
+        // discount_amount/discount_dollars are unconditional selects on
+        // this table (same assumption `existingFields` itself makes).
+        if (existing) {
+          financialCasSnapshot = {
+            parent: {
+              estimated_price: existing.estimated_price,
+              primary_line_price: existing.primary_line_price,
+              discount_type: existing.discount_type,
+              discount_amount: existing.discount_amount,
+              discount_dollars: existing.discount_dollars,
+              ...(cols.discount_id ? { discount_id: existing.discount_id } : null),
+              ...(cols.line_discount_id ? { line_discount_id: existing.line_discount_id } : null),
+              ...(cols.line_discount_type ? { line_discount_type: existing.line_discount_type } : null),
+              ...(cols.line_discount_amount ? { line_discount_amount: existing.line_discount_amount } : null),
+              ...(cols.pricing_provenance ? { pricing_provenance: existing.pricing_provenance } : null),
+            },
+            addons: existingAddonDiscountRows.map((r) => ({
+              id: r.id,
+              base_price: r.base_price,
+              estimated_price: r.estimated_price,
+              discount_id: r.discount_id,
+              discount_type: r.discount_type,
+              discount_amount: r.discount_amount,
+              discount_dollars: r.discount_dollars,
+            })),
+          };
+        }
 
         // GitHub review round 2 on #4657 (:2513): enforce non-stackable
         // stack_group the same way #4655 does for invoices — a conflict
@@ -10985,7 +11101,7 @@ async function computeUpdateDetailsFinancialPlan({
   return {
     replaceAddons, canonicalRestackedAddonDollars, legacyPreservationCasSnapshot, clearAddonDiscountsOnPriceEdit,
     reServiceConversion, reServiceTransition, reServiceConversionZeroPrice, legacyPrimaryGrossUnknown,
-    expectedAddonRowIds,
+    expectedAddonRowIds, financialCasSnapshot,
   };
 }
 
@@ -11162,6 +11278,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // decision never ran or never preserved — no-op there.
     let legacyPreservationCasSnapshot = null;
     let expectedAddonRowIds = null;
+    // GitHub Codex round 21 P1 (#4657, :12301): the financial CAS snapshot
+    // this save's plan was computed against — see computeUpdateDetailsFinancialPlan's
+    // own comment. null whenever the plan never priced money (nothing to
+    // guard) or addons was omitted entirely.
+    let financialCasSnapshot = null;
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
     // Notify + past date is always a mistake (a week-off click in the
@@ -11477,6 +11598,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       legacyPreservationCasSnapshot = financialPlan.legacyPreservationCasSnapshot;
       clearAddonDiscountsOnPriceEdit = financialPlan.clearAddonDiscountsOnPriceEdit;
       expectedAddonRowIds = financialPlan.expectedAddonRowIds;
+      financialCasSnapshot = financialPlan.financialCasSnapshot;
       // Codex pre-push audit P1 (round 4 on #4657, :13181): the re-service/
       // is_callback classification AND its reServiceConversionZeroPrice
       // decision (zeroing the visit + every add-on for an eligible free
@@ -12295,12 +12417,37 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // with figures computed from rows that no longer exist. Same 409
         // the legacy-preservation CAS above uses; nothing is committed.
         if (addonsReplaced && Array.isArray(expectedAddonRowIds)) {
-          await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first('id');
+          // GitHub Codex round 21 P1 (#4657, :12301): this SAME locked
+          // .first() also serves financialStateDrifted's parent-side
+          // re-read when this plan carries a financialCasSnapshot — select
+          // its exact field set here instead of issuing a second query.
+          // 'id' is always included so the row lock/shape stays meaningful
+          // even when there's no snapshot (a schedule-only save).
+          const parentRecheckFields = financialCasSnapshot
+            ? Array.from(new Set(['id', ...Object.keys(financialCasSnapshot.parent)]))
+            : ['id'];
+          const freshParentRow = await trx('scheduled_services')
+            .where({ id: req.params.id }).forUpdate().first(...parentRecheckFields);
+          const addonRecheckFields = financialCasSnapshot
+            ? ['id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars']
+            : ['id'];
           const freshAddonIdRows = await trx('scheduled_service_addons')
-            .where({ scheduled_service_id: req.params.id }).select('id');
+            .where({ scheduled_service_id: req.params.id }).select(...addonRecheckFields);
           if (addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))) {
             throw Object.assign(new Error('This visit changed while you were editing — reload and save again.'), {
               statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+          // GitHub Codex round 21 P1 (#4657, :12301): the id set matched,
+          // but another caller may have repriced this SAME set of rows in
+          // place (e.g. a primary-price edit that clears every add-on's
+          // stored discount columns without touching their ids). Compare
+          // the actual money this plan was built from against what's on
+          // the row now; only fires when this plan actually priced money
+          // (financialCasSnapshot is null on a schedule-only save).
+          if (financialStateDrifted(financialCasSnapshot, { parent: freshParentRow, addons: freshAddonIdRows })) {
+            throw Object.assign(new Error('This appointment’s pricing changed while saving — reload and save again.'), {
+              statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'FINANCIAL_STATE_DRIFT',
             });
           }
         }
@@ -21607,6 +21754,7 @@ function blackoutDateString(value) {
 
 router._test = {
   addonRowIdsDrifted,
+  financialStateDrifted,
   previewTotalDrifted,
   addonStackGroupConflictRows,
   assertNewStackGroupConflicts,

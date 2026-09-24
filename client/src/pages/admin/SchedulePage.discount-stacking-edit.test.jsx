@@ -1148,6 +1148,73 @@ it('round 4 (:2850): a line preset picked while Price is blank blocks Save inste
   expect(writes().filter(([url]) => url.includes('/update-details') && !url.includes('/preview'))).toHaveLength(0);
 });
 
+// GitHub Codex round 21 P2 (#4657, :2935): an overflowing exponent like
+// "1e309" parses through parseFloat as Infinity, which the old
+// `!isNaN(parseFloat(...))` guards treated as a "valid" price — the
+// discount-needs-a-price check passed, buildAddonsPayload posted Infinity
+// as basePrice, and JSON.stringify silently dropped it to null on the
+// wire. parseFinitePrice must reject it the same way a blank price is
+// already rejected.
+it('round 21 (:2935): a non-finite typed price ("1e309") on a discounted line blocks Save exactly like a blank price', async () => {
+  const fertLineFixture = {
+    ...baseService,
+    serviceAddons: [
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: fertLineFixture }));
+  render(<Harness service={fertLineFixture} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPriceInput = (await screen.findAllByPlaceholderText('0.00')).find((i) => Number(i.value) === 40);
+  const fertPicker = screen.getByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  // A real <input type="number"> sanitizes an out-of-range exponent like
+  // "1e309" to "" at the DOM layer before React ever sees it (jsdom mirrors
+  // spec browser behavior here) — bypass that layer so the component's own
+  // JS logic, the thing round 21 P2 actually found, is what's under test:
+  // Object.defineProperty over the native value accessor makes the next
+  // change event's e.target.value report the raw non-finite string exactly
+  // as the component would receive it from any other source (e.g. a pasted
+  // value that skips the same-keystroke sanitization).
+  Object.defineProperty(fertPriceInput, 'value', { value: '1e309', configurable: true });
+  fireEvent.change(fertPriceInput);
+  // Let the (unrelated) server-preview round trip settle first, so the
+  // disabled-button assertion below isolates lineDiscountPriceMissing —
+  // not a coincidental still-loading moneyPreviewBlocksSave.
+  await waitFor(() => expect(screen.queryByText(/Confirming totals with the server/)).not.toBeInTheDocument());
+  expect(screen.getByText(/A line has a discount selected but no price/)).toBeInTheDocument();
+  const save = screen.getByRole('button', { name: 'Save', exact: true });
+  expect(save).toBeDisabled();
+  fireEvent.click(save);
+  // Blocked at the client — no save attempt reaches the wire at all.
+  expect(writes().filter(([url]) => url.includes('/update-details') && !url.includes('/preview'))).toHaveLength(0);
+});
+
+it('round 21 (:2935): an ordinary exponent price ("1e3") on a discounted line saves normally with a finite basePrice', async () => {
+  const fertLineFixture = {
+    ...baseService,
+    serviceAddons: [
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: fertLineFixture }));
+  render(<Harness service={fertLineFixture} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPriceInput = (await screen.findAllByPlaceholderText('0.00')).find((i) => Number(i.value) === 40);
+  const fertPicker = screen.getByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  fireEvent.change(fertPriceInput, { target: { value: '1e3' } });
+  expect(screen.queryByText(/A line has a discount selected but no price/)).not.toBeInTheDocument();
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  const fertLine = body.addons.find((a) => a.serviceId === 'svc-fert');
+  expect(fertLine).toMatchObject({ basePrice: 1000, discountType: 'percentage', discountAmount: 10, discountId: 'disc-silver', discountName: 'WaveGuard Silver' });
+});
+
 // ---------------------------------------------------------------------
 // Round 5 on #4657 (GitHub review): two bounded edge cases in the
 // per-line reprice/remove flow and the submit-time gate re-probe's own

@@ -1669,6 +1669,22 @@ export function lineDiscountSaveBlocked({ known, appointmentDiscountSelected, li
   return !known && !!appointmentDiscountSelected && lineDiscountInPlay;
 }
 
+// GitHub Codex round 21 P2 (#4657, :2935): an overflowing exponent like
+// "1e309" parses through parseFloat/Number as Infinity — non-finite, but
+// every `!isNaN(parseFloat(...))` guard on a line/primary price in this
+// modal let it straight through as a "valid" price. The discount-needs-
+// a-price predicate then accepted the line, buildAddonsPayload posted
+// Infinity as basePrice, JSON.stringify silently dropped it to null on
+// the wire, and the server persisted an unpriced line while the picker
+// still showed a discount. One helper: a finite number in, that number
+// back; blank, non-numeric, NaN or +/-Infinity input is null — the same
+// "no valid price" outcome every caller already treats a blank field as.
+function parseFinitePrice(value) {
+  if (value === "" || value == null) return null;
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function EditServiceModal({ service, technicians, onClose, onSaved, onMarkPrepaid }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
@@ -2418,7 +2434,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Price has been edited away from the stamped seed, or just Price when
   // the line carries no discount at all (gross === net there).
   const lineGrossFor = (l) => {
-    const typed = l.price !== "" && !isNaN(parseFloat(l.price)) ? parseFloat(l.price) : 0;
+    const typed = parseFinitePrice(l.price) ?? 0;
     if (!stackingEnabled || lineDiscountActive(l)) return typed;
     return l._origDiscountType && l._origBasePrice != null && !priceEditedFromSeed(l) ? l._origBasePrice : typed;
   };
@@ -2931,7 +2947,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // it chosen. Block Save until every actively-picked line has a valid
   // price to submit it against, rather than let the pick vanish unseen.
   const lineDiscountPriceMissing = serviceLines.some(
-    (l) => lineDiscountActive(l) && l.lineDiscount && !(l.price !== "" && !isNaN(parseFloat(l.price))),
+    (l) => lineDiscountActive(l) && l.lineDiscount && parseFinitePrice(l.price) == null,
   );
 
   // Codex pre-push audit structural round on #4657 (:3526/:2394's class):
@@ -2985,10 +3001,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             // hidden pick must NOT be posted at all; falling through to the
             // flat-net branch below is exactly the behavior an operator who
             // never saw a Line discount control would get.
-            if (lineDiscountActive(l) && l.lineDiscount && l.price !== "" && !isNaN(parseFloat(l.price))) {
+            const lineGrossPrice = parseFinitePrice(l.price);
+            if (lineDiscountActive(l) && l.lineDiscount && lineGrossPrice != null) {
               return {
                 ...common,
-                basePrice: parseFloat(l.price),
+                basePrice: lineGrossPrice,
                 discountType: l.lineDiscount.discount_type,
                 discountAmount: l.lineDiscount.amount != null ? l.lineDiscount.amount : null,
                 discountId: l.lineDiscount.id || null,
@@ -3037,10 +3054,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             // whose seeded price was already net.)
             return {
               ...common,
-              price:
-                l.price !== "" && !isNaN(parseFloat(l.price))
-                  ? parseFloat(l.price)
-                  : null,
+              price: lineGrossPrice,
             };
           })
         : undefined;
@@ -3200,10 +3214,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // add-on lines) so the server's no-add-on save path can tell this
       // payload's gross convention apart from MobileServiceEditModal's net
       // convention by the field's presence, never by guessing from the number.
-      const primaryLinePriceValue =
-        form.price !== "" && !isNaN(parseFloat(form.price))
-          ? parseFloat(form.price)
-          : undefined;
+      const primaryLinePriceValue = parseFinitePrice(form.price) ?? undefined;
       const notifyOnMove = scheduleMoved && notificationType === "sms";
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
@@ -3303,10 +3314,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             discountType && discountPresetId && discountPresetId !== "custom"
               ? discountPresetId
               : (storedDiscountCleared ? null : undefined),
-          estimatedPrice:
-            form.price !== "" && !isNaN(parseFloat(form.price))
-              ? parseFloat(form.price)
-              : undefined,
+          estimatedPrice: parseFinitePrice(form.price) ?? undefined,
           createInvoice: takePayment || createInvoice,
           assignmentScope:
             form.technicianId !== (service.technicianId || "")
@@ -3581,10 +3589,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     "Customer";
   const customerPhone = service.customerPhone || customer.phone || "";
   const customerEmail = customer.email || "";
-  const primaryPrice =
-    form.price !== "" && !isNaN(parseFloat(form.price))
-      ? parseFloat(form.price)
-      : 0;
+  const primaryPrice = parseFinitePrice(form.price) ?? 0;
   const selectedDiscountPreset =
     discountPresetId && discountPresetId !== "custom"
       ? discountPresets.find((d) => String(d.id) === String(discountPresetId))
@@ -3677,10 +3682,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             ...form,
             isRecurring,
             ...(sendAddons ? { addons: addonsPayload } : {}),
-            primaryLinePrice:
-              form.price !== "" && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : undefined,
-            estimatedPrice:
-              form.price !== "" && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : undefined,
+            primaryLinePrice: parseFinitePrice(form.price) ?? undefined,
+            estimatedPrice: parseFinitePrice(form.price) ?? undefined,
             discountType: discountType || (storedDiscountCleared ? null : undefined),
             discountAmount:
               discountType && discountAmount !== "" ? Number(discountAmount) : (storedDiscountCleared ? null : undefined),

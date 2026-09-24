@@ -558,3 +558,70 @@ describe('expectedTotal witness — GitHub Codex round 15 P1 (#4657, :11355); ro
     expect(db.transaction).toHaveBeenCalledTimes(1);
   });
 });
+
+// GitHub Codex round 21 P1 (#4657, :12301): addonRowIdsDrifted's own locked
+// recheck (round 14 P1, tested behaviorally in
+// admin-schedule-discount-stack-edit-preservation.test.js and end-to-end
+// against real Postgres rows in discount-stack-pricing-provenance-postgres.test.js)
+// only proves the add-on ROW SET a plan was built against is still on disk
+// — it cannot see a concurrent caller that reprices this SAME set of rows
+// without replacing any of them (MobileServiceEditModal's primary-price-
+// only save, which can clear an add-on's stored discount columns in place
+// at :12444-12455). financialStateDrifted closes that gap, but it runs
+// deep inside this route's write transaction (well past every occupancy/
+// stop/membership lock this file's mocked `db.transaction` stub — which
+// throws immediately rather than invoking its callback — cannot reach).
+// Matching this file's own convention for logic this deep in the trx (see
+// "rung-1 wiring" and the scheduling-field CAS test above), this pins the
+// ACTUAL shipped source: the check sits at the SAME call site as
+// addonRowIdsDrifted, reuses the same locked `.first()` for its parent
+// re-read (never a second unlocked query), is gated on financialCasSnapshot
+// so a schedule-only save is untouched, runs BEFORE the write, and refuses
+// with the same 409 VISIT_CHANGED_RETRY code. The exact comparison logic
+// (a changed estimated_price / a cleared add-on discount / an identical
+// re-read proceeding) is proven behaviorally in financialStateDrifted's
+// own unit suite and the real-Postgres end-to-end proof named above.
+describe('financialStateDrifted wiring under the write lock (source-pattern guard — round 21 P1)', () => {
+  const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+  const idCheckIdx = ud.indexOf('if (addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))) {');
+  const moneyCheckIdx = ud.indexOf('if (financialStateDrifted(financialCasSnapshot, { parent: freshParentRow, addons: freshAddonIdRows })) {');
+  const writeIdx = ud.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
+
+  test('the financial CAS check sits right after the add-on identity check, both inside the SAME addonsReplaced-gated block, before the write', () => {
+    expect(idCheckIdx).toBeGreaterThan(-1);
+    expect(moneyCheckIdx).toBeGreaterThan(idCheckIdx);
+    expect(moneyCheckIdx).toBeLessThan(writeIdx);
+    const block = ud.slice(ud.indexOf('if (addonsReplaced && Array.isArray(expectedAddonRowIds)) {'), writeIdx);
+    expect(block).toContain('if (addonRowIdsDrifted(');
+    expect(block).toContain('if (financialStateDrifted(');
+  });
+
+  test('the parent re-read is the SAME locked .first() addonRowIdsDrifted\'s recheck already takes, selecting financialCasSnapshot\'s own field set — never a second unlocked query', () => {
+    const lockedReadIdx = ud.indexOf('const parentRecheckFields = financialCasSnapshot');
+    expect(lockedReadIdx).toBeGreaterThan(-1);
+    expect(lockedReadIdx).toBeLessThan(idCheckIdx);
+    const readSlice = ud.slice(lockedReadIdx, idCheckIdx);
+    expect(readSlice).toContain('.forUpdate()');
+    expect(readSlice).toContain('Object.keys(financialCasSnapshot.parent)');
+    // Only ONE forUpdate().first() on scheduled_services happens in this
+    // block — the parent re-read is reused, not duplicated.
+    expect((readSlice.match(/forUpdate\(\)/g) || []).length).toBe(1);
+  });
+
+  test('gated on financialCasSnapshot — a schedule-only save (no snapshot) never reaches the money comparison as a refusal', () => {
+    const moneyCheckLine = ud.slice(moneyCheckIdx, moneyCheckIdx + 400);
+    expect(moneyCheckLine).toMatch(/financialStateDrifted\(financialCasSnapshot, \{ parent: freshParentRow, addons: freshAddonIdRows \}\)/);
+    // financialStateDrifted itself returns false whenever its first
+    // argument is falsy (see its own unit suite) — the gate is INSIDE the
+    // pure function, not a separate `if (financialCasSnapshot)` wrapper,
+    // so a schedule-only save (financialCasSnapshot null) can never drift.
+  });
+
+  test('the refusal is the same 409 VISIT_CHANGED_RETRY code, with its own FINANCIAL_STATE_DRIFT reason', () => {
+    const refusal = ud.slice(moneyCheckIdx, ud.indexOf('}', ud.indexOf('});', moneyCheckIdx)) + 1);
+    expect(refusal).toContain("statusCode: 409");
+    expect(refusal).toContain("code: 'VISIT_CHANGED_RETRY'");
+    expect(refusal).toContain("reason: 'FINANCIAL_STATE_DRIFT'");
+    expect(refusal).toMatch(/pricing changed while saving/);
+  });
+});

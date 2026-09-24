@@ -70,6 +70,7 @@ const {
   stampPricingRegimeMarker,
   addonRowIdsDrifted,
   previewTotalDrifted,
+  financialStateDrifted,
 } = require('../routes/admin-schedule')._test;
 const {
   deriveLegacyPrimarySubmission,
@@ -1399,5 +1400,133 @@ describe('previewTotalDrifted (round 15 P1 + round 20 P1: the preview-total witn
 
   test('null expectedTotal does not drift against a plan that itself plans null (still unpriced)', () => {
     expect(previewTotalDrifted(null, null)).toBe(false);
+  });
+});
+
+// GitHub Codex round 21 P1 (#4657, :12301): addonRowIdsDrifted (above) only
+// proves the add-on ROW SET a plan was built against is still on disk — it
+// is blind to a concurrent caller that reprices this visit WITHOUT
+// replacing any add-on row at all. MobileServiceEditModal's own
+// primary-price-only save is exactly this shape: it updates estimated_price
+// and nulls every add-on's stored discount columns in place (:12444-12455),
+// leaving every id untouched, so addonRowIdsDrifted alone would let a stale
+// desktop request's plan overwrite that fresher state. financialStateDrifted
+// is the pure compare-and-swap the route's own locked recheck runs right
+// alongside addonRowIdsDrifted, comparing the ACTUAL money a plan was built
+// from (computeUpdateDetailsFinancialPlan's own financialCasSnapshot)
+// against the same fields re-read under the lock.
+describe('financialStateDrifted (round 21 P1: financial CAS alongside the add-on identity recheck)', () => {
+  function baseSnapshot() {
+    return {
+      parent: {
+        estimated_price: 160,
+        primary_line_price: 100,
+        discount_type: 'percentage',
+        discount_amount: 10,
+        discount_dollars: 30,
+        discount_id: 'disc-appt-1',
+        line_discount_id: null,
+        line_discount_type: null,
+        line_discount_amount: null,
+        pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: null, addons: { 'disc-addon-1': 25 } } },
+      },
+      addons: [
+        {
+          id: 'addon-row-1', base_price: 100, estimated_price: 90, discount_id: 'disc-addon-1', discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+        },
+      ],
+    };
+  }
+
+  function freshFromSnapshot(snapshot) {
+    return {
+      parent: { ...snapshot.parent },
+      addons: snapshot.addons.map((a) => ({ ...a })),
+    };
+  }
+
+  test('no snapshot (a schedule-only save that never planned money): never drifted', () => {
+    expect(financialStateDrifted(null, { parent: {}, addons: [] })).toBe(false);
+    expect(financialStateDrifted(undefined, { parent: { estimated_price: 999 }, addons: [] })).toBe(false);
+  });
+
+  test('an exact match (same parent + add-on fields, re-read verbatim): not drifted', () => {
+    const snap = baseSnapshot();
+    expect(financialStateDrifted(snap, freshFromSnapshot(snap))).toBe(false);
+  });
+
+  test('a sub-cent float wobble on a money field does not drift (cent-rounding tolerance)', () => {
+    const snap = baseSnapshot();
+    const fresh = freshFromSnapshot(snap);
+    fresh.parent.estimated_price = 160.001;
+    fresh.addons[0].estimated_price = 90.004;
+    expect(financialStateDrifted(snap, fresh)).toBe(false);
+  });
+
+  test('a concurrent primary-price edit changes the parent estimated_price: drifted', () => {
+    const snap = baseSnapshot();
+    const fresh = freshFromSnapshot(snap);
+    fresh.parent.estimated_price = 150;
+    expect(financialStateDrifted(snap, fresh)).toBe(true);
+  });
+
+  test('the MobileServiceEditModal repro: primary_line_price moves and every add-on discount column is cleared in place (same id) — drifted', () => {
+    const snap = baseSnapshot();
+    const fresh = freshFromSnapshot(snap);
+    fresh.parent.primary_line_price = 150;
+    fresh.parent.estimated_price = 150;
+    fresh.addons[0] = {
+      ...fresh.addons[0], discount_id: null, discount_type: null, discount_amount: null, discount_dollars: null,
+    };
+    expect(financialStateDrifted(snap, fresh)).toBe(true);
+  });
+
+  test('an add-on discount cleared alone (parent untouched): drifted', () => {
+    const snap = baseSnapshot();
+    const fresh = freshFromSnapshot(snap);
+    fresh.addons[0].discount_id = null;
+    fresh.addons[0].discount_type = null;
+    fresh.addons[0].discount_amount = null;
+    fresh.addons[0].discount_dollars = null;
+    expect(financialStateDrifted(snap, fresh)).toBe(true);
+  });
+
+  test('a changed appointment discount identity (discount_id) drifts even at the same dollar figure', () => {
+    const snap = baseSnapshot();
+    const fresh = freshFromSnapshot(snap);
+    fresh.parent.discount_id = 'disc-appt-2';
+    expect(financialStateDrifted(snap, fresh)).toBe(true);
+  });
+
+  test('pricing_provenance caps change (a catalog cap edit re-froze against a fresh cap): drifted', () => {
+    const snap = baseSnapshot();
+    const fresh = freshFromSnapshot(snap);
+    fresh.parent.pricing_provenance = {
+      ...fresh.parent.pricing_provenance,
+      caps: { line: null, addons: { 'disc-addon-1': 15 } },
+    };
+    expect(financialStateDrifted(snap, fresh)).toBe(true);
+  });
+
+  test('pricing_provenance unrelated field changes (e.g. engine_version) without touching marker or caps: not drifted', () => {
+    const snap = baseSnapshot();
+    const fresh = freshFromSnapshot(snap);
+    fresh.parent.pricing_provenance = { ...fresh.parent.pricing_provenance, engine_version: 2 };
+    expect(financialStateDrifted(snap, fresh)).toBe(false);
+  });
+
+  test('null vs undefined on any field compares equal', () => {
+    const snap = baseSnapshot();
+    snap.parent.line_discount_id = null;
+    const fresh = freshFromSnapshot(snap);
+    fresh.parent.line_discount_id = undefined;
+    expect(financialStateDrifted(snap, fresh)).toBe(false);
+  });
+
+  test('an add-on row present in the snapshot but missing from the fresh read: drifted', () => {
+    const snap = baseSnapshot();
+    const fresh = freshFromSnapshot(snap);
+    fresh.addons = [];
+    expect(financialStateDrifted(snap, fresh)).toBe(true);
   });
 });
