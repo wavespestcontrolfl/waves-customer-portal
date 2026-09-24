@@ -385,7 +385,15 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
       ORDER BY s.peer, s.endpoint, s.created_at DESC, s.id DESC
     )
     SELECT li.id, li.peer, li.endpoint, li.customer_id, li.message_body,
-           li.message_type, li.metadata, li.media, li.created_at
+           li.message_type, li.metadata, li.media, li.created_at,
+           (SELECT prev.message_body FROM sms_events prev
+            WHERE prev.direction = 'outbound'
+              AND prev.delivery_status IN ('queued', 'sent', 'delivered')
+              AND prev.message_type <> 'internal_alert'
+              AND prev.peer = li.peer AND prev.endpoint = li.endpoint
+              AND prev.created_at < li.created_at
+              AND prev.created_at > li.created_at - INTERVAL '24 hours'
+            ORDER BY prev.created_at DESC, prev.id DESC LIMIT 1) AS prior_outbound_body
     FROM latest_inbound li
     WHERE NOT EXISTS (
       SELECT 1 FROM sms_events os
@@ -420,6 +428,7 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
   const actionable = rows.filter((row) => inboundNeedsResponse({
     direction: 'inbound',
     body: row.message_body,
+    priorOutboundBody: row.prior_outbound_body,
     media: row.media,
     metadata: row.metadata,
   }));

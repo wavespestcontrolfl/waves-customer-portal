@@ -106,6 +106,29 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
   });
 
+  test('historical acknowledgments clear only with verified non-question context', async () => {
+    await seedEvent({ direction: 'outbound', body: 'The work is complete. Reply STOP to opt out.' });
+    await seedEvent({ body: 'Thanks!' });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
+    await seedEvent({ direction: 'outbound', body: 'Does 9am work?' });
+    for (const body of ['Okay', '👍', 'Thanks!']) {
+      await seedEvent({ body });
+      expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+    }
+  });
+
+  test('courtesy context excludes unknown, other-line, future, failed and stale outbound', async () => {
+    await seedEvent({ body: 'Thanks!' });
+    await seedEvent({ direction: 'outbound', messageType: 'reminder', body: 'Complete' });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+    tick = new Date(tick.getTime() + 25 * 60 * 60 * 1000);
+    await seedEvent({ direction: 'outbound', ours: '+19415550191', body: 'Complete' });
+    await seedEvent({ direction: 'outbound', status: 'failed', body: 'Complete' });
+    await seedEvent({ direction: 'outbound', messageType: 'internal_alert', body: 'Complete' });
+    await seedEvent({ body: 'Thanks!' });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+  });
+
   test('successful human reply closes; automated or failed outbound does not', async () => {
     await seedEvent({ body: 'Please call me' });
     await seedEvent({ direction: 'outbound', messageType: 'reminder', body: 'Appointment reminder' });

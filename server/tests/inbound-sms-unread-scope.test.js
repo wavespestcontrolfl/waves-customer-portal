@@ -30,7 +30,7 @@ test('global count dedupes actionable endpoint threads by peer and ignores read 
   mockCountRows = [
     { peer: '9415550100', endpoint: '9415550190', message_body: 'Can you call me?' },
     { peer: '9415550100', endpoint: '9415550191', message_body: 'The gate is locked' },
-    { peer: '9415550101', endpoint: '9415550190', message_body: 'Thanks!' },
+    { peer: '9415550101', endpoint: '9415550190', message_body: 'Thanks!', prior_outbound_body: 'The work is complete.' },
   ];
   expect(await countUnreadInboundSms({ role: 'admin' })).toEqual({ conversations: 1, messages: 2 });
   expect(mockQueries[0].sql).not.toContain('is_read');
