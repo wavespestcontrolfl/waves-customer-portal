@@ -571,6 +571,37 @@ describe('InspectionPage: a terminal state from /availability replaces the gate'
   });
 });
 
+describe('InspectionPage: a terminal state from the held-address refresh replaces the picker', () => {
+  it('"Show all open times" after a search, when the lead is now already booked, shows the covered card', async () => {
+    let availabilityPosts = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+      if (u.includes('/availability') && opts.method === 'POST') {
+        availabilityPosts += 1;
+        return Promise.resolve(jsonResponse(availabilityPosts === 1
+          ? { availability: okPayload().availability, needs_address: false }
+          : { state: 'already_booked', lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: null }, visit: { date: '2099-01-05', window: { start: '09:00', end: '09:30' } }, rescheduleUrl: null }));
+      }
+      return Promise.resolve(jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show all open times' }));
+    expect(await screen.findByText(/already on the calendar/i)).toBeInTheDocument();
+  });
+});
+
 describe('InspectionPage: a terminal state from the slot search replaces the picker', () => {
   it('converted from find-slots shows the covered card', async () => {
     stubFetch({

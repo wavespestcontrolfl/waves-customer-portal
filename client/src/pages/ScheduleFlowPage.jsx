@@ -1470,6 +1470,12 @@ export default function ScheduleFlowPage({ flow }) {
       const { res, body } = await postInspectionAvailability(token, resolvedAddress, { signal });
       if (signal?.aborted) return;
       if (!res.ok) throw new Error(body.error || 'availability refresh failed');
+      // A terminal state (already_booked / converted / gone) replaces the
+      // page, as the gate and the slot search do (Codex #4737 r11 pre-push P1).
+      if (body.state && body.state !== 'ok') {
+        setData(body);
+        return;
+      }
       mergeData({ availability: body.availability, needs_address: false });
       return;
     }
