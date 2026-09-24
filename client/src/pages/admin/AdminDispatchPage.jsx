@@ -8,7 +8,7 @@
  *   - "CSR Booking"  — DispatchPageV2's CSRPanel
  *   - "Job Scores"   — DispatchPageV2's RevenuePanel
  *   - "Insights"     — DispatchPageV2's InsightsPanel
- * Auto-Dispatch supervision is linked to Agent Ops; old Automation links redirect.
+ * Auto-Dispatch runs in the background; old diagnostic links still redirect.
  *
  * Per-tab URL state via ?tab=<key>. Default = board. Tabs that route into
  * DispatchPageV2 pass `activeTab` so its internal tab strip can stay
@@ -29,11 +29,10 @@ import React, {
   useRef,
   useCallback,
 } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import {
   CalendarDays,
   CalendarPlus,
-  Bot,
   ClipboardList,
   Headphones,
   Lightbulb,
@@ -92,7 +91,6 @@ const innerActiveTabFor = (topTab) =>
 
 export default function AdminDispatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
   const isAdmin = getAdminUser()?.role === "admin";
   const validTabKeys = TAB_LIST.map((t) => t.key);
   const tab = validTabKeys.includes(searchParams.get(TAB_KEY))
@@ -151,7 +149,6 @@ export default function AdminDispatchPage() {
                   onClick: handleAddAppointment,
                   disabled: !createReady,
                 }] : []),
-            ...(isAdmin ? [{ label: "Auto-Dispatch", icon: Bot, variant: "ghost", onClick: () => navigate("/admin/agents?tab=dispatch") }] : []),
           ]}
         />{" "}
       </div>{" "}

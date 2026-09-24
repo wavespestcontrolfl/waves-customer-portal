@@ -106,7 +106,7 @@ describe('dashboard request recovery', () => {
     const freshSharedKpis = result.current.values.kpis;
     adminFetch.mockClear();
 
-    now += 60 * 1000;
+    now += 30 * 1000;
     rerender({ tab: 'today' });
 
     expect(result.current.values.alerts).toEqual({ alerts: [] });
@@ -333,6 +333,19 @@ describe('dashboard request recovery', () => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     await act(async () => document.dispatchEvent(new Event('visibilitychange')));
     expect(adminFetch).toHaveBeenCalledTimes(6);
+  });
+
+  it('refreshes a visible dashboard after one minute', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    const { result } = renderHook(() => useDashboardData('today', 'period=mtd'));
+    await settle();
+    adminFetch.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(59999); });
+    expect(adminFetch).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(adminFetch).toHaveBeenCalledTimes(6);
+    expect(result.current.refreshing).toBe(false);
   });
 
   it('treats malformed operational feeds as unavailable rather than empty', async () => {

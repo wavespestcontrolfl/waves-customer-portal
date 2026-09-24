@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Route, RefreshCw, Play, ChevronRight } from "lucide-react";
+import { Route, Play, ChevronRight } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
 import { formatETDateOnly, formatETDateTime } from "../../lib/timezone";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 // This embedded page keeps its Tier-2 inline style system.
 const D = {
@@ -53,7 +54,7 @@ function Placement({ title, date, start, end, technician, status }) {
   </div>;
 }
 
-function Decision({ log, onRefresh }) {
+function Decision({ log, onRefresh, onSavingChange }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const customerName = [log.customer_first_name, log.customer_last_name].filter(Boolean).join(" ") || `Customer ${shortId(log.customer_id)}`;
@@ -70,15 +71,16 @@ function Decision({ log, onRefresh }) {
     ["Blackout start", prefs.blackout_start], ["Blackout end", prefs.blackout_end],
   ].filter(([, value]) => value != null);
   const changeProtection = async (control, field, value) => {
+    onSavingChange(true);
     setSaving(true);
     setError(null);
     try {
       await adminFetch(`/admin/auto-dispatch/services/${encodeURIComponent(log.current_visit_id)}/${control}`, {
         method: "PATCH", body: JSON.stringify({ [field]: value }),
       });
-      onRefresh();
+      await onRefresh();
     } catch (err) { setError(err.message || "Unable to update visit protection"); }
-    finally { setSaving(false); }
+    finally { setSaving(false); onSavingChange(false); }
   };
   return <article style={{ ...sectionStyle, overflowWrap: "anywhere" }}>
     <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
@@ -115,35 +117,39 @@ function Decision({ log, onRefresh }) {
   </article>;
 }
 
-function RunDetails({ selected, state, onRefresh }) {
+function RunDetails({ selected, state, onRefresh, onSavingChange }) {
   if (!selected) return <p style={sectionStyle}>Select a run to see its decisions.</p>;
-  if (state.loading) return <p style={sectionStyle}>Loading decisions…</p>;
-  if (state.error) return <div style={sectionStyle}><ErrorNotice>{state.error}</ErrorNotice><HeaderButton onClick={onRefresh}>Retry decisions</HeaderButton></div>;
+  if (state.loading && !state.data) return <p style={sectionStyle}>Loading decisions…</p>;
+  if (state.error && !state.data) return <div style={sectionStyle}><ErrorNotice>{state.error}</ErrorNotice><HeaderButton onClick={onRefresh}>Retry decisions</HeaderButton></div>;
   if (!state.data) return null;
   const { run, logs } = state.data;
   return <>
+    {state.error && <div style={sectionStyle}><ErrorNotice>{state.error}</ErrorNotice><HeaderButton onClick={onRefresh}>Retry decisions</HeaderButton></div>}
     <div style={sectionStyle}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}><Chip alert={ATTENTION.has(run.status)}>{label(run.status)}</Chip><Chip>{label(run.mode)}</Chip></div>
       <p>{fmt(run.started_at)} ET · {run.triggered_by || "Unknown trigger"} · Run {shortId(run.id)}</p>
-      {run.status === "running" && <p>This run is in progress. Refresh to load its latest decisions.</p>}
+      {run.status === "running" && <p>This run is in progress. Its decisions update automatically.</p>}
       {ATTENTION.has(run.status) && <ErrorNotice>{run.error_message || "This run needs attention. Review the failed decisions below."}</ErrorNotice>}
       <details><summary style={{ cursor: "pointer" }}>Policy recorded for this run</summary><div style={{ marginTop: 10 }}><Policy config={run.config_snapshot} /></div></details>
     </div>
-    {logs.length === 0 ? <p style={sectionStyle}>No decision rows were recorded for this run.</p> : logs.map((log) => <Decision key={log.id} log={log} onRefresh={onRefresh} />)}
+    {logs.length === 0 ? <p style={sectionStyle}>No decision rows were recorded for this run.</p> : logs.map((log) => <Decision key={log.id} log={log} onRefresh={onRefresh} onSavingChange={onSavingChange} />)}
   </>;
 }
 
 export default function AutoDispatchPage({ embedded = false }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const selected = searchParams.get("run");
-  const [refreshKey, setRefreshKey] = useState(0);
-  const refresh = useCallback(() => setRefreshKey((key) => key + 1), []);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [list, setList] = useState({ runs: [], automation: null, loading: true, error: null });
   const [detail, setDetail] = useState({ data: null, loading: false, error: null });
   const [running, setRunning] = useState(false);
+  const [savingControls, setSavingControls] = useState(0);
   const [runMessage, setRunMessage] = useState(null);
   const [runError, setRunError] = useState(null);
   const mounted = useRef(true);
+  const listRequest = useRef(0);
+  const detailRequest = useRef(0);
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -154,25 +160,69 @@ export default function AutoDispatchPage({ embedded = false }) {
     return params;
   });
 
-  useEffect(() => {
-    let active = true;
-    setList((previous) => ({ ...previous, loading: true, error: null }));
-    adminFetch("/admin/auto-dispatch/runs?limit=50")
-      .then((data) => { if (active) setList({ runs: data.runs, automation: data.automation, loading: false, error: null }); })
-      .catch((err) => { if (active) setList({ runs: [], automation: null, loading: false, error: err.message || "Failed to load runs" }); });
-    return () => { active = false; };
-  }, [refreshKey]);
+  const loadRuns = useCallback(async ({ background = false } = {}) => {
+    const request = ++listRequest.current;
+    if (!background) setList((previous) => ({ ...previous, loading: true, error: null }));
+    try {
+      const data = await adminFetch("/admin/auto-dispatch/runs?limit=50");
+      if (mounted.current && request === listRequest.current) {
+        setList({ runs: data.runs, automation: data.automation, loading: false, error: null });
+      }
+    } catch (err) {
+      if (mounted.current && request === listRequest.current) {
+        setList((previous) => ({ ...previous, loading: false, error: err.message || "Failed to load runs" }));
+      }
+    }
+  }, []);
+
+  const loadDetail = useCallback(async (runId, { clear = false } = {}) => {
+    if (!runId) {
+      detailRequest.current += 1;
+      setDetail({ data: null, loading: false, error: null });
+      return;
+    }
+    const request = ++detailRequest.current;
+    setDetail((previous) => ({ data: clear ? null : previous.data, loading: true, error: null }));
+    try {
+      const data = await adminFetch(`/admin/auto-dispatch/runs/${encodeURIComponent(runId)}`);
+      if (mounted.current && request === detailRequest.current && selectedRef.current === runId) {
+        setDetail({ data, loading: false, error: null });
+      }
+    } catch (err) {
+      if (mounted.current && request === detailRequest.current && selectedRef.current === runId) {
+        setDetail((previous) => ({ ...previous, loading: false, error: err.message || "Failed to load decisions" }));
+      }
+    }
+  }, []);
+
+  const refresh = useCallback(({ background = false } = {}) => {
+    const runId = selectedRef.current;
+    return Promise.all([
+      loadRuns({ background }),
+      runId ? loadDetail(runId) : Promise.resolve(),
+    ]);
+  }, [loadDetail, loadRuns]);
+
+  const handleSavingChange = useCallback((saving) => {
+    if (saving) {
+      detailRequest.current += 1;
+      setDetail((previous) => ({ ...previous, loading: false }));
+    }
+    setSavingControls((count) => saving ? count + 1 : Math.max(0, count - 1));
+  }, []);
 
   useEffect(() => {
-    let active = true;
-    setDetail({ data: null, loading: !!selected, error: null });
-    if (selected) {
-      adminFetch(`/admin/auto-dispatch/runs/${encodeURIComponent(selected)}`)
-        .then((data) => { if (active) setDetail({ data, loading: false, error: null }); })
-        .catch((err) => { if (active) setDetail({ data: null, loading: false, error: err.message || "Failed to load decisions" }); });
-    }
-    return () => { active = false; };
-  }, [selected, refreshKey]);
+    loadRuns();
+  }, [loadRuns]);
+
+  useEffect(() => {
+    loadDetail(selected, { clear: true });
+  }, [loadDetail, selected]);
+
+  useVisiblePageRefresh(() => refresh({ background: true }), {
+    intervalMs: detail.data?.run?.status === "running" ? 30_000 : 60_000,
+    enabled: !list.loading && !detail.loading && !running && savingControls === 0,
+  });
 
   const triggerDryRun = async () => {
     setRunning(true);
@@ -184,7 +234,7 @@ export default function AutoDispatchPage({ embedded = false }) {
       if (result.runId) selectRun(result.runId);
       if (result.status !== "completed") setRunError(`Dry-run ${label(result.status)}. Review the selected run for details.`);
       else setRunMessage("Dry-run completed. Its decisions are selected below.");
-      refresh();
+      await refresh();
     } catch (err) { if (mounted.current) setRunError(err.message || "Run failed"); }
     finally { if (mounted.current) setRunning(false); }
   };
@@ -193,11 +243,9 @@ export default function AutoDispatchPage({ embedded = false }) {
     {embedded ? <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
       <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: D.heading }}>Auto-Dispatch</h2>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-        <HeaderButton onClick={refresh} disabled={list.loading || detail.loading} icon={RefreshCw}>Refresh</HeaderButton>
         <HeaderButton onClick={triggerDryRun} disabled={running} icon={Play} primary>{running ? "Running…" : "Run dry-run"}</HeaderButton>
       </div>
     </div> : <AdminCommandHeader title="Auto-Dispatch" icon={Route} actions={[
-      { key: "refresh", label: "Refresh", onClick: refresh, disabled: list.loading || detail.loading, icon: RefreshCw },
       { key: "dryrun", label: running ? "Running…" : "Run dry-run", onClick: triggerDryRun, disabled: running, icon: Play },
     ]} />}
     <p>Supervise recurring appointment optimization. <Link to="/admin/dispatch" style={linkStyle}>Open dispatch board</Link></p>
@@ -211,7 +259,7 @@ export default function AutoDispatchPage({ embedded = false }) {
     </div>
     {runError && <ErrorNotice>{runError}</ErrorNotice>}
     {runMessage && <p role="status">{runMessage}</p>}
-    {list.error && <ErrorNotice>{list.error}</ErrorNotice>}
+    {list.error && <div><ErrorNotice>{list.error}</ErrorNotice><HeaderButton onClick={loadRuns} disabled={list.loading}>{list.loading ? "Retrying…" : "Retry runs"}</HeaderButton></div>}
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(320px,1fr)_minmax(360px,1.4fr)]">
       <section style={panelStyle} aria-label="Recent runs">
         <h3 style={{ ...sectionStyle, margin: 0, fontSize: 14, fontWeight: 500 }}>Recent runs</h3>
@@ -227,7 +275,7 @@ export default function AutoDispatchPage({ embedded = false }) {
       </section>
       <section style={panelStyle} aria-label="Run decisions">
         <h3 style={{ ...sectionStyle, margin: 0, fontSize: 14, fontWeight: 500 }}>Decisions</h3>
-        <RunDetails selected={selected} state={detail} onRefresh={refresh} />
+        <RunDetails selected={selected} state={detail} onRefresh={refresh} onSavingChange={handleSavingChange} />
       </section>
     </div>
   </div>;

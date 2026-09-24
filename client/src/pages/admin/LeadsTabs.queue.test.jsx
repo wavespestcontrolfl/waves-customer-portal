@@ -154,6 +154,47 @@ describe('Pipeline queue navigation', () => {
     await waitFor(() => expect(calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length).toBeGreaterThan(before));
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
   });
+  it('keeps status reconciliation off by default', async () => {
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    await waitFor(() => expect(calls.some(({ path }) => path === '/api/admin/leads/lead-qa')).toBe(true));
+    expect(calls.some(({ path }) => path.includes('leadReview=1'))).toBe(false);
+    expect(screen.queryByLabelText('Status review')).not.toBeInTheDocument();
+  });
+  it('shows the read-only status review inside an expanded lead when opted in', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => String(url).endsWith('/admin/leads/lead-qa?leadReview=1')
+      ? {
+        ok: true,
+        json: async () => ({
+          activities: [], calls: [],
+          reconciliation: {
+            mode: 'read_only', status: 'review',
+            summary: 'Evidence needs review before anyone changes this lead status.',
+            findings: [{
+              code: 'historical_contact_transition',
+              message: 'Verified evidence previously moved this lead from New to Contacted.',
+              evidence: { type: 'live_conversation', id: 'call-1', occurred_at: '2026-09-01T13:00:00.000Z' },
+            }],
+            scope: { assessment_limit: 6, assessment_truncated: true },
+          },
+        }),
+      }
+      : base(url, opts));
+    mount('/admin/pipeline?leadReview=1');
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    const panel = await screen.findByLabelText('Status review');
+    expect(panel).toHaveTextContent('Review needed');
+    expect(panel).toHaveTextContent('Verified evidence previously moved this lead');
+    expect(panel).toHaveTextContent('No status changes or customer messages were made');
+    expect(panel).toHaveTextContent('Shows up to 6 recent assessments');
+    expect(panel).toHaveTextContent('Older assessments were not checked');
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/admin/leads/lead-qa?leadReview=1',
+      expect.anything(),
+    );
+    expect(calls.some(({ options }) => options?.method && options.method !== 'GET')).toBe(false);
+  });
   it('shows the effective callback deadline on the lead', async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation(async (url, opts) => String(url).includes('/commitments/open')

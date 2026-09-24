@@ -414,6 +414,67 @@ function LeadBadge({ label, tone = "neutral", className }) {
     </Badge>
   );
 }
+const CONTACT_EVIDENCE_LABELS = {
+  live_conversation: "Live conversation",
+  assessment_booked: "Assessment booked",
+  assessment_completed: "Assessment completed",
+};
+function LeadStatusReviewPanel({ reconciliation }) {
+  if (!reconciliation) return null;
+  const isReview = reconciliation.status === "review";
+  const isUnavailable = reconciliation.status === "unavailable";
+  const label = isReview
+    ? "Review needed"
+    : isUnavailable
+      ? "Unavailable"
+      : reconciliation.status === "not_evaluated"
+        ? "Not evaluated"
+        : "No conflict";
+  return (
+    <Card
+      className={`mb-[14px] p-[14px] ${isReview ? "border-alert-fg" : "border-zinc-200"}`}
+      aria-label="Status review"
+    >
+      <div className="flex flex-wrap items-center gap-[8px] mb-[8px]">
+        <h4 className="m-0 text-zinc-900 text-ui-body font-medium">
+          Status review
+        </h4>
+        <LeadBadge label={label} tone={isReview ? "alert" : "neutral"} />
+      </div>
+      <p className="m-0 text-ui-body text-zinc-900">
+        {reconciliation.summary}
+      </p>
+      {reconciliation.findings?.map((finding, index) => (
+        <div
+          key={`${finding.code}-${finding.evidence?.id || index}`}
+          className="mt-[10px] border-l-2 border-solid border-zinc-300 pl-[10px] text-ui-body text-zinc-900"
+        >
+          {finding.message}
+          {finding.evidence && (
+            <div className="mt-[3px] text-ink-secondary">
+              {CONTACT_EVIDENCE_LABELS[finding.evidence.type] ||
+                finding.evidence.type}
+              {finding.evidence.id ? ` · ${finding.evidence.id}` : ""}
+              {finding.evidence.occurred_at
+                ? ` · ${new Date(finding.evidence.occurred_at).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`
+                : ""}
+            </div>
+          )}
+        </div>
+      ))}
+      <p className="m-[10px_0_0] text-ui-body text-ink-secondary">
+        Read-only preview for this lead and recent assessment evidence. No
+        status changes or customer messages were made.
+        {reconciliation.scope?.assessment_limit
+          ? ` Shows up to ${reconciliation.scope.assessment_limit} recent assessments.`
+          : ""}
+        {reconciliation.scope?.assessment_truncated
+          ? " Older assessments were not checked."
+          : ""}
+      </p>
+    </Card>
+  );
+}
 function AgingBadge({ lead }) {
   if (CLOSED_STATUSES.includes(lead.status)) return null;
   const days = daysSinceContact(lead);
@@ -807,6 +868,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const [leadActivitiesLoading, setLeadActivitiesLoading] = useState(false);
   const [leadActivitiesError, setLeadActivitiesError] = useState(null);
   const [leadCalls, setLeadCalls] = useState([]);
+  const [leadStatusReview, setLeadStatusReview] = useState(null);
   const openedLinkedLeadRef = useRef(null);
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
@@ -1076,6 +1138,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         setLeadActivities([]);
         setLinkedHistory(null);
         setLeadCalls([]);
+        setLeadStatusReview(null);
         setLeadActivitiesError(null);
         setLeadActivitiesLoading(true);
       }
@@ -1085,6 +1148,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         setLeadActivities(data.activities || []);
         setLinkedHistory(data.linkedHistory || null);
         setLeadCalls(data.calls || []);
+        setLeadStatusReview(data.reconciliation || null);
         if (!silent) setLeadActivitiesError(null);
       } catch (e) {
         console.error("loadLeadActivities", e);
@@ -1093,6 +1157,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           setLeadActivities([]);
           setLinkedHistory(null);
           setLeadCalls([]);
+          setLeadStatusReview(null);
           setLeadActivitiesError(e);
         }
       } finally {
@@ -2109,6 +2174,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     </div>{" "}
                                   </div>{" "}
                                 </div>
+                                {leadReviewEnabled && (
+                                  <LeadStatusReviewPanel
+                                    reconciliation={leadStatusReview}
+                                  />
+                                )}
                                 {/* AI Suggested Reply */}
                                 {(() => {
                                   const triageActivity = leadActivities.find(
