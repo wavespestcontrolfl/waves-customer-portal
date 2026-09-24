@@ -296,3 +296,247 @@ describe('booking.js activateWizardSeries — no combined-payment lock in this t
     expect(fnBody).not.toMatch(/self_pay_override/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Codex #4716 r3 P1s: a merge can COMMIT between the booking's own
+// transaction and one of these post-commit follow-up transactions, repointing
+// the parent scheduled_services row's customer_id to the winner while the
+// follow-up transaction still holds (and is handed) the retired loser's
+// row lock. Both creators now re-read the parent under lock, verify its
+// owner, and retry the WHOLE transaction under the real owner through one
+// shared mechanism (SeriesOwnerMovedError / lockAndVerifySeriesParentOwner /
+// runSeriesTxWithOwnerRetry) instead of building the duplicate guard, the
+// draft-owner check, or the seeded children off the stale id.
+// ---------------------------------------------------------------------------
+
+describe('SeriesOwnerMovedError / lockAndVerifySeriesParentOwner / runSeriesTxWithOwnerRetry — the shared owner-move retry primitive (Codex #4716 r3)', () => {
+  const {
+    SeriesOwnerMovedError,
+    lockAndVerifySeriesParentOwner,
+    runSeriesTxWithOwnerRetry,
+  } = require('../routes/booking')._internals;
+
+  test('all three primitives are exported', () => {
+    expect(typeof SeriesOwnerMovedError).toBe('function');
+    expect(typeof lockAndVerifySeriesParentOwner).toBe('function');
+    expect(typeof runSeriesTxWithOwnerRetry).toBe('function');
+  });
+
+  test('lockAndVerifySeriesParentOwner returns the row when it still belongs to the expected customer (fast path)', async () => {
+    const trx = jest.fn(() => ({
+      where: (cond) => {
+        expect(cond).toEqual({ id: 'svc-1' });
+        return {
+          forUpdate: () => ({
+            first: async (cols) => {
+              expect(cols).toBe('*');
+              return { id: 'svc-1', customer_id: 'cust-A' };
+            },
+          }),
+        };
+      },
+    }));
+    const row = await lockAndVerifySeriesParentOwner(trx, { parentId: 'svc-1', expectedCustomerId: 'cust-A' });
+    expect(row).toEqual({ id: 'svc-1', customer_id: 'cust-A' });
+    expect(trx).toHaveBeenCalledWith('scheduled_services');
+  });
+
+  test('a merge-moved parent throws SeriesOwnerMovedError carrying the row\'s CURRENT (winner) owner', async () => {
+    const trx = jest.fn(() => ({
+      where: () => ({ forUpdate: () => ({ first: async () => ({ id: 'svc-1', customer_id: 'cust-WINNER' }) }) }),
+    }));
+    let caught = null;
+    try {
+      await lockAndVerifySeriesParentOwner(trx, { parentId: 'svc-1', expectedCustomerId: 'cust-LOSER' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(SeriesOwnerMovedError);
+    expect(caught.code).toBe('SERIES_OWNER_MOVED');
+    expect(caught.newCustomerId).toBe('cust-WINNER');
+    expect(caught.parentRow).toEqual({ id: 'svc-1', customer_id: 'cust-WINNER' });
+  });
+
+  test('a missing parent row (deleted/cancelled by the merge) resolves null rather than throwing — the caller keeps its own existing missing-parent handling', async () => {
+    const trx = jest.fn(() => ({ where: () => ({ forUpdate: () => ({ first: async () => undefined }) }) }));
+    await expect(lockAndVerifySeriesParentOwner(trx, { parentId: 'svc-gone', expectedCustomerId: 'cust-A' }))
+      .resolves.toBeUndefined();
+  });
+
+  test('unchanged-owner fast path: the transaction body runs exactly once and onOwnerChange is never called', async () => {
+    const db = { transaction: (fn) => fn('trx-handle') };
+    const onOwnerChange = jest.fn();
+    let calls = 0;
+    const result = await runSeriesTxWithOwnerRetry(db, async (trx) => {
+      calls += 1;
+      expect(trx).toBe('trx-handle');
+      return { seedResult: { insertedRows: [{ id: 'child-1', customer_id: 'cust-A' }] } };
+    }, { onOwnerChange });
+    expect(calls).toBe(1);
+    expect(onOwnerChange).not.toHaveBeenCalled();
+    expect(result.seedResult.insertedRows[0].customer_id).toBe('cust-A');
+  });
+
+  test('owner-changed case: ONE SeriesOwnerMovedError retries the WHOLE transaction under the new owner, calling onOwnerChange before the retry runs', async () => {
+    const db = { transaction: (fn) => fn('trx-handle') };
+    let attempt = 0;
+    const onOwnerChange = jest.fn();
+    const result = await runSeriesTxWithOwnerRetry(db, async () => {
+      attempt += 1;
+      if (attempt === 1) throw new SeriesOwnerMovedError('cust-WINNER', { id: 'svc-1', customer_id: 'cust-WINNER' });
+      // The retried attempt builds its children off whatever the caller's
+      // own transaction body derives AFTER onOwnerChange updated its owner
+      // — proven here by the fact this second attempt only runs once
+      // onOwnerChange has already fired.
+      expect(onOwnerChange).toHaveBeenCalledTimes(1);
+      return { seedResult: { insertedRows: [{ id: 'child-1', customer_id: 'cust-WINNER' }] } };
+    }, { onOwnerChange });
+    expect(attempt).toBe(2);
+    expect(onOwnerChange).toHaveBeenCalledTimes(1);
+    expect(onOwnerChange).toHaveBeenCalledWith('cust-WINNER', { id: 'svc-1', customer_id: 'cust-WINNER' });
+    expect(result.seedResult.insertedRows[0].customer_id).toBe('cust-WINNER');
+  });
+
+  test('caps at 2 retries (3 total attempts) then rethrows the last SeriesOwnerMovedError so the path\'s own failure handling (loud log, price strip) still runs', async () => {
+    const db = { transaction: (fn) => fn('trx-handle') };
+    let attempts = 0;
+    const onOwnerChange = jest.fn();
+    await expect(runSeriesTxWithOwnerRetry(db, async () => {
+      attempts += 1;
+      throw new SeriesOwnerMovedError(`cust-${attempts}`, {});
+    }, { onOwnerChange })).rejects.toMatchObject({ code: 'SERIES_OWNER_MOVED' });
+    expect(attempts).toBe(3); // initial attempt + 2 retries, never a 4th
+    expect(onOwnerChange).toHaveBeenCalledTimes(2);
+  });
+
+  test('a non-owner-move error is never retried and propagates on the first attempt', async () => {
+    const db = { transaction: (fn) => fn('trx-handle') };
+    let attempts = 0;
+    const onOwnerChange = jest.fn();
+    await expect(runSeriesTxWithOwnerRetry(db, async () => {
+      attempts += 1;
+      throw new Error('some unrelated failure');
+    }, { onOwnerChange })).rejects.toThrow('some unrelated failure');
+    expect(attempts).toBe(1);
+    expect(onOwnerChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('booking.js pest follow-up seeding — re-verifies the parent owner under lock before the duplicate guard (Codex #4716 r3)', () => {
+  test('the transaction runs through runSeriesTxWithOwnerRetry (not a bare db.transaction), so a merge-moved owner retries the whole thing', () => {
+    const blockAt = booking.indexOf('Duplicate-series guard: don\'t seed a SECOND active series');
+    expect(blockAt).toBeGreaterThan(-1);
+    const nextBlockMarker = booking.indexOf('duplicateSeriesKept = pestDuplicateKeptAtBooking;', blockAt);
+    const txStartAt = booking.indexOf('const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {', nextBlockMarker);
+    expect(txStartAt).toBeGreaterThan(nextBlockMarker);
+    const onOwnerChangeAt = booking.indexOf('onOwnerChange: (newOwnerId) => { custId = newOwnerId; },', txStartAt);
+    expect(onOwnerChangeAt).toBeGreaterThan(txStartAt);
+  });
+
+  test('the parent row lock/verify (lockAndVerifySeriesParentOwner) sits between the customers FOR UPDATE and checkActiveSeriesLocked', () => {
+    const blockAt = booking.indexOf('Duplicate-series guard: don\'t seed a SECOND active series');
+    const rowLockAt = booking.indexOf("await trx('customers').where({ id: custId }).forUpdate().first('id');", blockAt);
+    expect(rowLockAt).toBeGreaterThan(blockAt);
+    const verifyAt = booking.indexOf('const lockedParentRow = await lockAndVerifySeriesParentOwner(trx, {', rowLockAt);
+    expect(verifyAt).toBeGreaterThan(rowLockAt);
+    expect(booking.slice(verifyAt, verifyAt + 400)).toMatch(/parentId: serviceRow\.id,\s*\n\s*expectedCustomerId: custId,/);
+    const staleReturnAt = booking.indexOf('if (!lockedParentRow) return { stale: true };', verifyAt);
+    expect(staleReturnAt).toBeGreaterThan(verifyAt);
+    const effectiveParentAt = booking.indexOf('const effectiveParent = { ...serviceRow, ...lockedParentRow };', staleReturnAt);
+    expect(effectiveParentAt).toBeGreaterThan(staleReturnAt);
+    const seriesLockAt = booking.indexOf('RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {', effectiveParentAt);
+    expect(seriesLockAt).toBeGreaterThan(effectiveParentAt);
+  });
+
+  test('every customer-scoped read after the verify uses the RE-READ effectiveParent, never the stale in-memory serviceRow (children carry the winner\'s customer_id)', () => {
+    const blockAt = booking.indexOf('Duplicate-series guard: don\'t seed a SECOND active series');
+    const effectiveParentAt = booking.indexOf('const effectiveParent = { ...serviceRow, ...lockedParentRow };', blockAt);
+    const blockEndAt = booking.indexOf('return { seedResult };', effectiveParentAt);
+    expect(blockEndAt).toBeGreaterThan(effectiveParentAt);
+    const body = booking.slice(effectiveParentAt, blockEndAt);
+    // seedFollowUpsForParent — where a customer_id: parent.customer_id
+    // (recurring-appointment-seeder.js) mints every child row — is handed
+    // the re-read row, not serviceRow.
+    expect(body).toMatch(/RecurringAppointmentSeeder\.seedFollowUpsForParent\(trx, effectiveParent, \{/);
+    expect(body).not.toMatch(/RecurringAppointmentSeeder\.seedFollowUpsForParent\(trx, serviceRow,/);
+    // The duplicate-series guard and the setup-fee stamp read the same
+    // re-verified row too.
+    expect(body).toMatch(/serviceId: effectiveParent\.service_id \|\| null,/);
+    expect(body).toMatch(/excludeParentId: effectiveParent\.id,/);
+    expect(body).toMatch(/stampDisclosedSetupFee\(trx, \{ stampServiceRow: effectiveParent \}\);/);
+    // The seeder itself really does copy customer_id straight from the
+    // parent object it is handed (proves the re-read row is what decides
+    // the children's owner, not merely passed through unused).
+    const seeder = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    expect(seeder).toMatch(/customer_id: parent\.customer_id,/);
+  });
+
+  test('a stale/missing parent (deleted or repointed away entirely) short-circuits to { stale: true } without seeding or stamping', () => {
+    const blockAt = booking.indexOf('Duplicate-series guard: don\'t seed a SECOND active series');
+    const staleReturnAt = booking.indexOf('if (!lockedParentRow) return { stale: true };', blockAt);
+    expect(staleReturnAt).toBeGreaterThan(blockAt);
+    const outcomeHandlingAt = booking.indexOf('if (outcome.kept) duplicateSeriesKept = outcome.kept;', blockAt);
+    expect(outcomeHandlingAt).toBeGreaterThan(staleReturnAt);
+    expect(booking.slice(outcomeHandlingAt, outcomeHandlingAt + 200))
+      .toMatch(/else if \(outcome\.seedResult\) followUpRows = outcome\.seedResult\.insertedRows \|\| \[\];/);
+  });
+});
+
+describe('booking.js activateWizardSeries — re-verifies the parent owner under lock before it can read stale drift or seed stale children (Codex #4716 r3)', () => {
+  test('activateWizardSeries also runs through runSeriesTxWithOwnerRetry, wired with the same onOwnerChange(custId) callback', () => {
+    const fnAt = booking.indexOf('const activateWizardSeries = async (seriesParentRow) => {');
+    expect(fnAt).toBeGreaterThan(-1);
+    const txStartAt = booking.indexOf('const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {', fnAt);
+    expect(txStartAt).toBeGreaterThan(fnAt);
+    const returnAt = booking.indexOf("return { seedResult, parentExtension };", txStartAt);
+    expect(returnAt).toBeGreaterThan(txStartAt);
+    const onOwnerChangeAt = booking.indexOf('onOwnerChange: (newOwnerId) => { custId = newOwnerId; },', returnAt);
+    expect(onOwnerChangeAt).toBeGreaterThan(returnAt);
+    const returnOutcomeAt = booking.indexOf('return outcome;', onOwnerChangeAt);
+    expect(returnOutcomeAt).toBeGreaterThan(onOwnerChangeAt);
+  });
+
+  test('lockedParent now selects customer_id and is verified BEFORE the alreadyActivated / priced-state checks', () => {
+    const fnAt = booking.indexOf('const activateWizardSeries = async (seriesParentRow) => {');
+    const lockedParentAt = booking.indexOf("const lockedParent = await trx('scheduled_services')", fnAt);
+    expect(lockedParentAt).toBeGreaterThan(fnAt);
+    expect(booking.slice(lockedParentAt, lockedParentAt + 400))
+      .toMatch(/\.first\('id', 'customer_id', 'is_recurring', 'status', 'payment_method_preference',/);
+    const throwAt = booking.indexOf('throw new SeriesOwnerMovedError(lockedParent.customer_id, lockedParent);', lockedParentAt);
+    expect(throwAt).toBeGreaterThan(lockedParentAt);
+    // The owner check precedes BOTH the alreadyActivated fast path and the
+    // priced-state drift check that strips price/payment/invoice — a
+    // merge-moved parent must retry, never read as "drift" and get
+    // stripped.
+    const alreadyActivatedAt = booking.indexOf('alreadyActivated: true', throwAt);
+    const pricedStateAt = booking.indexOf('no longer matches its priced state under lock', throwAt);
+    expect(alreadyActivatedAt).toBeGreaterThan(throwAt);
+    expect(pricedStateAt).toBeGreaterThan(throwAt);
+  });
+
+  test('the in-memory seriesParentRow.customer_id is re-synced from the locked row right after the owner check — the wizard activation keeps price/payment/invoice_flag intact because seedFollowUpsForParent (and every downstream helper keyed on seriesParentRow) now carries the REAL owner', () => {
+    const fnAt = booking.indexOf('const activateWizardSeries = async (seriesParentRow) => {');
+    const throwAt = booking.indexOf('throw new SeriesOwnerMovedError(lockedParent.customer_id, lockedParent);', fnAt);
+    const syncAt = booking.indexOf('if (lockedParent) seriesParentRow.customer_id = lockedParent.customer_id;', throwAt);
+    expect(syncAt).toBeGreaterThan(throwAt);
+    const isRecurringCheckAt = booking.indexOf('if (lockedParent && lockedParent.is_recurring) {', syncAt);
+    expect(isRecurringCheckAt).toBeGreaterThan(syncAt);
+    // seedFollowUpsForParent is still handed seriesParentRow (now correctly
+    // synced) — the price/payment/invoice fields it stamps on the parent,
+    // and the customer_id it stamps on every seeded child, both read off
+    // this one object.
+    const seedAt = booking.indexOf('await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow', fnAt);
+    expect(seedAt).toBeGreaterThan(syncAt);
+  });
+
+  test('regression: SeriesOwnerMovedError is thrown strictly between the lockedParent FOR UPDATE read and every custId-keyed check that follows it (draft-owner compare, duplicate guard)', () => {
+    const fnAt = booking.indexOf('const activateWizardSeries = async (seriesParentRow) => {');
+    const lockedParentAt = booking.indexOf("const lockedParent = await trx('scheduled_services')", fnAt);
+    const throwAt = booking.indexOf('throw new SeriesOwnerMovedError(lockedParent.customer_id, lockedParent);', lockedParentAt);
+    const draftOwnerCheckAt = booking.indexOf("String(lockedDraft.customer_id) === String(custId)", lockedParentAt);
+    const dupGuardAt = booking.indexOf('checkActiveSeriesLocked(trx, {', lockedParentAt);
+    expect(throwAt).toBeGreaterThan(lockedParentAt);
+    expect(draftOwnerCheckAt).toBeGreaterThan(throwAt);
+    expect(dupGuardAt).toBeGreaterThan(throwAt);
+  });
+});
