@@ -148,6 +148,15 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
     if (table === 'series_moves') return seriesMovesInsert;
+    // tech-out P1: the series anchor's retained-tech eligibility re-check
+    // (assertAssignableSlotTechnician, now run on any anchor DATE move, not
+    // only an explicit tech change) reads both tables — a plain active,
+    // non-absent default so a test that doesn't care about eligibility
+    // never has to wire it.
+    if (table === 'technicians') {
+      return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: 'tech-1', name: 'Tech', employment_status: 'active', field_dispatchable: true }) });
+    }
+    if (table === 'technician_absences') return chain({ whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(undefined) });
     throw new Error(`Unexpected trx table ${table}`);
   });
   const ordinaryRaw = rawFactory('trx.raw');

@@ -39,6 +39,9 @@ jest.mock('../models/db', () => {
   function techniciansChain() {
     const c = {};
     c.where = jest.fn((cond) => { c._cond = cond; return c; });
+    // tech-out P1: markTechOut's own FOR UPDATE lock on the technician row —
+    // a no-op on this in-memory double, chainable like the real query builder.
+    c.forUpdate = jest.fn(() => c);
     c.first = jest.fn(async () => (c._cond && c._cond.id ? state.technicians[c._cond.id] : undefined));
     return c;
   }
@@ -63,6 +66,9 @@ jest.mock('../models/db', () => {
     c.where = jest.fn((w) => { cond = { ...(cond || {}), ...w }; return c; });
     c.whereNull = jest.fn(() => { cond = { ...(cond || {}), __clearedNull: true }; return c; });
     c.whereRaw = jest.fn(() => { cond = { ...(cond || {}), __claimGuard: true }; return c; });
+    // tech-out P1: clearTechOut's own FOR UPDATE lock on the absence row — a
+    // no-op on this in-memory double, chainable like the real query builder.
+    c.forUpdate = jest.fn(() => c);
     c.first = jest.fn(async () => Object.values(state.absences).find((r) => {
       if (cond?.technician_id && r.technician_id !== cond.technician_id) return false;
       if (cond?.absence_date && r.absence_date !== cond.absence_date) return false;
@@ -727,6 +733,70 @@ describe('redistributeTechDay', () => {
       })).rejects.toThrow('alert insert boom');
     });
   });
+
+  describe('cancelled mid-run when the absence clears underneath it (tech-out P1)', () => {
+    test('a run whose absence is cleared mid-loop moves nothing further and writes no more alerts', async () => {
+      state.absences['abs-mid'] = {
+        id: 'abs-mid', technician_id: ABSENT_TECH, absence_date: DATE, reason: 'sick', cleared_at: null, redistribution: null,
+      };
+      const STOP_A = { ...STOP, id: 'stop-a' };
+      const STOP_B = { ...STOP, id: 'stop-b', window_start: '11:00', window_end: '12:00' };
+      state.absentStops = [STOP_A, STOP_B];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = []; // both stops would otherwise fit and move
+      // Simulates "tech is back" (clearTechOut) landing between the two
+      // moves: STOP_A's own move flips the absence's cleared_at as a
+      // side effect, so the guard sees it cleared before STOP_B's turn.
+      SmartRebooker.reschedule.mockImplementation(async () => {
+        state.absences['abs-mid'].cleared_at = 'NOW()';
+        return { success: true };
+      });
+
+      const summary = await redistributeTechDay({
+        technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1', absenceId: 'abs-mid',
+      });
+
+      expect(summary.status).toBe('cancelled');
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(summary.moved).toEqual([
+        { job_id: STOP_A.id, to_technician_id: CANDIDATE.id, to_technician_name: CANDIDATE.name, detour_minutes: null },
+      ]);
+      // STOP_B was never evaluated further — no alert, no park entry.
+      expect(createAlert).not.toHaveBeenCalled();
+      expect(summary.parked).toEqual([]);
+    });
+
+    test('a cleared absence detected before the FIRST move parks and moves nothing at all', async () => {
+      state.absences['abs-mid'] = {
+        id: 'abs-mid', technician_id: ABSENT_TECH, absence_date: DATE, reason: 'sick', cleared_at: 'NOW()', redistribution: null,
+      };
+      state.absentStops = [{ ...STOP }];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = [];
+
+      const summary = await redistributeTechDay({
+        technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1', absenceId: 'abs-mid',
+      });
+
+      expect(summary.status).toBe('cancelled');
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(createAlert).not.toHaveBeenCalled();
+      expect(summary.moved).toEqual([]);
+      expect(summary.parked).toEqual([]);
+    });
+
+    test('absenceId omitted (every pre-existing caller): no absence read, never cancelled', async () => {
+      state.absentStops = [{ ...STOP }];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = [];
+      SmartRebooker.reschedule.mockResolvedValue({ success: true });
+
+      const summary = await redistributeTechDay({ technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1' });
+
+      expect(summary.status).toBe('complete');
+      expect(summary.moved).toHaveLength(1);
+    });
+  });
 });
 
 describe('markTechOut', () => {
@@ -739,6 +809,16 @@ describe('markTechOut', () => {
     await expect(markTechOut({
       technicianId: ABSENT_TECH, date: '2020-01-01', reason: 'sick', actorId: 'actor-1',
     })).rejects.toMatchObject({ status: 409, code: 'PAST_DATE' });
+  });
+
+  test('the fresh mark locks the technician row FOR UPDATE before inserting the absence (tech-out P1)', async () => {
+    await markTechOut({ technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1' });
+    // Serialized with every assignment writer: the insert runs through a
+    // db.transaction whose OWN 'technicians' read took forUpdate — distinct
+    // from the plain existence check markTechOut also does outside it.
+    const lockedTechnicianRead = db.mock.results.find((r, i) => db.mock.calls[i][0] === 'technicians'
+      && r.value.forUpdate.mock.calls.length > 0);
+    expect(lockedTechnicianRead).toBeTruthy();
   });
 
   test('refuses an impossible calendar date (finding H)', async () => {
@@ -980,6 +1060,44 @@ describe('clearTechOut', () => {
   test('clearing an absence that does not exist is NOT_OUT (404)', async () => {
     await expect(clearTechOut({ technicianId: ABSENT_TECH, date: DATE, actorId: 'actor-1' }))
       .rejects.toMatchObject({ status: 404, code: 'NOT_OUT' });
+  });
+
+  describe('redistribution-running guard (tech-out P1)', () => {
+    test('a fresh (recent) running lease refuses the clear — 409 REDISTRIBUTION_RUNNING, nothing cleared', async () => {
+      state.absences['abs-1'] = {
+        id: 'abs-1', technician_id: ABSENT_TECH, absence_date: DATE, cleared_at: null,
+        redistribution: { status: 'running', started_at: new Date().toISOString() },
+      };
+
+      await expect(clearTechOut({ technicianId: ABSENT_TECH, date: DATE, actorId: 'actor-1' }))
+        .rejects.toMatchObject({ status: 409, code: 'REDISTRIBUTION_RUNNING' });
+
+      expect(state.absences['abs-1'].cleared_at).toBeNull();
+      expect(resolveAlert).not.toHaveBeenCalled();
+    });
+
+    test('a stale (>10min) running lease clears normally — the run that held it is presumed dead', async () => {
+      state.absences['abs-1'] = {
+        id: 'abs-1', technician_id: ABSENT_TECH, absence_date: DATE, cleared_at: null,
+        redistribution: { status: 'running', started_at: new Date(Date.now() - 11 * 60 * 1000).toISOString() },
+      };
+
+      const result = await clearTechOut({ technicianId: ABSENT_TECH, date: DATE, actorId: 'actor-1' });
+
+      expect(result.absence.cleared_at).toBe('NOW()');
+      expect(state.absences['abs-1'].cleared_at).toBe('NOW()');
+    });
+
+    test('a completed redistribution (status "complete") clears normally', async () => {
+      state.absences['abs-1'] = {
+        id: 'abs-1', technician_id: ABSENT_TECH, absence_date: DATE, cleared_at: null,
+        redistribution: { status: 'complete', total: 0, moved: [], parked: [], failed: [] },
+      };
+
+      const result = await clearTechOut({ technicianId: ABSENT_TECH, date: DATE, actorId: 'actor-1' });
+
+      expect(result.absence.cleared_at).toBe('NOW()');
+    });
   });
 
   describe('atomic clear + resolve (finding 5)', () => {

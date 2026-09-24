@@ -69,6 +69,7 @@ router.delete('/:technicianId', async (req, res, next) => {
     res.json({ absence, resolvedAlerts });
   } catch (err) {
     if (err.code === 'NOT_OUT') return res.status(404).json({ error: 'not_out' });
+    if (err.code === 'REDISTRIBUTION_RUNNING') return res.status(409).json({ error: 'redistribution_running' });
     next(err);
   }
 });

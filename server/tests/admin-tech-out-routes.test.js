@@ -159,4 +159,16 @@ describe('admin-tech-out routes', () => {
     expect(notFound.statusCode).toBe(404);
     expect(notFound.body).toEqual({ error: 'not_out' });
   });
+
+  test('DELETE maps REDISTRIBUTION_RUNNING to 409 redistribution_running (tech-out P1)', async () => {
+    techOut.techOutEnabled.mockReturnValue(true);
+    techOut.clearTechOut.mockRejectedValue(Object.assign(
+      new Error('still running'), { status: 409, code: 'REDISTRIBUTION_RUNNING' },
+    ));
+
+    const res = await run('delete', '/:technicianId');
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toEqual({ error: 'redistribution_running' });
+  });
 });

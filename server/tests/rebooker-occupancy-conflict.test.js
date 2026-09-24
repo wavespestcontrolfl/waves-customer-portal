@@ -118,7 +118,7 @@ function service(overrides = {}) {
   };
 }
 
-function wireRescheduleMocks(svc) {
+function wireRescheduleMocks(svc, { absentTechRow = undefined } = {}) {
   const serviceLookup = chain({ first: jest.fn().mockResolvedValue(svc) });
   const trxScheduled = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
   const historyInsert = chain();
@@ -131,6 +131,16 @@ function wireRescheduleMocks(svc) {
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
     if (table === 'series_moves') return chain();
+    // tech-out P1: the save-time eligibility re-check now also runs on a
+    // retained-tech DATE move, not only an explicit tech change — a plain
+    // active, non-absent default so a test with an assigned `svc.technician_id`
+    // never has to wire it just to move dates. `absentTechRow` (optional):
+    // a test that wants the "marked out on the new date" 422 supplies the
+    // uncleared technician_absences row the real query would find.
+    if (table === 'technicians') {
+      return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: svc.technician_id || 'tech-1', name: 'Tech', employment_status: 'active', field_dispatchable: true }) });
+    }
+    if (table === 'technician_absences') return chain({ whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(absentTechRow) });
     throw new Error(`Unexpected trx table ${table}`);
   });
   trx.raw = rawFactory('trx.raw');
@@ -195,6 +205,39 @@ describe('reschedule — shared occupancy conflict gate', () => {
       'customer_request', 'admin', { overlapAdvisory: true, expectConflictSnapshot: [] },
     )).rejects.toMatchObject({ statusCode: 409 });
     expect(trxScheduled.where).toHaveBeenCalledWith({ technician_id: technicianId });
+  });
+
+  describe('tech-out P1: retained-tech eligibility on a DATE move', () => {
+    test('a date-only move that keeps its technician is refused when that tech is marked out on the NEW date', async () => {
+      wireRescheduleMocks(service({ technician_id: 'tech-1', scheduled_date: BASE }), {
+        absentTechRow: { id: 'absence-1' },
+      });
+
+      // assertAssignableSlotTechnician (unchanged wrapper) translates the
+      // underlying TECH_NOT_ASSIGNABLE into the same customer-safe
+      // SLOT_TAKEN 409 every other ineligible-tech slot offer surfaces as —
+      // this test's job is only to prove the check now RUNS for a
+      // retained-tech date move, not that it changes that translation.
+      await expect(SmartRebooker.reschedule(
+        'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true },
+      )).rejects.toMatchObject({
+        status: 409, statusCode: 409, code: 'SLOT_TAKEN', message: expect.stringContaining('no longer available'),
+      });
+    });
+
+    test('a same-date, same-tech window-only edit performs no absence read at all (byte-identical, no new query)', async () => {
+      const { trx, trxScheduled } = wireRescheduleMocks(service({ technician_id: 'tech-1', scheduled_date: BASE }));
+
+      const result = await SmartRebooker.reschedule(
+        'svc-1', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true },
+      );
+      expect(result.success).toBe(true);
+      expect(trxScheduled.update).toHaveBeenCalled();
+      // Neither eligibility table was ever touched — the same-date,
+      // same-tech path takes no new query.
+      expect(trx.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
+      expect(trx.mock.calls.some(([table]) => table === 'technician_absences')).toBe(false);
+    });
   });
 
   test('an explicit empty reviewed snapshot rejects a newly appeared conflict before guard or write', async () => {

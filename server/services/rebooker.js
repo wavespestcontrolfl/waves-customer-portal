@@ -1623,11 +1623,17 @@ class SmartRebooker {
         assertConflictSnapshot([], options);
       }
 
-      // Save-time eligibility for a tech change (422 TECH_NOT_ASSIGNABLE) on
-      // the same trx that writes it — a slot offered before the tech went
-      // prospective/inactive/office-only cannot land here.
-      if (Object.prototype.hasOwnProperty.call(updates, 'technician_id')) {
-        await assertAssignableSlotTechnician(updates.technician_id, trx, newDateStr);
+      // Save-time eligibility (422 TECH_NOT_ASSIGNABLE) on the same trx that
+      // writes it — a slot offered before the tech went prospective/inactive/
+      // office-only cannot land here. Checked whenever this move changes the
+      // TECHNICIAN or lands the row on a different DATE: a date-only move
+      // keeps the same tech, but that tech may be marked out on the NEW date
+      // (tech-out P1) — keptTechId is the tech the row will actually carry
+      // after this commit either way. A same-date, same-tech window-only
+      // edit stays untouched: no new query.
+      const techChangeForEligibility = Object.prototype.hasOwnProperty.call(updates, 'technician_id');
+      if (techChangeForEligibility || !sameDayTarget) {
+        await assertAssignableSlotTechnician(keptTechId, trx, newDateStr);
       }
       // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
       // re-reads the receiving tech's capabilities here; the unit mover runs the
@@ -2840,8 +2846,18 @@ class SmartRebooker {
             ? null
             : occupancyProbeEnd(updateData.window_start, null, sib.estimated_duration_minutes)
         ));
-        if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
-          await assertAssignableSlotTechnician(options.technicianId || null, trx, String(date).split('T')[0]);
+        // Save-time eligibility (422 TECH_NOT_ASSIGNABLE) for the anchor —
+        // whenever its technician is changing OR it lands on a different
+        // DATE (tech-out P1): a date-only anchor move keeps its current
+        // technician, but that tech may be marked out on the NEW date.
+        // options.technicianId absent ⇒ use the anchor's OWN (retained)
+        // technician_id, never a bare null (that would check "unassigned").
+        const anchorTechChanges = isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId');
+        if (isAnchor && (anchorTechChanges || sibDateChanges)) {
+          const anchorKeptTechId = anchorTechChanges ? (options.technicianId || null) : (sib.technician_id || null);
+          await assertAssignableSlotTechnician(anchorKeptTechId, trx, String(date).split('T')[0]);
+        }
+        if (anchorTechChanges) {
           updateData.technician_id = options.technicianId || null;
           // Tech change also invalidates the sequence (same rule as the
           // single-reschedule path above).

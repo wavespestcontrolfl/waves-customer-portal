@@ -80,6 +80,21 @@ async function getTechOut({ technicianId, date }) {
 }
 
 /**
+ * True while THIS redistribution run's own absence row is still uncleared —
+ * read fresh right before each write (tech-out P1), never a snapshot from
+ * loop entry: a run must stop the instant "tech is back" clears the
+ * absence mid-loop, never moving or parking another stop under an absence
+ * that no longer exists. `absenceId` absent (every caller before this
+ * guard existed, and a direct redistributeTechDay call that isn't tracking
+ * an absence row) skips the read entirely — byte-identical to before.
+ */
+async function absenceStillUncleared(absenceId) {
+  if (!absenceId) return true;
+  const row = await db('technician_absences').where({ id: absenceId }).whereNull('cleared_at').first('id');
+  return !!row;
+}
+
+/**
  * rankBumpOrder — pure. Sorts parked stops "bump first" ascending by score:
  *   recurring (is_recurring === true) +0, else +50
  *   status 'confirmed' +20
@@ -422,6 +437,8 @@ async function redistributeTechDay({
     }
   }
 
+  let cancelled = false;
+
   try {
     for (const stop of units) {
       const memberIds = memberIdsFor(stop);
@@ -440,6 +457,15 @@ async function redistributeTechDay({
       // occupancy) must see this move.
       const placement = await placeStop(stop, crew, date, memberServiceTypesFor(stop));
       if (placement.placed) {
+        // tech-out P1: a fresh read right before this move commits — not a
+        // snapshot from loop entry — so a clear that landed on THIS or an
+        // earlier iteration is caught before another stop moves under a
+        // since-cleared absence. Stops the whole run: nothing further moves
+        // or parks.
+        if (absenceId && !(await absenceStillUncleared(absenceId))) {
+          cancelled = true;
+          break;
+        }
         try {
           // The canonical mover: a grouped stop (visit_id set) moves its
           // whole visit as a unit; the destination day's occupancy is
@@ -500,7 +526,7 @@ async function redistributeTechDay({
       }
     }
 
-    const ranked = rankBumpOrder(toPark.map((p) => p.stop));
+    const ranked = cancelled ? [] : rankBumpOrder(toPark.map((p) => p.stop));
     const nearMissById = new Map(toPark.map((p) => [p.stop.id, p.near_misses]));
     const moveErrorById = new Map(toPark.filter((p) => p.move_error).map((p) => [p.stop.id, p.move_error]));
     const memberIdsById = new Map(toPark.map((p) => [p.stop.id, p.memberIds]));
@@ -512,6 +538,14 @@ async function redistributeTechDay({
     // so the most recently inserted row is newest and lands on top. bump_order
     // itself still numbers ascending from 1 in the payload either way.
     for (let i = ranked.length - 1; i >= 0; i -= 1) {
+      // tech-out P1: same fresh re-check as the move guard above, right
+      // before this alert write — a clear that landed since the units loop
+      // (or on an earlier alert in this very loop) stops every remaining
+      // alert too.
+      if (absenceId && !(await absenceStillUncleared(absenceId))) {
+        cancelled = true;
+        break;
+      }
       const stop = ranked[i];
       const memberIds = memberIdsById.get(stop.id) || [stop.id];
       const alert = await createAlert({
@@ -540,11 +574,16 @@ async function redistributeTechDay({
       // (finding 1) — a single-stop unit gets its own one-entry array.
       newlyParkedByUnit[i] = memberIds.map((jobId) => ({ job_id: jobId, alert_id: alert.id, bump_order: i + 1 }));
     }
-    const parked = [...priorParked, ...newlyParkedByUnit.flat()];
+    // .filter(Boolean): a run cancelled partway through the alert loop
+    // leaves the not-yet-reached indices as holes (never written, never
+    // parked) — the array's own entries otherwise, unchanged.
+    const parked = [...priorParked, ...newlyParkedByUnit.filter(Boolean).flat()];
 
-    logger.info(`[tech-out] redistributed ${date} for ${absentTech?.name || technicianId}: ${moved.length} moved, ${parked.length} parked, ${failed.length} failed (of ${priorTotal ?? stops.length})`);
+    logger.info(`[tech-out] redistributed ${date} for ${absentTech?.name || technicianId}: ${moved.length} moved, ${parked.length} parked, ${failed.length} failed (of ${priorTotal ?? stops.length})${cancelled ? ' — CANCELLED (absence cleared mid-run)' : ''}`);
 
-    return { total: priorTotal ?? stops.length, moved, parked, failed, status: 'complete' };
+    return {
+      total: priorTotal ?? stops.length, moved, parked, failed, status: cancelled ? 'cancelled' : 'complete',
+    };
   } catch (err) {
     if (absenceId) {
       try {
@@ -600,16 +639,28 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
   // parked/failed lists (finding 4).
   let priorRedistribution = null;
   try {
-    const rows = await db('technician_absences')
-      .insert({
-        technician_id: technicianId, absence_date: normalizedDate, reason, note: note || null, created_by: actorId || null,
-        // The lease (finding 4): a fresh mark starts 'running' immediately —
-        // the partial unique index (WHERE cleared_at IS NULL) already
-        // serializes concurrent inserts for the same tech+date, so no
-        // separate claim is needed here, only for a RESUME below.
-        redistribution: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }),
-      })
-      .returning('*');
+    // Serialized with every assignment writer (tech-out P1): assignDispatchJob
+    // / the rebooker's assertAssignableTechnician reads this technician row
+    // FOR SHARE while committing a move. Taking FOR UPDATE here first means
+    // an in-flight assignment either finishes and commits (its own commit
+    // already checked eligibility at that moment) or is blocked behind this
+    // lock — either way, this absence row does not exist for any reader
+    // until AFTER this transaction commits, so redistribution's day-stops
+    // scan (which starts once this returns, outside this transaction) never
+    // races a concurrent write that has not yet seen the absence.
+    const rows = await db.transaction(async (trx) => {
+      await trx('technicians').where({ id: technicianId }).forUpdate().first('id');
+      return trx('technician_absences')
+        .insert({
+          technician_id: technicianId, absence_date: normalizedDate, reason, note: note || null, created_by: actorId || null,
+          // The lease (finding 4): a fresh mark starts 'running' immediately —
+          // the partial unique index (WHERE cleared_at IS NULL) already
+          // serializes concurrent inserts for the same tech+date, so no
+          // separate claim is needed here, only for a RESUME below.
+          redistribution: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }),
+        })
+        .returning('*');
+    });
     absence = rows[0];
   } catch (err) {
     if (err && err.code === '23505') {
@@ -678,21 +729,45 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
  * open (or vice versa).
  */
 async function clearTechOut({ technicianId, date, actorId }) {
-  const absence = await getTechOut({ technicianId, date });
-  if (!absence) throw serviceError(404, 'NOT_OUT', 'Technician is not marked out for this date');
-
-  const openAlerts = await db('dispatch_alerts')
-    .where({ type: 'tech_out_overflow', tech_id: technicianId })
-    .whereNull('resolved_at')
-    .whereRaw("payload->>'date' = ?", [date])
-    .select('id');
-
   const resolvedAlerts = [];
   const updated = await db.transaction(async (trx) => {
+    // Lock the absence row FOR UPDATE and re-read its live redistribution
+    // status under that lock (tech-out P1): the pre-transaction read a plain
+    // clear used to do is unlocked and can be stale by the time this commits
+    // — a genuinely in-flight run (fresh 'running' lease) must not have its
+    // absence pulled out from under it mid-move. A STALE lease (the run that
+    // held it died — crash, deploy) is presumed dead and clears normally,
+    // same staleness window markTechOut's own resume claim uses.
+    const absence = await trx('technician_absences')
+      .where({ technician_id: technicianId, absence_date: date })
+      .whereNull('cleared_at')
+      .forUpdate()
+      .first();
+    if (!absence) throw serviceError(404, 'NOT_OUT', 'Technician is not marked out for this date');
+    const { redistribution } = absence;
+    if (redistribution && redistribution.status === 'running') {
+      const startedAtMs = redistribution.started_at ? new Date(redistribution.started_at).getTime() : NaN;
+      const isStale = Number.isFinite(startedAtMs)
+        && (Date.now() - startedAtMs) > RESUME_LEASE_STALE_MINUTES * 60 * 1000;
+      if (!isStale) {
+        throw serviceError(409, 'REDISTRIBUTION_RUNNING', 'A redistribution run is still in progress for this absence — try again once it finishes');
+      }
+    }
+
     const rows = await trx('technician_absences')
       .where({ id: absence.id })
       .update({ cleared_at: trx.fn.now(), cleared_by: actorId || null })
       .returning('*');
+
+    // Queried INSIDE this same transaction, never a pre-snapshot (tech-out
+    // P1): a pre-read taken before the lock above could miss an alert a
+    // still-running redistribution parks between that read and this commit,
+    // leaving it open forever once the absence clears.
+    const openAlerts = await trx('dispatch_alerts')
+      .where({ type: 'tech_out_overflow', tech_id: technicianId })
+      .whereNull('resolved_at')
+      .whereRaw("payload->>'date' = ?", [date])
+      .select('id');
     for (const { id } of openAlerts) {
       // resolveAlert is the sole writer; small set, order doesn't matter.
       // A rejection here throws out of this callback and rolls the whole
@@ -705,7 +780,7 @@ async function clearTechOut({ technicianId, date, actorId }) {
     return rows[0];
   });
 
-  logger.info(`[tech-out] cleared absence ${absence.id} for ${technicianId} on ${date}; resolved ${resolvedAlerts.length} overflow alert(s)`);
+  logger.info(`[tech-out] cleared absence ${updated.id} for ${technicianId} on ${date}; resolved ${resolvedAlerts.length} overflow alert(s)`);
 
   return { absence: updated, resolvedAlerts };
 }
