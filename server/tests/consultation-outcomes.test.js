@@ -628,6 +628,23 @@ describe('recordOutcome — success + upsert', () => {
     expect(fakeDb.__store.consultation_outcomes).toHaveLength(0);
   });
 
+  test('Codex #4710 r15 P2 :385: the default warm follow-up preserves the recording instant\'s ET wall-clock time, across a DST change', async () => {
+    // Recording at 16:45 EDT on Friday 2026-10-30. +3 ET days lands on
+    // Monday 2026-11-02 — AFTER the Nov 1 fall-back (EDT -> EST). A naive
+    // 72-hour/noon-anchored add would shift the wall clock to 15:45; the
+    // wall-clock-preserving helper must still land on 16:45 ET (now EST).
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-10-30T20:45:00.000Z')); // 16:45 EDT
+    try {
+      const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: seededDb() });
+      expect(etDateString(new Date(saved.follow_up_at))).toBe('2026-11-02');
+      // 2026-11-02 is EST (UTC-5): 16:45 ET is 21:45 UTC.
+      expect(new Date(saved.follow_up_at).toISOString()).toBe('2026-11-02T21:45:00.000Z');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('re-recording the same visit upserts (one row, latest values win)', async () => {
     const fakeDb = seededDb();
     await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', interests: ['mosquito'] }, { trx: fakeDb });
@@ -845,6 +862,15 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     },
   );
 
+  test.each(['0000-01-01T09:00:00Z', '0000-01-01T09:00'])(
+    'Codex #4710 r15 P2 :367: a year-zero followUpAt (%s) is rejected — Postgres has no year zero',
+    async (followUpAt) => {
+      const fakeDb = makeFakeDb({ scheduled_services: [], leads: [] });
+      await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt }, { trx: fakeDb }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+    },
+  );
+
   test('Codex #4710 r6 P2: a rescheduled (pending-rebook) consultation cannot be closed out', async () => {
     const fakeDb = makeFakeDb({
       scheduled_services: [{ id: 'visit-1', status: 'rescheduled', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: SCHEDULED_DATE }],
@@ -873,6 +899,28 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     spyDb.transaction = async (fn) => fn(spyDb);
     const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb });
     expect(saved.customer_id).toBe('cust-new');
+  });
+
+  test('Codex #4710 r15 P2 :911: a technician reassigned between the unlocked read and the lock saves the NEW assignee, not the stale one', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [{ id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-old', scheduled_date: SCHEDULED_DATE }],
+      leads: [],
+    });
+    // The reassignment lands between the first (unlocked) read and the
+    // lock: flip technician_id once lockCustomerRow queries 'customers',
+    // same trigger point the customer-merge race test above uses.
+    let flipped = false;
+    const spyDb = (name) => {
+      const q = fakeDb(name);
+      if (name === 'customers' && !flipped) {
+        flipped = true;
+        fakeDb.__store.scheduled_services[0].technician_id = 'tech-new';
+      }
+      return q;
+    };
+    spyDb.transaction = async (fn) => fn(spyDb);
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb });
+    expect(saved.technician_id).toBe('tech-new');
   });
 
   test.each(['2026-02-31T09:00', '2026-09-25T99:99', '2026-03-08T02:30'])(
@@ -2082,6 +2130,23 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
     expect(stats.won).toBe(2);
     expect(stats.won_by_via).toEqual({ closeout_booking: 1, office_booking: 1 });
     expect(stats).not.toHaveProperty('won_at_door');
+  });
+
+  test('Codex #4710 r15 P2 :1587: an outcome recorded against the visit\'s OLD schedule is suppressed once the visit is moved into a new window — not a show, not counted', async () => {
+    const visits = [
+      {
+        status: 'confirmed',
+        scheduled_date: '2026-09-20', // moved out to next week
+        window_start: '09:00:00',
+        technician_id: 't1',
+        technician_name: 'Adam',
+        outcome: 'warm',
+        recorded_at: new Date('2026-09-11T14:00:00Z'), // recorded against the old (already-past) window
+      },
+    ];
+    const stats = await consultationStats({ trx: statsDb(visits) });
+    expect(stats.warm).toBe(0);
+    expect(stats.showed).toBe(0);
   });
 });
 

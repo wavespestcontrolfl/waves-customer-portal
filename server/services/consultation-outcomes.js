@@ -35,7 +35,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const {
-  etDateString, addETDays, parseETDateTime, etWallClockOccurrences,
+  etDateString, addETDays, addETDaysAtWallClock, parseETDateTime, etWallClockOccurrences,
 } = require('../utils/datetime-et');
 const { isAssessmentBooking } = require('./assessment-booking');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
@@ -339,6 +339,14 @@ function isValidFollowUpAt(followUpAt) {
   // (unsupported-shape bug below). Reject up front instead of relying on
   // that branch to catch every non-string too.
   if (typeof followUpAt !== 'string') return false;
+  // Codex #4710 r15 P2 :367: year 0000 (e.g. "0000-01-01T09:00:00Z") parses
+  // fine as a JS Date (astronomical year numbering treats it as 1 BC) and
+  // round-trips through both branches below, but the `follow_up_at` column
+  // is a Postgres timestamp — Postgres has no year zero, so this would 500
+  // at insert instead of 400 here. Reject any year < 0001 up front, in
+  // both the naive and explicit-offset shapes.
+  const yearMatch = /^(\d{4})-/.exec(String(followUpAt).trim());
+  if (yearMatch && Number(yearMatch[1]) < 1) return false;
   const parsed = parseETDateTime(followUpAt);
   if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime())) return false;
   // A naive wall-clock value must round-trip (Codex #4710 P2): parsing
@@ -381,8 +389,14 @@ function isValidFollowUpAt(followUpAt) {
 
 function defaultFollowUpAt(outcome, followUpAt) {
   if (followUpAt) return parseETDateTime(followUpAt);
-  if (outcome === 'warm') return addETDays(new Date(), 3);
-  if (outcome === 'cold') return addETDays(new Date(), 30);
+  // Codex #4710 r15 P2 :385: addETDays anchors at noon UTC for calendar-day
+  // arithmetic (by design, for date-only comparisons elsewhere in this
+  // file) — using it here for a WALL-CLOCK follow-up reminder collapsed a
+  // 16:45 ET recording into a 12:00 ET follow-up. addETDaysAtWallClock
+  // preserves the recording instant's ET wall-clock time N calendar days
+  // later, across a DST seam included (utils/datetime-et.js).
+  if (outcome === 'warm') return addETDaysAtWallClock(new Date(), 3);
+  if (outcome === 'cold') return addETDaysAtWallClock(new Date(), 30);
   return null;
 }
 
@@ -956,6 +970,12 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     if (liveVisit && !(await isAssessmentBooking(liveVisit, locked))) {
       throw makeError('That visit is not a Waves Assessment consultation', 409, 'NOT_CONSULTATION');
     }
+
+    // Codex #4710 r15 P2 :911: technician_id must come from the LOCKED
+    // re-read, not the pre-lock svcRow — a reassignment landing between the
+    // route's unlocked read and this lock (the same race the guards above
+    // close for status/customer/identity) must not save the old assignee.
+    if (liveVisit) row.technician_id = liveVisit.technician_id || null;
 
     const [saved] = await locked('consultation_outcomes')
       .insert(row)
@@ -1580,8 +1600,23 @@ const OUTCOME_BREAKDOWNS = {
 // row until the hourly repair pass fixes it. Counting that stale outcome
 // here would double-count the visit (once under no_show, once under its old
 // outcome); only the row markNoShow itself would have written qualifies.
+// Codex #4710 r15 P2 :1587: an outcome recorded against a visit's OLD
+// schedule must not count once the visit has been moved into a new window
+// — recorded_at predates the current (post-move) window opening, so it was
+// necessarily recorded against a schedule that no longer holds. Suppressed
+// here rather than cleared at write time (no schema change): the move
+// itself doesn't touch consultation_outcomes, so this stays purely a stats
+// read concern.
+function isStaleOutcome(v) {
+  if (!v.recorded_at) return false;
+  const opensMs = visitWindowOpensMs(v);
+  if (opensMs == null) return false;
+  return new Date(v.recorded_at).getTime() < opensMs;
+}
+
 function countedOutcome(v) {
   if (!v.outcome) return null;
+  if (isStaleOutcome(v)) return null;
   if (v.status === 'no_show') return v.outcome === 'lost' && v.lost_reason === 'no_show' ? v.outcome : null;
   if (DEAD_CONSULTATION_STATUSES.includes(v.status)) return null;
   return v.outcome;
@@ -1651,6 +1686,7 @@ async function consultationStats({ from, to, trx } = {}) {
     .select(
       'ss.status',
       'ss.scheduled_date',
+      'ss.window_start',
       'ss.technician_id',
       'tech.name as technician_name',
       'co.technician_id as outcome_technician_id',
@@ -1659,6 +1695,7 @@ async function consultationStats({ from, to, trx } = {}) {
       'co.lost_reason',
       'co.won_via',
       'co.won_at',
+      'co.recorded_at',
       'lsrc.name as lead_source',
     );
 

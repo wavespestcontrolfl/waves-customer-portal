@@ -732,6 +732,15 @@ function initScheduledJobs() {
         if (result.won > 0 || result.no_show_repaired > 0 || result.reopened > 0 || result.errors > 0) {
           logger.info(`[consultation-outcome-reconcile] scanned=${result.scanned} won=${result.won} no_show_repaired=${result.no_show_repaired || 0} reopened=${result.reopened || 0} errors=${result.errors}`);
         }
+        // Codex #4710 r15 P2 :733: errors > 0 must FAIL job health, same
+        // guard the auto-dispatch cron above uses — reconcileOpenConsultationOutcomes
+        // is best-effort per row (one row's failure never aborts the sweep),
+        // but a sweep that logged errors and still resolved read as a green
+        // consultation-outcome-reconcile in job_health, hiding a degraded
+        // pass (e.g. a systemic evidence-lookup failure) behind a "success".
+        if (result.errors > 0) {
+          throw new Error(`consultation-outcome reconcile sweep unhealthy: errors=${result.errors} scanned=${result.scanned}`);
+        }
       });
     } catch (err) {
       logger.error(`Consultation-outcome reconcile tick failed: ${err.message}`);

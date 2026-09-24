@@ -80,6 +80,30 @@ test('a tick with per-row errors still logs (visibility into the best-effort ski
   expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('errors=1'));
 });
 
+// Codex #4710 r15 P2 :733: result.errors > 0 must FAIL job health — the
+// sweep is best-effort per row (a single row's failure never aborts the
+// rest), but the TICK resolving successfully anyway means runExclusive
+// records job_health as a clean success even on a degraded pass. The task
+// runExclusive was handed must reject once it has logged the counts, same
+// guard the auto-dispatch cron uses for a non-'completed' run status.
+test('Codex #4710 r15 P2 :733: errors > 0 rejects the runExclusive task — job_health records the tick as failed, not a green success', async () => {
+  reconcileOpenConsultationOutcomes.mockResolvedValue({ scanned: 3, won: 0, errors: 2 });
+  const handler = registeredHandler();
+
+  // The task runExclusive was actually handed (not the outer try/catch
+  // wrapper) must itself reject — that's what makes runExclusive/job_health
+  // see a failure instead of a resolved tick.
+  await handler();
+  const [, capturedTask] = runExclusive.mock.calls[runExclusive.mock.calls.length - 1];
+  expect(capturedTask).toEqual(expect.any(Function));
+  await expect(capturedTask()).rejects.toThrow(/errors=2/);
+
+  // The outer tick handler still swallows it (never fatal to the process),
+  // but logs the failure — same shape as any other unhealthy cron.
+  await expect(handler()).resolves.toBeUndefined();
+  expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('errors=2'));
+});
+
 test('the sweep function throwing (contract violation — it should never throw) is caught, not fatal to the tick', async () => {
   reconcileOpenConsultationOutcomes.mockRejectedValue(new Error('unexpected'));
   const handler = registeredHandler();
