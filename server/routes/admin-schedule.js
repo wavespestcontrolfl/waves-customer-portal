@@ -556,8 +556,14 @@ function seriesExtendAnchor(latest, pattern, rOpts) {
   // recurring-schedule-audit.recurringCadenceDate already use) would anchor
   // every later extension on the one-off move and permanently shift the
   // plan's cadence (ADMIN-BUG-R30). Ignore the exception's raw date and
-  // project from the cadence slot it deviated from instead.
-  const anchorDate = latest?.date_exception ? latest.date_exception_cadence_date : latest?.scheduled_date;
+  // project from the cadence slot it deviated from instead. A legacy
+  // exception row can have date_exception=true with no
+  // date_exception_cadence_date recorded (pre-dates the column) — fall back
+  // to scheduled_date exactly like rebooker.dateExceptionStamp's own
+  // COALESCE-equivalent (rebooker.js:323-334), never to today's date.
+  const anchorDate = (latest?.date_exception && latest?.date_exception_cadence_date)
+    ? latest.date_exception_cadence_date
+    : latest?.scheduled_date;
   const latestStr = dateOnly(anchorDate) || '';
   if (!latestStr) return etDateString();
   return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
