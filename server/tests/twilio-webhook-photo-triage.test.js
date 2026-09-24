@@ -6,7 +6,7 @@
 const mockState = {};
 function resetState() {
   Object.assign(mockState, {
-    sms: [], drafts: [], sequence: 0, res: null, legacyGate: true, customer: null, techLookupFails: false,
+    sms: [], drafts: [], sequence: 0, res: null, legacyGate: true, customer: null, techLookupFails: false, visionTaken: false,
   });
 }
 resetState();
@@ -20,7 +20,11 @@ function mockDb(table) {
     if (table === 'message_drafts') mockState.drafts.push(stored);
     q.rows = [stored]; return q;
   };
-  q.update = async () => (table === 'messages' ? [{ id: 'synthetic-message' }] : 0);
+  q.update = async (patch) => {
+    if (table !== 'messages') return 0;
+    // visionTaken: a concurrent text won this message's vision reservation.
+    return mockState.visionTaken && patch.photo_triage_at ? [] : [{ id: 'synthetic-message' }];
+  };
   q.count = async () => [{ n: 0 }];
   q.first = async () => {
     if (table === 'messages') return { is_read: false };
@@ -165,13 +169,22 @@ test('legacy gate off: the triage still drafts; legacyAiDraftsAllowed stays fals
   expect(triage.legacyAiDraftsAllowed({ candidate: true, messageId: 'm' })).toBe(false);
 });
 
-test('a triage run failure is logged and never changes the response', async () => {
+test('a triage run failure is logged, releases its slot, and never changes the response', async () => {
   mockCreate.mockRejectedValue(new Error('vision exploded'));
   const res = await receive('what is this in my lawn?');
   expect(res.body).toBe('<Response></Response>');
   expect(res.statusCode).toBeUndefined();
-  expect(logger.error).toHaveBeenCalledWith('[photo-triage] inbound triage failed: vision exploded');
+  expect(logger.error).toHaveBeenCalledWith(
+    '[photo-triage] triage failed for message synthetic-message; vision slot released: vision exploded',
+  );
   expect(mockState.drafts).toHaveLength(0);
+});
+
+test('a lost vision reservation is not a candidate: the legacy draft still goes out', async () => {
+  mockState.visionTaken = true;
+  await receive('what is this in my lawn?');
+  expect(mockCreate).not.toHaveBeenCalled();
+  expect(mockState.drafts.map((d) => d.draft_response)).toEqual(['Legacy synthetic draft']);
 });
 
 test('a candidacy check failure is logged and falls back to the legacy draft', async () => {

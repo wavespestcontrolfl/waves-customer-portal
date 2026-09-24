@@ -16,8 +16,11 @@
  *     Awaited once, BEFORE the legacy AI draft step, whose gate reads the
  *     result (legacyAiDraftsAllowed): a triage candidate never also gets a
  *     legacy draft that would then block its own photo-triage draft.
+ *     A candidate has already RESERVED its vision slot, so suppressing the
+ *     legacy draft always leaves the text with a triage run.
  *   runPhotoTriage — takes that candidacy (the classifier is never re-run),
- *     claims the vision slot, runs the assessment, parks the draft.
+ *     runs the assessment, parks the draft. Any failure after the
+ *     reservation clears the stamp again (released, logged at error).
  * Every guard runs before any paid call:
  *   - gate off → fully inert (no DB read, no model call);
  *   - no image media, tech lines, and the AI assistant line are skipped;
@@ -141,11 +144,14 @@ async function hasPendingDraft(from, customerId, conn = db) {
   return Boolean(row);
 }
 
-// Stamps of `column` taken since the start of this ET day (range-scoped to
-// messages created in the last two days, which covers every same-day stamp).
+// Stamps of `column` taken since the start of this ET day. Only inbound SMS
+// rows are ever stamped; the direction + channel + created_at range (two
+// days covers every same-day stamp) matches the existing
+// messages (direction, channel, created_at) index.
 function slotsTakenToday(conn, column) {
   const dayStart = parseETDateTime(`${etDateString()}T00:00`);
   return conn('messages')
+    .where('direction', 'inbound')
     .where('channel', 'sms')
     .where('created_at', '>=', new Date(dayStart.getTime() - 24 * 60 * 60 * 1000))
     .where(column, '>=', dayStart)
@@ -173,6 +179,14 @@ async function claimSlot(slot, messageId) {
       .update({ [column]: db.fn.now() }, ['id']);
     return claimed.length ? 'claimed' : taken;
   });
+}
+
+// Hands a vision slot back: a run that failed after its claim leaves the
+// message unstamped (eligible for a later triage) and the failed run off
+// today's budget. Best-effort — a failed release only costs one slot.
+async function releaseVisionSlot(messageId) {
+  await db('messages').where({ id: messageId }).update({ [SLOTS.vision.column]: null })
+    .catch((err) => logger.error(`[photo-triage] vision slot release failed for message ${messageId}: ${err.message}`));
 }
 
 // The one customer-safe label the teaser allowlist publishes pre-capture.
@@ -264,6 +278,12 @@ async function assessPhotoTriageCandidacy({
   if (intent.intent !== 'photo_diagnosis') {
     return notCandidate(classifierClaim && classifierClaim !== 'claimed' ? classifierClaim : 'not_diagnosis');
   }
+  // Reserve the vision slot HERE, before this result suppresses the legacy
+  // draft: a message is a candidate only when its assessment is guaranteed
+  // a slot, so losing the last slot to a concurrent text falls back to the
+  // legacy path instead of leaving the customer with no draft at all.
+  const visionClaim = await claimSlot('vision', messageId);
+  if (visionClaim !== 'claimed') return notCandidate(visionClaim);
   return { candidate: true, intent, messageId, smsLogId, images, body, from, customer };
 }
 
@@ -279,35 +299,23 @@ function legacyAiDraftsAllowed(candidacy) {
   return true;
 }
 
-/**
- * @returns {Promise<{ status: 'skipped', reason: string } | { status: 'drafted', draftId, assessmentId, type }>}
- */
-async function runPhotoTriage(candidacy) {
-  if (!candidacy?.candidate) return { status: 'skipped', reason: candidacy?.reason || 'not_candidate' };
-  const { intent, messageId, smsLogId, images, body, from, customer } = candidacy;
-
-  const claim = await claimSlot('vision', messageId);
-  if (claim !== 'claimed') {
-    logger.info(`[photo-triage] message ${messageId} skipped: ${claim}`);
-    return { status: 'skipped', reason: claim };
-  }
-
+// Assessment + draft for a candidate whose vision slot is already reserved.
+// Throws on any failure so runPhotoTriage can hand the slot back.
+async function assessAndPark({ intent, messageId, smsLogId, images, body, from, customer }) {
   const created = await createAdminAssessment({
     type: intent.assessmentType,
     source: ASSESSMENT_SOURCE,
     message_photos: images.map((item) => ({ message_id: messageId, key: item.key })),
   });
-  if (created.error) {
-    logger.error(`[photo-triage] assessment failed for message ${messageId} (${created.status || 'error'})`);
-    return { status: 'skipped', reason: 'assessment_failed' };
-  }
+  if (created.error) throw new Error(`assessment refused (${created.status || 'error'})`);
 
   const text = buildDraftText({
     firstName: customer?.first_name,
     findingLabel: teaserFindingLabel(created.type, created.analysis),
   });
   // A second photo text from the same contact may have drafted while this
-  // one's vision call ran — the assessment is kept, the draft is not.
+  // one's vision call ran — the assessment is kept (its slot stays spent),
+  // the draft is not.
   const draftId = await parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method: intent.method });
   if (!draftId) {
     logger.info(`[photo-triage] ${created.type} assessment ${created.id} kept; draft skipped (pending draft appeared)`);
@@ -315,6 +323,22 @@ async function runPhotoTriage(candidacy) {
   }
   logger.info(`[photo-triage] message ${messageId} → ${created.type} assessment ${created.id}, pending draft ${draftId}`);
   return { status: 'drafted', draftId, assessmentId: created.id, type: created.type };
+}
+
+/**
+ * @returns {Promise<{ status: 'skipped', reason: string } | { status: 'drafted', draftId, assessmentId, type }>}
+ */
+async function runPhotoTriage(candidacy) {
+  if (!candidacy?.candidate) return { status: 'skipped', reason: candidacy?.reason || 'not_candidate' };
+  try {
+    return await assessAndPark(candidacy);
+  } catch (err) {
+    // A failed run must not stay "triaged": clear the reservation so the
+    // message is eligible again and the failure is off today's budget.
+    logger.error(`[photo-triage] triage failed for message ${candidacy.messageId}; vision slot released: ${err.message}`);
+    await releaseVisionSlot(candidacy.messageId);
+    return { status: 'skipped', reason: 'triage_failed' };
+  }
 }
 
 module.exports = {
@@ -330,6 +354,7 @@ module.exports = {
     hasPendingDraft,
     claimSlot,
     visionBudgetLeft,
+    releaseVisionSlot,
     parkDraftUnlessPending,
     teaserFindingLabel,
     buildDraftText,

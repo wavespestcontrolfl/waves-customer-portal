@@ -54,9 +54,9 @@ postgres('photo-text triage guards on PostgreSQL', () => {
     await database?.destroy();
   });
 
-  async function message({ createdAt = new Date(), triagedAt = null } = {}) {
+  async function message({ createdAt = new Date(), triagedAt = null, direction = 'inbound' } = {}) {
     const [row] = await trx('messages').insert({
-      id: randomUUID(), conversation_id: randomUUID(), channel: 'sms', direction: 'inbound',
+      id: randomUUID(), conversation_id: randomUUID(), channel: 'sms', direction,
       author_type: 'customer', body: 'what is this', created_at: createdAt, photo_triage_at: triagedAt,
     }).returning(['id']);
     return row.id;
@@ -100,6 +100,33 @@ postgres('photo-text triage guards on PostgreSQL', () => {
     await expect(triage.visionBudgetLeft()).resolves.toBe(true);
     await expect(triage.claimSlot('vision', first)).resolves.toBe('claimed');
     delete process.env.PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP;
+  });
+
+  test('cap counts only inbound rows: a stamped outbound row is not counted', async () => {
+    process.env.PHOTO_TRIAGE_DAILY_CAP = '1';
+    await message({ direction: 'outbound', triagedAt: new Date() });
+    await expect(triage.visionBudgetLeft()).resolves.toBe(true);
+    await expect(triage.claimSlot('vision', await message())).resolves.toBe('claimed');
+    await expect(triage.visionBudgetLeft()).resolves.toBe(false);
+  });
+
+  test('releaseVisionSlot clears the stamp: the message is claimable again and off the budget', async () => {
+    process.env.PHOTO_TRIAGE_DAILY_CAP = '1';
+    const id = await message();
+    await expect(triage.claimSlot('vision', id)).resolves.toBe('claimed');
+    await expect(triage.visionBudgetLeft()).resolves.toBe(false);
+    await triage.releaseVisionSlot(id);
+    expect((await trx('messages').where({ id }).first('photo_triage_at')).photo_triage_at).toBeNull();
+    await expect(triage.visionBudgetLeft()).resolves.toBe(true);
+    await expect(triage.claimSlot('vision', id)).resolves.toBe('claimed');
+  });
+
+  test('the cap count uses the (direction, channel, created_at) index', async () => {
+    const dayStart = parseETDateTime(`${etDateString()}T00:00`);
+    await trx.raw('SET LOCAL enable_seqscan = off');
+    const plan = await trx.raw(`EXPLAIN SELECT count(*) FROM messages WHERE direction = 'inbound' AND channel = 'sms'
+      AND created_at >= ? AND photo_triage_at >= ?`, [new Date(dayStart.getTime() - 86400e3), dayStart]);
+    expect(plan.rows.map((r) => r['QUERY PLAN']).join('\n')).toMatch(/direction_channel_created_at/);
   });
 
   test('vision budget read is non-consuming', async () => {

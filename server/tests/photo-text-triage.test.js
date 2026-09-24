@@ -19,6 +19,7 @@ function resetState() {
     updates: [],
     pendingWhere: [],
     raws: [],
+    draftInsertFails: false,
   });
 }
 resetState();
@@ -57,6 +58,7 @@ function mockQuery(table) {
     return mockState.alreadyTriaged ? [] : [{ id: 'msg-1' }];
   };
   q.insert = (row) => {
+    if (table === 'message_drafts' && mockState.draftInsertFails) throw new Error('drafts table unavailable');
     (mockState.inserts[table] = mockState.inserts[table] || []).push(row);
     const id = table === 'message_drafts' ? 'draft-1' : 'assess-1';
     return { returning: async () => [{ id, created_at: new Date('2026-09-24T14:00:00Z') }] };
@@ -380,12 +382,44 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
     expect(mockState.inserts.message_drafts).toBeUndefined();
   });
 
-  test('a pipeline refusal (vision unavailable) logs an error and parks nothing', async () => {
+  test('a pipeline refusal (vision unavailable) releases the vision slot, logs an error, parks nothing', async () => {
     mockIdentifyPest.mockResolvedValue({ ok: false, reason: 'vision_unavailable' });
     await expect(triageInboundPhotoText(input({ body: 'bugs everywhere' })))
-      .resolves.toEqual({ status: 'skipped', reason: 'assessment_failed' });
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[photo-triage] assessment failed'));
+      .resolves.toEqual({ status: 'skipped', reason: 'triage_failed' });
+    expect(logger.error).toHaveBeenCalledWith(
+      `[photo-triage] triage failed for message ${MESSAGE_ID}; vision slot released: assessment refused (503)`,
+    );
+    expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }, { photo_triage_at: null }]);
     expect(mockState.inserts.message_drafts).toBeUndefined();
+  });
+
+  test('a thrown assessment releases the vision slot', async () => {
+    mockLadder.mockRejectedValue(new Error('S3 timeout'));
+    await expect(triageInboundPhotoText(input())).resolves.toEqual({ status: 'skipped', reason: 'triage_failed' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('vision slot released: S3 timeout'));
+    expect(mockState.updates.at(-1).patch).toEqual({ photo_triage_at: null });
+  });
+
+  test('a failed draft insert releases the vision slot', async () => {
+    mockState.draftInsertFails = true;
+    await expect(triageInboundPhotoText(input())).resolves.toEqual({ status: 'skipped', reason: 'triage_failed' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('vision slot released: drafts table unavailable'));
+    expect(mockState.updates.at(-1).patch).toEqual({ photo_triage_at: null });
+  });
+
+  test('the vision slot is reserved at candidacy: losing it means not a candidate (legacy path runs)', async () => {
+    mockState.alreadyTriaged = true; // the conditional stamp matches no row
+    const candidacy = await triage.assessPhotoTriageCandidacy(input());
+    expect(candidacy).toEqual({ candidate: false, reason: 'already_triaged' });
+    expect(mockLadder).not.toHaveBeenCalled();
+  });
+
+  test('a won reservation is taken before candidacy returns; the run claims nothing more', async () => {
+    const candidacy = await triage.assessPhotoTriageCandidacy(input());
+    expect(candidacy.candidate).toBe(true);
+    expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }]);
+    await triage.runPhotoTriage(candidacy);
+    expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }]);
   });
 
   test('never logs the phone number or the message body', async () => {
