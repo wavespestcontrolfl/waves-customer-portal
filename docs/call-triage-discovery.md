@@ -448,7 +448,7 @@ Tests:
 
 > "Thanks for calling Waves Pest Control. This call may be recorded, transcribed, and processed with AI to help schedule and improve service. By continuing, you consent to this recording and processing."
 
-For `/call-complete` voicemail: confirm the contents of `WAVES_VOICEMAIL_URL`. If disclosure is missing, replace the audio asset OR prepend a `<Say>` disclosure before `<Record>`.
+For `/call-complete` voicemail (updated 2026-09-24, #4705): the voicemail path carries NO disclosure of its own by design. The default short `<Say>` greeting has no recording language and the `recorded` asset (`WAVES_VOICEMAIL_URL`) is opaque; consent rests entirely on the `/voice` disclosure above, which the same in-progress call has already heard. Do not prepend a reaffirmation before `<Record>` unless a change drops or bypasses the `/voice` disclosure — that reaffirmation is exactly the pre-beep delay #4705 removed (17 of 20 voicemail callers hung up before the tone).
 
 For `/outbound-connect`: prepend a `<Say>` disclosure to the connecting leg before the dial bridges.
 
