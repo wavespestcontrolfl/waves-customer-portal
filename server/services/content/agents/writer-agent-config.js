@@ -596,6 +596,15 @@ facts with stable fact ids). When it does:
   - Emit a claims_ledger entry for every local claim, citing the backing
     fact id(s). A claim with no backing fact id is not allowed.
 
+EDITORIAL ANSWER PLAN: Before expanding informational sections, call
+validate_answer_plan with headings, the questions they answer, and their
+self-contained first answer sentences. Revise until pass:true. Then expand
+those answers with supported details. Name entities clearly, use absolute
+dates where timing matters, avoid filler, and deliver the title's full promise.
+Use research tools to locate primary sources for statistics, attributed quotes
+and named examples. Include visible citations so the independent reviewer can
+retrieve supporting text. Never invent a number, source, quote or example.
+
 OUTPUT — call emit_draft() with the final shape (if the result carries
 draft_rejected, the draft was NOT captured — revise per its directives and
 call emit_draft() again; otherwise call it only once):
@@ -694,6 +703,18 @@ handles all of those after the gates pass.`,
       name: 'get_competitor_facts',
       description: 'For a NAMED-COMPETITOR comparison table only: returns the curated allowlist of competitors you may name, each with neutral, sourced, dated attributes. You may name ONLY businesses this returns, and state ONLY the attributes it lists. An empty list means no named competitors are curated — use a CATEGORY comparison instead.',
       input_schema: { type: 'object', properties: {} },
+    },
+    {
+      type: 'custom',
+      name: 'validate_answer_plan',
+      description: 'Before writing section depth, submit each informational section heading, question and self-contained direct first answer. Revise failures and obtain pass:true before emit_draft. At most three attempts.',
+      input_schema: {
+        type: 'object', required: ['sections'],
+        properties: { sections: { type: 'array', minItems: 1, maxItems: 30, items: {
+          type: 'object', required: ['heading', 'question', 'answer'],
+          properties: { heading: { type: 'string' }, question: { type: 'string' }, answer: { type: 'string' } },
+        } } },
+      },
     },
     {
       type: 'custom',
