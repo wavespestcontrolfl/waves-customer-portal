@@ -2,7 +2,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SmsTab } from "./CommunicationsPageV2";
 import { SMS_DRAFT_STORAGE_KEY } from "../../hooks/useSmsDraft";
@@ -19,7 +19,7 @@ const attachment = { url: "https://example.invalid/gate.png", key: "fixture/gate
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 const tick = async (ms = 350) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 const logRequests = () => fetch.mock.calls.filter(([url]) => String(url).includes("/communications/log?"));
-const setup = () => render(<SmsTab active />, { wrapper: MemoryRouter });
+const setup = (route = "/") => render(<SmsTab active />, { wrapper: ({ children }) => <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter> });
 const setupWithOwner = (id, props = {}) => render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id, role: "admin" } }} />}><Route path="*" element={<SmsTab active {...props} />} /></Route></Routes></MemoryRouter>);
 const savedApproval = {
   msgBody: "Edited approval reply", fromNumber: "+19415550199", selectedCustomerId: "customer-a",
@@ -191,9 +191,9 @@ it("loads and paginates the server needs-response filter, then restores the ordi
     }
     return response({ messages: [inbound("recent", "Recent ordinary message")], hasMore: false, page });
   };
-  setup(); await tick();
+  setup("/admin/communications?needsResponse=true"); await tick();
   const filter = screen.getByRole("combobox", { name: "Filter conversations" });
-  fireEvent.change(filter, { target: { value: "unanswered" } }); await tick();
+  expect(filter).toHaveValue("unanswered");
   expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
   expect(screen.getByText("Pending question 1")).toBeInTheDocument();
   expect(screen.queryByText("Recent ordinary message")).not.toBeInTheDocument();
@@ -213,6 +213,22 @@ it("loads and paginates the server needs-response filter, then restores the ordi
   fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "all" } }); await tick();
   expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.has("needsResponse")).toBe(false);
   expect(screen.getByText("Recent ordinary message")).toBeInTheDocument();
+});
+
+it("updates the mounted inbox when badge navigation changes the route", async () => {
+  render(<MemoryRouter initialEntries={["/admin/communications"]}>
+    <Link to="/admin/communications?needsResponse=true">Pending badge</Link>
+    <SmsTab active />
+  </MemoryRouter>);
+  await tick();
+  fireEvent.click(screen.getByRole("link", { name: "Pending badge" })); await tick();
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toHaveValue("unanswered");
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "all" } }); await tick();
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.has("needsResponse")).toBe(false);
+  fireEvent.click(screen.getByRole("link", { name: "Pending badge" })); await tick();
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toHaveValue("unanswered");
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
 });
 
 it("restores the ordinary dataset when Log View hides the unanswered selector", async () => {

@@ -503,6 +503,7 @@ export default function AdminLayoutV2() {
               </h2>
               {visibleItems.map((item) => {
                 const { path, icon: Icon, label } = item;
+                const destination = item.id === "communications" && unreadConversations > 0 ? `${path}?needsResponse=true` : path;
                 const isActive = isAdminNavItemActive(
                   item,
                   location.pathname,
@@ -511,7 +512,7 @@ export default function AdminLayoutV2() {
                 return (
                   <Link
                     key={path}
-                    to={path}
+                    to={destination}
                     aria-current={isActive ? "page" : undefined}
                     onClick={(e) => {
                       if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
@@ -519,12 +520,12 @@ export default function AdminLayoutV2() {
                       // query to strip) triggers no route change, so no
                       // beacon consumes the mark — don't leave a stale one
                       // for the next unmarked navigation to inherit.
-                      if (!(location.pathname === path && !location.search)) {
+                      if (`${location.pathname}${location.search}` !== destination) {
                         markUsageSource("sidebar");
                       }
                       if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                         e.preventDefault();
-                        navigate(path);
+                        navigate(destination);
                       }
                     }}
                     style={{
@@ -708,6 +709,7 @@ export default function AdminLayoutV2() {
               (item) => !item.adminOnly || user?.role === "admin",
             ).map((item) => {
               const { path, icon: Icon, label } = item;
+              const destination = item.id === "communications" && unreadConversations > 0 ? `${path}?needsResponse=true` : path;
               const active = isAdminNavItemActive(
                 item,
                 location.pathname,
@@ -716,17 +718,17 @@ export default function AdminLayoutV2() {
               return (
                 <Link
                   key={path}
-                  to={path}
+                  to={destination}
                   onClick={(e) => {
                     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
                     // Same stale-mark guard as the sidebar: a no-op re-tap
                     // fires no route change and must not leave a mark.
-                    if (!(location.pathname === path && !location.search)) {
+                    if (`${location.pathname}${location.search}` !== destination) {
                       markUsageSource("tabbar");
                     }
                     if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                       e.preventDefault();
-                      navigate(path);
+                      navigate(destination);
                     }
                   }}
                   aria-current={active ? "page" : undefined}

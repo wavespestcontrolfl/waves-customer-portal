@@ -27,6 +27,7 @@ export function WorkspaceGroup({ group, onNavigate, unreadCount, source = 'sideb
   const isExpanded = hasChildren && Boolean(expanded[group.id]);
   const isActive = selection.groupId === group.id;
   const Icon = group.icon;
+  const target = group.target && group.id === 'communications' && unreadCount > 0 ? { ...group.target, path: `${group.target.path}?needsResponse=true` } : group.target;
   const label = <><Icon size={18} strokeWidth={1.75} className="shrink-0" aria-hidden /><span className="min-w-0 flex-1">{group.label}</span>
     {group.id === 'communications' && unreadCount > 0 && <>
       <span className="sr-only">, {unreadCount} {unreadCount === 1 ? 'conversation' : 'conversations'} needing a reply</span>
@@ -35,7 +36,7 @@ export function WorkspaceGroup({ group, onNavigate, unreadCount, source = 'sideb
   const expansion = <ChevronDown size={16} aria-hidden className={cn('shrink-0 transition-transform', isExpanded && 'rotate-180')} />;
   return <div>
     <div className={cn('flex items-stretch rounded', isActive && 'bg-zinc-100')}>
-      {group.target ? <WorkspaceLink item={group.target} active={isActive && !isExpanded && selection.itemId === group.target.id} onNavigate={onNavigate} source={source}>
+      {group.target ? <WorkspaceLink item={target} active={isActive && !isExpanded && selection.itemId === group.target.id} onNavigate={onNavigate} source={source}>
         {label}
       </WorkspaceLink> : <Button variant="ghost" className={rowClass} aria-expanded={isExpanded} aria-controls={panelId} onClick={() => toggleGroup(group.id)}>
         {label}{expansion}

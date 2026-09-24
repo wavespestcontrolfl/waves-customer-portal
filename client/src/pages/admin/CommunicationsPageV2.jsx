@@ -810,6 +810,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // still gets the prefilled text/recipient, but sends as a plain manual
   // SMS — the AI draft stays pending for the owner (codex P2).
   const smsOutletContext = useOutletContext();
+  const location = useLocation();
+  const routeNeedsResponse = new URLSearchParams(location.search).get("needsResponse") === "true";
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
@@ -916,8 +918,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
   };
   // PR 4 — status filter chips, reply-from lock.
-  const [statusFilter, setStatusFilter] = useState("all");
-  const statusFilterRef = useRef("all");
+  const initialStatusFilter = routeNeedsResponse ? "unanswered" : "all";
+  const [statusFilter, setStatusFilter] = useState(initialStatusFilter);
+  const statusFilterRef = useRef(initialStatusFilter);
+  const routeLocationKeyRef = useRef(location.key);
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
   const [smsHasMore, setSmsHasMore] = useState(false);
@@ -1072,6 +1076,17 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSmsRefreshing(false);
     });
   }, [customer?.id]);
+
+  useEffect(() => {
+    if (!active || customer || routeLocationKeyRef.current === location.key) return;
+    routeLocationKeyRef.current = location.key;
+    const nextFilter = routeNeedsResponse ? "unanswered" : "all";
+    statusFilterRef.current = nextFilter;
+    setStatusFilter(nextFilter);
+    setSmsView("threads");
+    setActiveThread(null);
+    void loadData(smsSearchRef.current, { statusFilter: nextFilter });
+  }, [active, customer, loadData, location.key, routeNeedsResponse]);
 
   useEffect(() => {
     smsSearchRef.current = smsSearch.trim();
