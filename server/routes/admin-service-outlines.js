@@ -1,6 +1,6 @@
 const express = require('express');
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const { wrapServiceEmail, ctaButton, colors } = require('../services/email-template');
@@ -19,7 +19,15 @@ const {
 
 const router = express.Router();
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// Admin-only: the router's mutations text/email the lawn program overview to
+// customers and leads under the Waves name and approve/rewrite the approved
+// safety/product wording every packet is built from. No technician client
+// surface ever reaches this router (AdminLoginPage routes a technician login
+// straight to /tech; the composer at EstimatesPageV2.jsx and the
+// content-module editor at InventoryPage.jsx are admin-shell-only), and its
+// own design doc calls for "Admin approves packet" / "Admin sends by
+// SMS/email" (ADMIN-BUG-R37).
+router.use(adminAuthenticate, requireAdmin);
 
 function publicUrlForToken(token) {
   return `${publicPortalUrl()}/service-outlines/${encodeURIComponent(token)}`;

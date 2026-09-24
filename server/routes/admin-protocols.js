@@ -804,6 +804,34 @@ function unmatchedPricedProtocolLines(items) {
 }
 
 // GET /api/admin/protocols/lawn-mix — generic tech-facing protocol preview.
+// Owner-only projection for lawn-mix (ADMIN-BUG-R44): neither this route nor
+// command-center below applied the file's own viewerSeesPricing rule, so a
+// technician received the vendor purchase price (bestPrice/costPerUnit) of
+// every protocol product plus the per-line and whole-job material-cost
+// (COGS) total — the same data the 2026-08-25 inventory role lockdown made
+// owner-only. Technicians keep the recipe (rates, mixing order, label
+// fields); pricing/materialCost fields are stripped.
+function stripLawnMixItemPricing(item) {
+  const stripMix = (mix) => {
+    if (!mix) return mix;
+    const { materialCost: _materialCost, materialCostSource: _materialCostSource, materialCostDetail: _materialCostDetail, ...rest } = mix;
+    return rest;
+  };
+  let product = item.product;
+  if (product) {
+    const { bestPrice: _bestPrice, costPerUnit: _costPerUnit, costUnit: _costUnit, needsPricing: _needsPricing, ...rest } = product;
+    product = rest;
+  }
+  return {
+    ...item,
+    product,
+    jobMix: stripMix(item.jobMix),
+    fullTankMix: stripMix(item.fullTankMix),
+    plannedMix: stripMix(item.plannedMix),
+    plannedFullTankMix: stripMix(item.plannedFullTankMix),
+  };
+}
+
 router.get('/lawn-mix', async (req, res, next) => {
   try {
     const protocols = require('../config/protocols.json');
@@ -981,9 +1009,9 @@ router.get('/lawn-mix', async (req, res, next) => {
         expiresAt: calibration.expires_at || null,
       } : null,
       areaSqft,
-      materialCostSummary,
-      items,
-      selectedItems,
+      materialCostSummary: viewerSeesPricing(req) ? materialCostSummary : null,
+      items: viewerSeesPricing(req) ? items : items.map(stripLawnMixItemPricing),
+      selectedItems: viewerSeesPricing(req) ? selectedItems : selectedItems.map(stripLawnMixItemPricing),
       mixingOrder: buildMixOrder(selectedItems.map((item) => ({
         raw: item.raw,
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
@@ -1163,7 +1191,12 @@ router.post('/lawn/drafts/:id/publish', requireAdmin, async (req, res, next) => 
 
 // GET /api/admin/protocols/lawn/command-center — office operating view that
 // connects treatment plans, inventory, service reports, assessments, and wiki.
-router.get('/lawn/command-center', async (req, res, next) => {
+// Admin-only (ADMIN-BUG-R44): hands back vendor purchase price/vendor for
+// every mapped product, colleagues' staff emails in the audit trail, and
+// unpublished draft protocol versions — this Service Library screen is not
+// in TECH_ALLOWED_PATH_PREFIXES (no technician UI reaches it), so it is an
+// owner surface end to end rather than a per-field projection.
+router.get('/lawn/command-center', requireAdmin, async (req, res, next) => {
   try {
     const serviceDate = req.query.date ? dateOnlyToETNoon(req.query.date) : new Date();
     const protocolId = req.query.protocolId || null;

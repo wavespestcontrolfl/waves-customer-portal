@@ -484,6 +484,7 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
       .select(
         'ss.id',
         'ss.customer_id',
+        'ss.technician_id',
         // The zone-marking map must center on the BOOKED parcel: visit coords
         // first; the primary home only for non-divergent stamps — a divergent
         // stamp with no coords degrades to the map's missing_coordinates
@@ -494,6 +495,18 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
       )
       .first();
     if (!svc || !svc.customer_id) return res.status(404).json({ error: 'Service not found' });
+    // Ownership: a technician token must not read the precise coordinates,
+    // treatment-zone layout and termite/rodent station map of a customer the
+    // technician is not currently serving (ADMIN-BUG-R35; the customer-scoped
+    // sibling below is already requireAdmin).
+    {
+      const ownershipError = completionOwnershipError({
+        role: req.techRole,
+        actorTechnicianId: req.technicianId,
+        assignedTechnicianId: svc.technician_id,
+      });
+      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
     // Number(null) is 0 — a finite value that would sail past the payload's
     // missing_coordinates check and center the map at 0,0 (codex round-9 P2).
     return res.json(await buildPropertyMapPayload(svc.customer_id, coordOrNaN(svc.latitude), coordOrNaN(svc.longitude)));
@@ -990,6 +1003,19 @@ router.get('/:date?', async (req, res, next) => {
 // PATCH /api/admin/dispatch/:serviceId/note — save the staff-facing appointment note
 router.patch('/:serviceId/note', async (req, res, next) => {
   try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first('id', 'technician_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // Ownership: this route replaces the note wholesale with no history — a
+    // technician token must not be able to wipe another tech's visit notes
+    // (ADMIN-BUG-R35).
+    {
+      const ownershipError = completionOwnershipError({
+        role: req.techRole,
+        actorTechnicianId: req.technicianId,
+        assignedTechnicianId: svc.technician_id,
+      });
+      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
     const { notes } = req.body;
     const text = (notes == null ? '' : String(notes)).slice(0, 2000);
     const updated = await db('scheduled_services')
@@ -1780,6 +1806,28 @@ router.put('/:serviceId/status', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // A technician token is scoped to visits currently assigned to it — this
+    // route found the row by bare id with no ownership predicate, so a tech-1
+    // token could stamp/cancel/no-show tech-2's visit (ADMIN-BUG-R35). Admin
+    // requests stay unscoped.
+    {
+      const ownershipError = completionOwnershipError({
+        role: req.techRole,
+        actorTechnicianId: req.technicianId,
+        assignedTechnicianId: svc.technician_id,
+      });
+      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+    // Blast-radius actions that carry money or customer comms — a whole-
+    // series/following cancel (every future sibling, recurring plan stopped)
+    // and no_show (invoice void + card-on-file fee charge) — stay admin-only
+    // even on the tech's own visit; the mobile UI never renders a manual
+    // no-show button (removed 2026-07-31) and reaches series/following cancel
+    // only from the office-facing schedule surfaces.
+    if (req.techRole !== 'admin' && (toStatus === 'no_show' || (toStatus === 'cancelled' && ['following', 'series'].includes(scope)))) {
+      return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+    }
 
     // ⛔ 'completed' is NOT a bare status here. Only POST /:serviceId/complete
     // mints the service_records row + invoice; flipping the row to completed
@@ -2800,6 +2848,15 @@ router.put('/:serviceId/reorder', async (req, res, next) => {
         .where({ id: req.params.serviceId })
         .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
       if (!prov) { found = false; return; } // pre-fence behavior: unknown id was a silent no-op
+      // Ownership: prov.technician_id was previously used only as a stale-row
+      // fence, never checked against the caller — a technician token could
+      // rewrite another tech's route order (ADMIN-BUG-R35).
+      const ownershipError = completionOwnershipError({
+        role: req.techRole,
+        actorTechnicianId: req.technicianId,
+        assignedTechnicianId: prov.technician_id,
+      });
+      if (ownershipError) throw Object.assign(new Error(ownershipError.payload.error), { code: 'NOT_ASSIGNED', ownershipError });
       await lockTechDays(trx, [{ techId: prov.technician_id, date: prov.day }]);
       const updated = await trx('scheduled_services')
         .where({ id: req.params.serviceId })
@@ -2822,6 +2879,7 @@ router.put('/:serviceId/reorder', async (req, res, next) => {
     res.json({ success: true, ...(found ? {} : { updated: 0 }) });
   } catch (err) {
     if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
+    if (err.code === 'NOT_ASSIGNED') return res.status(err.ownershipError.status).json(err.ownershipError.payload);
     next(err);
   }
 });
@@ -2846,6 +2904,14 @@ router.put('/reorder/bulk', async (req, res, next) => {
       for (const item of order || []) {
         const prov = byId.get(String(item.serviceId));
         if (!prov) continue; // pre-fence behavior: unknown id was a silent no-op
+        // Ownership: a technician token may only reorder its OWN visits — a
+        // row belonging to another tech is skipped, same as an unknown id
+        // (ADMIN-BUG-R35).
+        if (completionOwnershipError({
+          role: req.techRole,
+          actorTechnicianId: req.technicianId,
+          assignedTechnicianId: prov.technician_id,
+        })) continue;
         const updated = await trx('scheduled_services')
           .where({ id: item.serviceId })
           .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [prov.day])
@@ -2872,11 +2938,31 @@ router.put('/reorder/bulk', async (req, res, next) => {
   }
 });
 
+// Owner-only vendor/COGS columns on products_catalog (same rule as
+// admin-inventory's OWNER_ONLY_PRODUCT_FIELDS / stripOwnerPricing, the
+// 2026-08-25 role lockdown — "per-product cost/COGS fields — owner-only").
+// This route selected the raw row with none of that projection
+// (ADMIN-BUG-R43); pest-recap.js's own read of this same table already
+// avoids the trap with an explicit agronomic select list.
+const CATALOG_OWNER_ONLY_FIELDS = [
+  'best_price', 'best_vendor', 'best_vendor_pricing_id',
+  'best_price_amount_cached', 'best_price_vendor_id_cached',
+  'best_price_updated_at', 'best_price_status',
+  'cost_per_unit', 'cost_unit', 'monthly_cost_estimate',
+  'needs_pricing', 'siteone_sku', 'auto_reorder_vendor_id', 'reorder_quantity',
+];
+function stripCatalogOwnerPricing(row) {
+  const out = { ...row };
+  for (const key of CATALOG_OWNER_ONLY_FIELDS) delete out[key];
+  return out;
+}
+
 // GET /api/admin/dispatch/products/catalog
 router.get('/products/catalog', async (req, res, next) => {
   try {
     const products = await db('products_catalog').where({ active: true }).orderBy('category').orderBy('name');
-    res.json({ products });
+    const isAdminRequest = req.techRole === 'admin';
+    res.json({ products: isAdminRequest ? products : products.map(stripCatalogOwnerPricing) });
   } catch (err) { next(err); }
 });
 
@@ -4045,6 +4131,19 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       .first('id', 'technician_id', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // Ownership: this route ran WITHOUT the tech-assignment check the
+    // tech-track twin (tech-track.js) already enforces — a technician token
+    // could rain-out (and, at scope='route', move every remaining stop on)
+    // another technician's day (ADMIN-BUG-R35).
+    {
+      const ownershipError = completionOwnershipError({
+        role: req.techRole,
+        actorTechnicianId: req.technicianId,
+        assignedTechnicianId: svc.technician_id,
+      });
+      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+
     if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
       return res.status(409).json({
         error: "This job is scheduled for a future date — rain-out applies to today's route.",
@@ -4053,6 +4152,12 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
     }
 
     const { reasonCode, scope, target, notifyCustomer, customerNote } = req.body || {};
+    // Blast-radius: scope='route' moves every remaining stop on the tech's
+    // day and texts each of those customers — admin-only even on the tech's
+    // own visit (same rationale as series/following cancel above).
+    if (req.techRole !== 'admin' && scope === 'route') {
+      return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+    }
     if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
       return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
     }
@@ -4785,6 +4890,29 @@ function pastRescheduleDateError(newDate) {
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+    // Ownership: this route found the anchor visit by bare id with no
+    // ownership predicate — a technician token could move any customer's
+    // (or a whole recurring plan's) visit (ADMIN-BUG-R35). Admin requests
+    // stay unscoped and skip this extra lookup entirely — completionOwnershipError
+    // is a no-op for role==='admin' anyway, and several existing admin-path
+    // tests exercise pure window-format validation before anything selects
+    // this row.
+    if (req.techRole !== 'admin') {
+      const anchor = await db('scheduled_services').where({ id: req.params.serviceId }).first('id', 'technician_id');
+      if (!anchor) return res.status(404).json({ error: 'Service not found' });
+      const ownershipError = completionOwnershipError({
+        role: req.techRole,
+        actorTechnicianId: req.technicianId,
+        assignedTechnicianId: anchor.technician_id,
+      });
+      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+    // Blast-radius: scope='series' moves every future occurrence of the
+    // plan — admin-only even on the tech's own visit (same rationale as
+    // series/following cancel).
+    if (req.techRole !== 'admin' && scope === 'series') {
+      return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+    }
     // Client-minted idempotency key for the series operation (see
     // rebooker.rescheduleSeries operationKey) — optional, string only.
     const operationKey = typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120

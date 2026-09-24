@@ -1139,11 +1139,14 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   }, [active, customer?.id, customerMessages, customerReadScope, markMessagesRead]);
 
   useEffect(() => {
-    if (customer) return;
+    // Server-enforced too (ADMIN-BUG-R38): the route is requireAdmin, so a
+    // technician's fetch would just 403 — skip it so the tab doesn't render
+    // a control it can never use.
+    if (customer || !smsIsAdminRole) return;
     adminFetch("/admin/communications/ai-auto-reply-status")
       .then((d) => setAiAutoReply(d.enabled))
       .catch(() => {});
-  }, []);
+  }, [smsIsAdminRole]);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -2590,7 +2593,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         {recoveryWarning && <ActionFeedback error>{recoveryWarning}</ActionFeedback>}
         <fieldset disabled={sending} className="m-0 min-w-0 border-0 p-0">
         {" "}
-        {!customer && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
+        {/* Owner-only (ADMIN-BUG-R38): company-wide AI auto-reply switch. */}
+        {!customer && smsIsAdminRole && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
           <button
             type="button"
             onClick={toggleAiAutoReply}
@@ -3540,7 +3544,7 @@ export default function CommunicationsPageV2() {
         secondaryAriaLabel="Template kind"
         secondaryNavGridClassName="grid-cols-2"
       />}
-      {activeTab === "events" && <NotificationEventsTabV2 />}
+      {activeTab === "events" && <NotificationEventsTabV2 isAdminRole={isAdminRole} />}
       {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 />}
