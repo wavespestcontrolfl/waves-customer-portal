@@ -101,6 +101,16 @@ describe('Claude FAST fallback', () => {
       .resolves.toEqual({ intent: null, assessmentType: null, method: 'ai' });
   });
 
+  test('allowModel is asked only when the regex misses; a "no" skips the model', async () => {
+    const allowModel = jest.fn(async () => false);
+    await expect(classifyPhotoDiagnosisIntent('Look at this by the driveway', { allowModel }))
+      .resolves.toEqual({ intent: null, assessmentType: null, method: 'none' });
+    expect(allowModel).toHaveBeenCalledTimes(1);
+    expect(mockDispatch).not.toHaveBeenCalled();
+    await classifyPhotoDiagnosisIntent('what is this in my lawn?', { allowModel });
+    expect(allowModel).toHaveBeenCalledTimes(1);
+  });
+
   test('a thrown dispatch is not a diagnosis and never throws', async () => {
     mockDispatch.mockRejectedValue(new Error('provider down'));
     await expect(classifyPhotoDiagnosisIntent('Here is my receipt'))

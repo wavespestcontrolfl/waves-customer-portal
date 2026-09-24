@@ -19,11 +19,15 @@
  *
  * Sibling for inbound PHOTO texts (services/photo-text-triage.js):
  *
- *   classifyPhotoDiagnosisIntent(body) -> Promise<{
+ *   classifyPhotoDiagnosisIntent(body, { allowModel }) -> Promise<{
  *     intent: 'photo_diagnosis' | null,
  *     assessmentType: 'lawn' | 'pest' | null,
- *     method: 'regex' | 'claude' | 'none',
+ *     method: 'regex' | 'ai' | 'none',
  *   }>
+ *
+ * allowModel (async, default always-yes) is asked right before the paid
+ * model call — the caller's budget claim — and a "no" returns method 'none'
+ * without calling the model.
  *
  * Only meaningful for a message that already carries an image. Same shape
  * of decision: regex fast path first (an identification question such as
@@ -240,8 +244,11 @@ Classify by what the customer is ASKING, not by which words appear.`;
   }
 }
 
-async function classifyPhotoDiagnosisIntent(body) {
-  return regexClassifyPhoto(body) || claudeClassifyPhoto(body);
+async function classifyPhotoDiagnosisIntent(body, { allowModel = async () => true } = {}) {
+  const fast = regexClassifyPhoto(body);
+  if (fast) return fast;
+  if (!(await allowModel())) return { intent: null, assessmentType: null, method: 'none' };
+  return claudeClassifyPhoto(body);
 }
 
 module.exports = {

@@ -64,10 +64,10 @@ postgres('photo-text triage guards on PostgreSQL', () => {
 
   test('claim: once per message; a replay is already_triaged and keeps the first stamp', async () => {
     const id = await message();
-    await expect(triage.claimTriage(id)).resolves.toBe('claimed');
+    await expect(triage.claimSlot('vision', id)).resolves.toBe('claimed');
     const first = await trx('messages').where({ id }).first('photo_triage_at');
     expect(first.photo_triage_at).toBeInstanceOf(Date);
-    await expect(triage.claimTriage(id)).resolves.toBe('already_triaged');
+    await expect(triage.claimSlot('vision', id)).resolves.toBe('already_triaged');
     const second = await trx('messages').where({ id }).first('photo_triage_at');
     expect(second.photo_triage_at.getTime()).toBe(first.photo_triage_at.getTime());
   });
@@ -79,10 +79,35 @@ postgres('photo-text triage guards on PostgreSQL', () => {
     await message({ createdAt: new Date(dayStart.getTime() - 3 * 3600e3), triagedAt: new Date(dayStart.getTime() - 3600e3) });
     await message({ triagedAt: new Date() });
     const next = await message();
-    await expect(triage.claimTriage(next)).resolves.toBe('claimed');
+    await expect(triage.claimSlot('vision', next)).resolves.toBe('claimed');
     const overCap = await message();
-    await expect(triage.claimTriage(overCap)).resolves.toBe('cap_reached');
+    await expect(triage.claimSlot('vision', overCap)).resolves.toBe('cap_reached');
     expect((await trx('messages').where({ id: overCap }).first('photo_triage_at')).photo_triage_at).toBeNull();
+  });
+
+  test('classifier slot: its own stamp and cap, independent of the vision slot', async () => {
+    process.env.PHOTO_TRIAGE_DAILY_CAP = '5';
+    process.env.PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP = '2';
+    const first = await message();
+    await expect(triage.claimSlot('classifier', first)).resolves.toBe('claimed');
+    await expect(triage.claimSlot('classifier', first)).resolves.toBe('already_classified');
+    const row = await trx('messages').where({ id: first }).first('photo_triage_at', 'photo_triage_classified_at');
+    expect(row.photo_triage_at).toBeNull();
+    expect(row.photo_triage_classified_at).toBeInstanceOf(Date);
+    await expect(triage.claimSlot('classifier', await message())).resolves.toBe('claimed');
+    await expect(triage.claimSlot('classifier', await message())).resolves.toBe('classifier_cap_reached');
+    // The vision budget is untouched by classifier stamps.
+    await expect(triage.visionBudgetLeft()).resolves.toBe(true);
+    await expect(triage.claimSlot('vision', first)).resolves.toBe('claimed');
+    delete process.env.PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP;
+  });
+
+  test('vision budget read is non-consuming', async () => {
+    process.env.PHOTO_TRIAGE_DAILY_CAP = '1';
+    await expect(triage.visionBudgetLeft()).resolves.toBe(true);
+    await expect(triage.visionBudgetLeft()).resolves.toBe(true);
+    await message({ triagedAt: new Date() });
+    await expect(triage.visionBudgetLeft()).resolves.toBe(false);
   });
 
   test('pending draft: inbound anchor from the same phone (any format), flagged phone, or same customer', async () => {

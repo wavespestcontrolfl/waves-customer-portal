@@ -10,7 +10,14 @@
  * question). This lane NEVER sends: the draft is the terminal artifact and
  * only an owner's Approve in /admin/drafts puts a message on the wire.
  *
- * Called fire-and-forget from the Twilio inbound webhook AFTER the TwiML ack.
+ * Two steps, both called from the Twilio inbound webhook AFTER the TwiML ack:
+ *   assessPhotoTriageCandidacy — every cheap guard, then the intent check
+ *     (regex fast path; the paid FAST classifier only with budget left).
+ *     Awaited once, BEFORE the legacy AI draft step, whose gate reads the
+ *     result (legacyAiDraftsAllowed): a triage candidate never also gets a
+ *     legacy draft that would then block its own photo-triage draft.
+ *   runPhotoTriage — takes that candidacy (the classifier is never re-run),
+ *     claims the vision slot, runs the assessment, parks the draft.
  * Every guard runs before any paid call:
  *   - gate off → fully inert (no DB read, no model call);
  *   - no image media, tech lines, and the AI assistant line are skipped;
@@ -19,12 +26,19 @@
  *   - an opted-out / suppressed number is skipped (the canonical
  *     messaging_suppression check + notification_prefs.sms_enabled); an
  *     unknown suppression state fails closed;
- *   - a conversation that already has a pending draft is skipped, and the
+ *   - a conversation that already has a pending draft is skipped (before
+ *     any model call), and the
  *     check is repeated atomically with the draft insert under a per-contact
  *     advisory lock (two photo texts finishing together park one draft);
+ *   - no model call at all once today's vision budget is spent (a
+ *     non-consuming read of the count);
+ *   - the paid classifier (captions the regex can't place) is bounded by its
+ *     own per-message claim (messages.photo_triage_classified_at) and
+ *     PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP per ET day (default = the vision cap);
  *   - one triage per message (messages.photo_triage_at claim) and at most
  *     PHOTO_TRIAGE_DAILY_CAP claims (= vision runs) per ET day, both decided
- *     in one transaction under an advisory lock.
+ *     in one transaction under an advisory lock. A classifier "no" never
+ *     burns a vision slot.
  *
  * Draft copy is built ONLY from the customer-safe teaser allowlists the
  * public funnels already publish pre-capture — lawn: buildTeaser's gated
@@ -37,7 +51,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
 const { classifyPhotoDiagnosisIntent } = require('./sms-service-intent');
 const {
   createAdminAssessment,
@@ -56,13 +70,23 @@ const DRAFT_INTENT = 'photo_triage';
 const ASSESSMENT_SOURCE = 'auto_triage';
 const DEFAULT_DAILY_CAP = 20;
 const MAX_DRAFT_SEGMENTS = 2;
-const CAP_LOCK_KEY = 'photo_triage_daily_cap';
+// Per-message stamp column → its own ET-day cap. Vision runs and paid
+// classifier calls are budgeted separately.
+const SLOTS = {
+  vision: { column: 'photo_triage_at', lockKey: 'photo_triage_daily_cap', taken: 'already_triaged', full: 'cap_reached' },
+  classifier: { column: 'photo_triage_classified_at', lockKey: 'photo_triage_classifier_cap', taken: 'already_classified', full: 'classifier_cap_reached' },
+};
 const CONTACT_LOCK_KEY = 'photo_triage_contact';
 const LAST10_SQL = (column) => `RIGHT(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10)`;
 
-function dailyCap() {
-  const parsed = Number.parseInt(process.env.PHOTO_TRIAGE_DAILY_CAP, 10);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_DAILY_CAP;
+function capFromEnv(name, fallback) {
+  const parsed = Number.parseInt(process.env[name], 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function dailyCap(slot = 'vision') {
+  const vision = capFromEnv('PHOTO_TRIAGE_DAILY_CAP', DEFAULT_DAILY_CAP);
+  return slot === 'vision' ? vision : capFromEnv('PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP', vision);
 }
 
 function phoneKey(phone) {
@@ -117,25 +141,37 @@ async function hasPendingDraft(from, customerId, conn = db) {
   return Boolean(row);
 }
 
-// One transaction under a global advisory lock: count today's claims (ET
-// day), refuse at the cap, otherwise stamp THIS message — a message that is
-// already stamped is never analyzed twice.
-async function claimTriage(messageId) {
-  const cap = dailyCap();
+// Stamps of `column` taken since the start of this ET day (range-scoped to
+// messages created in the last two days, which covers every same-day stamp).
+function slotsTakenToday(conn, column) {
+  const dayStart = parseETDateTime(`${etDateString()}T00:00`);
+  return conn('messages')
+    .where('channel', 'sms')
+    .where('created_at', '>=', new Date(dayStart.getTime() - 24 * 60 * 60 * 1000))
+    .where(column, '>=', dayStart)
+    .count('* as n')
+    .then(([row]) => Number(row.n));
+}
+
+// Non-consuming: is any of today's vision budget left? Read before any
+// model call so a spent budget costs nothing further.
+async function visionBudgetLeft() {
+  return (await slotsTakenToday(db, SLOTS.vision.column)) < dailyCap('vision');
+}
+
+// One transaction under the slot's advisory lock: count today's stamps,
+// refuse at the cap, otherwise stamp THIS message — a message already
+// stamped for the slot is never charged (or analyzed) twice.
+async function claimSlot(slot, messageId) {
+  const { column, lockKey, taken, full } = SLOTS[slot];
   return db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
-    const dayStart = parseETDateTime(`${etDateString()}T00:00`);
-    const [{ n }] = await trx('messages')
-      .where('channel', 'sms')
-      .where('created_at', '>=', new Date(dayStart.getTime() - 24 * 60 * 60 * 1000))
-      .where('photo_triage_at', '>=', dayStart)
-      .count('* as n');
-    if (Number(n) >= cap) return 'cap_reached';
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
+    if ((await slotsTakenToday(trx, column)) >= dailyCap(slot)) return full;
     const claimed = await trx('messages')
       .where({ id: messageId })
-      .whereNull('photo_triage_at')
-      .update({ photo_triage_at: db.fn.now() }, ['id']);
-    return claimed.length ? 'claimed' : 'already_triaged';
+      .whereNull(column)
+      .update({ [column]: db.fn.now() }, ['id']);
+    return claimed.length ? 'claimed' : taken;
   });
 }
 
@@ -199,25 +235,58 @@ async function runGuards({ messageId, smsLogId, from, numberType, isAiNumber, cu
   return null;
 }
 
-/**
- * @returns {Promise<{ status: 'skipped', reason: string } | { status: 'drafted', draftId, assessmentId, type }>}
- */
-async function triageInboundPhotoText({
+const notCandidate = (reason) => ({ candidate: false, reason });
+
+// Cheap guards first, then the intent check; the paid classifier runs only
+// with vision budget left AND a classifier slot claimed for this message.
+// Never throws past the caller's catch; never writes except the classifier
+// slot stamp.
+async function assessPhotoTriageCandidacy({
   inboundTouchpoint, smsLogEntry, body, from, numberType, isAiNumber, customer, media,
 }) {
-  if (!gateEnvValue(GATE)) return { status: 'skipped', reason: 'gate_off' };
+  if (!gateEnvValue(GATE)) return notCandidate('gate_off');
   const messageId = inboundTouchpoint?.message?.id || null;
   const smsLogId = smsLogEntry?.id || null;
   const images = imageMedia(media);
 
   const guard = await runGuards({ messageId, smsLogId, from, numberType, isAiNumber, customer, images });
-  if (guard) return { status: 'skipped', reason: guard };
+  if (guard) return notCandidate(guard);
+  if (await hasPendingDraft(from, customer?.id)) return notCandidate('pending_draft');
+  if (!(await visionBudgetLeft())) return notCandidate(SLOTS.vision.full);
 
-  const intent = await classifyPhotoDiagnosisIntent(body);
-  if (intent.intent !== 'photo_diagnosis') return { status: 'skipped', reason: 'not_diagnosis' };
-  if (await hasPendingDraft(from, customer?.id)) return { status: 'skipped', reason: 'pending_draft' };
+  let classifierClaim = null;
+  const intent = await classifyPhotoDiagnosisIntent(body, {
+    allowModel: async () => {
+      classifierClaim = await claimSlot('classifier', messageId);
+      return classifierClaim === 'claimed';
+    },
+  });
+  if (intent.intent !== 'photo_diagnosis') {
+    return notCandidate(classifierClaim && classifierClaim !== 'claimed' ? classifierClaim : 'not_diagnosis');
+  }
+  return { candidate: true, intent, messageId, smsLogId, images, body, from, customer };
+}
 
-  const claim = await claimTriage(messageId);
+// The legacy AI draft step's gate. A photo-triage candidate's own draft is
+// the reply for that text; a legacy draft on the same inbound would sit in
+// the queue first and make the triage skip as "pending draft".
+function legacyAiDraftsAllowed(candidacy) {
+  if (!isEnabled('legacyAiDrafts')) return false;
+  if (candidacy?.candidate) {
+    logger.info(`[photo-triage] legacy AI draft deferred to photo triage for message ${candidacy.messageId}`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @returns {Promise<{ status: 'skipped', reason: string } | { status: 'drafted', draftId, assessmentId, type }>}
+ */
+async function runPhotoTriage(candidacy) {
+  if (!candidacy?.candidate) return { status: 'skipped', reason: candidacy?.reason || 'not_candidate' };
+  const { intent, messageId, smsLogId, images, body, from, customer } = candidacy;
+
+  const claim = await claimSlot('vision', messageId);
   if (claim !== 'claimed') {
     logger.info(`[photo-triage] message ${messageId} skipped: ${claim}`);
     return { status: 'skipped', reason: claim };
@@ -249,7 +318,9 @@ async function triageInboundPhotoText({
 }
 
 module.exports = {
-  triageInboundPhotoText,
+  assessPhotoTriageCandidacy,
+  legacyAiDraftsAllowed,
+  runPhotoTriage,
   DRAFT_INTENT,
   _test: {
     dailyCap,
@@ -257,7 +328,8 @@ module.exports = {
     isInternalSender,
     isOptedOut,
     hasPendingDraft,
-    claimTriage,
+    claimSlot,
+    visionBudgetLeft,
     parkDraftUnlessPending,
     teaserFindingLabel,
     buildDraftText,

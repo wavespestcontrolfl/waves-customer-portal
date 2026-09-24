@@ -1377,7 +1377,20 @@ router.post('/sms', async (req, res) => {
     // booked, call us" while the customer actually had an appointment. Any
     // scheduling-intent inbound skips the auto-reply entirely and falls
     // through to Virginia's inbox.
-    const legacyAiDraftsEnabled = isEnabled('legacyAiDrafts');
+    // PHOTO-TEXT AUTO-TRIAGE (GATE_PHOTO_TRIAGE, default OFF), step 1: is
+    // this photo text a lawn/plant/pest "what is this"? Decided ONCE here —
+    // the service owns every guard (gate, image media, line type, internal
+    // sender, opt-out, pending draft, daily budgets) and runs the paid
+    // classifier at most once — because the legacy draft step's gate reads
+    // it: a triage candidate gets the photo-triage draft, never a legacy one.
+    const photoTriage = await require('../services/photo-text-triage').assessPhotoTriageCandidacy({
+      inboundTouchpoint, smsLogEntry, body: Body, from: From,
+      numberType: numberConfig.type, isAiNumber, customer, media: inboundMedia,
+    }).catch((err) => {
+      logger.error(`[photo-triage] candidacy check failed: ${err.message}`);
+      return { candidate: false, reason: 'error' };
+    });
+    const legacyAiDraftsEnabled = require('../services/photo-text-triage').legacyAiDraftsAllowed(photoTriage);
 
     if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
       try {
@@ -1565,16 +1578,12 @@ router.post('/sms', async (req, res) => {
       logger.info('[sms-intent] SMS reaction detected; skipping legacy AI draft');
     }
 
-    // PHOTO-TEXT AUTO-TRIAGE (GATE_PHOTO_TRIAGE, default OFF): a photo text
-    // that reads like a lawn/plant/pest "what is this" runs the admin photo
-    // assessment and parks ONE pending draft reply for owner approval —
-    // never a send. The service owns every guard (gate, image media, line
-    // type, internal sender, opt-out, pending draft, per-message claim,
-    // daily vision cap); detached so its vision call never holds this block.
-    void require('../services/photo-text-triage').triageInboundPhotoText({
-      inboundTouchpoint, smsLogEntry, body: Body, from: From,
-      numberType: numberConfig.type, isAiNumber, customer, media: inboundMedia,
-    }).catch((err) => logger.error(`[photo-triage] inbound triage failed: ${err.message}`));
+    // PHOTO-TEXT AUTO-TRIAGE, step 2: a candidate (step 1 above) runs the
+    // admin photo assessment and parks ONE pending draft reply for owner
+    // approval — never a send. A non-candidate is a no-op. Detached so the
+    // vision call never holds this block.
+    void require('../services/photo-text-triage').runPhotoTriage(photoTriage)
+      .catch((err) => logger.error(`[photo-triage] inbound triage failed: ${err.message}`));
 
     // SMS SHADOW DRAFTER (brand-voice loop, Phase B) — silently record what
     // the house-voice AI would have replied. status='shadow' rows never send

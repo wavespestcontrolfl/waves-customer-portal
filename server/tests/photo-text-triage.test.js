@@ -10,7 +10,7 @@ function resetState() {
     tech: null,
     prefs: null,
     pendingDraft: [], // successive md.first() results (pre-claim check, pre-insert recheck)
-    claimsToday: 0,
+    counts: { photo_triage_at: 0, photo_triage_classified_at: 0 },
     alreadyTriaged: false,
     message: null,
     conversationCustomerId: null,
@@ -51,7 +51,7 @@ function mockQuery(table) {
     if (table === 'customers') return mockState.customerRow;
     return null;
   };
-  q.count = async () => [{ n: mockState.claimsToday }];
+  q.count = async () => [{ n: mockState.counts[q.lastWhere?.[0]] ?? 0 }];
   q.update = async (patch) => {
     mockState.updates.push({ table, patch });
     return mockState.alreadyTriaged ? [] : [{ id: 'msg-1' }];
@@ -112,7 +112,12 @@ const { countSegments } = require('../services/messaging/segment-counter');
 const { CONDITION_LABEL_VALUES } = require('../services/lawn-diagnostic-report');
 const triage = require('../services/photo-text-triage');
 
-const { triageInboundPhotoText } = triage;
+// The webhook's two steps, in order (candidacy is awaited before the legacy
+// draft step; the run is detached after it).
+async function triageInboundPhotoText(args) {
+  return triage.runPhotoTriage(await triage.assessPhotoTriageCandidacy(args));
+}
+const AMBIGUOUS = 'Look at this by the driveway';
 const { buildDraftText, dailyCap, imageMedia, teaserFindingLabel } = triage._test;
 
 const MESSAGE_ID = 'dddddddd-eeee-4fff-8000-111111111111';
@@ -159,6 +164,7 @@ beforeEach(() => {
   mockSuppression.state = { suppressionLoaded: true };
   process.env = { ...savedEnv, GATE_PHOTO_TRIAGE: 'true' };
   delete process.env.PHOTO_TRIAGE_DAILY_CAP;
+  delete process.env.PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP;
   delete process.env.ADAM_PHONE;
   mockState.message = { id: MESSAGE_ID, direction: 'inbound', conversation_id: 'conv-1', media: JSON.stringify(MEDIA) };
   mockState.conversationCustomerId = CUSTOMER.id;
@@ -241,17 +247,73 @@ describe('guards (all before any paid call)', () => {
 
   test('daily cap: default 20, env override, and 0 turns the lane off', async () => {
     expect(dailyCap()).toBe(20);
-    mockState.claimsToday = 20;
+    mockState.counts.photo_triage_at = 20;
     await expectSkip({}, 'cap_reached');
     process.env.PHOTO_TRIAGE_DAILY_CAP = '25';
     expect(dailyCap()).toBe(25);
     resetState();
     mockState.message = { id: MESSAGE_ID, direction: 'inbound', media: JSON.stringify(MEDIA) };
-    mockState.claimsToday = 0;
     process.env.PHOTO_TRIAGE_DAILY_CAP = '0';
     await expectSkip({}, 'cap_reached');
     process.env.PHOTO_TRIAGE_DAILY_CAP = 'lots';
     expect(dailyCap()).toBe(20);
+  });
+});
+
+describe('paid classifier budget (captions the regex cannot place)', () => {
+  beforeEach(() => mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'lawn' } }));
+
+  test('vision budget spent → the classifier is never called', async () => {
+    mockState.counts.photo_triage_at = 20;
+    await expect(triageInboundPhotoText(input({ body: AMBIGUOUS })))
+      .resolves.toEqual({ status: 'skipped', reason: 'cap_reached' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockState.updates).toEqual([]);
+  });
+
+  test('pending draft → the classifier is never called', async () => {
+    mockState.pendingDraft = [{ id: 'other-draft' }];
+    await expect(triageInboundPhotoText(input({ body: AMBIGUOUS })))
+      .resolves.toEqual({ status: 'skipped', reason: 'pending_draft' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('budget available → classifier slot claimed, model called once, then the vision slot', async () => {
+    const result = await triageInboundPhotoText(input({ body: AMBIGUOUS }));
+    expect(result).toMatchObject({ status: 'drafted', type: 'lawn' });
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockState.updates.map((u) => u.patch)).toEqual([
+      { photo_triage_classified_at: 'NOW' },
+      { photo_triage_at: 'NOW' },
+    ]);
+    expect(JSON.parse(mockState.inserts.message_drafts[0].flags).classifier_method).toBe('ai');
+  });
+
+  test('a classifier "no" spends a classifier slot but never a vision slot', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'none' } });
+    await expect(triageInboundPhotoText(input({ body: AMBIGUOUS })))
+      .resolves.toEqual({ status: 'skipped', reason: 'not_diagnosis' });
+    expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_classified_at: 'NOW' }]);
+  });
+
+  test('classifier cap reached → no model call, no vision; defaults to the vision cap', async () => {
+    expect(dailyCap('classifier')).toBe(20);
+    process.env.PHOTO_TRIAGE_DAILY_CAP = '7';
+    expect(dailyCap('classifier')).toBe(7);
+    process.env.PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP = '3';
+    expect(dailyCap('classifier')).toBe(3);
+    mockState.counts.photo_triage_classified_at = 3;
+    await expect(triageInboundPhotoText(input({ body: AMBIGUOUS })))
+      .resolves.toEqual({ status: 'skipped', reason: 'classifier_cap_reached' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockLadder).not.toHaveBeenCalled();
+    expect(mockState.updates).toEqual([]);
+  });
+
+  test('a regex fast-path caption never touches the classifier budget', async () => {
+    mockState.counts.photo_triage_classified_at = 999;
+    await expect(triageInboundPhotoText(input())).resolves.toMatchObject({ status: 'drafted' });
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
 
