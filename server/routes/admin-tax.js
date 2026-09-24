@@ -232,18 +232,32 @@ router.post('/rates', async (req, res, next) => {
       // date (codex P0, round 2) — applies regardless of past/present/future.
       // NOT scoped to active:true (codex round-7 P0): a still-eligible
       // OLD-SHAPE legacy row for that exact date is active:false, and
-      // excluding it here left it tied against its replacement. expiry_date
-      // is set to TODAY (not effectiveDate): the readers no longer gate
-      // eligibility on `active` at all (codex round-5 P0), so an identical
-      // effective_date with expiry_date still null/future would tie the
-      // discarded row against its replacement with no reliable ordering —
-      // dating its expiry to the moment of replacement excludes it
-      // immediately regardless of whether effectiveDate is past or still
-      // staged, and regardless of its own prior active/expiry state
-      // (codex round-6 P0).
-      await trx('tax_rates')
+      // excluding it here left it tied against its replacement. The
+      // readers no longer gate eligibility on `active` at all (codex
+      // round-5 P0), so an identical effective_date with expiry_date still
+      // null/future would tie the discarded row against its replacement
+      // with no reliable ordering (codex round-6 P0) — the discarded row
+      // gets an EMPTY window (expiry_date = its own effective_date): it was
+      // never the rate in force for any day, it is excluded from every
+      // reader for every date, and it is never displayed with an interval
+      // it did not hold (expiring it to TODAY stretched a historical row
+      // through today and gave a staged draft an expiry before its own
+      // effective date — codex round-2 P2). Its successor boundary is what
+      // moves to the replacement: a corrected historical row that already
+      // ended at the next rate hands that end date on (the latest bound
+      // among the replaced rows, or open-ended when any of them was).
+      const replacedRows = await trx('tax_rates')
         .where({ county: countyKey, effective_date: effectiveDate })
-        .update({ active: false, expiry_date: nowET });
+        .select('id', 'expiry_date');
+      let inheritedExpiry = null;
+      if (replacedRows.length) {
+        const bounds = replacedRows.map((row) => (row.expiry_date ? dateOnlyStamp(row.expiry_date) : null));
+        const bounded = bounds.filter((bound) => bound && bound > effectiveDate);
+        if (bounds.every(Boolean) && bounded.length) inheritedExpiry = bounded.sort().at(-1);
+        await trx('tax_rates')
+          .whereIn('id', replacedRows.map((row) => row.id))
+          .update({ active: false, expiry_date: effectiveDate });
+      }
 
       if (isImmediate) {
         // Retire ONLY the rate that was actually in force AT THE SUBMITTED
@@ -268,7 +282,7 @@ router.post('/rates', async (req, res, next) => {
       await trx('tax_rates').insert({
         county: countyKey, state: 'FL', state_rate: parsedStateRate, county_surtax: parsedCountySurtax,
         combined_rate: parsedStateRate + parsedCountySurtax,
-        effective_date: effectiveDate, service_zone: serviceZone, notes, active: true,
+        effective_date: effectiveDate, expiry_date: inheritedExpiry, service_zone: serviceZone, notes, active: true,
       });
     });
     res.json({ success: true });

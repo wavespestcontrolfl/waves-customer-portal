@@ -11283,12 +11283,21 @@ export function CompletionPanel({
     // partial-inspection denominator disappear along with the numerator
     // (codex round-9 P1). A newly placed pin is inherently explicit
     // regardless of outcome.
+    // A "Customer declined" visit inspected NOTHING — the server discards
+    // its whole station payload (no check rows, taps included), so the
+    // visit-specific counts are zero: leaving them at every visible pin
+    // let the termite report (which falls back to the typed counts when a
+    // visit has no check rows) tell the declined customer every station
+    // was inspected (codex round-2 P1).
     const isInspectionOnly = visitOutcome === "inspection_only";
-    const checkedKeys = isInspectionOnly
-      ? activeKeys.filter((key) => stationMoves[key]
-        || stationNew.some((station) => station.key === key)
-        || Object.prototype.hasOwnProperty.call(stationStatuses, key))
-      : activeKeys;
+    const isCustomerDeclined = visitOutcome === "customer_declined";
+    const checkedKeys = isCustomerDeclined
+      ? []
+      : isInspectionOnly
+        ? activeKeys.filter((key) => stationMoves[key]
+          || stationNew.some((station) => station.key === key)
+          || Object.prototype.hasOwnProperty.call(stationStatuses, key))
+        : activeKeys;
     const statusOf = (key) => stationStatuses[key] || "ok";
     const inaccessible = checkedKeys.filter((key) => statusOf(key) === "inaccessible").length;
     // Each program maps to ITS schema's count keys — never auto-write a key

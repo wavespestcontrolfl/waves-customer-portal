@@ -21,8 +21,12 @@ const db = require('../models/db');
 const router = require('../routes/admin-tax');
 const TaxCalculator = require('../services/tax-calculator');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { dateOnlyStamp } = require('../services/service-report/time-format');
 
-jest.setTimeout(30000);
+// 90s, not 30s: the per-block teardown now also restores the county's tax_rates
+// rows, and the customers delete alone runs ~9s on the audit clone (FK
+// cascades) — under DB contention the 30s hook budget tripped (afterAll).
+jest.setTimeout(90000);
 
 async function withServer(fn) {
   const app = express();
@@ -31,6 +35,20 @@ async function withServer(fn) {
   app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
   const server = app.listen(0);
   try { return await fn(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise((r) => server.close(r)); }
+}
+
+// Every Postgres block below snapshots its county's rows before touching
+// them and puts them back verbatim afterwards: an immediate-rate POST also
+// RETIRES the county's pre-existing predecessor (active=false + an expiry),
+// so deleting only the rows a block inserted still left the shared audit
+// database's baseline mutated for every later run and suite (codex round-2
+// P2). Delete-then-reinsert (ids included) restores the exact prior rows.
+async function snapshotCounty(county) {
+  const rows = await db('tax_rates').where({ county }).orderBy('effective_date');
+  return async function restore() {
+    await db('tax_rates').where({ county }).del();
+    if (rows.length) await db('tax_rates').insert(rows);
+  };
 }
 
 // Always at least 5 ET years past today, never a fixed calendar year (codex
@@ -43,9 +61,10 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
 (process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('future-dated county tax rate (real PG)', () => {
   const customerId = randomUUID();
   let before;
-  let insertedRateId;
+  let restoreCounty;
 
   beforeAll(async () => {
+    restoreCounty = await snapshotCounty('Sarasota');
     before = await db('tax_rates').where({ county: 'Sarasota' }).orderBy('effective_date');
     await db('customers').insert({
       id: customerId, first_name: 'TaxRepro', last_name: 'Commercial', phone: '9415550199',
@@ -55,10 +74,7 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
 
   afterAll(async () => {
     await db('customers').where({ id: customerId }).del();
-    // Delete the fixture rate this test inserted (codex round-1 P2) — the
-    // baseline Sarasota row is left alone, only the FUTURE row this test
-    // created.
-    if (insertedRateId) await db('tax_rates').where({ id: insertedRateId }).del();
+    await restoreCounty();
   });
 
   test('seed sanity: one active Sarasota row at 7% and the calculator uses it', async () => {
@@ -91,7 +107,6 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
     expect(current.active).toBe(true);
     expect(current.expiry_date).toBeNull();
     expect(future).toBeDefined();
-    insertedRateId = future.id;
 
     // EXPECTED: an invoice minted TODAY is still taxed at 7%, not 7.5%.
     const r = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 100);
@@ -123,8 +138,10 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   // today (never a fixed calendar date) so the test never goes stale.
   const laterDate = etDateString(addETDays(new Date(), -30));
   const backfillDate = etDateString(addETDays(new Date(), -90));
+  let restoreCounty;
 
   beforeAll(async () => {
+    restoreCounty = await snapshotCounty(county);
     await db('customers').insert({
       id: customerId, first_name: 'TaxBackfill', last_name: 'Commercial', phone: '9415550197',
       email: `tax-backfill-${customerId}@example.com`, zip: '34201', property_type: 'commercial',
@@ -133,8 +150,7 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
 
   afterAll(async () => {
     await db('customers').where({ id: customerId }).del();
-    await db('tax_rates').where({ county, effective_date: laterDate }).del();
-    await db('tax_rates').where({ county, effective_date: backfillDate }).del();
+    await restoreCounty();
   });
 
   test('a March backfill posted after a July rate leaves July in force for later invoices', async () => {
@@ -177,8 +193,10 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   // but not yet effective.
   const predecessorEffective = etDateString(addETDays(new Date(), -100));
   const staged = etDateString(addETDays(new Date(), 30));
+  let restoreCounty;
 
   beforeAll(async () => {
+    restoreCounty = await snapshotCounty(county);
     await db('customers').insert({
       id: customerId, first_name: 'TaxOldShape', last_name: 'Commercial', phone: '9415550196',
       email: `tax-oldshape-${customerId}@example.com`, zip: '33947', property_type: 'commercial',
@@ -196,8 +214,7 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
 
   afterAll(async () => {
     await db('customers').where({ id: customerId }).del();
-    await db('tax_rates').where({ county, effective_date: predecessorEffective }).del();
-    await db('tax_rates').where({ county, effective_date: staged }).del();
+    await restoreCounty();
   });
 
   test('an old-shape predecessor (active=false, expiry in the future) is still honored until its expiry', async () => {
@@ -231,8 +248,10 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   const legacyEffective = etDateString(addETDays(new Date(), -60));
   const legacyExpiry = etDateString(addETDays(new Date(), 30));
   const backfillDate = etDateString(addETDays(new Date(), -200));
+  let restoreCounty;
 
   beforeAll(async () => {
+    restoreCounty = await snapshotCounty(county);
     await db('customers').insert({
       id: customerId, first_name: 'TaxLegacyPrecedence', last_name: 'Commercial', phone: '9415550195',
       email: `tax-legacy-precedence-${customerId}@example.com`, zip: '34102', property_type: 'commercial',
@@ -247,8 +266,7 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
 
   afterAll(async () => {
     await db('customers').where({ id: customerId }).del();
-    await db('tax_rates').where({ county, effective_date: legacyEffective }).del();
-    await db('tax_rates').where({ county, effective_date: backfillDate }).del();
+    await restoreCounty();
   });
 
   test('a January backfill posted after the fact does not outrank the still-current July legacy rate', async () => {
@@ -275,10 +293,10 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
 (process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('correcting a staged future rate must not show the discarded draft as upcoming too (codex round-4 P1)', () => {
   const county = 'Lee';
   const staged = etDateString(addETDays(new Date(), 45));
+  let restoreCounty;
 
-  afterAll(async () => {
-    await db('tax_rates').where({ county, effective_date: staged }).del();
-  });
+  beforeAll(async () => { restoreCounty = await snapshotCounty(county); });
+  afterAll(async () => { await restoreCounty(); });
 
   test('GET /rates labels the replaced draft superseded, not a second staged row', async () => {
     const first = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
@@ -305,6 +323,12 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
     const supersededDraft = leeRows.find((r) => r.status === 'superseded');
     expect(supersededDraft).toBeDefined();
     expect(parseFloat(supersededDraft.combinedRate)).toBeCloseTo(0.07, 6);
+    // EXPECTED: the discarded draft's window is EMPTY (expires on its own
+    // effective date) — never an expiry BEFORE its effective date, which
+    // is what expiring it to today produced for a staged draft (codex
+    // round-2 P2). The corrected draft stays open-ended.
+    expect(String(supersededDraft.expiryDate).slice(0, 10)).toBe(staged);
+    expect(stagedRows[0].expiryDate).toBeNull();
   });
 
   test('correcting TODAY\'S rate for the same effective date actually changes what invoices are taxed (codex round-6 P0)', async () => {
@@ -349,8 +373,10 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   const customerId = randomUUID();
   const legacyEffective = etDateString(addETDays(new Date(), -150));
   const legacyExpiry = etDateString(addETDays(new Date(), 60));
+  let restoreCounty;
 
   beforeAll(async () => {
+    restoreCounty = await snapshotCounty(county);
     await db('customers').insert({
       id: customerId, first_name: 'TaxLegacySameDate', last_name: 'Commercial', phone: '9415550193',
       email: `tax-legacy-samedate-${customerId}@example.com`, zip: '33947', property_type: 'commercial',
@@ -365,7 +391,7 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
 
   afterAll(async () => {
     await db('customers').where({ id: customerId }).del();
-    await db('tax_rates').where({ county, effective_date: legacyEffective }).del();
+    await restoreCounty();
   });
 
   test('a correction posted for the legacy row\'s exact effective date wins, not a tie with the discarded legacy row', async () => {
@@ -377,10 +403,15 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
 
     const rows = await db('tax_rates').where({ county, effective_date: legacyEffective }).orderBy('combined_rate');
     const legacyRow = rows.find((row) => parseFloat(row.combined_rate) === 0.07);
-    // EXPECTED: the legacy row is expired at the moment of correction,
-    // regardless of having been active:false all along.
+    const correctionRow = rows.find((row) => parseFloat(row.combined_rate) === 0.08);
+    // EXPECTED: the legacy row is discarded with an EMPTY window (expires
+    // on its own effective date), regardless of having been active:false
+    // all along — not stretched through today (codex round-2 P2) — and its
+    // successor boundary moves to the correction, which now ends where the
+    // legacy row ended instead of open-ended.
     expect(legacyRow.active).toBe(false);
-    expect(legacyRow.expiry_date).not.toBeNull();
+    expect(dateOnlyStamp(legacyRow.expiry_date)).toBe(legacyEffective);
+    expect(dateOnlyStamp(correctionRow.expiry_date)).toBe(legacyExpiry);
 
     const r = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 100);
     expect(r.rate).toBeCloseTo(0.08, 6);

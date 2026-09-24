@@ -66,11 +66,12 @@ const postgres = connection && /\/waves_audit_/.test(connection) ? describe : de
 let mockPg;
 jest.setTimeout(90000);
 
-async function seedTermiteVisit() {
+async function seedTermiteVisit({ stationCount = 2 } = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const today = etDateString();
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(),
-    serviceKey: `fixture_termite_${randomUUID().slice(0, 8)}`, stationIds: [randomUUID(), randomUUID()] };
+    serviceKey: `fixture_termite_${randomUUID().slice(0, 8)}`,
+    stationIds: Array.from({ length: stationCount }, () => randomUUID()) };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'TermiteBond', phone: '+12025550177',
     email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false });
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
@@ -85,10 +86,13 @@ async function seedTermiteVisit() {
     estimated_price: 0, estimated_duration_minutes: 60, create_invoice_on_complete: false });
   // Two existing pins on the property — the panel preloads these and posts
   // { id, status: 'ok' } for each one the tech never touches.
-  for (let i = 0; i < f.stationIds.length; i += 1) {
-    await mockPg('termite_stations').insert({ id: f.stationIds[i], customer_id: f.customerId, station_number: i + 1, program: 'termite',
-      geometry_image: JSON.stringify({ type: 'circle', cx: 0.2 + i * 0.3, cy: 0.5, r: 0.02 }), is_active: true, owned_by: 'customer' });
-  }
+  await mockPg('termite_stations').insert(f.stationIds.map((id, i) => ({
+    id, customer_id: f.customerId, station_number: i + 1, program: 'termite',
+    // Distinct positions on a 10-wide grid so a cap-sized roster never
+    // collides with itself or with the new pin a test drops at (0.95, 0.95).
+    geometry_image: JSON.stringify({ type: 'circle', cx: 0.05 + (i % 10) * 0.09, cy: 0.05 + Math.floor(i / 10) * 0.09, r: 0.02 }),
+    is_active: true, owned_by: 'customer',
+  })));
   return f;
 }
 
@@ -210,6 +214,63 @@ postgres('r2-completion-panel-client-contract-1: declined / inspection-only clos
       expect(checks).toHaveLength(1);
       expect(checks[0].station_id).toBe(f.stationIds[0]);
       expect(checks[0].status).toBe('activity');
+    } finally { await cleanup(f); }
+  });
+
+  test('inspection_only from a PRE-`touched` client keeps its unambiguous edits — a non-default status and a moved pin — and drops only the bare ok default (codex round-2 P1)', async () => {
+    // A completion tab loaded before the `touched` marker shipped sends the
+    // old payload shape for an explicit tap or a move. Neither edit can
+    // come from the zero-tap default, so the server must infer them as
+    // explicit rather than require a marker that client never emitted.
+    const f = await seedTermiteVisit({ stationCount: 3 });
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const legacyBody = {
+        ...body(f, 'inspection_only'),
+        structuredFindings: { type: 'termite_bait_station', values: { stations_checked: '2', termite_activity: 'Active termites present', bait_consumption: 'Light feeding' } },
+        termiteStations: [
+          { id: f.stationIds[0], status: 'activity' },
+          { id: f.stationIds[1], shape: { type: 'circle', cx: 0.95, cy: 0.95, r: 0.02 }, status: 'ok' },
+          { id: f.stationIds[2], status: 'ok' },
+        ],
+      };
+      const out = await completeScheduledService({
+        serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body: legacyBody,
+      });
+      expect(out).toMatchObject({ status: 200 });
+      const checks = await checksFor(f);
+      expect(checks.map((c) => [c.station_id, c.status]).sort()).toEqual(
+        [[f.stationIds[0], 'activity'], [f.stationIds[1], 'ok']].sort(),
+      );
+      const moved = await mockPg('termite_stations').where({ id: f.stationIds[1] }).first();
+      expect(moved.geometry_image).toMatchObject({ cx: 0.95, cy: 0.95 });
+    } finally { await cleanup(f); }
+  });
+
+  test('a "customer_declined" closeout carrying a pin over the station cap still completes — the discarded payload cannot 400 the closeout (codex round-2 P2)', async () => {
+    const TermiteStations = require('../services/termite-stations');
+    const f = await seedTermiteVisit({ stationCount: TermiteStations.MAX_ACTIVE_STATIONS });
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const declinedBody = {
+        ...body(f, 'customer_declined'),
+        termiteStations: [
+          ...f.stationIds.map((id) => ({ id, status: 'ok' })),
+          // The tech dropped one more pin before the customer turned them away.
+          { shape: { type: 'circle', cx: 0.95, cy: 0.95, r: 0.02 }, status: 'ok', touched: true },
+        ],
+      };
+      const out = await completeScheduledService({
+        serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body: declinedBody,
+      });
+      // Before: 400 termite_stations_cap from the pre-commit cap preflight
+      // even though a declined visit never persists a single entry.
+      expect(out).toMatchObject({ status: 200 });
+      expect(await checksFor(f)).toEqual([]);
+      expect(await mockPg('termite_stations').where({ customer_id: f.customerId }).count('* as n').first()
+        .then((row) => Number(row.n))).toBe(TermiteStations.MAX_ACTIVE_STATIONS);
     } finally { await cleanup(f); }
   });
 });

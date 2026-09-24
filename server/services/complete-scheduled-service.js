@@ -2572,6 +2572,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? typedPhotoSummary.trim().slice(0, 600)
       : '';
     const isIncompleteVisit = visitOutcome === 'incomplete';
+    // A visit the tech never performed at all (incomplete, customer
+    // declined) discards its station payload entirely — the post-commit
+    // sync below skips it, so the pre-commit station preflights (cap,
+    // trap-setup, consumption/capture consistency) must skip it too: a
+    // pin that will never be persisted must not 400 the closeout (codex
+    // round-2 P2). ONE definition, shared by the preflights and the sync.
+    const stationBlanketSkip = isIncompleteVisit || visitOutcome === 'customer_declined';
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
@@ -2883,7 +2890,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // office review with a billing hold (codex #4058 r5 P1). The pure
     // shape checks above still run: the saved form is the committed form.
     const stationProgram = TermiteStations.stationProgramForProfile(completionProfile);
-    if (!packetEffects && Array.isArray(termiteStations) && termiteStations.length && stationProgram && svc.customer_id
+    if (!packetEffects && !stationBlanketSkip && Array.isArray(termiteStations) && termiteStations.length && stationProgram && svc.customer_id
       && await TermiteStations.stationCapWouldOverflow(db, svc.customer_id, termiteStations, stationProgram)) {
       return ({ status: 400, body: {
         error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
@@ -2902,7 +2909,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // version of this check). `trap_visit_type` only exists on the
     // rodent_trapping schema, so its presence in any submitted section
     // identifies the declaration.
-    if (stationProgram === 'trapping' && Array.isArray(termiteStations) && termiteStations.length) {
+    if (stationProgram === 'trapping' && !stationBlanketSkip && Array.isArray(termiteStations) && termiteStations.length) {
       const declaresTrapSetup = [
         structuredFindings?.values,
         ...(Array.isArray(companionFindings) ? companionFindings.map((entry) => entry?.values) : []),
@@ -2918,11 +2925,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // bait consumption must not ship beside an explicit "None" consumption
     // select — the customer report would contradict itself. Pre-commit like
     // the cap check (the sync is fail-soft and can't reject); incomplete
-    // visits skip the station sync entirely, so they skip this too. The
+    // and declined visits skip the station sync entirely, so they skip
+    // this too. The
     // rodent findings live on the primary when rodent_bait_station IS the
     // findings type, else on its companion section.
     if (Array.isArray(termiteStations) && termiteStations.length
-      && stationProgram === 'rodent' && !isIncompleteVisit) {
+      && stationProgram === 'rodent' && !stationBlanketSkip) {
       const rodentValues = completionProfile?.findingsType === 'rodent_bait_station'
         ? (structuredFindings?.values || null)
         : ((Array.isArray(companionFindings)
@@ -2940,7 +2948,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Trapping analog: a capture-marked trap pin beside an explicit
     // Captures count of 0 contradicts itself on the customer report.
     if (Array.isArray(termiteStations) && termiteStations.length
-      && stationProgram === 'trapping' && !isIncompleteVisit) {
+      && stationProgram === 'trapping' && !stationBlanketSkip) {
       const trappingValues = completionProfile?.findingsType === 'rodent_trapping'
         ? (structuredFindings?.values || null)
         : ((Array.isArray(companionFindings)
@@ -7906,7 +7914,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // stations); it only drops the zero-tap defaults, keeping entries the
     // client marked `touched` (an explicit status tap or a move) or
     // `retire` (always an explicit action, and never writes a check row).
-    const stationBlanketSkip = isIncompleteVisit || visitOutcome === 'customer_declined';
+    // A completion tab loaded BEFORE the `touched` marker shipped never
+    // emits it, so the marker alone would drop that client's real
+    // inspections (codex round-2 P1); an edit the zero-tap default can
+    // never produce is inferred as explicit too — a shape (a moved pin or
+    // a new one) or a non-default status (only a tap sets anything but
+    // 'ok'). A bare `{id, status:'ok'}` stays ambiguous and is dropped:
+    // the current client marks an explicit 'ok' tap `touched`, and for a
+    // legacy tab it is indistinguishable from the default the panel
+    // serializes for every untouched pin (fail closed).
+    // stationBlanketSkip is defined beside isIncompleteVisit — the
+    // pre-commit station preflights share it.
+    const explicitStationEntry = (entry) => !!entry && (
+      entry.retire === true
+      || entry.touched === true
+      || entry.shape != null
+      || (typeof entry.status === 'string' && entry.status !== 'ok')
+    );
     if (Array.isArray(termiteStations) && termiteStations.length) {
       if (stationBlanketSkip || !stationProgram) {
         logger.warn('[completion] station payload skipped', {
@@ -7917,7 +7941,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         });
       } else {
         const syncEntries = visitOutcome === 'inspection_only'
-          ? termiteStations.filter((entry) => entry && (entry.retire === true || entry.touched === true))
+          ? termiteStations.filter(explicitStationEntry)
           : termiteStations;
         if (!syncEntries.length) {
           logger.warn('[completion] station payload skipped (inspection_only with no explicit taps)', { serviceId: svc.id });

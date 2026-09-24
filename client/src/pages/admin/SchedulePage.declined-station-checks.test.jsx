@@ -15,6 +15,20 @@ const service = {
   customerId: 'cust-1',
   serviceType: 'Termite Bait Station Monitoring',
   completionProfile: { serviceKey: 'termite', findingsType: 'termite_bait_station' },
+  // The dispatch payload's registry slice for the typed termite findings —
+  // without it the panel is not "typed" and never serializes
+  // structuredFindings (the station auto-counts land in these fields).
+  // Count fields only; the schema's selects are not under test here.
+  findingsSchema: {
+    type: 'termite_bait_station',
+    label: 'Termite Bait Station Inspection',
+    fields: [
+      { key: 'total_stations', label: 'Total stations on property', type: 'count', section: 'Station inspection', detail: true },
+      { key: 'stations_checked', label: 'Stations checked', type: 'count', section: 'Station inspection' },
+      { key: 'stations_inaccessible', label: 'Stations inaccessible', type: 'count', section: 'Station inspection', detail: true },
+      { key: 'stations_with_activity', label: 'Stations with termite activity', type: 'count', section: 'Station inspection' },
+    ],
+  },
   scheduledDate: '2026-09-23',
   status: 'on_site',
   price: 0,
@@ -68,4 +82,14 @@ it('a "Customer declined" termite closeout posts every station as checked ok wit
   ]);
   // The customer text still goes out by default on the declined visit.
   expect(body.sendCompletionSms).toBe(true);
+  // The typed counts must not claim the two untouched pins were inspected:
+  // the server discards a declined visit's station payload entirely, and
+  // the termite report falls back to these typed counts when a visit has
+  // no check rows (codex round-2 P1). total_stations stays the roster size.
+  expect(body.structuredFindings.values).toMatchObject({
+    total_stations: '2',
+    stations_checked: '0',
+    stations_inaccessible: '0',
+    stations_with_activity: '0',
+  });
 });
