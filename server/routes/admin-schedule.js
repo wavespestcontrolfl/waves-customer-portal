@@ -74,6 +74,7 @@ const {
   buildPrepaidSeriesContext,
   hasAnnualCoverage,
   withoutAnnualCoverage,
+  ANNUAL_PREPAY_METHOD,
 } = require('../services/prepaid-series');
 // Single-visit prepaid stamp: refuse only rows that are genuinely over.
 // NOT the series helper's TERMINAL_STATUSES — that set also skips
@@ -1583,15 +1584,38 @@ function recurringTemplateTechnicianId(parent) {
 // removed) the child is seeded unassigned so auto-dispatch places it — never
 // onto a tech who cannot take it. FOR SHARE conflicts with the Team tab's
 // FOR UPDATE, so the change cannot commit underneath the insert.
-async function assignableRecurringTemplateTechnicianId(conn, parent) {
+//
+// `date` (YYYY-MM-DD, optional): the CHILD's own occurrence date (never the
+// parent's anchor date). When given, a tech who otherwise passes the
+// assignability check is still seeded unassigned if they carry an uncleared
+// technician_absences row for that date (GATE_TECH_OUT_REDISTRIBUTE) — same
+// predicate as assertAssignableTechnician's date check in
+// technician-eligibility.js. This never throws (unlike that 422 path): a
+// series edit or auto-extend spawning several children must not fail the
+// whole call because ONE occurrence lands on a marked-out day — that child
+// is simply seeded unassigned, same as any other not-assignable case.
+// Omitting `date` keeps every caller byte-identical to before this check.
+async function assignableRecurringTemplateTechnicianId(conn, parent, date) {
   const techId = recurringTemplateTechnicianId(parent);
   if (!techId) return null;
   let q = conn('technicians').where({ id: techId });
   if (conn.isTransaction) q = q.forShare();
   const tech = await q.first('id', 'employment_status', 'field_dispatchable');
-  if (isAssignable(tech)) return techId;
-  logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
-  return null;
+  if (!isAssignable(tech)) {
+    logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
+    return null;
+  }
+  if (date) {
+    const absence = await conn('technician_absences')
+      .where({ technician_id: techId, absence_date: date })
+      .whereNull('cleared_at')
+      .first('id');
+    if (absence) {
+      logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is marked out on ${date}; seeding child unassigned`);
+      return null;
+    }
+  }
+  return techId;
 }
 
 // Statuses that mean a series visit is still ahead of us. Confirmed counts:
@@ -6216,11 +6240,37 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
 // recurringGroupRequestFields mirrors (finiteCount ?? 4) -- a mismatch
 // throws a retryable 409, matching DISCOUNT_STACKING_GATE_DIVERGED's own
 // shape and "before any write" contract for its own field.
-function assertPrepayTotalMatchesPricing({ totalAmount, finalPrice, plannedCount }) {
+// `requestedCount` (optional) is the count the CLIENT actually priced
+// totalAmount from — the recurringGroupRequestFields visit count the
+// operator saw on screen — distinct from `plannedCount`, the count this
+// total is being validated against here (which the booking route now
+// passes as the cadence rows ACTUALLY PLACED, not the request). When the two
+// counts differ AND totalAmount matches what requestedCount x finalPrice
+// would produce, the mismatch isn't a stale/changed price at all — it's a
+// short-placed series (blackout/day-off exhaustion placed fewer visits than
+// requested) submitting the total it correctly computed for the REQUEST,
+// which will never match a total keyed on fewer placed rows. Telling the
+// operator to "reload and try again" loops forever in that case (reloading
+// hits the same blackout exhaustion); a dedicated error names the actual
+// placed count and the total that would reconcile against it instead.
+function assertPrepayTotalMatchesPricing({ totalAmount, finalPrice, plannedCount, requestedCount }) {
   const authoritativePrepayTotal = Math.round((Number(finalPrice) || 0) * (Number(plannedCount) || 0) * 100) / 100;
-  if (Math.round(Number(totalAmount) * 100) !== Math.round(authoritativePrepayTotal * 100)) {
-    throw Object.assign(httpError(409, 'The price changed since this was previewed — reload and try again'), { code: 'PREPAY_TOTAL_DIVERGED' });
+  if (Math.round(Number(totalAmount) * 100) === Math.round(authoritativePrepayTotal * 100)) return;
+  if (requestedCount != null && Number(requestedCount) !== Number(plannedCount)) {
+    const requestedTotal = Math.round((Number(finalPrice) || 0) * Number(requestedCount) * 100) / 100;
+    if (Math.round(Number(totalAmount) * 100) === Math.round(requestedTotal * 100)) {
+      throw Object.assign(
+        httpError(409, `Only ${plannedCount} of the ${requestedCount} requested visit(s) could be placed — the $${totalAmount} prepayment (priced for ${requestedCount} visits) does not match the $${authoritativePrepayTotal} total for the ${plannedCount} visit(s) actually placed. Adjust the prepay amount to $${authoritativePrepayTotal}, add the missing visit(s) manually, or book without collecting a prepayment.`),
+        {
+          code: 'PREPAY_SHORT_SERIES',
+          placedCount: plannedCount,
+          requestedCount: Number(requestedCount),
+          expectedTotal: authoritativePrepayTotal,
+        },
+      );
+    }
   }
+  throw Object.assign(httpError(409, 'The price changed since this was previewed — reload and try again'), { code: 'PREPAY_TOTAL_DIVERGED' });
 }
 
 // Codex pre-push audit P0 (round 6, blocked push 8 on PR #4656): only the
@@ -7192,7 +7242,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE) —
       // covers a stale picker and the auto-assign path alike; recurring
       // children below inherit this row's tech, so one check fences both.
-      await assertAssignableTechnician(resolvedTechId, { conn: trx });
+      await assertAssignableTechnician(resolvedTechId, { conn: trx, date: String(scheduledDate).slice(0, 10) });
+      // The recurring-child and booster loops below insert this SAME
+      // resolvedTechId on OTHER dates (tech-out P1) — the parent-date check
+      // above can't see a tech marked out on one of those occurrence dates.
+      // plannedChildDates/plannedBoosterDates are fully computed (and
+      // locked) above, so every distinct destination date is checked once,
+      // here, before either insert loop runs — an absence on any occurrence
+      // date refuses the whole create instead of partially inserting a series.
+      if (resolvedTechId) {
+        const childBoosterDates = new Set([...plannedChildDates, ...plannedBoosterDates].filter(Boolean));
+        for (const occDate of childBoosterDates) {
+          await assertAssignableTechnician(resolvedTechId, { conn: trx, date: occDate });
+        }
+      }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -7570,7 +7633,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
           // leaves nothing committed at all, matching the sibling
           // DISCOUNT_STACKING_GATE_DIVERGED check's own "before any write"
           // contract for its own field).
-          assertPrepayTotalMatchesPricing({ totalAmount, finalPrice: pricing.finalPrice, plannedCount });
+          //
+          // Validated against the cadence rows ACTUALLY PLACED (parent +
+          // plannedChildDates), not the originally REQUESTED plannedCount
+          // (ADMIN-BUG-R09 variant B): blackout/day-off exhaustion can place
+          // fewer visits than requested (the route already warns about this
+          // above, bookingWarnings), and the client's totalAmount is
+          // computed from the requested count. Validating against the
+          // stale requested count let a short-placed series pass this gate
+          // and then fan the full amount across fewer rows than it prices
+          // for, over-stamping every placed visit above its own price.
+          const actualPlacedCadenceCount = 1 + plannedChildDates.length;
+          assertPrepayTotalMatchesPricing({
+            totalAmount, finalPrice: pricing.finalPrice, plannedCount: actualPlacedCadenceCount, requestedCount: plannedCount,
+          });
           await stampSeriesPrepaid(trx, {
             anchorServiceId: svc.id,
             totalAmount,
@@ -9058,12 +9134,25 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           case 'mark_prepaid': {
             const amt = Number(payload?.totalAmount);
             if (!Number.isFinite(amt) || amt <= 0) throw Object.assign(new Error('totalAmount must be a positive number'), { isValidation: true });
-            // Annual coverage is refused IN the UPDATE, not by a pre-read: an
-            // annual-prepay activation stamping the row between a SELECT and
-            // an unconditional UPDATE would be overwritten with a manual
-            // method, and completion would skip the annual coverage
-            // validator for an already-paid visit (Codex #4030 r7 P1).
+            // Terminal rows never take a stamp — same rule as the
+            // single-visit writer (PREPAID_STAMP_REFUSED_STATUSES /
+            // visit_terminal, admin-schedule.js:13384) and the series
+            // fan-out (TERMINAL_STATUSES): a completed/cancelled/no_show/
+            // skipped visit must not end up holding money for a visit that
+            // never runs or already closed its books (ADMIN-BUG-R50).
+            // Annual coverage is refused IN the SAME UPDATE, not by a
+            // pre-read: an annual-prepay activation stamping the row
+            // between a SELECT and an unconditional UPDATE would be
+            // overwritten with a manual method, and completion would skip
+            // the annual coverage validator for an already-paid visit
+            // (Codex #4030 r7 P1).
+            // NULL status is a live visit (same service-cadence convention
+            // fetchSeriesRows' own live-row lock uses): a bare whereNotIn
+            // evaluates unknown against NULL and would drop a legacy
+            // null-status row from eligibility, reporting it as if it
+            // carried annual coverage instead of stamping it.
             const stamped = await withoutAnnualCoverage(db('scheduled_services').where({ id }))
+              .where(function liveStatus() { this.whereNull('status').orWhereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES); })
               .update({
                 prepaid_amount: amt,
                 prepaid_method: payload?.method || 'cash',
@@ -9071,9 +9160,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 prepaid_at: new Date(),
               })
               .returning(['id']);
-            const unstamped = stamped.length ? null : await db('scheduled_services').where({ id }).first('id');
-            if (!stamped.length && !unstamped) throw Object.assign(new Error('Scheduled service not found'), { isValidation: true });
-            if (!stamped.length) throw Object.assign(new Error('Visit has annual prepay coverage; reconcile that term before recording a manual prepayment'), { isValidation: true });
+            if (!stamped.length) {
+              const current = await db('scheduled_services').where({ id }).first('status', 'annual_prepay_term_id', 'prepaid_method');
+              if (!current) throw Object.assign(new Error('Scheduled service not found'), { isValidation: true });
+              const refusal = PREPAID_STAMP_REFUSALS.find(({ refused }) => refused(current));
+              throw Object.assign(new Error(refusal ? refusal.body(current).error
+                : 'Visit has annual prepay coverage; reconcile that term before recording a manual prepayment'), { isValidation: true });
+            }
             break;
           }
         }
@@ -9478,6 +9571,33 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       discountId,
     } = req.body;
     let { discountType, discountAmount } = req.body;
+    // ADMIN-BUG-R52: reject negative money inputs outright. Without this, a
+    // negative discountAmount (custom appointment discount OR a per-add-on
+    // one) INFLATES the price instead of reducing it (applyDiscount only
+    // floors at zero), and a negative estimatedPrice fabricates a positive
+    // discount stamp the operator never chose when the replay reconciles a
+    // $0 gross against the negative net. Matches the n >= 0 rule this
+    // handler's own toMoney already enforces for add-on gross, and the
+    // [0, gross] clamp the booking/create path enforces via
+    // calculateDiscountDollars.
+    if (estimatedPrice !== undefined && estimatedPrice !== '' && Number(estimatedPrice) < 0) {
+      throw httpError(400, 'Price cannot be negative.');
+    }
+    if (primaryLinePrice !== undefined && primaryLinePrice !== '' && Number(primaryLinePrice) < 0) {
+      throw httpError(400, 'Price cannot be negative.');
+    }
+    if (discountAmount !== undefined && discountAmount !== null && discountAmount !== '' && Number(discountAmount) < 0) {
+      throw httpError(400, 'Discount amount cannot be negative.');
+    }
+    if (Array.isArray(addons)) {
+      for (const addon of addons) {
+        const addonDiscountAmount = addon?.discountAmount;
+        if (addonDiscountAmount !== undefined && addonDiscountAmount !== null && addonDiscountAmount !== ''
+          && Number(addonDiscountAmount) < 0) {
+          throw httpError(400, 'Add-on discount amount cannot be negative.');
+        }
+      }
+    }
     const updates = {};
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
@@ -10798,8 +10918,41 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           arrivalRouteFenceKeys = new Set(await lockTechDays(trx, preFence));
         }
       }
-      // Match customer editors and grouping: maintenance/comms, customer row,
-      // then stop locks. Tech-day fences remain ahead of all three.
+      // Save-time eligibility for the FINAL technician on the FINAL date
+      // this save lands on (tech-out P1 pre-push audit): assignScheduleJobs
+      // below only runs when the technician itself is changing, so a
+      // date-only edit that keeps the current technician used to skip
+      // eligibility entirely — the receiving day was never checked against
+      // technician_absences. And when assignScheduleJobs DOES run, its
+      // write to updates.scheduled_date hasn't happened yet, so without this
+      // it would validate the row's OLD date instead of the date this same
+      // transaction is about to write (assignDispatchJob's noticeSnapshot
+      // override, threaded below, fixes that half; this check covers the
+      // other). One check, on the tech-day fence already taken above, before
+      // any write in this transaction — refuse before the first write, same
+      // as the create-appointment path.
+      if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
+        const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
+          .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+        const finalTechnicianId = hasTechnicianIdUpdate
+          ? requestedTechnicianId
+          : (eligibilityRow?.technician_id || null);
+        const finalTechChanging = hasTechnicianIdUpdate
+          && (eligibilityRow?.technician_id || null) !== finalTechnicianId;
+        // Only a date that actually CHANGES is a new day to validate: the
+        // edit modal resubmits scheduled_date unchanged on a window / notes
+        // edit, and a tech marked out today must still be able to have
+        // today's stop edited in place (pre-push auditor P1 on #4678).
+        const finalDateChanging = updates.scheduled_date !== undefined
+          && dateOnly(updates.scheduled_date) !== (eligibilityRow?.day || null);
+        if (finalTechnicianId && (finalDateChanging || finalTechChanging)) {
+          const finalDate = finalDateChanging ? dateOnly(updates.scheduled_date) : (eligibilityRow?.day || null);
+          await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
+        }
+      }
+      // Match customer editors and grouping: maintenance/comms,
+      // combined-payment, customer row, then stop locks. Tech-day fences
+      // remain ahead of all four.
       const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan
         || (assignmentPlan && assignmentPlan.scope !== 'this_only')
         || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
@@ -10816,14 +10969,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id, false);
       }
       if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
-      // Payer activation shares comms → combined → customer/appointment rows
-      // with customer editors and combined-payment setup. Take this before
-      // address locking too; the later release reacquires it re-entrantly.
-      // EVERY Bill-To edit, in BOTH directions (local audit): clearing a payer
-      // or setting self_pay_override reconciles withdrawn invoices, which
-      // takes the same combined lock later — and taking the customer row
-      // first and that advisory lock afterwards is the inversion a concurrent
-      // customer-payer assignment deadlocks against.
+      // Combined-payment lock BEFORE the customer row lock (#4716 pre-push
+      // P1). executeMerge (customer-dedupe.js) takes pay.combined.customer
+      // UNCONDITIONALLY before its `customers` FOR UPDATE (see the "Combined
+      // -session locks BEFORE any customer row locks" comment there), and
+      // the customer editors follow the same order for a payer change. This
+      // save used to take the customer row lock first and this advisory
+      // lock afterward, which is the inversion a concurrent merge or
+      // customer-payer assignment deadlocks against — EVERY Bill-To edit, in
+      // BOTH directions (local audit): clearing a payer or setting
+      // self_pay_override reconciles withdrawn invoices, which takes the
+      // same combined lock. Taking it here, before the row lock below, is
+      // the fix.
       if (detailsChanged && (Object.prototype.hasOwnProperty.call(updates, 'payer_id')
         || Object.prototype.hasOwnProperty.call(updates, 'self_pay_override'))) {
         const provCust = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
@@ -10831,6 +10988,27 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           await require('../services/pay-combined').lockCombinedCustomers(trx, [String(provCust.customer_id)]);
         }
       }
+      // Customer row lock (Codex #4716 r2 P1), now AFTER the combined-payment
+      // lock above, completing the order the comment documents
+      // (maintenance/comms, combined-payment, customer row, then stop locks)
+      // — this trx previously never actually took it here, only deep inside
+      // the make-recurring spawn block, well AFTER this route had already
+      // locked and written the edited scheduled_services row (the occupancy
+      // re-check's own row lock, then the details write further down) and
+      // after lockAppointmentAddress's own customer-row-then-stop-locks call
+      // (only on an address-changing save). executeMerge (customer-dedupe.js)
+      // locks the combined-payment advisory lock, THEN the customer row FOR
+      // UPDATE, and then sweeps scheduled_services (FK repoint + address
+      // stamp); this route was doing the reverse in two ways — the customer
+      // row before the combined-payment lock (fixed above), and
+      // locking/writing the appointment row before reaching either, deep in
+      // one conditional branch. Taking the combined-payment lock, then this
+      // row lock, before any scheduled_services row lock or write in this
+      // transaction, whether spawn/duplicate-guard runs or not, is the fix:
+      // whichever side (this save or a concurrent merge) gets to the
+      // combined lock and customer row first now runs to completion before
+      // the other can proceed.
+      if (commsPeek) await trx('customers').where({ id: commsPeek.customer_id }).forUpdate().first('id');
       if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);
       if (addressPartnersQuery) {
         const lockedPartners = await addressPartnersQuery.clone();
@@ -12121,6 +12299,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (!['pending', 'confirmed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
             throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from an upcoming pending or confirmed visit.`);
           }
+          // Customer row lock: taken up front in this transaction's
+          // comms-lock section (Codex #4716 r2 P1 — moved off its original
+          // r1 position here, which ran AFTER this route had already
+          // locked and written the SAME scheduled_services row, e.g. the
+          // occupancy re-check's own row lock and the details write below
+          // it — an ABBA against executeMerge, which locks the customer
+          // row first and THEN sweeps scheduled_services). See the
+          // comms-lock section for the reasoning; nothing further to do
+          // here.
           // Race-safe duplicate-series backstop (P0), mirroring the POST
           // creator's in-trx guard: the child-date preload above only dedupes
           // rows already attached to THIS parent — it never sees a DIFFERENT
@@ -12326,7 +12513,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             const childIdentity = await resolveSeriesChildIdentity(trx, parent);
             const childData = {
               customer_id: parent.customer_id,
-              technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
+              technician_id: await assignableRecurringTemplateTechnicianId(trx, parent, nextDateStr),
               scheduled_date: nextDateStr,
               window_start: parent.window_start,
               window_end: parent.window_end,
@@ -13557,15 +13744,57 @@ router.delete('/:id/prepaid', async (req, res, next) => {
       if (!anchor) return res.status(404).json({ error: 'Scheduled service not found' });
       return res.json(await clearSeriesPrepaid(db, anchor));
     }
+    // Symmetry with the POST writer (13384-13388): a manual clear must never
+    // erase annual-prepay coverage evidence — nulling the stamp while
+    // annual_prepay_term_id stays set leaves the completion billing gate
+    // with no record the visit was already paid inside the annual term, so
+    // it mints a second invoice for it (ADMIN-BUG-R33). Reconcile the term
+    // (void/refund) instead of clearing the manual stamp field.
+    //
+    // Gate on the row's ACTUAL annual stamp (prepaid_method), not the bare
+    // annual_prepay_term_id link (Codex round-1 P1): attachScheduledServices
+    // links a row to a term by date/service match BEFORE the term ever
+    // stamps it, and applyPrepaidCoverageForTerm deliberately preserves an
+    // existing non-annual prepaid_method rather than overwrite it — "its
+    // stamp is a real out-of-band payment" (annual-prepay-renewals.js). A
+    // row can therefore carry a live term link while its stamp is a genuine
+    // manual cash/Zelle payment collected before the term ever claimed it.
+    // Reusing the link-based withoutAnnualCoverage here trapped that
+    // payment: staff could never clear or refund it. IS DISTINCT FROM keeps
+    // a NULL method (never stamped at all) eligible.
     const cleared = await db('scheduled_services').where({ id: req.params.id })
       .modify((q) => technicianLiveVisitFilter(req, q))
+      .whereRaw('prepaid_method IS DISTINCT FROM ?', [ANNUAL_PREPAY_METHOD])
       .update({
         prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null,
       })
-      .returning(['id']);
-    // 0 rows = the visit was reassigned/settled after the pre-check —
-    // report that instead of claiming the prepayment was cleared.
-    if (!cleared.length) return res.status(404).json({ error: 'Scheduled service not found' });
+      .returning(['id', 'annual_prepay_term_id']);
+    // 0 rows = the visit was reassigned/settled after the pre-check, or it
+    // carries a genuine annual stamp — tell the operator which before
+    // claiming the prepayment was cleared.
+    if (!cleared.length) {
+      const current = await db('scheduled_services').where({ id: req.params.id }).first('prepaid_method');
+      if (current && current.prepaid_method === ANNUAL_PREPAY_METHOD) {
+        return res.status(409).json({
+          error: 'This visit has annual prepay coverage — reconcile that term (void/refund) before clearing a manual prepayment.',
+          code: 'annual_prepay_coverage',
+        });
+      }
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
+    // The cleared row may still be linked to a live annual term (its manual
+    // stamp was occupying a slot the term itself would otherwise have
+    // claimed) — reapply that term's coverage so the now-unstamped visit is
+    // picked up if the term still needs it, rather than left uncovered by
+    // either payment. Best-effort: never blocks the clear response itself.
+    const linkedTermId = cleared[0]?.annual_prepay_term_id;
+    if (linkedTermId) {
+      try {
+        await require('../services/annual-prepay-renewals').refreshTermSnapshot(linkedTermId, db);
+      } catch (err) {
+        logger.warn(`[schedule] prepaid clear: term coverage re-apply failed for term ${linkedTermId}: ${err.message}`);
+      }
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -14372,7 +14601,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
       customer_id: parent.customer_id,
-      technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
+      technician_id: await assignableRecurringTemplateTechnicianId(trx, parent, nd),
       scheduled_date: nd,
       window_start: parent.window_start,
       window_end: parent.window_end,
@@ -14668,7 +14897,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           const childIdentity = await resolveSeriesChildIdentity(conn, parent);
           const nextData = {
             customer_id: parent.customer_id,
-            technician_id: await assignableRecurringTemplateTechnicianId(conn, parent),
+            technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
             scheduled_date: nextStr,
             window_start: parent.window_start, window_end: parent.window_end,
             service_type: childIdentity.service_type, status: 'pending',
@@ -19845,7 +20074,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent, nd),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',
@@ -19944,7 +20173,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent, nd),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',

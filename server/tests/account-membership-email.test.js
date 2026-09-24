@@ -40,6 +40,12 @@ function chain({ result = [], first, returning } = {}) {
 function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
+    // sendTemplate's notification_prefs opted-out check reads this table on
+    // every send; default to "no row" (opted in) unless a test overrides it,
+    // so the many pre-existing queues below don't all need a stub for it.
+    if (table === 'notification_prefs' && !tableQueues.has('notification_prefs')) {
+      return chain({ first: null });
+    }
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();

@@ -10,9 +10,9 @@ const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eli
 // and this commit is a "pick another slot" outcome for the customer, not an
 // internal 422 naming staff: translate it to the route's SLOT_TAKEN recovery
 // (reschedule-public refreshes availability on that code).
-async function assertAssignableSlotTechnician(technicianId, trx) {
+async function assertAssignableSlotTechnician(technicianId, trx, date) {
   try {
-    await assertAssignableTechnician(technicianId, { conn: trx });
+    await assertAssignableTechnician(technicianId, { conn: trx, date });
   } catch (err) {
     if (err.code !== NOT_ASSIGNABLE) throw err;
     throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
@@ -1623,11 +1623,17 @@ class SmartRebooker {
         assertConflictSnapshot([], options);
       }
 
-      // Save-time eligibility for a tech change (422 TECH_NOT_ASSIGNABLE) on
-      // the same trx that writes it — a slot offered before the tech went
-      // prospective/inactive/office-only cannot land here.
-      if (Object.prototype.hasOwnProperty.call(updates, 'technician_id')) {
-        await assertAssignableSlotTechnician(updates.technician_id, trx);
+      // Save-time eligibility (422 TECH_NOT_ASSIGNABLE) on the same trx that
+      // writes it — a slot offered before the tech went prospective/inactive/
+      // office-only cannot land here. Checked whenever this move changes the
+      // TECHNICIAN or lands the row on a different DATE: a date-only move
+      // keeps the same tech, but that tech may be marked out on the NEW date
+      // (tech-out P1) — keptTechId is the tech the row will actually carry
+      // after this commit either way. A same-date, same-tech window-only
+      // edit stays untouched: no new query.
+      const techChangeForEligibility = Object.prototype.hasOwnProperty.call(updates, 'technician_id');
+      if (techChangeForEligibility || !sameDayTarget) {
+        await assertAssignableSlotTechnician(keptTechId, trx, newDateStr);
       }
       // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
       // re-reads the receiving tech's capabilities here; the unit mover runs the
@@ -2345,9 +2351,19 @@ class SmartRebooker {
           // that lock in the opposite order, so never wait for maintenance
           // after the callback: try it here while only occupancy is held.
           await preflightReviewedMaintenance();
-          if (Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) {
+          {
             // Fence every source holder and projected destination before
-            // callback rows; the locked fingerprint catches assignments that
+            // callback rows and before ANY technician row lock in the loop
+            // below — for EVERY series move, not only a snapshot-guarded one.
+            // The per-sibling dated eligibility check (assertAssignable-
+            // SlotTechnician, technicians FOR SHARE) runs before that
+            // sibling's own slot-reserve lock; tech-out's markTechOut takes
+            // the tech-day fence FIRST and then the technician row FOR
+            // UPDATE, so without these up-front fences the two orders
+            // invert and one side deadlocks (pre-push auditor P1 on #4678).
+            // Same-session re-acquisition of a fence later in the loop is a
+            // no-op (xact advisory locks are reentrant). With a snapshot,
+            // the locked fingerprint additionally catches assignments that
             // committed while these fences were awaited.
             const sweptSet = new Set(sweptIds.map(String));
             const techDays = [];
@@ -2840,8 +2856,30 @@ class SmartRebooker {
             ? null
             : occupancyProbeEnd(updateData.window_start, null, sib.estimated_duration_minutes)
         ));
-        if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
-          await assertAssignableSlotTechnician(options.technicianId || null, trx);
+        // Save-time eligibility (422 TECH_NOT_ASSIGNABLE) for the anchor —
+        // whenever its technician is changing OR it lands on a different
+        // DATE (tech-out P1): a date-only anchor move keeps its current
+        // technician, but that tech may be marked out on the NEW date.
+        // options.technicianId absent ⇒ use the anchor's OWN (retained)
+        // technician_id, never a bare null (that would check "unassigned").
+        const anchorTechChanges = isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId');
+        if (isAnchor && (anchorTechChanges || sibDateChanges)) {
+          const anchorKeptTechId = anchorTechChanges ? (options.technicianId || null) : (sib.technician_id || null);
+          await assertAssignableSlotTechnician(anchorKeptTechId, trx, String(date).split('T')[0]);
+        }
+        // Same save-time eligibility check for every NON-anchor sibling
+        // that lands on a new date (tech-out P1): a follower keeps its own
+        // technician_id (siblings never take options.technicianId — that
+        // only ever retargets the anchor), but that tech may be marked out
+        // on the follower's NEW date even though the anchor's date is fine.
+        // A same-date landing keeps whatever the row already had and needs
+        // no re-check (that combination was already accepted before this
+        // move).
+        if (!isAnchor && sibDateChanges) {
+          const sibKeptTechId = sib.technician_id || null;
+          await assertAssignableSlotTechnician(sibKeptTechId, trx, String(date).split('T')[0]);
+        }
+        if (anchorTechChanges) {
           updateData.technician_id = options.technicianId || null;
           // Tech change also invalidates the sequence (same rule as the
           // single-reschedule path above).

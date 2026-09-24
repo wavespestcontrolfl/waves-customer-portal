@@ -1,4 +1,9 @@
 const { phoneIdentityKey } = require('../utils/phone');
+const {
+  draftIdSql,
+  draftReplyToMessageIdSql,
+  loadPriorOutboundBodies,
+} = require('./sms-response-policy');
 
 const TIMELINE_TYPES = new Set([
   'all', 'interaction', 'sms', 'call', 'service', 'invoice', 'estimate',
@@ -352,11 +357,28 @@ function mapCommsMessage(message, customer, twilioNumbers) {
   const numberCfg = twilioNumbers?.findByNumber?.(message.our_endpoint_id) || null;
   let media = [];
   try { media = typeof message.media === 'string' ? JSON.parse(message.media) : (message.media || []); } catch { media = []; }
+  const { courtesyOnly, spamEnforced } = require('./sms-response-policy').responseFlags({
+    direction: message.direction, body: message.body, media,
+    metadata: message.metadata, legacyMetadata: message.response_metadata,
+    auditMetadata: message.response_audit_metadata,
+    priorOutboundBody: message.response_prior_outbound_body,
+  });
+  const responseMessageType = message.response_message_type || message.message_type;
+  const responseStatus = message.response_status || message.delivery_status;
+  const responseIsAnswer = require('./sms-response-policy').outboundIsAnswer({
+    direction: message.direction, messageType: responseMessageType, status: responseStatus,
+    isClickFollowup: message.response_is_click_followup === true,
+    replyToMessageId: message.response_reply_to_message_id,
+  });
   return {
     id: message.id, conversationId: message.conversation_id, channel: message.channel,
     direction: message.direction, body: message.body, aiSummary: message.ai_summary,
     messageType: message.message_type, durationSeconds: message.duration_seconds, media,
+    responseMessageType, responseStatus, responseIsAnswer,
+    responseReplyToMessageId: message.response_reply_to_message_id || null,
+    responseCreatedAt: message.response_created_at || message.created_at,
     answeredBy: message.answered_by, isRead: !!message.is_read,
+    courtesyOnly, spamEnforced,
     deliveryStatus: message.delivery_status, recordingSid: message.recording_sid,
     createdAt: message.created_at, ourEndpointId: message.our_endpoint_id,
     ourEndpointLabel: numberCfg?.label || null,
@@ -368,12 +390,42 @@ async function listCustomerComms(db, customer, query = {}) {
   const customerId = customer.id;
   const parsed = parseCommsRequest(query, customerId);
   const readBefore = parsed.cursor?.readBefore || new Date().toISOString();
+  const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', m.metadata->>'draft_id')");
+  const responseReplyToMessageId = draftReplyToMessageIdSql('mdx.sms_log_id');
   const selectCommsColumns = queryBuilder => queryBuilder
+    .joinRaw(`LEFT JOIN LATERAL (
+      SELECT sl.message_type, sl.status, sl.metadata, sl.created_at
+      FROM sms_log sl
+      WHERE sl.twilio_sid = m.twilio_sid AND sl.direction = m.direction
+      ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
+    ) sms_response ON true`)
+    .joinRaw(`LEFT JOIN LATERAL (
+      SELECT mal.metadata
+      FROM messaging_audit_log mal
+      WHERE mal.provider_message_id = m.twilio_sid AND mal.channel = 'sms'
+      ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
+    ) sms_audit ON true`)
+    .joinRaw(`LEFT JOIN LATERAL (
+      SELECT mdx.intent = 'click_followup' AS is_click_followup,
+             ${responseReplyToMessageId} AS reply_to_message_id
+      FROM message_drafts mdx
+      WHERE mdx.id = ${responseDraftId}
+      LIMIT 1
+    ) sms_answer ON true`)
     .select(
       'm.id', 'm.conversation_id', 'm.channel', 'm.direction', 'm.body',
       'm.ai_summary', 'm.message_type', 'm.duration_seconds', 'm.media', 'm.answered_by',
-      'm.is_read', 'm.delivery_status', 'm.recording_sid', 'm.created_at',
-      'c.our_endpoint_id', 'c.contact_phone',
+      'm.is_read', 'm.delivery_status', 'm.recording_sid', 'm.metadata', 'm.created_at',
+      'c.customer_id', 'c.our_endpoint_id', 'c.contact_phone',
+    )
+    .select(
+      'sms_response.message_type as response_message_type',
+      'sms_response.status as response_status',
+      'sms_response.metadata as response_metadata',
+      'sms_response.created_at as response_created_at',
+      'sms_audit.metadata as response_audit_metadata',
+      'sms_answer.is_click_followup as response_is_click_followup',
+      'sms_answer.reply_to_message_id as response_reply_to_message_id',
     );
   const rowsQuery = selectCommsColumns(db('messages as m')
     .leftJoin('conversations as c', 'm.conversation_id', 'c.id')
@@ -388,6 +440,14 @@ async function listCustomerComms(db, customer, query = {}) {
   const rows = await rowsQuery.orderBy('m.created_at', 'desc').orderBy('m.id', 'desc').limit(parsed.limit + 1);
   const hasMore = rows.length > parsed.limit;
   const pageRows = rows.slice(0, parsed.limit);
+  const priorOutboundBodies = await loadPriorOutboundBodies(db, pageRows, {
+    customerScoped: true, fallbackCustomerPhone: customer.phone,
+  });
+  for (const row of pageRows) {
+    if (priorOutboundBodies.has(String(row.id))) {
+      row.response_prior_outbound_body = priorOutboundBodies.get(String(row.id));
+    }
+  }
   const last = pageRows[pageRows.length - 1];
   const nextCursor = hasMore && last ? encodeCursor({
     v: 1, kind: 'comms', customerId, filter: parsed.channel, readBefore,
@@ -426,6 +486,14 @@ async function listCustomerComms(db, customer, query = {}) {
       .orderBy('m.created_at', 'desc')
       .orderBy('m.id', 'desc')
       .limit(1);
+    const composerPriorOutboundBodies = await loadPriorOutboundBodies(db, composerRows, {
+      customerScoped: true, fallbackCustomerPhone: customer.phone,
+    });
+    for (const row of composerRows) {
+      if (composerPriorOutboundBodies.has(String(row.id))) {
+        row.response_prior_outbound_body = composerPriorOutboundBodies.get(String(row.id));
+      }
+    }
     composerComms = composerRows.map(message => mapCommsMessage(message, customer, twilioNumbers));
   }
   return {
@@ -439,5 +507,5 @@ module.exports = {
   TIMELINE_TYPES,
   listCustomerComms,
   listCustomerTimeline,
-  _private: { decodeCursor, encodeCursor, parseCommsRequest, parseTimelineRequest, compareEvents },
+  _private: { decodeCursor, encodeCursor, parseCommsRequest, parseTimelineRequest, compareEvents, mapCommsMessage },
 };

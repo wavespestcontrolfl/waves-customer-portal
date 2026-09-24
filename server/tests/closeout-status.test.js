@@ -296,6 +296,14 @@ describe('closeout-status: report + report delivery', () => {
     // 'skipped' is classified by its reason: suppression = policy; no recipient = gap; ineligible/blank = unknown.
     expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'skipped', last_error: 'Suppressed: bounce (service_operational)' } })).facts.reportDelivery)
       .toMatchObject({ state: 'not_required', reason: 'delivery_skipped_suppressed', ruleSource: 'email_suppression' });
+    // Audit r2-completion-live-money-tail-1 follow-up: a customer's own
+    // portal opt-out (email_enabled/service_completed off) must classify the
+    // same way as a suppression-list block — a policy choice, not a gap —
+    // so closeout never alerts staff to "add a working email" for someone
+    // who explicitly turned emails off. sendServiceReportV1Email's skip text
+    // for that case starts with "Suppressed:" for exactly this reason.
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'skipped', last_error: 'Suppressed: customer opted out of service report email' } })).facts.reportDelivery)
+      .toMatchObject({ state: 'not_required', reason: 'delivery_skipped_suppressed', ruleSource: 'email_suppression' });
     expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'skipped', last_error: 'No service report recipient email' } })).facts.reportDelivery)
       .toMatchObject({ state: 'failed', reason: 'delivery_skipped_no_recipient' });
     expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'skipped', last_error: 'Not a completed service report v1 record' } })).facts.reportDelivery)

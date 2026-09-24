@@ -956,8 +956,19 @@ async function assignTechnician(input, actionContext = {}) {
     // already on tech.id are a no-op reassignment: clearing them would
     // erase a valid manual/optimized position (uncapped audit r25 P1) —
     // the predicate is on the row value the UPDATE itself observes.
-    // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE).
-    await assertAssignableTechnician(tech.id, { conn: trx });
+    // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE),
+    // checked once per distinct destination day the selected stops land on
+    // — a tech marked out for even one of several dates in this bulk assign
+    // must refuse the whole call, not silently accept the days it's clear
+    // for (the absence read per date is cheap; see swapTechAssignments for
+    // the same date-threaded pattern).
+    const destDates = [...new Set(services.map((s) => s.scheduled_date_str))];
+    for (const d of destDates) {
+      await assertAssignableTechnician(tech.id, { conn: trx, date: d });
+    }
+    // No-op split from the LOCKED live rows (not a separate count query):
+    // the commit-count guard below compares the UPDATE's touched rows
+    // against exactly this set.
     const nonNoOpIds = live.filter((l) => String(l.technician_id || '') !== String(tech.id)).map((l) => l.id);
     const alreadyOn = live.length - nonNoOpIds.length;
     // The COMMITTED schedule of every reassigned row rides back for the
@@ -1757,8 +1768,8 @@ async function swapTechAssignments(input, actionContext = {}) {
       // Only a tech RECEIVING stops must be assignable: swapping an offboarded
       // tech's remaining route onto an eligible one is exactly how their
       // retained future work gets reassigned.
-      if (bIds.length) await assertAssignableTechnician(techA.id, { conn: trx });
-      if (aIds.length) await assertAssignableTechnician(techB.id, { conn: trx });
+      if (bIds.length) await assertAssignableTechnician(techA.id, { conn: trx, date });
+      if (aIds.length) await assertAssignableTechnician(techB.id, { conn: trx, date });
       if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
       // The COMMITTED schedule of every swapped row rides back for the
       // notices (pre-push audit P1): a same-day window edit landing between

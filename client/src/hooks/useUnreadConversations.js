@@ -1,10 +1,9 @@
-// The global Messages icon or a customer's Message action: conversations with an inbound text
-// nobody has read (GET /admin/communications/unread-count — the inbox's own
-// per-thread rule, counted server-side). Refreshes on the same bounded
-// cadence the notification bell uses, when the tab becomes visible again,
-// and immediately when a customer thread is marked read anywhere in the app
-// (UNREAD_CHANGED_EVENT). A failed poll keeps the last known number: the
-// badge must never blank or inflate because a request dropped.
+// The global Messages icon or a customer's Message action: the server-reported
+// conversation badge count. Refreshes on the same bounded cadence the
+// notification bell uses, when the tab becomes visible again, and immediately
+// when message state changes anywhere in the app (UNREAD_CHANGED_EVENT). A
+// failed poll keeps the last known number: the badge must never blank or
+// inflate because a request dropped.
 import { useEffect, useState } from "react";
 import { adminFetch } from "../utils/admin-fetch";
 
@@ -25,7 +24,7 @@ export default function useUnreadConversations(enabled = true, customerId = null
       try {
         const scope = customerId ? `?customerId=${encodeURIComponent(customerId)}` : "";
         const r = await adminFetch(`/admin/communications/unread-count${scope}`);
-        if (!cancelled && currentRequest === request) setCount(Math.max(0, Number(r?.conversations) || 0));
+        if (!cancelled && currentRequest === request && Number.isSafeInteger(r?.conversations) && r.conversations >= 0) setCount(r.conversations);
       } catch {
         /* keep the last known count */
       }
@@ -37,11 +36,16 @@ export default function useUnreadConversations(enabled = true, customerId = null
     };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener(UNREAD_CHANGED_EVENT, load);
+    const onPush = (event) => {
+      if (event.data?.type === "waves:push-received") load();
+    };
+    navigator.serviceWorker?.addEventListener("message", onPush);
     return () => {
       cancelled = true;
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener(UNREAD_CHANGED_EVENT, load);
+      navigator.serviceWorker?.removeEventListener("message", onPush);
     };
   }, [enabled, customerId]);
 

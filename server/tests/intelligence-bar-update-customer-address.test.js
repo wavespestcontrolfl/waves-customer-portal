@@ -36,11 +36,22 @@ jest.mock('../services/customer-address-fanout', () => ({
 jest.mock('../services/geocoder', () => ({
   ensureCustomerGeocoded: jest.fn(() => Promise.resolve({ latitude: 27.1, longitude: -82.4 })),
 }));
+// Churn billing disarm disclosure (GitHub Codex #4684 r4): churnGuardOrRepair
+// itself (its live-visit/prepay-term/pending-invoice checks and its call
+// into cancellation-processor.js's disarm helpers) is exercised elsewhere
+// (customer-lifecycle-guard's own tests) — here it is mocked so the tool
+// RESULT shape can be asserted for both the blocked and wound-down paths
+// without re-deriving every one of its DB reads.
+jest.mock('../services/customer-lifecycle-guard', () => ({
+  churnGuardOrRepair: jest.fn(),
+  describeLiveVisit: jest.fn(() => 'This customer still has a scheduled visit'),
+}));
 
 const db = require('../models/db');
 const customerProperties = require('../services/customer-properties');
 const addressFanout = require('../services/customer-address-fanout');
 const geocoder = require('../services/geocoder');
+const { churnGuardOrRepair } = require('../services/customer-lifecycle-guard');
 const { executeTool } = require('../services/intelligence-bar/tools');
 
 const CUSTOMER_ID = 'cust-1';
@@ -159,6 +170,193 @@ test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode 
   expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ latitude: null, longitude: null }));
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith('cust-a');
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith('cust-b');
+});
+
+describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684 r4)', () => {
+  test('update_customer stage->churned reports billing_wound_down when churnGuardOrRepair does not block', async () => {
+    db.__qb.first
+      .mockResolvedValueOnce(baseRow) // before (pre-transaction read)
+      .mockResolvedValueOnce(baseRow) // locked in-transaction read (FOR UPDATE)
+      .mockResolvedValueOnce({ ...baseRow, pipeline_stage: 'churned', active: false }); // after
+    churnGuardOrRepair.mockResolvedValueOnce({ blocked: false });
+
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID,
+      updates: { pipeline_stage: 'churned' },
+    });
+
+    expect(result.success).toBe(true);
+    // churnGuardOrRepair (Codex #4715 parent round-6 rename/widen of
+    // churnGuardForRow) takes the locked row as a 3rd arg for its
+    // already-churned rail-only-repair decision.
+    expect(churnGuardOrRepair).toHaveBeenCalledWith(expect.anything(), CUSTOMER_ID, expect.anything());
+    expect(result.billing_wound_down).toBe(true);
+    expect(result.billing_wound_down_fields).toEqual(expect.arrayContaining([
+      'active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at',
+    ]));
+    // Codex #4715 r1 P2: the completed card only renders warning/error/message
+    // on an ordinary result — the structured fields above are invisible
+    // without this.
+    expect(result.message).toBe('Billing wound down: Auto Pay off (customer + saved methods), next charge date and armed retries cleared.');
+  });
+
+  test('update_customer stage->churned reports rails_repaired (not billing_wound_down) when churnGuardOrRepair only repairs the rails', async () => {
+    // Codex #4715 r4 P2: railsRepairedOnly (already-churned row, customer-
+    // level billing already off) skips disarmCustomerBillingFields entirely
+    // — the receipt must not claim customer fields were wound down this write.
+    db.__qb.first
+      .mockResolvedValueOnce(baseRow) // before
+      .mockResolvedValueOnce(baseRow) // locked in-transaction read
+      .mockResolvedValueOnce({ ...baseRow, pipeline_stage: 'churned', active: false }); // after
+    churnGuardOrRepair.mockResolvedValueOnce({ blocked: false, railsRepairedOnly: true });
+
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID,
+      updates: { pipeline_stage: 'churned' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.billing_wound_down).toBe(false);
+    expect(result.rails_repaired).toBe(true);
+    expect(result.billing_wound_down_fields).toEqual(['payment_methods.autopay_enabled', 'payments.next_retry_at']);
+    // Copy stays consistent with the confirmation card's own repeat-save
+    // sentence (authorization-contract.js): "only saved-method Auto Pay and
+    // armed retries are repaired".
+    expect(result.message).toMatch(/only saved-method Auto Pay and armed retries were repaired/);
+  });
+
+  test('update_customer stage->churned refuses (no billing_wound_down) when churnGuardOrRepair blocks on a live visit', async () => {
+    db.__qb.first
+      .mockResolvedValueOnce(baseRow) // before
+      .mockResolvedValueOnce(baseRow); // locked in-transaction read
+    churnGuardOrRepair.mockResolvedValueOnce({
+      blocked: true,
+      liveVisit: { liveReason: 'upcoming_visit', scheduled_date: '2026-10-01', status: 'confirmed' },
+      liveTerm: null,
+      pendingPrepayInvoice: null,
+      error: 'still has a scheduled visit — use "Cancel plan…" first',
+    });
+
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID,
+      updates: { pipeline_stage: 'churned' },
+    });
+
+    expect(result.error).toMatch(/^Cannot mark Churned:/);
+    expect(result.preview_changed).toBe(true);
+    expect(result.billing_wound_down).toBeUndefined();
+    expect(result.message).toBeUndefined();
+  });
+
+  test('bulk_update_customers (fast CASE path) reports billing_wound_down_count for non-blocked rows and skips the blocked one', async () => {
+    db.__qb.select.mockResolvedValueOnce([{ id: 'cust-a' }, { id: 'cust-b' }, { id: 'cust-c' }]);
+    churnGuardOrRepair.mockImplementation((trx, cid) => Promise.resolve(
+      cid === 'cust-b' ? { blocked: true, error: 'still has an active prepay term — use "Cancel plan…" first' } : { blocked: false },
+    ));
+
+    const result = await executeTool('bulk_update_customers', {
+      customer_ids: ['cust-a', 'cust-b', 'cust-c'],
+      updates: { pipeline_stage: 'churned' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(churnGuardOrRepair).toHaveBeenCalledTimes(3);
+    expect(result.billing_wound_down_count).toBe(2);
+    expect(result.skipped_customers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ customer_id: 'cust-b' }),
+    ]));
+    expect(result.message).toBe('Billing wound down for 2 customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.');
+    // Codex #4715 r2 P2: the card renders `warning` first and hides
+    // `message` on a partial update — the wind-down sentence must ride in
+    // `warning` too, not only in `message`.
+    expect(result.warning).toContain('Billing wound down for 2 customer(s)');
+    // Pre-push audit P1: the fast CASE path's warning used to say only "see
+    // skipped_customers for why" — PendingActionsCard renders ONLY
+    // `warning`, so the churn refusal's actionable reason (the "use Cancel
+    // plan…" instruction from churnGuardOrRepair's `error`) never reached
+    // the operator. Mirrors the per-row bulk branch's own warning.
+    expect(result.warning).toContain('still has an active prepay term — use "Cancel plan…" first');
+    expect(result.skipped_customers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ customer_id: 'cust-b', churn_blocked: true }),
+    ]));
+  });
+
+  test('bulk_update_customers (fast CASE path) reports rails_repaired_count separately from billing_wound_down_count', async () => {
+    // Codex #4715 r4 P2: churnGuardOrRepair's railsRepairedOnly means an
+    // already-churned row whose customer-level billing was already off —
+    // it never touched active/autopay_enabled/next_charge_date this write,
+    // so it must not be counted (or worded) as a full wind-down.
+    db.__qb.select.mockResolvedValueOnce([{ id: 'cust-a' }, { id: 'cust-b' }]);
+    churnGuardOrRepair.mockImplementation((trx, cid) => Promise.resolve(
+      cid === 'cust-b' ? { blocked: false, railsRepairedOnly: true } : { blocked: false },
+    ));
+
+    const result = await executeTool('bulk_update_customers', {
+      customer_ids: ['cust-a', 'cust-b'],
+      updates: { pipeline_stage: 'churned' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.billing_wound_down_count).toBe(1);
+    expect(result.rails_repaired_count).toBe(1);
+    expect(result.message).toContain('Billing wound down for 1 customer(s)');
+    expect(result.message).toContain('1 customer(s) were already churned — only saved-method Auto Pay and armed retries were repaired.');
+  });
+
+  test('bulk_update_customers (per-row path, churn + address combined) reports billing_wound_down_count only for the row that committed', async () => {
+    const rowA = { ...baseRow, id: 'cust-a' };
+    const rowB = { ...baseRow, id: 'cust-b' };
+    db.__qb.first
+      .mockResolvedValueOnce(rowA) // before (cust-a)
+      .mockResolvedValueOnce(rowA) // locked read (cust-a)
+      .mockResolvedValueOnce(rowB) // before (cust-b)
+      .mockResolvedValueOnce(rowB); // locked read (cust-b)
+    churnGuardOrRepair.mockImplementation((trx, cid) => Promise.resolve(
+      cid === 'cust-b' ? { blocked: true, error: 'still has a scheduled visit — use "Cancel plan…" first' } : { blocked: false },
+    ));
+
+    const result = await executeTool('bulk_update_customers', {
+      customer_ids: ['cust-a', 'cust-b'],
+      updates: { pipeline_stage: 'churned', city: 'Venice' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.updated_count).toBe(1);
+    expect(result.billing_wound_down_count).toBe(1);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ customer_id: 'cust-b' }),
+    ]));
+    expect(result.message).toBe('Billing wound down for 1 customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.');
+    // Codex #4715 r2 P2: same as the fast CASE path — `warning` must carry
+    // the wind-down sentence too, since the card hides `message` when a
+    // `warning` is also present.
+    expect(result.warning).toContain('Billing wound down for 1 customer(s)');
+  });
+
+  test('bulk_update_customers (per-row path) reports rails_repaired_count for a railsRepairedOnly row', async () => {
+    const rowA = { ...baseRow, id: 'cust-a' };
+    const rowB = { ...baseRow, id: 'cust-b' };
+    db.__qb.first
+      .mockResolvedValueOnce(rowA) // before (cust-a)
+      .mockResolvedValueOnce(rowA) // locked read (cust-a)
+      .mockResolvedValueOnce(rowB) // before (cust-b)
+      .mockResolvedValueOnce(rowB); // locked read (cust-b)
+    churnGuardOrRepair.mockImplementation((trx, cid) => Promise.resolve(
+      cid === 'cust-b' ? { blocked: false, railsRepairedOnly: true } : { blocked: false },
+    ));
+
+    const result = await executeTool('bulk_update_customers', {
+      customer_ids: ['cust-a', 'cust-b'],
+      updates: { pipeline_stage: 'churned', city: 'Venice' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.updated_count).toBe(2);
+    expect(result.billing_wound_down_count).toBe(1);
+    expect(result.rails_repaired_count).toBe(1);
+    expect(result.message).toContain('Billing wound down for 1 customer(s)');
+    expect(result.message).toContain('1 customer(s) were already churned — only saved-method Auto Pay and armed retries were repaired.');
+  });
 });
 
 test('a bulk NON-address edit skips per-customer fanout (one transaction, no address machinery)', async () => {

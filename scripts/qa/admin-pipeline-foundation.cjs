@@ -198,6 +198,8 @@ function bodyFor(url, method) {
   if (p === "/api/admin/customers/customer-fixture/comms") return { comms: [] };
   if (p === "/api/admin/leads/contact-matches")
     return { matches: [], total: 0 };
+  if (p === "/api/admin/call-recordings/commitments/open")
+    return { commitments: [], enabled: false };
   if (p === "/api/admin/leads/lead-fixture")
     return { lead, activities: [], calls: [] };
   if (method !== "GET") return { ok: true };
@@ -300,12 +302,37 @@ async function main() {
         });
       });
 
-      await page.goto(`${server.baseUrl}/admin/pipeline?tab=leads`, {
-        timeout: 60000,
-      });
+      await page.goto(
+        `${server.baseUrl}/admin/leads?leadId=lead-fixture`,
+        {
+          timeout: 60000,
+        },
+      );
       await page
         .getByRole("button", { name: "Avery Example", exact: true })
         .waitFor();
+      await page.waitForURL((current) => {
+        const url = new URL(current);
+        return (
+          url.searchParams.get("lead") === "lead-fixture" &&
+          !url.searchParams.has("leadId")
+        );
+      });
+      const exactLeadRequest = report.requests.find(
+        (request) =>
+          request.width === width &&
+          request.key === "GET /api/admin/leads" &&
+          new URLSearchParams(request.search).get("id") === "lead-fixture",
+      );
+      assert.ok(
+        exactLeadRequest,
+        `legacy lead link did not fetch by id at ${width}`,
+      );
+      assert.equal(
+        new URLSearchParams(exactLeadRequest.search).has("status"),
+        false,
+        `legacy lead link retained the open-only filter at ${width}`,
+      );
       await waitForFonts(page);
       assert.equal(
         await page
@@ -314,6 +341,28 @@ async function main() {
           .getAttribute("data-ui-density"),
         "comfortable",
       );
+      const listShot = path.join(output, `lead-list-${width}.png`);
+      await page.screenshot({ path: listShot, fullPage: true });
+      report.screenshots.push(listShot);
+      await page
+        .getByRole("combobox", { name: "Stage for Avery Example" })
+        .selectOption("lost");
+      const lostDialog = page.getByRole("dialog", { name: "Mark lead lost" });
+      await lostDialog.waitFor();
+      const lostShot = path.join(output, `lead-lost-${width}.png`);
+      await page.screenshot({ path: lostShot, fullPage: true });
+      report.screenshots.push(lostShot);
+      await lostDialog.getByLabel(/^Reason/).selectOption("no_response");
+      const lostRequestPromise = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          new URL(request.url()).pathname ===
+            "/api/admin/leads/lead-fixture/lost",
+      );
+      await lostDialog.getByRole("button", { name: "Mark Lost" }).click();
+      const lostRequest = await lostRequestPromise;
+      assert.equal(lostRequest.postDataJSON().reason, "no_response");
+      await lostDialog.waitFor({ state: "hidden" });
       await page.getByRole("button", { name: "New lead", exact: true }).click();
       const newLead = page.getByRole("dialog", { name: "New lead" });
       await newLead.waitFor();
@@ -374,9 +423,9 @@ async function main() {
         },
         `Selected analytics control contrast at ${width}`,
       );
-      const leadsShot = path.join(output, `leads-${width}.png`);
-      await page.screenshot({ path: leadsShot, fullPage: true });
-      report.screenshots.push(leadsShot);
+      const analyticsShot = path.join(output, `leads-analytics-${width}.png`);
+      await page.screenshot({ path: analyticsShot, fullPage: true });
+      report.screenshots.push(analyticsShot);
       assert.deepEqual(
         await page.locator(".ui-surface").first().evaluate(visibleTypography),
         [],
@@ -392,6 +441,8 @@ async function main() {
         report.scenarios.push({
           width,
           leadsList: true,
+          legacyLeadLink: true,
+          lostDisposition: true,
           leadDialog: true,
           board: true,
           sources: true,

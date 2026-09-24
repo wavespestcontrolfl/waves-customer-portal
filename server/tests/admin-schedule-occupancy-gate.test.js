@@ -319,7 +319,16 @@ describe('PUT /:id/update-details — arrival warnings for partial route edits',
   ])('a route-only edit %j commits with the route warning under the date lock', async (change) => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const row = { ...SVC };
-    trx.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...row } : undefined));
+    // Save-time eligibility (tech-out P1) now reads the technicians table
+    // directly from the route, ahead of the (mocked-out) assignDispatchJob
+    // in this suite — an active, field-dispatchable row for whichever tech
+    // is posted, same as every other table this permissive chain answers.
+    trx.mockImplementation((table) => {
+      if (table === 'technicians') {
+        return chain({ id: '00000000-0000-4000-8000-000000000002', name: 'Route Tech', employment_status: 'active', field_dispatchable: true, active: true });
+      }
+      return chain(table === 'scheduled_services' ? { ...row } : undefined);
+    });
     require('../services/dispatch-assignment').assignDispatchJob.mockImplementation(async ({ technicianId }) => {
       row.technician_id = technicianId;
       return { changed: true };

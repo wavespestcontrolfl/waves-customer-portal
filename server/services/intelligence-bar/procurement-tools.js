@@ -57,6 +57,9 @@ Use for: "compare SiteOne vs LESCO on Bifen IT", "where's the cheapest Demand CS
         product_name: { type: 'string', description: 'Product name to compare (partial match OK)' },
         product_id: { type: 'string', format: 'uuid', description: 'Or use exact product UUID' },
       },
+      // Server-side only: tool-definition.js strips top-level combinators from
+      // the copy sent to Anthropic (the API rejects them); the registry's
+      // validator still enforces it.
       anyOf: [{ required: ['product_name'] }, { required: ['product_id'] }],
     },
   },

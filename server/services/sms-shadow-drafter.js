@@ -26,6 +26,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 const { createDeepMessage } = require('./llm/deep');
+const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 
 const DRAFTER = 'house_voice';
 // v7 (06-14): FEW-SHOT VOICE GROUNDING. v6 attacked fact fabrication via data
@@ -73,7 +74,9 @@ const DRAFTER = 'house_voice';
 // retired; auto-send alone still refuses amounts). Access-code values never
 // appear in prompts or replies. The verifier shares the block, so every
 // added fact also becomes checkable ground truth.
-const PROMPT_VERSION = 'house_voice_v10';
+// v11: explicit, context-sensitive gratitude candidates. The existing
+// graduation cohort resets when these instructions change.
+const PROMPT_VERSION = 'house_voice_v11';
 const SHADOW_STATUS = 'shadow';
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
@@ -159,7 +162,8 @@ USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled
 ALSO:
 - If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.
 - Each intended_actions entry's "type" must be one of: ${INTENDED_ACTION_TYPES.join(', ')}.
-- If the message is a pure courtesy acknowledgement that warrants NO reply at all (e.g. "Thanks!", a bare "ok" closing the thread), set "reply" to "" and intended_actions to [{"type":"none","note":"no reply warranted"}]. But a short confirmation that answers a question we asked (a "yes" to a proposed time) DOES warrant a reply.
+- When CLASSIFIED INTENT is gratitude_reply, the customer may be expressing standalone thanks. Inspect the recent conversation and account flags first. Only when a completed answer/service or payment acknowledgement clearly explains the thanks, and there is no unresolved request, complaint, instruction, booking acceptance or operational question, return exactly the APPROVED GRATITUDE REPLY and intended_actions [{"type":"none"}]. If context is uncertain or anything still needs attention, return reply "". Never add a question, sales offer, review request, promise, sign-off or CTA. Never answer a reaction or continue an exchange after our own courtesy reply. Names mentioned by the customer are addressees, not customer identity. The server independently checks eligibility after a quiet period; this is only a draft.
+- For other intents, if the message is a pure courtesy acknowledgement that warrants NO reply at all (e.g. "Thanks!", a bare "ok" closing the thread), set "reply" to "" and intended_actions to [{"type":"none","note":"no reply warranted"}]. But a short confirmation that answers a question we asked (a "yes" to a proposed time) DOES warrant a reply.
 
 Respond with ONLY a JSON object, no prose, no code fences:
 {
@@ -645,6 +649,7 @@ function buildUserPromptFromFacts(factsBlock, inboundMessage, intent, scheduling
   return `${factsBlock}
 
 CLASSIFIED INTENT: ${intent?.intent || 'GENERAL'}${schedulingIntent ? ' (scheduling-intent detected — be especially careful to only state schedule facts present above)' : ''}
+${intent?.intent === GRATITUDE_INTENT ? `APPROVED GRATITUDE REPLY: ${JSON.stringify(intent.approvedReply || 'Our pleasure!')}` : ''}
 
 The facts above are the ONLY ones you have. If answering needs a detail that isn't shown — an exact time, a tech name, what was found, a billing event — do not invent it; say you'll confirm and follow up.
 ${exemplarBlock ? `\n${exemplarBlock}\n` : ''}
@@ -774,7 +779,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // any fact leakage from another customer's exemplar (a date/price/service);
   // with SHADOW_DRAFT_VERIFY off the single-pass draft is marked converged
   // without that net, so exemplars are withheld and v7 degrades to v6.
-  const exemplars = VERIFY_ENABLED ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
+  // Gratitude has fixed server-approved copy. Mutable corpus examples add no
+  // value here and would change the examined prompt without a version change.
+  const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
+    ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
   const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock);
 
@@ -913,9 +921,14 @@ function parseShadowResponse(text) {
  * from the inbound webhook: all failures are caught, logged masked, and
  * recorded nowhere else — a shadow miss must never affect the live path.
  */
-async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false }) {
+async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false, source = null, hasMedia = false }) {
   const startedAt = Date.now();
   try {
+    const gratitudeCandidate = source === 'live_webhook' && !hasMedia && !schedulingIntent
+      && customer?.id && smsLogId && isGratitudeOnly(inboundMessage);
+    if (gratitudeCandidate) {
+      intent = { intent: GRATITUDE_INTENT, confidence: 1, approvedReply: buildGratitudeReply(customer.first_name) };
+    }
     const ContextAggregator = require('./context-aggregator');
     // The webhook already matched a single active customer (deleted_at +
     // shared-number protection) — build context from that row instead of
@@ -1018,11 +1031,26 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // shaped this draft — null = base prompt. Lets cohort readouts
           // split v9 drafts by the profile that was live at draft time.
           voice_profile_version: voiceProfileVersion ?? null,
+          ...(gratitudeCandidate ? {
+            gratitude: {
+              source: 'live_webhook',
+              policy_version: GRATITUDE_POLICY_VERSION,
+              actions_verified_safe: parsed.auto_send_safe === true,
+              verifier_enabled: VERIFY_ENABLED,
+            },
+          } : {}),
         }),
         scheduling_intent: Boolean(schedulingIntent),
         draft_ms: Date.now() - startedAt,
       })
       .returning('id');
+
+    // Gratitude is never sent or published from the webhook/drafter. The
+    // existing scheduled sweep rechecks the immutable source, entire recent
+    // thread, cutoff, quiet window and exact fixed copy before considering
+    // the ordinary graduation + shared auto-send boundary. A rejected
+    // candidate must not supersede operational suggestions or close tasks.
+    if (gratitudeCandidate) return row?.id || null;
 
     // A draft that copied a redaction placeholder ([name], [phone], …) from a
     // few-shot exemplar must NEVER reach a customer — keep it shadow (the judge
@@ -1251,6 +1279,8 @@ module.exports = {
   resolveEffectiveVoiceProfile,
   DRAFTER,
   PROMPT_VERSION,
+  VERIFY_ENABLED,
+  MAX_REVISIONS,
   SHADOW_STATUS,
   INTENDED_ACTION_TYPES,
   EXEMPLAR_INJECTION_RE,
