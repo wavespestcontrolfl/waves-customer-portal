@@ -318,6 +318,15 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, fungus_control: 40, color_health: 70, stress_damage: 40 });
   });
 
+  test('a legacy explicit Stress entry survives a later partial save', async () => {
+    const blanks = { ...COMPLETE, color_health: null, fungus_control: 75, thatch_level: 85, stress_damage: null };
+    const { assessment } = await seed(blanks, { run: false });
+    const first = await request(assessment.id, { adjustedScores: { stress_damage: 40 } });
+    expect(first.body).toMatchObject({ confirmed: false, missingScores: ['color_health'] });
+    const second = await request(assessment.id, { adjustedScores: { color_health: 70 } });
+    expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, stress_damage: 40 });
+  });
+
   test.each([false, true])('legacy confirmation works when the optional run table is missing: %s', async (missingTable) => {
     const { assessment } = await seed(COMPLETE, { run: false });
     if (missingTable) await mockKnex.schema.renameTable('lawn_assessment_runs', 'temporarily_missing_runs');

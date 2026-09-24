@@ -135,7 +135,9 @@ function legacyStressIsFixed(assessment, adjustedScores) {
   const aiRead = parseJsonObject(assessment.adjusted_scores, null);
   const ai = aiRead ? aiRead.stress_damage : assessment.stress_damage;
   const typedStress = adjustedScores?.stress_damage;
-  return (ai != null && ai !== '') || (typedStress != null && typedStress !== '' && Number.isFinite(Number(typedStress)));
+  const earlierEntry = aiRead && assessment.stress_damage != null && assessment.stress_damage !== '';
+  return (ai != null && ai !== '') || earlierEntry
+    || (typedStress != null && typedStress !== '' && Number.isFinite(Number(typedStress)));
 }
 
 function legacyConfirmFinalScores(assessment, adjustedScores) {
@@ -162,6 +164,13 @@ function legacyConfirmFinalScores(assessment, adjustedScores) {
   }
   if (typed('stress_damage')) {
     finalScores.stress_damage = scoreValue(adjustedScores.stress_damage);
+    return finalScores;
+  }
+  // A pending save stores Stress only when it is real (AI-read or typed —
+  // legacyStressIsFixed), so a stored Stress the AI didn't read is the
+  // technician's earlier entry: keep it.
+  if (assessment.stress_damage != null && assessment.stress_damage !== '' && !assessment.confirmed_by_tech) {
+    finalScores.stress_damage = scoreValue(assessment.stress_damage);
     return finalScores;
   }
   // Derive from the KNOWN components only, with the 95 floor.
