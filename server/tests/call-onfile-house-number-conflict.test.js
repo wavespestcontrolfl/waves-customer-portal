@@ -336,6 +336,8 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     // The disputed premise is held out of active property persistence on both authority paths (codex r32 P1).
     expect(processor).toContain("if (!v2SoleAddressAuthority && !disputedPremise(extracted.address_line1)");
     expect(processor).toContain("if (disputedPremise(entry.address_line1)) continue;");
+    // A standing hold carried over without fresh AV evidence restores the disputed street (codex r33 P1).
+    expect(processor).toContain("if (!disputedStatedStreet) disputedStatedStreet = standingPayload?.stated_street || null;");
     // A reprocess re-binds the identity only for a LINKED call; an unlink keeps the filing identity (codex r29 P2).
     expect(processor).toContain("...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),");
   });

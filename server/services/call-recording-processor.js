@@ -10422,6 +10422,10 @@ const CallRecordingProcessor = {
           } else if (standingConflictCoversCall) {
             if (!disputeClaimedUnrecorded) houseNumberConflictFiled = true;
             houseNumberDisputed = true;
+            // The carried-over hold restores the disputed street too, so the
+            // property persistence keeps holding that premise out (codex r33
+            // P1).
+            if (!disputedStatedStreet) disputedStatedStreet = standingPayload?.stated_street || null;
             if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
             logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
           } else {
