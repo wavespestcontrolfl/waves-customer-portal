@@ -49,6 +49,10 @@ describe('enriched profile addressVerdict (codex #4667 r25 P1)', () => {
     expect(countyRecordVouchesTypedNumber('1260 Example St', county)).toBe(false);
     expect(countyRecordVouchesTypedNumber('Example St', { ...county, addressLine1: '1260 Example St' })).toBe(false);
     expect(countyRecordVouchesTypedNumber('1260 Example St', { ...county, addressLine1: '1250 Example St' })).toBe(false);
+    // Same number on ANOTHER street or in another ZIP is no vouch (codex r43 P1).
+    expect(countyRecordVouchesTypedNumber('1260 Example St', { ...county, addressLine1: '1260 Other Ave' })).toBe(false);
+    expect(countyRecordVouchesTypedNumber('1260 Example St, Parrish, FL 34219', { ...county, addressLine1: '1260 Example St', zipCode: '34221' })).toBe(false);
+    expect(countyRecordVouchesTypedNumber('1260 Example St, Parrish, FL 34219', { ...county, addressLine1: '1260 EXAMPLE STREET', zipCode: '34219' })).toBe(true);
     expect(countyRecordVouchesTypedNumber('1260 Example St', { squareFootage: 1623 })).toBe(false);
   });
 

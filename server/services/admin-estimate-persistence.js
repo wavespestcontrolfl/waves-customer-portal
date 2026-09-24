@@ -3417,7 +3417,11 @@ async function reviseAdminEstimate({
         // …and the COMPLETE locality on both sides (codex r21 P1): a
         // street-only estimate must not move a same-number customer in
         // another town.
-        if (before && custDisplay && sameDoor && samePremiseDisplay(custDisplay, lockedPrior?.address, { requireLocality: true })) {
+        // …the SAME relaxation the linked lead gets (codex r43 P1): a prior
+        // estimate that carried no locality at all cannot demand one, or a
+        // street-only flagged estimate could never move its linked customer
+        // off the rejected number.
+        if (before && custDisplay && sameDoor && samePremiseDisplay(custDisplay, lockedPrior?.address, { requireLocality: priorHasLocality })) {
           // The repository's established address-change path, not a bare
           // column write (codex r17 P1): coordinates cleared atomically
           // with the address (the async re-geocode refills them), the

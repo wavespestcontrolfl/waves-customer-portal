@@ -274,3 +274,4 @@ function contactPairLockKey(email, phone) {
 module.exports = {
   cachedAuditSuperseded,
   auditEvidenceAt, deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey };
+module.exports.streetKeyNoUnit = streetKeyNoUnit;

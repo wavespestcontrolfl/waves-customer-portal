@@ -2633,10 +2633,23 @@ function houseNumbersOf(address, rc) {
 // PROPERTY, not for the typed number — such a lookup runs the audit and,
 // without one, reads 'unanswered', never 'county_record' (codex #4667 r25
 // P1: an unvouched county_record would clear a prior address hold).
+// …and the SAME STREET (and ZIP where both sides carry one): a geocode
+// that snapped the typed address to a county record on another street or
+// in another town with the same leading number must not vouch for it and
+// clear a standing address hold (codex #4667 r43 P1).
 function countyRecordVouchesTypedNumber(address, rc) {
   if (!hasCountyEvidence(rc)) return false;
   const { typed, record } = houseNumbersOf(address, rc);
-  return !!(typed && record && typed === record);
+  if (!(typed && record && typed === record)) return false;
+  const { streetKeyNoUnit, parseDisplayAddress } = require('../services/lead-address-unverified');
+  const typedParsed = parseDisplayAddress(address);
+  const recordLine = rc?.addressLine1 || rc?._parcel?.situsAddress || '';
+  const typedStreet = streetKeyNoUnit(typedParsed.streetLine || address);
+  const recordStreet = streetKeyNoUnit(recordLine);
+  if (!typedStreet || !recordStreet || typedStreet !== recordStreet) return false;
+  const recordZip = String(rc?.zipCode || rc?._parcel?.zip || '').match(/\d{5}/)?.[0] || null;
+  if (typedParsed.zip && recordZip && typedParsed.zip !== recordZip) return false;
+  return true;
 }
 
 const FALLBACK_CRITICAL_FIELDS = ['squareFootage', 'lotSize', 'stories', 'propertyType'];

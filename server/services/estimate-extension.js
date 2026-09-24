@@ -489,6 +489,21 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           .forUpdate()
           .first('id');
         if (!row) return false;
+        // No link-visible sibling may be off-surface (codex #4667 r43 P1):
+        // the sibling revive above skips a blocked sibling, so the group
+        // link the text and email carry would render without that
+        // property — the notification is withheld instead (the extension
+        // itself stands; staff see the hold on the estimate).
+        if (estimate.estimate_group_id) {
+          const blocked = await trx('estimates')
+            .where({ estimate_group_id: estimate.estimate_group_id })
+            .whereNot({ id: estimate.id })
+            .whereNull('archived_at')
+            .whereIn('status', ['sent', 'viewed', 'expired'])
+            .whereRaw(`NOT ${ADDRESS_UNVERIFIED_ABSENT_SQL}`)
+            .first('id');
+          if (blocked) return false;
+        }
         const claimedAt = new Date().toISOString();
         const CLAIM_STAMP_SQL = "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)";
         await trx('estimates').where({ id: estimate.id }).update({

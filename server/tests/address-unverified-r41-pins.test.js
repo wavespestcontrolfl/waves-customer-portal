@@ -116,3 +116,17 @@ describe('pre-push audit after r42: parser and lookup clean-timestamp', () => {
     expect(block).toContain('staffCleanAt = lockedCleanAt;\n          } else if (addressUnverified && newerFlag');
   });
 });
+
+describe('codex r43', () => {
+  test('a grouped extension withholds its notification when any link-visible sibling is off-surface', () => {
+    const ext = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+    const claim = ext.slice(ext.indexOf('const deliveryClaimToken = '), ext.indexOf('let smsResult = '));
+    expect(claim).toContain('.whereRaw(`NOT ${ADDRESS_UNVERIFIED_ABSENT_SQL}`)');
+    expect(claim.indexOf('if (blocked) return false;')).toBeLessThan(claim.indexOf('const claimedAt = '));
+  });
+  test('the customer fan-out relaxes locality exactly as the lead does when the prior estimate had none', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/admin-estimate-persistence'), 'utf8');
+    expect(src).toContain("samePremiseDisplay(custDisplay, lockedPrior?.address, { requireLocality: priorHasLocality })");
+    expect(src).not.toContain("samePremiseDisplay(custDisplay, lockedPrior?.address, { requireLocality: true })");
+  });
+});
