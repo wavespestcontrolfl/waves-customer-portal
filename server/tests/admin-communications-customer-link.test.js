@@ -79,6 +79,7 @@ jest.mock('../services/composer-customer-links', () => ({
   buildPayBalanceLink: jest.fn(),
   buildLatestEstimateLink: jest.fn(),
   buildReferralLink: jest.fn(),
+  buildConsultationLink: jest.fn(),
   buildAutopaySetupLink: jest.fn(),
   buildAppointmentPageLink: jest.fn(),
   buildCardRequestLink: jest.fn(),
@@ -240,6 +241,59 @@ describe('POST /admin/communications/customer-link', () => {
       expect(body.firstName).toBe('PersonA');
       expect(body.url).toContain('/r/WAVES-ABC12345');
       expect(body.line).toContain('Share Waves here');
+    });
+  });
+
+  // lead-inspection-link-scope.md §4 — dark behind GATE_LEAD_INSPECTION_LINK.
+  describe('consultation', () => {
+    test('dispatches the phone-owning customer id (no leadId override) and returns url/line/firstName', async () => {
+      wireDb({ customers: soloCustomer() });
+      builders.buildConsultationLink.mockResolvedValue({
+        url: 'https://waves.link/l/abc123',
+        line: "Hi PersonA, it's Waves. Pick a time for us to stop by for a free consultation: https://waves.link/l/abc123\n\nOr reply here and we'll set it up.\n\nReply STOP to opt out.\n\n",
+        standalone: true,
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(builders.buildConsultationLink).toHaveBeenCalledWith(CUSTOMER_UUID, undefined);
+        expect(body.kind).toBe('consultation');
+        expect(body.firstName).toBe('PersonA');
+        expect(body.url).toContain('waves.link/l/abc123');
+        expect(body.standalone).toBe(true);
+      });
+    });
+
+    test('a composer-supplied leadId rides through to the builder', async () => {
+      wireDb({ customers: soloCustomer() });
+      builders.buildConsultationLink.mockResolvedValue({
+        url: 'https://waves.link/l/abc123',
+        line: 'line\n\n',
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', {
+          phone: '+15551234567',
+          kind: 'consultation',
+          leadId: 'lead-uuid-1',
+        });
+        expect(res.status).toBe(200);
+        expect(builders.buildConsultationLink).toHaveBeenCalledWith(CUSTOMER_UUID, 'lead-uuid-1');
+      });
+    });
+
+    test('gate off (or no lead on file): 404 with the builder\'s reason, same shape as every other kind', async () => {
+      wireDb({ customers: soloCustomer() });
+      builders.buildConsultationLink.mockResolvedValue({
+        url: null,
+        line: '',
+        reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)',
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+        expect(res.status).toBe(404);
+        expect((await res.json()).error).toBe('Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)');
+      });
     });
   });
 

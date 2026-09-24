@@ -24,6 +24,12 @@ jest.mock('../services/referral-engine', () => ({
   resolvePromoter: jest.fn(),
   getLiveSettings: jest.fn(async () => ({ program_active: true })),
 }));
+// buildConsultationLink's own lead-resolution logic (customerId vs a
+// caller-supplied leadId override) is what this file tests; the SMS-
+// template render + fallback contract is lead-consultation-link.test.js's.
+jest.mock('../services/lead-consultation-link', () => ({
+  buildLeadConsultationSmsLine: jest.fn(),
+}));
 jest.mock('../routes/estimate-public', () => ({
   isEstimateCustomerViewable: jest.fn(),
   findLinkedUpcomingAppointment: jest.fn(),
@@ -141,6 +147,7 @@ const {
   buildLatestEstimateLink,
   buildReviewRequestLink,
   buildReferralLink,
+  buildConsultationLink,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
   buildAppointmentPageLink,
@@ -469,6 +476,50 @@ describe('buildReferralLink', () => {
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/not active/);
     expect(resolvePromoter).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildConsultationLink', () => {
+  const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+
+  test('a caller-supplied leadId override wins over the customer lookup', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-override', first_name: 'Pat' } }) };
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/abc', line: 'line\n\n', standalone: true });
+    const r = await buildConsultationLink('c1', 'lead-override');
+    expect(r.url).toBe('https://waves.link/l/abc');
+    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-override', 'Pat');
+  });
+
+  test('no leadId override: resolves the customer\'s newest non-deleted lead', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris' } }) };
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/xyz', line: 'line\n\n', standalone: true });
+    const r = await buildConsultationLink('c1');
+    expect(r.url).toBe('https://waves.link/l/xyz');
+    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-newest', 'Chris');
+  });
+
+  test('a leadId override for a deleted/missing lead falls back to the customer lookup', async () => {
+    let call = 0;
+    mockBuilders = {
+      leads: {
+        where: jest.fn(function () { return this; }),
+        whereNull: jest.fn(function () { return this; }),
+        orderBy: jest.fn(function () { return this; }),
+        first: jest.fn(async () => (call++ === 0 ? null : { id: 'lead-fallback', first_name: 'Sam' })),
+      },
+    };
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/fb', line: 'line\n\n', standalone: true });
+    const r = await buildConsultationLink('c1', 'lead-gone');
+    expect(r.url).toBe('https://waves.link/l/fb');
+    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-fallback', 'Sam');
+  });
+
+  test('no lead on file for the customer: a reason, no link, builder never called', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: null }) };
+    const r = await buildConsultationLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/no lead/i);
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
   });
 });
 

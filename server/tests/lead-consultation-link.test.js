@@ -1,5 +1,5 @@
 /**
- * buildLeadConsultationLink / consultationUrlForLead
+ * buildLeadConsultationLink / consultationUrlForLead / buildLeadConsultationSmsLine
  * (services/lead-consultation-link.js) — composer-contract shape
  * ({ url, line, reason }), gate-off dark-ship behavior, and the no-phone /
  * missing-lead / no-secret reasons (lead-inspection-link-scope.md §4).
@@ -10,6 +10,10 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal
 jest.mock('../services/short-url', () => ({
   createShortCode: jest.fn(async () => ({ code: 'abc123', shortUrl: 'https://waves.link/l/abc123' })),
 }));
+// buildLeadConsultationSmsLine's template render — getTemplate stubbed per
+// test; admin-sms-templates' own inactive/missing/fallback semantics are
+// admin-sms-templates-render.test.js's contract, not this file's.
+jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
 
 let mockBuilders = {};
 const mockDb = jest.fn((table) => mockBuilders[table]);
@@ -24,8 +28,10 @@ function chainBuilder({ firstRow = null } = {}) {
 }
 
 const { createShortCode } = require('../services/short-url');
+const { getTemplate } = require('../routes/admin-sms-templates');
 const {
   buildLeadConsultationLink,
+  buildLeadConsultationSmsLine,
   consultationUrlForLead,
   consultationSmsLineFor,
 } = require('../services/lead-consultation-link');
@@ -146,5 +152,60 @@ describe('consultationSmsLineFor', () => {
   test('empty url yields empty line', () => {
     expect(consultationSmsLineFor(null)).toBe('');
     expect(consultationSmsLineFor('')).toBe('');
+  });
+});
+
+describe('buildLeadConsultationSmsLine', () => {
+  test('renders the admin template with {first_name, consultation_url}, collapsed to one line and flagged standalone', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    getTemplate.mockResolvedValue(
+      "Hi Pat, it's Waves. Pick a time for us to stop by for a free consultation: https://waves.link/l/abc123\n\nOr reply here and we'll set it up.\n\nReply STOP to opt out.",
+    );
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(getTemplate).toHaveBeenCalledWith('lead_consultation_link', {
+      first_name: 'Pat',
+      consultation_url: 'https://waves.link/l/abc123',
+    });
+    expect(result.url).toBe('https://waves.link/l/abc123');
+    expect(result.standalone).toBe(true);
+    // Collapsed to one line (no embedded newlines other than the
+    // required trailing '\n\n') so the composer's recipient-change strip
+    // removes the whole rendered message as a unit.
+    expect(result.line.endsWith('\n\n')).toBe(true);
+    expect(result.line.slice(0, -2)).not.toMatch(/\n/);
+    expect(result.line).toContain("Hi Pat, it's Waves.");
+    expect(result.line).toContain('Reply STOP to opt out.');
+  });
+
+  test('missing first name falls back to "there"', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    getTemplate.mockResolvedValue('Hi {first_name}');
+    await buildLeadConsultationSmsLine(LEAD_ID, null);
+    expect(getTemplate).toHaveBeenCalledWith('lead_consultation_link', expect.objectContaining({ first_name: 'there' }));
+  });
+
+  test('an inactive/missing template row falls back to the bare builder clause, no standalone flag', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    getTemplate.mockResolvedValue(null);
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBe('https://waves.link/l/abc123');
+    expect(result.line).toBe(`Pick a time for us to stop by for a free consultation: ${result.url}\n\n`);
+    expect(result.standalone).toBeUndefined();
+  });
+
+  test('a template render that throws falls back to the bare builder clause', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    getTemplate.mockRejectedValue(new Error('render exploded'));
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBe('https://waves.link/l/abc123');
+    expect(result.standalone).toBeUndefined();
+  });
+
+  test('gate off / no link to build: the reason passes through untouched, getTemplate never called', async () => {
+    process.env.GATE_LEAD_INSPECTION_LINK = 'false';
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.reason).toMatch(/switched off/i);
+    expect(getTemplate).not.toHaveBeenCalled();
   });
 });
