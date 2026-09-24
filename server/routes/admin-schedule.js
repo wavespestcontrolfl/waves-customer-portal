@@ -1771,6 +1771,57 @@ async function resolvePlannedTotal(db, id, updates, cols = null) {
   return row?.estimated_price ?? null;
 }
 
+// Generic row-version CAS for PUT /:id/update-details (follow-up to #4657,
+// owner-approved 2026-09-24 over moving the planner under the lock). The
+// planner reads the visit row + its add-on rows BEFORE the transaction;
+// the route re-reads them FOR UPDATE and compares field by field
+// (financialStateDrifted / addonRowIdsDrifted / legacyPreservationSnapshotStale).
+// Review rounds 19, 21, 22, 26 and 27 each found a column that comparison
+// did not yet cover. Every UPDATE in Postgres writes a NEW tuple version:
+// `xmin` (the writing transaction) changes across transactions and `ctid`
+// (the tuple's physical location) changes on every update, the writer's
+// own transaction included. Recording both with the planner's own reads
+// and re-checking them under the lock refuses ANY concurrent write to
+// those rows — listed column or not — with the same 409 VISIT_CHANGED_RETRY
+// the operator already knows. A physical relocation with no logical
+// change (VACUUM FULL / CLUSTER) can only produce a spurious retry, never
+// a missed write. The per-field comparators stay (they carry the specific
+// reasons and their own pins); this is the backstop beneath them.
+//
+// `rowVersionSelect` adds the version to a select list only when the
+// connection can build a raw expression (unit-test mocks often cannot);
+// a snapshot with no recorded version simply skips the check, and a
+// recorded version whose row no longer answers is drift.
+function rowVersionSelect(conn) {
+  return typeof conn?.raw === 'function'
+    ? [conn.raw("(xmin::text || ':' || ctid::text) as row_version")]
+    : [];
+}
+
+function rowVersionsFor(parentRow, addonRows) {
+  const addons = {};
+  for (const r of (addonRows || [])) {
+    if (r && r.id != null && r.row_version != null) addons[String(r.id)] = String(r.row_version);
+  }
+  return { parent: parentRow?.row_version != null ? String(parentRow.row_version) : null, addons };
+}
+
+function rowVersionsDrifted(snapshot, fresh) {
+  const versions = snapshot?.versions;
+  if (!versions) return false;
+  if (versions.parent != null) {
+    const after = fresh?.parent?.row_version;
+    if (after == null || String(after) !== String(versions.parent)) return true;
+  }
+  const freshById = new Map((fresh?.addons || []).map((r) => [String(r.id), r.row_version]));
+  for (const [id, before] of Object.entries(versions.addons || {})) {
+    if (before == null) continue;
+    const after = freshById.get(String(id));
+    if (after == null || String(after) !== String(before)) return true;
+  }
+  return false;
+}
+
 function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
   const existingType = existing?.discount_type || null;
   const existingAmount = existing?.discount_amount == null || existing.discount_amount === ''
@@ -10314,7 +10365,8 @@ async function computeSingleServiceEstimatedPricePlan({
             ...(cols.line_discount_id ? ['line_discount_id'] : []),
             ...(cols.line_discount_type ? ['line_discount_type'] : []),
             ...(cols.line_discount_amount ? ['line_discount_amount'] : []),
-            ...(cols.pricing_provenance ? ['pricing_provenance'] : []))
+            ...(cols.pricing_provenance ? ['pricing_provenance'] : []),
+            ...rowVersionSelect(db))
           .catch(() => null);
         // GitHub Codex round 27 P1 (#4657, :10969): freshness judged against
         // THIS read, never the route's earlier one.
@@ -10346,6 +10398,7 @@ async function computeSingleServiceEstimatedPricePlan({
         const addonRows = cols.primary_line_price
           ? await db('scheduled_service_addons')
               .where({ scheduled_service_id: id })
+              .select('*', ...rowVersionSelect(db))
               .catch(() => [])
           : [];
         // GitHub Codex round 22 P1 (#4657, :11627): same shape as the
@@ -10386,6 +10439,7 @@ async function computeSingleServiceEstimatedPricePlan({
             discount_amount: r.discount_amount,
             discount_dollars: r.discount_dollars,
           })),
+          versions: rowVersionsFor(existingPrice, addonRows),
         } : null;
         const desktopGrossConvention = primaryLinePrice !== undefined && primaryLinePrice !== null
           && primaryLinePrice !== '' && !isNaN(Number(primaryLinePrice));
@@ -10597,7 +10651,7 @@ async function normalizeUpdateDetailsAddons({
       // null-service_id line (addonServiceIdentityForFreshness).
       const existingAddonDiscountRows = await db('scheduled_service_addons')
         .where({ scheduled_service_id: id })
-        .select('*');
+        .select('*', ...rowVersionSelect(db));
       const existingAddonDiscountById = new Map(existingAddonDiscountRows.map((r) => [r.id, r]));
       // Codex pre-push audit P1 (round 4 on #4657, :9542): the terms alone
       // (id/type/amount) are not enough — removing and reselecting the
@@ -11065,7 +11119,7 @@ async function computeUpdateDetailsFinancialPlan({
         if (cols.line_discount_amount) existingFields.push('line_discount_amount');
         const existing = await db('scheduled_services')
           .where({ id: id })
-          .first(...existingFields)
+          .first(...existingFields, ...rowVersionSelect(db))
           .catch(() => null);
         // GitHub Codex round 27 P1 (#4657, :10969): appointment-discount
         // freshness judged against THIS read — the same row the financial
@@ -11126,6 +11180,9 @@ async function computeUpdateDetailsFinancialPlan({
               discount_amount: r.discount_amount,
               discount_dollars: r.discount_dollars,
             })),
+            // Row-version CAS (see rowVersionsDrifted): the xmin of every
+            // row this plan was built from.
+            versions: rowVersionsFor(existing, existingAddonDiscountRows),
           };
         }
 
@@ -12592,6 +12649,34 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         throw Object.assign(httpError(409, 'Appointments changed routes while saving — reload and save again.'), {
           code: 'VISIT_CHANGED_RETRY',
         });
+      }
+
+      // Row-version CAS (follow-up to #4657; GitHub Codex round 1 on #4769,
+      // :13144): ANY concurrent write to the visit row or one of its add-on
+      // rows since the plan read them — a column the field comparators do
+      // not list included — is drift. Compared HERE, at the row's first
+      // locked read and BEFORE any route-owned write: applyAppointmentAddress
+      // and assignScheduleJobs (just below) update this same row, and the
+      // late financial CAS block would have read the route's own update as
+      // drift and refused every priced edit that also moved the visit. The
+      // customer row lock above precedes this row lock (ordering contract);
+      // the later FOR UPDATE reads of the same row are re-entrant.
+      if (financialCasSnapshot?.versions) {
+        const lockedVersionRow = await trx('scheduled_services')
+          .where({ id: req.params.id }).forUpdate().first('id', ...rowVersionSelect(trx));
+        // The add-on rows are locked too (pre-push fallback audit P1 on
+        // 39412c3242): an unlocked read here would let a concurrent writer
+        // change an add-on row after the compare and before this
+        // transaction's own add-on replace, which then silently discards
+        // that write. Parent row first, then its add-on rows, in id order
+        // — the same order every other writer on this visit takes.
+        const lockedAddonVersionRows = await trx('scheduled_service_addons')
+          .where({ scheduled_service_id: req.params.id }).orderBy('id').forUpdate().select('id', ...rowVersionSelect(trx));
+        if (rowVersionsDrifted(financialCasSnapshot, { parent: lockedVersionRow, addons: lockedAddonVersionRows })) {
+          throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+            statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
+          });
+        }
       }
 
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
@@ -22475,6 +22560,9 @@ router._test = {
   resolvePlannedTotal,
   addonRowIdsDrifted,
   financialStateDrifted,
+  rowVersionsDrifted,
+  rowVersionsFor,
+  rowVersionSelect,
   previewTotalDrifted,
   addonStackGroupConflictRows,
   assertNewStackGroupConflicts,

@@ -460,12 +460,12 @@ describe('Customer360ProfileV2 profile state', () => {
       return response({});
     }));
     const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
-    await screen.findByLabelText('2 unread conversations');
+    await screen.findByLabelText('2 conversations needing a reply');
     expect(read).toBe(false);
     container.querySelector('.c360-panel').scrollTo = vi.fn();
-    fireEvent.click(screen.getByRole('button', { name: /Message.*2 unread conversations/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Message.*2 conversations needing a reply/ }));
     await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
-    await waitFor(() => expect(screen.queryByLabelText('2 unread conversations')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByLabelText('2 conversations needing a reply')).not.toBeInTheDocument());
     expect(read).toBe(true);
     const readCall = fetch.mock.calls.find(([url]) => String(url).endsWith('/messages/read'));
     expect(JSON.parse(readCall[1].body)).toEqual({ messageIds: ['message-a'], ...readScope });

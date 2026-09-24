@@ -3,15 +3,16 @@
 // the destination stays the inbox.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdminLayoutV2 from "./AdminLayoutV2";
 import { adminFetch } from "../utils/admin-fetch";
 
 const unread = vi.hoisted(() => ({ value: 0 }));
+const mobile = vi.hoisted(() => ({ value: false }));
 vi.mock("../hooks/useUnreadConversations", () => ({ default: () => unread.value }));
-vi.mock("../hooks/useIsMobile", () => ({ default: () => false }));
+vi.mock("../hooks/useIsMobile", () => ({ default: () => mobile.value }));
 vi.mock("../hooks/useFeatureFlag", () => ({
   refetchFlags: vi.fn(() => Promise.resolve()),
   useFeatureFlag: vi.fn(() => false),
@@ -57,6 +58,7 @@ describe("AdminLayoutV2 Messages badge", () => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
     unread.value = 0;
+    mobile.value = false;
   });
 
   it("is hidden at zero", async () => {
@@ -66,18 +68,21 @@ describe("AdminLayoutV2 Messages badge", () => {
     expect(link).not.toHaveTextContent(/unread/);
   });
 
-  it("names the count for screen readers and keeps the inbox as the destination", async () => {
+  it("links the mobile badge to unanswered conversations", async () => {
     unread.value = 5;
+    mobile.value = true;
     mount();
-    const link = await screen.findByRole("link", { name: /Communications.*5 unread conversations/ });
-    expect(link).toHaveAttribute("href", "/admin/communications");
+    const tabbar = await screen.findByRole("navigation", { name: "Primary" });
+    const link = within(tabbar).getByRole("link", { name: /Messages.*5 conversations needing a reply/ });
+    expect(link).toHaveAttribute("href", "/admin/communications?needsResponse=true");
     expect(link).toHaveTextContent("5");
   });
 
   it("caps a backlog at 99+", async () => {
     unread.value = 240;
     mount();
-    const link = await screen.findByRole("link", { name: /Communications.*240 unread conversations/ });
+    const link = await screen.findByRole("link", { name: /Communications.*240 conversations needing a reply/ });
+    expect(link).toHaveAttribute("href", "/admin/communications?needsResponse=true");
     expect(link).toHaveTextContent("99+");
   });
 });
