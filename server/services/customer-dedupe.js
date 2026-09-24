@@ -1388,6 +1388,18 @@ async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
   return matches;
 }
 
+async function resolveUnstampedMatchProperties(database, matches) {
+  const { sourceEstimateForScope } = require('./recurring-appointment-seeder');
+  for (const match of matches) {
+    if (match.property_id || match.service_address_line1 || !match.source_estimate_id) continue;
+    try {
+       
+      const src = await sourceEstimateForScope(database, match.source_estimate_id);
+      if (src?.property_id) match.property_id = src.property_id;
+    } catch { /* keep the primary-address fallback */ }
+  }
+}
+
 async function duplicateSeriesMergeConflict(database, winner, loser) {
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   // IDENTITY collection only (which service_id/service_type families the
@@ -1422,6 +1434,17 @@ async function duplicateSeriesMergeConflict(database, winner, loser) {
       liveFamilyMatches(database, winner.id, serviceId, serviceType),
     ]);
     if (!Array.isArray(loserActive) || !loserActive.length || !Array.isArray(winnerActive) || !winnerActive.length) continue;
+    // An UNSTAMPED parent (no property_id, no service_address_*) can still
+    // serve its creating estimate's SECONDARY property — the seeder's own
+    // scoped duplicate check recovers that from source_estimate_id
+    // (sourceEstimateForScope) before it ever falls back to the customer's
+    // primary street, and so does this: without it two customers with
+    // different homes whose unstamped series both serve the same secondary
+    // property read as different premises and merge without a conflict.
+    // Only the estimate's authoritative property_id is adopted (a bare
+    // free-text estimate address has no unit/ZIP structure addressCompat
+    // can compare); rows that resolve to nothing keep the primary fallback.
+    await resolveUnstampedMatchProperties(database, [...loserActive, ...winnerActive]);
     const propertyIds = [...new Set(
       [...loserActive, ...winnerActive].map((m) => m.property_id).filter(Boolean).map(String),
     )];

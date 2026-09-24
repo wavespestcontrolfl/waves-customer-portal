@@ -43,18 +43,25 @@ async function makeCustomer(overrides) {
   return id;
 }
 
-async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly Pest Control', propertyId = null, addressStamp = null, parentStatus = 'confirmed', seedChild = true } = {}) {
+// Relative dates (AGENTS.md date-sensitive test rule): the liveness rules
+// under test (findActiveRecurringSeries' upcoming probe and
+// cancelledParentStillLive) compare against today's ET date, so an
+// anchored fixture would silently lapse once the calendar passed it.
+const isoDaysAhead = (n) => new Date(Date.now() + n * 24 * 3600 * 1000).toISOString().slice(0, 10);
+
+async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly Pest Control', propertyId = null, addressStamp = null, parentStatus = 'confirmed', seedChild = true, sourceEstimateId = null } = {}) {
   const parentId = randomUUID();
   await db('scheduled_services').insert({
     id: parentId, customer_id: customerId, service_type: serviceType, service_id: serviceId,
-    scheduled_date: '2026-10-05', status: parentStatus, is_recurring: true, recurring_parent_id: null,
+    scheduled_date: isoDaysAhead(11), status: parentStatus, is_recurring: true, recurring_parent_id: null,
     recurring_pattern: 'monthly', recurring_ongoing: true, property_id: propertyId,
+    ...(sourceEstimateId ? { source_estimate_id: sourceEstimateId } : {}),
     ...(addressStamp || {}),
   });
   if (seedChild) {
     await db('scheduled_services').insert({
       id: randomUUID(), customer_id: customerId, service_type: serviceType, service_id: serviceId,
-      scheduled_date: '2026-11-05', status: 'pending', is_recurring: true, recurring_parent_id: parentId,
+      scheduled_date: isoDaysAhead(42), status: 'pending', is_recurring: true, recurring_parent_id: parentId,
       recurring_pattern: 'monthly', property_id: propertyId, ...(addressStamp || {}),
     });
   }
@@ -214,7 +221,7 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
     // no children left. findActiveRecurringSeries judges this lapsed and
     // the cancelled-but-ongoing union must not resurrect it.
     const loserParentId = await seedParent(loserId, { parentStatus: 'completed', seedChild: false });
-    await db('scheduled_services').where({ id: loserParentId }).update({ recurring_ongoing: false, scheduled_date: '2026-01-05' });
+    await db('scheduled_services').where({ id: loserParentId }).update({ recurring_ongoing: false, scheduled_date: isoDaysAhead(-250) });
 
     const winner = await db('customers').where({ id: winnerId }).first();
     const loser = await db('customers').where({ id: loserId }).first();
@@ -255,5 +262,32 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
       expect(conflict).not.toBeNull();
       expect(conflict.code).toBe('duplicate_series_conflict');
     }
+  });
+
+  test('UNSTAMPED parents whose source estimates are linked to the same secondary property conflict, even with different home addresses (pre-push audit P1)', async () => {
+    const winnerId = await makeCustomer({ address_line1: '1 Alpha St', city: 'Sarasota', zip: '34231' });
+    const loserId = await makeCustomer({ address_line1: '5 Beta Ave', city: 'Sarasota', zip: '34232' });
+    const winnerPropertyId = randomUUID();
+    const loserPropertyId = randomUUID();
+    await db('customer_properties').insert([
+      { id: winnerPropertyId, customer_id: winnerId, label: 'Rental', address_line1: '22 Sample Way', city: 'Sarasota', zip: '34231', is_primary: false },
+      { id: loserPropertyId, customer_id: loserId, label: 'Rental', address_line1: '22 Sample Way', city: 'Sarasota', zip: '34231', is_primary: false },
+    ]);
+    const winnerEstimateId = randomUUID();
+    const loserEstimateId = randomUUID();
+    await db('estimates').insert([
+      { id: winnerEstimateId, customer_id: winnerId, property_id: winnerPropertyId, address: '22 Sample Way, Sarasota, FL 34231', status: 'accepted' },
+      { id: loserEstimateId, customer_id: loserId, property_id: loserPropertyId, address: '22 Sample Way, Sarasota, FL 34231', status: 'accepted' },
+    ]);
+    // No property_id, no service_address_* on either parent — only the
+    // creating estimate knows these series serve the rental, not the home.
+    await seedParent(winnerId, { sourceEstimateId: winnerEstimateId });
+    await seedParent(loserId, { sourceEstimateId: loserEstimateId });
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).not.toBeNull();
+    expect(conflict.code).toBe('duplicate_series_conflict');
   });
 });
