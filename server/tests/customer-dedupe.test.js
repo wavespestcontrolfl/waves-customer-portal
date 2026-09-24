@@ -2392,15 +2392,18 @@ describe('runAutoMergeSweep', () => {
   // undo-merge dismissal a concurrent revertMerge just committed and refuse,
   // never re-merge the pair the operator just split back apart.
   it('a candidate undone by a CONCURRENT revertMerge between the snapshot and this turn is refused, not re-merged', async () => {
+    // Synthetic fixture data only (Codex round 1 P1): a fictional name and
+    // the NANP-reserved 555-0100..0199 fictional-use phone block, never a
+    // copy of another test's real-looking customer data.
     const winnerRow = {
-      id: 'cccccccc-0000-0000-0000-000000000001',
-      first_name: 'Diana', last_name: 'Blowers', phone: '+16124074763',
-      address_line1: '4414 Ozark Ave', zip: '34207',
+      id: 'cccccccc-0000-0000-0000-000000000003',
+      first_name: 'Sweepfixture', last_name: 'Winner', phone: '+15555550142',
+      address_line1: '1 Fixture Ln', zip: '00000',
       pipeline_stage: 'new_lead', created_at: '2026-07-08',
     };
     const loserRow = {
-      id: 'cccccccc-0000-0000-0000-000000000002',
-      first_name: 'Diana', last_name: null, phone: '6124074763',
+      id: 'cccccccc-0000-0000-0000-000000000004',
+      first_name: 'Sweepfixture', last_name: null, phone: '5555550142',
       address_line1: null, zip: null,
       pipeline_stage: 'new_lead', created_at: '2026-07-09',
     };

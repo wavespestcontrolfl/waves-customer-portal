@@ -50,7 +50,10 @@ async function seed({ storedPhone }) {
 
 async function cleanup(f) {
   await mockPg('referrals').where({ promoter_id: f.promoter.id }).del().catch(() => {});
-  await mockPg('leads').where({ phone: '+19415551234' }).orWhere({ phone: '941-555-1234' }).del().catch(() => {});
+  // No leads delete here (Codex round 1 P1): every case in this file
+  // asserts the guard REFUSES, so this test never creates a lead — a
+  // by-phone delete would risk erasing an unrelated pre-existing row in a
+  // shared audit database that happened to match either literal phone.
   await mockPg('referral_promoters').where({ id: f.promoter.id }).del();
   await mockPg('customers').whereIn('id', [f.customerId, f.promoterCustomerId]).del();
 }
