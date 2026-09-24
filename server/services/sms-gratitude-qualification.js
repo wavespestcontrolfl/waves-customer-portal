@@ -159,7 +159,8 @@ async function createGratitudeQualification({ dbi = db, triggeredBy = null } = {
         error.runId = prior.id;
         throw error;
       }
-      await trx('agent_decisions').where({ id: prior.id, workflow: WORKFLOW }).update({
+      const recovered = await trx('agent_decisions').where({ id: prior.id, workflow: WORKFLOW })
+        .whereRaw("input_snapshot->>'state' = 'running'").update({
         input_snapshot: JSON.stringify({
           ...priorSnapshot,
           state: 'failed',
@@ -170,6 +171,15 @@ async function createGratitudeQualification({ dbi = db, triggeredBy = null } = {
         correction_note: 'stale_run_recovered',
         updated_at: trx.fn.now(),
       });
+      if (recovered !== 1) {
+        const latest = await trx('agent_decisions').where({ id: prior.id, workflow: WORKFLOW })
+          .first('id', 'input_snapshot');
+        const error = new Error('gratitude qualification run changed during stale recovery');
+        error.code = 'RUN_IN_PROGRESS';
+        error.runId = prior.id;
+        error.state = parseSnapshot(latest?.input_snapshot)?.state || 'missing';
+        throw error;
+      }
     }
 
     const current = await readCurrent({ dbi: trx });
@@ -267,7 +277,7 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
         .whereRaw("input_snapshot->>'executionToken' = ?", [executionToken])
         .update({
           input_snapshot: JSON.stringify(complete),
-          status: graded.qualified ? 'shadow' : 'failed',
+          status: graded.qualified ? 'shadow' : 'qualification_failed',
           correction_note: graded.qualified ? null : graded.reason,
           updated_at: dbi.fn.now(),
         });
