@@ -4,7 +4,10 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const {
+  sendManualCustomerSms,
+  manualSmsDeliveryState,
+} = require('../services/messaging/send-manual-customer-sms');
 const { evaluateClickFollowupGate } = require('../services/click-followup-gate');
 const { isEnabled } = require('../config/feature-gates');
 const { CAMPAIGN_GATE } = require('../services/campaign-drafts');
@@ -376,6 +379,15 @@ function blockedSendResponse(res, smsResult) {
     error: smsResult.reason || smsResult.code || 'SMS send blocked/failed',
     code: smsResult.code,
     nextAllowedAt: smsResult.nextAllowedAt,
+  });
+}
+
+function uncertainSendResponse(res) {
+  return res.status(409).json({
+    error: 'The carrier did not confirm this text. It may still go out; check the thread and do not retry until it is reconciled.',
+    code: 'SMS_DELIVERY_UNCERTAIN',
+    mayHaveSent: true,
+    retryable: false,
   });
 }
 
@@ -837,7 +849,7 @@ router.put('/:id/approve', async (req, res, next) => {
     if (clarifyGuard.blocked) return;
     let smsResult;
     try {
-      smsResult = await sendCustomerMessage({
+      smsResult = await sendManualCustomerSms({
         to: toPhone,
         body: draft.draft_response,
         channel: 'sms',
@@ -866,8 +878,14 @@ router.put('/:id/approve', async (req, res, next) => {
         },
       });
     } catch (sendErr) {
+      if (manualSmsDeliveryState(sendErr) === 'uncertain') {
+        return uncertainSendResponse(res);
+      }
       await releaseFailedSendClaim(draft, clarifyGuard);
       throw sendErr;
+    }
+    if (manualSmsDeliveryState(smsResult) === 'uncertain') {
+      return uncertainSendResponse(res);
     }
     if (!smsResult.sent) {
       await releaseFailedSendClaim(draft, clarifyGuard);
@@ -988,7 +1006,7 @@ router.put('/:id/revise', async (req, res, next) => {
     if (clarifyGuard.blocked) return;
     let smsResult;
     try {
-      smsResult = await sendCustomerMessage({
+      smsResult = await sendManualCustomerSms({
         to: toPhone,
         body: revisedResponse,
         channel: 'sms',
@@ -1017,8 +1035,14 @@ router.put('/:id/revise', async (req, res, next) => {
         },
       });
     } catch (sendErr) {
+      if (manualSmsDeliveryState(sendErr) === 'uncertain') {
+        return uncertainSendResponse(res);
+      }
       await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
       throw sendErr;
+    }
+    if (manualSmsDeliveryState(smsResult) === 'uncertain') {
+      return uncertainSendResponse(res);
     }
     if (!smsResult.sent) {
       await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
