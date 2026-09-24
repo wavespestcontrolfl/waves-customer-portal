@@ -377,29 +377,11 @@ function defaultFollowUpAt(outcome, followUpAt) {
   return null;
 }
 
-// The visit's scheduled_date as a plain 'YYYY-MM-DD' — pg hands a DATE
-// column back as either a Date (midnight UTC on Railway's TZ=UTC box) or,
-// over some drivers/mocks, already a string; normalize once (shared by
-// consultationStats' own scheduledDateStr derivation below).
-//
-// P1-1: a DATE column must NEVER be run through etDateString. That helper
-// treats its input as an absolute instant and converts it to ET — so pg's
-// UTC-midnight Date for '2026-09-10' reads as '2026-09-09' 20:00/19:00 ET
-// the day before, and etDateString hands back '2026-09-09'. Read a Date's
-// calendar fields with the UTC getters instead (mirrors the Date branch of
-// server/services/auto-dispatch/dates.js's toDateStr).
-function toDateOnlyString(value) {
-  if (value == null) return null;
-  if (typeof value === 'string') return value.slice(0, 10);
-  if (value instanceof Date) {
-    if (Number.isNaN(value.getTime())) return null;
-    const y = value.getUTCFullYear();
-    const m = String(value.getUTCMonth() + 1).padStart(2, '0');
-    const d = String(value.getUTCDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  }
-  return String(value).slice(0, 10);
-}
+// The visit's scheduled_date as a plain 'YYYY-MM-DD' — the repo's shared
+// DATE normalizer (Codex #4710 r11 P1), never a local copy. P1-1: a DATE
+// column must NEVER be run through etDateString (it would read pg's
+// UTC-midnight Date as the previous ET day).
+const { toDateStr } = require('./auto-dispatch/dates');
 
 // Round 8-11: successive rounds patched findSaleEvidenceForConsultation's
 // non-assessment-booking evidence check with one more excluded class at a
@@ -767,13 +749,13 @@ async function reconcileOneOpenOutcome(database, { outcomeRowId, customerId, now
     const live = visit
       && !DEAD_CONSULTATION_STATUSES.includes(visit.status)
       && String(visit.customer_id || '') === String(customerId || '')
-      && toDateOnlyString(visit.scheduled_date) <= etDateString(now)
+      && toDateStr(visit.scheduled_date) <= etDateString(now)
       && (visitWindowOpensMs(visit) ?? -Infinity) <= now.getTime();
     const won = live
       ? await attemptEvidenceBasedWin(locked, {
         outcomeRowId,
         customerId,
-        scheduledDateStr: toDateOnlyString(visit.scheduled_date),
+        scheduledDateStr: toDateStr(visit.scheduled_date),
         windowStart: visit.window_start || null,
         now,
       })
@@ -792,7 +774,7 @@ async function reconcileOneOpenOutcome(database, { outcomeRowId, customerId, now
 // usable date/window.
 function visitWindowOpensMs(visit) {
   if (!visit.scheduled_date || !visit.window_start) return null;
-  const opens = parseETDateTime(`${toDateOnlyString(visit.scheduled_date)}T${String(visit.window_start).slice(0, 5)}`);
+  const opens = parseETDateTime(`${toDateStr(visit.scheduled_date)}T${String(visit.window_start).slice(0, 5)}`);
   return Number.isNaN(opens?.getTime?.()) ? null : opens.getTime();
 }
 
@@ -807,7 +789,7 @@ const HELD_VISIT_GUARDS = [
     status: 409, code: 'CONSULTATION_NOT_HELD', message: 'That consultation was marked no-show, cancelled or skipped — its outcome cannot be recorded',
   },
   {
-    fails: (v) => Boolean(v.scheduled_date) && toDateOnlyString(v.scheduled_date) > etDateString(new Date()),
+    fails: (v) => Boolean(v.scheduled_date) && toDateStr(v.scheduled_date) > etDateString(new Date()),
     status: 409, code: 'CONSULTATION_IN_FUTURE', message: 'That consultation has not happened yet — record its outcome on or after the visit day',
   },
   {
@@ -918,7 +900,7 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     const liveVisit = await locked('scheduled_services')
       .where({ id: scheduledServiceId })
       .forNoKeyUpdate()
-      .first('status', 'technician_id', 'customer_id', 'scheduled_date', 'window_start');
+      .first('status', 'technician_id', 'customer_id', 'scheduled_date', 'window_start', 'service_type', 'service_id');
     // A customer merge that repointed the visit between the first read and
     // this lock would otherwise write the retired customer_id (Codex #4710
     // r6 P2) — retried once from the top against the surviving customer.
@@ -929,6 +911,12 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     const guardCtx = { customerId, actingTechnicianId, actingIsAdmin, nowMs: Date.now() };
     const refused = HELD_VISIT_GUARDS.find((guard) => guard.fails(liveVisit || {}, guardCtx));
     if (refused) throw makeError(refused.message, refused.status, refused.code);
+    // The visit's IDENTITY re-checked on the locked row too (Codex #4710 r11
+    // P2): dispatch can retype it off the assessment after the unlocked
+    // check above, and an outcome must never attach to an ordinary service.
+    if (liveVisit && !(await isAssessmentBooking(liveVisit, locked))) {
+      throw makeError('That visit is not a Waves Assessment consultation', 409, 'NOT_CONSULTATION');
+    }
 
     const [saved] = await locked('consultation_outcomes')
       .insert(row)
@@ -982,7 +970,7 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
         const won = await attemptEvidenceBasedWin(locked, {
           outcomeRowId: saved.id,
           customerId,
-          scheduledDateStr: toDateOnlyString(liveVisit.scheduled_date),
+          scheduledDateStr: toDateStr(liveVisit.scheduled_date),
           windowStart: liveVisit.window_start,
           now,
         });
@@ -1028,9 +1016,9 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
  * won_via / won_at / won_evidence_booking_id always come from the row's own
  * evidence (findSaleEvidenceForConsultation); a row with no qualifying
  * evidence stays open (Codex #4710 r10 pre-push P1). `via` names the caller
- * for the log; `evidenceBookingId` is accepted for caller compatibility.
+ * for the log.
  */
-async function markWonForCustomer(customerId, { via, trx, now = new Date(), evidenceBookingId = null } = {}) {
+async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {}) {
   if (!customerId || !trx || !via) return 0;
   try {
     let winCount = 0;
@@ -1105,7 +1093,7 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date(), evid
         if (!isConvertibleOutcome(row)) continue;
          
         const evidence = await findSaleEvidenceForConsultation(sp, {
-          customerId, scheduledDateStr: toDateOnlyString(row.scheduled_date), windowStart: row.window_start || null, now,
+          customerId, scheduledDateStr: toDateStr(row.scheduled_date), windowStart: row.window_start || null, now,
         });
         // No qualifying evidence (e.g. the sale predates this consultation's
         // window on the same day) → not won; the caller's own write is never
@@ -1331,7 +1319,7 @@ async function rejudgeLiveWin(locked, row, consultation, { now, stampOnly, clear
   }
   const evidence = await findSaleEvidenceForConsultation(locked, {
     customerId: row.customer_id,
-    scheduledDateStr: toDateOnlyString(consultation.scheduled_date),
+    scheduledDateStr: toDateStr(consultation.scheduled_date),
     windowStart: consultation.window_start,
     now,
   });
@@ -1645,10 +1633,10 @@ async function consultationStats({ from, to, trx } = {}) {
       if (breakdown) bump(stats[breakdown.bucket], v[breakdown.field] || 'unspecified');
     }
     if (outcome === 'won' && v.won_at) {
-      // P1-1: v.scheduled_date is a DATE column — toDateOnlyString reads its
+      // P1-1: v.scheduled_date is a DATE column — toDateStr reads its
       // calendar fields directly (never etDateString, which would shift a
       // UTC-midnight date back a day under Railway's TZ=UTC).
-      closeDurations.push(etDaysBetween(new Date(v.won_at), toDateOnlyString(v.scheduled_date)));
+      closeDurations.push(etDaysBetween(new Date(v.won_at), toDateStr(v.scheduled_date)));
     }
     const tech = creditedTechnician(v);
     const source = v.lead_source || 'unknown';

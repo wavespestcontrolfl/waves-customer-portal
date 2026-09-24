@@ -504,6 +504,21 @@ describe('recordOutcome — success + upsert', () => {
     expect(etDateString(new Date(saved.follow_up_at))).toBe(etDateString(addETDays(new Date(), 3)));
   });
 
+  // Codex #4710 r11 P2: a visit retyped off the assessment after the
+  // unlocked check is refused under the lock.
+  test('a visit retyped to an ordinary service before the lock is refused (NOT_CONSULTATION), nothing written', async () => {
+    const fakeDb = seededDb();
+    const spyDb = (name) => {
+      if (name === 'customers') fakeDb.__store.scheduled_services[0].service_type = 'Quarterly Pest Control';
+      return fakeDb(name);
+    };
+    Object.assign(spyDb, fakeDb);
+    spyDb.transaction = async (fn) => fn(spyDb);
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb }))
+      .rejects.toMatchObject({ code: 'NOT_CONSULTATION' });
+    expect(fakeDb.__store.consultation_outcomes || []).toHaveLength(0);
+  });
+
   test('cold defaults follow_up_at to +30 ET days; lost has none', async () => {
     const coldSaved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'cold' }, { trx: seededDb() });
     expect(etDateString(new Date(coldSaved.follow_up_at))).toBe(etDateString(addETDays(new Date(), 30)));
@@ -1144,7 +1159,7 @@ describe('markWonForCustomer', () => {
         { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
       ],
     });
-    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: NOW, evidenceBookingId: 'sale-1' });
+    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: NOW });
     const row = fakeDb.__store.consultation_outcomes[0];
     expect(row).toMatchObject({ outcome: 'won', won_via: 'estimate_accept', won_evidence_booking_id: null });
     expect(new Date(row.won_at).getTime()).toBe(addETDays(NOW, -4).getTime());
@@ -1290,14 +1305,12 @@ describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => 
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-today').outcome).toBe('warm');
   });
 
-  test('Codex #4710 r3 P1: a win records its OWN evidence booking id (not the caller\'s evidenceBookingId) and each row\'s prior outcome', async () => {
+  test('Codex #4710 r3 P1: a win records its OWN evidence booking id and each row\'s prior outcome', async () => {
     const fakeDb = seededDb();
     fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-last-week').outcome = 'cold';
-    // evidenceBookingId is accepted for caller compatibility only (see the
-    // function's own doc comment) — it must NOT show up on the written
-    // row; won_evidence_booking_id always comes from the evidence search's
-    // own booking (sale-evidence-1), never this caller-supplied id.
-    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z'), evidenceBookingId: 'sale-1-ignored' });
+    // won_evidence_booking_id always comes from the evidence search's own
+    // booking (sale-evidence-1).
+    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
     const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
     expect(byId['co-today']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-evidence-1', pre_win_outcome: 'warm' });
     expect(byId['co-last-week']).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-evidence-1', pre_win_outcome: 'cold' });
