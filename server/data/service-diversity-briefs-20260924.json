@@ -16,7 +16,7 @@
       "secondary_kws": [],
       "intent": "informational",
       "window": "2026-09-28",
-      "byline": "adam-augusta",
+      "byline": "adam",
       "cta": [
         "CONTACT"
       ],
@@ -47,6 +47,7 @@
         "Tree/shrub and irrigation education must not imply Waves offers installation, repair, pruning, removal or diagnosis beyond verified service scope. Link /contact/ for a scope check."
       ],
       "internal_links": [
+        "/tree-and-shrub-care-bradenton-fl/",
         "/contact/"
       ]
     },
@@ -59,7 +60,7 @@
       "secondary_kws": [],
       "intent": "informational",
       "window": "2026-10-01",
-      "byline": "adam-augusta",
+      "byline": "adam",
       "cta": [
         "CONTACT"
       ],
@@ -134,6 +135,7 @@
         "Tree/shrub and irrigation education must not imply Waves offers installation, repair, pruning, removal or diagnosis beyond verified service scope. Link /contact/ for a scope check."
       ],
       "internal_links": [
+        "/lawn-care-bradenton-fl/",
         "/contact/"
       ]
     },
@@ -146,7 +148,7 @@
       "secondary_kws": [],
       "intent": "informational",
       "window": "2026-10-08",
-      "byline": "adam-augusta",
+      "byline": "adam",
       "cta": [
         "CONTACT"
       ],
@@ -174,6 +176,7 @@
         "Tree/shrub and irrigation education must not imply Waves offers installation, repair, pruning, removal or diagnosis beyond verified service scope. Link /contact/ for a scope check."
       ],
       "internal_links": [
+        "/tree-and-shrub-care-bradenton-fl/",
         "/contact/"
       ]
     },
@@ -186,7 +189,7 @@
       "secondary_kws": [],
       "intent": "informational",
       "window": "2026-10-12",
-      "byline": "adam-augusta",
+      "byline": "adam",
       "cta": [
         "CONTACT"
       ],
@@ -220,12 +223,14 @@
       "id": "BG06",
       "action": "new_supporting_blog",
       "slug": "/pest-control/property-pest-observation-log-swfl/",
+      "service": "commercial-pest",
+      "hub_link": "/commercial-pest-control-bradenton-fl/",
       "working_title": "A Pest Observation Log for Southwest Florida Property Managers",
       "primary_kw": "a pest observation log for southwest florida property managers",
       "secondary_kws": [],
       "intent": "informational",
       "window": "2026-10-15",
-      "byline": "adam-augusta",
+      "byline": "adam",
       "cta": [
         "CONTACT"
       ],
