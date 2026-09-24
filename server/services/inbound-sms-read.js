@@ -319,9 +319,11 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
 async function countUnreadInboundSms({ excludePhones = [], customerId = null } = {}) {
   const {
     HUMAN_REPLY_TYPES,
+    DRAFT_REPLY_TYPES,
     NON_ACTIONABLE_INBOUND_TYPES,
     inboundNeedsResponse,
     phoneIdentitySql,
+    draftIdSql,
   } = require('./sms-response-policy');
   const eventPeer = phoneIdentitySql('base.contact_phone');
   const eventEndpoint = phoneIdentitySql('base.our_endpoint_id');
@@ -337,7 +339,9 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
              COALESCE(m.metadata, '{}'::jsonb)
                || COALESCE(legacy.metadata, '{}'::jsonb)
                || COALESCE(audit.metadata, '{}'::jsonb) AS metadata,
-             COALESCE(m.media, '[]'::jsonb) AS media
+             COALESCE(m.media, '[]'::jsonb) AS media,
+             response_draft.id IS NOT NULL AS has_draft_provenance,
+             response_draft.intent AS draft_intent
       FROM messages m
       JOIN conversations c ON c.id = m.conversation_id
       LEFT JOIN customers cu ON cu.id = c.customer_id
@@ -355,6 +359,8 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
         ORDER BY mal.created_at DESC, mal.id DESC
         LIMIT 1
       ) audit ON true
+      LEFT JOIN message_drafts response_draft
+        ON response_draft.id = ${draftIdSql("COALESCE(audit.metadata->>'draft_id', legacy.metadata->>'draft_id', m.metadata->>'draft_id')")}
       WHERE m.channel = 'sms'
         AND (CAST(:customerId AS uuid) IS NULL OR c.customer_id = CAST(:customerId AS uuid))
         AND NOT (COALESCE(c.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
@@ -397,14 +403,10 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
         AND os.created_at > li.created_at
         AND os.peer = li.peer
         AND os.endpoint = li.endpoint
-        -- Human-approved click-followup nudges are proactive marketing. Use
-        -- their exact durable draft id; a broad time/phone match can suppress
-        -- a real manual reply sent near the nudge.
-        AND NOT EXISTS (
-          SELECT 1 FROM message_drafts mdx
-          WHERE mdx.id::text = os.metadata->>'draft_id'
-            AND mdx.intent = 'click_followup'
-        )
+        -- Approval sends can be proactive nudges. Require an exact draft
+        -- link for ambiguous types; absent provenance never clears an ask.
+        AND (os.message_type <> ALL(CAST(:draftReplyTypes AS text[])) OR os.has_draft_provenance)
+        AND os.draft_intent IS DISTINCT FROM 'click_followup'
     )
     -- STOP closes every business-number thread for the peer. A later genuine
     -- inbound candidate can reopen only if it arrived after that STOP.
@@ -418,6 +420,7 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
     excludePhones,
     ignoredInboundTypes: NON_ACTIONABLE_INBOUND_TYPES,
     humanReplyTypes: HUMAN_REPLY_TYPES,
+    draftReplyTypes: DRAFT_REPLY_TYPES,
   });
   const actionable = rows.filter((row) => inboundNeedsResponse({
     direction: 'inbound',

@@ -153,7 +153,18 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
       body: 'Checking in on your estimate', auditMetadata: { draft_id: draftId },
     });
     expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
-    await seedEvent({ direction: 'outbound', messageType: 'manual', status: 'sent', body: 'Yes, we can help.' });
+    await seedEvent({ direction: 'outbound', messageType: 'manual', status: 'sent', body: 'Yes, we can help.', auditMetadata: { draft_id: 'not-a-uuid' } });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
+  });
+
+  test('approval sends without exact provenance cannot clear an unanswered question', async () => {
+    await seedEvent({ body: 'Please call me' });
+    await seedEvent({ direction: 'outbound', messageType: 'ai_approved', body: 'Checking in' });
+    await seedEvent({ direction: 'outbound', messageType: 'ai_revised', metadata: { draft_id: 'invalid' } });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+    const draftId = randomUUID();
+    await mockPg('message_drafts').insert({ id: draftId, intent: 'customer_issue_needs_review' });
+    await seedEvent({ direction: 'outbound', messageType: 'ai_approved', auditMetadata: { draft_id: draftId } });
     expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
   });
 
