@@ -138,6 +138,9 @@ describe('_assessReviewSyncHealth (escalation)', () => {
         orWhereNot: jest.fn(function () { return this; }),
         whereNull: jest.fn(function () { return this; }),
         orWhereNull: jest.fn(function () { return this; }),
+        whereIn: jest.fn(function () { return this; }),
+        orderBy: jest.fn(function () { return this; }),
+        limit: jest.fn(function () { return this; }),
         whereRaw: jest.fn(function (sql, bindings) {
           if (sql.includes("metadata->>'resolved'")) this._unresolvedOnly = true;
           if (sql.includes('> ?::timestamptz')) this._newerThan = bindings[0];

@@ -1849,11 +1849,17 @@ class GoogleBusinessService {
           // is still unresolved (so no re-bell), but the standing digest
           // describes B. Rewrite the digest to the CURRENT findings when its
           // text differs, surfacing it unread again (pre-push audit P1).
+          // Only the NEWEST unresolved digest is the standing row: older
+          // unresolved duplicates (the pre-fix production state) must not all
+          // flip back to unread on every detail change (codex r1 P2).
           const digestTitle = subject.slice(0, 200);
-          await trx('notifications').where({ recipient_type: 'admin', category: 'ops_digest' })
+          const standingDigest = trx('notifications').select('id')
+            .where({ recipient_type: 'admin', category: 'ops_digest' })
             .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
             .whereRaw("metadata->>'source' IS NULL")
             .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+            .orderBy('created_at', 'desc').limit(1);
+          await trx('notifications').whereIn('id', standingDigest)
             .where((q) => q.whereNot('title', digestTitle).orWhereNot('body', body).orWhereNull('body'))
             .update({
               title: digestTitle,
