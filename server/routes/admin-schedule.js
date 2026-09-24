@@ -7364,6 +7364,22 @@ router.post('/', requireAdmin, async (req, res, next) => {
         source: 'admin_schedule',
       });
 
+      // Consultation-outcomes reconciliation (round 10 fast path — see the
+      // RECONCILIATION MODEL note atop consultation-outcomes.js; the hourly
+      // sweep, reconcileOpenConsultationOutcomes, is the completeness
+      // guarantee behind this and every other booking path). Same guarded
+      // call admin-leads.js's schedule-appointment uses: isQualifyingSaleBooking
+      // reads straight off `svc` (this INSERT's own RETURNING row) — no
+      // extra query — and a Waves Assessment booked directly off this
+      // calendar tool is excluded the same way admin-leads.js excludes one
+      // (an assessment is never itself a win). Best-effort,
+      // savepoint-isolated inside markWonForCustomer (waves-db §5b).
+      if (!(await require('../services/assessment-booking').isAssessmentBooking(svc, trx))
+        && require('../services/consultation-outcomes').isQualifyingSaleBooking(svc)) {
+        await require('../services/consultation-outcomes')
+          .markWonForCustomer(customerId, { via: 'office_booking', trx });
+      }
+
       // Create recurring instances from the dates precomputed (and locked)
       // above. Children resolve the CURRENT catalog identity from the
       // inserted parent (serviceId is optional on this endpoint — a legacy

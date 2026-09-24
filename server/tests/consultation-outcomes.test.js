@@ -19,10 +19,16 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const {
   recordOutcome,
   markWonForCustomer,
+  reconcileOpenConsultationOutcomes,
   markNoShow,
   consultationStats,
   isQualifyingSaleBooking,
 } = require('../services/consultation-outcomes');
+// reconcileOpenConsultationOutcomes (round 10) reads the module-level `db`
+// singleton directly — every other function here takes `trx` as a param
+// instead, so this is the only describe block that installs a fake
+// implementation onto the mocked module rather than passing one in.
+const db = require('../models/db');
 const {
   VOICE_AGENT_BOOKING_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
@@ -33,10 +39,21 @@ const {
 // CONFLICT ... WHERE and the UPDATE ... WHERE predicates are evaluated
 // against the row at write time, in the same call, exactly like Postgres —
 // there is no separate JS read-then-check step to race.
+// Supports plain names ('outcome'), a table-prefixed name whose result key
+// is just the field ('ss.scheduled_date' -> scheduled_date), and an
+// explicit alias ('co.id as outcome_id' -> outcome_id) — the three shapes
+// reconcileOpenConsultationOutcomes' join select uses (real knex resolves
+// all three the same way).
 function pick(row, cols) {
   if (!cols.length) return row;
   const out = {};
-  cols.forEach((c) => { out[c] = row[c]; });
+  cols.forEach((c) => {
+    const parts = c.split(' ');
+    const source = parts[0];
+    const alias = parts.length >= 3 ? parts[2] : null;
+    const fieldKey = source.includes('.') ? source.split('.').pop() : source;
+    out[alias || fieldKey] = row[fieldKey];
+  });
   return out;
 }
 
@@ -108,11 +125,23 @@ function makeFakeDb(seed = {}) {
   }
 
   function table(name) {
-    const rows = store[name] || (store[name] = []);
+    // reconcileOpenConsultationOutcomes' sweep query is the one join this
+    // shim supports — a small purpose-built row source (real knex would do
+    // this with .join()) rather than a generic SQL-join engine. Every
+    // chain method below then runs unmodified against the merged rows
+    // (co fields win on the 'id' collision, matching that the sweep
+    // selects 'co.id as outcome_id', never bare 'id').
+    const rows = name === 'consultation_outcomes as co'
+      ? (store.consultation_outcomes || []).map((co) => {
+        const ss = (store.scheduled_services || []).find((s) => s.id === co.scheduled_service_id);
+        return ss ? { ...ss, ...co } : null;
+      }).filter(Boolean)
+      : (store[name] || (store[name] = []));
     let filtered = rows;
     let insertPayload = null;
 
     const api = {
+      join() { return api; }, // the row source above already performed the one join shape this shim supports
       where(...args) { filtered = applyWhereArgs(filtered, args); return api; },
       whereNull(col) { filtered = filtered.filter((r) => resolveField(r, col) == null); return api; },
       whereNotNull(col) { filtered = filtered.filter((r) => resolveField(r, col) != null); return api; },
@@ -131,6 +160,7 @@ function makeFakeDb(seed = {}) {
         });
         return api;
       },
+      limit(n) { filtered = filtered.slice(0, n); return api; },
       select: (...cols) => Promise.resolve(filtered.map((r) => pick(r, cols))),
       first: (...cols) => Promise.resolve(filtered[0] ? pick(filtered[0], cols) : undefined),
       insert(payload) { insertPayload = { ...payload }; return api; },
@@ -773,6 +803,144 @@ describe('markWonForCustomer', () => {
 
     await expect(markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW }))
       .resolves.toBe(0);
+  });
+});
+
+// ---- reconcileOpenConsultationOutcomes (round 10 — the hourly sweep) ------
+
+describe('reconcileOpenConsultationOutcomes — the completeness guarantee (round 10)', () => {
+  const SCHEDULED_DATE = '2026-09-10';
+  const NOW = new Date('2026-09-23T12:00:00Z');
+
+  function install(seed) {
+    const fakeDb = makeFakeDb(seed);
+    db.mockImplementation(fakeDb);
+    db.transaction = fakeDb.transaction;
+    return fakeDb;
+  }
+
+  afterEach(() => {
+    db.mockReset();
+    delete db.transaction;
+  });
+
+  test('outcome recorded FIRST, the qualifying booking created SECOND — the sweep finds it on its next tick and wins it', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        // The consultation visit itself.
+        { id: 'visit-1', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-1', service_type: 'Waves Assessment' },
+        // The real sale, booked well after the outcome was recorded — no
+        // direct hook ever ran for it in this test (that's the point).
+        {
+          id: 'visit-real', scheduled_date: '2026-09-17', customer_id: 'cust-1', service_type: 'Quarterly Pest Control',
+          status: 'confirmed', created_at: new Date('2026-09-17T00:00:00Z'),
+        },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'warm' },
+      ],
+    });
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+
+    expect(result).toEqual({ scanned: 1, won: 1, errors: 0 });
+    const row = fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1');
+    expect(row.outcome).toBe('won');
+    expect(row.won_via).toBe('office_booking');
+    expect(new Date(row.won_at).toISOString()).toBe(new Date('2026-09-17T00:00:00Z').toISOString());
+  });
+
+  test('skips a visit scheduled outside the 90-day attribution window (stays warm, not counted as scanned)', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-old', scheduled_date: '2026-01-01', customer_id: 'cust-1', service_type: 'Waves Assessment' },
+        { id: 'visit-real', scheduled_date: '2026-01-05', customer_id: 'cust-1', service_type: 'Quarterly Pest Control', status: 'confirmed', created_at: new Date('2026-01-05T00:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-old', scheduled_service_id: 'visit-old', customer_id: 'cust-1', outcome: 'warm' },
+      ],
+    });
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+
+    expect(result).toEqual({ scanned: 0, won: 0, errors: 0 });
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-old').outcome).toBe('warm');
+  });
+
+  test('skips an already-won row (idempotent — not selected at all, since the query only reads warm/cold)', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-1', service_type: 'Waves Assessment' },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'closeout_booking', won_at: new Date('2026-09-11T00:00:00Z') },
+      ],
+    });
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+
+    expect(result).toEqual({ scanned: 0, won: 0, errors: 0 });
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking'); // untouched
+  });
+
+  test('continues past a row whose reconciliation throws — the rest of the sweep still runs', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-a', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-a', service_type: 'Waves Assessment' },
+        { id: 'visit-a-real', scheduled_date: '2026-09-17', customer_id: 'cust-a', service_type: 'Quarterly Pest Control', status: 'confirmed', created_at: new Date('2026-09-17T00:00:00Z') },
+        { id: 'visit-b', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-b', service_type: 'Waves Assessment' },
+        { id: 'visit-b-real', scheduled_date: '2026-09-18', customer_id: 'cust-b', service_type: 'Quarterly Pest Control', status: 'confirmed', created_at: new Date('2026-09-18T00:00:00Z') },
+      ],
+      consultation_outcomes: [
+        // Recorded first (by created order/recorded_at) — this is the one
+        // whose per-row reconciliation blows up.
+        { id: 'co-a', scheduled_service_id: 'visit-a', customer_id: 'cust-a', outcome: 'warm', recorded_at: new Date('2026-09-20T00:00:00Z') },
+        { id: 'co-b', scheduled_service_id: 'visit-b', customer_id: 'cust-b', outcome: 'cold', recorded_at: new Date('2026-09-21T00:00:00Z') },
+      ],
+    });
+    // Make customer 'cust-a's row lock throw — simulates a transient DB
+    // error on exactly one row's reconciliation. cust-b's lock is
+    // unaffected (this fake db has no customers rows seeded, but
+    // forNoKeyUpdate().first('id') against an empty table just resolves to
+    // undefined — harmless).
+    const spyDb = (name) => {
+      if (name === 'customers') {
+        return {
+          where: (cond) => {
+            if (cond && cond.id === 'cust-a') {
+              return { forNoKeyUpdate: () => ({ first: async () => { throw new Error('simulated lock failure for cust-a'); } }) };
+            }
+            return fakeDb('customers').where(cond);
+          },
+        };
+      }
+      return fakeDb(name);
+    };
+    spyDb.transaction = async (fn) => fn(spyDb);
+    db.mockImplementation(spyDb);
+    db.transaction = spyDb.transaction;
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+
+    expect(result.scanned).toBe(2);
+    expect(result.errors).toBe(1);
+    expect(result.won).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-a').outcome).toBe('warm'); // untouched by the throw
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-b').outcome).toBe('won'); // the sweep kept going
+  });
+
+  test('bounded by limit — a large backlog does not all run in one tick', async () => {
+    const outcomes = [];
+    const visits = [];
+    for (let i = 0; i < 5; i += 1) {
+      visits.push({ id: `visit-${i}`, scheduled_date: SCHEDULED_DATE, customer_id: `cust-${i}`, service_type: 'Waves Assessment' });
+      outcomes.push({ id: `co-${i}`, scheduled_service_id: `visit-${i}`, customer_id: `cust-${i}`, outcome: 'warm', recorded_at: new Date(`2026-09-1${i}T00:00:00Z`) });
+    }
+    install({ scheduled_services: visits, consultation_outcomes: outcomes });
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW, limit: 2 });
+
+    expect(result.scanned).toBe(2); // only the 2 oldest-recorded rows this tick
   });
 });
 

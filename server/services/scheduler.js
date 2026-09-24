@@ -6893,6 +6893,39 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY :27 — Consultation-outcome reconciliation sweep. THE COMPLETENESS
+  // GUARANTEE behind the direct hooks at admin-leads.js/admin-schedule.js
+  // (see the RECONCILIATION MODEL note atop consultation-outcomes.js): those
+  // two hooks are the fast path at the two main manual-booking routes, but
+  // wiring markWonForCustomer into every scheduled_services insert site
+  // one-by-one does not converge (estimate-accept, proposal-win, the
+  // funnel, voice-relay confirm, re-service, and whatever ships next all
+  // create real bookings too). This sweep scans every open (warm/cold)
+  // consultation outcome within its 90-day attribution window and re-runs
+  // the SAME evidence check (findSaleEvidenceForConsultation) the hooks
+  // use, so any OTHER insert path is reconciled within the hour regardless.
+  // Idempotent (the guarded UPDATE only ever touches a still-open row) and
+  // best-effort per row (one row's failure is logged and skipped, never
+  // aborts the rest of the sweep). Ungated — ordinarily-dark by construction
+  // rather than behind a GATE_*: a no-op beyond a handful of row-lock
+  // queries whenever there are no open outcomes to reconcile. See
+  // server/services/consultation-outcomes.js.
+  // =========================================================================
+  cron.schedule('27 * * * *', async () => {
+    try {
+      await runExclusive('consultation-outcome-reconcile', async () => {
+        const { reconcileOpenConsultationOutcomes } = require('./consultation-outcomes');
+        const result = await reconcileOpenConsultationOutcomes();
+        if (result.won > 0 || result.errors > 0) {
+          logger.info(`[consultation-outcome-reconcile] scanned=${result.scanned} won=${result.won} errors=${result.errors}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Consultation-outcome reconcile tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // NIGHTLY 3:20 AM — Triage dead-letter drain. Auto-resolves provably-moot
   // open triage cards and auto-dismisses aged informational flags so the
   // triage inbox stays an exception queue instead of a landfill (~1,800

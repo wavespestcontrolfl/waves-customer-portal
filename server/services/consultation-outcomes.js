@@ -8,6 +8,15 @@
  *
  * Table: server/models/migrations/20260923000010_consultation_outcomes.js
  * One row per scheduled_service_id (unique), upserted on re-record.
+ *
+ * RECONCILIATION MODEL (round 10): direct hooks (markWonForCustomer called
+ * from admin-leads.js and admin-schedule.js right after a qualifying
+ * booking commits) are the FAST PATH at the two main manual-booking routes,
+ * catching most real sales the moment they happen; the hourly sweep,
+ * reconcileOpenConsultationOutcomes, is the COMPLETENESS GUARANTEE that
+ * catches every other insert path (existing or future) within its next
+ * tick, so this service never again needs a new direct hook wired in to
+ * stay correct.
  */
 
 const db = require('../models/db');
@@ -388,6 +397,54 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
   return null;
 }
 
+// Shared by recordOutcome's post-record reconciliation AND the hourly sweep
+// (reconcileOpenConsultationOutcomes, below): runs the evidence check for
+// ONE already-identified customer/visit, and — only if it finds qualifying
+// evidence — the same guarded win UPDATE (WHERE outcome IN warm/cold, so a
+// row that resolved between the caller's read and this write is provably
+// untouched). Runs inside its own transaction (a SAVEPOINT when `database`
+// is already a caller transaction/savepoint), matching the "insert +
+// evidence check as one unit" discipline P1-A established — but this
+// function does NOT take the customer-row lock itself; the caller must
+// already hold it (recordOutcome via its own lockCustomerRow call before
+// the insert; the sweep via reconcileOneOpenOutcome). Returns the won row,
+// or null when no qualifying evidence was found. Throws on a genuine DB
+// error — best-effort is the CALLER's responsibility (each logs its own
+// context), not this shared piece.
+async function attemptEvidenceBasedWin(database, {
+  outcomeRowId, customerId, scheduledDateStr, now,
+}) {
+  let won = null;
+  await database.transaction(async (sp) => {
+    const evidence = await findSaleEvidenceForConsultation(sp, { customerId, scheduledDateStr, now });
+    if (!evidence) return;
+    const [wonRow] = await sp('consultation_outcomes')
+      .where({ id: outcomeRowId })
+      .whereIn('outcome', ['warm', 'cold'])
+      .update({ outcome: 'won', won_at: evidence.won_at, won_via: evidence.won_via, updated_at: new Date() })
+      .returning('*');
+    won = wonRow || null;
+  });
+  return won;
+}
+
+// The sweep's per-row unit of work: lock the customer row FIRST (P1-A
+// discipline — see lockCustomerRow), then attempt the evidence-based win
+// for this one already-existing open outcome row, both inside ONE
+// transaction. Unlike recordOutcome (which has an insert to run under the
+// same lock), the sweep has nothing else to do under it, so lock-then-
+// attempt collapses into this one small wrapper.
+async function reconcileOneOpenOutcome(database, {
+  outcomeRowId, customerId, scheduledDateStr, now,
+}) {
+  return database.transaction(async (locked) => {
+    await lockCustomerRow(locked, customerId);
+    return attemptEvidenceBasedWin(locked, {
+      outcomeRowId, customerId, scheduledDateStr, now,
+    });
+  });
+}
+
 /**
  * Record (or re-record) the technician's read of a consultation visit.
  * Never accepts outcome 'won' — that is stamped only by markWonForCustomer
@@ -508,23 +565,19 @@ async function recordOutcome(params = {}, { trx } = {}) {
     // that case, and a warm/cold row saved afterward would sit open forever.
     // Savepoint-isolated (waves-db §5b) and best-effort: an evidence-lookup
     // hiccup must never fail the record itself, or abort the lock-holding
-    // transaction above it.
+    // transaction above it. attemptEvidenceBasedWin (below) is the SAME
+    // evidence-check-then-guarded-UPDATE the hourly sweep
+    // (reconcileOpenConsultationOutcomes) reuses for every other insert
+    // path — this call site inlines the customer-row lock above because it
+    // ALSO has the insert/merge to run under it first; the sweep has no
+    // insert, so it locks + attempts in one step via reconcileOneOpenOutcome.
     if (['warm', 'cold'].includes(saved.outcome)) {
       try {
-        let won = null;
-        await locked.transaction(async (sp) => {
-          const evidence = await findSaleEvidenceForConsultation(sp, {
-            customerId,
-            scheduledDateStr: toDateOnlyString(svcRow.scheduled_date),
-            now,
-          });
-          if (!evidence) return;
-          const [wonRow] = await sp('consultation_outcomes')
-            .where({ id: saved.id })
-            .whereIn('outcome', ['warm', 'cold'])
-            .update({ outcome: 'won', won_at: evidence.won_at, won_via: evidence.won_via, updated_at: new Date() })
-            .returning('*');
-          won = wonRow || null;
+        const won = await attemptEvidenceBasedWin(locked, {
+          outcomeRowId: saved.id,
+          customerId,
+          scheduledDateStr: toDateOnlyString(svcRow.scheduled_date),
+          now,
         });
         if (won) return won;
       } catch (err) {
@@ -630,6 +683,72 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
     logger.error(`[consultation-outcomes] markWonForCustomer failed for customer ${customerId} (via ${via}): ${err.message}`);
     return 0;
   }
+}
+
+/**
+ * Round 10 — THE COMPLETENESS GUARANTEE (see the file header): rather than
+ * hook markWonForCustomer into every scheduled_services insert site
+ * one-by-one (a race the repo cannot win — estimate-accept, proposal-win,
+ * admin-leads, admin-schedule, the funnel, voice-relay confirm, re-service,
+ * and whatever ships next all create real bookings), this sweep scans every
+ * OPEN (warm/cold) consultation_outcomes row whose visit falls within the
+ * 90-day attribution window and re-runs the SAME evidence check
+ * (findSaleEvidenceForConsultation) recordOutcome's own post-record
+ * reconciliation uses. Any insert path this file has no direct hook for —
+ * or ever will not — is covered here on the next hourly tick.
+ *
+ * Idempotent (the guarded UPDATE only ever touches a still-open warm/cold
+ * row — a re-run over an already-won row finds nothing to do) and
+ * best-effort PER ROW: one row's failure (lock contention, a transient DB
+ * error) is logged and skipped, never aborts the rest of the sweep. Bounded
+ * by `limit` so one very large backlog can't turn an hourly tick into an
+ * hours-long one; the next tick picks up whatever this one didn't reach
+ * (oldest-recorded-first, so the same rows aren't perpetually starved by a
+ * skewed ordering).
+ *
+ * Returns { scanned, won, errors } — never throws.
+ */
+async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200 } = {}) {
+  const result = { scanned: 0, won: 0, errors: 0 };
+  let rows;
+  try {
+    const cutoff = etDateString(addETDays(now, -WON_WINDOW_DAYS));
+    const nowDateStr = etDateString(now);
+    // Same [90-days-ago, today] visit-date window markWonForCustomer's own
+    // atomic UPDATE bounds itself to (P1-2) — a consultation scheduled in
+    // the future, or one long past its attribution window, is never
+    // reconciled by either path.
+    rows = await db('consultation_outcomes as co')
+      .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
+      .whereIn('co.outcome', ['warm', 'cold'])
+      .whereNotNull('co.customer_id')
+      .where('ss.scheduled_date', '>=', cutoff)
+      .where('ss.scheduled_date', '<=', nowDateStr)
+      .orderBy('co.recorded_at', 'asc')
+      .limit(limit)
+      .select('co.id as outcome_id', 'co.customer_id', 'ss.scheduled_date');
+  } catch (err) {
+    logger.error(`[consultation-outcomes] reconcile sweep query failed: ${err.message}`);
+    result.errors += 1;
+    return result;
+  }
+
+  result.scanned = rows.length;
+  for (const row of rows) {
+    try {
+      const wonRow = await reconcileOneOpenOutcome(db, {
+        outcomeRowId: row.outcome_id,
+        customerId: row.customer_id,
+        scheduledDateStr: toDateOnlyString(row.scheduled_date),
+        now,
+      });
+      if (wonRow) result.won += 1;
+    } catch (err) {
+      result.errors += 1;
+      logger.warn(`[consultation-outcomes] reconcile sweep failed for outcome ${row.outcome_id}: ${err.message}`);
+    }
+  }
+  return result;
 }
 
 /**
@@ -823,6 +942,7 @@ module.exports = {
   isQualifyingSaleBooking,
   recordOutcome,
   markWonForCustomer,
+  reconcileOpenConsultationOutcomes,
   markNoShow,
   consultationStats,
 };
