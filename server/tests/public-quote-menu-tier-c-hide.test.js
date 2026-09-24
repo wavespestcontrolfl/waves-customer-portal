@@ -7,6 +7,7 @@ const hide = require('../models/migrations/20260903000020_public_quote_menu_tier
 const selectable = require('../models/migrations/20260829000020_services_public_quote_selectable');
 const { FORMERLY_PUBLIC_KEYS } = require('../services/public-services-menu');
 const retire6x = require('../models/migrations/20260924000010_lawn_retire_bimonthly_6x');
+const retireTsQuarterly = require('../models/migrations/20260924020000_tree_shrub_retire_quarterly');
 
 function fakeKnex(db) {
   const knex = (table) => {
@@ -45,7 +46,10 @@ const STAYS = [
   'lawn_care_recurring', 'lawn_care_6week', 'lawn_care_monthly', 'lawn_care_one_time', 'lawn_pest_knockdown',
   'dethatching', 'plugging', 'top_dressing',
   'mosquito_seasonal', 'mosquito_monthly', 'mosquito_one_time',
-  'tree_shrub_quarterly', 'tree_shrub_program', 'tree_shrub_6week', 'palm_injection',
+  // tree_shrub_quarterly is NOT here: it left the public quote menu via
+  // 20260924020000 (owner directive 2026-09-24, mirroring lawn's 6x
+  // retirement) — no longer a public product to assert survives.
+  'tree_shrub_program', 'tree_shrub_6week', 'palm_injection',
   'termite_bait', 'termite_liquid', 'termite_trenching', 'termite_slab_pretreat', 'bora_care',
   'rodent_inspection', 'rodent_trapping', 'rodent_bait_quarterly', 'rodent_exclusion',
   'flea_tick', 'bed_bug_treatment', 'bee_wasp_removal', 'fire_ant', 'wildlife_trapping', 'wdo_inspection',
@@ -57,7 +61,9 @@ describe('20260903000020 Tier C rows leave the public quote menu', () => {
   });
 
   test('CONTRACT: every hidden key stays accepted on /calculate as quote-on-request (cached pages, stale snapshot)', () => {
-    expect([...FORMERLY_PUBLIC_KEYS].sort()).toEqual([...hide.HIDE_KEYS, retire6x.SERVICE_KEY].sort());
+    expect([...FORMERLY_PUBLIC_KEYS].sort()).toEqual(
+      [...hide.HIDE_KEYS, retire6x.SERVICE_KEY, retireTsQuarterly.SERVICE_KEY].sort(),
+    );
   });
 
   test('flips exactly the ruled rows; every public product beside them stays selectable', async () => {

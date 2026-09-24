@@ -789,14 +789,14 @@ describe('section ladders stamp billedPerApplication (owner 2026-07-23: billing 
     ],
   };
 
-  test('tree & shrub ladder (incl. the 9x Enhanced upsell) flags every tier', () => {
+  test('tree & shrub ladder (incl. the 9x Enhanced upsell) flags every sold tier (light/4x retired 2026-09-24)', () => {
     const ladder = bundleSectionLadderForService(
       'tree_shrub',
       { results: TS_RESULT_STATS },
       { name: 'Tree & Shrub', service: 'tree_shrub' },
       0,
     );
-    expect(ladder.map((e) => e.key)).toEqual(['light', 'standard', 'enhanced']);
+    expect(ladder.map((e) => e.key)).toEqual(['standard', 'enhanced']);
     for (const entry of ladder) {
       expect(entry.billedPerApplication).toBe(true);
     }
@@ -829,13 +829,14 @@ describe('section ladders stamp billedPerApplication (owner 2026-07-23: billing 
   });
 });
 
-describe('retired T&S Premium is not a combo axis (estimator audit 2026-07-24)', () => {
-  // Pre-v4.5 estimates still store the 12x Premium row. The section ladder
-  // whitelists light/standard/enhanced, so a premium combo priced totals the
-  // accept-time tier restamp could never apply — the accept committed the
-  // premium combo's dollars while the recurring rows kept their stored
-  // cadence (billed ≠ scheduled). Premium must vanish from the tier map so
-  // no such combo exists; Enhanced (9x) stays — un-retired by #2968.
+describe('retired T&S Premium AND Light are not combo axes (estimator audit 2026-07-24; light retired 2026-09-24)', () => {
+  // Pre-v4.5 estimates still store the 12x Premium row, and pre-2026-09-24
+  // estimates still store the 4x Light row. The section ladder now
+  // whitelists only standard/enhanced, so a premium or light combo priced
+  // totals the accept-time tier restamp could never apply — the accept
+  // committed that combo's dollars while the recurring rows kept their
+  // stored cadence (billed ≠ scheduled). Both must vanish from the tier map
+  // so no such combo exists; Enhanced (9x) stays — un-retired by #2968.
   const TS_ROWS_WITH_PREMIUM = [
     { name: 'Light', v: 4, mo: 30, ann: 360, pa: 90 },
     { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
@@ -843,12 +844,12 @@ describe('retired T&S Premium is not a combo axis (estimator audit 2026-07-24)',
     { name: 'Premium', v: 12, mo: 80, ann: 960, pa: 80 },
   ];
 
-  test('nonPestTierBaseMap drops premium, keeps light/standard/enhanced', () => {
+  test('nonPestTierBaseMap drops premium AND light, keeps standard/enhanced', () => {
     const map = nonPestTierBaseMap({ ts: TS_ROWS_WITH_PREMIUM });
-    expect(Object.keys(map.tree_shrub).sort()).toEqual(['enhanced', 'light', 'standard']);
+    expect(Object.keys(map.tree_shrub).sort()).toEqual(['enhanced', 'standard']);
   });
 
-  test('no combo carries a tree_shrub:premium selection', () => {
+  test('no combo carries a tree_shrub:premium or tree_shrub:light selection', () => {
     const v1 = {
       pestTiers: [
         { label: 'Quarterly', mo: 95, pa: 285, apps: 4 },
@@ -865,11 +866,13 @@ describe('retired T&S Premium is not a combo axis (estimator audit 2026-07-24)',
     expect(combos.length).toBeGreaterThan(0);
     for (const combo of combos) {
       expect(combo.selection.tree_shrub).not.toBe('premium');
+      expect(combo.selection.tree_shrub).not.toBe('light');
       expect(combo.key).not.toContain('tree_shrub:premium');
+      expect(combo.key).not.toContain('tree_shrub:light');
     }
-    // The three live tiers all fan out.
+    // Only the two live tiers fan out.
     const tsKeys = new Set(combos.map((c) => c.selection.tree_shrub));
-    expect([...tsKeys].sort()).toEqual(['enhanced', 'light', 'standard']);
+    expect([...tsKeys].sort()).toEqual(['enhanced', 'standard']);
   });
 });
 

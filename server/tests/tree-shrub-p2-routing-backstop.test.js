@@ -60,7 +60,7 @@ describe('service-line routing — tree/shrub tokens beat fertil/weed', () => {
   });
 });
 
-describe('recurringTreeShrubRowAtRetiredCadence — premium-only backstop (9x un-retired 2026-07-23)', () => {
+describe('recurringTreeShrubRowAtRetiredCadence — premium + light backstop (9x un-retired 2026-07-23; light retired 2026-09-24)', () => {
   const estData = (svc) => ({ recurring: { services: [svc] } });
 
   test('restamped Enhanced selection (tree_shrub_6week key) is a live cadence', () => {
@@ -79,13 +79,13 @@ describe('recurringTreeShrubRowAtRetiredCadence — premium-only backstop (9x un
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Premium (12 visits)' }))).toBe(true);
   });
 
-  test('current 6x Standard and 4x Light rows pass', () => {
+  test('current 6x Standard rows pass; 4x Light rows are retired (owner directive 2026-09-24)', () => {
     expect(recurringTreeShrubRowAtRetiredCadence(estData({
       name: 'Bi-Monthly Tree & Shrub Care Service', serviceKey: 'tree_shrub_program', visitsPerYear: 6,
     }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({
       name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly', visitsPerYear: 4,
-    }))).toBe(false);
+    }))).toBe(true);
   });
 
   test('legacy cadence-less T&S rows and non-T&S rows pass (converter defaults them to the current program)', () => {
@@ -102,16 +102,17 @@ describe('recurringTreeShrubRowAtRetiredCadence — premium-only backstop (9x un
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', frequency: 'monthly' }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', recurringPattern: 'custom' }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', frequencyKey: 'semiannual' }))).toBe(true);
-    // The two live tiers' field cadences still pass.
+    // The live 6x tier's field cadence still passes; 'quarterly' (4x Light,
+    // retired 2026-09-24) no longer does.
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Bi-Monthly Tree & Shrub Care Service', frequency: 'bi_monthly', visitsPerYear: 6 }))).toBe(false);
-    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Quarterly Tree & Shrub Care Service', frequency: 'quarterly', visitsPerYear: 4 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Quarterly Tree & Shrub Care Service', frequency: 'quarterly', visitsPerYear: 4 }))).toBe(true);
   });
 
-  test('every converter visit-count alias is checked (codex P2 r2)', () => {
+  test('every converter visit-count alias is checked (codex P2 r2); 4-visit aliases are retired 2026-09-24', () => {
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 9 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 12 }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', treatmentsPerYear: 9 }))).toBe(false);
-    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 4 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 4 }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 6 }))).toBe(false);
   });
 });
@@ -143,6 +144,13 @@ describe('retiredTreeShrubRequoteNeeded — shared quote gate (deposit mirror co
     expect(retiredTreeShrubRequoteNeeded({
       results: { ts: [{ name: '12x Premium Tree & Shrub' }] },
       recurring: { services: [{ name: 'Tree & Shrub Care' }] },
+    })).toBe(true);
+  });
+
+  test('a Light-only (4x/quarterly) ladder requotes too (owner directive 2026-09-24)', () => {
+    expect(retiredTreeShrubRequoteNeeded({
+      results: { ts: [{ key: 'light', ann: 300 }] },
+      recurring: { services: [{ name: 'Quarterly Tree & Shrub Care Service' }] },
     })).toBe(true);
   });
 

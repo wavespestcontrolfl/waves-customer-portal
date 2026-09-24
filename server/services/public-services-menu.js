@@ -12,7 +12,7 @@
  * its own reviewed product copy keyed by service_key (pre-push codex P1).
  */
 const db = require('../models/db');
-const { LAWN_TIERS } = require('./pricing-engine/constants');
+const { LAWN_TIERS, TREE_SHRUB } = require('./pricing-engine/constants');
 
 const FAMILY_LABELS = {
   pest_control: 'Pest Control',
@@ -43,7 +43,8 @@ const CADENCE_LABELS = {
 //   pest.frequency  quarterly | bimonthly | monthly     (no semiannual)
 //   lawn.tier       standard | enhanced | premium      (no 4-app basic)
 //   mosquito.tier   seasonal9 | monthly12
-//   treeShrub.tier  light | standard | enhanced
+//   treeShrub.tier  light | standard | enhanced (light hidden 2026-09-24 —
+//                   never instant; instantForRow gates it below)
 //   sanitation.tier light | standard | heavy
 // Everything absent here is quote-on-request (a keyed lead the office
 // estimates). This is a pricing-engine capability, kept in code, and MUST
@@ -221,6 +222,11 @@ function instantForRow(row, { packageCountVerified = false } = {}) {
   // instant, even if an admin re-selects the catalog row.
   const lawnTier = PUBLIC_QUOTE_REQUESTS[row.service_key]?.lawn?.tier;
   if (lawnTier && LAWN_TIERS[lawnTier]?.hidden) return false;
+  // A T&S tier hidden from sale (light/4x-quarterly, owner directive
+  // 2026-09-24: stop offering quarterly tree & shrub care) — same
+  // reasoning: never instant, even if an admin re-selects the row.
+  const treeShrubTier = PUBLIC_QUOTE_REQUESTS[row.service_key]?.treeShrub?.tier;
+  if (treeShrubTier && TREE_SHRUB.tiers[treeShrubTier]?.hidden) return false;
   return true;
 }
 
@@ -268,7 +274,8 @@ async function loadPublicServicesMenu(conn = db) {
 // label from `name` so key and label can never disagree (pre-push codex P1:
 // serviceKey and serviceInterest are independently attacker-controlled).
 // Keys the menu advertised until migration 20260903000020 (and, for
-// lawn_care_recurring, 20260924000010 — 6x lawn retired) hid them. A visitor
+// lawn_care_recurring, 20260924000010 — 6x lawn retired; and, for
+// tree_shrub_quarterly, 20260924020000 — 4x/quarterly T&S retired) hid them. A visitor
 // on a cached quote page, or on the astro fallback snapshot until it is
 // refreshed, can still post one; it must keep resolving (AGENTS.md: astro
 // form posts are an external contract, breaking them is P0) — as a
@@ -283,7 +290,7 @@ const FORMERLY_PUBLIC_KEYS = new Set([
   'rodent_exclusion_only', 'rodent_trapping_exclusion', 'rodent_trapping_sanitation',
   'rodent_trapping_exclusion_sanitation', 'rodent_wire_mesh', 'rodent_bird_box', 'rodent_general_one_time',
   'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
-  'lawn_care_recurring',
+  'lawn_care_recurring', 'tree_shrub_quarterly',
 ]);
 
 async function publicSelectableService(serviceKey, conn = db) {

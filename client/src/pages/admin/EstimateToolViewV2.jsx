@@ -5273,12 +5273,19 @@ export default function EstimateToolViewV2({
                           counts (owner directive 2026-08-04) and the 9x
                           program is sellable here — the builder used to
                           hardcode standard (audit INP-004). Keys stay
-                          light/standard/enhanced. */}
+                          light/standard/enhanced (light retained server-side
+                          for the one grandfathered quarterly customer), but
+                          4x — Light/Quarterly is dropped from this picker
+                          (owner directive 2026-09-24: stop offering
+                          quarterly tree & shrub care). A reopened estimate
+                          that still carries tsTier=light shows no matching
+                          option here, same as a retired lawn cadence would —
+                          the retired-cadence requote gate handles it on
+                          send/accept, not this dropdown. */}
                       <Field label="Program" id="estimate-tsTier" className="mb-4">
                         <SelectV2
                           k="tsTier"
                           options={[
-                            { value: "light", label: "4x applications/yr" },
                             { value: "standard", label: "6x applications/yr" },
                             { value: "enhanced", label: "9x applications/yr" },
                           ]}

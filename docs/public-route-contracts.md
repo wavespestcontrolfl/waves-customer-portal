@@ -274,6 +274,16 @@ row still resolves to a retired lawn cadence — any tier hidden via
 removed 4x/quarterly — by explicit cadence, visit count, or the cadence's
 catalog key (`lawn_care_recurring` for 6x). The customer picks a current lawn
 option or the office requotes; the accept never silently reprices at 9x.
+
+The same accept path answers 409 `{ error, reason:
+'retired_tree_shrub_cadence_selection' }` when a recurring tree & shrub row
+still resolves to a retired T&S cadence — 4x/Light/quarterly (hidden via
+`TREE_SHRUB.tiers.light.hidden` since 2026-09-24, catalog key
+`tree_shrub_quarterly`) or the already-retired 12x/Premium — by explicit
+cadence, visit count, or cadence wording. 9x/Enhanced and 6x/Standard stay
+current. One existing customer's already-scheduled quarterly program is
+grandfathered and untouched by this gate; it only blocks a NEW self-serve
+accept from landing on the retired cadence.
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
 remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned

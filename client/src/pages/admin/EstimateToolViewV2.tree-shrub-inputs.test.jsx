@@ -4,7 +4,9 @@
 // program was unsellable from the admin path and access minutes never
 // priced. Both selects exist ONLY while Tree & Shrub is selected, default to
 // the mandated standard/easy, and the program names are application counts
-// (owner directive 2026-08-04 — no Standard/Enhanced/Premium names).
+// (owner directive 2026-08-04 — no Standard/Enhanced/Premium names). 4x
+// Light/Quarterly is dropped from this picker (owner directive 2026-09-24:
+// stop offering quarterly tree & shrub care) — only standard/enhanced offer.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
@@ -84,12 +86,10 @@ describe("tree & shrub program and access selects", () => {
     });
 
     expect(Array.from(program.options).map((o) => o.value)).toEqual([
-      "light",
       "standard",
       "enhanced",
     ]);
     expect(Array.from(program.options).map((o) => o.textContent)).toEqual([
-      "4x applications/yr",
       "6x applications/yr",
       "9x applications/yr",
     ]);

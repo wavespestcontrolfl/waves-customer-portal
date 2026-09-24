@@ -91,6 +91,13 @@ describe('keyed leads', () => {
     // Even re-selected by an admin, a hidden lawn tier is never instant.
     bimonthly[0].public_quote_selectable = true;
     expect((await publicSelectableService('lawn_care_recurring', fakeConn(bimonthly))).instant).toBe(false);
+    // 4x/quarterly T&S retired 2026-09-24 (owner directive): same treatment
+    // as the lawn 6x retirement — a cached form posting the old key still
+    // becomes a lead, never instant-priced, even after an admin re-selects it.
+    const quarterlyTs = [row({ service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care Service', category: 'tree_shrub', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4, public_quote_selectable: false })];
+    expect(await publicSelectableService('tree_shrub_quarterly', fakeConn(quarterlyTs))).toEqual({ service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care Service', instant: false, booking_enabled: true });
+    quarterlyTs[0].public_quote_selectable = true;
+    expect((await publicSelectableService('tree_shrub_quarterly', fakeConn(quarterlyTs))).instant).toBe(false);
     // Archived rows are gone for good — the compat window is for hidden rows only.
     expect(await publicSelectableService('pest_general_semiannual', fakeConn(rows))).toBeNull();
     // A hidden row that WAS instant is not instant any more.

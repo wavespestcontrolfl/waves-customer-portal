@@ -9926,7 +9926,13 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'tree_shrub', name: 'Tree & Shrub', icon: 'palm',
-    frequencies: ['4x per year', '6x per year'],
+    // My Plan renders frequencies[0] as the cadence line and SERVICE_CATALOG
+    // has no link to the customer's enrolled program — same as lawn/mosquito
+    // above. Customers enrolled before a cadence retired (4x/quarterly,
+    // owner directive 2026-09-24) keep their plan, so naming any one
+    // cadence misstates someone's; variant-neutral until the panel reads
+    // the matched service's real cadence.
+    frequencies: ['Recurring tree & shrub program'],
     basePrice: 50, description: 'Deep root feeding, insect & disease treatment, palm injections (Arborjet)',
     products: ['Merit 75 WP', 'Keel Fungicide', 'Arborjet TREE-age'],
   },

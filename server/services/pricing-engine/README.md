@@ -49,7 +49,7 @@ Single source of truth for what this engine prices, how, and with what constants
 |---|---|---|---|
 | Pest Control | ✅ quarterly / bimonthly / monthly | ✅ | ✅ |
 | Lawn Care | ✅ basic/standard/enhanced/premium | ✅ per-treatment | ✅ |
-| Tree & Shrub | ✅ light/standard | — | ✅ |
+| Tree & Shrub | ✅ standard/enhanced (light retired 2026-09-24) | — | ✅ |
 | Palm Injection | ✅ (4 treatment types) | — | ❌ flat credit only |
 | Mosquito | ✅ Seasonal/Monthly | ✅ treatable area | ✅ |
 | Termite Bait | ✅ monthly subscription | install only | ✅ |
@@ -116,7 +116,7 @@ Tree & Shrub uses a 43% direct-cost ratio target, not a 43% margin target. This 
 | Light | 4x | $0.075/sqft | $40 |
 | Standard | 6x | $0.110/sqft | $50 |
 
-The 6-visit Standard program is the mandated default and the pre-selected/auto-recommended tier (matches the protocol `six_x` cadence). Light (4x, protocol `four_x`) is a customer-selectable alternative cadence — shown alongside Standard the same way pest shows quarterly/bi-monthly/monthly — but it is never the auto-recommended default. Customer-facing surfaces label the tiers as cadences: Light = **Quarterly** (4 visits), Standard = **Bi-monthly** (6 visits). The 9-visit Enhanced and 12-visit Premium tiers are retired; legacy `tier: "enhanced"` / `tier: "premium"` requests are normalized to Standard with a warning.
+The 6-visit Standard program is the mandated default and the pre-selected/auto-recommended tier (matches the protocol `six_x` cadence). Light (4x/Quarterly, protocol `four_x`) is RETIRED for new sales (owner directive 2026-09-24: "remove quarterly tree and shrub care from the estimates and services") — `TREE_SHRUB.tiers.light.hidden` drops it from every offering surface, mirroring lawn's 6x/bi-monthly retirement; it stays priceable only for the one grandfathered existing quarterly customer's plan. `tier: "premium"` (12x) is likewise retired and normalizes to Standard with a warning. Enhanced (9x) is a live, customer-selectable upsell (un-retired 2026-07-23), never auto-recommended.
 
 **Standard positioning:** six core seasonal applications across the year.
 

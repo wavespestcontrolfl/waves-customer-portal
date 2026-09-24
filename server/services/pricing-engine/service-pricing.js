@@ -2920,7 +2920,15 @@ function priceTreeShrub(property, options = {}) {
     recommendedTier,
     recommendationReasons,
     recommended: tier === recommendedTier,
-    availableTiers: Object.keys(TREE_SHRUB.tiers),
+    // Light (4x/quarterly) is hidden:true (owner directive 2026-09-24) — out
+    // of the default offered list, same as priceLawnCare's customer-facing
+    // tiers array. options.includeHiddenTiers (the internal/legacy escape
+    // hatch, mirroring priceLawnCare's) restores the full key set for a
+    // caller that genuinely needs it (e.g. rendering the one grandfathered
+    // quarterly customer's existing plan).
+    availableTiers: options.includeHiddenTiers
+      ? Object.keys(TREE_SHRUB.tiers)
+      : Object.keys(TREE_SHRUB.tiers).filter((k) => !TREE_SHRUB.tiers[k].hidden),
     frequency,
     // Expose visitsPerYear (mirrors `frequency`) so cost/audit consumers that
     // key off visits — admin-pricing-config margin preview, estimate-pricing

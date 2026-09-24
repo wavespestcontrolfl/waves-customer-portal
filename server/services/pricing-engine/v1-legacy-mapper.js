@@ -59,7 +59,18 @@ const effectiveOneTimePrice = (li = {}) => {
   );
 };
 
-const TREE_SHRUB_LEGACY_TIERS = ['light', 'standard', 'enhanced'];
+// Light (4x/quarterly) is retired for new sales (owner directive 2026-09-24:
+// "remove quarterly tree and shrub care from the estimates and services") —
+// dropped from this ladder entirely, mirroring how LAWN_TIERS.standard.hidden
+// drops 6x from priceLawnCare's `tiers` array (which R.lawn reads directly
+// above; T&S has no equivalent array on priceTreeShrub's single-tier output,
+// so this file builds its own ladder and needs its own filter). A stored
+// estimate that still selects 'light' falls back to 'standard' here on
+// replay — same as a reopened 6x lawn estimate defaults to enhanced — and
+// the retired-cadence requote gate (estimate-public.js) is what actually
+// protects accept, not this preview ladder. priceTreeShrub itself still
+// prices 'light' correctly when called explicitly (grandfathered plans).
+const TREE_SHRUB_LEGACY_TIERS = ['standard', 'enhanced'];
 
 function treeShrubTierLabel(tier) {
   if (tier === 'light') return 'Light';

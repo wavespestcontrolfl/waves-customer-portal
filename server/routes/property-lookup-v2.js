@@ -4153,7 +4153,13 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
 // INP-001..005). A present-but-malformed value is REJECTED at the API
 // boundary — never silently dropped, defaulted, or clamped into a confident
 // price; an absent value stays absent so the pricer's own fallbacks run.
-const TREE_SHRUB_TIERS = new Set(['light', 'standard', 'enhanced']);
+// 'light' (4x/quarterly) is retired for NEW quotes (owner directive
+// 2026-09-24: "remove quarterly tree and shrub care from the estimates and
+// services") — dropped from this builder input's accepted values, same
+// treatment as a genuinely unknown tier. The one grandfathered quarterly
+// customer's existing plan is unaffected: this validates a NEW property
+// lookup / estimate build, never a replay of their stored engine inputs.
+const TREE_SHRUB_TIERS = new Set(['standard', 'enhanced']);
 const TREE_SHRUB_ACCESS = new Set(['easy', 'moderate', 'difficult']);
 function treeShrubInputError(message) {
   const err = new Error(message);
@@ -4431,7 +4437,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     const enumInput = (value, fallback) => (isBlankInput(value) ? fallback
       : (typeof value === 'string' ? value.trim().toLowerCase() : value));
     const tsTier = enumInput(o.treeShrubTier, 'standard');
-    if (!TREE_SHRUB_TIERS.has(tsTier)) throw treeShrubInputError('Tree & Shrub program must be light, standard, or enhanced.');
+    if (!TREE_SHRUB_TIERS.has(tsTier)) throw treeShrubInputError('Tree & Shrub program must be standard or enhanced.');
     const tsAccess = enumInput(o.treeShrubAccess, 'easy');
     if (!TREE_SHRUB_ACCESS.has(tsAccess)) throw treeShrubInputError('Tree & Shrub access must be easy, moderate, or difficult.');
     // Palms: the same resolution the property block uses below — the
