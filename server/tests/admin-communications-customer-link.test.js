@@ -79,6 +79,7 @@ jest.mock('../services/composer-customer-links', () => ({
   buildPayBalanceLink: jest.fn(),
   buildLatestEstimateLink: jest.fn(),
   buildReferralLink: jest.fn(),
+  buildConsultationLink: jest.fn(),
   buildAutopaySetupLink: jest.fn(),
   buildAppointmentPageLink: jest.fn(),
   buildCardRequestLink: jest.fn(),
@@ -88,6 +89,11 @@ jest.mock('../services/composer-customer-links', () => ({
   buildStatementLink: jest.fn(),
   buildReceiptLink: jest.fn(),
   buildProjectReportLink: jest.fn(),
+}));
+// Consultation's lead-only fallback (an unconverted lead with no customers
+// row) calls this directly, bypassing composer-customer-links entirely.
+jest.mock('../services/lead-consultation-link', () => ({
+  buildLeadConsultationSmsLine: jest.fn(),
 }));
 jest.mock('../services/prep-guide-sender', () => ({
   isSupportedPestType: () => true,
@@ -106,9 +112,15 @@ const express = require('express');
 const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const builders = require('../services/composer-customer-links');
+const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 const ReviewService = require('../services/review-request');
 
 const CUSTOMER_UUID = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
+// leadId is UUID-format-gated (pre-push Codex P2) — the consultation
+// lead-only fallback tests below use real UUID shapes, not bare strings.
+const LEAD_UUID_2 = 'b2b2b2b2-2222-4222-8222-222222222222';
+const LEAD_UUID_3 = 'c3c3c3c3-3333-4333-8333-333333333333';
+const LEAD_UUID_4 = 'd4d4d4d4-4444-4444-8444-444444444444';
 
 function makeCustomersBuilder({ firstRow = null, selectResults = [] } = {}) {
   const queue = [...selectResults];
@@ -190,10 +202,41 @@ function makeVisitsBuilder(rows = []) {
   return b;
 }
 
-function wireDb({ customers, reviewRequests = makeReviewRequestsBuilder(), visits = makeVisitsBuilder() }) {
+// leads: consultation's lead-only fallback (resolveConsultationLeadOnly).
+// `rows` is consumed in call order across the two possible db('leads')
+// queries: the explicit leadId lookup (terminal .first(), one row or
+// null) and the open-lead-by-phone fallback (terminal .select() after
+// .whereIn/.limit(2), an ARRAY — up to two rows, so ambiguity can be
+// judged without a third query). Each call takes the next queued value;
+// .first() returns it as-is, .select() wraps a truthy value as a
+// one-element array (or [] for null/undefined) — a test that wants the
+// ambiguous-match case queues an array of 2+ rows directly. The last
+// value repeats once exhausted, so a single-row array covers a test that
+// only ever makes one call.
+function makeLeadsBuilder(rows = [null]) {
+  const queue = [...rows];
+  const next = () => (queue.length > 1 ? queue.shift() : queue[0]);
+  const b = {};
+  b.where = jest.fn(() => b);
+  b.whereNull = jest.fn(() => b);
+  b.whereRaw = jest.fn(() => b);
+  b.whereIn = jest.fn(() => b);
+  b.orderBy = jest.fn(() => b);
+  b.limit = jest.fn(() => b);
+  b.first = jest.fn(async () => next());
+  b.select = jest.fn(async () => {
+    const value = next();
+    if (value == null) return [];
+    return Array.isArray(value) ? value : [value];
+  });
+  return b;
+}
+
+function wireDb({ customers, reviewRequests = makeReviewRequestsBuilder(), visits = makeVisitsBuilder(), leads = makeLeadsBuilder() }) {
   db.mockImplementation((table) => {
     if (table === 'customers') return customers;
     if (table === 'scheduled_services') return visits;
+    if (table === 'leads') return leads;
     return reviewRequests;
   });
 }
@@ -240,6 +283,217 @@ describe('POST /admin/communications/customer-link', () => {
       expect(body.firstName).toBe('PersonA');
       expect(body.url).toContain('/r/WAVES-ABC12345');
       expect(body.line).toContain('Share Waves here');
+    });
+  });
+
+  // lead-inspection-link-scope.md §4 — dark behind GATE_LEAD_INSPECTION_LINK.
+  describe('consultation', () => {
+    test('dispatches the phone-owning customer id (no leadId override) and returns url/line/firstName', async () => {
+      wireDb({ customers: soloCustomer() });
+      builders.buildConsultationLink.mockResolvedValue({
+        url: 'https://waves.link/l/abc123',
+        line: "Hi PersonA, it's Waves. Pick a time for us to stop by for a free consultation: https://waves.link/l/abc123\n\nOr reply here and we'll set it up.\n\nReply STOP to opt out.\n\n",
+        standalone: true,
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(builders.buildConsultationLink).toHaveBeenCalledWith(CUSTOMER_UUID);
+        expect(body.kind).toBe('consultation');
+        expect(body.firstName).toBe('PersonA');
+        expect(body.url).toContain('waves.link/l/abc123');
+        expect(body.standalone).toBe(true);
+        // Pre-push Codex P1: consultation is in OWNER_RIDES_BACK_KINDS — an
+        // operator who typed the phone without picking the search result
+        // still gets the resolved customerId back, so the eventual /sms
+        // send carries it and applies that customer's own consent policy
+        // instead of going out as an unverified conversational lead.
+        expect(body.customerId).toBe(CUSTOMER_UUID);
+      });
+    });
+
+    // Codex #4709 r15 P2: the customer path takes no lead override.
+    test('a leadId on the customer path is ignored — the builder gets only the customer', async () => {
+      wireDb({ customers: soloCustomer() });
+      builders.buildConsultationLink.mockResolvedValue({
+        url: 'https://waves.link/l/abc123',
+        line: 'line\n\n',
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', {
+          phone: '+15551234567',
+          kind: 'consultation',
+          leadId: 'lead-uuid-1',
+        });
+        expect(res.status).toBe(200);
+        expect(builders.buildConsultationLink).toHaveBeenCalledWith(CUSTOMER_UUID);
+      });
+    });
+
+    test('gate off (or no lead on file): 404 with the builder\'s reason, same shape as every other kind', async () => {
+      wireDb({ customers: soloCustomer() });
+      builders.buildConsultationLink.mockResolvedValue({
+        url: null,
+        line: '',
+        reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)',
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+        expect(res.status).toBe(404);
+        expect((await res.json()).error).toBe('Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)');
+      });
+    });
+
+    // GH Codex P1: an unconverted lead has no customers row at all —
+    // resolveComposerRecipient's customer-only lookup must not be the last
+    // word for this kind.
+    describe('lead-only fallback (no customers row for this phone)', () => {
+      test('a lead with no customer_id still gets a link (no leadId override needed)', async () => {
+        wireDb({
+          customers: makeCustomersBuilder(), // no customer on file for this number
+          leads: makeLeadsBuilder([{ id: 'lead-1', first_name: 'Jamie', phone: '+15551234567' }]),
+        });
+        buildLeadConsultationSmsLine.mockResolvedValue({
+          url: 'https://waves.link/l/lead1',
+          line: "Hi Jamie, it's Waves. Pick a time...\n\n",
+          standalone: true,
+        });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+          expect(res.status).toBe(200);
+          const body = await res.json();
+          expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-1', 'Jamie');
+          expect(builders.buildConsultationLink).not.toHaveBeenCalled();
+          expect(body.kind).toBe('consultation');
+          expect(body.firstName).toBe('Jamie');
+          expect(body.url).toContain('waves.link/l/lead1');
+          expect(body.standalone).toBe(true);
+        });
+      });
+
+      test('a leadId whose phone does not match the destination is rejected — 404 with a reason, no link, and the phone-based lookup never runs', async () => {
+        const leads = makeLeadsBuilder([{ id: 'lead-2', first_name: 'Robin', phone: '+19995551234', status: 'new', converted_at: null }]);
+        wireDb({ customers: makeCustomersBuilder(), leads });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            leadId: LEAD_UUID_2,
+          });
+          expect(res.status).toBe(404);
+          expect((await res.json()).error).toMatch(/does not match/i);
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+          expect(builders.buildConsultationLink).not.toHaveBeenCalled();
+          // Only the leadId lookup ran — never fell through to a phone-based
+          // second query that could mint a different lead's link.
+          expect(leads.first).toHaveBeenCalledTimes(1);
+          expect(leads.select).not.toHaveBeenCalled();
+        });
+      });
+
+      // Codex #4709 r10 P1: a stale explicit selection is refused — never
+      // permission to pick some other open lead on this number.
+      test('a stale/deleted leadId (resolves to no lead) is refused with 404, never swapped for another lead', async () => {
+        wireDb({
+          customers: makeCustomersBuilder(),
+          leads: makeLeadsBuilder([null, { id: 'lead-3', first_name: 'Sam', phone: '+15551234567' }]),
+        });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            leadId: LEAD_UUID_3,
+          });
+          expect(res.status).toBe(404);
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+        });
+      });
+
+      // Codex #4709 r14 P1: a selected customer that went stale is reported,
+      // never replaced by a lead on the same phone.
+      test('a stale selected customerId is a 404, never the lead-only fallback', async () => {
+        wireDb({
+          customers: makeCustomersBuilder(),
+          leads: makeLeadsBuilder([{ id: 'lead-1', first_name: 'Jamie', phone: '+15551234567' }]),
+        });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            customerId: '11111111-2222-4333-8444-555555555555',
+          });
+          expect(res.status).toBe(404);
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+        });
+      });
+
+      // Pre-push Codex P2: a malformed leadId must 400 before either leads
+      // query, never fall through to the phone-only lookup as if no
+      // override had been supplied.
+      test('a malformed (non-UUID) leadId is rejected with 400 before any leads query', async () => {
+        const leads = makeLeadsBuilder([{ id: 'lead-1', first_name: 'Jamie', phone: '+15551234567' }]);
+        wireDb({ customers: makeCustomersBuilder(), leads });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            leadId: 'not-a-real-uuid',
+          });
+          expect(res.status).toBe(400);
+          expect((await res.json()).error).toMatch(/leadId/i);
+          expect(leads.first).not.toHaveBeenCalled();
+          expect(leads.select).not.toHaveBeenCalled();
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+        });
+      });
+
+      // Pre-push Codex P1: the fallback used to accept ANY non-deleted lead
+      // by id — a converted/closed lead (already a real customer, or lost/
+      // disqualified/etc.) must be refused, not silently minted a link for.
+      test('a converted lead, named explicitly by id, is refused — no link, no fallback substitution', async () => {
+        const leads = makeLeadsBuilder([{ id: 'lead-4', first_name: 'Won', phone: '+15551234567', status: 'won', converted_at: new Date('2026-01-01') }]);
+        wireDb({ customers: makeCustomersBuilder(), leads });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', {
+            phone: '+15551234567',
+            kind: 'consultation',
+            leadId: LEAD_UUID_4,
+          });
+          expect(res.status).toBe(404);
+          expect((await res.json()).error).toMatch(/already converted or closed/i);
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+          expect(leads.select).not.toHaveBeenCalled();
+        });
+      });
+
+      // Pre-push Codex P1: the phone-only fallback used to .first() the
+      // newest match without checking whether the phone was ambiguous.
+      test('two open leads share the phone and no leadId was given: refused rather than silently picking the newest', async () => {
+        wireDb({
+          customers: makeCustomersBuilder(),
+          leads: makeLeadsBuilder([[
+            { id: 'lead-5', first_name: 'Newer', phone: '+15551234567' },
+            { id: 'lead-6', first_name: 'Older', phone: '+15551234567' },
+          ]]),
+        });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+          expect(res.status).toBe(409);
+          expect((await res.json()).error).toBe('multiple leads share this number; pick the lead');
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+        });
+      });
+
+      test('no customer AND no lead on this number: the original customer-not-found 404', async () => {
+        wireDb({ customers: makeCustomersBuilder(), leads: makeLeadsBuilder([null]) });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'consultation' });
+          expect(res.status).toBe(404);
+          expect((await res.json()).error).toBe('No customer found for that number');
+          expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+        });
+      });
     });
   });
 
@@ -803,7 +1057,7 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test.each(['appointment', 'service_report'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1)', async (kind) => {
+  test.each(['appointment', 'service_report', 'consultation'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1 / pre-push Codex P1 for consultation)', async (kind) => {
     wireDb({ customers: makeCustomersBuilder({
       selectResults: [
         [{ id: CUSTOMER_UUID, account_id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002', account_id: CUSTOMER_UUID }], // number → one account

@@ -24,6 +24,7 @@ import { isAcceptedSms } from "../../../utils/sms-delivery";
 import { adminFetch } from "../../../utils/admin-fetch";
 import { notifyUnreadChanged } from "../../../hooks/useUnreadConversations";
 import { getAdminUser } from "../../../lib/adminAuth";
+import { combineAppendedDraft, consultationLineOf } from "../../../lib/composerLinks";
 import AuthenticatedCallAudio from "../AuthenticatedCallAudio";
 import { deliveryLabel, formatDuration } from "./activity";
 import { etDateString, formatETDate, formatETTime } from "../../../lib/timezone";
@@ -66,6 +67,33 @@ function writeDraft(customerId, value) {
     else sessionStorage.removeItem(key);
   } catch {
     /* storage unavailable — the draft lives in state for this mount */
+  }
+}
+
+// The exact consultation-invite LINE last inserted for this identity,
+// remembered alongside the draft (pre-push Codex P1): every short link
+// shares the same host, so combineAppendedDraft below used to sweep ANY
+// line on that host — a pasted pay/review/estimate link, not just a prior
+// consultation clause. Session-scoped like the draft itself.
+const consultationLineKey = (identity) => {
+  const staffId = getAdminUser()?.id;
+  return staffId ? `c360:sms-consult-line:${staffId}:${identity}` : null;
+};
+function readConsultationLine(identity) {
+  try {
+    return sessionStorage.getItem(consultationLineKey(identity) || "") || "";
+  } catch {
+    return "";
+  }
+}
+function writeConsultationLine(identity, value) {
+  try {
+    const key = consultationLineKey(identity);
+    if (!key) return;
+    if (value) sessionStorage.setItem(key, value);
+    else sessionStorage.removeItem(key);
+  } catch {
+    /* storage unavailable — falls back to the wording+host heuristic */
   }
 }
 
@@ -125,7 +153,36 @@ function MessageBubble({ m }) {
   );
 }
 
-export default function CustomerSmsPanel({ customer, open, onClose, onSent, leadId, initialDraft = "" }) {
+// firstUrlIn / urlHost / consultationLineOf / combineAppendedDraft live in
+// ../../../lib/composerLinks — shared with CommunicationsPageV2.jsx's own
+// consultation re-insert handling (Codex #4709 P2). See that module for
+// the reasoning (scheme-free links, no regex lookbehind for old Safari,
+// the remembered-line/URL/wording+host fallback chain, footer dedup).
+
+// initialDraft only SEEDS an empty draft — an existing per-identity draft
+// (sessionStorage) wins over it, same as opening the panel fresh. A caller
+// whose text must actually land in the box regardless of what's already
+// there (Send consultation link) passes appendDraft instead: joined onto
+// whatever draft already exists (existing, matching how the Communications
+// composer's own Insert Link actions add a clause to the current body
+// rather than silently losing it — CommunicationsPageV2 insertCustomerLinkLine).
+//
+// A stored draft already carrying an earlier consultation insert (the
+// operator collapsed and re-expanded the row, or clicked the button twice)
+// must not get a SECOND copy of the same invite appended below it
+// (pre-push Codex P2) — this is the only appendDraft caller in this
+// component today, so the prior clause is replaced in place rather than
+// appended twice. Every short link shares the same short-link host
+// (pre-push Codex P1), so "any line whose URL shares the new addition's
+// host" is NOT unambiguously the prior consultation clause — it also
+// matches a pasted pay/review/estimate link, which this used to silently
+// delete. The exact line last inserted is remembered per identity
+// (sessionStorage, alongside the draft itself) and only THAT line is
+// removed; a wording+host match is a fallback for when nothing is
+// remembered yet (a fresh session, or storage unavailable) — narrower than
+// "same host alone" so an unrelated short link still survives on a first
+// insert.
+export default function CustomerSmsPanel({ customer, open, onClose, onSent, leadId, initialDraft = "", appendDraft = "" }) {
   const isMobile = useIsMobile();
   const customerId = customer?.id ? String(customer.id) : null;
   const phone = customer?.phone || "";
@@ -138,7 +195,11 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [draft, setDraft] = useState(() => (identity ? readDraft(identity) || initialDraft : ""));
+  const [draft, setDraft] = useState(() => (identity ? combineAppendedDraft(readDraft(identity) || initialDraft, appendDraft, readConsultationLine(identity)) : ""));
+  // The latest draft, for the appendDraft effect to build on without a
+  // setState updater (see that effect).
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const [sentNote, setSentNote] = useState("");
@@ -168,8 +229,37 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
     setPendingNew(0);
     setLiveNote("");
     knownIdsRef.current = new Set();
-    setDraft(identity ? readDraft(identity) || initialDraft : "");
+    const base = identity ? readDraft(identity) || initialDraft : "";
+    draftRef.current = base;
+    setDraft(base);
   }, [identity, initialDraft]);
+
+  // appendDraft joins onto the draft the panel already holds — including
+  // whatever the operator may have typed already, or an appendDraft-aware
+  // mount the reset effect above (which does not know about appendDraft)
+  // would otherwise clobber back to the plain seeded value in the SAME
+  // post-mount effect flush. Started at a sentinel that never equals a
+  // real appendDraft value, so this DOES fire on mount too — after the
+  // reset effect's setDraft — and is guarded only against re-applying the
+  // SAME value again on a later re-render that does not change it.
+  const appliedAppendDraftRef = useRef(undefined);
+  useEffect(() => {
+    if (appendDraft && appendDraft !== appliedAppendDraftRef.current) {
+      // No setState updater here (Codex #4709 P1): the next draft is
+      // computed once from draftRef, then set and persisted synchronously,
+      // so StrictMode's double-invoked updaters and re-run mount effects
+      // can neither strip the wrong line nor lose an unpersisted append.
+      const remembered = identity ? readConsultationLine(identity) : "";
+      const next = combineAppendedDraft(draftRef.current, appendDraft, remembered);
+      draftRef.current = next;
+      setDraft(next);
+      if (identity) {
+        writeDraft(identity, next);
+        writeConsultationLine(identity, consultationLineOf(appendDraft));
+      }
+    }
+    appliedAppendDraftRef.current = appendDraft;
+  }, [appendDraft, identity]);
 
   const isNearBottom = () => {
     const el = listRef.current;
