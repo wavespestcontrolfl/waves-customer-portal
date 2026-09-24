@@ -10,7 +10,14 @@ const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/m
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
-const { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
+const {
+  hasSchedulingIntent,
+  isSmsReaction,
+  isQuietSmsReaction,
+  isCourtesyOnly,
+  hasRescheduleOrAwayIntent,
+  outboundAsksForReply,
+} = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { phoneMatchDigits } = require('../utils/phone');
 
@@ -2075,7 +2082,7 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
     if (!last) return true;
     // A question mark OR an explicit reply directive ("Reply YES to confirm",
     // "let us know", "text back") — templates ask without "?" (hook P1).
-    return /\?|\breply\b|\brespond\b|\btext\s+(?:us\s+)?back\b|\blet\s+(?:us|me)\s+know\b|\bconfirm\b/i.test(String(last.message_body || ''));
+    return outboundAsksForReply(last.message_body);
   } catch (e) {
     logger.warn(`[twilio-webhook] awaiting-answer lookup failed: ${e.message}; treating as awaiting`);
     return true;
