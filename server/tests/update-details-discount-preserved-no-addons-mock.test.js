@@ -161,6 +161,38 @@ test('an unrelated save echoing the gross primaryLinePrice as estimatedPrice mus
   expect(write.payload.discount_amount).not.toBeNull();
 });
 
+test('Codex round-1 P0: a genuine mobile price change on a row WITH existing add-ons must NOT be silently ignored just because it matches the primary line\'s own gross', async () => {
+  // Stored row: a $100 primary line + a $50 add-on = $150 total, no
+  // discount. `deriveLegacyPrimarySubmission` returns only the PRIMARY
+  // line's own gross (100) here — NOT the row's true $150 total — so a
+  // "does the posted price match the derived gross" check must never apply
+  // when the row has existing add-on rows, or a genuine new total that
+  // happens to equal 100 gets discarded as an unchanged echo.
+  const storedWithAddons = { ...STORED, estimated_price: 150, discount_type: null, discount_amount: null, discount_dollars: null };
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_service_addons') {
+      const c = chain(table);
+      c.then = (resolve, reject) => Promise.resolve([{ base_price: 50, estimated_price: 50 }]).then(resolve, reject);
+      c.catch = (fn) => Promise.resolve([{ base_price: 50, estimated_price: 50 }]).catch(fn);
+      return c;
+    }
+    const c = chain(table);
+    if (table === 'scheduled_services') {
+      c.first = jest.fn(async () => ({ ...storedWithAddons }));
+    }
+    return c;
+  });
+  // MobileServiceEditModal seeds from the stored NET total (150) and posts
+  // a genuinely NEW total of 100 — which happens to equal the stored
+  // primary line's own gross, purely by coincidence.
+  const { status, body } = await put({ estimatedPrice: 100, notes: 'gate code 1234' });
+  const write = captured.find((c) => c.table === 'scheduled_services');
+  console.log('status', status, JSON.stringify(body), 'captured scheduled_services update:', JSON.stringify(write?.payload));
+  expect(write).toBeDefined();
+  // The genuine price change must actually land — never silently discarded.
+  expect(Number(write.payload.estimated_price)).toBeCloseTo(100, 2);
+});
+
 test('an unrelated MobileServiceEditModal save echoing the stored NET as estimatedPrice must also NOT strip the discount', async () => {
   // MobileServiceEditModal seeds its price state from the stored NET
   // `estimatedPrice` (90) and posts it back verbatim — the opposite

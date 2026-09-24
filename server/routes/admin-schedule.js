@@ -10333,22 +10333,38 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // the stored NET `estimatedPrice` verbatim. Diffing the posted value
         // against only the net (the old behavior) treated every discounted,
         // add-on-less DESKTOP save as a price change and silently stripped
-        // the discount; diffing against only a re-derived gross (an
-        // intermediate version of this fix) broke the equally real MOBILE
-        // no-op the same way in reverse. An echoed, untouched Price field
-        // must be a no-op under EITHER convention, so treat the price as
-        // unchanged when it matches the stored net OR the row's own
-        // (re-derived, same way the client derives it) gross.
+        // the discount.
+        //
+        // Codex round 1 (P0): the fix cannot simply accept EITHER
+        // representation as unchanged everywhere — when the row has
+        // EXISTING add-on rows, `deriveLegacyPrimarySubmission` returns only
+        // the PRIMARY line's own gross (it ignores add-ons whenever
+        // `primaryLinePrice` is set), not the row's total; treating that as
+        // an acceptable stand-in for "the whole-visit price" would let a
+        // genuine mobile price change that happens to equal the stored
+        // primary's gross be silently discarded as a no-op. Desktop can
+        // never actually reach this add-on-less branch for a row that HAS
+        // stored add-ons — its own save always includes an `addons` key
+        // once the row had any (SchedulePage.jsx `hadAddonsInitially`/
+        // `sendAddons`), routing it through the OTHER branch above instead.
+        // So whenever this branch sees existing add-on rows, the caller can
+        // only be one using the NET convention (today: mobile), and the
+        // gross fallback must not apply — compare against the stored NET
+        // only, exactly as before this fix. The gross fallback is scoped to
+        // the genuinely ambiguous case this bug report is about: a row with
+        // NO stored add-ons, where gross and net differ only by the
+        // appointment discount and either caller's echo must be a no-op.
         const existingNetPrice = Number(existingPrice?.estimated_price);
-        const existingGrossPrice = deriveLegacyPrimarySubmission({
-          primaryLinePrice: existingPrice?.primary_line_price,
-          estimatedPrice: existingPrice?.estimated_price,
-          addons: addonRows.map((addon) => ({
-            basePrice: addon.base_price != null ? addon.base_price : addon.estimated_price,
-          })),
-        });
         const matchesNet = Number.isFinite(existingNetPrice) && Math.abs(existingNetPrice - basePrice) < 0.005;
-        const matchesGross = Number.isFinite(existingGrossPrice) && Math.abs(existingGrossPrice - basePrice) < 0.005;
+        let matchesGross = false;
+        if (addonRows.length === 0) {
+          const existingGrossPrice = deriveLegacyPrimarySubmission({
+            primaryLinePrice: existingPrice?.primary_line_price,
+            estimatedPrice: existingPrice?.estimated_price,
+            addons: [],
+          });
+          matchesGross = Number.isFinite(existingGrossPrice) && Math.abs(existingGrossPrice - basePrice) < 0.005;
+        }
         const priceChanged = !matchesNet && !matchesGross;
         const discountTypeChanged = discountType !== undefined
           && (discountType || null) !== (existingPrice?.discount_type || null);
