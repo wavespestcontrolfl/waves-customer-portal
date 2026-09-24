@@ -1195,6 +1195,10 @@ function mistingContextRows(context = {}) {
     ...(Array.isArray(context.services) ? context.services : []),
     ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
     ...(Array.isArray(context.quoteOnlyItems) ? context.quoteOnlyItems : []),
+    // Retained recurring rows too: in one_time mode the builder moves the
+    // plan's recurring services here, and a mixed estimate must not read as
+    // misting-only.
+    ...(Array.isArray(context.recurringServices) ? context.recurringServices : []),
   ];
 }
 
@@ -1213,7 +1217,7 @@ function estimateContextIsMistingOnly(context = {}) {
 
 function isMistingSystemQuestion(q = '') {
   // Bare "mist"/"misting" is barrier wording ("21-day misting") and does not count.
-  return isMistingSystemService({ text: q }) || /\b(misters?|nozzles?|design\s*visit|reservoir|cabinet)\b/i.test(q);
+  return isMistingSystemService({ text: q }) || /\b(misters?|nozzles?|design\s*visit|reservoir)\b/i.test(q);
 }
 
 // Misting-system copy, sourced from wiki/protocols/mosquito-misting-systems.md

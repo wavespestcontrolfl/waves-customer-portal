@@ -96,6 +96,26 @@ describe('Ask Waves fallback — mosquito misting SYSTEM quote-required question
   });
 
 
+  describe('Codex #4779 r8: cabinet is not a misting signal; one_time mode keeps recurring rows', () => {
+    test('mixed misting + pest: "kitchen cabinet" pest question is not intercepted', () => {
+      const mixed = { billing: { quoteRequired: true, amountText: null }, services: [
+        { service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' },
+        { service: 'pest_general_quarterly', label: 'Quarterly Pest Control Service' },
+      ] };
+      const answer = answerEstimateQuestionFallback('Do you spray inside the kitchen cabinet?', mixed);
+      expect(answer.toLowerCase()).not.toContain('design visit');
+    });
+    test('one_time view of a recurring + misting estimate is not misting-only', () => {
+      const ctx = {
+        billing: { quoteRequired: true, amountText: null },
+        services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' }],
+        recurringServices: [{ service: 'pest_general_quarterly', label: 'Quarterly Pest Control Service' }],
+      };
+      const answer = answerEstimateQuestionFallback('What does the quarterly pest plan include?', ctx);
+      expect(answer.toLowerCase()).not.toContain('design visit');
+    });
+  });
+
   describe('one fixed protocol answer for every misting question (Codex r7: no keyword intent routing)', () => {
     const KEY_FACTS = [
       'free on-site design visit',

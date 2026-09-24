@@ -1737,7 +1737,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     // The visit's catalog identity is not a treatment (inspection,
     // assessment, the specialty grab-bag) and no booked add-on's protocol
     // names the product: the search is not a way to dose on an inspection.
-    [!treatment && !protocolLine, `No treatment protocol for this visit (${svc.service_category})`],
+    [!treatment && !protocolLine, `No treatment protocol for this visit (${svc.service_category || 'no catalog identity'})`],
     // A booked lawn add-on has no plan on this visit: a product no primary /
     // add-on protocol names is not dosed off the catalog past the lawn
     // plan's turf, ordinance, stress and approval guards.
@@ -1793,7 +1793,14 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
  */
 async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDate, deps = {}) {
   const protocols = deps.protocols || require('../config/protocols.json');
-  const primaryKey = svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined;
+  // A categoryless misting-system visit (legacy/manual, no catalog row) is a
+  // non-treatment too: resolve it to null (no program) rather than undefined
+  // (unknown treatment), so the mix path never doses a searched product.
+  const mistingNonTreatment = isMistingDesignConsultation({ serviceKey: svc.service_key, name: svc.service_type })
+    || isMistingSystemServiceUnconfigured({ serviceKey: svc.service_key, name: svc.service_type });
+  const primaryKey = mistingNonTreatment
+    ? null
+    : (svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined);
   const treatment = primaryKey !== null;
   const primaryIsLawn = treatment && (primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn');
   const addons = (await loadAddons(dbh, serviceId))

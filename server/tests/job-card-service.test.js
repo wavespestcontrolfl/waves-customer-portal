@@ -755,6 +755,13 @@ describe('mixForProduct', () => {
     } finally { delete process.env.GATE_LABEL_PIPELINE; }
   });
 
+  test('a categoryless (legacy/manual) misting-system visit gets no searched dose (Codex #4779 r8 P1)', async () => {
+    const mistingVisit = { ...visit, service_type: 'Mosquito Misting System Service', service_category: null, service_key: null };
+    const dbh = makeDb({ scheduled_services: [mistingVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), evaluateApprovals: approve() }, ...at });
+    expect(out).toMatchObject({ amount: null, reason: 'No treatment protocol for this visit (no catalog identity)' });
+  });
+
   test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] } });
