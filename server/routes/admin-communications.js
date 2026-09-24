@@ -1667,14 +1667,40 @@ router.get('/log', async (req, res, next) => {
     let query = db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .leftJoin('customers', 'conversations.customer_id', 'customers.id')
+      .joinRaw(`LEFT JOIN LATERAL (
+        SELECT sl.message_type, sl.status, sl.metadata
+        FROM sms_log sl
+        WHERE sl.twilio_sid = messages.twilio_sid AND sl.direction = messages.direction
+        ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
+      ) sms_response ON true`)
+      .joinRaw(`LEFT JOIN LATERAL (
+        SELECT mal.metadata
+        FROM messaging_audit_log mal
+        WHERE mal.provider_message_id = messages.twilio_sid AND mal.channel = 'sms'
+        ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
+      ) sms_audit ON true`)
+      .joinRaw(`LEFT JOIN LATERAL (
+        SELECT EXISTS (
+          SELECT 1 FROM message_drafts mdx
+          WHERE mdx.id::text = COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', messages.metadata->>'draft_id')
+            AND mdx.intent = 'click_followup'
+        ) AS is_click_followup
+      ) sms_answer ON true`)
       .where('messages.channel', 'sms')
       .select(
         'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
         'messages.delivery_status as status', 'messages.message_type',
-        'messages.created_at', 'messages.media', 'messages.is_read', 'messages.read_at',
+        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at',
         'conversations.customer_id', 'conversations.our_endpoint_id',
         'conversations.contact_phone',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
+      )
+      .select(
+        'sms_response.message_type as response_message_type',
+        'sms_response.status as response_status',
+        'sms_response.metadata as response_metadata',
+        'sms_audit.metadata as response_audit_metadata',
+        'sms_answer.is_click_followup as response_is_click_followup',
       )
       .orderBy('messages.created_at', 'desc');
 
@@ -1740,13 +1766,29 @@ router.get('/log', async (req, res, next) => {
       const contact = m.contact_phone || m.customer_phone || fallbackCustomer?.phone;
       const from = m.direction === 'inbound' ? contact : ours;
       const to = m.direction === 'inbound' ? ours : contact;
+      const { courtesyOnly, spamEnforced } = require('../services/sms-response-policy').responseFlags({
+        direction: m.direction, body: m.body, media: m.media,
+        metadata: m.metadata, legacyMetadata: m.response_metadata,
+        auditMetadata: m.response_audit_metadata,
+      });
+      const responseMessageType = m.response_message_type || m.message_type;
+      const responseStatus = m.response_status || m.status;
+      const responseIsAnswer = require('../services/sms-response-policy').outboundIsAnswer({
+        direction: m.direction, messageType: responseMessageType, status: responseStatus,
+        isClickFollowup: m.response_is_click_followup === true,
+      });
       return {
         id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
         body: m.body, status: m.status, messageType: m.message_type,
+        responseMessageType,
+        responseStatus,
+        responseIsAnswer,
         customerId: m.customer_id || fallbackCustomer?.id || null, customerName,
         createdAt: m.created_at,
         isRead: !!m.is_read,
         readAt: m.read_at,
+        courtesyOnly,
+        spamEnforced,
         media: await signMediaForClient(m.media),
       };
     }));
