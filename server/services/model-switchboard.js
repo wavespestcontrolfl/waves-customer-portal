@@ -174,11 +174,21 @@ const AGENT_LOCK = LOCK.registration('Anthropic Managed Agents · model set at r
 // the first VALID slug is what the generator tries first (an all-invalid
 // value falls back to its default chain, hence null → the literal). Lazy
 // require: image-generator pulls in fetch + logger at load.
-function firstImageChainModel(value) {
-  const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
-  const [first] = parseChain(value);
-  return first ? MODEL_MAP[first].model : null;
+// The Nth leg of the EFFECTIVE image chain — image-generator's own parser,
+// which drops SynthID-watermarked Gemini slugs unless
+// ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true (and, with the override on and
+// no env chain, restores the pre-2026-09-24 interleaved defaults). The lane's
+// primary AND fallback both read through it, so the Models page shows the
+// legs that will really run, override on or off.
+function nthImageChainModel(n) {
+  return (value) => {
+    const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
+    const slug = parseChain(value)[n];
+    return slug ? MODEL_MAP[slug].model : null;
+  };
 }
+const firstImageChainModel = nthImageChainModel(0);
+const secondImageChainModel = nthImageChainModel(1);
 
 // Lane extras: `retry` = the leg tried after the fallback leg (the fan-out
 // photo lanes re-run Gemini on GEMINI_VISION_FALLBACK; the sequential caption
@@ -360,7 +370,7 @@ const LANES = [
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
-  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), LIT('gpt-image-1.5', { providers: ['openai'], cap: 'image' }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'chain: gpt-image-2 → gpt-image-1.5 → gpt-image-1, OpenAI only (owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain unless ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true, which restores the old interleaved Gemini legs)' }),
+  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), D('BLOG_IMAGE_PROVIDER', secondImageChainModel(undefined) || 'gpt-image-1.5', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondImageChainModel }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'effective chain, OpenAI only by default: gpt-image-2 → gpt-image-1.5 → gpt-image-1 (owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain). ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs and this lane then reports that Gemini backup.' }),
   L('video_gen', 'Reels video generation', 'content/video-generator.js', 'locked', T('GEMINI_VIDEO_FAST'), T('GEMINI_VIDEO_QUALITY'), { lock: LOCK.provider('video chain') }),
   L('mentions_prober', 'LLM mentions prober (Claude, OpenAI, Gemini, Perplexity arms)', 'seo/llm-mention-prober.js', 'locked', E('MODEL_MENTIONS', T('WORKHORSE'), { live: true }), null, { lock: LOCK.measurement('each engine is probed directly; a fallback would falsify the measurement'), note: 'OPENAI_MENTIONS_MODEL gpt-4o-search-preview · GEMINI_MENTIONS_MODEL gemini-2.5-flash · PERPLEXITY_MENTIONS_MODEL sonar' }),
   L('sealed_eval', 'SMS sealed-eval exam legs', 'sms-sealed-eval.js', 'locked', T('SMS_SONNET'), T('OPENAI_REPORT_WRITER'), { lock: LOCK.measurement('frozen exam; Gemini / Luna / Opus / Fable measurement legs too') }),

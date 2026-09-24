@@ -19,9 +19,12 @@ const OPENAI_OK_BODY = { data: [{ b64_json: 'AAAA' }] };
 const GEMINI_OK_BODY = { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'BBBB' } }] } }] };
 
 const ORIGINAL_ENV = { ...process.env };
-beforeEach(() => { jest.clearAllMocks(); });
+// Every assertion is about the DEFAULT watermark policy or an explicit toggle:
+// never inherit an operator's ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS from
+// the environment, and hand it back afterwards.
+beforeEach(() => { jest.clearAllMocks(); delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; });
 afterEach(() => {
-  for (const k of ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'BLOG_IMAGE_PROVIDER']) {
+  for (const k of ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'BLOG_IMAGE_PROVIDER', 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS']) {
     if (ORIGINAL_ENV[k] === undefined) delete process.env[k];
     else process.env[k] = ORIGINAL_ENV[k];
   }
@@ -53,7 +56,6 @@ describe('parseChain', () => {
 
 describe('no pixel-watermarked providers (owner directive 2026-09-24)', () => {
   const { pixelWatermarkAllowed, PIXEL_WATERMARK_OVERRIDE_ENV } = require('../services/content/image-generator')._internals;
-  afterEach(() => { delete process.env[PIXEL_WATERMARK_OVERRIDE_ENV]; });
   test('every Gemini image slug is tagged pixelWatermark; no OpenAI slug is', () => {
     for (const [slug, cfg] of Object.entries(MODEL_MAP)) {
       if (cfg.api === 'gemini') expect(cfg.pixelWatermark).toBe('synthid');
