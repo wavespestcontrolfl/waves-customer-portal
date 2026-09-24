@@ -576,12 +576,13 @@ function getHeldConnection() {
  * its cohort for good — codex P1 on #4103), so the maintenance sweep must
  * not use it. pg_locks reports an int8 advisory key as (classid = high 32
  * bits, objid = low 32 bits, objsubid = 1); the shift-or reassembles the
- * signed key hashtext() produced. Returns true / false, or null when the
- * probe itself failed.
+ * signed key hashtext() produced. `dbi` may be an existing transaction so
+ * callers that already pin a pool connection do not need a second checkout.
+ * Returns true / false, or null when the probe itself failed.
  */
-async function lockHeldByAnySession(jobName) {
+async function lockHeldByAnySession(jobName, dbi = db) {
   try {
-    const res = await db.raw(
+    const res = await dbi.raw(
       `SELECT EXISTS (
          SELECT 1 FROM pg_locks
          WHERE locktype = 'advisory' AND granted AND objsubid = 1
