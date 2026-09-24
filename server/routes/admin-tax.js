@@ -212,11 +212,17 @@ router.post('/rates', async (req, res, next) => {
     if (parsedStateRate < 0 || parsedStateRate >= 1 || parsedCountySurtax < 0 || parsedCountySurtax >= 1) {
       return res.status(400).json({ error: 'stateRate and countySurtax must each be a decimal fraction between 0 and 1' });
     }
-    // Normalize casing so a re-post of the same county always matches the
-    // existing active row (audit r1-billing-1 judge note: 'sarasota' vs
-    // 'Sarasota' silently inserted a second, unmatched active row).
+    // A re-post of the same county must always match its existing rows
+    // (audit r1-billing-1 judge note: 'sarasota' vs 'Sarasota' silently
+    // inserted a second, unmatched active row). The stored spelling is
+    // matched case-insensitively and REUSED — the readers (calculateTax,
+    // getCurrentTaxRates) match `county` exactly against the spelling the
+    // ZIP inference and the seeded rows carry, so re-casing the operator's
+    // input ('DeSoto' -> 'Desoto') wrote a rate under a key no reader ever
+    // looks up and left the real row un-retired (fallback-auditor P1 on
+    // e60c3d08d8). Only a county with NO row yet takes the operator's
+    // spelling, first letter capitalized, the rest untouched.
     const normalizedCounty = county.trim();
-    const countyKey = normalizedCounty.charAt(0).toUpperCase() + normalizedCounty.slice(1).toLowerCase();
 
     // A future effective date is staged, not activated: the current row
     // stays in force (untouched) until its effective_date arrives, and both
@@ -227,6 +233,13 @@ router.post('/rates', async (req, res, next) => {
     const nowET = etDateString();
     const isImmediate = effectiveDate <= nowET;
     await db.transaction(async (trx) => {
+      const existingCounty = await trx('tax_rates')
+        .whereRaw('lower(county) = ?', [normalizedCounty.toLowerCase()])
+        .select('county').first();
+      const countyKey = existingCounty
+        ? existingCounty.county
+        : normalizedCounty.charAt(0).toUpperCase() + normalizedCounty.slice(1);
+
       // Correcting an already-posted/staged rate for the SAME effective
       // date must replace it, not sit beside it as a duplicate for that
       // date (codex P0, round 2) — applies regardless of past/present/future.

@@ -418,6 +418,44 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   });
 });
 
+(process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('a re-post reuses the stored county spelling instead of re-casing it (fallback-auditor P1 on e60c3d08d8)', () => {
+  // DeSoto is a service-area county whose canonical spelling has interior
+  // caps: the old first-upper/rest-lower normalization wrote 'Desoto', a
+  // key no reader matches, and left the real 'DeSoto' row un-retired.
+  const county = 'DeSoto';
+  const predecessorEffective = etDateString(addETDays(new Date(), -120));
+  let restoreCounty;
+
+  beforeAll(async () => {
+    restoreCounty = await snapshotCounty(county);
+    await db('tax_rates').insert({
+      county, state: 'FL', state_rate: 0.06, county_surtax: 0.015, combined_rate: 0.075,
+      effective_date: predecessorEffective, active: true, notes: 'seeded DeSoto predecessor',
+    });
+  });
+
+  afterAll(async () => { await restoreCounty(); });
+
+  test('POST county "desoto" retires the existing "DeSoto" row and inserts under the same key', async () => {
+    const today = etDateString();
+    const res = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ county: 'desoto', stateRate: 0.06, countySurtax: 0.01, effectiveDate: today, notes: 'lowercase re-post' }),
+    }).then((r) => r.json()));
+    expect(res.success).toBe(true);
+
+    const rows = await db('tax_rates').whereRaw('lower(county) = ?', ['desoto']).orderBy('effective_date');
+    // EXPECTED: exactly one spelling in the table — no 'Desoto' twin.
+    expect(new Set(rows.map((r) => r.county))).toEqual(new Set([county]));
+    expect(rows).toHaveLength(2);
+    const [predecessor, replacement] = rows;
+    expect(predecessor.active).toBe(false);
+    expect(dateOnlyStamp(predecessor.expiry_date)).toBe(today);
+    expect(replacement.active).toBe(true);
+    expect(parseFloat(replacement.combined_rate)).toBeCloseTo(0.07, 6);
+  });
+});
+
 // No database needed: validation runs (and rejects) before the route ever
 // touches tax_rates, so this runs unconditionally.
 describe('POST /admin/tax/rates rejects malformed rate strings before retiring anything (codex round-1 P1)', () => {
