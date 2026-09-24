@@ -20,7 +20,7 @@ jest.mock('../config/feature-gates', () => {
 });
 // call-commitments is required lazily inside applyRescheduleFollowUps for the
 // fulfillment refresh — stub it so that unrelated pass never touches a real db.
-jest.mock('../services/call-commitments', () => ({ refreshFulfillment: jest.fn().mockResolvedValue(undefined) }), { virtual: true });
+jest.mock('../services/call-commitments', () => ({ refreshFulfillment: jest.fn().mockResolvedValue(undefined) }));
 
 const db = require('../models/db');
 const CallRecordingProcessor = require('../services/call-recording-processor');
