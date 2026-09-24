@@ -103,9 +103,8 @@ test('wrapper opt-in blocks a recent unresolved manual reservation under the thr
   expect(inserted).toEqual([]);
 });
 
-test('wrapper opt-in stamps the narrow durable marker on a new reservation', async () => {
-  isEnabled.mockImplementation((name) => name === 'smsGratitudeReplies');
-  const { inserted } = trxWith();
+test('wrapper opt-in reserves an empty thread while both autonomous gates are off', async () => {
+  const { inserted, reservationFirst } = trxWith();
 
   const out = await suggest.reserveHumanReply({
     to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'new reply',
@@ -113,6 +112,10 @@ test('wrapper opt-in stamps the narrow durable marker on a new reservation', asy
   });
 
   expect(out.reservationId).toBe('resv-1');
+  expect(isEnabled).toHaveBeenCalledWith('smsAutoSend');
+  expect(isEnabled).toHaveBeenCalledWith('smsGratitudeReplies');
+  expect(hasActiveAutoSendClaim).not.toHaveBeenCalled();
+  expect(reservationFirst).toHaveBeenCalledWith('id');
   expect(JSON.parse(inserted[0].row.metadata)).toMatchObject({
     manual_send_reservation: true,
     manual_wrapper_reservation: true,
