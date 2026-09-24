@@ -357,3 +357,13 @@ describe('codex r49', () => {
     expect(block).toContain('address_verdict: buildAddressVerdict({ flag: addressUnverified');
   });
 });
+
+describe('pre-push audit after r50', () => {
+  test('a failed pre-SMS recheck withholds the response link and handoff token too', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    const start = src.indexOf('} catch (smsRecheckErr) {');
+    const block = src.slice(start, src.indexOf('}', start + 300));
+    expect(block).toContain('bookingUrl = null;');
+    expect(block).toContain('websiteEstimateUrl = null;');
+  });
+});

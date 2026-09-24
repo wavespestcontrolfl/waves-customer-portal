@@ -3877,7 +3877,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         smsLinkDeliverable = !!bookingUrl;
       } catch (smsRecheckErr) {
         smsLinkDeliverable = false;
-        logger.error(`[public-quote] pre-SMS address recheck failed — booking SMS withheld: ${smsRecheckErr.code || smsRecheckErr.name || 'error'}`);
+        // …and the JSON response's link and handoff token go with it (pre-push
+        // audit P1 after r50): a recheck that could not vouch for the link
+        // (a withdrawal refused by this run's own claim, say) must not hand
+        // the same link back to the client either.
+        bookingUrl = null;
+        websiteEstimateUrl = null;
+        logger.error(`[public-quote] pre-SMS address recheck failed — booking SMS and response link withheld: ${smsRecheckErr.code || smsRecheckErr.name || 'error'}`);
       }
     }
     if (normalizedPhone && !quoteRequired && bookingUrl && smsLinkDeliverable) {
