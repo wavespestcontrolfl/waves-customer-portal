@@ -455,11 +455,16 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
           .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
           .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(normPhone).replace(/\D/g, '').slice(-10)])
           .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
-          .select('extracted_data');
-        const snapshots = rows.map((row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data)).filter(Boolean);
-        const newestClean = snapshots
-          .filter((snap) => cleanVerdictCovers(snap, normalizedAddress, { requireLocality: true }))
-          .map((snap) => Date.parse(snap.address_verdict?.at || '') || 0)
+          .select('id', 'extracted_data');
+        const parseSnap = (row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data);
+        const snapshots = rows.map(parseSnap).filter(Boolean);
+        // The CURRENT lead's clean verdict (a staff confirmation of a
+        // street-only intake carries no locality) is judged on the premise
+        // alone; other leads need the complete locality (codex r18 P1).
+        const newestClean = rows
+          .map((row) => ({ own: String(row.id) === String(lead.id), snap: parseSnap(row) }))
+          .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, normalizedAddress, { requireLocality: !own }))
+          .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
           .reduce((max, at) => Math.max(max, at), 0);
         const newestFlag = snapshots
           .map((snap) => recoverAddressUnverified(snap))

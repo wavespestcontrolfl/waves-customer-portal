@@ -10562,6 +10562,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
             ? JSON.parse(freshLinkRow.estimate_data) : (freshLinkRow?.estimate_data || null);
         } catch { freshLinkData = null; }
+        // The shared off-surface predicate on the freshly LOCKED row (the
+        // county-roll address block among its markers): a flag stamped
+        // after the handler's pre-read must refuse the accept here, not
+        // rely on the millisecond-truncated updated_at CAS (codex #4667
+        // r18 P1).
+        if (freshLinkData && require('../utils/estimate-claim-sql').estimateOffCustomerSurface({ estimate_data: freshLinkData })) {
+          const err = new Error('Estimate is no longer active');
+          err.status = 409;
+          throw err;
+        }
         const eng = freshLinkData?.estimatorEngine;
         if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
           const err = new Error('Estimate is no longer active');

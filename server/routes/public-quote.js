@@ -2400,6 +2400,29 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                     updated_at: new Date(),
                   });
               }
+              // Legacy quote-wizard rows a flagged run BLOCKED without
+              // archiving (scheduled / send_failed / draft …) get the block
+              // lifted by the same clean verdict — otherwise every later
+              // send keeps failing ADDRESS_UNVERIFIED after the roll
+              // cleared the premise (codex r18 P1).
+              const blocked = await trx('estimates')
+                .where({ source: 'quote_wizard' })
+                .whereNull('archived_at')
+                .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+                .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
+                .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+                .select('id', 'address');
+              const unblocked = blocked
+                .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
+                .map((row) => row.id);
+              if (unblocked.length) {
+                await trx('estimates')
+                  .whereIn('id', unblocked)
+                  .update({
+                    estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
+                    updated_at: new Date(),
+                  });
+              }
             } catch (supersedeErr) {
               logger.warn(`[public-quote] withdrawn-publication supersession failed: ${supersedeErr.code || supersedeErr.name || 'error'}`);
             }

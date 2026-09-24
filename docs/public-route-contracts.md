@@ -992,7 +992,9 @@ be incomplete), other leads' need the complete locality. Withdrawn-publication
 verdicts are superseded only after the locked reconciliation, and a flagged rerun withdraws website publications in
 every non-terminal delivery state (sent, viewed, scheduled, sending,
 send_failed) and stamps the block on matching legacy quote-wizard rows
-(any of those states or draft) without archiving them; the lookup stage
+(any of those states or draft) without archiving them; a clean verdict that
+supersedes the warning also lifts the block on those unarchived legacy
+rows; the lookup stage
 applies the same quarantine when it persists a flagged verdict
 (`services/website-quote-withdrawal.js`). A premise correction on the
 estimate moves the linked customer through the established address-change

@@ -3234,8 +3234,16 @@ async function reviseAdminEstimate({
       // that already moved the lead to another premise (and maybe wrote a
       // newer flag for it) must keep that newer verdict and address
       // (codex #4667 r16 P1) — the same rule the customer fan-out applies.
-      const { samePremiseDisplay: leadPremiseMatches } = require('./lead-address-unverified');
-      const leadRow = await trx('leads').where({ id: writtenData.lead_id }).first('address', 'city', 'zip');
+      const { samePremiseDisplay: leadPremiseMatches, contactPairLockKey } = require('./lead-address-unverified');
+      // The same contact-pair advisory lock /calculate and the booking
+      // confirm take around the verdict, so a concurrent reconciliation
+      // cannot read the old flag, lose to this clean verdict and then
+      // overwrite it with its stale result (codex r18 P1). Lead row locked
+      // too, so the premise check and the write see one state.
+      if (row.customer_email && row.customer_phone) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(row.customer_email, row.customer_phone)]);
+      }
+      const leadRow = await trx('leads').where({ id: writtenData.lead_id }).forUpdate().first('address', 'city', 'zip');
       const leadDisplay = leadRow ? [leadRow.address, leadRow.city, leadRow.zip].filter(Boolean).join(', ') : '';
       const leadStillPrior = !!leadRow && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address));
       if (leadStillPrior) await trx('leads').where({ id: writtenData.lead_id }).update({
@@ -3254,7 +3262,15 @@ async function reviseAdminEstimate({
         const { samePremiseDisplay } = require('./lead-address-unverified');
         const before = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first();
         const custDisplay = before ? [before.address_line1, before.address_line2, before.city, before.zip].filter(Boolean).join(', ') : '';
-        if (before && custDisplay && samePremiseDisplay(custDisplay, lockedPrior?.address)) {
+        // …and the SAME DOOR: the premise comparison strips units by design,
+        // but a customer at Apt 4 linked to an Apt 5 estimate must not be
+        // moved by that estimate's correction (codex r18 P1).
+        const { unitKey } = require('./customer-properties');
+        const { splitStreetLineUnit } = require('../utils/address-normalizer');
+        const doorUnit = (line1, line2) => unitKey(line2) || unitKey(splitStreetLineUnit(String(line1 || '')).unit) || '';
+        const priorParsed = parseDisplayAddress(lockedPrior?.address);
+        const sameDoor = !!before && doorUnit(before.address_line1, before.address_line2) === doorUnit(priorParsed.line1, priorParsed.unit);
+        if (before && custDisplay && sameDoor && samePremiseDisplay(custDisplay, lockedPrior?.address)) {
           // The repository's established address-change path, not a bare
           // column write (codex r17 P1): coordinates cleared atomically
           // with the address (the async re-geocode refills them), the
