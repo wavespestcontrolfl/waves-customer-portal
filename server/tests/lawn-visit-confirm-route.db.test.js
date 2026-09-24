@@ -283,6 +283,12 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(require('../services/logger').error).toHaveBeenCalledTimes(1);
   });
 
+  test('legacy confirmation with an empty payload derives a missing Stress, never 0', async () => {
+    const { assessment } = await seed({ ...COMPLETE, fungus_control: 75, thatch_level: 85, stress_damage: null }, { run: false });
+    const result = await request(assessment.id, { adjustedScores: {} });
+    expect(result.body.assessment.stress_damage).toBe(75);
+  });
+
   test.each([false, true])('legacy confirmation works when the optional run table is missing: %s', async (missingTable) => {
     const { assessment } = await seed(COMPLETE, { run: false });
     if (missingTable) await mockKnex.schema.renameTable('lawn_assessment_runs', 'temporarily_missing_runs');

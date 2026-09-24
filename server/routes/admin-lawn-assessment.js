@@ -139,7 +139,9 @@ function legacyConfirmFinalScores(assessment, adjustedScores) {
     finalScores.stress_damage = scoreValue(assessment.stress_damage);
     return finalScores;
   }
-  const aiFloor = Number.isFinite(Number(assessment.stress_damage))
+  // Number(null) is 0, so check for a stored value first — a missing floor
+  // is the 95 fallback, never a 0 that drags Stress to zero.
+  const aiFloor = assessment.stress_damage != null && Number.isFinite(Number(assessment.stress_damage))
     ? Number(assessment.stress_damage)
     : 95;
   const derivedStress = Math.min(
