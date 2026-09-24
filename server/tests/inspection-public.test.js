@@ -1607,6 +1607,9 @@ describe('structural: the inspection dark guard precedes global /api middleware'
     expect(guard).toBeLessThan(src.indexOf("app.use('/api/', limiter);"));
     // Codex #4737 r4 P0: noStore is mounted at the prefix BEFORE the gate, so
     // the dark 404 (and any limiter 429) keeps the privacy headers.
+    // Codex #4737 r5 P0: the same pre-parser guard refuses an unsigned
+    // token (signature only — expiry passes through for GET's expired state).
+    expect(src.slice(guard, guard + 900)).toContain('verifyLeadConsultationToken(token, 0)');
     const noStoreMount = src.indexOf("app.use('/api/public/inspection', require('./middleware/no-store').noStore);");
     expect(noStoreMount).toBeGreaterThan(-1);
     expect(noStoreMount).toBeLessThan(guard);

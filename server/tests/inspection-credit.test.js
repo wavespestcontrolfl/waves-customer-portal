@@ -987,6 +987,20 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(source).not.toContain('no-show invoice void sweep failed');
   });
 
+  // Codex #4737 r5 P1: assessments are excluded where evidence is recorded
+  // AND everywhere it is selected, not only at the final mint.
+  it('free assessments are excluded from credit evidence at record time and in every selection query', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    const callbackFilters = (source.match(/COALESCE\((s\.)?is_callback, false\) = false/g) || []).length;
+    const assessmentFilters = (source.match(/\.whereRaw\(notAssessmentSql\(/g) || []).length;
+    expect(assessmentFilters).toBe(callbackFilters);
+    const fnAt = source.indexOf('async function markBookingForInspectionCredit');
+    const insertAt = source.indexOf("sp('inspection_credit_booking_events')", fnAt);
+    const checkAt = source.indexOf('isAssessmentBooking(booked, sp)', fnAt);
+    expect(checkAt).toBeGreaterThan(fnAt);
+    expect(checkAt).toBeLessThan(insertAt);
+  });
+
   it('booking evidence freezes its moment at call time, not at retry time (r26 P2, r16 carry-through)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
     // The post-commit retry reuses eventRow; a DB-default created_at would

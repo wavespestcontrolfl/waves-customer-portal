@@ -52,6 +52,14 @@ describe('request URL log redaction', () => {
     );
   });
 
+  // Codex #4737 r5 P1: the consultation page's dotted lead bearer.
+  test('redacts the consultation link token under /inspection/ and /api/public/inspection/', () => {
+    const tok = '3f2f7b9c-1111-4222-8333-abcdefabcdef.1790000000.sms-0123456789abcdef.AbC_dEf-123';
+    expect(redactRequestUrl(`/inspection/${tok}`)).toBe('/inspection/[REDACTED]');
+    expect(redactRequestUrl(`/api/public/inspection/${tok}/find-slots`)).toBe('/api/public/inspection/[REDACTED]/find-slots');
+    expect(redactRequestUrl(`/api/public/inspection/${tok}?x=1`)).toBe('/api/public/inspection/[REDACTED]?x=1');
+  });
+
   test('does not throw on malformed escapes or alter URLs without a query', () => {
     expect(redactRequestUrl('/api/plain/path')).toBe('/api/plain/path');
     expect(() => redactRequestUrl('/api/path?%E0%A4%A=value&token')).not.toThrow();

@@ -397,6 +397,15 @@ app.use('/api/public/inspection', (req, res, next) => {
   if (!require('./config/feature-gates').leadInspectionLinkLive()) {
     return res.status(404).json({ error: 'not_found' });
   }
+  // A token that is not even validly SIGNED is a uniform 404 here, before
+  // the global limiter and body parsers (Codex #4737 r5 P0). Expiry is not
+  // checked here (nowSec 0) — an expired-but-genuine link still reaches the
+  // router, which answers GET { state: 'expired' }.
+  let token = String(req.path || '').split('/').filter(Boolean)[0] || '';
+  try { token = decodeURIComponent(token); } catch { token = ''; }
+  if (!token || !require('./utils/lead-consultation-token').verifyLeadConsultationToken(token, 0)) {
+    return res.status(404).json({ error: 'not_found' });
+  }
   next();
 });
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
