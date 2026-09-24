@@ -2699,6 +2699,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })
         .update({ status: 'send_failed', last_send_error: invalidatedNow, updated_at: db.fn.now() });
+      // …and the draft siblings this send already claimed as 'sending' go
+      // back too (pre-push audit P1 after r45): every pre-delivery exit
+      // releases the status claims, or the next group send fails its
+      // mid-send check on rows nobody is delivering.
+      await releaseGroupSiblingClaims(claimedGroupSiblings);
       const err = new Error(invalidatedNow === 'reprice_pending'
         ? "This estimate is being re-priced from the customer's bedroom answer — the replacement draft is on its way. Nothing was sent."
         : invalidatedNow === 'sibling_claim_unavailable'

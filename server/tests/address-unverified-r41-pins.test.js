@@ -146,6 +146,10 @@ describe('codex r44', () => {
     const adm = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
     expect(adm).toContain("if (Number(stamped) !== siblingIds.length) {\n            throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });");
     expect(adm).toContain("if (claimErr?.code === 'SIBLING_CLAIM_UNAVAILABLE') return 'sibling_claim_unavailable';");
+    // …and that pre-delivery exit releases the draft siblings claimed as 'sending'.
+    const exitStart = adm.indexOf('    if (invalidatedNow) {');
+    const exitBlock = adm.slice(exitStart, adm.indexOf('err.statusCode = 409;', exitStart));
+    expect(exitBlock).toContain('await releaseGroupSiblingClaims(claimedGroupSiblings);');
   });
   test('never-published expired siblings are outside both link-visible selectors', () => {
     const adm = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
