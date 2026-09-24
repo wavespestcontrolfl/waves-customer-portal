@@ -8887,7 +8887,7 @@ function LawnAssessmentCompletionBlock({
                       Only one photo may hold "front" at a time (setPhotoZone). */}
                   <select
                     value={photo.zone || ""}
-                    disabled={disabled}
+                    disabled={disabled || analyzing}
                     onChange={(e) => setPhotoZone(index, e.target.value || null)}
                     aria-label={`Slot for photo ${index + 1}`}
                     style={{

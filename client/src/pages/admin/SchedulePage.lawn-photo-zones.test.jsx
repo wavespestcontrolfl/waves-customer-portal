@@ -24,6 +24,7 @@ const service = {
 };
 
 let assessRequests;
+let holdAssess;
 
 class FixtureFileReader {
   readAsDataURL() {
@@ -43,6 +44,7 @@ class FixtureImage {
 
 beforeEach(async () => {
   assessRequests = [];
+  holdAssess = null;
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -59,6 +61,7 @@ beforeEach(async () => {
     if (url.includes('lawn-assessment/history')) data = { history: [] };
     if (url.includes('lawn-assessment/assess')) {
       assessRequests.push(JSON.parse(options.body));
+      if (holdAssess) await holdAssess;
       data = {
         success: true,
         assessment: { id: 'assessment-zone-test' },
@@ -122,4 +125,18 @@ it('sends zone only for photos with a picked slot, and omits it otherwise', asyn
     { data: 'cGhvdG8=', mimeType: 'image/jpeg', zone: 'trouble' },
     { data: 'cGhvdG8=', mimeType: 'image/jpeg' },
   ]);
+});
+
+it('locks the slot pickers while the analysis request is in flight', async () => {
+  holdAssess = new Promise(() => {});
+  mount();
+  const fileInput = await screen.findByLabelText('Add turf photos');
+  fireEvent.change(fileInput, { target: { files: [new File(['photo1'], 'a.jpg', { type: 'image/jpeg' })] } });
+  const select = await screen.findByLabelText('Slot for photo 1');
+  fireEvent.change(select, { target: { value: 'front' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+  await waitFor(() => expect(assessRequests).toHaveLength(1));
+  // The zones were already serialized into the request; a change now would
+  // look saved but never persist.
+  expect(screen.getByLabelText('Slot for photo 1').disabled).toBe(true);
 });
