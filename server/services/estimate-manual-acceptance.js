@@ -866,6 +866,13 @@ async function markEstimateManuallyAccepted({
           skipAutoSchedule: true,
           bookedAppointmentIds,
           skipMembershipEmail: true,
+          // The Mark Won / Annual Prepay confirm dialogs the operator agreed
+          // to promise the customer is NOT texted (and, for annual prepay,
+          // NOT emailed) — EstimatesPageV2.jsx / OpportunityActions.jsx. Without
+          // this, convertEstimate still queues the new-recurring welcome
+          // SMS + email for a genuinely new signup, which the cron delivers
+          // ~60 minutes later with no operator visibility or way to cancel it.
+          skipWelcomeSms: true,
           skipSetupInvoice: !annualPrepaySelected,
           // The commercial-schedule admin notification writes through the
           // GLOBAL pool — defer it so a rolled-back Mark Won can't page staff
