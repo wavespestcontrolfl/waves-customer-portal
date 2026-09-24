@@ -151,6 +151,7 @@ const RULE_NOTES = {
   visit_completed_at_address: 'Auto-resolved: a visit was completed at the address this call named; the address is proven.',
   spam_aged: `Auto-dismissed: spam/wrong-number advisory unactioned after ${SPAM_AGE_DAYS} days.`,
   advisory_aged: `Auto-dismissed: informational flag unactioned after ${ADVISORY_AGE_DAYS} days.`,
+  house_number_adopted: 'Auto-resolved: the customer record now carries the house number the caller stated; the disagreement is settled.',
 };
 
 // scheduled_services statuses that are a booking still going to happen or
@@ -273,6 +274,15 @@ function localityAgrees(file, { city, zip }) {
   return true;
 }
 const localityMatches = (item, reading) => localityAgrees(onFileAddress(item) || {}, reading);
+// ZIP-wins variant for the house-number lane (codex r33 P2 / r34 P1):
+// postal-city names alias (Bradenton / Lakewood Ranch share a ZIP), so
+// agreeing ZIPs settle the locality on their own — the detector's own rule.
+function localityAgreesZipWins(file, reading) {
+  const a = zip5(reading?.zip);
+  const b = zip5(file?.zip);
+  if (a && b) return a === b;
+  return localityAgrees(file || {}, reading || {});
+}
 
 // Readings come ONLY from the card: payload.address_as_heard and the
 // heard_address snapshot call-routing-gates stamps at filing. Never the
@@ -371,7 +381,7 @@ function requestedAddressIsOnFile(item) {
 // active property row it points at, else null.
 function bookingPlace(visit, places) {
   if (visit.service_address_line1 && (zip5(visit.service_address_zip) || cityKey(visit.service_address_city))) {
-    return { key: addressKey(visit.service_address_line1), unit: unitOf(visit.service_address_line1, visit.service_address_line2), city: visit.service_address_city, zip: visit.service_address_zip };
+    return { key: addressKey(visit.service_address_line1), line1: visit.service_address_line1, unit: unitOf(visit.service_address_line1, visit.service_address_line2), city: visit.service_address_city, zip: visit.service_address_zip };
   }
   return visit.property_id ? places.get(String(visit.property_id)) || null : null;
 }
@@ -931,6 +941,46 @@ function trustedPreexistingCustomer(item) {
     && customerPredatesCall(item);
 }
 const filled = (v) => String(v || '').trim() !== '';
+// The record now names the SAME premise the caller stated on a
+// house-number-conflict card: same street key (house + street name, unit
+// and suffix spelling aside) and, where both sides carry one, the same ZIP.
+// Leading digits alone would let '120 Unrelated Ave' close a card about
+// '120 Example St' (pre-push audit P1).
+// The card is settled only for the customer it was FILED against: after
+// a relink the newly linked customer's columns say nothing about the
+// original dispute — the human path refuses until a reprocess refreshes
+// the card, and the sweep must not settle it either (codex r27 + r28 P1).
+function disputeBoundToCallCustomer(item) {
+  const payload = parseMaybeJson(item.payload);
+  if (!payload?.dispute_customer_id || item.call_customer_id === undefined) return true;
+  return String(payload.dispute_customer_id) === String(item.call_customer_id || '');
+}
+function recordCarriesStatedStreet(item) {
+  const payload = parseMaybeJson(item.payload);
+  if (!disputeBoundToCallCustomer(item)) return false;
+  // The detector's own street key, so N / North and St / Street resolve
+  // exactly as they were detected (codex #4666 P2).
+  // …including the suffix-less equivalence the detector applies ("1250
+  // Main" answers a card about "1250 Main St").
+  const { sameHouseNumberStreet } = require('./call-triage-flags');
+  if (!sameHouseNumberStreet(payload?.stated_street, item.customer_address_line1)) return false;
+  // A stated unit must be on the record too: the validated DOOR is the
+  // premise, not the building (codex r12 P1).
+  if (String(payload?.stated_unit || '').trim()) {
+    const recordUnit = unitOf(item.customer_address_line1, item.customer_address_line2);
+    if (!recordUnit || recordUnit !== unitOf(payload.stated_street, payload.stated_unit)) return false;
+  }
+  // The stated locality must hold on the record too (same helper the
+  // address-moot rules use): a ZIP or city the caller gave that the record
+  // now lacks or contradicts is not the same premise (pre-push audit P1).
+  // Postal-city aliases (Lakewood Ranch / Bradenton share a ZIP): agreeing
+  // ZIPs settle the locality on their own, the same ZIP-wins rule the
+  // detector applies at filing (codex r33 P2).
+  return localityAgreesZipWins(
+    { city: item.customer_city, zip: item.customer_zip },
+    { city: payload?.stated_city, zip: payload?.stated_zip },
+  );
+}
 
 // The rules, in precedence order — ONE table (codex r28 P2). `when` reads
 // the joined card row, its evidence flags (`ev`, null while the evidence
@@ -985,6 +1035,35 @@ const CLASSIFY_RULES = [
   { rule: 'visit_completed_at_address', action: 'resolve',
     when: (item, ev) => ADDRESS_MOOT_CODES.has(item.reason_code) && ev?.visit_completed_at_address === true
       && !item.customer_deleted_at && heardAddressMatchesOnFile(item) && !cardConfirmedUnbooked(item, ev) },
+  // The house-number disagreement answers itself when the record's street
+  // now carries the number the caller stated (an operator or the correction
+  // lane adopted it). Any other edit keeps the ask — the office still has
+  // to pick a number. Never aged out: it gates an estimate send.
+  // A confirmed call held on this card has no other scheduling card (the
+  // hold suppresses the skipped-booking fallback), so the corrected record
+  // settles the address but not the still-unbooked appointment — the
+  // confirmed-unbooked guard keeps the card until a booking lands
+  // (pre-push audit P1).
+  { rule: 'house_number_adopted', action: 'resolve',
+    when: (item, ev) => item.reason_code === 'on_file_house_number_conflict'
+      && !item.customer_deleted_at
+      // Settled only for the customer the card was FILED against, on BOTH
+      // branches — the durable cleared marker must not bypass the identity
+      // check after a relink (codex r28 P1).
+      && disputeBoundToCallCustomer(item)
+      // …or the processor cleared the disagreement durably (the record's
+      // own number validated on a later pass) and the card stands only for
+      // its scheduling ask (codex r23 P1).
+      && (recordCarriesStatedStreet(item) || !!parseMaybeJson(item.payload)?.address_dispute_cleared_at)
+      && !cardConfirmedUnbooked(item, ev)
+      // A card that also records a PROMISED follow-up (visit 2 the hold
+      // kept from booking) is settled by staff: booking evidence for the
+      // primary says nothing about visit 2 (local audit P1 after r20).
+      && !parseMaybeJson(item.payload)?.follow_up_plan
+      // …and one that records a RETAINED same-call visit still carrying the
+      // disputed number: another booking covering the ask says nothing
+      // about that visit's address — staff settle it (codex r38 P1).
+      && !parseMaybeJson(item.payload)?.retained_service_id },
   { rule: 'spam_aged', action: 'dismiss', when: (item, ev, now) => item.reason_code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS },
   { rule: 'advisory_aged', action: 'dismiss',
     when: (item, ev, now) => ADVISORY_AGE_CODES.has(item.reason_code) && item.severity === 'advisory' && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS },
@@ -1061,6 +1140,9 @@ function loadCandidateItems(conn, itemIds = null) {
 const EVIDENCE_CODES = new Set([
   'quote_promised', 'email_unverified', 'caller_not_authorized', 'not_confirmed',
   ...ADDRESS_MOOT_CODES,
+  // house_number_adopted needs booking_after_card for a confirmed call
+  // (its booking is held on this very card).
+  'on_file_house_number_conflict',
 ]);
 
 // ── Evidence arms ───────────────────────────────────────────────────────
@@ -1354,6 +1436,27 @@ async function loadContactEvidence(conn, items, flag) {
 // neither is only associated with the customer and proves nothing about
 // where service happens. The unit is part of the identity: Unit B is not
 // Unit A, and a unit-less stamp cannot prove a unit.
+// A booking positively at the address the CALLER stated on a house-number
+// card (stated_street / stated_unit / stated_city / stated_zip) — the
+// filing-time on-file snapshot cannot vouch once the office adopted the
+// caller's number (pre-push audit P1 on #4666): key, unit and locality
+// all against the stated premise.
+function visitAtStatedAddress(item, visit, places) {
+  const payload = parseMaybeJson(item.payload);
+  if (!String(payload?.stated_street || '').trim()) return false;
+  const place = bookingPlace(visit, places);
+  if (!place || !place.key) return false;
+  if (place.customer_id && String(place.customer_id) !== String(item.call_customer_id)) return false;
+  // The DETECTOR's comparator (directionals, suffixless spellings), not the
+  // property key — the record and the manual booking may carry an
+  // equivalent spelling of the stated street (codex r8 P2).
+  const { sameHouseNumberStreet } = require('./call-triage-flags');
+  if (!sameHouseNumberStreet(payload.stated_street, place.line1 || '')) return false;
+  const unit = unitOf(payload.stated_street, payload.stated_unit);
+  return (!unit || unit === place.unit)
+    && localityAgreesZipWins(place, { city: payload.stated_city, zip: payload.stated_zip });
+}
+
 function visitAtOnFileAddress(item, visit, places) {
   const onFile = addressKey(onFileAddress(item)?.address_line1);
   if (!onFile) return false;
@@ -1410,15 +1513,31 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
   const asked = requestedPlaces(item);
   if (!asked) return false;
   const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inAsk(v));
-  const association = singleProperty && requestedAddressIsOnFile(item) && window
-    ? parents.filter((v) => inAsk(v) && visitAtOnFileAddress(item, v, places))
+  // A house-number card whose record now carries the STATED street: the
+  // office adopted the caller's number and booked by hand (admin bookings
+  // carry no source_call_log_id) — the filing-time on-file snapshot can no
+  // longer vouch, but the corrected record does (pre-push audit P1 on
+  // #4666). Service, cadence, window and hour checks still apply.
+  const adoptedAddress = item.reason_code === 'on_file_house_number_conflict' && recordCarriesStatedStreet(item);
+  const association = singleProperty && (requestedAddressIsOnFile(item) || adoptedAddress) && window
+    ? parents.filter((v) => inAsk(v) && (adoptedAddress ? visitAtStatedAddress(item, v, places) : visitAtOnFileAddress(item, v, places)))
+    : [];
+  // A house-number dispute the processor durably CLEARED (the stated
+  // premise is a saved secondary property, or the record validated): its
+  // preserved requested premise is the ask, and a manual booking there
+  // (no source_call_log_id) covers it — service, cadence, window, hour and
+  // unit checks still apply through inAsk + bookingAtReadings (codex r36
+  // P1).
+  const clearedDispute = item.reason_code === 'on_file_house_number_conflict' && !!parseMaybeJson(item.payload)?.address_dispute_cleared_at;
+  const clearedAssociation = singleProperty && clearedDispute && window && asked.length === 1
+    ? parents.filter((v) => inAsk(v) && bookingAtReadings(item, v, places, asked[0]))
     : [];
   // Every address the call named needs its own covering bookings — a
   // two-property ask is not answered by bookings at one of them (codex r24
   // P2); the association pool applies only to a one-address on-file ask.
   const words = (v) => `${v.service_type || ''} ${v.service_category_snapshot || ''}`;
   return asked.every((readings, i) => coveredByDistinct(categories,
-    direct.filter((v) => bookingAtReadings(item, v, places, readings)).concat(i === 0 ? association : []), words));
+    direct.filter((v) => bookingAtReadings(item, v, places, readings)).concat(i === 0 ? association.concat(clearedAssociation) : []), words));
 }
 
 // The priced LINES an estimate carries, each with its own service words
@@ -1822,7 +1941,7 @@ function lineRecordIdentity(line) {
 }
 
 // Bookings and completed visits for the not_confirmed / address arms.
-async function loadVisitEvidence(conn, items, flag) {
+async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {}) {
   // not_confirmed cards, address cards, and every card whose call CONFIRMED
   // an appointment (the confirmed-unbooked guard is answered only by a
   // booking matching the card's snapshotted ask).
@@ -1841,7 +1960,7 @@ async function loadVisitEvidence(conn, items, flag) {
   const places = new Map();
   const activeCount = new Map();
   for (const r of propRows) {
-    places.set(String(r.id), { customer_id: r.customer_id, key: addressKey(r.address_line1), unit: unitOf(r.address_line1, r.address_line2), city: r.city, zip: r.zip });
+    places.set(String(r.id), { customer_id: r.customer_id, key: addressKey(r.address_line1), line1: r.address_line1, unit: unitOf(r.address_line1, r.address_line2), city: r.city, zip: r.zip });
     activeCount.set(String(r.customer_id), (activeCount.get(String(r.customer_id)) || 0) + 1);
   }
   // The association and address arms need EXACTLY one active property —
@@ -1871,8 +1990,13 @@ async function loadVisitEvidence(conn, items, flag) {
 
   for (const item of visitItems) {
     const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
+    // At VERDICT time (ignoreGate) the association path is admitted for a
+    // multi-property account too: the booking's own stamped address has
+    // to match the approved premise there, so the single-property guard
+    // (a nightly-sweep safety margin) would only file a duplicate task
+    // for an appointment that exists (codex #4666 r24 P1).
     if (needsBooking(item)
-      && bookingCoversRequest(item, mine, { singleProperty: singleProperty(item.call_customer_id), places })) {
+      && bookingCoversRequest(item, mine, { singleProperty: ignoreGate || singleProperty(item.call_customer_id), places })) {
       flag(item.id, 'booking_after_card');
     }
     if (ADDRESS_MOOT_CODES.has(item.reason_code) && singleProperty(item.call_customer_id)) {
@@ -1889,10 +2013,15 @@ async function loadVisitEvidence(conn, items, flag) {
 
 // Per-item proof map for the evidence rules — the four arms above over the
 // open evidence-coded cards. Empty when the evidence gate is off.
-async function loadEvidence(conn, items) {
+// `ignoreGate`: the verdict-time coverage check (admin-triage
+// settleHeldConflictCard) must see a matching booking whether or not the
+// NIGHTLY evidence resolution is switched on — with the gate off an
+// empty map filed a duplicate booking task for an appointment that
+// already existed (codex #4666 r22 P1).
+async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
   const evidence = new Map();
   const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('triageAutoResolveEvidence')) return evidence;
+  if (!ignoreGate && !isEnabled('triageAutoResolveEvidence')) return evidence;
   const candidates = items.filter((i) => EVIDENCE_CODES.has(i.reason_code) && i.status === 'open');
   if (!candidates.length) return evidence;
   const flag = (id, key) => {
@@ -1909,7 +2038,7 @@ async function loadEvidence(conn, items) {
   await loadEmailEvidence(conn, candidates, flag);
   await loadUnambiguousEmailEvidence(conn, candidates, flag);
   await loadContactEvidence(conn, candidates, flag);
-  await loadVisitEvidence(conn, candidates, flag);
+  await loadVisitEvidence(conn, candidates, flag, { ignoreGate });
   return evidence;
 }
 
@@ -2041,6 +2170,7 @@ async function sweep({ now = new Date() } = {}) {
 }
 
 module.exports = {
+  isInspection,
   unambiguousDictationTarget,
   loadUnambiguousEmailEvidence,
   runTriageAutoResolve,
@@ -2064,6 +2194,7 @@ module.exports = {
   requestedAddressIsOnFile,
   bookingAtRequestedAddress,
   bookingCoversRequest,
+  visitAtStatedAddress,
   loadEvidence,
   EVIDENCE_CODES,
   LIVE_BOOKING_STATUSES,
