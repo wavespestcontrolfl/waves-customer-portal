@@ -2803,10 +2803,21 @@ async function createSelfBooking(payload = {}) {
         // (advisory lock, then estimate rows), so a flagged lookup
         // withdrawing this draft and this confirm cannot deadlock (codex
         // r19 P2).
+        // The contact pair's email: the form's, else the email of the lead
+        // the link NAMES — a bare /book?lead=<id> link with the optional
+        // email cleared must still be judged against the newer flagged
+        // lead a repeat lookup minted for the same phone and premise
+        // (codex r28 P1). The named lead's email is an identity, not
+        // evidence, so it is read before the lock.
+        let contactEmail = String(new_customer?.email || '').trim() || null;
+        if (!contactEmail && LEAD_ID_RE.test(String(lead_id || ''))) {
+          const namedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('email');
+          contactEmail = String(namedLead?.email || '').trim() || null;
+        }
         {
           const { contactPairLockKey } = require('../services/lead-address-unverified');
-          if (new_customer?.email && phoneDigits) {
-            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(new_customer.email, phoneDigits)]);
+          if (contactEmail && phoneDigits) {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, phoneDigits)]);
           }
         }
         if (pricing_estimate_id && estimate_token) {
@@ -2845,10 +2856,10 @@ async function createSelfBooking(payload = {}) {
         // it too (codex r11 P2).
         let newestClean = 0;
         let contactSnapshots = [];
-        if (submitted && new_customer?.email && phoneDigits) {
+        if (submitted && contactEmail && phoneDigits) {
           const contactLeads = await trx('leads')
             .whereNull('deleted_at')
-            .whereRaw('LOWER(email) = ?', [String(new_customer.email).toLowerCase().trim()])
+            .whereRaw('LOWER(email) = ?', [contactEmail.toLowerCase()])
             .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits.slice(-10)])
             .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
             .forUpdate()

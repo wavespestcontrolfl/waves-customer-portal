@@ -3091,10 +3091,15 @@ async function reviseAdminEstimate({
     // and then rewrites matching estimates — so the customer row is
     // locked here BEFORE the estimate row, one order with that path
     // (codex #4667 r26 P2). Only rows carrying the block pay for it.
+    // Decided from a read taken UNDER the contact-pair lock just acquired
+    // (not the pre-transaction snapshot — codex r28 P2): the public lookup
+    // stamps the block only while holding that same lock, so nothing can
+    // flag the row between this read and the row lock below.
     {
       const parsePre = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
-      if (estimate?.customer_id && parsePre(estimate.estimate_data)?.addressUnverified === true) {
-        await trx('customers').where({ id: estimate.customer_id }).whereNull('deleted_at').forUpdate().first('id');
+      const synced = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
+      if (synced?.customer_id && parsePre(synced.estimate_data)?.addressUnverified === true) {
+        await trx('customers').where({ id: synced.customer_id }).whereNull('deleted_at').forUpdate().first('id');
       }
     }
     const lockedPrior = await trx('estimates')
@@ -3288,7 +3293,12 @@ async function reviseAdminEstimate({
         logger.warn(`[admin-estimate-persistence] contact-matched lead verdict not stamped: ${leadErr.code || leadErr.name || 'error'}`);
       }
     }
-    if (writtenData?.addressUnverifiedClearedBy && priorLockedData?.addressUnverified === true && writtenData.lead_id) {
+    // Runs with OR without a direct lead link (codex r28 P1): a contact-
+    // matched legacy row with a customer_id but no estimate_data.lead_id
+    // still fans its correction out to the linked customer, primary
+    // property and downstream snapshots — only the lead-specific writes
+    // need the link.
+    if (writtenData?.addressUnverifiedClearedBy && priorLockedData?.addressUnverified === true) {
       const { parseDisplayAddress } = require('./lead-address-unverified');
       const parsed = parseDisplayAddress(row.address);
       const verdict = {
@@ -3323,7 +3333,9 @@ async function reviseAdminEstimate({
       if (row.customer_email && row.customer_phone) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(row.customer_email, row.customer_phone)]);
       }
-      const leadRow = await trx('leads').where({ id: writtenData.lead_id }).forUpdate().first('address', 'city', 'zip');
+      const leadRow = writtenData.lead_id
+        ? await trx('leads').where({ id: writtenData.lead_id }).forUpdate().first('address', 'city', 'zip')
+        : null;
       const leadDisplay = leadRow ? [leadRow.address, leadRow.city, leadRow.zip].filter(Boolean).join(', ') : '';
       // …and the SAME DOOR (unit): a lead a prefill lookup moved to Apt 5
       // must not be rewritten by the Apt 4 estimate's correction (codex
