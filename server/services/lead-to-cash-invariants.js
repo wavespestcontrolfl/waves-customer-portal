@@ -343,6 +343,10 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
       html: report.html,
       text: report.text,
       link: '/admin/invoices',
+      // No dedupe/refresh here on purpose: closeout_failed_facts checks
+      // yesterday only, so rewriting one standing row could replace an
+      // unresolved closeout failure (and its IDs) with today's OK line. Each
+      // report stays its own immutable row; sentRecently() bounds the cadence.
       sendEmail: () => mailer.sendOne({
         to, fromEmail: fromEmail(), fromName: FROM_NAME,
         subject: report.subject, html: report.html, text: report.text,

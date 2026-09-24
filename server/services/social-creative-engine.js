@@ -25,10 +25,15 @@ function boolEnv(key, defaultValue = false) {
 }
 
 // Best-first, matching the blog engine's policy (owner directive 2026-08-27):
-// gpt-image-2 leads, image-native Gemini (Nano Banana line) is the fallback,
-// then the older gpt-image slugs and the legacy Gemini text-model slug —
-// resilience over any single provider/model ID. Override: SOCIAL_IMAGE_PROVIDER.
-const SOCIAL_DEFAULT_CHAIN = 'gpt-image-2,gemini-image-best,gemini-image,gpt-image-1.5,gpt-image-1,gemini';
+// gpt-image-2 leads, then the older gpt-image slugs. OpenAI-only since
+// 2026-09-24 (owner: no invisible watermarks) — every Gemini image model
+// embeds SynthID in the pixels, and image-generator's parseChain drops those
+// slugs from ANY chain, so a SOCIAL_IMAGE_PROVIDER override cannot bring
+// them back without ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true.
+const SOCIAL_DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1';
+// Pre-2026-09-24 order; the default only while the override is set (see
+// image-generator.js — the kill switch alone must restore the old fallbacks).
+const SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2,gemini-image-best,gemini-image,gpt-image-1.5,gpt-image-1,gemini';
 
 const CREATIVE_FLAGS = {
   get enabled() { return boolEnv('SOCIAL_CREATIVE_ENGINE_ENABLED', false); },
@@ -39,7 +44,10 @@ const CREATIVE_FLAGS = {
     if (!Number.isFinite(value)) return 3;
     return Math.max(1, Math.min(4, Math.round(value)));
   },
-  get chain() { return process.env.SOCIAL_IMAGE_PROVIDER || SOCIAL_DEFAULT_CHAIN; },
+  // Same literal-'true' override image-generator's parseChain honors
+  // (PIXEL_WATERMARK_OVERRIDE_ENV); read here directly so the flag has no
+  // module dependency (tests mock image-generator down to its class).
+  get chain() { return process.env.SOCIAL_IMAGE_PROVIDER || (process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS === 'true' ? SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN : SOCIAL_DEFAULT_CHAIN); },
 };
 
 // Video (Veo Reels) — separate opt-in on top of the creative engine. A video
@@ -434,6 +442,7 @@ module.exports = {
   CREATIVE_FLAGS,
   SCENE_LIBRARY,
   SOCIAL_DEFAULT_CHAIN,
+  SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN,
   VIDEO_FLAGS,
   buildScenePrompt,
   buildVideoPrompt,

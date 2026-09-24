@@ -2989,11 +2989,13 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // certificate reaches this path before closeout creates its service record,
     // so scheduled_service_id alone is a valid invoice source.
     // Unlike WDO there's no cheap synthetic fee to preview, and replaying the
-    // full discount/tax math outside create() would risk drift, so we mint the
-    // real draft on BOTH the dry-run and the send. That's safe: the draft is
-    // persisted + linked to the project, so a re-preview or the follow-up send
-    // reuses the SAME draft (reuse path 1 above) — a cancelled preview leaves at
-    // most one legitimate draft per project, never duplicates.
+    // full discount/tax math outside create() would risk drift, so the dry-run
+    // below builds the draft through the same create() call the real send uses
+    // — inside a savepoint that is always rolled back, so a preview never
+    // persists a numbered invoice or links it to the project (ADMIN-BUG-R49).
+    // The real send's draft IS persisted + linked, so a follow-up send after a
+    // preview mints exactly one draft and reuses it on any resend (reuse path
+    // 1 above) — never duplicates.
     if (!project.service_record_id && !project.scheduled_service_id) {
       const err = new Error('This service report isn’t linked to an appointment or completed visit, so an invoice can’t be built automatically. Create the invoice from the visit first — it will be reused here.');
       err.code = 'invoice_build_failed';
@@ -3098,6 +3100,40 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       const err = new Error('The linked visit has no pricing, so an invoice can’t be built automatically. Add pricing on the appointment (or create the invoice from the visit) first — it will be reused here.');
       err.code = 'invoice_build_failed';
       throw err;
+    }
+    if (dryRun) {
+      // Preview only (ADMIN-BUG-R49): build the draft through the SAME
+      // create() call the real send uses below — replaying the discount/tax
+      // math independently would risk drift — but inside a SAVEPOINT that is
+      // UNCONDITIONALLY rolled back, so a cancelled or errored preview never
+      // mints a real numbered draft, never links it to the project, and never
+      // burns an invoice number. Without this, the never-sent draft let the
+      // project Close guard read billing as resolved.
+      const previewSavepoint = `project_invoice_preview_${crypto.randomBytes(6).toString('hex')}`;
+      await trx.raw(`SAVEPOINT ${previewSavepoint}`);
+      let previewInvoice;
+      try {
+        const previewCreated = await InvoiceService.create({
+          customerId: project.customer_id,
+          serviceRecordId: project.service_record_id || undefined,
+          scheduledServiceId: scheduledServiceId || undefined,
+          lineItems: built.lineItems,
+          discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
+          trustedStoredDiscountSources: ['scheduled_service'],
+          notes: `Auto-generated for ${getProjectType(project.project_type)?.label || 'service'} project ${project.id}.`,
+          database: trx,
+        });
+        const previewFresh = await trx('invoices').where({ id: previewCreated.id }).first();
+        previewInvoice = previewFresh || previewCreated;
+      } finally {
+        await trx.raw(`ROLLBACK TO SAVEPOINT ${previewSavepoint}`);
+        await trx.raw(`RELEASE SAVEPOINT ${previewSavepoint}`);
+      }
+      return {
+        invoice: { ...previewInvoice, id: null, invoice_number: null, status: 'preview' },
+        created: true,
+        preview: true,
+      };
     }
     const createdNonWdo = await InvoiceService.create({
       customerId: project.customer_id,

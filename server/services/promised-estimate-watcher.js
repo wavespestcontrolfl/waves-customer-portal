@@ -270,7 +270,7 @@ async function runPromisedEstimateWatcher(opts = {}) {
 
   const composed = composePromisedEstimateDigest(rows);
   if (!composed) {
-    await retireIfClean('promised-estimate'); // fall-off: no promised quote outstanding
+    await retireIfClean('promised-estimate', { lockKey: 'ops-digest:promised-estimate' }); // fall-off: no promised quote outstanding
     return { skipped: 'nothing_found' };
   }
 
@@ -302,6 +302,12 @@ async function runPromisedEstimateWatcher(opts = {}) {
       html: composed.html,
       text: composed.text,
       link: '/admin/pipeline',
+      // No rolling window: notifyAdmin's window is measured from created_at,
+      // which refreshOnDedupe never advances, so a gap standing longer than
+      // the window would mint a second row. retireIfClean drops the key on
+      // the clean run, so a new episode still rings (pre-push audit P1).
+      dedupeKey: 'ops-digest:promised-estimate',
+      refreshOnDedupe: true,
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),

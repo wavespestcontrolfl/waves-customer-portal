@@ -321,27 +321,25 @@ async function markLost(leadId, { reason, competitor, notes }) {
 // ---------------------------------------------------------------------------
 // 4. logFirstResponse
 // ---------------------------------------------------------------------------
-async function logFirstResponse(leadId) {
-  const lead = await db('leads').where('id', leadId).whereNull('deleted_at').first();
-  if (!lead || lead.response_time_minutes != null) return; // deleted or already logged
-
-  const firstContact = new Date(lead.first_contact_at);
-  const now = new Date();
-  const minutes = Math.round((now - firstContact) / 60000);
-
-  await db('leads').where('id', leadId).update({
-    response_time_minutes: minutes,
-    updated_at: new Date(),
-  });
-
-  await db('lead_activities').insert({
-    lead_id: leadId,
-    activity_type: 'first_response',
-    description: `First response in ${minutes} minutes`,
-    performed_by: 'system',
-  });
-
-  return minutes;
+async function logFirstResponse(leadId, { database = db } = {}) {
+  const write = async (trx) => {
+    const lead = await trx('leads').where('id', leadId).whereNull('deleted_at').first();
+    if (!lead || lead.response_time_minutes != null) return;
+    const firstContact = new Date(lead.first_contact_at || lead.created_at);
+    if (!Number.isFinite(firstContact.getTime())) return;
+    const minutes = Math.max(0, Math.round((Date.now() - firstContact.getTime()) / 60000));
+    const changed = await trx('leads').where('id', leadId).whereNull('deleted_at')
+      .whereNull('response_time_minutes').update({ response_time_minutes: minutes, updated_at: new Date() });
+    if (!changed) return;
+    await trx('lead_activities').insert({
+      lead_id: leadId,
+      activity_type: 'first_response',
+      description: `First response in ${minutes} minutes`,
+      performed_by: 'system',
+    });
+    return minutes;
+  };
+  return database.isTransaction ? write(database) : database.transaction(write);
 }
 
 // ---------------------------------------------------------------------------

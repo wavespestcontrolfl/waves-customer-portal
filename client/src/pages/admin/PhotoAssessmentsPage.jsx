@@ -296,7 +296,7 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
           <TabList>
             <Tab value="all">All</Tab>
             <Tab value="lawn">Lawn</Tab>
-            <Tab value="pest">Pest ID</Tab>
+            <Tab value="pest">Pest</Tab>
           </TabList>
         </Tabs>
         <div className="w-40">

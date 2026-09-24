@@ -3273,7 +3273,7 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
         // explicit override that is not assignable is a 422.
         if (insertData.technician_id) {
           try {
-            await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+            await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(date).slice(0, 10) });
           } catch (eligErr) {
             if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
             logger.warn(`[dispatch] follow-up inherits technician ${insertData.technician_id} who is not assignable; booking unassigned`);
@@ -3640,7 +3640,16 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // A partial/unverifiable unit move deliberately retains the cohort
       // hold — this unconditional post-move sync must not release it
       // (codex #3609 r37).
-      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
+      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify,
+      // willNotify=false means this move sends no replacement notice of its
+      // own (Day-grid resize/bulk move always set notifyCustomer:false; a
+      // rain-out whose moved-SMS didn't send lands here too) — a still-
+      // pending creation confirmation must stay pending so the deferred
+      // sendConfirmation / stranded sweep still delivers it with the new
+      // time, exactly like the sibling re-arms in admin-schedule.js's bulk
+      // reschedule and auto-dispatch/apply.js (ADMIN-BUG-R24).
+      ...(willNotify ? {} : { keepPendingConfirmation: true }),
+      ...(expectSchedule ? { expectSchedule } : {}) },
     );
     if (synced && synced.skippedStale === true) return 'stale';
     if (synced !== null) return true;
@@ -5192,7 +5201,11 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         ts.updated_at,
         ts.location_updated_at,
         COALESCE(today_agg.total, 0)     AS today_total,
-        COALESCE(today_agg.completed, 0) AS today_completed
+        COALESCE(today_agg.completed, 0) AS today_completed,
+        EXISTS (
+          SELECT 1 FROM technician_absences a
+          WHERE a.technician_id = t.id AND a.absence_date = ? AND a.cleared_at IS NULL
+        ) AS out_today
       FROM technicians t
       INNER JOIN tech_status ts ON ts.tech_id = t.id
       LEFT JOIN (
@@ -5215,7 +5228,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         AND ts.location_updated_at >= NOW() - INTERVAL '24 hours'
       ORDER BY t.name
       `,
-      [today]
+      [today, today]
     );
 
     const jobRows = await db.raw(
@@ -5280,6 +5293,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       location_updated_at: r.location_updated_at,
       today_total: parseInt(r.today_total, 10) || 0,
       today_completed: parseInt(r.today_completed, 10) || 0,
+      out_today: !!r.out_today,
     })));
 
     const jobs = (jobRows.rows || []).map((r) => {
@@ -5590,7 +5604,10 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
         's.window_start',
         's.window_end'
       )
-      .orderBy('a.created_at', 'desc')
+      // Newest first; alerts written in one transaction share created_at
+      // (now() is per-transaction), so a tech-out batch orders by its own
+      // bump_order (#1 first). Rows without one keep pure recency.
+      .orderByRaw("a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST")
       .limit(limit);
 
     if (unresolved) q.whereNull('a.resolved_at');

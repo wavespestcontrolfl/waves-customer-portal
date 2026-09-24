@@ -269,7 +269,7 @@ async function main() {
       assert.equal(await page.getByRole('textbox', { name: 'Reply' }).inputValue(), '');
     });
     await scenario('blocked senders remains in the Email sub-section', async () => {
-      await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked Senders' }).click();
+      await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked' }).click();
       await page.getByPlaceholder('Block domain or email (e.g. spammer.com or bad@example.com)').waitFor();
       await channel(page, 'SMS').click();
       blockedSenders = [{ id: 'fixture-block', domain: 'blocked.example.invalid', created_at: new Date().toISOString() }];
@@ -283,7 +283,7 @@ async function main() {
       const linked = await openPage();
       await linked.goto(`${server.baseUrl}/admin/communications?id=${a.id}#tab=email`);
       await linked.getByText(a.body_text, { exact: true }).waitFor();
-      await linked.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked Senders' }).click();
+      await linked.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked' }).click();
       await linked.evaluate((id) => {
         history.pushState({}, '', `/admin/communications?id=${id}#tab=email`);
         window.dispatchEvent(new PopStateEvent('popstate'));

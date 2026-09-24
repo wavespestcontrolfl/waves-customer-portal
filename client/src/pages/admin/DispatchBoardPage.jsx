@@ -53,6 +53,7 @@ export default function DispatchBoardPage() {
     setSelectedJobId,
     loading,
     error,
+    refreshTechs,
   } = useDispatchBoard();
 
   // Stable callback so memoized <TechCard>doesn't see a new prop on
@@ -186,14 +187,18 @@ export default function DispatchBoardPage() {
             onJobDropOnTech={handleJobDropOnTech}
           />
         }
-        right={<ActionQueuePane />}
+        right={<ActionQueuePane onOpenJob={handleSelectJob} />}
       />{" "}
       <JobDrawer
         jobId={selectedJobId}
         onClose={handleCloseJob}
         refetchSignal={drawerRefetchSignal}
       />{" "}
-      <TechDrawer techId={selectedTechId} onClose={handleCloseTech} />{" "}
+      <TechDrawer
+        techId={selectedTechId}
+        onClose={handleCloseTech}
+        onAbsenceChanged={refreshTechs}
+      />{" "}
     </>
   );
 }

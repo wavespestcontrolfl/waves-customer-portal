@@ -53,7 +53,7 @@ jest.setTimeout(30000);
     return {
       id: randomUUID(), twilio_call_sid: `CA${randomUUID().replaceAll('-', '')}`,
       direction: 'inbound', from_phone: '+19415550100', customer_id: null,
-      status: 'no-answer', answered_by: 'missed', metadata: {},
+      status: 'no-answer', answered_by: 'missed', duration_seconds: 40, metadata: {},
       created_at: new Date(now - minsAgo * 60000), updated_at: new Date(now - minsAgo * 60000),
       ...extra,
     };

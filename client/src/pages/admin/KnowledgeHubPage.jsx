@@ -9,7 +9,7 @@ const KnowledgeBasePage = React.lazy(() => import("./KnowledgeBasePage"));
 
 const AREAS = [
   { key: "wiki", label: "Wiki", Icon: BookOpen },
-  { key: "base", label: "Knowledge Base", Icon: Brain },
+  { key: "base", label: "Library", Icon: Brain },
 ];
 
 export default function KnowledgeHubPage() {

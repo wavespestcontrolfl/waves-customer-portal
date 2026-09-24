@@ -224,6 +224,31 @@ describe('estimate slot weekend and expander behavior', () => {
     expect(windows.has('13:00')).toBe(true);
   });
 
+  // GATE_TECH_OUT_REDISTRIBUTE's slot-discovery counterpart (codex #4678
+  // pre-push auditor P1): buildAsapCapacitySlots' absentDays read
+  // (technician-eligibility.js absentTechDays), threaded through here.
+  describe('absentDays (technician_absences, GATE_TECH_OUT_REDISTRIBUTE)', () => {
+    const TECHS = [{ id: 'tech-1', name: 'Tech One' }, { id: 'tech-2', name: 'Tech Two' }];
+    const NOW = new Date('2026-05-01T12:00:00Z'); // well before both fixture dates
+
+    test('omitting absentDays (default) is byte-identical to legacy behavior — every direct caller today', () => {
+      const slots = slotAvailabilityInternals.buildAsapCapacitySlotsForTechs({
+        dateFrom: '2026-05-27', dateTo: '2026-05-27', durationMinutes: 60, techs: TECHS, now: NOW,
+      });
+      expect(new Set(slots.map((s) => s.techId))).toEqual(new Set(['tech-1', 'tech-2']));
+    });
+
+    test('a tech absent on one date in a two-date window is dropped that date only, the other tech and the other date are unaffected', () => {
+      const absentDays = new Set(['tech-2:2026-05-27']);
+      const slots = slotAvailabilityInternals.buildAsapCapacitySlotsForTechs({
+        dateFrom: '2026-05-27', dateTo: '2026-05-28', durationMinutes: 60, techs: TECHS, now: NOW, absentDays,
+      });
+      const techIdsByDate = (date) => new Set(slots.filter((s) => s.date === date).map((s) => s.techId));
+      expect(techIdsByDate('2026-05-27')).toEqual(new Set(['tech-1']));
+      expect(techIdsByDate('2026-05-28')).toEqual(new Set(['tech-1', 'tech-2']));
+    });
+  });
+
   test('selection preserves feasible afternoon times after occupied mornings were removed', () => {
     const slots = ['13:00', '14:00'].map((windowStart, i) => ({
       slotId: `afternoon-${i}`, date: '2030-01-02', windowStart,

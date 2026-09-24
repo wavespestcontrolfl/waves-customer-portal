@@ -16,6 +16,7 @@ const { invoiceAmountDue } = require('./invoice-helpers');
 const { gates } = require('../config/feature-gates');
 const StripeService = require('./stripe');
 const { sendMicrodepositVerificationEmail } = require('./microdeposit-verification-email');
+const { formatDateOnly } = require('../utils/date-only');
 
 function tierDaysForOverdue(daysSince) {
   if (daysSince < 14) return 7;
@@ -312,14 +313,12 @@ const LatePaymentService = {
       // Dun for amount DUE (total − applied account credit), not the gross total.
       const totalAmount = invoiceAmountDue(inv);
 
-      let formattedDate = '';
-      if (inv.service_date) {
-        try {
-          formattedDate = new Date(inv.service_date).toLocaleDateString('en-US', {
-            month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
-          });
-        } catch { /* ignore */ }
-      }
+      // ADMIN-BUG-R51: service_date is a DATE column, not an instant — formatting
+      // it through an America/New_York instant formatter shifts a UTC-midnight
+      // pg Date (TZ=UTC in production) to the PREVIOUS Eastern day. formatDateOnly
+      // normalises to noon UTC first, matching the sibling dunning paths
+      // (invoice-followups.js, balance-reminder.js) for the same column.
+      const formattedDate = formatDateOnly(inv.service_date, { month: 'short', fallback: '' });
       const dateClause = formattedDate ? ` completed on ${formattedDate}` : '';
 
       // Ownership ONE more time, on the last read before the provider (local

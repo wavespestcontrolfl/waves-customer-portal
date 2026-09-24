@@ -1840,7 +1840,7 @@ function CustomerHealthSection() {
 
   const tabs = [
     { key: "dashboard", label: "Dashboard" },
-    { key: "scores", label: "Health Scores" },
+    { key: "scores", label: "Scores" },
     { key: "quiet", label: "Quiet" },
     { key: "alerts", label: "Alerts" },
   ];

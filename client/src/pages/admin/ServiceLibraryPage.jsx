@@ -1165,8 +1165,8 @@ export default function ServiceLibraryPage() {
   };
 
   const tabs = [
-    { key: "catalog", label: "Service Catalog", Icon: Library },
-    { key: "protocols", label: "Treatment Plans", Icon: Sprout },
+    { key: "catalog", label: "Services", Icon: Library },
+    { key: "protocols", label: "Treatments", Icon: Sprout },
     { key: "discounts", label: "Discounts", Icon: Percent },
   ];
 

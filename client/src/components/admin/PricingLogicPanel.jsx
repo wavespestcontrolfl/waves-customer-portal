@@ -47,11 +47,11 @@ const af = (p, o = {}) =>
   });
 
 const TABS = [
-  { key: "global", label: "Global constants" },
-  { key: "lawn", label: "Lawn care" },
-  { key: "pest", label: "Pest control" },
-  { key: "tree_shrub", label: "Tree & shrub" },
-  { key: "palm", label: "Palm injection" },
+  { key: "global", label: "Constants" },
+  { key: "lawn", label: "Lawn" },
+  { key: "pest", label: "Pest" },
+  { key: "tree_shrub", label: "Ornamentals" },
+  { key: "palm", label: "Palms" },
   { key: "mosquito", label: "Mosquito" },
   { key: "termite", label: "Termite" },
   { key: "rodent", label: "Rodent" },

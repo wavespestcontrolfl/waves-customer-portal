@@ -233,9 +233,9 @@ function slotDurationMinutes(start, end) {
 const SCHEDULE_TABS = [
   { id: "board", label: "Schedule" },
   { id: "protocols", label: "Protocols" },
-  { id: "match", label: "Tech Match", desktopOnly: true },
-  { id: "csr", label: "CSR Booking", desktopOnly: true },
-  { id: "revenue", label: "Job Scores", desktopOnly: true },
+  { id: "match", label: "Matching", desktopOnly: true },
+  { id: "csr", label: "Booking", desktopOnly: true },
+  { id: "revenue", label: "Scores", desktopOnly: true },
   { id: "insights", label: "Insights", desktopOnly: true },
 ];
 

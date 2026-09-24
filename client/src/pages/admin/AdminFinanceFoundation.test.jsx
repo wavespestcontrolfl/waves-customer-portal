@@ -289,7 +289,7 @@ describe("Finance workflow preservation", () => {
   });
   it("keeps taxability confirmation and restores the enabled control after failure", async () => {
     open(TaxPage);
-    await taxSection("Tax Setup", "Taxability");
+    await taxSection("Setup", "Taxability");
     const control = await screen.findByRole("button", {
       name: /Example pest control/,
     });
@@ -374,9 +374,9 @@ describe("Finance workflow preservation", () => {
       );
       open(TaxPage);
       await taxSection("Expenses");
-      await screen.findByRole("button", { name: "Bank Import", exact: true });
+      await screen.findByRole("button", { name: "Import", exact: true });
       const release = hold(key);
-      await taxSection("Expenses", "Bank Import");
+      await taxSection("Expenses", "Import");
       const matched = within(
         (await screen.findByText("Matched", { exact: true })).parentElement,
       );
@@ -406,7 +406,7 @@ describe("Finance workflow preservation", () => {
     overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
     overrides.set(key, () => response({ transactions: [oldRow], hasMore: true }));
     open(TaxPage);
-    await taxSection("Expenses", "Bank Import");
+    await taxSection("Expenses", "Import");
     await screen.findByText(oldRow.description);
     const releaseFilter = hold(key);
     edit("Status", "unmatched");
@@ -437,7 +437,7 @@ describe("Finance workflow preservation", () => {
     await taxSection("Expenses");
     await screen.findByRole("button", { name: "+ Add Expense" });
     expect(
-      screen.queryByRole("button", { name: "Bank Import", exact: true }),
+      screen.queryByRole("button", { name: "Import", exact: true }),
     ).not.toBeInTheDocument();
   });
 });

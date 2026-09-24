@@ -161,7 +161,7 @@ const STAFF_SECTIONS = [
   { key: "analytics", label: "Analytics", Icon: BarChart3 },
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
-  { key: "pay-growth", label: "Pay & Growth", Icon: BarChart3 },
+  { key: "pay-growth", label: "Growth", Icon: BarChart3 },
 ];
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf

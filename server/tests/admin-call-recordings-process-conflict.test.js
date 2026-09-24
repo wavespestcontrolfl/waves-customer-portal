@@ -96,9 +96,93 @@ describe('the CSR scorer refuses to persist after ownership moves', () => {
 
   test('the processor hands its claim check to the scorer', () => {
     const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const callAt = processor.indexOf('CSRCoach.scoreCall({');
+    const callAt = processor.indexOf('CSRCoach.scoreCallIfApplicable({');
     expect(callAt).toBeGreaterThan(-1);
-    expect(processor.slice(callAt, callAt + 300)).toContain('stillOwnsClaim');
+    expect(processor.slice(callAt, callAt + 900)).toContain('stillOwnsClaim');
+  });
+});
+
+// The 15-point rubric is a SALES rubric — it only describes an inbound
+// new_lead call. Applying it to every transcribed call scored billing
+// questions, service calls, and vendor calls as botched sales pitches
+// (2026-09-23 audit). The applicability decision plus scoring itself are
+// OWNED by csr-coach.js's `scoreCallIfApplicable` (moved there 2026-09-24,
+// codex r1 P2b — the processor function this diff rewrites was already over
+// the repo's structural-complexity threshold, so a new if/else it owned was
+// itself a P2, AGENTS.md L409-413). These pin that the PROCESSOR makes ONE
+// call and owns no applicability branch of its own, and that it wires the
+// "v2 drives routing" (enforce mode) test correctly (codex r1 P2a — a shadow
+// misclassification must not cost a genuine lead its score, since the flag
+// contract at call-recording-processor.js ~64-71 says shadow mode restores
+// the full legacy V1 drive).
+describe('the CSR sales-rubric applicability gate lives in csr-coach.js, not the processor', () => {
+  const processorSource = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const coachSource = require('fs').readFileSync(require.resolve('../services/csr/csr-coach'), 'utf8');
+
+  test('the processor calls scoreCallIfApplicable exactly once and never calls the applicability check or scoreCall directly', () => {
+    const csrSection = processorSource.slice(
+      processorSource.indexOf('Step 8: CSR Coach scoring'),
+      processorSource.indexOf('newsletterCandidate && v2EmailBlocked'),
+    );
+    expect(csrSection).toContain('CSRCoach.scoreCallIfApplicable({');
+    expect(csrSection).not.toContain('CSRCoach.csrScoringApplies(');
+    expect(csrSection).not.toContain('CSRCoach.scoreCall(');
+    // The only decision left in the processor is consuming the abandon
+    // signal — no applicability branch of its own.
+    expect(csrSection).toContain('if (csrOutcome?.abandon)');
+  });
+
+  test('the processor wires direction from isOutboundCall and v2Promoted from the enforce-mode test used elsewhere in the file', () => {
+    const callAt = processorSource.indexOf('CSRCoach.scoreCallIfApplicable({');
+    const closeAt = processorSource.indexOf('});', callAt);
+    const call = processorSource.slice(callAt, closeAt);
+    expect(call).toContain('isOutboundCall(call)');
+    expect(call).toContain('v2Result?.extraction || null');
+    expect(call).toContain("v2Result?.status || null");
+    expect(call).toContain('CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED');
+  });
+
+  test('scoreCallIfApplicable in csr-coach.js checks applicability before scoring and skips with no insert', () => {
+    const fnAt = coachSource.indexOf('async scoreCallIfApplicable(');
+    const fnEnd = coachSource.indexOf('\n  }\n', fnAt);
+    const fn = coachSource.slice(fnAt, fnEnd);
+    const gateAt = fn.indexOf('csrScoringApplies({');
+    const scoreAt = fn.indexOf('this.scoreCall({');
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(scoreAt).toBeGreaterThan(gateAt);
+    const skipBranch = fn.slice(0, fn.indexOf('this.scoreCall('));
+    expect(skipBranch).toMatch(/logger\.info\(`\[call-proc\] CSR scoring skipped/);
+    expect(skipBranch).not.toContain("db('csr_call_scores')");
+  });
+});
+
+// Functional coverage of the same rule, at the pure-function level: shadow
+// mode (v2 not driving routing) must preserve legacy scoring even when v2
+// misclassifies a genuine lead; promoted mode (v2 driving routing) is the
+// only mode where a non-new_lead call_nature is allowed to suppress scoring.
+describe('csrScoringApplies — shadow vs promoted (codex r1 P2a)', () => {
+  const { csrScoringApplies } = require('../services/csr/csr-coach');
+
+  test('shadow mode (v2Promoted false/omitted): a billing_question misclassification still scores', () => {
+    expect(csrScoringApplies({ direction: 'inbound', callNature: 'billing_question', v2Valid: true, v2Promoted: false })).toBe(true);
+    expect(csrScoringApplies({ direction: 'inbound', callNature: 'billing_question', v2Valid: true })).toBe(true);
+  });
+
+  test('promoted mode (v2Promoted true): a billing_question call is refused — no row written', () => {
+    expect(csrScoringApplies({ direction: 'inbound', callNature: 'billing_question', v2Valid: true, v2Promoted: true })).toBe(false);
+  });
+
+  test('promoted mode: a new_lead call still qualifies — scoreCall still runs', () => {
+    expect(csrScoringApplies({ direction: 'inbound', callNature: 'new_lead', v2Valid: true, v2Promoted: true })).toBe(true);
+  });
+
+  test('shadow mode: a new_lead call still qualifies too', () => {
+    expect(csrScoringApplies({ direction: 'inbound', callNature: 'new_lead', v2Valid: true, v2Promoted: false })).toBe(true);
+  });
+
+  test('outbound is refused regardless of promotion', () => {
+    expect(csrScoringApplies({ direction: 'outbound', callNature: 'new_lead', v2Valid: true, v2Promoted: true })).toBe(false);
+    expect(csrScoringApplies({ direction: 'outbound', callNature: 'new_lead', v2Valid: true, v2Promoted: false })).toBe(false);
   });
 });
 
@@ -374,11 +458,22 @@ describe('claim ceiling is derived from the provider budgets', () => {
   test('an ownership loss reported by CSR scoring abandons the pass', () => {
     // scoreCall returns { skipped, reason: 'ownership_lost' } from its own
     // post-await check; reading that as "no score" and carrying on reached
-    // the unfenced route-decision insert and ai_validation write.
-    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const start = source.indexOf('await CSRCoach.scoreCall({');
-    const end = source.indexOf('csrScoreResult = {', start);
-    expect(source.slice(start, end)).toMatch(/scoreResult\.reason === 'ownership_lost'[^;]*\)\s*\{\s*return abandonToPeer\(/);
+    // the unfenced route-decision insert and ai_validation write. This check
+    // (moved into csr-coach.js's scoreCallIfApplicable 2026-09-24, codex r1
+    // P2b) now signals the abandon back to the processor as a plain return
+    // value instead of calling abandonToPeer itself — the processor is the
+    // only place that owns claim-abandonment, so it consumes that signal
+    // with `if (csrOutcome?.abandon) return abandonToPeer(...)` (asserted in
+    // 'the CSR sales-rubric applicability gate lives in csr-coach.js' above).
+    const coach = require('fs').readFileSync(require.resolve('../services/csr/csr-coach'), 'utf8');
+    const start = coach.indexOf('const scoreResult = await this.scoreCall({');
+    const end = coach.indexOf('return { applicable: true, abandon: true };', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(coach.slice(start, end)).toMatch(/scoreResult\.reason === 'ownership_lost'/);
+
+    const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(processor).toContain("if (csrOutcome?.abandon) return abandonToPeer('finalization after CSR scoring');");
   });
 
   test('the recordings list forces only rows that already finished', () => {

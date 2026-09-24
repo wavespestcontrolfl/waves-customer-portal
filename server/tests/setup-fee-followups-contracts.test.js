@@ -28,8 +28,11 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     expect(replayWaiverAt).toBeGreaterThan(replayAt);
     expect(primaryActivationAt).toBeGreaterThan(replayWaiverAt);
     
-    // ...and the pest seeding path still calls the same helper atomically.
-    expect(booking).toMatch(/await stampDisclosedSetupFee\(trx, \{ stampServiceRow: serviceRow \}\)/);
+    // ...and the pest seeding path still calls the same helper atomically —
+    // against effectiveParent (Codex #4716 r3: the re-verified parent row,
+    // serviceRow merged with a fresh owner-checked FOR UPDATE read), not
+    // the stale in-memory serviceRow.
+    expect(booking).toMatch(/await stampDisclosedSetupFee\(trx, \{ stampServiceRow: effectiveParent \}\)/);
   });
 
   test('the signed funnel key is normalized to the priced family before the setup-fee intersection (codex #3591 r25 P1)', () => {

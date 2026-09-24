@@ -69,6 +69,10 @@ function createCapacityDbFixture(prefix = 'scheduling_capacity') {
       searchPath: [schema], pool: { min: 0, max: 5 } });
     for (const table of ['customers', 'estimates', 'services', 'scheduled_services', 'technicians',
       'technician_capabilities', 'tech_schedule_blocks', 'schedule_blackout_dates', 'system_settings', 'audit_log',
+      // Tech-out (#4678): every dated eligibility check (reserveSlot at hold
+      // time, commit's graduate paths) and slot discovery's absentTechDays
+      // read technician_absences — an empty copy means "nobody is out".
+      'technician_absences',
       // reserveSlot/commitReservation read booking_config for the lunch
       // interval / day-end override (Codex r1 P2s on #4663) and fail
       // closed (push-audit P1) if that read has never succeeded — an
@@ -102,7 +106,7 @@ function createCapacityDbFixture(prefix = 'scheduling_capacity') {
     process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
     process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
     for (const table of ['scheduled_services', 'estimates', 'tech_schedule_blocks', 'technician_capabilities',
-      'schedule_blackout_dates', 'system_settings', 'audit_log']) await mockPg(table).del();
+      'technician_absences', 'schedule_blackout_dates', 'system_settings', 'audit_log']) await mockPg(table).del();
     await mockPg('estimates').insert(ids.estimates.map(id => ({ id, customer_id: ids.customer, status: 'sent',
       estimate_data: estimateData(), expires_at: addETDays(new Date(), 30) })));
   });

@@ -896,6 +896,214 @@
             "null"
           ],
           "description": "The AGENT committed to send a quote/estimate after the call. Means work is still owed to the caller — set even when an appointment was also booked."
+        },
+        "price": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The PRIMARY price stated on the call by either party (the accepted one if any, else the first stated) — distinct from quoted_price_usd, which stays the narrower accepted-total-only field. When more than one distinct price was stated (e.g. a one-time price AND a monthly price), every one of them also goes in the sibling `prices` array with the primary entry FIRST (prices[0]), and this field is always a copy of that entry — the two fields agree by construction, never by a separate ordering rule. Optional: omit or leave every field null when no price was discussed.",
+          "properties": {
+            "amount_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "The stated price, or the LOW end when a range was given. null when no number was stated. Never estimate or invent a price."
+            },
+            "amount_max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "The HIGH end of a stated range (e.g. '$90 to 100 per quarter' -> amount_usd 90, amount_max_usd 100). null when a single number was given, not a range."
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "one_time",
+                "per_application",
+                "per_month",
+                "per_quarter",
+                "per_year",
+                "unknown",
+                null
+              ],
+              "description": "The billing unit AS SPOKEN (e.g. 'per application', 'a quarter', 'a year'). 'unknown' when a price was stated but no unit was said; null when no price was stated."
+            },
+            "accepted": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "DERIVED from caller_response — kept only for backward compatibility with readers written before caller_response existed; set both consistently. true when caller_response is 'accepted'. false when caller_response is 'declined' or 'no_response'. null when caller_response is 'not_at_issue' or null/absent. This schema does not itself enforce the derivation — normalizeExtractionV2 (server/utils/normalize-extraction-v2.js) recomputes `accepted` from `caller_response` before persistence whenever caller_response is present, so a model that returns a disagreeing pair is corrected rather than trusted as-is."
+            },
+            "caller_response": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "accepted",
+                "declined",
+                "no_response",
+                "not_at_issue",
+                null
+              ],
+              "description": "The CALLER's explicit response to this price — replaces the old boolean-only accepted signal, which conflated \"declined\" with \"never responded\". 'accepted' when the caller agreed to it. 'declined' when the caller said no / pushed back and it was not resolved to yes. 'no_response' when the agent stated it and the call moved on (hung up, changed subject) before the caller reacted either way. 'not_at_issue' when acceptance was never in play (e.g. caller only asked \"what's the price for X\" as a general question, or it's a competitor's price the caller is just quoting back). null when the call did not address the question at all."
+            },
+            "stated_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "agent",
+                "caller",
+                null
+              ],
+              "description": "Who said the number first — almost always 'agent'; 'caller' when the caller quoted a price back (e.g. a competitor's price, or repeating what they read online)."
+            },
+            "prepay_term": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "annual",
+                "none",
+                null
+              ],
+              "description": "'annual' when paying for the year up front was discussed ('pay the year', 'annual prepay'); 'none' when prepay was explicitly ruled out; null when never discussed."
+            },
+            "tier_mentioned": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "bronze",
+                "silver",
+                "gold",
+                "platinum",
+                null
+              ],
+              "description": "A WaveGuard package tier name mentioned in connection with THIS price, by either party. Independent of waveguard_tier_mentioned (which is caller-sourced only)."
+            },
+            "evidence_quote": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verbatim transcript quote the price fields above were read from. null when price is otherwise empty."
+            }
+          }
+        },
+        "prices": {
+          "type": "array",
+          "maxItems": 6,
+          "description": "EVERY DISTINCT price stated on the call (one-time, monthly, a competitor's price, etc.), ordered with the PRIMARY entry FIRST — the accepted one if any, else the first price stated on the call — followed by the remaining distinct prices in the order stated. `price` (the sibling field above) is always a copy of prices[0] under this ordering — a single ordering rule, not two that can disagree. A call with only one price mentioned may leave this empty or omit it; `price` alone still carries it. Each entry has the same shape as `price`. This schema does not itself enforce that `price` matches prices[0] — normalizeExtractionV2 (server/utils/normalize-extraction-v2.js) canonicalizes `price` from a nonempty `prices` before persistence (merging rather than replacing when they describe the same price), so a model that returns a disagreeing pair is corrected rather than trusted as-is.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "amount_usd": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "The stated price, or the LOW end when a range was given. null when no number was stated. Never estimate or invent a price."
+              },
+              "amount_max_usd": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "The HIGH end of a stated range. null when a single number was given, not a range."
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "one_time",
+                  "per_application",
+                  "per_month",
+                  "per_quarter",
+                  "per_year",
+                  "unknown",
+                  null
+                ],
+                "description": "The billing unit AS SPOKEN. 'unknown' when a price was stated but no unit was said; null when no price was stated."
+              },
+              "accepted": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "DERIVED from caller_response — see the same field on `price`."
+              },
+              "caller_response": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "accepted",
+                  "declined",
+                  "no_response",
+                  "not_at_issue",
+                  null
+                ],
+                "description": "The CALLER's explicit response to THIS price — see the same field on `price`."
+              },
+              "stated_by": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "agent",
+                  "caller",
+                  null
+                ],
+                "description": "Who said the number first — almost always 'agent'; 'caller' when the caller quoted a price back."
+              },
+              "prepay_term": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "annual",
+                  "none",
+                  null
+                ]
+              },
+              "tier_mentioned": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "bronze",
+                  "silver",
+                  "gold",
+                  "platinum",
+                  null
+                ]
+              },
+              "evidence_quote": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Verbatim transcript quote this entry's price fields were read from."
+              }
+            }
+          }
         }
       }
     },

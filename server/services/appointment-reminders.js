@@ -3962,11 +3962,22 @@ const AppointmentReminders = {
       //     just echo details the customer hasn't been told changed.
       // Future windows stay unsent in every case, so reminders follow the
       // new appointment time.
+      const startMoved = newApptTime.getTime() !== new Date(record.appointment_time).getTime();
       const covered = sendNotification
         ? { alreadyInside72hWindow: false, alreadyInside24hWindow: false }
         : coverDueWindows
           ? reminderFlagsCoveredByNotice(newApptTime)
-          : { ...reminderFlagsCoveredByNotice(newApptTime), alreadyInside24hWindow: false };
+          : {
+            // A same-start silent edit (duration-only resize) changes
+            // nothing the customer needs to hear about, so a 72h reminder
+            // the send-window hold had merely deferred (not yet sent) must
+            // NOT be stamped sent here — no text went out, and stamping it
+            // loses that reminder for good (ADMIN-BUG-R24 secondary). A
+            // real date/time move still covers a due 72h window, same as
+            // before.
+            ...(startMoved ? reminderFlagsCoveredByNotice(newApptTime) : { alreadyInside72hWindow: false }),
+            alreadyInside24hWindow: false,
+          };
 
       // Resolve the post-reschedule state of each reminder window:
       //   • A real start-time move re-arms from the covered/pending value
@@ -3976,7 +3987,6 @@ const AppointmentReminders = {
       //     duplicate. A still-pending flag on a same-start edit falls through
       //     to the covered value, so a notifying edit (coverDueWindows) still
       //     covers the due window and the cron can't race the route's SMS.
-      const startMoved = newApptTime.getTime() !== new Date(record.appointment_time).getTime();
       const now = new Date();
       const resolveFlag = (coveredVal, prevSent, prevSentAt) => {
         if (!startMoved && prevSent) return { sent: true, at: prevSentAt };

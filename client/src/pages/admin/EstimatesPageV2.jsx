@@ -2762,12 +2762,12 @@ const TABS = [
   },
   {
     key: "new",
-    label: "Create Estimate",
+    label: "Create",
     Icon: FilePlus2,
   },
   {
     key: "pricing",
-    label: "Pricing Logic",
+    label: "Pricing",
     Icon: SlidersHorizontal,
   },
 ];
@@ -3898,12 +3898,32 @@ function EstimatesWorkspace() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [newLeadRequest, setNewLeadRequest] = useState(0);
   const readLeadPrefill = useCallback((params) => {
+    // `leadId` predates the consolidated Pipeline and has two meanings:
+    // old lead-alert links use it to select a lead, while estimate-builder
+    // links pair it with tab=new. Keep the legacy alert on the Leads tab so
+    // LeadsSection can normalize it to the canonical `lead` key.
+    const estimatePrefillRequested =
+      params.get("tab") === "new" ||
+      [
+        "customerId",
+        "address",
+        "customerName",
+        "customerPhone",
+        "customerEmail",
+        "serviceInterest",
+        "editEstimateId",
+        "first_name",
+        "last_name",
+        "phone",
+        "email",
+        "service_interest",
+      ].some((key) => params.has(key));
     const legacyName = [params.get("first_name"), params.get("last_name")]
       .filter(Boolean)
       .join(" ")
       .trim();
     return {
-      leadId: params.get("leadId") || "",
+      leadId: estimatePrefillRequested ? params.get("leadId") || "" : "",
       customerId: params.get("customerId") || "",
       address: params.get("address") || "",
       customerName: params.get("customerName") || legacyName,
