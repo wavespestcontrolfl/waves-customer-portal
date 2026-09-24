@@ -736,10 +736,30 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
   test('every OFFICE series writer consults the shared verdict; the completion auto-extend deliberately does not (owner ruling: warn at completion)', () => {
     // reconcile (count raise + ongoing flip) + the two alert-action loops.
     expect((src.match(/await seriesExtensionUnbillable\(trx, \{/g) || []).length).toBe(3);
-    const from = src.indexOf('async function runRecurringSeriesMaintenanceLocked(');
+    // The single-visit insert step (candidate search → insert → prepay →
+    // add-ons → visit-groups) was extracted out of
+    // runRecurringSeriesMaintenanceLocked into extendSeriesOnceLocked so the
+    // nightly top-up loop (below) can share it — the insert site moved, the
+    // completion path's behavior did not: it still never consults the gate.
+    const from = src.indexOf('async function extendSeriesOnceLocked(');
     const autoExtend = src.slice(from, src.indexOf('\nasync function ', from + 10));
     expect(autoExtend).toContain("insert(nextData)");
     expect(autoExtend).not.toContain('seriesExtensionUnbillable(');
+  });
+
+  test('the nightly top-up DOES consult the shared verdict — it is not the completion auto-extend, and it can mint many unattended rows in one run', () => {
+    // topUpRecurringSeriesLocked calls the mechanism-only
+    // extendSeriesOnceLocked in a loop (up to 24x/run) with no human
+    // approving each date — unlike the completion path's one blocking
+    // visit, there is no "don't hold up a tech closing a job" reason to
+    // skip the gate here, and skipping it would let an unattended run
+    // quietly commit the business to a stack of $0 visits. It uses `conn`
+    // (this function's own parameter name), not `trx` — same helper, same
+    // verdict, just topUp's own naming convention.
+    const from = src.indexOf('async function topUpRecurringSeriesLocked(');
+    const topUp = src.slice(from, src.indexOf('\nasync function ', from + 10));
+    expect(topUp).toContain('await seriesExtensionUnbillable(conn, {');
+    expect(topUp).toContain("skipped: 'unbillable_extension'");
   });
 });
 

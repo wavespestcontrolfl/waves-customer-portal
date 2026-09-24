@@ -126,7 +126,12 @@ function topupScenario({
     window_start: '08:00', window_end: '10:00',
     service_type: 'Weekly Pest Control', time_window: 'morning', zone: 'A',
     estimated_duration_minutes: 60, skip_weekends: false,
-    create_invoice_on_complete: false,
+    // Billable by default (create_invoice_on_complete + a real price) so
+    // the horizon/cap/eligibility tests below aren't incidentally tripped
+    // by topUpRecurringSeriesLocked's own billable-amount gate
+    // (seriesExtensionUnbillable) — that gate has its own dedicated tests
+    // further down; an override can still set either back to unbillable.
+    create_invoice_on_complete: true, estimated_price: '150.00',
     ...parentOverrides,
   };
   const customer = {
@@ -248,6 +253,33 @@ describe('topUpRecurringSeriesLocked — eligibility', () => {
     const { conn } = topupScenario();
     const result = await topUpRecurringSeriesLocked(conn, 999, { horizonDays: 365 });
     expect(result.skipped).toBe('not_found');
+  });
+});
+
+describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
+  // Same shared verdict every OFFICE series writer consults
+  // (seriesExtensionUnbillable) — the completion-time single-visit
+  // auto-extend deliberately skips it (owner ruling: warn at completion),
+  // but this unattended nightly loop can mint many rows in one run and so
+  // belongs with the OFFICE-writer class (schedule-update-details-
+  // recurring-count.test.js pins that classification on the source).
+  test('skips an unpriced series with no create-invoice stamp and no membership/lane — never mints a stack of $0 visits', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { create_invoice_on_complete: false, estimated_price: null },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('unbillable_extension');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('a monthly member with a real dues rate is billable even with no price stamp — dues cover it', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { create_invoice_on_complete: false, estimated_price: null },
+      customerOverrides: { billing_mode: 'monthly_membership', monthly_rate: 120, waveguard_tier: 'silver' },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
   });
 });
 

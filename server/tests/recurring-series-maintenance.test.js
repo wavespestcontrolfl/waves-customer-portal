@@ -658,7 +658,11 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // check (the nightly top-up loop) — extendSeriesOnceLocked's internal
     // call (moved out of runRecurringSeriesMaintenanceLocked, net zero) is
     // the completion path's existing occurrence, not a new one.
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(6);
+    // 6th: topUpRecurringSeriesLocked's billable-amount-gate probe (the
+    // same shared seriesExtensionUnbillable verdict every OFFICE series
+    // writer consults — top-up is unattended and can mint many rows per
+    // run, so it belongs with that class, not the completion exemption).
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(7);
     // The occupied-dates preload is shared the same way (same 4th consumer).
     expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });

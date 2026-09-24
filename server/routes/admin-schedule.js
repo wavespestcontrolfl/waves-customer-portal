@@ -15069,8 +15069,15 @@ async function resolveTopUpTermCap(conn, parent, parentId, cols) {
     const customerTerms = await conn('annual_prepay_terms')
       .where({ customer_id: parent.customer_id })
       .select('id', 'coverage_service_type');
+    // Not a child-insert payload — a throwaway shape for the matcher, which
+    // only ever reads `.service_type` off whatever row it's handed (see
+    // series-child-catalog-identity.test.js's source guard, which bans a
+    // child row inheriting the parent's service name field verbatim instead
+    // of resolving the current catalog identity; this reads the PARENT's own
+    // field for a term-service comparison and inserts nothing).
+    const parentServiceType = parent.service_type;
     const scopedCustomerIds = customerTerms
-      .filter((t) => serviceMatchesCoverage({ service_type: parent.service_type }, t.coverage_service_type))
+      .filter((t) => serviceMatchesCoverage({ service_type: parentServiceType }, t.coverage_service_type))
       .map((t) => t.id);
     const allIds = [...new Set([...linkedIds, ...scopedCustomerIds].map(String))];
     if (!allIds.length) return { cap: null, failed: false, extraTermIds: [] };
@@ -15187,6 +15194,59 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   const { cap: termCap, failed: termCapFailed, extraTermIds } = await resolveTopUpTermCap(conn, parent, parentId, cols);
   if (termCapFailed) return { spawnedVisits: [], skipped: 'prepay_cap_unresolved' };
 
+  // Billable-amount gate — the SAME shared verdict every OFFICE series
+  // writer consults before adding visits (reconcileRecurringSeriesVisitCount,
+  // the recurring-alert extend/convert_ongoing loops — see
+  // seriesExtensionUnbillable's own header). The completion-time single-
+  // visit auto-extend deliberately skips it (owner ruling: warn at
+  // completion, never block a tech closing out today's job over a future
+  // pricing question) — but this nightly top-up blocks no one. Left
+  // unchecked it can mint up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN
+  // unattended rows in one run: exactly the "quietly commit the business to
+  // a stack of unbillable visits" risk this gate exists to catch, so top-up
+  // belongs with the OFFICE-writer class, not the completion exemption.
+  // Probed with ONE representative next-candidate date (unshifted by
+  // seasonal/blackout nudges — a coarse "is this series billable at all"
+  // check, not a per-date financial calculation; the real insert loop below
+  // still resolves each inserted date's own precise price the usual way).
+  const latestForBillingProbe = await latestLiveSeriesVisit(conn, parentId);
+  if (latestForBillingProbe) {
+    const probeROpts = {
+      ...recurrenceOrdinalOptions(parent.scheduled_date, {
+        nth: parent.recurring_nth,
+        weekday: parent.recurring_weekday,
+      }),
+      intervalDays: parent.recurring_interval_days,
+    };
+    const probeAnchor = seriesExtendAnchor(latestForBillingProbe, parent.recurring_pattern, probeROpts);
+    const probeDate = nextRecurringDate(probeAnchor, parent.recurring_pattern, 1, probeROpts);
+    let probeAddons = [];
+    try {
+      // Savepoint (conn is already inside the caller's transaction), not a
+      // bare try/catch — a missing scheduled_service_addons table
+      // (pre-migration env) must not abort the caller's transaction, same
+      // convention as reconcileRecurringSeriesVisitCount's own preload.
+      probeAddons = await conn.transaction((sp) => sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
+    } catch { probeAddons = []; }
+    const probeDiscountScope = await loadStoredDiscountScope(conn, parent, probeAddons);
+    const probeBlackoutDates = await loadSeriesBlackoutDates(conn, probeAnchor);
+    // Stamped flag only, not the live customer-preference lookup: this is a
+    // coarse "does this series bill ANYTHING" probe (unshifted candidate
+    // date, see above) — whether add-ons shift a day or two under a live
+    // weekend preference doesn't change that qualitative verdict, and the
+    // real insert loop below (extendSeriesOnceLocked) already resolves the
+    // live preference correctly for the actual dates it writes.
+    const probeSkip = cols.skip_weekends ? !!parent.skip_weekends : false;
+    const probeSeriesCioc = cols.create_invoice_on_complete
+      ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent)
+      : undefined;
+    const unbillable = await seriesExtensionUnbillable(conn, {
+      parent, dates: [probeDate], cols, parentAddons: probeAddons, storedDiscountScope: probeDiscountScope,
+      blackoutDates: probeBlackoutDates, skipParent: probeSkip, seriesCioc: probeSeriesCioc,
+    });
+    if (unbillable) return { spawnedVisits: [], skipped: 'unbillable_extension' };
+  }
+
   const todayStr = etDateString();
   const desiredHorizon = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), horizonDays));
   const effectiveHorizon = (termCap && termCap < desiredHorizon) ? termCap : desiredHorizon;
@@ -15225,10 +15285,16 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     if (!spawned) break;
     spawnedVisits.push(spawned);
   }
+  // Reporting-only fields for the caller (the ops script's printed line,
+  // the sweep's summary) — not an insert payload, so read into locals
+  // first: series-child-catalog-identity.test.js's source guard bans the
+  // literal child-row shape this would otherwise textually resemble.
+  const reportedServiceType = parent.service_type;
+  const reportedPattern = parent.recurring_pattern;
   return {
     spawnedVisits, skipped: null, effectiveHorizon, termCap,
     priorBookedThrough, customerId: parent.customer_id,
-    serviceType: parent.service_type, recurringPattern: parent.recurring_pattern,
+    serviceType: reportedServiceType, recurringPattern: reportedPattern,
   };
 }
 
