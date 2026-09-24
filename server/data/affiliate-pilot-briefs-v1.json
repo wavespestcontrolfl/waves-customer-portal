@@ -41,7 +41,7 @@
           "product_id": "ks-adjustable-door-sweep",
           "placement": "primary-rec",
           "anchor": "an adjustable double-bubble door sweep",
-          "section": "the installation step-by-step section"
+          "section": "the manufacturer-guided measurement and installation step"
         }
       ],
       "sources": [
@@ -91,7 +91,7 @@
           "product_id": "stuff-it-copper-mesh",
           "placement": "primary-rec",
           "anchor": "a roll of copper exclusion mesh",
-          "section": "the how-to-stuff-and-seat section"
+          "section": "the verified incidental-gap application section; never the drainage or ventilation section"
         }
       ],
       "sources": [
@@ -141,7 +141,7 @@
           "product_id": "acurite-glass-rain-gauge",
           "placement": "primary-rec",
           "anchor": "a glass rain gauge",
-          "section": "the reading-rainfall-at-the-house section"
+          "section": "the manufacturer-guided rain-gauge siting and reading section"
         }
       ],
       "sources": [
@@ -190,7 +190,7 @@
           "product_id": "xlux-soil-moisture-meter",
           "placement": "primary-rec",
           "anchor": "a battery-free soil moisture meter",
-          "section": "the how-to-probe section"
+          "section": "the manufacturer-guided meter placement and interpretation section"
         }
       ],
       "sources": [
@@ -240,7 +240,7 @@
           "product_id": "orbit-sprinkler-catch-cups",
           "placement": "primary-rec",
           "anchor": "a set of sprinkler catch cups",
-          "section": "the setting-up-the-audit section"
+          "section": "the cited catch-cup setup and measurement step"
         }
       ],
       "sources": [
@@ -279,6 +279,7 @@
       "outline": [
         "Explain the purpose and limits of a homeowner visual check without a fixed completion-time promise",
         "Walk accessible ground-level doors, utility areas, and under-sink spaces; no ladders, roof access, electrical work, or disturbing droppings",
+        "At an accessible exterior door, document a daylight gap and assess sweep fit against manufacturer instructions; place the approved door-sweep alternative link here without promising exclusion or blocking drainage",
         "Use the approved flashlight to improve visibility where appropriate; do not claim it outperforms a phone without evidence",
         "Photograph the area and record the location and date; do not identify a pest from one ambiguous sign",
         "Use a blank observation log with condition, location, photo, and question for the technician",
@@ -289,13 +290,13 @@
           "product_id": "police-security-inspector-penlight",
           "placement": "primary-rec",
           "anchor": "a pocket LED inspection light",
-          "section": "the using-the-light-in-cabinet-voids section"
+          "section": "the flashlight visibility step for accessible areas"
         },
         {
           "product_id": "ks-adjustable-door-sweep",
           "placement": "alt-rec",
           "anchor": "an adjustable door sweep",
-          "section": "the exterior-perimeter zone, as the fix for a daylight gap under a door"
+          "section": "the accessible exterior-door observation step, only if the door sweep is suitable"
         }
       ],
       "sources": [
