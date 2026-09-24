@@ -252,6 +252,35 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  // Owner ruling 2026-09-24: commercial/HOA calls are never auto-booked on
+  // an agreed price alone; Waves personnel dictating the booking on the
+  // recording (the same grounded agent commitment) is what clears the hold.
+  test('agent commitment demotes commercial_requires_quote to failedOpenFlags and books', () => {
+    const ex = agentCommitted(['commercial_requires_quote']);
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(true);
+    expect(r.appointmentBlockingFlags || []).not.toContain('commercial_requires_quote');
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['commercial_requires_quote']));
+  });
+
+  test('an agreed price WITHOUT an agent commitment does not clear commercial_requires_quote', () => {
+    const ex = agentCommitted(['commercial_requires_quote'], { claim: false, quote: null });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.service_request = { ...(ex.service_request || {}), quoted_price_usd: 100 };
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
+  test('gate off → commercial_requires_quote still hard-blocks even with a pinned agent commitment', () => {
+    const ex = agentCommitted(['commercial_requires_quote']);
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    const r = canAutoRoute(ex, { transcript: TRANSCRIPT, addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
   test('gate off → caller_not_authorized still hard-blocks even with a pinned agent commitment', () => {
     const r = canAutoRoute(agentCommitted(), { transcript: TRANSCRIPT });
     expect(r.allowed).toBe(false);
