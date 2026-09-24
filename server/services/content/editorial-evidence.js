@@ -49,7 +49,27 @@ async function evaluate(document, brief = {}) {
 // Repairs happen BEFORE existing schema, claims, privacy and SEO gates. A final
 // independent review below still checks the exact bytes emitted by the publisher.
 async function prepareDraft(draft, brief = {}) {
-  if (!enabled() || !['supporting-blog', 'customer-question'].includes(brief.page_type)
+  if (!enabled()) return draft;
+  if (brief.action_type === 'refresh_existing_page') {
+    // Match publishRefresh's target precedence, then let its own resolver tell
+    // us whether this is a blog. Refresh briefs deliberately use the generic
+    // page_type=refresh, so trusting page_type would skip blog repairs (or,
+    // conversely, applying the review to every refresh would pull service and
+    // location pages into a blog-only contract).
+    const target = draft.file_path || brief.target_url || brief.page_url || draft.page_url;
+    let resolved;
+    try {
+      // Dynamic to avoid the load-time cycle: astro-publisher imports this
+      // module for final evidence generation.
+      const publisher = require('../content-astro/astro-publisher');
+      if (!target || typeof publisher.resolveExistingAstroFileForTarget !== 'function') throw new Error('refresh target resolver unavailable');
+      resolved = await publisher.resolveExistingAstroFileForTarget(target);
+    } catch {
+      throw reviewError(null);
+    }
+    if (!resolved?.path) throw reviewError(null);
+    if (!applicable(resolved.path)) return draft;
+  } else if (!['supporting-blog', 'customer-question'].includes(brief.page_type)
       && brief.action_type !== 'new_supporting_blog') return draft;
   const original = fm.stringify(draft.frontmatter || {}, draft.body || '');
   let document = original;
