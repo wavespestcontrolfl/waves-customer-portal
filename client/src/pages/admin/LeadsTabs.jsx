@@ -465,7 +465,10 @@ function LeadBadge({ label, tone = "neutral", className }) {
     </Badge>
   );
 }
-const CONTACT_EVIDENCE_LABELS = {
+// Short labels for the status-review panel; the Map above carries the
+// activity-timeline sentences (a second const of the same name broke the
+// client build on main — esbuild: "already been declared").
+const REVIEW_EVIDENCE_LABELS = {
   live_conversation: "Live conversation",
   assessment_booked: "Assessment booked",
   assessment_completed: "Assessment completed",
@@ -503,7 +506,7 @@ function LeadStatusReviewPanel({ reconciliation }) {
           {finding.message}
           {finding.evidence && (
             <div className="mt-[3px] text-ink-secondary">
-              {CONTACT_EVIDENCE_LABELS[finding.evidence.type] ||
+              {REVIEW_EVIDENCE_LABELS[finding.evidence.type] ||
                 finding.evidence.type}
               {finding.evidence.id ? ` · ${finding.evidence.id}` : ""}
               {finding.evidence.occurred_at
