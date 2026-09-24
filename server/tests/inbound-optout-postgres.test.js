@@ -59,6 +59,7 @@ suite('inbound STOP application receipts (PostgreSQL)', () => {
   test('two concurrent deliveries apply a STOP once', async () => {
     const results = await Promise.all([applyInboundOptout(input, database), applyInboundOptout(input, database)]);
     expect(results.map(result => result.applied).sort()).toEqual([false, true]);
+    expect(results[0].appliedAt).toEqual(results[1].appliedAt);
     expect(await consent()).toMatchObject({ suppression: { active: true }, recipient: 'declined', enabled: false, receipts: 1 });
   });
 
@@ -73,7 +74,7 @@ suite('inbound STOP application receipts (PostgreSQL)', () => {
       await start('notification_prefs').update({ sms_enabled: true });
       retry = applyInboundOptout(input, database);
       await start.commit();
-      expect(await retry).toEqual({ applied: false });
+      expect(await retry).toEqual(expect.objectContaining({ applied: false, appliedAt: expect.any(Date) }));
       expect(await consent()).toMatchObject({ suppression: { active: false }, recipient: 'confirmed', enabled: true, receipts: 1 });
     } finally { if (!start.isCompleted()) await start.rollback(); await retry; }
   });
@@ -89,6 +90,6 @@ suite('inbound STOP application receipts (PostgreSQL)', () => {
       await expect(applyInboundOptout(input, database)).rejects.toThrow();
       expect(await consent()).toEqual({ suppression: undefined, recipient: 'confirmed', enabled: true, receipts: 0 });
     } finally { await database.raw('ALTER TABLE ?? DROP CONSTRAINT synthetic_failure', [table]); }
-    expect(await applyInboundOptout(input, database)).toEqual({ applied: true });
+    expect(await applyInboundOptout(input, database)).toEqual(expect.objectContaining({ applied: true, appliedAt: expect.any(Date) }));
   });
 });
