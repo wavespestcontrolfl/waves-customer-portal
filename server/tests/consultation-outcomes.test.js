@@ -79,6 +79,7 @@ function makeFakeDb(seed = {}) {
     scheduled_services: seed.scheduled_services || [],
     services: seed.services || [],
     leads: seed.leads || [],
+    estimates: seed.estimates || [],
     consultation_outcomes: seed.consultation_outcomes || [],
   };
   let nextId = 1;
@@ -108,6 +109,7 @@ function makeFakeDb(seed = {}) {
     const api = {
       where(...args) { filtered = applyWhereArgs(filtered, args); return api; },
       whereNull(col) { filtered = filtered.filter((r) => resolveField(r, col) == null); return api; },
+      whereNotNull(col) { filtered = filtered.filter((r) => resolveField(r, col) != null); return api; },
       whereIn(col, valueOrFn) {
         const values = typeof valueOrFn === 'function' ? runSubquery(valueOrFn) : valueOrFn;
         filtered = filtered.filter((r) => values.includes(resolveField(r, col)));
@@ -309,6 +311,95 @@ describe('recordOutcome — success + upsert', () => {
   });
 });
 
+describe('recordOutcome — P1-1 post-record reconciliation (the sale closed before the tech recorded the outcome)', () => {
+  const SCHEDULED_DATE = '2026-09-10';
+  const NOW = new Date('2026-09-23T12:00:00Z'); // 13 days after the visit
+
+  function seededDb(overrides = {}) {
+    return makeFakeDb({
+      scheduled_services: [
+        // created_at set to the scheduled_date itself — a real row is never
+        // NULL here (NOT NULL default now()); this is the consultation's own
+        // booking moment, which the (c) evidence check must exclude via the
+        // isAssessmentBooking filter, not by never seeing the row.
+        { id: 'visit-1', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', service_id: null, scheduled_date: SCHEDULED_DATE, created_at: new Date(`${SCHEDULED_DATE}T09:00:00Z`) },
+      ],
+      leads: overrides.leads || [],
+      estimates: overrides.estimates || [],
+      ...overrides.extraTables,
+    });
+  }
+
+  test('an accepted estimate dated after the visit flips a freshly-recorded warm to won (won_via estimate_accept)', async () => {
+    const fakeDb = seededDb({
+      estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-09-15T00:00:00Z') }],
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('estimate_accept');
+    expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-15T00:00:00Z').toISOString());
+  });
+
+  test('a converted lead dated after the visit flips a freshly-recorded warm to won (won_via office_booking)', async () => {
+    const fakeDb = seededDb({
+      leads: [{ id: 'lead-1', customer_id: 'cust-1', converted_at: new Date('2026-09-16T00:00:00Z'), deleted_at: null, created_at: SCHEDULED_DATE }],
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('office_booking');
+  });
+
+  test('a non-assessment booking created after the visit flips a freshly-recorded warm to won (won_via office_booking); another assessment does not', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push(
+      { id: 'visit-2', service_type: 'Waves Assessment', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z') }, // another consultation — not a sale
+      { id: 'visit-3', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-17T00:00:00Z') },
+    );
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('office_booking');
+    expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-17T00:00:00Z').toISOString());
+  });
+
+  test('no qualifying evidence anywhere → stays warm', async () => {
+    const fakeDb = seededDb({
+      // An estimate that never got accepted, and a lead never converted —
+      // neither counts.
+      estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'sent', accepted_at: null }],
+      leads: [{ id: 'lead-1', customer_id: 'cust-1', converted_at: null, deleted_at: null, created_at: SCHEDULED_DATE }],
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('warm');
+  });
+
+  test('evidence dated BEFORE the visit does not count (a pre-existing estimate is not this consultation\'s sale)', async () => {
+    const fakeDb = seededDb({
+      estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-08-01T00:00:00Z') }],
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('warm');
+  });
+
+  test('P1-2: evidence dated in the FUTURE relative to `now` does not count', async () => {
+    // Sanity companion to the markWonForCustomer future-consultation test
+    // below — the upper bound applies to evidence dates here too.
+    const fakeDb = seededDb({
+      estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-10-01T00:00:00Z') }],
+    });
+    // Freeze "now" inside recordOutcome via a fixed-clock test is not
+    // available (it reads `new Date()` internally), so this proves the
+    // window arithmetic directly: an estimate accepted well after today
+    // must not be picked up by a call made "today".
+    jest.useFakeTimers().setSystemTime(NOW);
+    try {
+      const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+      expect(saved.outcome).toBe('warm');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
 // ---- markWonForCustomer ----------------------------------------------------
 
 describe('markWonForCustomer', () => {
@@ -325,6 +416,8 @@ describe('markWonForCustomer', () => {
         { id: 'visit-lead', scheduled_date: etDateString(addETDays(NOW, -5)) },
         // Within window, but already resolved lost — must not be re-touched.
         { id: 'visit-already-lost', scheduled_date: etDateString(addETDays(NOW, -3)) },
+        // P1-2: scheduled NEXT WEEK — a booking landing today must not win it.
+        { id: 'visit-future', scheduled_date: etDateString(addETDays(NOW, 7)) },
       ],
       leads: [{ id: 'lead-9', customer_id: 'cust-1' }],
       consultation_outcomes: [
@@ -332,6 +425,7 @@ describe('markWonForCustomer', () => {
         { id: 'co-old', scheduled_service_id: 'visit-old', customer_id: 'cust-1', lead_id: null, outcome: 'cold' },
         { id: 'co-lead', scheduled_service_id: 'visit-lead', customer_id: null, lead_id: 'lead-9', outcome: 'warm' },
         { id: 'co-already-lost', scheduled_service_id: 'visit-already-lost', customer_id: 'cust-1', lead_id: null, outcome: 'lost' },
+        { id: 'co-future', scheduled_service_id: 'visit-future', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
       ],
     });
   }
@@ -348,6 +442,18 @@ describe('markWonForCustomer', () => {
     expect(byId['co-lead'].outcome).toBe('won');
     expect(byId['co-old'].outcome).toBe('cold'); // untouched — outside the window
     expect(byId['co-already-lost'].outcome).toBe('lost'); // untouched — not warm/cold
+    expect(byId['co-future'].outcome).toBe('warm'); // untouched — visit is scheduled AFTER today
+  });
+
+  test('P1-2: a consultation scheduled next week stays warm when a booking lands today (upper bound on the window)', async () => {
+    const fakeDb = seededDb();
+    const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: NOW });
+    const coFuture = fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-future');
+    expect(coFuture.outcome).toBe('warm');
+    expect(coFuture.won_at).toBeUndefined();
+    // Sanity: it's excluded from the count too, not just left with stale
+    // fields — 2 is co-recent + co-lead only (asserted in detail above).
+    expect(count).toBe(2);
   });
 
   test('idempotent — a second call finds nothing left to win', async () => {

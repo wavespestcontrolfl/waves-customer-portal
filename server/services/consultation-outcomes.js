@@ -73,6 +73,70 @@ function defaultFollowUpAt(outcome, followUpAt) {
   return null;
 }
 
+// The visit's scheduled_date as a plain 'YYYY-MM-DD' — pg hands a DATE
+// column back as either a Date (midnight UTC) or, over some drivers/mocks,
+// already a string; normalize once (mirrors consultationStats' own
+// scheduledDateStr derivation).
+function toDateOnlyString(value) {
+  if (typeof value === 'string') return value.slice(0, 10);
+  return etDateString(value);
+}
+
+/**
+ * Reconciliation from the CONSULTATION side (P1-1): a sale can commit
+ * BEFORE the technician gets around to recording the visit's outcome, in
+ * which case markWonForCustomer already ran and found nothing to win — a
+ * warm/cold row recorded afterward would otherwise sit open forever. Checks,
+ * in order, for the first qualifying evidence dated on/after the visit's
+ * scheduled_date (ET) and on/before BOTH `now` (P1-2 — never a future date)
+ * and the visit's own 90-day window:
+ *   (a) leads.converted_at for any lead on this customer,
+ *   (b) an accepted estimate for this customer (estimates.status='accepted',
+ *       accepted_at),
+ *   (c) a non-assessment scheduled_services row for this customer created
+ *       after the visit (another consultation is never itself a sale).
+ * Returns { won_via, won_at } for the first match, or null.
+ */
+async function findSaleEvidenceForConsultation(database, { customerId, scheduledDateStr, now = new Date() }) {
+  if (!customerId) return null;
+
+  const nowDateStr = etDateString(now);
+  const windowEndDate = addETDays(new Date(`${scheduledDateStr}T12:00:00Z`), WON_WINDOW_DAYS);
+  const windowEndStr = etDateString(windowEndDate);
+  // Never later than `now` (P1-2), and never past the visit's own window.
+  const upperBoundStr = nowDateStr < windowEndStr ? nowDateStr : windowEndStr;
+  const inRange = (dateStr) => dateStr >= scheduledDateStr && dateStr <= upperBoundStr;
+
+  const leadRows = await database('leads').where({ customer_id: customerId }).select('id', 'converted_at');
+  for (const lead of leadRows) {
+    if (!lead.converted_at) continue;
+    if (inRange(etDateString(new Date(lead.converted_at)))) {
+      return { won_via: 'office_booking', won_at: new Date(lead.converted_at) };
+    }
+  }
+
+  const acceptedEstimate = await database('estimates')
+    .where({ customer_id: customerId, status: 'accepted' })
+    .whereNotNull('accepted_at')
+    .orderBy('accepted_at', 'asc')
+    .first('accepted_at');
+  if (acceptedEstimate && inRange(etDateString(new Date(acceptedEstimate.accepted_at)))) {
+    return { won_via: 'estimate_accept', won_at: new Date(acceptedEstimate.accepted_at) };
+  }
+
+  const bookings = await database('scheduled_services')
+    .where({ customer_id: customerId })
+    .select('id', 'service_type', 'service_id', 'created_at');
+  for (const booking of bookings) {
+    if (!inRange(etDateString(new Date(booking.created_at)))) continue;
+     
+    if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale
+    return { won_via: 'office_booking', won_at: new Date(booking.created_at) };
+  }
+
+  return null;
+}
+
 /**
  * Record (or re-record) the technician's read of a consultation visit.
  * Never accepts outcome 'won' — that is stamped only by markWonForCustomer
@@ -168,6 +232,36 @@ async function recordOutcome(params = {}, { trx } = {}) {
   if (!saved) {
     throw makeError('This consultation already converted — its outcome cannot be edited', 409, 'ALREADY_WON');
   }
+
+  // P1-1: the sale may have already closed BEFORE the tech got around to
+  // recording this outcome — markWonForCustomer ran against zero rows in
+  // that case, and a warm/cold row saved afterward would sit open forever.
+  // Savepoint-isolated (waves-db §5b) and best-effort, same as
+  // markWonForCustomer: an evidence-lookup hiccup must never fail the record
+  // itself, or (if `database` is a caller's live transaction) abort it.
+  if (['warm', 'cold'].includes(saved.outcome)) {
+    try {
+      let won = null;
+      await database.transaction(async (sp) => {
+        const evidence = await findSaleEvidenceForConsultation(sp, {
+          customerId,
+          scheduledDateStr: toDateOnlyString(svcRow.scheduled_date),
+          now,
+        });
+        if (!evidence) return;
+        const [wonRow] = await sp('consultation_outcomes')
+          .where({ id: saved.id })
+          .whereIn('outcome', ['warm', 'cold'])
+          .update({ outcome: 'won', won_at: evidence.won_at, won_via: evidence.won_via, updated_at: new Date() })
+          .returning('*');
+        won = wonRow || null;
+      });
+      if (won) return won;
+    } catch (err) {
+      logger.warn(`[consultation-outcomes] post-record sale-evidence reconciliation failed for ${scheduledServiceId}: ${err.message}`);
+    }
+  }
+
   return saved;
 }
 
@@ -190,13 +284,17 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
       const leadRows = await sp('leads').where({ customer_id: customerId }).select('id');
       const leadIds = leadRows.map((r) => r.id);
       const cutoff = etDateString(addETDays(now, -WON_WINDOW_DAYS));
+      // Upper bound (P1-2): a consultation scheduled in the future must never
+      // be marked won by today's booking — that would also send
+      // median_days_to_close negative. Bounds the window on BOTH sides.
+      const nowDateStr = etDateString(now);
 
       // One atomic UPDATE: the outcome guard (only an open warm/cold row can
-      // win) and the 90-day window (a subquery against scheduled_services,
-      // not a prior SELECT) both live in the same statement's WHERE, so
-      // nothing can flip a row's outcome between "read" and "write" — there
-      // is no read. The win count is the rows this UPDATE actually touched,
-      // never a pre-computed candidate list.
+      // win) and the [90-day-ago, today] window (a subquery against
+      // scheduled_services, not a prior SELECT) both live in the same
+      // statement's WHERE, so nothing can flip a row's outcome between
+      // "read" and "write" — there is no read. The win count is the rows
+      // this UPDATE actually touched, never a pre-computed candidate list.
       const updated = await sp('consultation_outcomes')
         .whereIn('outcome', ['warm', 'cold'])
         .where(function matchCustomerOrItsLeads() {
@@ -204,7 +302,9 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
           if (leadIds.length) this.orWhereIn('lead_id', leadIds);
         })
         .whereIn('scheduled_service_id', function liveVisits() {
-          this.select('id').from('scheduled_services').where('scheduled_date', '>=', cutoff);
+          this.select('id').from('scheduled_services')
+            .where('scheduled_date', '>=', cutoff)
+            .where('scheduled_date', '<=', nowDateStr);
         })
         .update({ outcome: 'won', won_at: now, won_via: via, updated_at: now })
         .returning('id');
