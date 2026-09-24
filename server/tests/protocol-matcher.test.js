@@ -235,6 +235,12 @@ describe('mosquito misting SYSTEM is a consultation, not the barrier protocol', 
     });
   });
 
+  test.each(['Mosquito Misting-System Service', 'Mosquito misting_system service'])('separator variant %s (no key) is still the consultation, never barrier', (name) => {
+    const result = matchServiceProtocol(protocols, name, {});
+    expect(result.programKey).toBeNull();
+    expect(result.reason).toBe('misting_system_consultation');
+  });
+
   test('a "misting system" name with no catalog key also gets no protocol', () => {
     // The plain design-visit identity (no install/maintenance/refill
     // qualifier) is the free-consultation reason.

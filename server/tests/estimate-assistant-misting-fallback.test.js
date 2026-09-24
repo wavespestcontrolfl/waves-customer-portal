@@ -127,6 +127,26 @@ describe('Ask Waves fallback — mosquito misting SYSTEM quote-required question
     });
   });
 
+  describe('Codex round-5: re-entry, bare misting, visit weather', () => {
+    test('re-entry question states the dry/label re-entry condition', () => {
+      const answer = answerEstimateQuestionFallback('Can we go outside after it sprays?', mistingContext);
+      expect(answer.toLowerCase()).toContain('until the mist has settled and treated surfaces are dry');
+    });
+    test('mixed misting + barrier estimate: bare "misting" question stays off the system copy', () => {
+      const mixed = { billing: { quoteRequired: true, amountText: null }, services: [
+        { service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' },
+        { service: 'mosquito_monthly', label: 'Monthly Mosquito Control Service' },
+      ] };
+      const answer = answerEstimateQuestionFallback('How does the 21-day misting cycle work?', mixed);
+      expect(answer.toLowerCase()).not.toContain('design visit');
+    });
+    test('weather question about the design visit gets the reschedule answer, not cycle pausing', () => {
+      const answer = answerEstimateQuestionFallback('Will you still come for the design visit if it rains?', mistingContext);
+      expect(answer.toLowerCase()).toContain('reschedule');
+      expect(answer.toLowerCase()).not.toContain('optional weather sensor');
+    });
+  });
+
   describe('intent order: price first, booking last (topic questions containing "when" stay on topic)', () => {
     test.each([
       ['When should I pause it before a storm?', 'should be paused for rain'],

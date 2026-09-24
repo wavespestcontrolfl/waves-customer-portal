@@ -60,7 +60,8 @@
  */
 
 const MISTING_SYSTEM_SERVICE_KEY = 'mosquito_misting_system';
-const MISTING_SYSTEM_NAME_PATTERN = /\bmisting\s+systems?\b/i;
+// Separator-tolerant: "misting system", "misting-system", "misting_system".
+const MISTING_SYSTEM_NAME_PATTERN = /\bmisting[\s_-]+systems?\b/i;
 // Words that mark a keyless name as a DIFFERENT phase of the product
 // (install/maintenance/refill), not the plain design-visit identity. Bare
 // "service" is excluded on purpose — see the module comment above.
