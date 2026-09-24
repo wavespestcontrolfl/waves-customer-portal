@@ -540,12 +540,20 @@ describe('topUpRecurringSeriesLocked — annual-prepay scope cut v1 (Codex GitHu
         return firstCall[1] ? null : parent;
       }
       if (table === 'customers' && op === 'first') return customer;
+      if (table === 'annual_prepay_terms' && op === 'columnInfo') return { dispute_suspended_at: {} };
       if (table === 'annual_prepay_terms as t' && op === 'first') { capturedCalls.push(calls); return undefined; }
       return null;
     });
     await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
     expect(capturedCalls).toHaveLength(1);
     expect(capturedCalls[0]).toContainEqual(['where', 't.status', PAYMENT_PENDING_STATUS]);
+    // Codex r8 P1: only a CURRENT, UNDISPUTED unpaid term excludes — an
+    // expired unpaid term is moot and a dispute-suspended term was demoted
+    // to payment_pending precisely so ordinary billing/visits continue.
+    const windowFn = capturedCalls[0].find((c) => c[0] === 'whereFn');
+    expect(windowFn[1]).toContainEqual(['whereNull', 't.term_end']);
+    expect(windowFn[1]).toContainEqual(['orWhere', 't.term_end', '>=', etDateString()]);
+    expect(capturedCalls[0]).toContainEqual(['whereNull', 't.dispute_suspended_at']);
     const raw = capturedCalls[0].find((c) => c[0] === 'whereRaw');
     expect(raw).toBeDefined();
     expect(raw[2]).toEqual(expect.arrayContaining(['void', 'cancelled', 'canceled', 'refunded']));
@@ -789,6 +797,25 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
     for (const row of inserted) {
       expect(row.window_start).toBe('19:00');
       expect(row.window_end).toBe('20:00');
+    }
+  });
+
+  test('persists the duration-derived end when the stored window_end is missing (Codex GitHub r8 P2)', async () => {
+    // A null end would otherwise be copied onto every child, and the
+    // missed-service sweep (window_end || window_start) would treat the
+    // visit as over at its start time.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '18:00', window_end: null,
+        estimated_duration_minutes: 60,
+      },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+    for (const row of inserted) {
+      expect(row.window_start).toBe('18:00');
+      expect(row.window_end).toBe('19:00');
     }
   });
 

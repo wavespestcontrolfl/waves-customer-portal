@@ -14794,7 +14794,10 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   } catch {
     return { unplaceable: true };
   }
-  const endStale = windowEnd != null && windowEnd !== '' && parseHHMM(windowEnd) !== parseHHMM(validated.window_end);
+  // A missing stored end is stale too: persist the duration-derived end, or
+  // every child keeps a null end and the missed-service sweep
+  // (window_end || window_start) reads the visit as over at its start (Codex r8 P2).
+  const endStale = windowEnd == null || windowEnd === '' || parseHHMM(windowEnd) !== parseHHMM(validated.window_end);
   if (!needsFlooring && !endStale) return null;
   return { start: validated.window_start, end: validated.window_end };
 }
@@ -15269,10 +15272,20 @@ async function isCustomerPrepayLive(conn, customerId) {
   // reconcile with. A pending term whose invoice WAS voided/cancelled/
   // refunded is genuinely dead (never activates) and does not exclude.
   const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const termHasDisputeMarker = !!((await conn('annual_prepay_terms').columnInfo()) || {}).dispute_suspended_at;
   const pendingUnresolved = await conn('annual_prepay_terms as t')
     .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
     .where('t.customer_id', customerId)
     .where('t.status', AnnualPrepayRenewals.PAYMENT_PENDING_STATUS)
+    // Only a CURRENT, UNDISPUTED unpaid term still expected to activate.
+    // An expired unpaid term is moot (defaultAnnualPrepayTermStart), and a
+    // dispute-suspended term was demoted to payment_pending precisely so
+    // ordinary billing and visits continue
+    // (suspendActiveTermsForDisputedInvoice) — neither excludes (Codex r8 P1).
+    .where(function currentWindow() {
+      this.whereNull('t.term_end').orWhere('t.term_end', '>=', etDateString());
+    })
+    .modify((q) => { if (termHasDisputeMarker) q.whereNull('t.dispute_suspended_at'); })
     .whereRaw(
       `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
       cancelledStatuses,
