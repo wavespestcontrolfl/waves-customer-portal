@@ -51,6 +51,32 @@ test('keeps factual sections whose headings begin with a decorative heading word
   expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
 });
 
+test('keeps prose adjacent to a fenced code block', () => {
+  const passages = ['Pests transmit pathogens.', 'Mosquitoes breed in standing water.'];
+  const analysis = analyzeDocument(`${passages[0]}\n\`\`\`text\nexample\n\`\`\`\n${passages[1]}`, 'Guide');
+  expect(analysis.passages.map((passage) => passage.text)).toEqual(passages);
+  expect(analysis.claims.map((claim) => claim.passage)).toEqual(passages);
+});
+
+test('ignores decorative headings inside fenced examples', () => {
+  const passage = 'Mosquitoes breed in standing water.';
+  const analysis = analyzeDocument(`\`\`\`md\n## Sources\nExample only.\n\`\`\`\n${passage}`, 'Guide');
+  expect(analysis.sections).toEqual([expect.objectContaining({ heading: 'Guide', lead: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
+});
+
+test('keeps deterministic factual claims phrased as questions', () => {
+  const passage = 'Did you know termites cause $5 billion in property damage every year?';
+  expect(analyzeDocument(passage, 'Guide').claims).toEqual([expect.objectContaining({ passage })]);
+});
+
+test('keeps factual sentences after an opening call to action', () => {
+  const passage = 'Termites cause $5 billion in property damage every year.';
+  const analysis = analyzeDocument(`Call us today for an inspection. ${passage}`, 'Guide');
+  expect(analysis.passages).toEqual([expect.objectContaining({ text: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
+});
+
 test('rejects repairs that change MDX tag nesting', () => {
   expect(repairViolation('<Callout><Note>Text</Note></Callout>', '<Callout><Note>Text</Callout></Note>')).toBe('mdxTags_changed');
 });
