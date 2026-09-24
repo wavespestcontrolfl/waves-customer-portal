@@ -134,14 +134,14 @@ function makeDb(initial = {}) {
 }
 
 function makeGh(over = {}) {
-  const calls = { putFile: [], comments: [] };
+  const calls = { putFile: [], commitFiles: [], comments: [] };
   const gh = {
     // Post-push revalidation compares the live PR head to the pushed commit —
     // after a putFile the fake PR's head is the pushed sha, like GitHub's.
     async getPr() {
       return {
         state: 'open',
-        head: { sha: calls.putFile.length ? 'newcommit999aaa' : HEAD, ref: 'content/blog-x' },
+        head: { sha: (calls.putFile.length || calls.commitFiles.length) ? 'newcommit999aaa' : HEAD, ref: 'content/blog-x' },
       };
     },
     async listPrReviewComments() { return over.reviewComments || [finding()]; },
@@ -151,10 +151,11 @@ function makeGh(over = {}) {
     // The created commit's PARENT is the pre-push tip — the r18 parent CAS
     // requires it to equal the pinned parent on pinned lanes.
     async putFile(args) { calls.putFile.push(args); return { commit: { sha: 'newcommit999aaa', parents: [{ sha: over.pushParent || HEAD }] } }; },
+    async commitFiles(args) { calls.commitFiles.push(args); return { commit: { sha: 'newcommit999aaa' } }; },
     // Post-push flows read the pushed commit; tests on the PINNED lanes
     // pass over.preHead so the r17 pre-push parent recheck sees the pinned
     // parent before the push.
-    async getBranchSha() { return calls.putFile.length ? 'newcommit999aaa' : (over.preHead || 'newcommit999aaa'); },
+    async getBranchSha() { return (calls.putFile.length || calls.commitFiles.length) ? 'newcommit999aaa' : (over.preHead || 'newcommit999aaa'); },
     async createIssueComment(n, body) { calls.comments.push({ n, body }); if (over.commentThrows) throw new Error('gh 502'); return {}; },
   };
   Object.assign(gh, over.gh || {});
@@ -276,7 +277,8 @@ describe('runRemediationForPr', () => {
   test('fresh findings under limit → push fix, persist state, re-request review', async () => {
     const db = makeDb();
     const gh = makeGh();
-    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED BODY'), validateFixedBlogFile: PASS });
+    const editorialEvidence = { filesForDocument: jest.fn(async () => []) };
+    const r = await runRemediationForPr(CTX, { db, gh, editorialEvidence, callAnthropic: makeCall('FIXED BODY'), validateFixedBlogFile: PASS });
     expect(r.remediated).toBe(true);
     expect(r.round).toBe(1);
     expect(gh._calls.putFile[0].path).toBe('src/content/blog/pest-control/roaches.md');
@@ -284,9 +286,157 @@ describe('runRemediationForPr', () => {
     expect(gh._calls.comments[0].body).toContain('newcommit999aaa');
     const st = db._tables.codex_remediation_state[0];
     expect(st.rounds).toBe(1); expect(st.status).toBe('remediating');
+    expect(editorialEvidence.filesForDocument).toHaveBeenCalledTimes(1);
+    expect(gh._calls.commitFiles).toHaveLength(0);
     // Pushed-round proof for the P2-only merge bar (round 9): only the
     // success path records the pushed commit SHA.
     expect(st.last_push_sha).toBe('newcommit999aaa');
+  });
+
+  test('evidence sidecar and validated fix commit atomically from the immutable PR head', async () => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const editorialBrief = { required_sources: ['https://example.edu/source'] };
+    const sidecar = { path: 'content-ops/editorial-evidence/test.json', content: '{"signed":true}\n' };
+    const editorialEvidence = { filesForDocument: jest.fn(async () => [sidecar]) };
+
+    const result = await runRemediationForPr({ ...CTX, expectedParentSha: HEAD, editorialBrief }, {
+      db,
+      gh,
+      editorialEvidence,
+      callAnthropic: makeCall('FIXED BODY'),
+      validateFixedBlogFile: PASS,
+    });
+
+    expect(result.remediated).toBe(true);
+    const reviewedDocument = editorialEvidence.filesForDocument.mock.calls[0][0].document;
+    expect(reviewedDocument.trim()).toBe('FIXED BODY');
+    expect(editorialEvidence.filesForDocument).toHaveBeenCalledWith({
+      document: reviewedDocument,
+      path: 'src/content/blog/pest-control/roaches.md',
+      brief: editorialBrief,
+    });
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.commitFiles).toEqual([{
+      branch: 'content/blog-x',
+      expectedHeadSha: HEAD,
+      files: [
+        { path: 'src/content/blog/pest-control/roaches.md', content: reviewedDocument },
+        sidecar,
+      ],
+      message: 'fix(blog): address Codex review findings (round 1)',
+    }]);
+  });
+
+  test('an incomplete fact check retries on the same head with retained budget instead of parking', async () => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const onPark = jest.fn();
+    const validate = jest.fn()
+      .mockResolvedValueOnce({ ok: false, reason: 'factcheck did not complete', transient: true })
+      .mockImplementation(PASS);
+    const editorialEvidence = { filesForDocument: jest.fn(async () => []) };
+    const ctx = { ...CTX, expectedParentSha: HEAD, prePushCheck: jest.fn(async () => true), onPark };
+    const deps = { db, gh, editorialEvidence, callAnthropic: jest.fn(makeCall('FIXED BODY')), validateFixedBlogFile: validate };
+
+    const first = await runRemediationForPr(ctx, deps);
+    expect(first).toEqual(expect.objectContaining({ skipped: true, transient: true, reason: expect.stringContaining('will retry') }));
+    expect(onPark).not.toHaveBeenCalled();
+    expect(db._tables.codex_remediation_state[0]).toEqual(expect.objectContaining({ status: 'active', rounds: 1 }));
+
+    const second = await runRemediationForPr(ctx, deps);
+    expect(second).toEqual(expect.objectContaining({ remediated: true, round: 2 }));
+  });
+
+  test('an editorial provider outage retries on the same head with retained budget, then atomically commits after recovery', async () => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const prePushCheck = jest.fn(async () => true);
+    const outage = Object.assign(new Error('review provider unavailable'), { code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+    const sidecar = { path: 'content-ops/editorial-evidence/test.json', content: '{"signed":true}\n' };
+    const editorialEvidence = { filesForDocument: jest.fn()
+      .mockRejectedValueOnce(outage)
+      .mockResolvedValueOnce([sidecar]) };
+    const callAnthropic = jest.fn(makeCall('FIXED BODY'));
+    const onPark = jest.fn();
+    const ctx = { ...CTX, expectedParentSha: HEAD, prePushCheck, onPark };
+    const deps = { db, gh, editorialEvidence, callAnthropic, validateFixedBlogFile: PASS };
+
+    const outageResult = await runRemediationForPr(ctx, deps);
+
+    expect(outageResult).toEqual(expect.objectContaining({
+      skipped: true, transient: true, reason: expect.stringContaining('temporarily unavailable'),
+    }));
+    expect(prePushCheck).not.toHaveBeenCalled();
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.commitFiles).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0]).toEqual(expect.objectContaining({
+      status: 'active', rounds: 1,
+    }));
+    expect(onPark).not.toHaveBeenCalled();
+
+    const recovered = await runRemediationForPr(ctx, deps);
+
+    expect(recovered).toEqual(expect.objectContaining({ remediated: true, round: 2 }));
+    expect(editorialEvidence.filesForDocument).toHaveBeenCalledTimes(2);
+    expect(callAnthropic).toHaveBeenCalledTimes(2);
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.commitFiles).toHaveLength(1);
+    expect(gh._calls.commitFiles[0].files[1]).toEqual(sidecar);
+    expect(db._tables.codex_remediation_state[0].rounds).toBe(2);
+  });
+
+  test('repeated editorial outages exhaust the existing round budget and park without a write', async () => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const outage = Object.assign(new Error('signing key unavailable'), { code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+    const editorialEvidence = { filesForDocument: jest.fn().mockRejectedValue(outage) };
+    const callAnthropic = jest.fn(makeCall('FIXED BODY'));
+    const deps = { db, gh, editorialEvidence, callAnthropic, validateFixedBlogFile: PASS };
+    const ctx = { ...CTX, expectedParentSha: HEAD };
+
+    for (let attempt = 1; attempt < MAX_ROUNDS; attempt += 1) {
+      await expect(runRemediationForPr(ctx, deps)).resolves.toEqual(expect.objectContaining({
+        skipped: true, transient: true,
+      }));
+    }
+    const exhausted = await runRemediationForPr(ctx, deps);
+
+    expect(exhausted).toEqual(expect.objectContaining({
+      parked: true, reason: expect.stringContaining(`exhausted ${MAX_ROUNDS} remediation rounds`),
+    }));
+    expect(db._tables.codex_remediation_state[0]).toEqual(expect.objectContaining({
+      status: 'parked', rounds: MAX_ROUNDS, park_phase: 'pre_push', parked_head_sha: HEAD,
+    }));
+    expect(editorialEvidence.filesForDocument).toHaveBeenCalledTimes(MAX_ROUNDS);
+    expect(callAnthropic).toHaveBeenCalledTimes(MAX_ROUNDS);
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.commitFiles).toHaveLength(0);
+  });
+
+  test.each([
+    ['missing output', null, 'returned no file list'],
+    ['deterministic rejection mentioning availability', Object.assign(
+      new Error('Claim about network availability is unsupported'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED' },
+    ), 'network availability'],
+  ])('editorial %s fails closed and is not retried on the same head', async (_label, error, reason) => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const editorialEvidence = { filesForDocument: error
+      ? jest.fn().mockRejectedValue(error) : jest.fn().mockResolvedValue(null) };
+    const callAnthropic = jest.fn(makeCall('FIXED BODY'));
+    const deps = { db, gh, editorialEvidence, callAnthropic, validateFixedBlogFile: PASS };
+    const ctx = { ...CTX, expectedParentSha: HEAD };
+
+    const result = await runRemediationForPr(ctx, deps);
+    expect(result).toEqual(expect.objectContaining({
+      parked: true, reason: expect.stringContaining(reason),
+    }));
+    expect((await runRemediationForPr(ctx, deps)).reason).toBe('parked');
+    expect(editorialEvidence.filesForDocument).toHaveBeenCalledTimes(1);
+    expect(callAnthropic).toHaveBeenCalledTimes(1);
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.commitFiles).toHaveLength(0);
   });
 
   test('.mdx finding path is edited (not the slug .md fallback)', async () => {
@@ -1198,6 +1348,23 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
   const FAQ_MD = `---\n${JSON.stringify(TERMITE_FM, null, 2)}\n---\nBait stations target the colony itself.\n\n## Frequently Asked Questions\n\n### How long does bait last?\n\nStations stay in service as long as they are monitored.`;
   const gateDeps = { factCheckEvaluate: async () => ({ pass: true }) };
 
+  test('mandatory editorial fact checking rejects an unchecked pass', async () => {
+    const result = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true, requireFactCheck: true }, gateDeps);
+    expect(result).toEqual({ ok: false, reason: 'factcheck did not complete', transient: true });
+  });
+
+  test('the editorial evidence gate requires a completed fact check without the caller flag', async () => {
+    const prior = process.env.GATE_EDITORIAL_EVIDENCE;
+    process.env.GATE_EDITORIAL_EVIDENCE = 'true';
+    try {
+      const result = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true }, gateDeps);
+      expect(result).toEqual({ ok: false, reason: 'factcheck did not complete', transient: true });
+    } finally {
+      if (prior === undefined) delete process.env.GATE_EDITORIAL_EVIDENCE;
+      else process.env.GATE_EDITORIAL_EVIDENCE = prior;
+    }
+  });
+
   test('validateFixedBlogFile: termite post with a pre-existing FAQ blocks without the flag, passes with it', async () => {
     const strict = await rem.validateFixedBlogFile(FAQ_MD, {}, gateDeps);
     expect(strict.ok).toBe(false);
@@ -1283,17 +1450,20 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
       const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
       gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
       let optsSeen = null;
+      const reviewedBrief = { voice_constraints: { operator_brief: { faq_required: true } }, required_sources: ['https://example.edu/termite'] };
+      const editorialEvidence = { filesForDocument: jest.fn(async () => []) };
       const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
-        db, gh, callAnthropic: makeCall('FIXED'),
+        db, gh, editorialEvidence, callAnthropic: makeCall('FIXED'),
         validateFixedBlogFile: (md, opts) => { optsSeen = opts; return { ok: true }; },
         validateAutonomousRunGates: async () => ({ ok: true }),
         autonomousRunner: {
-          _loadReviewedBrief: async () => ({ voice_constraints: { operator_brief: { faq_required: true } } }),
+          _loadReviewedBrief: async () => reviewedBrief,
           _deriveGuardrailOptions: async () => ({ service: 'termite', domains: null, operatorFaqException: true }),
         },
       });
       expect(r.remediated).toBe(true);
       expect(optsSeen.operatorFaqException).toBe(true);
+      expect(editorialEvidence.filesForDocument).toHaveBeenCalledWith(expect.objectContaining({ brief: reviewedBrief }));
     } finally {
       process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;
     }
@@ -1906,6 +2076,138 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     });
     expect(r.skipped).toBe(true);
     expect(r.reason).toMatch(/foreign parent/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('a verified evidence-only child of the publisher pin can request review from its exact head', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin }) }],
+    });
+    const gh = makeGh({ reviewComments: [], issueComments: [], reviews: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const verifyEvidenceOnlyAdvance = jest.fn().mockResolvedValue(true);
+    const prePushCheck = jest.fn().mockResolvedValue(true);
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck,
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(verifyEvidenceOnlyAdvance).toHaveBeenCalledWith(
+      { pinnedSha: publisherPin, headSha: HEAD }, { gh },
+    );
+    expect(prePushCheck).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe('requested codex review (no request found for current head)');
+    expect(gh._calls.comments[0].body).toContain(HEAD);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('an evidence-only child of a manually approved article head can request review', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const approvedSha = '3'.repeat(40);
+    const db = makeDb({ autonomous_runs: [{
+      id: 'run-1', action_type: 'new_supporting_blog',
+      trust_build_approved_at: '2026-09-24T08:00:00Z',
+      draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin, trust_build_approved_head_sha: approvedSha }),
+    }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], reviews: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const verifyEvidenceOnlyAdvance = jest.fn(async ({ pinnedSha }) => pinnedSha === approvedSha);
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck: jest.fn().mockResolvedValue(true),
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(verifyEvidenceOnlyAdvance).toHaveBeenCalledTimes(1);
+    expect(verifyEvidenceOnlyAdvance).toHaveBeenCalledWith(
+      { pinnedSha: approvedSha, headSha: HEAD }, { gh },
+    );
+    expect(result.reason).toBe('requested codex review (no request found for current head)');
+    expect(gh._calls.comments[0].body).toContain(HEAD);
+  });
+
+  test('a publisher anchor still recovers when its equal approval SHA has no live approval timestamp', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const db = makeDb({ autonomous_runs: [{
+      id: 'run-1', action_type: 'new_supporting_blog', trust_build_approved_at: null,
+      draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin, trust_build_approved_head_sha: publisherPin }),
+    }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], reviews: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const verifyEvidenceOnlyAdvance = jest.fn().mockResolvedValue(true);
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck: jest.fn().mockResolvedValue(true),
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(verifyEvidenceOnlyAdvance).toHaveBeenCalledWith(
+      { pinnedSha: publisherPin, headSha: HEAD }, { gh },
+    );
+    expect(result.reason).toBe('requested codex review (no request found for current head)');
+  });
+
+  test('revoking human approval during its evidence-child proof withholds remediation', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const approvedSha = '3'.repeat(40);
+    const db = makeDb({ autonomous_runs: [{
+      id: 'run-1', action_type: 'new_supporting_blog',
+      trust_build_approved_at: '2026-09-24T08:00:00Z',
+      draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin, trust_build_approved_head_sha: approvedSha }),
+    }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    const prePushCheck = jest.fn().mockResolvedValue(true);
+    const verifyEvidenceOnlyAdvance = jest.fn(async () => {
+      db._tables.autonomous_runs[0].trust_build_approved_at = null;
+      const payload = JSON.parse(db._tables.autonomous_runs[0].draft_payload);
+      delete payload.trust_build_approved_head_sha;
+      db._tables.autonomous_runs[0].draft_payload = JSON.stringify(payload);
+      return true;
+    });
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck,
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(result.reason).toMatch(/foreign parent/);
+    expect(prePushCheck).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('a pin-mismatched head whose evidence-only proof fails is withheld before any review request or write', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const publisherPin = '1'.repeat(40);
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: publisherPin }) }],
+    });
+    const gh = makeGh({ reviewComments: [], issueComments: [] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    const verifyEvidenceOnlyAdvance = jest.fn().mockResolvedValue(false);
+
+    const result = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, editorialEvidence: { verifyEvidenceOnlyAdvance }, prePushCheck: jest.fn().mockResolvedValue(true),
+      callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+
+    expect(result.reason).toMatch(/foreign parent/);
+    expect(gh._calls.comments).toHaveLength(0);
     expect(gh._calls.putFile).toHaveLength(0);
   });
 

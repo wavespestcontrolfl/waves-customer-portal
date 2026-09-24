@@ -56,6 +56,10 @@ jest.mock('../services/content/topic-targeting-gate', () => ({
   // REAL lock helper: the tests drive it through the db.transaction stub.
   withTopicMergeLock: jest.requireActual('../services/content/topic-targeting-gate').withTopicMergeLock,
 }));
+jest.mock('../services/content/editorial-evidence', () => ({
+  assertPrEvidence: jest.fn().mockResolvedValue(undefined),
+  verifyEvidenceOnlyAdvance: jest.fn().mockResolvedValue(false),
+}));
 jest.mock('../services/seo/indexnow-submit', () => ({
   submit: jest.fn(),
 }));
@@ -72,6 +76,7 @@ const indexNow = require('../services/seo/indexnow-submit');
 const social = require('../services/social-media');
 const logger = require('../services/logger');
 const topicGate = require('../services/content/topic-targeting-gate');
+const editorialEvidence = require('../services/content/editorial-evidence');
 const poller = require('../services/content/autonomous-pr-poller');
 // The topic-merge lock's transaction: queries delegate to the db mock (so
 // setupDb records the park writes), raw() answers the advisory-lock probe.
@@ -82,6 +87,7 @@ function fakeTrx(locked) {
 }
 
 const CANONICAL = 'https://www.wavespestcontrol.com/blog/test-post/';
+const EDITORIAL_BASE_PROOF = { baseSha: 'editorial-base-sha', baseRef: 'main' };
 
 function makeRun(overrides = {}) {
   return {
@@ -133,6 +139,8 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
     .filter((r) => r.opportunity_id)
     .map((r) => ({ id: r.opportunity_id, claim_id: r.queue_claim_id || null, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
   const updates = [];
+  let runFirstRead = 0;
+  let queueFirstRead = 0;
   db.mockImplementation((table) => {
     const q = {
       _filters: {},
@@ -167,7 +175,8 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         if (table === 'opportunity_queue') {
           if (queueFirst !== undefined) {
             return Promise.resolve(
-              Array.isArray(queueFirst) ? queueFirst.find((r) => r.id === q._filters.id) || null : queueFirst,
+              typeof queueFirst === 'function' ? queueFirst(queueFirstRead++)
+                : Array.isArray(queueFirst) ? queueFirst.find((r) => r.id === q._filters.id) || null : queueFirst,
             );
           }
           return Promise.resolve(queueRows.find((r) => r.id === q._filters.id) || null);
@@ -187,7 +196,11 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
           // Default: an ungoverned run whose head IS the publisher-pinned
           // commit (the pin is UNIVERSAL on these lanes — PR r14), so the
           // pre-existing merge tests keep merging.
-          return Promise.resolve(runFirst !== undefined ? runFirst : {
+          const configured = typeof runFirst === 'function'
+            ? runFirst(runFirstRead++)
+            : Array.isArray(runFirst) ? runFirst[Math.min(runFirstRead++, runFirst.length - 1)]
+              : runFirst;
+          return Promise.resolve(runFirst !== undefined ? configured : {
             comparison_table_result: null,
             draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }),
             trust_build_approved_at: null,
@@ -264,6 +277,8 @@ beforeEach(() => {
   // Default: the PR head's blog file is readable and the topic recheck is
   // clean (the recheck fails closed on an unreadable file).
   gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\nBody.\n' });
+  editorialEvidence.assertPrEvidence.mockResolvedValue(EDITORIAL_BASE_PROOF);
+  editorialEvidence.verifyEvidenceOnlyAdvance.mockResolvedValue(false);
   topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: true, findings: [] }));
   // Default: merged targets respond live (production deploy already done).
   // Individual tests override to exercise the awaiting_live_deploy gate.
@@ -346,11 +361,14 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
     expect((await belt(approved, { content: body }, 'HEADSHA1')).ok).toBe(true);
     // Bound to the exact approved head: a later push (or no SHA) fails closed.
     expect(await belt(approved, body, 'headsha2')).toMatchObject({ ok: false, reason: expect.stringMatching(/merge by hand/) });
+    expect((await affiliateBeltVerdict(approved, body, 'headsha2', ghFor(liveReg()), { approvedEvidenceChild: true })).ok).toBe(true);
     expect((await belt(approved, body, null)).ok).toBe(false);
     expect((await belt({ ...approved, draft_payload: JSON.stringify({ body }) }, body, 'headsha1')).ok).toBe(false);
     // A product added on the branch AFTER approval is not approved.
     const extra = `${body}\n<AffiliateLink product="ant-bait" placement="alt-rec">y</AffiliateLink>`;
     expect(await belt(approved, extra, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/ant-bait/) });
+    expect(await affiliateBeltVerdict(approved, extra, 'headsha2', ghFor(liveReg()), { approvedEvidenceChild: true }))
+      .toMatchObject({ ok: false, reason: expect.stringMatching(/ant-bait/) });
   });
   test('an unresolvable head file fails closed; a resolved non-affiliate file passes', async () => {
     expect((await belt({}, null)).ok).toBe(false);
@@ -1501,6 +1519,47 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(JSON.stringify(res)).toMatch(/affiliate_contract_blocked/);
   });
 
+  test('an affiliate refresh renews through an evidence-only child of its approved head', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    process.env.GATE_AFFILIATE_LINKS = 'true';
+    const publisherPin = '1'.repeat(40);
+    const approvedSha = '3'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const content = '---\ntitle: Legacy\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n';
+    const affiliateFile = { path: 'src/content/blog/legacy-post.mdx', file: { content } };
+    const run = makeRun({
+      action_type: 'refresh_existing_page', brief_id: 'brief-r', trust_build_approved_by: 'adam',
+      trust_build_approved_at: new Date(),
+      draft_payload: JSON.stringify({
+        type: 'draft', frontmatter: { title: 'Refresh' }, body: content,
+        autopublish_head_sha: publisherPin, trust_build_approved_head_sha: approvedSha,
+      }),
+    });
+    const briefs = [{ id: 'brief-r', target_url: 'https://www.wavespestcontrol.com/blog/legacy-post/', target_keyword: 'k', city: 'Venice' }];
+    setupDb({
+      pending: [run], briefs,
+      runFirst: governedRun({ pin: publisherPin, approvedAt: run.trust_build_approved_at, approvedSha, verdict: null, briefId: 'brief-r' }),
+    });
+    gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(headSha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    editorialEvidence.verifyEvidenceOnlyAdvance.mockImplementation(async ({ pinnedSha }) => pinnedSha === approvedSha);
+    publisher.resolveExistingAstroFileForTarget.mockResolvedValue(affiliateFile);
+    gh.getBranchSha.mockResolvedValue('regbase1');
+    gh.getFile.mockImplementation(async (filePath) => (
+      filePath === 'packages/affiliate-registry/registry.json' ? __liveRegFile : null
+    ));
+    gh.mergePr.mockResolvedValue({ merged: true });
+
+    const res = await poller.pollPending();
+
+    expect(editorialEvidence.verifyEvidenceOnlyAdvance).toHaveBeenCalledWith({ pinnedSha: approvedSha, headSha });
+    expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({ sha: headSha }));
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
   test('a same-leaf flat file under ANOTHER category is not this post (fails closed like an unreadable file)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
@@ -1649,6 +1708,161 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       expect(gh.mergePr).toHaveBeenCalledTimes(1);
       expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
     });
+  });
+
+  test('a verified evidence-only descendant of the publisher pin auto-merges without repinning the run', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const pinnedSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    setupDb({
+      pending: [makeRun()],
+      runFirst: governedRun({ pin: pinnedSha, verdict: null, briefId: null }),
+    });
+    gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(headSha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    editorialEvidence.verifyEvidenceOnlyAdvance.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(editorialEvidence.verifyEvidenceOnlyAdvance).toHaveBeenCalledWith({ pinnedSha, headSha });
+    expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({ sha: headSha }));
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('an evidence-only child of a live human-approved head retains the human override with eligibility gates off', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const pinnedSha = '1'.repeat(40);
+    const approvedSha = '3'.repeat(40);
+    const headSha = '2'.repeat(40);
+    setupDb({
+      pending: [makeRun()],
+      runFirst: governedRun({
+        pin: pinnedSha, approvedAt: '2026-09-24T08:00:00Z', approvedSha,
+        verdict: { pass: true, findings: [], requiresHumanReview: true }, briefId: null,
+      }),
+    });
+    gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(headSha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    editorialEvidence.verifyEvidenceOnlyAdvance.mockImplementation(async ({ pinnedSha: anchor }) => anchor === approvedSha);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(editorialEvidence.verifyEvidenceOnlyAdvance).toHaveBeenCalledTimes(1);
+    expect(editorialEvidence.verifyEvidenceOnlyAdvance).toHaveBeenCalledWith({ pinnedSha: approvedSha, headSha });
+    expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({ sha: headSha }));
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('a publisher anchor remains eligible when a same-SHA approval marker has no live timestamp', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const pinnedSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    setupDb({
+      pending: [makeRun()],
+      runFirst: governedRun({ pin: pinnedSha, approvedAt: null, approvedSha: pinnedSha, verdict: null, briefId: null }),
+    });
+    gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(headSha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    editorialEvidence.verifyEvidenceOnlyAdvance.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(editorialEvidence.verifyEvidenceOnlyAdvance).toHaveBeenCalledWith({ pinnedSha, headSha });
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('revoking human approval while its evidence-child proof runs fails closed', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const pinnedSha = '1'.repeat(40);
+    const approvedSha = '3'.repeat(40);
+    const headSha = '2'.repeat(40);
+    setupDb({
+      pending: [makeRun()],
+      runFirst: [
+        governedRun({ pin: pinnedSha, approvedAt: '2026-09-24T08:00:00Z', approvedSha, briefId: null }),
+        governedRun({ pin: pinnedSha, approvedAt: null, approvedSha: null, briefId: null }),
+      ],
+    });
+    gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(headSha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    editorialEvidence.verifyEvidenceOnlyAdvance.mockResolvedValue(true);
+
+    const res = await poller.pollPending();
+
+    expect(editorialEvidence.verifyEvidenceOnlyAdvance).toHaveBeenCalledWith({ pinnedSha: approvedSha, headSha });
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['publisher pin', () => governedRun({ pin: '3'.repeat(40), verdict: null, briefId: null })],
+    ['full comparison verdict', (pin) => governedRun({ pin, verdict: { pass: true, findings: [{ code: 'changed' }], requiresHumanReview: false }, briefId: null })],
+  ])('an evidence proof cannot authorize the head after its persisted %s changes', async (_field, changedContext) => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const pinnedSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    setupDb({
+      pending: [makeRun()],
+      runFirst: [
+        governedRun({ pin: pinnedSha, verdict: null, briefId: null }),
+        changedContext(pinnedSha),
+      ],
+    });
+    gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(headSha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    editorialEvidence.verifyEvidenceOnlyAdvance.mockResolvedValue(true);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('an evidence proof cannot authorize the head after the queue row moves', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const pinnedSha = '1'.repeat(40);
+    const headSha = '2'.repeat(40);
+    const parked = { id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null };
+    setupDb({
+      pending: [makeRun()],
+      runFirst: governedRun({ pin: pinnedSha, verdict: null, briefId: null }),
+      queueFirst: (read) => read === 0 ? parked : { ...parked, status: 'queued' },
+    });
+    gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(headSha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    editorialEvidence.verifyEvidenceOnlyAdvance.mockResolvedValue(true);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'queue_row_moved_during_gating' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
   test('governed run: a FOREIGN head (pin mismatch) is withheld even with eligibility (PR r12)', async () => {
@@ -1882,7 +2096,10 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(publisher.assertCodexReviewClear).toHaveBeenCalledWith(42, { headSha: 'headsha1' });
     // sha pins the merge to the exact head the build/Codex gates checked
-    expect(gh.mergePr).toHaveBeenCalledWith(42, { method: 'squash', title: 'Blog: Test Post', sha: 'headsha1' });
+    expect(gh.mergePr).toHaveBeenCalledWith(42, {
+      method: 'squash', title: 'Blog: Test Post', sha: 'headsha1',
+      expectBaseSha: EDITORIAL_BASE_PROOF.baseSha, expectBaseRef: EDITORIAL_BASE_PROOF.baseRef,
+    });
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
     expect(res.autoMerges).toBe(1);
     expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published', published_url: CANONICAL });
