@@ -26,9 +26,13 @@ on:
   push:
     branches: [main]
 
+# Only PR runs cancel their superseded predecessor. On main every push shares
+# the one ref, and merges land faster than the ~16-minute server job, so
+# cancelling there left main with no completed run at all (2026-09-24: 14
+# consecutive main pushes, every run cancelled). Main runs queue instead.
 concurrency:
   group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   server:
