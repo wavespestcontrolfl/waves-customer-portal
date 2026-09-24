@@ -1492,6 +1492,11 @@ router.post('/:id/send', async (req, res, next) => {
               .whereRaw("COALESCE(estimate_data, '{}'::jsonb) = ?::jsonb", [JSON.stringify(parseEstimateData(estimate.estimate_data) || {})]);
           }
           if (idempotencyKey) q.whereRaw("NOT (COALESCE(estimate_data->'manualSendAttempts', '[]'::jsonb) @> ?::jsonb)", [JSON.stringify([{ key: idempotencyKey }])]);
+          // The county-roll address block is reasserted IN the claim: a
+          // flagged /calculate that refreshed the draft after the
+          // request-time read must not be sent by a caller that omitted
+          // expectedEditVersion (codex #4667 r13 P1).
+          q.whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL);
         })
         .update({ status: 'sending', updated_at: db.fn.now() });
       if (!claimed) {
@@ -2179,6 +2184,10 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
 // on the markers, so a message that still slips out carries a link that
 // serves nothing. DB failure fails CLOSED (the leg is retryable);
 // unparseable estimate_data proceeds, matching the verdict read.
+// SQL form of the county-roll address block (estimate_data.addressUnverified
+// === true): every atomic send claim carries it (codex #4667 r13 P1).
+const ADDRESS_UNVERIFIED_ABSENT_SQL = "NOT COALESCE(estimate_data->'addressUnverified' = 'true'::jsonb, false)";
+
 async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
   const row = await db('estimates').where({ id: estimateId }).first('id', 'estimate_group_id', 'archived_at', 'estimate_data');
   if (!row) return true;
@@ -2188,6 +2197,9 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
     data = typeof row.estimate_data === 'string'
       ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
   } catch { return false; }
+  // The county-roll address block landing between the claim and the
+  // provider handoff (codex #4667 r13 P1).
+  if (data?.addressUnverified === true) return true;
   const eng = data?.estimatorEngine;
   if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
   // A bedroom re-price in flight (estimate-clarify-asks): the draft's

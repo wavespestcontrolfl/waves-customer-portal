@@ -3222,10 +3222,37 @@ async function reviseAdminEstimate({
         at: new Date().toISOString(),
         source: `staff:${writtenData.addressUnverifiedClearedBy}`,
       };
+      // A premise CORRECTION moves the lead's own address columns with it
+      // (the booking route binds an estimate handoff to the lead's / the
+      // customer's on-file premise): clearing the old-premise flag while
+      // the columns still name the rejected number would let the original
+      // unverified address book and reject the corrected one (codex #4667
+      // r13 P1). A confirmation changes nothing but the verdict.
+      const corrected = writtenData.addressUnverifiedClearedBy === 'address_corrected';
       await trx('leads').where({ id: writtenData.lead_id }).update({
         extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
+        ...(corrected && parsed.streetLine ? {
+          address: parsed.streetLine,
+          ...(parsed.city ? { city: parsed.city } : {}),
+          ...(parsed.zip ? { zip: parsed.zip } : {}),
+        } : {}),
         updated_at: now(),
       });
+      // The linked customer whose on-file premise IS the rejected one moves
+      // too — never a customer already living somewhere else.
+      if (corrected && parsed.streetLine && row.customer_id) {
+        const { samePremiseDisplay } = require('./lead-address-unverified');
+        const cust = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').first('id', 'address_line1', 'city', 'zip');
+        const custDisplay = cust ? [cust.address_line1, cust.city, cust.zip].filter(Boolean).join(', ') : '';
+        if (cust && custDisplay && samePremiseDisplay(custDisplay, lockedPrior?.address)) {
+          await trx('customers').where({ id: cust.id }).update({
+            address_line1: parsed.streetLine,
+            ...(parsed.city ? { city: parsed.city } : {}),
+            ...(parsed.zip ? { zip: parsed.zip } : {}),
+            updated_at: now(),
+          });
+        }
+      }
     }
     return row;
   });

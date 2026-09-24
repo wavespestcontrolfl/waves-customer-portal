@@ -1220,12 +1220,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // clean lookups are never cached) and supersedes every older warning
     // (pre-push audit P1).
     let leadCleanVerdict = false;
-    if (leadId && contactEmail) {
+    // The own lead is read by id alone: this recovers a NEGATIVE verdict
+    // (a flag can only withhold the handoff, never grant it), so a visitor
+    // who corrected their email between the stages keeps the roll's
+    // warning for the same judged address (codex r13 P1). The flag's own
+    // stamped address still has to cover this request.
+    if (leadId) {
       try {
         const own = await db('leads')
           .where({ id: leadId })
           .whereNull('deleted_at')
-          .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
           .first('extracted_data');
         const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
         // The own lead's clean verdict is NOT taken on its own: it joins the

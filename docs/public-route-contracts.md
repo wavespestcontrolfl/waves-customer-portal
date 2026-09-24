@@ -952,7 +952,11 @@ the confirmation may flag the premise again (the lookup stage applies the
 same rule to a cache-hit audit; the audit's own `auditedAt` stamp is the
 evidence time, so a live backfill on a cache hit is fresh), and a cached
 clean answer is evidence from its cache time, so a flag committed after that
-stamp outranks it. Withdrawn-publication verdicts are superseded only after
+stamp outranks it. A flag on the visitor's own lookup-stage lead is recovered by lead id
+alone (a negative verdict, so a corrected email does not drop it); a
+premise correction on the estimate moves the lead's address columns with
+it; every send claim and the final pre-provider check reassert the block.
+Withdrawn-publication verdicts are superseded only after
 the locked reconciliation, and a flagged rerun withdraws publications in
 every non-terminal delivery state (sent, viewed, scheduled, sending,
 send_failed). A roll that never answered (GIS
