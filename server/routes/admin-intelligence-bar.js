@@ -962,7 +962,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         // refuses at the confirm preflight and again at the executor's own
         // read, instead of another customer's email getting the
         // replied-via-SMS stamp.
-        const srcEmail = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+        const srcEmail = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'reply_to', 'subject', 'gmail_thread_id', 'customer_id');
         if (!srcEmail) return { failed: true, modelResult: { error: 'That email could not be found — nothing was proposed.' } };
         params._pinned_email = emailPinFingerprint(srcEmail);
       }
@@ -2990,7 +2990,7 @@ router.post('/confirm-action', async (req, res, next) => {
         }
       }
       if (!drifted && pinnedEmail) {
-        const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+        const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'reply_to', 'subject', 'gmail_thread_id', 'customer_id');
         drifted = !email || emailPinFingerprint(email) !== String(pinnedEmail);
       }
       // Kept in execParams: approvePrice re-verifies on ITS loaded row.
