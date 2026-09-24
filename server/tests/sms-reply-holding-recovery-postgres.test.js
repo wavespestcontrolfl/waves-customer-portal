@@ -186,11 +186,15 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     const prepared = await providerCoordination.prepareProviderHandoffReservation({
       to: '+12025550101', fromNumber: '+19413529161', body: 'Deduped push body', messageType: 'receipt',
     });
-    const reservation = await trx('sms_log').where({ id: prepared.handle.reservationId }).first('created_at');
+    const reservationCreatedAt = new Date(Date.now() - 1000);
+    await trx('sms_log').where({ id: prepared.handle.reservationId }).update({
+      created_at: reservationCreatedAt,
+      updated_at: reservationCreatedAt,
+    });
     await trx('sms_log').insert({
       id: randomUUID(), direction: 'outbound', from_phone: 'push', to_phone: '+12025550101',
       message_body: 'Deduped push body', message_type: 'receipt', status: 'sent', twilio_sid: null,
-      created_at: new Date(new Date(reservation.created_at).getTime() + proofOffsetMs),
+      created_at: new Date(reservationCreatedAt.getTime() + proofOffsetMs),
       metadata: { channel: 'push', providerAccepted: true, push_notification_id: proofNotificationId },
     });
     providerCoordination.captureProviderContext(prepared.handle, {
