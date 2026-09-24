@@ -24,6 +24,7 @@ jest.mock('../models/db', () => {
     return b;
   });
   dbFn.transaction = jest.fn(async (run) => run(dbFn));
+  dbFn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   dbFn.fn = { now: jest.fn(() => 'NOW()') };
   dbFn._deletes = mockDeletes;
   dbFn._raws = mockRaws;
@@ -364,5 +365,49 @@ describe('extensionDeliverableUnderGate — the siblings an extension would REVI
     expect(await extensionDeliverableUnderGate(fakeDatabase([], []), { ...anchor, estimate_group_id: null })).toBe(true);
     mockGateState.sendRequiresServerPricing = false;
     expect(await extensionDeliverableUnderGate(fakeDatabase([], [{ id: 'est-b', status: 'expired', pricing_authority: 'CLIENT_FALLBACK', estimate_data: '{}' }]), anchor)).toBe(true);
+  });
+});
+
+describe('extendEstimate post-write notifications: delivery claim (codex #4667 r41 P1)', () => {
+  it('takes a token-fenced delivery claim under the address-hold predicate before the legs, and withholds both legs when the row left the surface', async () => {
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockClear();
+    db._raws.length = 0;
+    // First transaction = the extension write; second = the claim, whose
+    // locked read finds the row off-surface (a county hold landed).
+    const offSurface = { first: jest.fn(async () => null), update: jest.fn(async () => 1) };
+    for (const m of ['where', 'whereNull', 'whereNotNull', 'forUpdate', 'whereIn']) offSurface[m] = jest.fn(() => offSurface);
+    offSurface.whereRaw = jest.fn((sql) => { db._raws.push({ table: 'estimates', sql, claim: true }); return offSurface; });
+    const claimTrx = jest.fn(() => offSurface);
+    claimTrx.raw = db.raw; claimTrx.fn = db.fn;
+    db.transaction
+      .mockImplementationOnce(async (run) => run(db))
+      .mockImplementationOnce(async (run) => run(claimTrx));
+    const res = await extendEstimate({
+      estimate: {
+        id: 'est-claim-1', status: 'viewed', archived_at: null,
+        expires_at: PAST, viewed_at: PAST, customer_phone: '+15550100999', customer_email: 'c@example.com',
+        customer_id: 'cust-1', estimate_data: {},
+      },
+      days: 7, entryPoint: 'test', workflow: 'test',
+    });
+    const claimRaws = db._raws.filter((r) => r.claim).map((r) => r.sql);
+    expect(claimRaws.some((sql) => sql.includes('delivering_at'))).toBe(true);
+    expect(claimRaws.some((sql) => sql.includes('addressUnverified'))).toBe(true);
+    expect(res.smsResult).toEqual({ sent: false, reason: 'off_surface_before_notification' });
+    expect(res.emailResult).toEqual({ sent: false, reason: 'off_surface_before_notification' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(offSurface.update).not.toHaveBeenCalled();
+  });
+
+  it('stamps the claim with jsonb_set on the locked row, and releases it token-fenced through the shared anchor release', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+    const claim = src.slice(src.indexOf('const deliveryClaimToken = '), src.indexOf('let smsResult = '));
+    expect(claim).toContain('.whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)');
+    expect(claim).toContain('.whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)');
+    expect(claim).toContain(".forUpdate()");
+    expect(claim).toContain("jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text)");
+    expect(src).toContain("require('../routes/admin-estimates').clearEstimateDeliveryClaim(estimate.id, deliveryClaimToken)");
+    expect(src.indexOf('clearEstimateDeliveryClaim(estimate.id')).toBeGreaterThan(src.indexOf('let emailResult = '));
   });
 });

@@ -20,7 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
-const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
@@ -458,8 +458,48 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // 2026-07-11). Plumbing failures (URL shortener, lead lookup, provider)
   // degrade to an unsent-SMS result instead; the admin notification/response
   // carry the reason.
-  let smsResult = { sent: false, reason: 'silent' };
+  // The notification legs run under the DELIVERY CLAIM (codex #4667 r41
+  // P1): the extension committed above, and a county-roll hold landing
+  // between it and the provider calls would archive or hide the quote
+  // while the text and email still carry its link. The withdrawal refuses
+  // to commit while a claim is fresh, so the claim is taken in a short
+  // locked transaction that re-judges the row's surface first; no claim
+  // (off-surface since the write, or another send's claim live) → no
+  // notification, reported as such. Token-fenced release after both legs
+  // (the anchor's shared release also completes a deferred invalidation).
+  // Same post-write invariant: never throws.
+  const deliveryClaimToken = require('crypto').randomUUID();
+  let claimHeld = false;
   if (!silent) {
+    try {
+      claimHeld = await db.transaction(async (trx) => {
+        const row = await trx('estimates')
+          .where({ id: estimate.id })
+          .whereNull('archived_at')
+          .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
+          .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+          .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+          .forUpdate()
+          .first('id');
+        if (!row) return false;
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)",
+            [new Date().toISOString(), deliveryClaimToken],
+          ),
+          updated_at: trx.fn.now(),
+        });
+        return true;
+      });
+    } catch (err) {
+      logger.warn(`[estimate-extension] delivery claim not taken for estimate ${estimate.id} — notifications withheld: ${err.code || err.name || 'db_error'}`);
+      claimHeld = false;
+    }
+  }
+  let smsResult = { sent: false, reason: 'silent' };
+  if (!silent && !claimHeld) {
+    smsResult = { sent: false, reason: 'off_surface_before_notification' };
+  } else if (!silent) {
     try {
       if (!estimate.customer_phone) {
         smsResult = { sent: false, reason: 'no_phone' };
@@ -529,7 +569,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // idempotency key is scoped per grant (id + new expiry) so a later, further
   // extension emails again while accidental double-fires of THIS grant don't.
   let emailResult = { sent: false, reason: 'silent' };
-  if (!silent) {
+  if (!silent && !claimHeld) {
+    emailResult = { sent: false, reason: 'off_surface_before_notification' };
+  } else if (!silent) {
     try {
       if (!estimate.customer_email) {
         emailResult = { sent: false, reason: 'no_email' };
@@ -572,6 +614,13 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   }
 
   logger.info(`[estimate-extension] Extended estimate ${estimate.id} by ${parsedDays}d to ${newExpiry.toISOString()} via ${entryPoint} (sms=${smsResult.sent ? 'sent' : smsResult.reason || 'skipped'}, email=${emailResult.sent ? 'sent' : emailResult.reason || 'skipped'})`);
+  if (claimHeld) {
+    try {
+      await require('../routes/admin-estimates').clearEstimateDeliveryClaim(estimate.id, deliveryClaimToken);
+    } catch (err) {
+      logger.warn(`[estimate-extension] delivery claim release failed for estimate ${estimate.id} (ages out by TTL): ${err.code || err.name || 'db_error'}`);
+    }
+  }
   return { newExpiry, status: revivedStatus || estimate.status, smsResult, emailResult };
 }
 

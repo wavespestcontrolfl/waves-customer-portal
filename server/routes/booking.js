@@ -2967,7 +2967,12 @@ async function createSelfBooking(payload = {}) {
         // Newest clean verdict for this premise across the contact pair —
         // computed FIRST so the lead-named flag below can be superseded by
         // it too (codex r11 P2).
-        let newestClean = 0;
+        // …PER contact pair (codex r41 P1): a clean verdict a visitor just
+        // earned under a different email + phone must not supersede the
+        // flag an older link's pair still carries for the same premise —
+        // only evidence from the SAME pair supersedes that pair's flag.
+        const pairKeyOf = (row) => `${String(row?.email || '').toLowerCase()}|${String(row?.phone || '').replace(/\D/g, '').slice(-10)}`;
+        const newestCleanByPair = new Map();
         let contactSnapshots = [];
         if (submitted && reconcilePairs.length) {
           const contactLeads = await trx('leads')
@@ -2981,23 +2986,29 @@ async function createSelfBooking(payload = {}) {
             })
             .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
             .forUpdate()
-            .select('id', 'extracted_data');
-          contactSnapshots = contactLeads.map((row) => parseData(row.extracted_data)).filter(Boolean);
+            .select('id', 'email', 'phone', 'extracted_data');
+          contactSnapshots = contactLeads
+            .map((row) => ({ pairKey: pairKeyOf(row), snap: parseData(row.extracted_data) }))
+            .filter((entry) => entry.snap);
           // The lead the link NAMES is judged on the unit-insensitive
           // premise alone (a staff confirmation of a street-only intake
           // carries no locality); other leads need the complete locality
           // (codex r20 P1) — the same rule /calculate and the lookup apply.
           const namedLeadId = LEAD_ID_RE.test(String(lead_id || '')) ? String(lead_id) : null;
-          newestClean = contactLeads
-            .map((row) => ({ own: namedLeadId != null && String(row.id) === namedLeadId, snap: parseData(row.extracted_data) }))
-            .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, submitted, { requireLocality: !own }))
-            .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
-            .reduce((max, at) => Math.max(max, at), 0);
+          for (const row of contactLeads) {
+            const own = namedLeadId != null && String(row.id) === namedLeadId;
+            const snap = parseData(row.extracted_data);
+            if (!snap || !cleanVerdictCovers(snap, submitted, { requireLocality: !own })) continue;
+            const at = Date.parse(snap.address_verdict?.at || '') || 0;
+            const key = pairKeyOf(row);
+            newestCleanByPair.set(key, Math.max(newestCleanByPair.get(key) || 0, at));
+          }
         }
         if (LEAD_ID_RE.test(String(lead_id || '')) && submitted) {
-          const lockedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').forUpdate().first('extracted_data');
+          const lockedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').forUpdate().first('email', 'phone', 'extracted_data');
           const flag = recoverAddressUnverified(parseData(lockedLead?.extracted_data));
-          if (flag && flagCoversAddress(flag, submitted) && !(newestClean && newestClean > (Date.parse(flag.flagged_at || '') || 0))) refuse();
+          const cleanForPair = lockedLead ? (newestCleanByPair.get(pairKeyOf(lockedLead)) || 0) : 0;
+          if (flag && flagCoversAddress(flag, submitted) && !(cleanForPair && cleanForPair > (Date.parse(flag.flagged_at || '') || 0))) refuse();
         }
         // The CURRENT contact-and-premise verdict too, not only the lead
         // the link names: a repeat lookup mints a NEW lead whose flag
@@ -3005,13 +3016,14 @@ async function createSelfBooking(payload = {}) {
         // confirming in that window would see only the older clean lead
         // (codex r9 P1). Both typed contact factors bind the lookup.
         if (submitted && contactSnapshots.length) {
-          for (const snap of contactSnapshots) {
+          for (const { pairKey, snap } of contactSnapshots) {
             const flag = recoverAddressUnverified(snap);
             // Stamped flags only across leads (an unstamped one would match
             // any address) — pre-push audit P1.
             if (!flag || !flag.address_line1 || !flagCoversAddress(flag, submitted)) continue;
             const flaggedAt = Date.parse(flag.flagged_at || '') || 0;
-            if (newestClean && newestClean > flaggedAt) continue;
+            const cleanForPair = newestCleanByPair.get(pairKey) || 0;
+            if (cleanForPair && cleanForPair > flaggedAt) continue;
             refuse();
           }
         }

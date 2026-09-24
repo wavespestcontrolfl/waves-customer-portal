@@ -2145,6 +2145,25 @@ async function releaseGroupSiblingClaims(claimedSiblings = []) {
 // is non-fatal — an uncleared claim ages out by TTL, the pending marker
 // already blocks any resend, and the next reconcile (claim now stale)
 // applies the full invalidation itself.
+// The group siblings' share of a send's claim (stamped in the claim
+// transaction, codex #4667 r41 P1): a plain token-fenced clear — siblings
+// carry no pending-invalidation bookkeeping of this send's. Non-fatal (TTL).
+async function clearGroupSiblingDeliveryClaims(estimate, deliveryClaimToken) {
+  if (!estimate?.id || !estimate.estimate_group_id || !deliveryClaimToken) return;
+  try {
+    await db('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereRaw("estimate_data->'estimatorEngine'->>'delivering_token' = ?", [deliveryClaimToken])
+      .update({
+        estimate_data: db.raw("jsonb_set(estimate_data, '{estimatorEngine}', (estimate_data->'estimatorEngine') - 'delivering_at' - 'delivering_token', true)"),
+        updated_at: db.fn.now(),
+      });
+  } catch (err) {
+    logger.warn(`[admin-estimates] group sibling delivery-claim release failed for estimate ${estimate.id} (ages out by TTL): ${err.code || err.name || 'db_error'}`);
+  }
+}
+
 async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
   if (!estimateId || !deliveryClaimToken) return;
   try {
@@ -2291,6 +2310,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     thrown = err;
   } finally {
     await clearEstimateDeliveryClaim(estimate?.id, deliveryClaimToken);
+    await clearGroupSiblingDeliveryClaims(estimate, deliveryClaimToken);
   }
   // When NO channel delivered, the customer never saw the single-service
   // shape, so the park is compensated — the line is restored through the
@@ -2623,6 +2643,26 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         };
         await trx('estimates').where({ id: estimate.id })
           .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+        // …and the SAME claim on every other link-visible group member
+        // (codex #4667 r41 P1): the county-roll withdrawal refuses to
+        // commit a hold while a delivery claim is live, so a sibling
+        // flagged after its final recheck cannot vanish from the group
+        // link mid-send. Token-fenced release in the outer finally. A
+        // sibling already under another send's fresh claim keeps that one.
+        const siblingIds = linkVisibleGroupIds.filter((id) => String(id) !== String(estimate.id));
+        if (siblingIds.length) {
+          await trx('estimates')
+            .whereIn('id', siblingIds)
+            .whereNull('archived_at')
+            .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+            .update({
+              estimate_data: trx.raw(
+                "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)",
+                [data.estimatorEngine.delivering_at, deliveryClaimToken],
+              ),
+              updated_at: trx.fn.now(),
+            });
+        }
       }
       return null;
     });
@@ -5542,3 +5582,4 @@ module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;
 module.exports.applyLeadServiceForSend = applyLeadServiceForSend;
 module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
 module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;
+module.exports.clearEstimateDeliveryClaim = clearEstimateDeliveryClaim;
