@@ -364,7 +364,20 @@ async function redistributeTechDay({
             detour_minutes: placement.best.detour_minutes,
           });
         } catch (err) {
+          // A failed move (CAS race, destination conflict, rebooker refusal)
+          // must not strand the stop on the absent tech with no path
+          // forward: record it AND park it as an overflow alert so a human
+          // decides, same as a stop nobody could fit. The chosen tech rides
+          // along as the near miss so the dispatcher sees what was tried.
           failed.push({ job_id: stop.id, error: err.message });
+          toPark.push({
+            stop,
+            move_error: err.message,
+            near_misses: [{
+              technician_id: placement.best.id, technician_name: placement.best.name,
+              conflict_reason: 'move_failed', detour_minutes: placement.best.detour_minutes,
+            }],
+          });
         }
       } else {
         toPark.push({ stop, near_misses: placement.near_misses });
@@ -373,6 +386,7 @@ async function redistributeTechDay({
 
     const ranked = rankBumpOrder(toPark.map((p) => p.stop));
     const nearMissById = new Map(toPark.map((p) => [p.stop.id, p.near_misses]));
+    const moveErrorById = new Map(toPark.filter((p) => p.move_error).map((p) => [p.stop.id, p.move_error]));
     const newlyParked = new Array(ranked.length);
     // Insert alerts in REVERSE bump order (highest bump_order — "bump
     // last" — created FIRST, bump #1 — "bump first" — created LAST): the
@@ -398,6 +412,7 @@ async function redistributeTechDay({
           bump_total: ranked.length,
           bump_reason: stop.bump_reason,
           near_misses: (nearMissById.get(stop.id) || []).slice(0, 3),
+          ...(moveErrorById.has(stop.id) ? { move_error: moveErrorById.get(stop.id) } : {}),
         },
       });
       newlyParked[i] = { job_id: stop.id, alert_id: alert.id, bump_order: i + 1 };

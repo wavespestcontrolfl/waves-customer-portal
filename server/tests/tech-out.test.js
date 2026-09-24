@@ -425,7 +425,7 @@ describe('redistributeTechDay', () => {
     expect(opts.select).toEqual(expect.arrayContaining(['scheduled_services.visit_id']));
   });
 
-  test('a 409 (CAS/conflict) from SmartRebooker.reschedule is recorded as failed, not parked, and the loop continues', async () => {
+  test('a 409 (CAS/conflict) from SmartRebooker.reschedule is recorded as failed AND parked as an overflow alert so the stop is never stranded', async () => {
     state.absentStops = [{ ...STOP }];
     state.crew = [CANDIDATE];
     state.overlapsByTech[CANDIDATE.id] = [];
@@ -435,7 +435,12 @@ describe('redistributeTechDay', () => {
 
     expect(summary.failed).toEqual([{ job_id: STOP.id, error: 'Job was reassigned concurrently' }]);
     expect(summary.moved).toEqual([]);
-    expect(createAlert).not.toHaveBeenCalled();
+    expect(summary.parked).toEqual([{ job_id: STOP.id, alert_id: `alert-${STOP.id}`, bump_order: 1 }]);
+    expect(summary.status).toBe('complete');
+    expect(createAlert).toHaveBeenCalledTimes(1);
+    const { payload } = createAlert.mock.calls[0][0];
+    expect(payload.move_error).toBe('Job was reassigned concurrently');
+    expect(payload.near_misses).toEqual([expect.objectContaining({ technician_id: CANDIDATE.id, conflict_reason: 'move_failed' })]);
   });
 
   describe('near-miss ranking (finding G)', () => {
