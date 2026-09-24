@@ -78,9 +78,10 @@ function sourceSha256() {
 
 async function readCurrent({ dbi }) {
   const { fixtureSha256 } = loadGratitudeExam();
+  const verifierFallbackModel = MODELS.TEXT_POLICIES?.deepAnalysis?.fallback?.model;
   if (!drafter.PROMPT_VERSION || typeof drafter.VERIFY_ENABLED !== 'boolean'
       || !Number.isInteger(drafter.MAX_REVISIONS) || drafter.MAX_REVISIONS < 0
-      || !verifier.VERIFIER_MODEL || !MODELS.FLAGSHIP) {
+      || !verifier.VERIFIER_MODEL || !verifierFallbackModel) {
     throw new Error('invalid_gratitude_qualification_config');
   }
   const voiceProfile = await drafter.resolveEffectiveVoiceProfile({ dbi });
@@ -100,7 +101,7 @@ async function readCurrent({ dbi }) {
       enabled: drafter.VERIFY_ENABLED === true,
       maxRevisions: drafter.MAX_REVISIONS,
       model: verifier.VERIFIER_MODEL,
-      fallbackModel: MODELS.FLAGSHIP,
+      fallbackModel: verifierFallbackModel,
     },
     systemPromptSha256: sha256(renderedPrompt.system),
     voiceProfileVersion: voiceProfile?.version ?? null,
@@ -191,7 +192,7 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
 
   try {
     const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
-    const outcome = await runExclusive('sms-gratitude-qualification', async () => {
+    const outcome = await runExclusive(`sms-gratitude-qualification:${runId}`, async () => {
       const durable = await dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW })
         .first('id', 'input_snapshot');
       active = parseSnapshot(durable?.input_snapshot);
