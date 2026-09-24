@@ -1212,54 +1212,13 @@ function summarizeKnownCaller(customer) {
 }
 
 
-// The visit(s) a dispute pulled ride on the open conflict card
-// (payload.held_unassigned_booking_ids) so the verdict route names EXACTLY
-// those rows for reassignment, not any unassigned row of the call
-// (codex r11 P1). Best-effort; the card may not exist yet.
-// A pulled visit's reminders are HELD too (the reminder cron's existing
-// move_hold_until quiet period): a customer must not get the 72h/24h
-// reminder for an appointment whose address is in dispute and whose
-// technician was just removed. Released by the conflict settlement
-// (admin-triage settleHeldConflictCard) — codex r17 P1.
-const DISPUTE_REMINDER_HOLD_MS = 45 * 24 * 60 * 60 * 1000;
-async function noteDisputeHeldBooking(conn, callLogId, scheduledServiceId) {
-  try {
-    // Tokenized like the grouped-move hold it reuses, and never over a live
-    // hold another owner placed (codex r18 P1). A visit with no reminder
-    // row yet is covered by the self-heal's held-visit exclusion.
-    await conn('appointment_reminders')
-      .where({ scheduled_service_id: scheduledServiceId })
-      .where((q) => q.whereNull('move_hold_until').orWhere('move_hold_until', '<', new Date()))
-      .update({ move_hold_until: new Date(Date.now() + DISPUTE_REMINDER_HOLD_MS), move_hold_token: `house-number-dispute:${callLogId}` });
-    await conn('triage_items')
-      .where({ call_log_id: callLogId, reason_code: 'on_file_house_number_conflict' })
-      .whereIn('status', ['open', 'in_progress'])
-      .update({
-        payload: conn.raw(
-          "jsonb_set(COALESCE(payload, '{}'::jsonb), '{held_unassigned_booking_ids}', (COALESCE(payload->'held_unassigned_booking_ids', '[]'::jsonb) - ?::text) || to_jsonb(?::text), true)",
-          [String(scheduledServiceId), String(scheduledServiceId)],
-        ),
-        updated_at: new Date(),
-      });
-  } catch (noteErr) {
-    logger.warn(`[call-proc] could not note held booking ${scheduledServiceId} on the conflict card: ${noteErr.code || noteErr.name || 'db_error'}`);
-  }
-}
-
 // What a house-number DISPUTE does to a reused AI booking, pure (tested in
-// call-onfile-house-number-conflict.test.js): new side effects (default
-// technician backfill, follow-up creation) are held whenever disputed;
-// existing assignments are pulled only under this pass's processing claim
-// and never off a human's attached booking. Status is enforced atomically
-// by the assignment writer (allowedStatuses), not here.
-function disputeReuseDecision({ disputed = false, owned = false, attachedManualBooking = false, technicianId = null } = {}) {
-  const held = !!disputed;
-  const mayPull = held && !!owned && !attachedManualBooking;
-  return {
-    holdNewSideEffects: held,
-    pullPrimaryAssignment: mayPull && !!technicianId,
-    pullFollowUpAssignments: mayPull,
-  };
+// call-onfile-house-number-conflict.test.js): NEW side effects (default
+// technician backfill, follow-up creation, card-request texts, reminder
+// repairs) are held whenever disputed. An existing assignment is never
+// pulled — the card is the office's surface for it (see the processor).
+function disputeReuseDecision({ disputed = false } = {}) {
+  return { holdNewSideEffects: !!disputed };
 }
 
 // The fail-open routing input for a known caller: null unless they are a
@@ -10099,10 +10058,6 @@ const CallRecordingProcessor = {
           const retired = await trx('triage_items')
             .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
             .whereRaw("COALESCE(payload->'scheduling_window'->>'status', payload->>'scheduling_status') IS DISTINCT FROM 'confirmed'")
-            // A card whose dispute pulled technicians off visits is settled
-            // by STAFF (the verdict files the reassignment task) — the same
-            // rule the nightly resolver applies (codex r17 P1).
-            .whereRaw("COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(payload->'held_unassigned_booking_ids') = 'array' THEN payload->'held_unassigned_booking_ids' ELSE '[]'::jsonb END), 0) = 0")
             .update({
               status: 'resolved',
               resolution_note: customerId
@@ -10215,85 +10170,14 @@ const CallRecordingProcessor = {
     } catch (standingErr) {
       logger.warn(`[call-proc] standing house-number card check failed for ${maskSid(callSid)}: ${standingErr.code || standingErr.name || 'db_error'}`);
     }
-    // Existing AI bookings this call created are reconciled HERE — AFTER
-    // the standing-card check above, so a dispute carried over from an
-    // earlier pass reconciles them too (pre-push audit P1) — and
-    // independently of whether the latest
-    // extraction still qualifies to create a booking (a reprocess can be
-    // routing-blocked, unconfirmed or time-less and never reach the booking
-    // branch, leaving an earlier booking and its children assigned and
-    // dispatchable at the disputed number — pre-push audit P1). Same
-    // writer, same CAS, same allowed-status fence and processing-claim
-    // check as the reuse branch; the reuse branch then finds nothing left
-    // to pull.
-    // …and only once a DURABLE card records the dispute (this pass's card
-    // landed or an earlier pass's still stands): pulling a technician with
-    // no card behind it leaves the office neither the dispute nor a
-    // reassignment task (codex r12 P1). Holding NEW side effects needs no
-    // card.
-    if (houseNumberDisputed && houseNumberConflictFiled && customerId) {
-      try {
-        await db.transaction(async (trx) => {
-          // The shared triage-call lock FIRST, held through recording the
-          // pulled ids: a concurrent verdict/dismiss otherwise reads the
-          // card before `held_unassigned_booking_ids` lands, sees the
-          // booking still assigned, and closes the card with no recovery
-          // task while this pass unassigns it (codex r13 P1).
-          await lockTriageCall(trx, call.id);
-          const owned = await trx('call_log')
-            .where({ id: call.id })
-            .where('processing_token', procToken)
-            .forUpdate()
-            .first('id');
-          if (!owned) {
-            logger.info(`[call-proc] processing claim lost — existing-booking dispute pull skipped for ${maskSid(callSid)} (the owner applies it)`);
-            return;
-          }
-          // The card must still be OPEN under the lock: a verdict that
-          // settled it while this pass waited already filed (or declined)
-          // the recovery, so pulling a technician now would strand the
-          // visit with no card naming it (local audit P1).
-          const cardStillOpen = await trx('triage_items')
-            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
-            .whereIn('status', ['open', 'in_progress'])
-            .first('id');
-          if (!cardStillOpen) {
-            logger.info(`[call-proc] house-number card settled meanwhile — existing-booking dispute pull skipped for ${maskSid(callSid)}`);
-            return;
-          }
-          const parents = await trx('scheduled_services')
-            .where({ source_call_log_id: call.id, booking_source: 'phone_call' })
-            .whereIn('status', ['pending', 'confirmed'])
-            .select('id', 'technician_id');
-          const parentIds = parents.map((row) => row.id);
-          const children = parentIds.length
-            ? await trx('scheduled_services')
-              .whereIn('parent_service_id', parentIds)
-              .where({ source_action: 'ai_call_pipeline_followup' })
-              .whereIn('status', ['pending', 'confirmed'])
-              .select('id', 'technician_id')
-            : [];
-          const { assignDispatchJob } = require('./dispatch-assignment');
-          for (const row of [...parents, ...children]) {
-            if (!row.technician_id) continue;
-            try {
-              await assignDispatchJob({ jobId: row.id, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId: row.technician_id, allowedStatuses: ['pending', 'confirmed'] });
-              await noteDisputeHeldBooking(trx, call.id, row.id);
-              logger.warn(`[call-proc] existing AI booking ${row.id} unassigned for ${maskSid(callSid)}: house number disputed`);
-            } catch (pullErr) {
-              if (['STATUS_NOT_ALLOWED', 'TERMINAL_STATUS_RACE', 'ASSIGNMENT_STALE'].includes(pullErr?.code) || pullErr?.status === 409 || pullErr?.statusCode === 409) {
-                logger.warn(`[call-proc] existing AI booking ${row.id} kept its assignment for ${maskSid(callSid)}: ${pullErr.code || 'reassigned concurrently'}`);
-                continue;
-              }
-              throw pullErr;
-            }
-          }
-        });
-      } catch (pullErr) {
-        logger.warn(`[call-proc] existing-booking dispute pull failed for ${maskSid(callSid)}: ${pullErr.code || pullErr.name || 'db_error'}`);
-      }
-    }
-
+    // Existing assignments are deliberately NOT pulled off a disputed
+    // booking (codex r6..r20): every pull grew a recovery-task, reminder-
+    // hold and settlement surface that never converged. The card, the
+    // call's review status and the CONFIRM BEFORE DISPATCH timeline note
+    // are the office's surface for an already-assigned visit; only NEW
+    // side effects (a fresh booking, a follow-up, a default technician,
+    // a card-request text, reminder repairs) are held while the dispute
+    // stands.
     const verifiableAni = firstExternalPhone(call.from_phone);
     if (customerId && verifiableAni && !createdCustomerFromCall && !isOutboundCall(call)) {
       try {
@@ -14205,114 +14089,11 @@ const CallRecordingProcessor = {
                   // 'phone_call', so anything else came from the attach path.
                   const isAttachedManualBooking = String(existing.booking_source || '') !== 'phone_call';
                   let primaryRow = existing;
-                  // A DISPUTED house number (on_file_house_number_conflict
-                  // card filed above) keeps the existing booking as it is
-                  // but holds the NEW side effects — a technician assignment
-                  // and a follow-up visit at the disputed address — until
-                  // the office confirms the number (pre-push audit P1).
-                  // The dispute's row mutations below run only under THIS
-                  // pass's processing claim, checked inside the booking
-                  // transaction: a pass that lost its claim (the card lane
-                  // reported claim_lost, or a reclaim landed since) must not
-                  // unassign a visit the replacement pass created or kept
-                  // after resolving the conflict (codex r8 P1). The hold on
-                  // NEW side effects stands regardless (it creates nothing).
-                  let disputeOwned = false;
-                  if (houseNumberDisputed) {
-                    const ownedForDispute = await trx('call_log')
-                      .where({ id: call.id })
-                      .where('processing_token', procToken)
-                      .forUpdate()
-                      .first('id');
-                    disputeOwned = !!ownedForDispute;
-                    if (!disputeOwned) logger.info(`[call-proc] processing claim lost — dispute unassignments skipped for ${maskSid(callSid)} (the owner applies them)`);
-                  }
-                  const reuseDecision = disputeReuseDecision({
-                    disputed: houseNumberDisputed, owned: disputeOwned && houseNumberConflictFiled, attachedManualBooking: isAttachedManualBooking, technicianId: existing.technician_id,
-                  });
+                  const reuseDecision = disputeReuseDecision({ disputed: houseNumberDisputed });
                   const reuseHeldForAddress = reuseDecision.holdNewSideEffects;
                   if (reuseHeldForAddress) disputeHeldReuse = true;
                   if (reuseHeldForAddress) {
                     logger.warn(`[call-proc] reused booking for ${maskSid(callSid)} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
-                  }
-                  // An AI booking this call already ASSIGNED is still
-                  // dispatchable to the disputed number: pull the
-                  // assignment (technician + route position) under the
-                  // same tech-day fence the assignment path holds, so the
-                  // visit sits in the unassigned pool until the office
-                  // confirms the address (codex r6 P1). A human's attached
-                  // booking is never touched.
-                  // Pre-dispatch rows only: a visit already en route or on
-                  // site keeps its technician (pulling them mid-job would
-                  // cut their access to the ongoing work) — the conflict
-                  // card is the office's surface for it (pre-push audit P1).
-                  // The status predicate is enforced ATOMICALLY by the writer
-                  // (allowedStatuses on its CAS write), not by this read.
-                  if (reuseDecision.pullPrimaryAssignment) {
-                    // Through the canonical assignment writer (codex r7 P1):
-                    // its technician CAS (expectTechnicianId) refuses to
-                    // overwrite a dispatcher's NEWER assignment, it holds the
-                    // tech-day fences itself, and it carries the socket /
-                    // notification side effects so clients drop the
-                    // disputed visit. A stale-assignment conflict means a
-                    // human moved it since — theirs stands, logged.
-                    const { assignDispatchJob } = require('./dispatch-assignment');
-                    const pull = async (rowId, expectTechnicianId, label) => {
-                      try {
-                        await assignDispatchJob({ jobId: rowId, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId, allowedStatuses: ['pending', 'confirmed'] });
-                        await noteDisputeHeldBooking(trx, call.id, rowId);
-                        logger.warn(`[call-proc] ${label} ${rowId} unassigned for ${maskSid(callSid)}: house number disputed`);
-                        return true;
-                      } catch (pullErr) {
-                        if (pullErr?.code === 'STATUS_NOT_ALLOWED') {
-                          // Already underway: the technician keeps the job;
-                          // the conflict card is the office's surface for it.
-                          logger.warn(`[call-proc] ${label} ${rowId} is underway for ${maskSid(callSid)}: left assigned despite the house-number dispute (office review)`);
-                          return false;
-                        }
-                        if (pullErr?.code === 'TERMINAL_STATUS_RACE') {
-                          // Completed / cancelled / gone since the read —
-                          // nothing left to pull (pre-push audit P1).
-                          logger.info(`[call-proc] ${label} ${rowId} reached a terminal status before the dispute pull for ${maskSid(callSid)} — nothing to unassign`);
-                          return false;
-                        }
-                        if (pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
-                          logger.warn(`[call-proc] ${label} ${rowId} kept its newer assignment for ${maskSid(callSid)}: ${pullErr.code || 'reassigned concurrently'}`);
-                          return false;
-                        }
-                        throw pullErr;
-                      }
-                    };
-                    if (await pull(existing.id, existing.technician_id, 'reused booking')) {
-                      const refreshed = await trx('scheduled_services').where({ id: existing.id }).first();
-                      if (refreshed) primaryRow = refreshed;
-                    }
-                  }
-                  // Its AI-created follow-up child(ren) from an earlier pass
-                  // are just as dispatchable to the disputed number — held
-                  // whenever the AI booking is, whether or not the parent
-                  // still carried a technician (pre-push audit P1); same
-                  // writer, same CAS (codex r6 P1).
-                  if (reuseDecision.pullFollowUpAssignments) {
-                    const { assignDispatchJob } = require('./dispatch-assignment');
-                    const children = await trx('scheduled_services')
-                      .where({ parent_service_id: existing.id, source_action: 'ai_call_pipeline_followup' })
-                      .whereNotNull('technician_id')
-                      .whereIn('status', ['pending', 'confirmed'])
-                      .select('id', 'technician_id');
-                    for (const child of children) {
-                      try {
-                        await assignDispatchJob({ jobId: child.id, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId: child.technician_id, allowedStatuses: ['pending', 'confirmed'] });
-                        await noteDisputeHeldBooking(trx, call.id, child.id);
-                        logger.warn(`[call-proc] follow-up visit ${child.id} unassigned for ${maskSid(callSid)}: house number disputed`);
-                      } catch (pullErr) {
-                        if (pullErr?.code === 'STATUS_NOT_ALLOWED' || pullErr?.code === 'TERMINAL_STATUS_RACE' || pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
-                          logger.warn(`[call-proc] follow-up visit ${child.id} kept its newer assignment for ${maskSid(callSid)}: ${pullErr.code || 'reassigned concurrently'}`);
-                        } else {
-                          throw pullErr;
-                        }
-                      }
-                    }
                   }
                   if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId && !reuseHeldForAddress) {
                     // Tech-day membership fence + route_order clear (uncapped
@@ -14472,6 +14253,23 @@ const CallRecordingProcessor = {
                 // a number the office has been asked to confirm first —
                 // hold it like an ambiguous attach (codex #4666 r5 P1).
                 if (houseNumberDisputed) {
+                  // The promised follow-up (visit 2) rides on the card so the
+                  // recovery task the settlement files names it — otherwise
+                  // staff book the recovered primary and never see visit 2
+                  // was promised (codex r20 P1). Best-effort stamp.
+                  if (callFollowUpPlan) {
+                    try {
+                      await trx('triage_items')
+                        .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+                        .whereIn('status', ['open', 'in_progress'])
+                        .update({
+                          payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ follow_up_plan: { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null } })]),
+                          updated_at: new Date(),
+                        });
+                    } catch (planErr) {
+                      logger.warn(`[call-proc] could not note the promised follow-up on the conflict card for ${maskSid(callSid)}: ${planErr.code || planErr.name || 'db_error'}`);
+                    }
+                  }
                   return { __held: { reason: 'on_file_house_number_conflict' } };
                 }
                 // findExistingCallAppointment only sees THIS call's rows —
@@ -16359,8 +16157,15 @@ const CallRecordingProcessor = {
               service: extracted.matched_service || extracted.requested_service || null,
             },
           }))
+          // A standing task (open OR claimed) is REFRESHED with the current
+          // service / window rather than left stale — the same merge the
+          // settlement path applies (codex r20 P1).
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-          .ignore();
+          .merge({
+            payload: db.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+            summary: db.raw('EXCLUDED.summary'),
+            updated_at: new Date(),
+          });
       } catch (fallbackErr) {
         logger.warn(`[call-proc] shadow-mode dispute fallback card failed for ${maskSid(callSid)}: ${fallbackErr.code || fallbackErr.name || 'db_error'}`);
       }

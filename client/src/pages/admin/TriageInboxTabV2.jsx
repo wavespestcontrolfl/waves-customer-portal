@@ -199,16 +199,11 @@ export function ConfirmEvidence({ payload }) {
     p.stated_street && { label: "To resolve", value: (p.scheduling_window?.status === "confirmed" || p.scheduling_status === "confirmed")
       ? "Accept = the address on file is correct (a booking task is then filed for the confirmed appointment). Accept judges the WHOLE call — every other open card on it resolves too, so review those first. If the caller's number is right, edit the customer's address to it and book the appointment; the card closes once both are done."
       : "Accept = the address on file is correct. Accept judges the WHOLE call — every other open card on it resolves too, so review those first. If the caller's number is right, edit the customer's address to it; the card closes once the record matches." },
-    // A recovery task for visits a house-number dispute left unassigned:
-    // the reviewer reassigns and re-arms THESE, never books a replacement.
-    Array.isArray(p.held_visits) && p.held_visits.length > 0 && {
-      label: "Visits to reassign",
-      value: p.held_visits.map((v) => [
-        v.scheduled_date ? new Date(`${String(v.scheduled_date).slice(0, 10)}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "date TBD",
-        v.window_start ? String(v.window_start).slice(0, 5) : null,
-        v.service_type || null,
-        `#${String(v.id).slice(0, 8)}`,
-      ].filter(Boolean).join(" · ")).join(" — ") + ". Assign a technician and re-arm the confirmation; do not book a new visit.",
+    // A promised follow-up (visit 2) the dispute hold kept from being
+    // booked with the primary — book both, not just the recovered primary.
+    p.follow_up_plan && (p.follow_up_plan.scheduled_date || p.follow_up_plan.window_start) && {
+      label: "Promised follow-up",
+      value: `Visit 2 was promised${p.follow_up_plan.scheduled_date ? ` for ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""} — book it with the primary appointment.`,
     },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },

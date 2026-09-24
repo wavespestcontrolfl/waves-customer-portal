@@ -97,14 +97,13 @@ describe('promised reschedule link review', () => {
 // the call (a realtor's buyer, a landlord's tenant) — the card must show the
 // operator WHO to confirm, in both payload shapes the server produces.
 describe('ConfirmEvidence — dispute recovery task', () => {
-  it('names the held visits to reassign', () => {
+  it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{
       flag: 'auto_booking_skipped_after_approval',
-      existing_scheduled_service_ids: ['aaaaaaaa-1111'],
-      held_visits: [{ id: 'aaaaaaaa-1111', scheduled_date: '2026-09-25', window_start: '10:00:00', service_type: 'pest_control' }],
+      follow_up_plan: { scheduled_date: '2026-10-09', window_start: '10:00:00' },
     }} />);
-    expect(screen.getByText('Visits to reassign:')).toBeInTheDocument();
-    expect(screen.getByText(/Sep 25 · 10:00 · pest_control · #aaaaaaaa/)).toBeInTheDocument();
+    expect(screen.getByText('Promised follow-up:')).toBeInTheDocument();
+    expect(screen.getByText(/Visit 2 was promised for 2026-10-09 at 10:00/)).toBeInTheDocument();
   });
 });
 

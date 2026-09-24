@@ -181,16 +181,6 @@ describe('triage auto-resolve: house_number_adopted', () => {
       .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 
-  test('a card whose dispute pulled technicians off visits is left to staff', () => {
-    const held = item({
-      customer_address_line1: '1250 Example Street',
-      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null, held_unassigned_booking_ids: ['ss-1'] },
-    });
-    expect(classifyTriageItem(held, {}, { now: NOW })).toBeNull();
-    expect(classifyTriageItem({ ...held, payload: { ...held.payload, held_unassigned_booking_ids: [] } }, {}, { now: NOW }))
-      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
-  });
-
   test('a stated unit must be on the record before the ask is settled', () => {
     const unitCard = item({
       customer_address_line1: '1250 Example Street', customer_address_line2: 'Apt 3',
@@ -318,29 +308,10 @@ describe('heldConflictTaskDecision (verdict route)', () => {
 
   test('an unconfirmed card still files the reassignment task for a held booking', () => {
     const unconfirmed = { ...held, scheduling_window: { status: 'none' } };
-    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: unconfirmed, heldUnassignedBookingId: 'ss-9' }).file).toBe(true);
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: unconfirmed }).file).toBe(false);
     expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: unconfirmed }).file).toBe(false);
   });
 
-  test('a booking the dispute left unassigned files a reassignment task even when coverage is satisfied', () => {
-    const d = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, bookingCovered: true, heldUnassignedBookingId: 'ss-9' });
-    expect(d.file).toBe(true);
-    expect(d.skippedReason).toBe('house_number_dispute_settled_reassign_held_booking');
-    expect(d.heldUnassignedBookingId).toBe('ss-9');
-    // A denial that marks the appointment wrong still hands the held visits to staff.
-    const denied = heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held, heldUnassignedBookingIds: ['ss-9'] });
-    expect(denied.file).toBe(true);
-    expect(denied.skippedReason).toBe('house_number_dispute_denied_cancel_or_reassign_held_booking');
-    expect(denied.heldUnassignedBookingIds).toEqual(['ss-9']);
-    // Every held visit (parent + follow-up) rides on the task.
-    const many = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, bookingCovered: true, heldUnassignedBookingIds: ['ss-9', 'ss-10'] });
-    expect(many.heldUnassignedBookingIds).toEqual(['ss-9', 'ss-10']);
-    expect(many.heldUnassignedBookingId).toBe('ss-9');
-    // A denial that marks the appointment wrong no longer drops the held visit (codex r18 P1): staff cancel or rebook it by hand.
-    const deniedHeld = heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held, heldUnassignedBookingId: 'ss-9' });
-    expect(deniedHeld.file).toBe(true);
-    expect(deniedHeld.skippedReason).toBe('house_number_dispute_denied_cancel_or_reassign_held_booking');
-  });
 
   test('a covering booking, or a card whose call never confirmed, files nothing', () => {
     expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, bookingCovered: true }).file).toBe(false);
@@ -358,18 +329,9 @@ describe('heldConflictTaskDecision (verdict route)', () => {
 
 describe('disputeReuseDecision (reused AI booking under a dispute)', () => {
   const { disputeReuseDecision } = require('../services/call-recording-processor');
-
-  test('no dispute → nothing held, nothing pulled', () => {
-    expect(disputeReuseDecision({ disputed: false, owned: true, technicianId: 't1' })).toEqual({ holdNewSideEffects: false, pullPrimaryAssignment: false, pullFollowUpAssignments: false });
-  });
-
-  test('a dispute holds new side effects always, and pulls assignments only under the processing claim', () => {
-    expect(disputeReuseDecision({ disputed: true, owned: true, technicianId: 't1' })).toEqual({ holdNewSideEffects: true, pullPrimaryAssignment: true, pullFollowUpAssignments: true });
-    expect(disputeReuseDecision({ disputed: true, owned: false, technicianId: 't1' })).toEqual({ holdNewSideEffects: true, pullPrimaryAssignment: false, pullFollowUpAssignments: false });
-    expect(disputeReuseDecision({ disputed: true, owned: true, technicianId: null })).toEqual({ holdNewSideEffects: true, pullPrimaryAssignment: false, pullFollowUpAssignments: true });
-  });
-
-  test("a human's attached booking is never touched", () => {
-    expect(disputeReuseDecision({ disputed: true, owned: true, attachedManualBooking: true, technicianId: 't1' })).toEqual({ holdNewSideEffects: true, pullPrimaryAssignment: false, pullFollowUpAssignments: false });
+  test('a dispute holds NEW side effects and never pulls an existing assignment', () => {
+    expect(disputeReuseDecision({ disputed: false })).toEqual({ holdNewSideEffects: false });
+    expect(disputeReuseDecision({ disputed: true })).toEqual({ holdNewSideEffects: true });
+    expect(Object.keys(disputeReuseDecision({ disputed: true }))).toEqual(['holdNewSideEffects']);
   });
 });
