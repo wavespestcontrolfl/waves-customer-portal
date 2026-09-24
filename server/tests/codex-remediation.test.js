@@ -328,29 +328,95 @@ describe('runRemediationForPr', () => {
     }]);
   });
 
-  test('editorial review or signing failure parks before pre-push state and branch mutation', async () => {
+  test('an editorial provider outage retries on the same head with retained budget, then atomically commits after recovery', async () => {
     const db = makeDb();
-    const gh = makeGh();
+    const gh = makeGh({ preHead: HEAD });
     const prePushCheck = jest.fn(async () => true);
-    const editorialEvidence = { filesForDocument: jest.fn(async () => { throw new Error('review provider unavailable'); }) };
+    const outage = Object.assign(new Error('review provider unavailable'), { code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+    const sidecar = { path: 'content-ops/editorial-evidence/test.json', content: '{"signed":true}\n' };
+    const editorialEvidence = { filesForDocument: jest.fn()
+      .mockRejectedValueOnce(outage)
+      .mockResolvedValueOnce([sidecar]) };
+    const callAnthropic = jest.fn(makeCall('FIXED BODY'));
+    const onPark = jest.fn();
+    const ctx = { ...CTX, expectedParentSha: HEAD, prePushCheck, onPark };
+    const deps = { db, gh, editorialEvidence, callAnthropic, validateFixedBlogFile: PASS };
 
-    const result = await runRemediationForPr({ ...CTX, prePushCheck }, {
-      db,
-      gh,
-      editorialEvidence,
-      callAnthropic: makeCall('FIXED BODY'),
-      validateFixedBlogFile: PASS,
-    });
+    const outageResult = await runRemediationForPr(ctx, deps);
 
-    expect(result).toEqual(expect.objectContaining({ parked: true, reason: expect.stringContaining('editorial evidence generation failed') }));
+    expect(outageResult).toEqual(expect.objectContaining({
+      skipped: true, transient: true, reason: expect.stringContaining('temporarily unavailable'),
+    }));
     expect(prePushCheck).not.toHaveBeenCalled();
     expect(gh._calls.putFile).toHaveLength(0);
     expect(gh._calls.commitFiles).toHaveLength(0);
     expect(db._tables.codex_remediation_state[0]).toEqual(expect.objectContaining({
-      status: 'parked',
-      park_phase: 'pre_push',
+      status: 'active', rounds: 1,
     }));
-    expect(db._tables.codex_remediation_state[0].sync_pending_sha).toBeUndefined();
+    expect(onPark).not.toHaveBeenCalled();
+
+    const recovered = await runRemediationForPr(ctx, deps);
+
+    expect(recovered).toEqual(expect.objectContaining({ remediated: true, round: 2 }));
+    expect(editorialEvidence.filesForDocument).toHaveBeenCalledTimes(2);
+    expect(callAnthropic).toHaveBeenCalledTimes(2);
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.commitFiles).toHaveLength(1);
+    expect(gh._calls.commitFiles[0].files[1]).toEqual(sidecar);
+    expect(db._tables.codex_remediation_state[0].rounds).toBe(2);
+  });
+
+  test('repeated editorial outages exhaust the existing round budget and park without a write', async () => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const outage = Object.assign(new Error('signing key unavailable'), { code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+    const editorialEvidence = { filesForDocument: jest.fn().mockRejectedValue(outage) };
+    const callAnthropic = jest.fn(makeCall('FIXED BODY'));
+    const deps = { db, gh, editorialEvidence, callAnthropic, validateFixedBlogFile: PASS };
+    const ctx = { ...CTX, expectedParentSha: HEAD };
+
+    for (let attempt = 1; attempt < MAX_ROUNDS; attempt += 1) {
+      await expect(runRemediationForPr(ctx, deps)).resolves.toEqual(expect.objectContaining({
+        skipped: true, transient: true,
+      }));
+    }
+    const exhausted = await runRemediationForPr(ctx, deps);
+
+    expect(exhausted).toEqual(expect.objectContaining({
+      parked: true, reason: expect.stringContaining(`exhausted ${MAX_ROUNDS} remediation rounds`),
+    }));
+    expect(db._tables.codex_remediation_state[0]).toEqual(expect.objectContaining({
+      status: 'parked', rounds: MAX_ROUNDS, park_phase: 'pre_push', parked_head_sha: HEAD,
+    }));
+    expect(editorialEvidence.filesForDocument).toHaveBeenCalledTimes(MAX_ROUNDS);
+    expect(callAnthropic).toHaveBeenCalledTimes(MAX_ROUNDS);
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.commitFiles).toHaveLength(0);
+  });
+
+  test.each([
+    ['missing output', null, 'returned no file list'],
+    ['deterministic rejection mentioning availability', Object.assign(
+      new Error('Claim about network availability is unsupported'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED' },
+    ), 'network availability'],
+  ])('editorial %s fails closed and is not retried on the same head', async (_label, error, reason) => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const editorialEvidence = { filesForDocument: error
+      ? jest.fn().mockRejectedValue(error) : jest.fn().mockResolvedValue(null) };
+    const callAnthropic = jest.fn(makeCall('FIXED BODY'));
+    const deps = { db, gh, editorialEvidence, callAnthropic, validateFixedBlogFile: PASS };
+    const ctx = { ...CTX, expectedParentSha: HEAD };
+
+    const result = await runRemediationForPr(ctx, deps);
+    expect(result).toEqual(expect.objectContaining({
+      parked: true, reason: expect.stringContaining(reason),
+    }));
+    expect((await runRemediationForPr(ctx, deps)).reason).toBe('parked');
+    expect(editorialEvidence.filesForDocument).toHaveBeenCalledTimes(1);
+    expect(callAnthropic).toHaveBeenCalledTimes(1);
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.commitFiles).toHaveLength(0);
   });
 
   test('.mdx finding path is edited (not the slug .md fallback)', async () => {

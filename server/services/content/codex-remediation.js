@@ -1112,6 +1112,18 @@ function retryableFrontmatterPark(state) {
     || state.park_reason === 'frontmatter repair rejected after bounded retry: schema_types may only follow the publisher-derived FAQPage change';
 }
 
+// Editorial review/signing depends on remote providers and configured keys.
+// Retry only recognizable availability failures; a policy rejection or a
+// malformed/no-evidence result remains a same-head human hold.
+function transientEditorialEvidenceError(error) {
+  if (error?.code === 'BLOG_EDITORIAL_REVIEW_FAILED') return false;
+  if (error?.code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE') return true;
+  const status = Number(error?.status || error?.statusCode);
+  if (status === 408 || status === 429 || status >= 500) return true;
+  return /(?:unavailable|temporar|timed?\s*out|timeout|rate.?limit|overload|signing key|signature verification|ECONN|ETIMEDOUT|ENOTFOUND|fetch failed|network)/i
+    .test(String(error?.message || ''));
+}
+
 /**
  * Re-run the AUTONOMOUS runner's publish gates on a remediated .mdx before
  * committing — the runner's uniqueness / quality / SEO-completion /
@@ -1966,6 +1978,19 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     });
     if (!Array.isArray(editorialFiles)) throw new Error('editorial evidence generator returned no file list');
   } catch (e) {
+    if (transientEditorialEvidenceError(e)) {
+      // The LLM fix and every content gate already ran, so this attempt spent
+      // a round even though no branch write occurred. Keep the row active
+      // while budget remains; otherwise every poll could repeat paid model
+      // work forever. The final failure parks before any write as before.
+      const attempt = (state.rounds || 0) + 1;
+      await saveState(db, prNumber, { branch, status: 'active', rounds: attempt });
+      const reason = `editorial evidence generation temporarily unavailable: ${e.message}`;
+      if (atRoundLimit(attempt)) {
+        return park(db, prNumber, `${reason} (exhausted ${MAX_ROUNDS} remediation rounds)`, onPark, headSha, PARK_PRE_PUSH);
+      }
+      return { skipped: true, transient: true, reason: `${reason} (will retry)` };
+    }
     return park(db, prNumber, `editorial evidence generation failed: ${e.message}`, onPark, headSha, PARK_PRE_PUSH);
   }
   if (editorialFiles.length && typeof gh.commitFiles !== 'function') {
