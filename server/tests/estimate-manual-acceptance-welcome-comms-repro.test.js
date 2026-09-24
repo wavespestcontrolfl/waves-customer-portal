@@ -69,7 +69,20 @@ function makeDb(estimate) {
       clause: null,
       where(clause) { if (typeof clause === 'function') return this; this.clause = clause; return this; },
       whereIn() { return this; },
+      // customerHasLiveRecurringPlan (estimate-manual-acceptance.js, landed
+      // on main via PR #4671 after this branch was cut) chains
+      // .whereNotIn('status', TERMINAL_STATUSES) and, inside a nested
+      // .where(builder) callback, .whereNull('source_estimate_id') /
+      // .orWhereNot('source_estimate_id', ...) on the scheduled_services
+      // query. None of this needs to actually filter anything here — the
+      // fixture has no scheduled_services rows at all (first() below
+      // resolves null/no-row for every table but 'estimates'), so the
+      // annual-prepay eligibility guard always reads "no live plan", which
+      // is correct for this test: these cases are about welcome-comms
+      // suppression, not prepay eligibility.
+      whereNotIn() { return this; },
       whereNull(column) { this.nullColumns = [...(this.nullColumns || []), column]; return this; },
+      orWhereNot() { return this; },
       whereRaw() { return this; },
       forUpdate() { return this; },
       first: async () => (table === 'estimates' ? estimate : null),
