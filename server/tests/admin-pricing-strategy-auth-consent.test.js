@@ -37,19 +37,27 @@ function withServer(fn) {
 const LIVE = { id: 'c1', first_name: 'Test', phone: '+15550000001', deleted_at: null, active: true };
 const PREFS = { customer_id: 'c1', sms_enabled: true, marketing_offers: true, updated_at: '2026-08-01T00:00:00.000Z' };
 
-// Per-table mock: customers.first → customer, notification_prefs.first → prefs.
+// Per-table mock: customers.first → customer, notification_prefs.first →
+// prefs, customer_interactions.first → no prior claim (the upsell
+// double-send guard's persisted check, audit r1-races-2).
 function setupDb({ customer = LIVE, prefs = PREFS, updateResult = [{ id: 'r1' }] } = {}) {
   const updateCalls = [];
-  db.mockImplementation((table) => {
+  const build = (table) => {
     const q = {};
     for (const m of ['where', 'whereNull', 'select', 'orderBy', 'limit', 'increment']) q[m] = jest.fn(() => q);
-    q.first = jest.fn(async () => (table === 'notification_prefs' ? prefs : customer));
+    q.first = jest.fn(async () => {
+      if (table === 'notification_prefs') return prefs;
+      if (table === 'customer_interactions') return null; // no prior upsell claim
+      return customer;
+    });
     q.insert = jest.fn(async () => [1]);
     q.catch = jest.fn(async () => undefined);
     q.update = jest.fn((u) => { updateCalls.push({ table, updates: u }); return q; });
     q.returning = jest.fn(async () => updateResult);
     return q;
-  });
+  };
+  db.mockImplementation(build);
+  db.transaction = jest.fn(async (cb) => cb(Object.assign(build, { raw: jest.fn((sql) => sql) })));
   return updateCalls;
 }
 

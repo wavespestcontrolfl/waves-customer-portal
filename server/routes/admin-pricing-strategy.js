@@ -270,24 +270,20 @@ router.get('/upsell-opportunities', async (req, res, next) => {
 // and eligibility checks and sent, with no in-flight guard and no prior-send
 // check, so a double-click or a re-click after the "Upsell SMS sent!" toast
 // texted the same marketing SMS twice (exactly the "send it twice" class the
-// owner's no-unintended-comms directive forbids). In-process (per app
-// instance), since no persisted per-send idempotency table exists for this
-// route yet: `upsellSendsInFlight` blocks a concurrent duplicate request for
-// the same customer, and `upsellLastSentAt` blocks a later, non-concurrent
-// re-click within the cooldown window.
-const upsellSendsInFlight = new Set();
-const upsellLastSentAt = new Map();
-const UPSELL_RESEND_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+// owner's no-unintended-comms directive forbids). The claim below is a real
+// Postgres row, inserted under a per-customer advisory lock inside its own
+// short transaction BEFORE the message renders/sends, so it is atomic across
+// concurrent requests and survives a restart or a second app instance — an
+// in-memory guard alone could not. It uses customer_interactions (an
+// existing, durable per-customer log table other senders already write to,
+// e.g. account-membership-email.js) rather than this route's own
+// 'communications' insert below: a repo-wide grep found only that one write
+// site and no migration ever creates a 'communications' table, so it is not
+// a reliable read-back source for a correctness-critical check.
+const UPSELL_RESEND_COOLDOWN = "interval '1 hour'";
+const UPSELL_SENT_INTERACTION_TYPE = 'upsell_sms_sent';
 
 router.post('/trigger-upsell/:customerId', async (req, res, next) => {
-  const { customerId } = req.params;
-  if (upsellSendsInFlight.has(customerId)) {
-    return res.status(409).json({
-      error: 'An upsell send is already in progress for this customer.',
-      code: 'UPSELL_SEND_IN_PROGRESS',
-    });
-  }
-  upsellSendsInFlight.add(customerId);
   try {
     const customer = await db('customers').where('id', req.params.customerId).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -318,21 +314,37 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
     }
     const consentCapturedAt = new Date(prefs.updated_at || prefs.created_at || Date.now()).toISOString();
 
-    // Prior-send guard: checked here (a genuinely eligible, consented send),
-    // not before the checks above, so a customer who already got an upsell
-    // recently still gets the correct 404/422 for an unrelated reason rather
-    // than a misleading "already sent" on a request that was never going to
-    // send anyway.
-    const lastSentAt = upsellLastSentAt.get(customerId);
-    if (lastSentAt && Date.now() - lastSentAt < UPSELL_RESEND_COOLDOWN_MS) {
+    const upsell = await PricingIntelligence.findBestUpsell(customer.id);
+    if (!upsell) return res.status(404).json({ error: 'No upsell opportunity found for this customer' });
+
+    // Prior-send guard: claimed here (a genuinely eligible, consented send
+    // with a real offer found), not before the checks above, so a customer
+    // who already got an upsell recently still gets the correct 404/422 for
+    // an unrelated reason rather than a misleading "already sent" on a
+    // request that was never going to send anyway. The lock + read + insert
+    // happen in one transaction, so two concurrent requests for the same
+    // customer cannot both pass the check before either claims it.
+    const claimed = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['upsell_trigger', customer.id]);
+      const recent = await trx('customer_interactions')
+        .where({ customer_id: customer.id, interaction_type: UPSELL_SENT_INTERACTION_TYPE })
+        .where('created_at', '>=', trx.raw(`now() - ${UPSELL_RESEND_COOLDOWN}`))
+        .first();
+      if (recent) return false;
+      await trx('customer_interactions').insert({
+        customer_id: customer.id,
+        interaction_type: UPSELL_SENT_INTERACTION_TYPE,
+        subject: 'Upsell SMS claimed',
+        metadata: JSON.stringify({ type: 'upsell', upsellType: upsell.type, service: upsell.service }),
+      });
+      return true;
+    });
+    if (!claimed) {
       return res.status(409).json({
         error: 'An upsell offer was already sent to this customer recently.',
         code: 'UPSELL_ALREADY_SENT',
       });
     }
-
-    const upsell = await PricingIntelligence.findBestUpsell(customer.id);
-    if (!upsell) return res.status(404).json({ error: 'No upsell opportunity found for this customer' });
 
     const firstName = customer.first_name || 'there';
 
@@ -379,12 +391,13 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
       },
     });
     if (!smsResult.sent) {
+      // The claim above is already persisted even though this particular
+      // send failed/was blocked — the operator can re-trigger after the
+      // cooldown; a tighter release-on-failure isn't worth the extra
+      // complexity for what should be a rare path (consent/eligibility are
+      // already checked before the claim).
       return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
     }
-    // Stamp the cooldown immediately on a confirmed send, before the
-    // best-effort bookkeeping below, so a re-click racing this same request
-    // (or landing right after it) is blocked even if the bookkeeping fails.
-    upsellLastSentAt.set(customerId, Date.now());
     logger.info(`[pricing-strategy] Upsell SMS sent to customer ${customer.id}: ${upsell.type} - ${upsell.service}`);
 
     // Log the attempt — increment times_triggered on matching rule
@@ -403,9 +416,7 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
     }).catch(() => {}); // non-critical
 
     res.json({ success: true, upsell, messageSent: message });
-  } catch (err) { next(err); } finally {
-    upsellSendsInFlight.delete(customerId);
-  }
+  } catch (err) { next(err); }
 });
 
 // =========================================================================

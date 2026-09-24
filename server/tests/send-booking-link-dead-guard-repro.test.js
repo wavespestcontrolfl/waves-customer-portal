@@ -103,16 +103,21 @@ const ESTIMATE = {
   estimate_data: JSON.stringify({ oneTime: [{ name: 'German Roach Treatment', price: 295 }] }),
 };
 
-// The live appointment that every real booking path produces.
-const LINKED_APPT = {
-  id: 'ss-1',
-  customer_id: 'cust-1',
-  source_estimate_id: 'est-1',
-  status: 'confirmed',
-  scheduled_date: TOMORROW,
-  window_start: '09:00',
-  service_type: 'German Roach Treatment',
-};
+// The live appointment that every real booking path produces. Mutable
+// status per test (LINKED_APPT_STATUS) so a skipped/no-show linked visit
+// can be exercised without duplicating the whole fixture.
+let LINKED_APPT_STATUS = 'confirmed';
+function linkedAppt() {
+  return {
+    id: 'ss-1',
+    customer_id: 'cust-1',
+    source_estimate_id: 'est-1',
+    status: LINKED_APPT_STATUS,
+    scheduled_date: TOMORROW,
+    window_start: '09:00',
+    service_type: 'German Roach Treatment',
+  };
+}
 
 const scheduledServicesQueries = [];
 
@@ -130,13 +135,17 @@ function makeBuilder(table) {
     if (table === 'scheduled_services') {
       scheduledServicesQueries.push(b.wheres.slice());
       // Answer like a real DB: the row matches on source_estimate_id (how
-      // it is actually linked) or on its own id.
+      // it is actually linked) or on its own id, but only when its status
+      // isn't excluded by a whereNotIn('status', [...]) on this query.
       const flat = JSON.stringify(b.wheres);
       const bySource = b.wheres.some(([m, a]) => m === 'where' && a && typeof a === 'object' && String(a.source_estimate_id) === 'est-1')
         || b.wheres.some(([m, a, v]) => m === 'where' && a === 'source_estimate_id' && String(v) === 'est-1')
         || /source_estimate_id/.test(flat) && /est-1/.test(flat);
       const byId = b.wheres.some(([m, a]) => m === 'where' && a && typeof a === 'object' && String(a.id) === 'ss-1');
-      return (bySource || byId) ? { ...LINKED_APPT } : null;
+      if (!bySource && !byId) return null;
+      const excludedStatuses = b.wheres.find(([m, col]) => m === 'whereNotIn' && col === 'status')?.[2] || [];
+      if (excludedStatuses.includes(LINKED_APPT_STATUS)) return null;
+      return { ...linkedAppt() };
     }
     return null;
   });
@@ -161,6 +170,7 @@ describe('AUDIT r1-estimates-2: send-booking-link on an already-booked estimate'
     jest.clearAllMocks();
     scheduledServicesQueries.length = 0;
     ESTIMATE_DATA_OVERRIDE = null;
+    LINKED_APPT_STATUS = 'confirmed';
     db.mockImplementation((table) => makeBuilder(table));
   });
 
@@ -197,4 +207,19 @@ describe('AUDIT r1-estimates-2: send-booking-link on an already-booked estimate'
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(res.status).toBe(409);
   });
+
+  test.each(['skipped', 'no_show', 'cancelled', 'rescheduled', 'completed'])(
+    'a %s linked visit is terminal — the guard does NOT block a fresh booking link',
+    async (status) => {
+      LINKED_APPT_STATUS = status;
+      const res = await withServer(async (baseUrl) => {
+        const r = await fetch(`${baseUrl}/estimates/est-1/send-booking-link`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        return { status: r.status, body: await r.json() };
+      });
+      expect(res.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    },
+  );
 });

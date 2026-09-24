@@ -3,8 +3,10 @@
 // Before the fix, POST /trigger-upsell/:customerId had no in-flight guard
 // and no prior-send check: two POSTs (a double-click, or a re-click after
 // the "Upsell SMS sent!" toast) each independently passed every check and
-// sent, texting the same marketing SMS twice. The route now tracks
-// per-customer in-flight sends and a resend cooldown.
+// sent, texting the same marketing SMS twice. The route now claims a
+// customer_interactions row under a per-customer advisory lock, inside a
+// transaction, before rendering/sending — atomic across concurrent
+// requests and persisted (survives a restart or a second app instance).
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
@@ -23,10 +25,6 @@ jest.mock('../services/sms-template-renderer', () => ({
 const express = require('express');
 const db = require('../models/db');
 
-// The double-send guard's Maps are module-level state, not reset between
-// tests — this is the point (it must survive a page reload) but it also
-// means each test below uses its OWN customer id so the two tests don't
-// interfere with each other's cooldown.
 let router;
 beforeAll(() => { router = require('../routes/admin-pricing-strategy'); });
 
@@ -40,15 +38,36 @@ function withServer(fn) {
   return fn(base).finally(() => new Promise((r) => server.close(r)));
 }
 
-const tables = { communications: [], upsell_rules_increments: 0 };
+const tables = { communications: [], upsell_rules_increments: 0, customer_interactions: [] };
+// Serializes db.transaction bodies one at a time, the way a real Postgres
+// pg_advisory_xact_lock would serialize two concurrent requests for the
+// same customer — otherwise this in-memory fake has no lock of its own and
+// both "transactions" could race past the recent-claim check.
+let txQueue = Promise.resolve();
 function setupDb(customerRow) {
-  db.mockImplementation((table) => {
+  const build = (table) => {
     const q = {};
     for (const m of ['where', 'whereNull', 'select', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
-    q.first = jest.fn(async () => customerRow); // serves both customers + notification_prefs
-    q.insert = jest.fn(async (row) => { if (table === 'communications') tables.communications.push(row); return [1]; });
+    q.first = jest.fn(async () => {
+      if (table === 'customer_interactions') {
+        return tables.customer_interactions.find((r) => r.customer_id === customerRow.id) || null;
+      }
+      return customerRow; // serves both customers + notification_prefs
+    });
+    q.insert = jest.fn(async (row) => {
+      if (table === 'communications') tables.communications.push(row);
+      if (table === 'customer_interactions') tables.customer_interactions.push(row);
+      return [1];
+    });
     q.increment = jest.fn(async () => { tables.upsell_rules_increments += 1; return 1; });
     return q;
+  };
+  db.mockImplementation(build);
+  db.transaction = jest.fn((cb) => {
+    const trx = Object.assign(build, { raw: jest.fn((sql) => sql) });
+    const run = txQueue.then(() => cb(trx));
+    txQueue = run.catch(() => {});
+    return run;
   });
 }
 
@@ -58,7 +77,11 @@ function liveCustomer(id) {
 const upsell = { type: 'cross_sell', service: 'Mosquito Control', category: 'mosquito', discountPct: 10, rule: { id: 7 } };
 
 describe('audit r1-races-2: trigger-upsell double-send guard', () => {
-  beforeEach(() => { db.mockReset(); mockFindBestUpsell.mockReset(); mockSend.mockReset(); tables.communications.length = 0; tables.upsell_rules_increments = 0; });
+  beforeEach(() => {
+    db.mockReset(); mockFindBestUpsell.mockReset(); mockSend.mockReset();
+    tables.communications.length = 0; tables.upsell_rules_increments = 0; tables.customer_interactions.length = 0;
+    txQueue = Promise.resolve();
+  });
 
   test('two sequential POSTs (re-click after toast): first sends, second is blocked — exactly one send', async () => {
     setupDb(liveCustomer('c-sequential'));

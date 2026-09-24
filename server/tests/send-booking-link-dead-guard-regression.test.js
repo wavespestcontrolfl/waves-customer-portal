@@ -4,7 +4,7 @@
 // estimate_data.scheduled_service_id, so an estimate whose visit is linked
 // via scheduled_services.source_estimate_id (every admin/public booking
 // path) still got a fresh /book SMS. The guard now ORs both keys and
-// matches any live (not cancelled/rescheduled/completed) status.
+// matches any live (non-TERMINAL_STATUSES) status.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),

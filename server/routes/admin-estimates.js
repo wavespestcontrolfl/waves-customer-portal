@@ -4965,19 +4965,23 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     // and the customer's own /book) stamps scheduled_services.source_estimate_id
     // — estimate_data.scheduled_service_id is written only by the call-agent
     // assessment pre-draft, so keying the guard on that key alone left every
-    // normal booking unchecked. OR both keys and match any live (not
-    // cancelled/rescheduled/completed) status.
+    // normal booking unchecked. OR both keys and match any live status —
+    // TERMINAL_STATUSES (cancelled/completed/no_show/skipped/rescheduled),
+    // the same terminal set waveguard-existing-services.js uses, so a
+    // skipped or no-show visit doesn't block a legitimate replacement
+    // booking link.
     try {
       const estData = typeof estimate.estimate_data === 'string'
         ? JSON.parse(estimate.estimate_data)
         : estimate.estimate_data;
       const linkedSvcId = estData?.scheduled_service_id || null;
+      const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
       const linked = await db('scheduled_services')
         .where((q) => {
           q.where({ source_estimate_id: estimate.id });
           if (linkedSvcId) q.orWhere({ id: linkedSvcId });
         })
-        .whereNotIn('status', ['cancelled', 'rescheduled', 'completed'])
+        .whereNotIn('status', TERMINAL_STATUSES)
         .first();
       if (linked) {
         return res.status(409).json({
