@@ -296,6 +296,7 @@ function formatRawWindow(start, end) {
 function autoAttemptReasonLabel(reason) {
   if (!reason) return null;
   if (reason === 'grouped_visit_manual') return 'Part of a grouped visit — needs a manual decision';
+  if (reason === 'office_review_pending') return 'Booking still awaiting office review — needs a manual decision';
   if (reason === 'live_status') return 'Stop is already in progress — needs a manual decision';
   if (reason === 'no_eligible_candidate') return 'No eligible technician was free to take it automatically';
   if (reason === 'schedule_changed') return 'The schedule changed during the move — try auto-assign again';

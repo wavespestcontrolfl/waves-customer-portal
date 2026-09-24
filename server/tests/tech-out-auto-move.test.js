@@ -44,6 +44,9 @@ const {
   autoMoveEnabled, autoAssignParkedAlert, autoAssignTechDay,
 } = require('../services/tech-out-auto-move');
 
+const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+
+const REVIEW_SOURCE = OFFICE_REVIEW_PENDING_SOURCE_ACTIONS[0];
 const ABSENT_TECH = 'tech-absent';
 const CANDIDATE = { id: 'tech-2', name: 'Tech Two' };
 const ALERT_ID = 'alert-1';
@@ -91,6 +94,8 @@ function baseStop(overrides = {}) {
     scheduled_date: DATE,
     customer_id: 'cust-1',
     track_state: 'scheduled',
+    source_action: null,
+    customer_confirmed: true,
     ...overrides,
   };
 }
@@ -180,6 +185,30 @@ describe('autoAssignParkedAlert', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['status pending', { status: 'pending' }],
+    ['a call-review source not yet customer-confirmed', { status: 'confirmed', source_action: REVIEW_SOURCE, customer_confirmed: false }],
+  ])('office review pending (%s): left parked, the mover is never called', async (_label, overrides) => {
+    const queue = [query(baseAlert()), query(baseStop(overrides)), query({})];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'office_review_pending' });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('a superseded (rescheduled) row is stale: no move, and its card is closed as a systemic resolution', async () => {
+    const queue = [query(baseAlert()), query(baseStop({ status: 'rescheduled' }))];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, skipped: 'already_resolved' });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, auto: true }));
+  });
+
   test('idempotent: the stop already moved off the absent tech — no-op skip, no mover call, no re-annotation', async () => {
     const queue = [query(baseAlert()), query(baseStop({ technician_id: 'someone-else' }))];
     db.mockImplementation(() => queue.shift());
@@ -189,6 +218,8 @@ describe('autoAssignParkedAlert', () => {
     expect(res).toEqual({ moved: false, alert_id: ALERT_ID, skipped: 'already_resolved' });
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     expect(db.raw).not.toHaveBeenCalled();
+    // The card would otherwise keep counting as parked: closed, systemically.
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, auto: true }));
   });
 
   test('idempotent: an already-resolved alert is a no-op', async () => {
@@ -242,6 +273,7 @@ describe('autoAssignParkedAlert', () => {
       expect: {
         technician_id: ABSENT_TECH, scheduled_date: DATE, window_start: '09:00', window_end: '11:00', status: 'confirmed',
         track_state: 'scheduled',
+        customer_confirmed: true,
       },
     });
     expect(typeof options.moveGuard).toBe('function');

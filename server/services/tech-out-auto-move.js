@@ -26,8 +26,10 @@
  * Out of scope, always left parked for a human (never thrown away):
  *   - a grouped visit (alert carries >1 visit_member_ids, or the stop now
  *     carries a visit_id) — `grouped_visit_manual`
- *   - any member status not in RESCHEDULABLE_STATUSES (en_route / on_site /
- *     in_progress / any other live or terminal state) — `live_status`
+ *   - a call booking still awaiting office review (status 'pending', or a
+ *     call-review source not yet customer_confirmed) — `office_review_pending`
+ *   - anything but a plain 'confirmed' visit, or a live tracker state
+ *     (en_route / on_property) — `live_status`
  *   - no eligible candidate technician, or every attempt the mover refused
  *     — `no_eligible_candidate`
  *   - the stop is no longer on the absent tech for that date (already moved,
@@ -38,8 +40,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const SmartRebooker = require('./rebooker');
-const { RESCHEDULABLE_STATUSES } = require('./reschedule-eligibility');
 const { LIVE_TRACK_STATES } = require('./cancellation-eligibility');
+const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const { assertCapabilitiesActive, inactiveCapabilitiesForServices } = require('./technician-capabilities');
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
@@ -356,22 +358,33 @@ function makeStillParkedGuard({ alertId, absentTechId, date, stopId, excludeServ
  */
 function stopMoveRefusal(stop, absentTechId, date) {
   if (!stop) return { reason: 'stop_not_found', skipped: false };
-  // A grouped visit the alert didn't know about (grouped after park) is a
-  // human decision, same as the up-front alert-payload check.
-  if (stop.visit_id) return { reason: 'grouped_visit_manual', skipped: false };
-  if (!RESCHEDULABLE_STATUSES.has(String(stop.status))) return { reason: 'live_status', skipped: false };
-  // The tracker can go live (en_route / on_property) before the operational
-  // status syncs, so a 'confirmed' row may already be an active visit.
-  if (LIVE_TRACK_STATES.includes(String(stop.track_state))) return { reason: 'live_status', skipped: false };
   const scheduledDateStr = stop.scheduled_date instanceof Date
     ? stop.scheduled_date.toISOString().slice(0, 10)
     : String(stop.scheduled_date || '').slice(0, 10);
-  // Idempotent no-op: the stop already moved off the absent tech, or off
-  // this date, by some other path (a dispatcher's manual reassignment, a
-  // prior auto-move run) since this alert was parked.
-  if (String(stop.technician_id || '') !== String(absentTechId || '') || scheduledDateStr !== String(date)) {
-    return { reason: 'already_resolved', skipped: true };
+  // Stale card: the stop already left the absent tech's day by some other
+  // path (a dispatcher's reassignment, a prior run, a date move), or it was
+  // superseded ('rescheduled' is a non-route placeholder the parking query
+  // itself never selects). Nothing to move; the caller closes the card.
+  if (String(stop.technician_id || '') !== String(absentTechId || '')
+    || scheduledDateStr !== String(date)
+    || stop.status === 'rescheduled') {
+    return { reason: 'already_resolved', skipped: true, stale: true };
   }
+  // A grouped visit the alert didn't know about (grouped after park) is a
+  // human decision, same as the up-front alert-payload check.
+  if (stop.visit_id) return { reason: 'grouped_visit_manual', skipped: false };
+  // A call booking still awaiting office review is never touched: the
+  // mover's post-commit legacy activation would confirm it (reminders, lead
+  // conversion, review card) as a side effect of a technician change.
+  if (stop.status === 'pending'
+    || (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(stop.source_action) && !stop.customer_confirmed)) {
+    return { reason: 'office_review_pending', skipped: false };
+  }
+  // Only a plain confirmed visit moves; anything else is live or terminal.
+  if (stop.status !== 'confirmed') return { reason: 'live_status', skipped: false };
+  // The tracker can go live (en_route / on_property) before the operational
+  // status syncs, so a 'confirmed' row may already be an active visit.
+  if (LIVE_TRACK_STATES.includes(String(stop.track_state))) return { reason: 'live_status', skipped: false };
   return null;
 }
 
@@ -408,11 +421,15 @@ async function loadMovableStop(alertId) {
       'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.estimated_duration_minutes', 'scheduled_services.visit_id',
       'scheduled_services.technician_id', 'scheduled_services.scheduled_date',
-      'scheduled_services.customer_id', 'scheduled_services.track_state', ...guardedCoordSelects(db),
+      'scheduled_services.customer_id', 'scheduled_services.track_state',
+      'scheduled_services.source_action', 'scheduled_services.customer_confirmed', ...guardedCoordSelects(db),
     );
   const refusal = stopMoveRefusal(stop, absentTechId, date);
   if (refusal) {
     if (!refusal.skipped) await annotateAttempt(alertId, refusal.reason);
+    // A stale card left open would keep counting in parked_open_count while
+    // the run reports nothing left: close it as a systemic resolution.
+    if (refusal.stale) await resolveStaleAlert(alertId);
     return {
       done: refusal.skipped
         ? { moved: false, alert_id: alertId, skipped: refusal.reason }
@@ -429,6 +446,14 @@ async function loadMovableStop(alertId) {
  * "also absent on this date") — called per candidate here, right before
  * ranking, so a race between the crew read and this check is still caught.
  */
+async function resolveStaleAlert(alertId) {
+  try {
+    await resolveAlert({ id: alertId, resolvedBy: null, auto: true });
+  } catch (err) {
+    logger.warn(`[tech-out-auto-move] failed to close stale alert ${alertId}: ${err.message}`);
+  }
+}
+
 /** Open stops still on the absent tech that day (the batch the mover may pass over). */
 async function absentDayStopIds(absentTechId, date) {
   const rows = await db('scheduled_services')
@@ -507,6 +532,8 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
             // The non-live tracker state we read: a tech going en_route or
             // on_property after that read misses this CAS (409), never moves.
             track_state: stop.track_state ?? null,
+            // Pinned so a row cannot slip into office review mid-move.
+            customer_confirmed: stop.customer_confirmed ?? null,
           },
           moveGuard: makeMoveGuard(stop, date),
           beforeMove: makeStillParkedGuard({
