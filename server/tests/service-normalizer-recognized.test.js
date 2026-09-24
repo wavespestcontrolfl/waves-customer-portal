@@ -111,3 +111,19 @@ describe('mappedServiceLabel — no catalog branch at all', () => {
     expect(mappedServiceLabel('Rodent Trapping Service')).toBeNull();
   });
 });
+
+describe('tree & shrub labels keep their family (2026-09-24 round-6 P1)', () => {
+  test.each([
+    ['Tree & Shrub Fertilization', 'Tree & Shrub Care'],
+    ['Tree & Shrub Weed & Feed', 'Tree & Shrub Care'],
+    ['Palm Fertilization', 'Tree & Shrub Care'],
+    ['Palm Injection', 'Palm Injection'],
+    ['Arborjet Tree Injection', 'Arborjet Treatment'],
+  ])('%s → %s, never a lawn service', (raw, expected) => {
+    expect(mappedServiceLabel(raw)).toBe(expected);
+  });
+  test('lawn fertilization itself is unchanged', () => {
+    expect(mappedServiceLabel('Lawn Fertilization')).toBe('Lawn Fertilization');
+    expect(mappedServiceLabel('Fertilization - 1 hour - $85')).toBe('Lawn Fertilization');
+  });
+});

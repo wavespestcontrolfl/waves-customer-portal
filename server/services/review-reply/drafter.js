@@ -28,7 +28,10 @@ const { dispatchWithFallback } = require('../llm/call');
 const { SERVED_CITIES } = require('./grounding');
 const { whereHasRealReply } = require('./draft-prefix');
 
-const REPLY_VERSION = 'reply-v1';
+// reply-v2 (2026-09-24, #4713): the safe-copy template rung is gone, so a
+// reply-v1 draft stored on a failed publish may be that canned text — the
+// runner's publish-retry reuse only takes drafts of the CURRENT version.
+const REPLY_VERSION = 'reply-v2';
 const DRAFT_TIMEOUT_MS = 45 * 1000;
 const RECENT_REPLIES_LIMIT = 10;
 
@@ -324,7 +327,7 @@ const DATE_CLAIM_RE = /\b(?:noon|midnight|\d{1,2}(?::\d{2})?\s?(?:am|pm|a\.m\.|p
 // Service / treatment / relationship claims. Each is a factual assertion
 // about what we did or who the customer is; it must come from the review
 // text or from an allowed account fact, never from the model.
-const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|membership|members?|programs?|waveguard)\b/gi;
+const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|did (?:its|their) job|doing (?:its|their) job|does (?:its|their) job|did the trick|does the trick|made (?:a|all the) (?:\w+ )?difference|makes? (?:a|all the) (?:\w+ )?difference|paid off|kicked in|took effect|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|membership|members?|programs?|waveguard)\b/gi;
 // Membership/plan-status terms within SERVICE_CLAIM_RE (2026-09-25 P1 fix,
 // pre-push round 2) — an identity/relationship claim, not an outcome, so
 // deliberately absent from OUTCOME_TERM_RE. Bare "plan" is NOT a claim
@@ -333,10 +336,11 @@ const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|(?:a )?thing of the past|i
 // other SERVICE_CLAIM_RE term (round-3 fix: two completed visits alone label
 // an account "recurring" with no plan evidence at all, so that relationship
 // fact does not license calling someone a member on its own).
+const MEMBERSHIP_TERM_RE = /^(?:(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|membership|members?)$/i;
 // Outcome / result phrases within SERVICE_CLAIM_RE — the ones a negation
 // in the review flips ("did not get rid of", "never eliminated", "not under
 // control"). Topic nouns (ants, treatment, lawn) are deliberately absent.
-const OUTCOME_TERM_RE = /^(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
+const OUTCOME_TERM_RE = /^(?:behind (?:you|us|them)|did (?:its|their) job|doing (?:its|their) job|does (?:its|their) job|did the trick|does the trick|made (?:a|all the) (?:\w+ )?difference|makes? (?:a|all the) (?:\w+ )?difference|paid off|kicked in|took effect|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
 // Staff credential / award modifiers: nothing in the grounding proves them,
 // so they need the reviewer's own words (codex r52).
 const CREDENTIAL_CLAIM_RE = /\b(?:certified|licen[cs]ed|insured|bonded|background[- ]checked|vetted|accredited|award[- ]winning|trained|state[- ]licen[cs]ed|screened|degreed|qualified|experts?|specialists?|master|veteran|senior|lead|head|top[- ]rated)\b/gi;
@@ -675,7 +679,10 @@ function checkServiceClaims(ctx) {
     // ants". A bare topic noun ("ants", "treatment") inside a negated clause
     // is still a fine thing to name in the reply.
     const outcome = OUTCOME_TERM_RE.test(t);
-    if (support === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
+    // Membership/plan status is polar too (round-6 P1): "I am not a member"
+    // must not source "Glad to have you as a member".
+    const polar = outcome || MEMBERSHIP_TERM_RE.test(t);
+    if (support === 'negated' && polar && !bodyNegates(t)) return reject('negated_review_claim', t);
     if (support === 'negated') continue;
     const stem = stemOf(t);
     if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
@@ -686,7 +693,7 @@ function checkServiceClaims(ctx) {
     if (rooted) {
       const rootSupport = rootSupported(reviewLower, reviewWords, stem, t, reviewNeg);
       if (rootSupport === true) continue;
-      if (rootSupport === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
+      if (rootSupport === 'negated' && polar && !bodyNegates(t)) return reject('negated_review_claim', t);
       continue;
     }
     // Not sourced by a literal or root match, and (checked above) not

@@ -500,7 +500,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, glad the service hit the mark. Thanks for having us out to the house.'), g)).toBeNull();
     // An account service category makes its words sourced.
     const g2 = grounding({ text: 'Great service!', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['mosquito control'], city: null } });
-    expect(verify(good('Hi Dana, glad the mosquito control is doing its job. Thanks for sticking with us over the years.'), g2)).toBeNull();
+    expect(verify(good('Hi Dana, glad you trust us with the mosquito control. Thanks for sticking with us over the years.'), g2)).toBeNull();
+    // …the category sources the NAME only; "Great service!" states no
+    // outcome, so an efficacy idiom about it is unsourced (round-6 P1).
+    expect(verify(good('Hi Dana, glad the mosquito control is doing its job.'), g2)).toBe('unlisted_service_claim');
     // Outcome vocabulary is a claim too.
     expect(verify(good('Hi Dana, glad we eliminated the infestation and protected your home.'), g)).toBe('unlisted_service_claim');
     const g3 = grounding({ text: 'They eliminated our ant infestation fast!', mentionedTechNames: [], topics: [], account: null });
@@ -702,7 +705,45 @@ describe('2026-09-24 fix: sentence-initial gerunds pass, servicesPerformed words
     g.allow.servicePhrases = ['cockroach treatment'];
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for the note about the ant treatment.'), g)).toBe('unlisted_service_claim');
     // The full phrase, used as written, passes.
-    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the cockroach treatment did its job.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for trusting us with the cockroach treatment.'), g)).toBeNull();
+    // …but the phrase sources only the service NAME, never an efficacy
+    // claim about it (round-6 P1): the review states no outcome at all.
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the cockroach treatment did its job.'), g)).toBe('unlisted_service_claim');
+  });
+});
+
+describe('2026-09-24 round-6 P1 fixes: outcome idioms, negated membership, reply version', () => {
+  const genericGrounding = (text = 'Great service.') => {
+    const g = grounding({ text, mentionedTechNames: [], topics: [] });
+    g.allow.servicePhrases = ['cockroach treatment'];
+    return g;
+  };
+  test.each([
+    'Glad the cockroach treatment did its job.',
+    'Glad the cockroach treatment did the trick.',
+    'Glad the cockroach treatment made a real difference.',
+    'Glad the cockroach treatment paid off.',
+  ])('an outcome idiom after a sourced service name needs outcome evidence: %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBe('unlisted_service_claim');
+  });
+  test('the idiom passes when the review states that outcome about the same subject', () => {
+    const g = genericGrounding('The cockroach treatment did the trick, no more roaches.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the cockroach treatment did the trick.'), g)).toBeNull();
+  });
+  test('"I am not a member" cannot source "Glad to have you as a member"', () => {
+    const g = genericGrounding('I am not a member but the tech was great.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad to have you as a member.'), g)).toBe('negated_review_claim');
+  });
+  test('a negated service plan cannot source an affirmative one', () => {
+    const g = genericGrounding('We do not have a service plan yet.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for being on our service plan.'), g)).toBe('negated_review_claim');
+  });
+  test('an affirmative membership the reviewer wrote still passes', () => {
+    const g = genericGrounding('We have been a member for years.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for being a member.'), g)).toBeNull();
+  });
+  test('REPLY_VERSION moved past reply-v1 so stored safe-copy drafts are never reused on a publish retry', () => {
+    expect(Drafter.REPLY_VERSION).not.toBe('reply-v1');
   });
 });
 
@@ -803,7 +844,7 @@ describe('2026-09-25 pre-push round 2: subject-scoped outcome fallback / opener 
   test('service-phrase spans match names joined by "&" or a hyphen, not just plain whitespace (2026-09-25 P2 fix)', () => {
     const g1 = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [] });
     g1.allow.servicePhrases = ['flea tick treatment'];
-    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the Flea & Tick Treatment did the trick.'), g1)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you chose the Flea & Tick Treatment.'), g1)).toBeNull();
     const g2 = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [] });
     g2.allow.servicePhrases = ['one time pest control'];
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you chose the One-Time Pest Control for your home.'), g2)).toBeNull();

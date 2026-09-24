@@ -160,11 +160,20 @@ function mappedServiceLabel(raw) {
   if (!raw) return null;
   const cleaned = stripServiceSuffixes(raw);
   if (!cleaned) return null;
+  // Tree & shrub labels that also carry a lawn-program word ("Tree & Shrub
+  // Fertilization", "Palm Weed & Feed") would otherwise hit the generic
+  // /fertil/ lawn mapping first and be published as "Lawn Fertilization" —
+  // a service the customer never had (2026-09-24 round-6 P1). Same family
+  // rule as detectServiceCategory: only the tree & shrub mappings apply, and
+  // the family label is the fallback.
+  const treeShrub = detectServiceCategory(cleaned) === 'tree_shrub';
   for (const mapping of SERVICE_TYPE_MAP) {
+    if (treeShrub && !TREE_SHRUB_TYPES.has(mapping.type)) continue;
     if (mapping.match.test(cleaned)) return mapping.type;
   }
-  return null;
+  return treeShrub ? 'Tree & Shrub Care' : null;
 }
+const TREE_SHRUB_TYPES = new Set(['Tree & Shrub Care', 'Palm Injection', 'Arborjet Treatment']);
 
 /**
  * Detect the service category for color coding and icon assignment.
