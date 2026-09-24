@@ -297,6 +297,9 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
       { status: 'confirmed', track_state: 'on_property', expectConflict: true }, // tracker leads status
       { status: 'confirmed', track_state: 'scheduled', expectConflict: false }, // plain past row: lapsed
       { status: 'rescheduled', track_state: 'cancelled', expectConflict: false }, // tracker pulled it
+      { status: 'cancelled', track_state: 'en_route', expectConflict: false }, // terminal status beats stale tracker (r9)
+      { status: 'no_show', track_state: 'on_property', expectConflict: false },
+      { status: 'skipped', track_state: 'en_route', expectConflict: false },
     ];
     for (const c of cases) {
       const winnerId = await makeCustomer({ address_line1: '17 Palm Ct', city: 'Bradenton', zip: '34205' });
