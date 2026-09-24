@@ -55,6 +55,20 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Pest Pressure technician direct score (owner ruling 2026-09-24): on the
+service-report payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), when the visit's rating was entered by staff
+(`client_pest_rating_source = 'technician'`) `pestPressure.score` /
+`displayScore` equal that 0–5 rating exactly, and `label` resolves from the
+active six-band labels (0 None · 1 Very Low · 2 Low · 3 Moderate · 4 Elevated ·
+5 High; a customized label set is kept). When `showComponentBreakdownToCustomer`
+is on, such reports' `components` object is a single
+`technicianActivityRating` entry (`{ value, weight: 100, present: true }`)
+instead of the five weighted components; customer-rated reports keep the
+five-component blend. Customer-visible pressure numbers no longer floor at
+0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
+unchanged.
+
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
 On itemized accepted-plan invoices, each base-application row intentionally may
@@ -962,6 +976,24 @@ lookup-measured or customer-confirmed lot (owner ruling 2026-09-03; the
 recurring program joined this contract then, so a direct-API caller that
 posts an unconfirmed `lotSqFt` with `mosquito` now receives a manual
 quote where it previously received a price)).
+
+Keyed quote-on-request (a catalog `serviceKey`/`service_key` whose row is
+`public_quote_selectable=true` but carries NO `PUBLIC_QUOTE_REQUESTS` entry,
+`services/public-services-menu.js`): the route skips the pricing engine
+entirely and calls `quoteOnRequestEstimate` (`routes/public-quote.js`) —
+the lead is captured with `leads.service_key` + `service_interest` set to
+the catalog name verbatim, zero totals, no self-book handoff — and the
+response is `202 { quote_required: true, service, reason:
+'quote_on_request', service_interest, message }`. `message` is a generic
+"{catalog name} is priced by our team, not the calculator — we'll send
+your estimate shortly." UNLESS the key carries its own service-specific
+copy. `mosquito_misting_system` (Mosquito Misting System Service, catalog
+row `20260924000020_mosquito_misting_catalog_row`; no engine pricer —
+misting is quoted after an on-site design visit) is the one keyed
+exception today: its `message` is "Mosquito misting systems are designed
+and priced on site — we'll call to schedule your free design visit."
+instead of the generic copy. No pricing, no self-book slot, no new auth
+surface — additive response-copy branching only.
 
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run

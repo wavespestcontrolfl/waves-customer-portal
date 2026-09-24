@@ -51,7 +51,12 @@ beforeAll((done) => {
   const app = express();
   app.use(express.json());
   app.use('/api/admin/schedule', adminScheduleRouter);
-  app.use((err, _req, res, _next) => res.status(err.statusCode || 500).json({ error: err.message }));
+  // Mirrors middleware/errors.js's own isOperational handling (code included)
+  // closely enough for route-level `code` assertions on an error the route's
+  // own inline catch does not itself enrich (i.e. one thrown with only
+  // `statusCode`/`isOperational`, never `.status` — the pattern every
+  // VISIT_CHANGED_RETRY throw in this route already uses).
+  app.use((err, _req, res, _next) => res.status(err.statusCode || 500).json({ error: err.message, ...(err.code ? { code: err.code } : {}) }));
   server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; done(); });
 });
 afterAll((done) => { server.close(done); });
@@ -493,4 +498,163 @@ test('an address change combined with a cadence rewrite is refused under lock be
   expect(block).toContain("throw httpError(422, 'Change the address and the recurrence in separate saves.')");
   // No scheduled_services write may precede the refusal inside the trx.
   expect(handler.slice(trxStart, refuse)).not.toMatch(/\.(update|insert|del|delete)\(/);
+});
+
+describe('expectedTotal witness — GitHub Codex round 15 P1 (#4657, :11355); round 20 P1 (#4657, :3330)', () => {
+  test('a non-numeric expectedTotal is refused 422 before any DB work', async () => {
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status, body } = await put({ notes: 'x', expectedTotal: 'lots' });
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/expectedTotal must be a number/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('null expectedTotal (confirmed "Not priced") against a schedule-only edit proceeds — the plan leaves estimated_price untouched, matching the confirmed unpriced state', async () => {
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status } = await put({ scheduledDate: '2099-02-01', expectedTotal: null });
+    expect(status).toBe(418);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('null expectedTotal (confirmed "Not priced") against a genuine estimatedPrice edit refuses 409 VISIT_CHANGED_RETRY — the plan would silently persist a real price against a witnessed unpriced preview', async () => {
+    db.mockImplementation(() => {
+      const c = chain({ ...STORED, estimated_price: 100 });
+      c.columnInfo = jest.fn().mockResolvedValue({ estimated_price: {} });
+      return c;
+    });
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status, body } = await put({ estimatedPrice: 150, expectedTotal: null });
+    expect(status).toBe(409);
+    expect(body.code).toBe('VISIT_CHANGED_RETRY');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a witnessed save that never plans a price (a schedule-only edit) refuses 409 VISIT_CHANGED_RETRY / PREVIEW_TOTAL_DRIFT before opening the transaction', async () => {
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status, body } = await put({ scheduledDate: '2099-02-01', expectedTotal: 199.99 });
+    expect(status).toBe(409);
+    expect(body.code).toBe('VISIT_CHANGED_RETRY');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a stale expectedTotal against a genuine price edit refuses 409, even off by a cent', async () => {
+    db.mockImplementation(() => {
+      const c = chain({ ...STORED, estimated_price: 100 });
+      c.columnInfo = jest.fn().mockResolvedValue({ estimated_price: {} });
+      return c;
+    });
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    // This save plans estimated_price = 150 (a genuine $100 → $150 edit);
+    // the operator's confirmed witness is stale by a single cent.
+    const { status, body } = await put({ estimatedPrice: 150, expectedTotal: 150.01 });
+    expect(status).toBe(409);
+    expect(body.code).toBe('VISIT_CHANGED_RETRY');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a matching expectedTotal against a genuine price edit proceeds to the transaction', async () => {
+    db.mockImplementation(() => {
+      const c = chain({ ...STORED, estimated_price: 100 });
+      c.columnInfo = jest.fn().mockResolvedValue({ estimated_price: {} });
+      return c;
+    });
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status } = await put({ estimatedPrice: 150, expectedTotal: 150 });
+    expect(status).toBe(418);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+// GitHub Codex round 21 P1 (#4657, :12301): addonRowIdsDrifted's own locked
+// recheck (round 14 P1, tested behaviorally in
+// admin-schedule-discount-stack-edit-preservation.test.js and end-to-end
+// against real Postgres rows in discount-stack-pricing-provenance-postgres.test.js)
+// only proves the add-on ROW SET a plan was built against is still on disk
+// — it cannot see a concurrent caller that reprices this SAME set of rows
+// without replacing any of them (MobileServiceEditModal's primary-price-
+// only save, which can clear an add-on's stored discount columns in place
+// at :12444-12455). financialStateDrifted closes that gap, but it runs
+// deep inside this route's write transaction (well past every occupancy/
+// stop/membership lock this file's mocked `db.transaction` stub — which
+// throws immediately rather than invoking its callback — cannot reach).
+// Matching this file's own convention for logic this deep in the trx (see
+// "rung-1 wiring" and the scheduling-field CAS test above), this pins the
+// ACTUAL shipped source: the check sits at the SAME call site as
+// addonRowIdsDrifted, reuses the same locked `.first()` for its parent
+// re-read (never a second unlocked query), is gated on financialCasSnapshot
+// so a schedule-only save is untouched, runs BEFORE the write, and refuses
+// with the same 409 VISIT_CHANGED_RETRY code. The exact comparison logic
+// (a changed estimated_price / a cleared add-on discount / an identical
+// re-read proceeding) is proven behaviorally in financialStateDrifted's
+// own unit suite and the real-Postgres end-to-end proof named above.
+describe('financialStateDrifted wiring under the write lock (source-pattern guard — round 21 P1, extended round 22 P1)', () => {
+  const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+  // GitHub Codex round 22 P1 (#4657, :11627): round 21 gated this whole
+  // block on `addonsReplaced && Array.isArray(expectedAddonRowIds)` alone
+  // — a visit opened with no add-ons (financialCasSnapshot built by
+  // computeSingleServiceEstimatedPricePlan, replaceAddons never touched)
+  // never reached this block at all, so its financial CAS was checked
+  // only before the write transaction, never under the lock. The gate is
+  // now `(addonsReplaced && Array.isArray(expectedAddonRowIds)) ||
+  // financialCasSnapshot`, and the id-identity check itself moved inside
+  // the block as its own `addonsReplaced &&`-guarded condition (it stays
+  // meaningless — and skipped — on a save that never replaced add-on
+  // rows), while the financial-state check runs unconditionally (it's a
+  // no-op on a null snapshot already, per financialStateDrifted's own
+  // contract).
+  // GitHub Codex round 26 P1 (#4657, :11902): a posted witness with no
+  // snapshot (the blank-price path on an unpriced no-add-on visit) enters
+  // the block too, for lockedWitnessDrifted's under-lock recheck.
+  const gateIdx = ud.indexOf('if ((addonsReplaced && Array.isArray(expectedAddonRowIds)) || financialCasSnapshot || expectedTotal !== undefined) {');
+  const idCheckIdx = ud.indexOf('addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))');
+  const moneyCheckIdx = ud.indexOf('if (financialStateDrifted(financialCasSnapshot, { parent: freshParentRow, addons: freshAddonIdRows })) {');
+  const writeIdx = ud.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
+
+  test('the block is gated on EITHER addonsReplaced or a non-null financialCasSnapshot, so the no-add-on path reaches it too', () => {
+    expect(gateIdx).toBeGreaterThan(-1);
+    expect(gateIdx).toBeLessThan(idCheckIdx);
+  });
+
+  test('the financial CAS check sits right after the add-on identity check, both inside the SAME gated block, before the write', () => {
+    expect(idCheckIdx).toBeGreaterThan(-1);
+    expect(moneyCheckIdx).toBeGreaterThan(idCheckIdx);
+    expect(moneyCheckIdx).toBeLessThan(writeIdx);
+    const block = ud.slice(gateIdx, writeIdx);
+    expect(block).toContain('addonRowIdsDrifted(');
+    expect(block).toContain('if (financialStateDrifted(');
+    // The id-identity check itself stays gated on addonsReplaced (it is
+    // meaningless when no add-on rows were ever replaced), unlike the
+    // money check right after it.
+    const idCheckLine = ud.slice(idCheckIdx - 200, idCheckIdx + 100);
+    expect(idCheckLine).toMatch(/addonsReplaced && Array\.isArray\(expectedAddonRowIds\)\s*\n\s*&& addonRowIdsDrifted\(/);
+  });
+
+  test('the parent re-read is the SAME locked .first() addonRowIdsDrifted\'s recheck already takes, selecting financialCasSnapshot\'s own field set — never a second unlocked query', () => {
+    const lockedReadIdx = ud.indexOf('const parentRecheckFields = financialCasSnapshot');
+    expect(lockedReadIdx).toBeGreaterThan(-1);
+    expect(lockedReadIdx).toBeLessThan(idCheckIdx);
+    const readSlice = ud.slice(lockedReadIdx, idCheckIdx);
+    expect(readSlice).toContain('.forUpdate()');
+    expect(readSlice).toContain('Object.keys(financialCasSnapshot.parent)');
+    // Only ONE forUpdate().first() on scheduled_services happens in this
+    // block — the parent re-read is reused, not duplicated.
+    expect((readSlice.match(/forUpdate\(\)/g) || []).length).toBe(1);
+  });
+
+  test('gated on financialCasSnapshot — a schedule-only save (no snapshot) never reaches the money comparison as a refusal', () => {
+    const moneyCheckLine = ud.slice(moneyCheckIdx, moneyCheckIdx + 400);
+    expect(moneyCheckLine).toMatch(/financialStateDrifted\(financialCasSnapshot, \{ parent: freshParentRow, addons: freshAddonIdRows \}\)/);
+    // financialStateDrifted itself returns false whenever its first
+    // argument is falsy (see its own unit suite) — the gate is INSIDE the
+    // pure function, not a separate `if (financialCasSnapshot)` wrapper,
+    // so a schedule-only save (financialCasSnapshot null) can never drift.
+  });
+
+  test('the refusal is the same 409 VISIT_CHANGED_RETRY code, with its own FINANCIAL_STATE_DRIFT reason', () => {
+    const refusal = ud.slice(moneyCheckIdx, ud.indexOf('}', ud.indexOf('});', moneyCheckIdx)) + 1);
+    expect(refusal).toContain("statusCode: 409");
+    expect(refusal).toContain("code: 'VISIT_CHANGED_RETRY'");
+    expect(refusal).toContain("reason: 'FINANCIAL_STATE_DRIFT'");
+    expect(refusal).toMatch(/pricing changed while saving/);
+  });
 });

@@ -168,6 +168,44 @@ function excludeUnresolvedSendReservations(query, table = 'sms_log') {
   );
 }
 
+// An accepted reply reservation is itself the durable provider receipt when
+// Twilio's ordinary sms_log insert failed. A cleanup may remove it only after
+// a different, non-reservation row proves the same provider handoff. Prefer
+// exact SID identity. Older callers that promoted without passing a SID retain
+// a narrow fallback: the same endpoints/body, created between reservation
+// creation and promotion. A later delivery callback can move both rows to a
+// terminal failed/undelivered/canceled status without changing that identity.
+// Every candidate needs a real SID.
+function preserveSoleAcceptedReplyReceipts(query) {
+  const nonReservation = SEND_RESERVATION_MARKERS
+    .map(marker => `COALESCE(receipt.metadata->>'${marker}', 'false') <> 'true'`)
+    .join(' AND ');
+  return query.whereRaw(`NOT (
+    sms_log.status IN ('sent', 'delivered', 'failed', 'undelivered', 'canceled')
+    AND COALESCE(sms_log.metadata->>'provider_outcome', '') = 'accepted'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM sms_log receipt
+      WHERE receipt.id <> sms_log.id
+        AND receipt.direction = 'outbound'
+        AND receipt.status IN ('queued', 'sent', 'delivered', 'failed', 'undelivered', 'canceled')
+        AND receipt.twilio_sid ~* '^(SM|MM)[a-f0-9]{32}$'
+        AND ${nonReservation}
+        AND (
+          (sms_log.twilio_sid IS NOT NULL AND receipt.twilio_sid = sms_log.twilio_sid)
+          OR (
+            sms_log.twilio_sid IS NULL
+            AND receipt.from_phone = sms_log.from_phone
+            AND receipt.to_phone = sms_log.to_phone
+            AND receipt.message_body IS NOT DISTINCT FROM sms_log.message_body
+            AND receipt.created_at >= sms_log.created_at
+            AND receipt.created_at <= sms_log.updated_at
+          )
+        )
+    )
+  )`);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Lifecycle: create / release / promote a review-ask reservation.
 //
@@ -407,6 +445,7 @@ module.exports = {
   isUnresolvedReviewAskReservation,
   isUnresolvedSendReservation,
   excludeUnresolvedSendReservations,
+  preserveSoleAcceptedReplyReceipts,
   SEND_RESERVATION_MARKERS,
   REPLY_RESERVATION_HOLD_HOURS,
   REVIEW_ASK_RESERVATION_HOLD_HOURS,

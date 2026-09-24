@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
 import { Badge, Card, CardBody, cn } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 /**
  * Agents hub → "Queue" tab (GATE_ADMIN_OPS_QUEUE). One read-only view of
@@ -75,6 +75,8 @@ export default function AgentQueueTab({ embedded = false } = {}) {
     load();
   }, [load]);
 
+  useVisiblePageRefresh(load, { intervalMs: 30_000, enabled: !loading });
+
   const toggleLane = (key) =>
     setOpenLanes((prev) => {
       const next = new Set(prev);
@@ -94,24 +96,18 @@ export default function AgentQueueTab({ embedded = false } = {}) {
           <StatTile label="Parked" value={count(totals.parked, totals.truncatedStatuses, "parked")} />
           <StatTile label="Pending" value={count(totals.pending, totals.truncatedStatuses, "pending")} />
         </div>
-        <div className="flex items-center gap-3">
-          {data?.generatedAt ? (
-            <span className="text-13 text-ink-tertiary">as of {ago(data.generatedAt) || "just now"}</span>
-          ) : null}
-          <button
-            type="button"
-            onClick={load}
-            disabled={loading}
-            className="inline-flex items-center gap-2 h-9 px-3 rounded-sm border-hairline border-zinc-300 bg-white text-13 font-medium text-zinc-900 u-focus-ring disabled:opacity-60"
-          >
-            <RefreshCw size={14} className={loading ? "animate-spin" : undefined} aria-hidden />
-            {loading ? "Refreshing" : "Refresh"}
-          </button>
-        </div>
+        {data?.generatedAt ? (
+          <span className="text-13 text-ink-tertiary">as of {ago(data.generatedAt) || "just now"}</span>
+        ) : null}
       </div>
 
       {error ? (
-        <div role="alert" className="text-14 text-alert-fg">{error}</div>
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-3 text-14 text-alert-fg">
+          <span>{error}</span>
+          <button type="button" onClick={load} disabled={loading} className="h-11 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 font-medium text-zinc-900 u-focus-ring disabled:opacity-60">
+            {loading ? "Retrying…" : "Retry"}
+          </button>
+        </div>
       ) : null}
 
       {!loading && !error && lanes.length === 0 ? (

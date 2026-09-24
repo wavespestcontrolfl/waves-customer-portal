@@ -161,6 +161,12 @@ describe('public pricing ranges', () => {
     expect(lawn.unit).toBe('per application');
   });
 
+  test('lawn notes name only the sold cadences, grammatically (6x retired 2026-09-24)', () => {
+    const lawn = payload.services.find((s) => s.key === 'lawn_care_program');
+    expect(lawn.notes).toMatch(/^9x or 12x applications per year by tier;/);
+    expect(lawn.notes).not.toMatch(/\b6x\b/);
+  });
+
   test('no lawn or pest combined monthly totals are published', () => {
     const lawn = payload.services.find((s) => s.key === 'lawn_care_program');
     const pest = payload.services.find((s) => s.key === 'general_pest_quarterly');

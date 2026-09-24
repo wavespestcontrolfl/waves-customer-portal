@@ -39,8 +39,8 @@ export default function ActionInbox({ alerts, stale = false }) {
         <CardBody>
           <div className="py-2 text-ui-body text-ink-secondary">
             {loaded
-              ? "Alerts couldn't be refreshed — refresh to retry."
-              : "Alerts couldn't be loaded — refresh to retry."}
+              ? "Alerts couldn't be refreshed — retrying automatically."
+              : "Alerts couldn't be loaded — retrying automatically."}
           </div>
         </CardBody>
       </UiSurface>

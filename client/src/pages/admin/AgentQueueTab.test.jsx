@@ -54,7 +54,9 @@ describe("AgentQueueTab", () => {
     adminFetch.mockRejectedValueOnce(new Error("HTTP 404")).mockResolvedValueOnce(QUEUE);
     render(<AgentQueueTab />);
     expect(await screen.findByRole("alert")).toHaveTextContent("HTTP 404");
-    fireEvent.click(screen.getByRole("button", { name: /Refresh/ }));
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(retry).toHaveClass("h-11", "md:h-8");
+    fireEvent.click(retry);
     await waitFor(() => expect(screen.getByText("Scheduled jobs")).toBeInTheDocument());
   });
 });

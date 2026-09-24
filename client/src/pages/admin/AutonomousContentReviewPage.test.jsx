@@ -15,6 +15,17 @@ function item(id = 'blog-1') {
     review_actions: { can_approve_named_competitor: true, can_requeue: true, can_dismiss: true },
   };
 }
+function linkItem(id = 'link-1', detailRevision = 1) {
+  return {
+    id,
+    anchor_text: id,
+    status: 'failed',
+    target_url: `/target/${id}`,
+    source_url: `/source/${id}`,
+    reviewer_notes: `Link detail revision ${detailRevision}`,
+    review_actions: { can_requeue: true, can_verify_now: true, can_dismiss: true },
+  };
+}
 beforeEach(() => {
   revision = 1;
   vi.stubGlobal('fetch', vi.fn(async (url) => {
@@ -29,6 +40,12 @@ beforeEach(() => {
   }));
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+async function resumeRefresh() {
+  await act(async () => {
+    window.dispatchEvent(new Event('online'));
+    await Promise.resolve();
+  });
+}
 
 describe('autonomous blog monitor', () => {
   it('shows failed topic checks and offers no human publishing decisions', async () => {
@@ -55,8 +72,8 @@ describe('autonomous blog monitor', () => {
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
     revision = 2;
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByText('Full draft revision 2');
+    await resumeRefresh();
+    expect(screen.getByText('Full draft revision 2')).toBeTruthy();
     expect(screen.queryByText('Full draft revision 1')).toBeNull();
   });
   it('reaches older activity and resets pagination when filtering', async () => {
@@ -81,9 +98,10 @@ describe('review regressions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     const note = await screen.findByPlaceholderText('Reviewer note (optional)');
     fireEvent.change(note, { target: { value: 'First record note' } });
+    note.blur();
     revision = 2;
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByText('Full draft revision 2');
+    await resumeRefresh();
+    expect(screen.getByText('Full draft revision 2')).toBeTruthy();
     expect(screen.getByPlaceholderText('Reviewer note (optional)').value).toBe('First record note');
     fireEvent.click(screen.getByText('Seasonal ants other-2'));
     await waitFor(() => expect(screen.queryByDisplayValue('First record note')).toBeNull());
@@ -120,25 +138,24 @@ describe('review regressions', () => {
   });
 
   it('lets a slow list response finish before polling again', async () => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     let finish;
     fetch.mockImplementation((url, opts) => url.includes('/review?')
       ? new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ items: [item()], total: 1 }) }); })
       : original(url, opts));
     render(<AutonomousContentReviewPage embedded />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(61000); });
+    await resumeRefresh();
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.includes('/review?'))).toHaveLength(1);
     await act(async () => { finish(); });
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.includes('/review?'))).toHaveLength(2);
   });
 });
 
 describe('activity observability', () => {
   it.each([['Links', '/internal-links'], ['Impact', '/autonomous/impact']])('preserves %s errors during background blog polling', async (tab, endpoint) => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => url.includes(endpoint)
       ? Promise.reject(new Error(`${tab} unavailable`)) : original(url, opts));
@@ -146,7 +163,7 @@ describe('activity observability', () => {
     await act(async () => {});
     fireEvent.click(screen.getByRole('button', { name: tab, exact: true }));
     expect(screen.getByText(`${tab} unavailable`)).toBeTruthy();
-    await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.includes('/review?')).length).toBeGreaterThan(1);
     expect(screen.getByText(`${tab} unavailable`)).toBeTruthy();
   });
@@ -186,7 +203,6 @@ describe('failed activity queries', () => {
 
 describe('background refresh boundaries', () => {
   it('keeps a failed decision visible after successful list polling', async () => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => opts?.method === 'POST'
       ? Promise.reject(new Error('Decision failed')) : original(url, opts));
@@ -196,7 +212,7 @@ describe('background refresh boundaries', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Requeue' })); });
     expect(screen.getByText('Decision failed')).toBeTruthy();
     revision = 2;
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(screen.getByText('Full draft revision 2')).toBeTruthy();
     expect(screen.getByText('Decision failed')).toBeTruthy();
   });
@@ -209,7 +225,6 @@ describe('background refresh boundaries', () => {
   });
 
   it('closes vanished selection on polling without opening another run', async () => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     let vanished = false;
     fetch.mockImplementation((url, opts) => vanished && url.includes('/review?')
@@ -218,42 +233,42 @@ describe('background refresh boundaries', () => {
     await act(async () => {});
     fireEvent.click(screen.getByRole('button', { name: /Seasonal ants blog-1 / }));
     vanished = true;
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(screen.queryByText('Full draft revision 1')).toBeNull();
     expect(screen.getByText('Select a run to see its status.')).toBeTruthy();
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(screen.getByText('Select a run to see its status.')).toBeTruthy();
   });
 });
 
 describe('slow and failed detail refresh', () => {
   it('lets a slow selected detail finish while list polling continues', async () => {
-    vi.useFakeTimers();
     const original = fetch.getMockImplementation();
     let finish;
     fetch.mockImplementation((url, opts) => url.endsWith('/review/blog-1')
       ? new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ item: item() }) }); }) : original(url, opts));
     render(<AutonomousContentReviewPage embedded />);
     await act(async () => {});
-    await act(async () => { await vi.advanceTimersByTimeAsync(61000); });
+    await resumeRefresh();
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.endsWith('/review/blog-1'))).toHaveLength(1);
     expect(fetch.mock.calls.filter(([url]) => url.includes('/review?')).length).toBeGreaterThan(1);
     await act(async () => { finish(); });
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(fetch.mock.calls.filter(([url]) => url.endsWith('/review/blog-1'))).toHaveLength(2);
   });
 
   it('preserves selected content and unsaved notes after a background list failure', async () => {
-    vi.useFakeTimers();
     render(<AutonomousContentReviewPage embedded />);
     await act(async () => {});
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Review' })); });
     fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Keep this note' } });
+    screen.getByPlaceholderText('Reviewer note (optional)').blur();
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => url.includes('/review?')
       ? Promise.reject(new Error('Poll failed')) : original(url, opts));
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(screen.getByText('Poll failed')).toBeTruthy();
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
     expect(screen.getByPlaceholderText('Reviewer note (optional)').value).toBe('Keep this note');
@@ -298,12 +313,11 @@ describe('navigation and background loading', () => {
   });
 
   it('keeps loaded cards visible and selectable while a background poll is pending', async () => {
-    vi.useFakeTimers();
     render(<AutonomousContentReviewPage embedded />);
     await act(async () => {});
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => url.includes('/review?') ? new Promise(() => {}) : original(url, opts));
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     const row = screen.getByRole('button', { name: /Seasonal ants blog-2 / });
     expect(row.disabled).toBe(false);
     expect(screen.getByRole('button', { name: 'Next' }).disabled).toBe(false);
@@ -357,12 +371,12 @@ describe('3916 follow-ups', () => {
     });
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
-    vi.useFakeTimers();
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Review' })));
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
     fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Keep this note' } });
+    screen.getByPlaceholderText('Reviewer note (optional)').blur();
     hold = true;
-    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    await resumeRefresh();
     expect(release).toBeTypeOf('function');
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
     expect(screen.queryByText('Abbreviated list preview')).toBeNull();
@@ -388,5 +402,292 @@ describe('3916 follow-ups', () => {
     expect(screen.getByRole('combobox', { name: 'Activity status' }).value).toBe('all');
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
     expect(fetch.mock.calls.length).toBe(calls);
+  });
+});
+
+describe('internal-link refresh ownership', () => {
+  it('keeps failed link actions visible while read errors independently recover', async () => {
+    const original = fetch.getMockImplementation();
+    let listFailure = '';
+    let actionCalls = 0;
+    let finishNextAction;
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links/link-1/decision')) {
+        actionCalls += 1;
+        if (actionCalls === 1) return Promise.reject(new Error('Link action failed'));
+        return new Promise((resolve) => { finishNextAction = resolve; });
+      }
+      if (url.includes('/internal-links?')) {
+        if (listFailure) return Promise.reject(new Error(listFailure));
+        return Promise.resolve({ ok: true, json: async () => ({ items: [linkItem('link-1')] }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Requeue' }));
+    await screen.findByText('Link action failed');
+
+    await resumeRefresh();
+    expect(screen.getByText('Link action failed')).toBeTruthy();
+
+    listFailure = 'Link read failed';
+    await resumeRefresh();
+    expect(screen.getByText('Link action failed · Link read failed')).toBeTruthy();
+
+    listFailure = '';
+    await resumeRefresh();
+    expect(screen.getByText('Link action failed')).toBeTruthy();
+    expect(screen.queryByText('Link read failed')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+    await waitFor(() => expect(finishNextAction).toBeTypeOf('function'));
+    expect(screen.queryByText('Link action failed')).toBeNull();
+    await act(async () => finishNextAction({
+      ok: true,
+      json: async () => ({ item: linkItem('link-1', 2) }),
+    }));
+  });
+
+  it('keeps a blurred dirty link note and selection when a background poll no longer contains it', async () => {
+    const original = fetch.getMockImplementation();
+    let links = [linkItem('link-1')];
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links?')) {
+        return Promise.resolve({ ok: true, json: async () => ({ items: links }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      if (url.endsWith('/internal-links/link-2')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-2', 2) }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    const note = screen.getByPlaceholderText('Reviewer note (optional)');
+    fireEvent.change(note, { target: { value: 'Keep this link note' } });
+    note.blur();
+
+    links = [linkItem('link-2', 2)];
+    await resumeRefresh();
+    expect(screen.getByText('Link detail revision 1')).toBeTruthy();
+    expect(screen.getByDisplayValue('Keep this link note')).toBeTruthy();
+    expect(screen.queryByText('Link detail revision 2')).toBeNull();
+  });
+
+  it('keeps a link note typed after its background poll has started', async () => {
+    const original = fetch.getMockImplementation();
+    let listReads = 0;
+    let finishPoll;
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links?')) {
+        listReads += 1;
+        if (listReads === 2) return new Promise((resolve) => { finishPoll = resolve; });
+        return Promise.resolve({ ok: true, json: async () => ({ items: [linkItem('link-1')] }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    act(() => { window.dispatchEvent(new Event('online')); });
+    await waitFor(() => expect(finishPoll).toBeTypeOf('function'));
+
+    const note = screen.getByPlaceholderText('Reviewer note (optional)');
+    fireEvent.change(note, { target: { value: 'Typed during the poll' } });
+    note.blur();
+    await act(async () => finishPoll({
+      ok: true,
+      json: async () => ({ items: [linkItem('link-2', 2)] }),
+    }));
+
+    expect(screen.getByText('Link detail revision 1')).toBeTruthy();
+    expect(screen.getByDisplayValue('Typed during the poll')).toBeTruthy();
+  });
+
+  it('allows a later poll to change selection after the dirty link note is cleared', async () => {
+    const original = fetch.getMockImplementation();
+    let links = [linkItem('link-1')];
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links?')) {
+        return Promise.resolve({ ok: true, json: async () => ({ items: links }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      if (url.endsWith('/internal-links/link-2')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-2', 2) }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    const note = screen.getByPlaceholderText('Reviewer note (optional)');
+    fireEvent.change(note, { target: { value: 'Temporary note' } });
+    links = [linkItem('link-2', 2)];
+    await resumeRefresh();
+    expect(screen.getByText('Link detail revision 1')).toBeTruthy();
+
+    fireEvent.change(note, { target: { value: '' } });
+    await resumeRefresh();
+    expect(await screen.findByText('Link detail revision 2')).toBeTruthy();
+    expect(screen.queryByText('Link detail revision 1')).toBeNull();
+  });
+
+  it('refetches retained link detail after a background list poll', async () => {
+    const original = fetch.getMockImplementation();
+    let linkRevision = 1;
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links?')) {
+        return Promise.resolve({ ok: true, json: async () => ({ items: [linkItem('link-1', linkRevision)] }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1', linkRevision) }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+
+    linkRevision = 2;
+    await resumeRefresh();
+    expect(await screen.findByText('Link detail revision 2')).toBeTruthy();
+    expect(screen.queryByText('Link detail revision 1')).toBeNull();
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith('/internal-links/link-1'))).toHaveLength(2);
+  });
+
+  it('does not let a stale polled detail overwrite a changed link selection', async () => {
+    const original = fetch.getMockImplementation();
+    let linkOneReads = 0;
+    let finishStaleDetail;
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links?')) {
+        return Promise.resolve({ ok: true, json: async () => ({ items: [linkItem('link-1'), linkItem('link-2')] }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        linkOneReads += 1;
+        if (linkOneReads === 2) {
+          return new Promise((resolve) => { finishStaleDetail = resolve; });
+        }
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      if (url.endsWith('/internal-links/link-2')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-2', 2) }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    await resumeRefresh();
+    await waitFor(() => expect(finishStaleDetail).toBeTypeOf('function'));
+
+    fireEvent.click(screen.getByText('link-2'));
+    expect(await screen.findByText('Link detail revision 2')).toBeTruthy();
+    await act(async () => finishStaleDetail({
+      ok: true,
+      json: async () => ({ item: { ...linkItem('link-1', 9), reviewer_notes: 'Stale link detail' } }),
+    }));
+    expect(screen.getByText('Link detail revision 2')).toBeTruthy();
+    expect(screen.queryByText('Stale link detail')).toBeNull();
+  });
+
+  it('does not apply a completed link action to a newer selection', async () => {
+    const original = fetch.getMockImplementation();
+    let finishAction;
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links/link-1/decision')) {
+        return new Promise((resolve) => { finishAction = resolve; });
+      }
+      if (url.includes('/internal-links?')) {
+        return Promise.resolve({ ok: true, json: async () => ({ items: [linkItem('link-1'), linkItem('link-2', 2)] }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-1') }) });
+      }
+      if (url.endsWith('/internal-links/link-2')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem('link-2', 2) }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Requeue' }));
+    await waitFor(() => expect(finishAction).toBeTypeOf('function'));
+
+    fireEvent.click(screen.getByText('link-2'));
+    await screen.findByText('Link detail revision 2');
+    fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), {
+      target: { value: 'Note for link two' },
+    });
+
+    await act(async () => finishAction({
+      ok: true,
+      json: async () => ({ item: { ...linkItem('link-1', 9), reviewer_notes: 'Actioned link one' } }),
+    }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Requeue' }).disabled).toBe(false));
+    expect(screen.getByText('Link detail revision 2')).toBeTruthy();
+    expect(screen.queryByText('Actioned link one')).toBeNull();
+    expect(screen.getByDisplayValue('Note for link two')).toBeTruthy();
+  });
+
+  it('releases an invalidated foreground link retry when its mutation fails', async () => {
+    const original = fetch.getMockImplementation();
+    let listMode = 'normal';
+    let finishRetry;
+    fetch.mockImplementation((url, opts) => {
+      if (url.includes('/internal-links/link-1/decision')) {
+        return Promise.reject(new Error('Link decision failed'));
+      }
+      if (url.includes('/internal-links?')) {
+        if (listMode === 'fail') return Promise.reject(new Error('Links poll failed'));
+        if (listMode === 'pending') return new Promise((resolve) => { finishRetry = resolve; });
+        return Promise.resolve({ ok: true, json: async () => ({ items: [linkItem()] }) });
+      }
+      if (url.endsWith('/internal-links/link-1')) {
+        return Promise.resolve({ ok: true, json: async () => ({ item: linkItem() }) });
+      }
+      return original(url, opts);
+    });
+
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    await screen.findByText('Link detail revision 1');
+
+    listMode = 'fail';
+    await resumeRefresh();
+    await screen.findByText('Links poll failed');
+    listMode = 'pending';
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(finishRetry).toBeTypeOf('function'));
+    expect(screen.getByText('Loading…')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Requeue' }));
+    await screen.findByText('Link decision failed');
+    expect(screen.queryByText('Loading…')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Retry' }).disabled).toBe(false);
+
+    await act(async () => finishRetry({ ok: true, json: async () => ({ items: [linkItem()] }) }));
+    expect(screen.getByText('Link decision failed')).toBeTruthy();
   });
 });

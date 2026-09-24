@@ -216,6 +216,7 @@ const SERVICE_LABEL = {
   stinging_v2: 'Stinging Insect',
   exclusion_v2: 'Exclusion',
   rodent_guarantee_combo: 'Rodent Guarantee',
+  mosquito_misting_system: 'Mosquito Misting System',
 };
 
 const labelFor = svc => SERVICE_LABEL[svc] || svc;
