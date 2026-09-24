@@ -189,6 +189,7 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
   const initial = parseSnapshot(row?.input_snapshot);
   if (!row || initial?.state !== 'running' || !initial.pins) throw new Error('gratitude_qualification_not_runnable');
   let active = initial;
+  const executionToken = crypto.randomUUID();
 
   try {
     const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
@@ -197,6 +198,18 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
         .first('id', 'input_snapshot');
       active = parseSnapshot(durable?.input_snapshot);
       if (!durable || active?.state !== 'running' || !active.pins) {
+        return { id: runId, state: active?.state || 'missing', skipped: true, reason: 'run_not_running' };
+      }
+      const executing = { ...active, executionToken, executionStartedAt: new Date().toISOString() };
+      active = executing;
+      const claimed = await dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW })
+        .whereRaw("input_snapshot->>'state' = 'running'")
+        .whereRaw("input_snapshot->>'executionToken' IS NULL")
+        .update({ input_snapshot: JSON.stringify(executing), updated_at: dbi.fn.now() });
+      if (claimed !== 1) {
+        const latest = await dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW })
+          .first('id', 'input_snapshot');
+        active = parseSnapshot(latest?.input_snapshot);
         return { id: runId, state: active?.state || 'missing', skipped: true, reason: 'run_not_running' };
       }
       const current = await readCurrent({ dbi });
@@ -239,6 +252,7 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
       const complete = { ...active, state: 'complete', results, summary: graded };
       const updated = await dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW })
         .whereRaw("input_snapshot->>'state' = 'running'")
+        .whereRaw("input_snapshot->>'executionToken' = ?", [executionToken])
         .update({
           input_snapshot: JSON.stringify(complete),
           status: graded.qualified ? 'shadow' : 'failed',
@@ -263,14 +277,15 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
       failure: String(error?.message || 'qualification_failed').slice(0, 200),
     };
     try {
-      await dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW })
+      const failureUpdate = dbi('agent_decisions').where({ id: runId, workflow: WORKFLOW })
         .whereRaw("input_snapshot->>'state' = 'running'")
-        .update({
-          input_snapshot: JSON.stringify(failed),
-          status: 'failed',
-          correction_note: failed.failure,
-          updated_at: dbi.fn.now(),
-        });
+        .whereRaw("(input_snapshot->>'executionToken' IS NULL OR input_snapshot->>'executionToken' = ?)", [executionToken]);
+      await failureUpdate.update({
+        input_snapshot: JSON.stringify(failed),
+        status: 'failed',
+        correction_note: failed.failure,
+        updated_at: dbi.fn.now(),
+      });
     } catch { /* the original failure remains authoritative */ }
     throw error;
   }

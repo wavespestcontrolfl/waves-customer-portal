@@ -18,14 +18,28 @@ function memoryDb() {
     if (table !== 'agent_decisions') throw new Error(`unexpected table ${table}`);
     let filters = {};
     let requiredState = null;
+    let executionTokenCondition = null;
+    let expectedExecutionToken = null;
     let order = null;
     let pendingInsert = null;
     const matching = () => rows.filter(row => Object.entries(filters).every(([key, value]) => row[key] === value)
-      && (!requiredState || snapshot(row)?.state === requiredState));
+      && (!requiredState || snapshot(row)?.state === requiredState)
+      && (executionTokenCondition !== 'absent' || snapshot(row)?.executionToken == null)
+      && (executionTokenCondition !== 'equal' || snapshot(row)?.executionToken === expectedExecutionToken)
+      && (executionTokenCondition !== 'absent_or_equal'
+        || snapshot(row)?.executionToken == null || snapshot(row)?.executionToken === expectedExecutionToken));
     const query = {
       where(values) { filters = { ...filters, ...values }; return query; },
-      whereRaw(sql) {
+      whereRaw(sql, bindings = []) {
         if (sql === "input_snapshot->>'state' = 'running'") requiredState = 'running';
+        else if (sql === "input_snapshot->>'executionToken' IS NULL") executionTokenCondition = 'absent';
+        else if (sql === "input_snapshot->>'executionToken' = ?") {
+          executionTokenCondition = 'equal';
+          [expectedExecutionToken] = bindings;
+        } else if (sql === "(input_snapshot->>'executionToken' IS NULL OR input_snapshot->>'executionToken' = ?)") {
+          executionTokenCondition = 'absent_or_equal';
+          [expectedExecutionToken] = bindings;
+        }
         else throw new Error(`unexpected whereRaw ${sql}`);
         return query;
       },
@@ -72,7 +86,7 @@ function setSnapshot(row, value) {
 }
 
 function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lockError = null,
-  runExclusiveImpl = null, mutateDraft = null } = {}) {
+  runExclusiveImpl = null, mutateDraft = null, beforeDispatch = null } = {}) {
   jest.resetModules();
   const previousVerify = process.env.SHADOW_DRAFT_VERIFY;
   const previousRevisions = process.env.SHADOW_DRAFT_VERIFY_MAX_REVISIONS;
@@ -80,6 +94,7 @@ function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lock
   process.env.SHADOW_DRAFT_VERIFY_MAX_REVISIONS = '2';
   let draftIndex = 0;
   const dispatchWithFallback = jest.fn(async (policy, payload) => {
+    if (beforeDispatch) await beforeDispatch();
     expect(snapshot(dbi.rows.at(-1)).state).toBe('running');
     const encoded = payload.text.match(/APPROVED GRATITUDE REPLY: ("(?:[^"\\]|\\.)*")/);
     const approved = encoded ? JSON.parse(encoded[1]) : '';
@@ -337,6 +352,94 @@ describe('sms gratitude qualification', () => {
     expect(generateGroundedDraft).toHaveBeenCalledTimes(exam.fixtures.length * 2);
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'complete' });
     expect(store.rows[0].status).toBe('shadow');
+  });
+
+  test.each([
+    ['no connection', async () => ({ skipped: true, reason: 'no_connection' }), 'gratitude_qualification_lock_no_connection'],
+    ['lock exception', async () => { throw new Error('synthetic duplicate lock failure'); }, 'synthetic duplicate lock failure'],
+  ])('a duplicate %s cannot fail an owner that claimed execution', async (_label, duplicateLock, failure) => {
+    const store = memoryDb();
+    let releaseDraft;
+    let announceDraft;
+    let draftPaused = false;
+    let invocation = 0;
+    const draftStarted = new Promise(resolve => { announceDraft = resolve; });
+    const draftRelease = new Promise(resolve => { releaseDraft = resolve; });
+    const runExclusiveImpl = async (_jobName, task) => {
+      invocation += 1;
+      if (invocation > 1) return duplicateLock();
+      return task();
+    };
+    const beforeDispatch = async () => {
+      if (draftPaused) return;
+      draftPaused = true;
+      announceDraft();
+      await draftRelease;
+    };
+    const { qualification, generateGroundedDraft } = loadQualification({
+      dbi: store, runExclusiveImpl, beforeDispatch,
+    });
+    const run = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    const owner = qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id });
+    await draftStarted;
+
+    await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id }))
+      .rejects.toThrow(failure);
+    expect(snapshot(store.rows[0])).toMatchObject({
+      state: 'running', executionToken: expect.any(String), executionStartedAt: expect.any(String),
+    });
+    expect(store.rows[0].status).toBe('initiated');
+
+    releaseDraft();
+    await expect(owner).resolves.toMatchObject({ id: run.id, state: 'complete', qualified: true });
+    expect(generateGroundedDraft).toHaveBeenCalledTimes(exam.fixtures.length * 2);
+  });
+
+  test('an acquisition failure before the execution claim makes the owner skip model calls', async () => {
+    const store = memoryDb();
+    let releaseOwner;
+    let announceOwner;
+    let invocation = 0;
+    const ownerPaused = new Promise(resolve => { announceOwner = resolve; });
+    const ownerRelease = new Promise(resolve => { releaseOwner = resolve; });
+    const runExclusiveImpl = async (_jobName, task) => {
+      invocation += 1;
+      if (invocation > 1) return { skipped: true, reason: 'no_connection' };
+      announceOwner();
+      await ownerRelease;
+      return task();
+    };
+    const { qualification, generateGroundedDraft } = loadQualification({ dbi: store, runExclusiveImpl });
+    const run = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    const owner = qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id });
+    await ownerPaused;
+
+    await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id }))
+      .rejects.toThrow('gratitude_qualification_lock_no_connection');
+    expect(snapshot(store.rows[0])).toMatchObject({
+      state: 'failed', failure: 'gratitude_qualification_lock_no_connection',
+    });
+
+    releaseOwner();
+    await expect(owner).resolves.toEqual({
+      id: run.id, state: 'failed', skipped: true, reason: 'run_not_running',
+    });
+    expect(generateGroundedDraft).not.toHaveBeenCalled();
+  });
+
+  test('a callback that finds an existing execution token skips without model calls', async () => {
+    const store = memoryDb();
+    const { qualification, generateGroundedDraft } = loadQualification({ dbi: store });
+    const run = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    const marked = snapshot(store.rows[0]);
+    marked.executionToken = '00000000-0000-4000-8000-999999999999';
+    marked.executionStartedAt = '2030-01-01T00:00:00.000Z';
+    setSnapshot(store.rows[0], marked);
+
+    await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id }))
+      .resolves.toEqual({ id: run.id, state: 'running', skipped: true, reason: 'run_not_running' });
+    expect(snapshot(store.rows[0])).toEqual(marked);
+    expect(generateGroundedDraft).not.toHaveBeenCalled();
   });
 
   test('a replacement run does not inherit the stale owner lease', async () => {
