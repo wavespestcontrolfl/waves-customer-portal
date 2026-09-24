@@ -2553,7 +2553,7 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
   // resolved — mergedWinnerId itself never queries `customers`).
   // journal: { [loserId]: { winner_customer_id } }.
   // activityRows: consultation_prospect lead_activities rows (metadata JSON strings).
-  function makeMergeFakeDb({ customers = {}, journal = {}, lead = null, activityRows = [] } = {}) {
+  function makeMergeFakeDb({ customers = {}, journal = {}, lead = null, activityRows = [], openVisitsByCustomer = {} } = {}) {
     return (table) => {
       const state = { where: {} };
       const chain = {
@@ -2562,6 +2562,8 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
         whereNotNull() { return chain; },
         whereNot() { return chain; },
         orderBy() { return chain; },
+        whereNotIn() { return chain; },
+        limit: async () => (table === 'scheduled_services' ? (openVisitsByCustomer[state.where.customer_id] || []) : []),
         select(...cols) { state.select = cols; return chain; },
         first: async () => {
           if (table === 'customers') {
@@ -2612,26 +2614,48 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
   // The actual regression: without the fix, provenanceCustomer's plain
   // loadCustomer(meta.customer_id) returns null for the soft-deleted loser
   // and loadTrustedCustomer treats the lead as having no prospect at all.
-  test('provenanceCustomer resolves a merged-away outright-trusted prospect to its winner', async () => {
+  // Codex #4737 r10 pre-push P0: a merge proves record identity, not the
+  // token holder's — the winner needs the verified-phone proof.
+  test('provenanceCustomer follows a merge to its winner ONLY under the verified-phone proof', async () => {
     const fakeDb = makeMergeFakeDb({
       customers: { 'winner-1': { id: 'winner-1', phone: '9415551234', account_id: null } },
       journal: { 'loser-1': { winner_customer_id: 'winner-1' } },
       activityRows: [{ metadata: JSON.stringify({ customer_id: 'loser-1' }) }],
     });
     const lead = { id: 'lead-1', phone: '9415551234', customer_id: null };
-    const result = await provenanceCustomer(fakeDb, lead, 'tok');
-    expect(result).toEqual(expect.objectContaining({ id: 'winner-1' }));
+    // An unverified token (no SMS claim, not a call lead): not trusted.
+    expect(await provenanceCustomer(fakeDb, lead, null)).toBeNull();
+    // An SMS-delivered token to this phone: trusted.
+    const smsToken = { channel: require('../utils/lead-consultation-token').smsChannelFor('9415551234') };
+    expect(await provenanceCustomer(fakeDb, lead, smsToken)).toEqual(expect.objectContaining({ id: 'winner-1' }));
   });
 
-  test('trustedLeadProfileIds: a merged prospect resolves to the winner, which lands in the dedupe set', async () => {
+  test('trustedLeadProfileIds: a merged prospect\'s winner joins the DEDUPE set; response sets stay strict', async () => {
     const fakeDb = makeMergeFakeDb({
       customers: { 'winner-1': { id: 'winner-1', phone: '9415551234', account_id: null } },
       journal: { 'loser-1': { winner_customer_id: 'winner-1' } },
       lead: { id: 'lead-1', phone: '9415551234', customer_id: null },
       activityRows: [{ metadata: JSON.stringify({ customer_id: 'loser-1' }) }],
     });
-    const ids = await trustedLeadProfileIds(fakeDb, 'lead-1', 'tok', 'booked-cust-id');
-    expect(ids).toEqual(expect.arrayContaining(['winner-1']));
-    expect(ids).not.toEqual(expect.arrayContaining(['loser-1']));
+    // The dedupe (existence only) includes the winner…
+    const dedupe = await trustedLeadProfileIds(fakeDb, 'lead-1', null, 'booked-cust-id', { includeMergedWinners: true });
+    expect(dedupe).toEqual(expect.arrayContaining(['winner-1']));
+    expect(dedupe).not.toEqual(expect.arrayContaining(['loser-1']));
+    // …but a response set for an unverified token does not (pre-push P0).
+    const strict = await trustedLeadProfileIds(fakeDb, 'lead-1', null, 'booked-cust-id');
+    expect(strict).toEqual(['booked-cust-id']);
+  });
+
+  // The page's answer for an unverified lead whose merged prospect's winner
+  // holds the assessment: already_booked, with no visit or reschedule link.
+  test('resolveEligibility: a merged prospect holding an open assessment → already_booked with no details', async () => {
+    const { resolveEligibility } = inspectionPublicRouter._test;
+    const fakeDb = makeMergeFakeDb({
+      journal: { 'loser-1': { winner_customer_id: 'winner-1' } },
+      activityRows: [{ metadata: JSON.stringify({ customer_id: 'loser-1' }) }],
+      openVisitsByCustomer: { 'winner-1': [{ id: 'ss-w', scheduled_date: '2099-01-05', window_start: '09:00', service_type: 'Waves Assessment', reschedule_token: 'w-tok' }] },
+    });
+    const eligibility = await resolveEligibility(fakeDb, { id: 'lead-1', phone: '9415551234', converted_at: null }, null);
+    expect(eligibility).toEqual({ state: 'already_booked', visit: null, rescheduleUrl: null });
   });
 });

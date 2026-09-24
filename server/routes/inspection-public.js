@@ -379,7 +379,10 @@ async function provenanceCustomer(dbConn, lead, token) {
   const winnerId = await mergedWinnerId(dbConn, meta.customer_id);
   const prospect = await loadCustomer(dbConn, winnerId || meta.customer_id);
   if (!prospect) return null;
-  if (!meta.requires_verification) return prospect;
+  // A merge establishes record identity, not the token holder's authority
+  // (Codex #4737 r10 pre-push P0): a merged-away prospect's winner is
+  // trusted only under the verified-phone proof, whatever the flag said.
+  if (!meta.requires_verification && !winnerId) return prospect;
   return (await verifiedForCustomer(lead, prospect, token, dbConn)) ? prospect : null;
 }
 
@@ -753,6 +756,19 @@ async function findOpenVisit(dbConn, customerId, { assessmentOnly = false, exclu
 // protected callers get `rescheduleUrl: null` here and the route fills it
 // in with a SEPARATE, safe rescheduleUrlFor call once the transaction has
 // committed and the lock is released.
+// Whether any merged-away prospect of this lead now lives on a customer
+// with an open assessment.
+async function mergedProspectHoldsAssessment(dbConn, lead) {
+  if (!lead?.id) return false;
+  const rows = await dbConn('lead_activities').where({ lead_id: lead.id, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata');
+  for (const row of rows || []) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+    const winnerId = meta?.customer_id ? await mergedWinnerId(dbConn, meta.customer_id) : null;
+    if (winnerId && await findOpenVisit(dbConn, winnerId, { assessmentOnly: true })) return true;
+  }
+  return false;
+}
+
 async function resolveEligibility(dbConn, lead, custRow, { includeRescheduleUrl = true } = {}) {
   if (custRow) {
     const openAssessment = await findOpenVisit(dbConn, custRow.id, { assessmentOnly: true });
@@ -763,6 +779,13 @@ async function resolveEligibility(dbConn, lead, custRow, { includeRescheduleUrl 
         rescheduleUrl: includeRescheduleUrl ? await rescheduleUrlFor(openAssessment.id) : null,
       };
     }
+  }
+  // No trusted customer, but a flow-created prospect of this lead was merged
+  // into a customer holding an open assessment (Codex #4737 r10 P1 + its
+  // pre-push P0): already booked — with no details, since the merge winner
+  // is not proven to be the token holder's.
+  if (!custRow && await mergedProspectHoldsAssessment(dbConn, lead)) {
+    return { state: 'already_booked', visit: null, rescheduleUrl: null };
   }
   // 'converted' fires on the lead's own converted_at even without a
   // resolvable customer row (a converted lead should always have one, but
@@ -1691,7 +1714,11 @@ async function leadWideEligibility(lead, custRow, profileIds) {
 // provenance, and a requires_verification provenance profile only under
 // the verified-phone proof. Reads on `dbConn` so the booking transaction
 // can re-run it inside its lead lock (Codex #4737 r9 pre-push P1).
-async function trustedLeadProfileIds(dbConn, leadId, token, custId) {
+// includeMergedWinners (the booking DEDUPE only): a merged prospect's
+// winner joins the set without verification — the dedupe reads existence,
+// never details. Every set that drives a response stays strict (r10
+// pre-push P0).
+async function trustedLeadProfileIds(dbConn, leadId, token, custId, { includeMergedWinners = false } = {}) {
   const lead = await loadLead(dbConn, leadId);
   const ids = new Set([custId].filter(Boolean).map(String));
   if (!lead) return [...ids];
@@ -1710,7 +1737,7 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId) {
     const winnerId = await mergedWinnerId(dbConn, meta.customer_id);
     const targetId = winnerId || meta.customer_id;
     if (ids.has(String(targetId))) continue;
-    if (!meta.requires_verification) { ids.add(String(targetId)); continue; }
+    if (!meta.requires_verification && (!winnerId || includeMergedWinners)) { ids.add(String(targetId)); continue; }
     const profile = await loadCustomer(dbConn, targetId);
     if (profile && await verifiedForCustomer(lead, profile, token, dbConn)) ids.add(String(profile.id));
   }
@@ -1916,8 +1943,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // lead lock (resolveCustomerIds on its own trx) and dedupes the
     // assessment across all of them, so two commits with different
     // addresses never both book.
-    const resolveCustomerIds = (conn) => trustedLeadProfileIds(conn, lead.id, verified, custRow.id);
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds } });
+    const resolveCustomerIds = (conn, opts) => trustedLeadProfileIds(conn, lead.id, verified, custRow.id, opts);
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }) } });
 
     if (!result.ok) {
       const profileIds = result.code === 'ALREADY_BOOKED' ? await resolveCustomerIds(db) : [custRow.id];
