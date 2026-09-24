@@ -675,6 +675,61 @@ describe('Codex #4737 r11 P2s: availability eligibility; race refresh never at a
   });
 });
 
+describe('Codex #4737 r17: south Hillsborough is served; the in-booking and waitlist checks are lead-wide', () => {
+  test('P1: a Ruskin (south Hillsborough) address is in area; a Tampa one is not', async () => {
+    firstResults.leads = LEAD_ROW;
+    mockCounty.mockResolvedValueOnce('Hillsborough');
+    mockBuildAvailability.mockResolvedValueOnce({ slots: [], days: [{ date: FUTURE_DATE, slots: [] }] });
+    const served = await callAvailability(mintLeadConsultationToken(LEAD_ID), { address: '100 Shell Point Rd, Ruskin, FL 33570' });
+    expect(served.statusCode).toBe(200);
+    expect(served.body.error).toBeUndefined();
+    mockCounty.mockResolvedValueOnce('Hillsborough');
+    const tampa = await callAvailability(mintLeadConsultationToken(LEAD_ID), { address: '1 Main St, Tampa, FL 33602' });
+    expect(tampa.statusCode).toBe(422);
+    expect(tampa.body.error).toBe('out_of_area');
+  });
+
+  const twoProfiles = () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: null };
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-new' }) };
+    listResults.lead_activities = [
+      { metadata: JSON.stringify({ customer_id: 'cust-old' }) },
+      { metadata: JSON.stringify({ customer_id: 'cust-new' }) },
+    ];
+    const rows = {
+      'cust-new': { id: 'cust-new', phone: '9415550101', address_line1: '2 New St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 },
+      'cust-old': { id: 'cust-old', phone: '9415550101', address_line1: '1 Old St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.45, longitude: -82.55 },
+    };
+    firstResults.customers = (q) => rows[q.conds.id] || null;
+  };
+
+  test('P0: the waitlist refuses when another trusted profile now holds an assessment', async () => {
+    twoProfiles();
+    listResults.scheduled_services = (q) => (q.conds.customer_id === 'cust-old'
+      ? [{ id: 'ss-old', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'old-tok' }]
+      : []);
+    const res = await callWaitlist(mintLeadConsultationToken(LEAD_ID), { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('P0: the in-booking verdict is ineligible when another trusted profile got a future visit', async () => {
+    twoProfiles();
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(200);
+    const { leadDedupe } = mockCreateSelfBooking.mock.calls[0][0].callbackVisit;
+    expect(await leadDedupe.revalidate(db)).toBe('ok');
+    // A paid visit lands on the OTHER trusted profile after the read check.
+    listResults.scheduled_services = (q) => (q.conds.customer_id === 'cust-old'
+      ? [{ id: 'ss-paid', scheduled_date: '2099-02-01', window_start: '09:00', window_end: '10:00', service_type: 'Quarterly Pest Control', reschedule_token: 'paid-tok' }]
+      : []);
+    expect(await leadDedupe.revalidate(db)).toBe('ineligible');
+  });
+});
+
 describe('Codex #4737 r16 P2: read-side eligibility spans every trusted profile', () => {
   test('an older trusted (flow-created) profile holding the open assessment → GET already_booked, no slots offered', async () => {
     firstResults.leads = { ...LEAD_ROW, customer_id: null };

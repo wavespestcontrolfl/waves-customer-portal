@@ -800,4 +800,29 @@ describe('InspectionPage ?slot= preselect', () => {
     expect(await screen.findByRole('button', { name: /^Book /i })).toBeInTheDocument();
     expect(screen.getByText(/moved you to the next open time/i)).toBeInTheDocument();
   });
+
+  // Codex #4737 r17 P2: the next opening AFTER the requested time, never an
+  // earlier one; nothing later → the earliest, with honest wording.
+  it('picks the first opening after the requested time, not an earlier one', async () => {
+    const availability = {
+      ...okPayload().availability,
+      days: [
+        { date: '2026-07-12', fullDate: 'Sunday, July 12', nearby: false, slots: [
+          { start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' },
+          { start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' },
+        ] },
+      ],
+    };
+    stubFetch({ get: jsonResponse(okPayload({ availability })) });
+    renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
+    expect(await screen.findByRole('button', { name: /^Book .*3:00/i })).toBeInTheDocument();
+    expect(screen.getByText(/moved you to the next open time/i)).toBeInTheDocument();
+  });
+
+  it('with nothing after the requested time, falls back to the earliest with wording that says so', async () => {
+    stubFetch({ get: jsonResponse(okPayload()) }); // only 13:00 on 07-12
+    renderPage('/inspection/deadbeef?slot=2026-07-12|17:00');
+    expect(await screen.findByRole('button', { name: /^Book /i })).toBeInTheDocument();
+    expect(screen.getByText(/nothing later/i)).toBeInTheDocument();
+  });
 });

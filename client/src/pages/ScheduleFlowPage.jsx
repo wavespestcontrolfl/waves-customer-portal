@@ -1437,12 +1437,18 @@ export default function ScheduleFlowPage({ flow }) {
       setSelectedSlot({ ...slot, date: day.date, fullDate: day.fullDate });
       return;
     }
-    const fallbackDay = days[0];
-    const fallbackSlot = fallbackDay?.slots?.[0];
-    if (fallbackSlot) {
-      setSelectedDate(fallbackDay.date);
-      setSelectedSlot({ ...fallbackSlot, date: fallbackDay.date, fullDate: fallbackDay.fullDate });
-      setSlotMovedNotice('That time just filled. We moved you to the next open time.');
+    // The first opening AT OR AFTER the requested time (Codex #4737 r17
+    // P2), never an earlier one; if nothing later remains, the earliest
+    // opening with wording that says so.
+    const openings = days.flatMap((d) => (d.slots || []).map((sl) => ({ day: d, slot: sl })));
+    const later = openings.find(({ day: d, slot: sl }) => d.date > wantDate || (d.date === wantDate && sl.start_time >= wantTime));
+    const pick = later || openings[0];
+    if (pick) {
+      setSelectedDate(pick.day.date);
+      setSelectedSlot({ ...pick.slot, date: pick.day.date, fullDate: pick.day.fullDate });
+      setSlotMovedNotice(later
+        ? 'That time just filled. We moved you to the next open time.'
+        : "That time just filled, and there's nothing later this week. Here's the earliest open time.");
     }
   }, [flow, data, searchParams]);
 

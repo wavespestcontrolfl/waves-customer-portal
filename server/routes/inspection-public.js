@@ -630,7 +630,7 @@ async function geocodeServiceAddress(address) {
 //
 // Without a key (documented fallback): the box test is the ONLY area check
 // available, so it's run explicitly here — never a bare `ok: true`.
-async function checkServiceArea(location) {
+async function checkServiceArea(location, address = null) {
   if (!location) return { ok: false, county: null };
   // The box is a geographic guard in BOTH modes (local audit P1):
   // reverseGeocodeCounty returns a bare county name, so an out-of-state
@@ -646,7 +646,21 @@ async function checkServiceArea(location) {
     logger.warn(`[inspection-public] county reverse-geocode failed: ${err.message}`);
   }
   if (!county) return { ok: false, county: null, unavailable: true };
-  return { ok: isInServiceAreaCounty(county), county };
+  if (isInServiceAreaCounty(county)) return { ok: true, county };
+  // South Hillsborough is served by the Parrish office (config/locations.js
+  // SOUTH_HILLSBOROUGH_CITIES — Codex #4737 r16 P1): a Hillsborough address
+  // in one of those localities (by city, or by its ZIP's city) is in area.
+  return { ok: servedSouthHillsborough(county, address), county };
+}
+
+function servedSouthHillsborough(county, address) {
+  if (!/hillsborough/i.test(String(county || ''))) return false;
+  const { SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
+  const { zipToCity } = require('../utils/zip-to-city');
+  const cities = [address?.city, address?.zip ? zipToCity(address.zip) : null]
+    .filter(Boolean)
+    .map((c) => String(c).toLowerCase().trim());
+  return cities.some((c) => SOUTH_HILLSBOROUGH_CITIES.includes(c));
 }
 
 // The ONE place a "final" booking location is ever produced — every caller
@@ -680,7 +694,7 @@ async function finalizeBookingLocation(lead, custRow, suppliedAddress) {
 // commit's adopted-property recheck — the only location that does not come
 // out of finalizeBookingLocation (local audit P1).
 async function serviceAreaFailure(location, address = null) {
-  const area = await checkServiceArea(location);
+  const area = await checkServiceArea(location, address);
   if (area.unavailable) return { failure: 'service_area_unavailable' };
   // Outside the box there is no county lookup; the address's own city/ZIP
   // is the waitlist's region signal instead (Codex #4737 r6 P2).
@@ -1823,7 +1837,8 @@ async function commitVerdict(conn, leadId, token, customerId) {
   const freshLead = await loadLead(conn, leadId, { forUpdate: true });
   const trusted = freshLead ? await loadTrustedCustomer(conn, freshLead, token) : null;
   if (!trusted || String(trusted.id) !== String(customerId)) return 'customer_changed';
-  const eligibility = await resolveEligibility(conn, freshLead, trusted, { includeRescheduleUrl: false });
+  // Every trusted profile, as the read side does (Codex #4737 r17 P0).
+  const eligibility = await readEligibility(freshLead, trusted, token, { conn, includeRescheduleUrl: false });
   return eligibility.state === 'ok' ? 'ok' : 'ineligible';
 }
 
@@ -1834,14 +1849,15 @@ async function commitVerdict(conn, leadId, token, customerId) {
 // find-slots must show another trusted profile's open assessment BEFORE
 // offering times the commit would refuse. Only trusted profiles are read,
 // so nothing about an untrusted one is revealed.
-async function readEligibility(lead, custRow, token) {
-  const own = await resolveEligibility(db, lead, custRow);
+async function readEligibility(lead, custRow, token, { conn = db, includeRescheduleUrl = true } = {}) {
+  const opts = { includeRescheduleUrl };
+  const own = await resolveEligibility(conn, lead, custRow, opts);
   if (own.state !== 'ok') return own;
-  const ids = await trustedLeadProfileIds(db, lead.id, token, custRow?.id || null);
+  const ids = await trustedLeadProfileIds(conn, lead.id, token, custRow?.id || null);
   for (const id of ids) {
     if (custRow && String(id) === String(custRow.id)) continue;
-    const profile = await loadCustomer(db, id);
-    const other = profile ? await resolveEligibility(db, lead, profile) : null;
+    const profile = await loadCustomer(conn, id);
+    const other = profile ? await resolveEligibility(conn, lead, profile, opts) : null;
     if (other && other.state !== 'ok') return other;
   }
   return own;
@@ -2159,7 +2175,8 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
     // a caller-supplied county — and anything else is the generic 404.
     const ticket = verifyWaitlistTicket(req.body?.waitlist_ticket, lead.id);
     if (!ticket) return res.status(404).json({ error: 'not_found' });
-    const eligibility = await resolveEligibility(db, lead, await loadTrustedCustomer(db, lead, verified), { includeRescheduleUrl: false });
+    // Lead-wide, every trusted profile (Codex #4737 r17 P0).
+    const eligibility = await readEligibility(lead, await loadTrustedCustomer(db, lead, verified), verified, { includeRescheduleUrl: false });
     if (eligibility.state !== 'ok') return res.status(404).json({ error: 'not_found' });
     const county = ticket.county || '';
 
