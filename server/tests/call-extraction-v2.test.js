@@ -734,6 +734,24 @@ describe('normalize extraction v2', () => {
       expect(resultB.service_request.price).toMatchObject({ amount_usd: 40, unit: 'per_month', caller_response: 'declined', accepted: false });
     });
 
+    // codex #4722 r1 push-gate P1: primary selection must key off the
+    // NORMALIZED accepted, not caller_response directly — caller_response
+    // is optional (pre-1.13.0 shape / a field the model omitted), and an
+    // entry that omits it keeps its own accepted value unchanged. Checking
+    // caller_response alone would skip that entry and fall through to
+    // prices[0], demoting a genuinely accepted price.
+    test('selects the accepted entry as primary even when it omits caller_response (legacy accepted-only shape)', () => {
+      const extraction = validModelOutput();
+      delete extraction.service_request.price;
+      extraction.service_request.prices = [
+        { amount_usd: 40, unit: 'per_month', accepted: false },
+        { amount_usd: 300, unit: 'one_time', accepted: true },
+      ];
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price).toMatchObject({ amount_usd: 300, unit: 'one_time', accepted: true });
+      expect(result.service_request.price).not.toHaveProperty('caller_response');
+    });
+
     test('a price that disagrees with the accepted prices[] entry is replaced by that entry', () => {
       const extraction = validModelOutput();
       extraction.service_request.price = { amount_usd: 40, unit: 'per_month', caller_response: 'declined', accepted: false };

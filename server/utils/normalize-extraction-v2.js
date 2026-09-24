@@ -170,7 +170,13 @@ function normalizeServiceRequestPricing(serviceRequest) {
   if (Array.isArray(result.prices)) {
     result.prices = result.prices.map(normalizePriceEntry);
     if (result.prices.length > 0) {
-      const accepted = result.prices.find((p) => p && p.caller_response === 'accepted');
+      // Select on the NORMALIZED accepted, not caller_response directly:
+      // caller_response is optional, and an entry that omits it keeps its
+      // own (already-correct) accepted value from normalizePriceEntry
+      // above — checking caller_response alone would miss that entry and
+      // fall through to prices[0], demoting a genuinely accepted price
+      // (codex #4722 r1 push-gate P1).
+      const accepted = result.prices.find((p) => p && p.accepted === true);
       result.price = accepted || result.prices[0];
     }
   }
