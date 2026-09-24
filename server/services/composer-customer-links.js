@@ -1509,7 +1509,13 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLea
     // number must never carry this lead's bearer to whoever owns it now.
     if (lead.customer_id) {
       const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
-      if (owner && digitsLast10(owner.phone) !== String(toLast10 || '')) {
+      // An archived (soft-deleted) linked customer fails closed too (Codex
+      // #4709 r11 P1): the lead's retained number may belong to someone
+      // else by now.
+      if (!owner) {
+        return refuseSend("This lead's customer record is archived — update the lead before sending the consultation link.");
+      }
+      if (digitsLast10(owner.phone) !== String(toLast10 || '')) {
         return refuseSend("This lead's customer has a different phone on file now — update the lead before sending the consultation link.");
       }
     }

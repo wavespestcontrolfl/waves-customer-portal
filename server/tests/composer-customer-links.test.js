@@ -2783,6 +2783,14 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(refusal.error).toMatch(/different phone/);
   });
 
+  test('Codex #4709 r11 P1: a lead linked to an ARCHIVED customer → refused (fails closed)', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-archived' } });
+    mockBuilders.customers = chainBuilder({ firstRow: null });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/archived/);
+  });
+
   test('the gate went off since the insert → refused', async () => {
     wireConsultation();
     leadInspectionLinkLive.mockReturnValue(false);

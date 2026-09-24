@@ -1350,15 +1350,25 @@ router.post('/:id/send-sms', async (req, res, next) => {
     // — a number exactly one live customer owns is that customer's text, so
     // their notification preferences apply; an ambiguous number is refused.
     const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+    // The lead's OWN linked customer is the trusted owner when it is live and
+    // its current phone is this destination (Codex #4709 r11 P2): a
+    // household of customers sharing the number is otherwise ambiguous to
+    // the generic owner recovery and every send would 409.
+    const destLast10 = String(lead.phone || '').replace(/\D/g, '').slice(-10);
+    let linkedOwnerId = null;
+    if (lead.customer_id) {
+      const linked = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('id', 'phone');
+      if (linked && String(linked.phone || '').replace(/\D/g, '').slice(-10) === destLast10) linkedOwnerId = linked.id;
+    }
     const bearerCheck = await bearerLinkSendCheck(
       message,
-      String(lead.phone || '').replace(/\D/g, '').slice(-10),
-      { trustedCustomerId: null, usDestination: isUsPhone(lead.phone), expectedLeadId: lead.id },
+      destLast10,
+      { trustedCustomerId: linkedOwnerId, usDestination: isUsPhone(lead.phone), expectedLeadId: lead.id },
     );
     if (!bearerCheck.ok) {
       return res.status(409).json({ error: bearerCheck.error });
     }
-    const ownerCustomerId = bearerCheck.customerId || null;
+    const ownerCustomerId = linkedOwnerId || bearerCheck.customerId || null;
 
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     const sendResult = await sendCustomerMessage({

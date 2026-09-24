@@ -174,6 +174,7 @@ describe('a consultation short code in the message is re-checked at THIS send bo
   const originalGate = process.env.GATE_LEAD_INSPECTION_LINK;
   let shortCodeRows;
   let ownerRows = [];
+  let linkedCustomerRow = null;
 
   function wireConsultationDb() {
     db.mockImplementation((table) => {
@@ -191,7 +192,7 @@ describe('a consultation short code in the message is re-checked at THIS send bo
         return q;
       }
       const builder = {
-        first: jest.fn(async () => ({ ...lead })), update,
+        first: jest.fn(async () => (table === 'customers' ? linkedCustomerRow : { ...lead })), update,
         insert: jest.fn(async (row) => { if (table === 'lead_activities') activities.push(row); }),
         // bearerLinkSendCheck's owner recovery lists customers on the number
         // (none here — an unconverted lead).
@@ -226,6 +227,24 @@ describe('a consultation short code in the message is re-checked at THIS send bo
       expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-owner', audience: 'customer' }));
     } finally {
       ownerRows = [];
+    }
+  });
+
+  // Codex #4709 r11 P2: a household sharing the number is not ambiguous
+  // when the lead's OWN linked customer is live and on this phone.
+  test('the lead\'s own linked customer on this phone is the trusted owner, even with other customers on the number', async () => {
+    ownerRows = [{ id: 'c1' }, { id: 'c2' }];
+    const original = lead.customer_id;
+    lead.customer_id = 'c1';
+    linkedCustomerRow = { id: 'c1', phone: '+19415550103' };
+    try {
+      const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1 Reply STOP to opt out.', to: '+19415550103' });
+      expect(response.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', audience: 'customer' }));
+    } finally {
+      ownerRows = [];
+      linkedCustomerRow = null;
+      lead.customer_id = original;
     }
   });
 
