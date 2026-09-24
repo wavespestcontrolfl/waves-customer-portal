@@ -33,6 +33,39 @@ const {
 
 const expectedPerim = (footprint, factor) => Math.round(4 * Math.sqrt(footprint) * factor);
 
+describe('enriched profile addressVerdict (codex #4667 r25 P1)', () => {
+  const { countyRecordVouchesTypedNumber } = require('../routes/property-lookup-v2')._private;
+  const county = { squareFootage: 1623, stories: 1, _source: 'county', _parcel: { parcelId: 'P-1' } };
+
+  test('county_record only when the record\'s situs number agrees with the typed one', () => {
+    const vouched = buildEnrichedProfile({ ...county, addressLine1: '1260 Example St' }, null, 27.4, -82.4, null, null, '1260 Example St, Parrish, FL 34219');
+    expect(vouched.addressVerdict).toBe('county_record');
+    expect(countyRecordVouchesTypedNumber('1260 Example St', { ...county, _parcel: { parcelId: 'P-1', situsAddress: '1260 EXAMPLE ST' } })).toBe(true);
+  });
+
+  test('a parcel id with no parseable situs number is not a vouch — unanswered, and it needs the audit', () => {
+    const bare = buildEnrichedProfile(county, null, 27.4, -82.4, null, null, '1260 Example St, Parrish, FL 34219');
+    expect(bare.addressVerdict).toBe('unanswered');
+    expect(countyRecordVouchesTypedNumber('1260 Example St', county)).toBe(false);
+    expect(countyRecordVouchesTypedNumber('Example St', { ...county, addressLine1: '1260 Example St' })).toBe(false);
+    expect(countyRecordVouchesTypedNumber('1260 Example St', { ...county, addressLine1: '1250 Example St' })).toBe(false);
+    // Same number on ANOTHER street or in another ZIP is no vouch (codex r43 P1).
+    expect(countyRecordVouchesTypedNumber('1260 Example St', { ...county, addressLine1: '1260 Other Ave' })).toBe(false);
+    expect(countyRecordVouchesTypedNumber('1260 Example St, Parrish, FL 34219', { ...county, addressLine1: '1260 Example St', zipCode: '34221' })).toBe(false);
+    expect(countyRecordVouchesTypedNumber('1260 Example St, Parrish, FL 34219', { ...county, addressLine1: '1260 EXAMPLE STREET', zipCode: '34219' })).toBe(true);
+    // An explicit city / state mismatch is no vouch either (pre-push audit after r50).
+    expect(countyRecordVouchesTypedNumber('1260 Example St, Parrish, FL', { ...county, addressLine1: '1260 Example St', city: 'Sarasota' })).toBe(false);
+    expect(countyRecordVouchesTypedNumber('1260 Example St, Parrish, FL', { ...county, addressLine1: '1260 Example St', city: 'Parrish', state: 'GA' })).toBe(false);
+    expect(countyRecordVouchesTypedNumber('1260 Example St, Parrish, FL', { ...county, addressLine1: '1260 Example St', city: 'PARRISH', state: 'fl' })).toBe(true);
+    expect(countyRecordVouchesTypedNumber('1260 Example St', { squareFootage: 1623 })).toBe(false);
+  });
+
+  test('an audited profile reads audited whatever the record says', () => {
+    const audited = buildEnrichedProfile(county, null, 27.4, -82.4, null, { county: 'Sample', hasExactMatch: false }, '1260 Example St');
+    expect(audited.addressVerdict).toBe('audited');
+  });
+});
+
 describe('enriched profile estimatedPerimeterLF', () => {
   test('derives perimeter from footprint with the MODERATE/COMPLEX 1.35 layout factor', () => {
     const profile = buildEnrichedProfile(

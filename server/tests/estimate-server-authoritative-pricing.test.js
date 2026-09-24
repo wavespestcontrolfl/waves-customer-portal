@@ -35,6 +35,8 @@ function makeDatabase() {
       return Promise.resolve([row]);
     },
   });
+  // The save's contact-pair advisory lock (#4667) is a raw statement.
+  trx.raw = async () => undefined;
   return { database: { transaction: async (cb) => cb(trx) }, inserts, getInsert: () => inserts.find((i) => i.table === 'estimates') };
 }
 

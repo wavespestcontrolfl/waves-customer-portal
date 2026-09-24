@@ -115,10 +115,15 @@ describe('cancellation is serialized with series maintenance (P0-2b)', () => {
 
   test('the maintenance re-reads recurring_ongoing INSIDE the lock, both before and after its insert', () => {
     // Pre-insert re-check and post-insert compensating re-check both live in
-    // runRecurringSeriesMaintenanceLocked, i.e. after the lock is taken.
-    const locked = scheduleSrc.indexOf('async function runRecurringSeriesMaintenanceLocked');
+    // extendSeriesOnceLocked — extracted from runRecurringSeriesMaintenanceLocked
+    // so the nightly top-up horizon loop (topUpRecurringSeriesLocked) shares
+    // the exact same insert step — called only after the per-parent lock is
+    // taken (both callers already hold it when they call in).
+    const locked = scheduleSrc.indexOf('async function extendSeriesOnceLocked');
+    const lockedEnd = scheduleSrc.indexOf('async function runRecurringSeriesMaintenanceLocked');
     expect(locked).toBeGreaterThan(-1);
-    const body = scheduleSrc.slice(locked);
+    expect(lockedEnd).toBeGreaterThan(locked);
+    const body = scheduleSrc.slice(locked, lockedEnd);
     expect((body.match(/\.first\('recurring_ongoing'\)/g) || []).length).toBeGreaterThanOrEqual(2);
     expect(body).toContain('stillOngoing = !!(freshParent && freshParent.recurring_ongoing);');
     expect(body).toContain('if (!parentNow || !parentNow.recurring_ongoing) {');

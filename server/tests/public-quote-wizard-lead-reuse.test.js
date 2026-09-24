@@ -213,7 +213,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // same statement over the replace snapshot; no label = the merge write.
     const landSrc = src.slice(src.indexOf('const land = async (claim, label) => {'), src.indexOf('let prior = dedupeOn'));
     expect(landSrc).toMatch(/status: label \? 'duplicate' : 'new',/);
-    expect(landSrc).toMatch(/'won_estimate_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'won_estimate_id'\)\) \|\| \?::jsonb \|\| \?::jsonb",\n\s+\[extractedData, JSON\.stringify\(label \? \{ duplicate_of_lead_id: label \} : \{\}\)\],/);
+    expect(landSrc).toMatch(/'won_estimate_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'won_estimate_id', 'address_unverified', COALESCE\(extracted_data, '\{\}'::jsonb\)->'address_unverified', 'address_verdict', COALESCE\(extracted_data, '\{\}'::jsonb\)->'address_verdict'\)\) \|\| \?::jsonb \|\| \?::jsonb",\n\s+\[extractedData, JSON\.stringify\(label \? \{ duplicate_of_lead_id: label \} : \{\}\)\],/);
     expect(landSrc).toMatch(/const rows = await claim\(ownRow\(\)\)\.update\(\{ \.\.\.updateFields, \.\.\.relabel \}\)\.returning\(RETURNING\);\n\s+lead = rows\[0\] \|\| null;/);
     expect(landSrc).toMatch(/if \(lead && label !== undefined\) duplicateOfLeadId = label;\n\s+else if \(relabelable\(lead\)\) duplicateOfLeadId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
     // The claimed snapshot never carries the OLD marker forward.

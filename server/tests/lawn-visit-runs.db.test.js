@@ -105,7 +105,7 @@ const analysis = (overrides = {}) => ({
     expect(row.scores_raw).toEqual({ turf_density: 72, weed_coverage: 15, color_health: null });
     expect(row.raw_response).toEqual({ ok: true });
     expect(row.vision_context).toEqual({ season: 'peak', month: 9 });
-    expect(row.reconciliation).toEqual({ published_observations: NO_OBSERVATIONS, stress_damage_override: null });
+    expect(row.reconciliation).toEqual({ published_observations: NO_OBSERVATIONS });
     await expect(visit.recordRun({ assessment, analysis: analysis(), photoRecords: [] }, db.knex)).rejects.toThrow(/unique|duplicate/i);
     expect(await visit.loadRun(assessment.id, db.knex)).toMatchObject({ id: row.id });
     // The photo ids are attached after the photos are stored (the run itself is written with the assessment).

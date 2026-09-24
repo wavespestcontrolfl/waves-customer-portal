@@ -21,6 +21,7 @@ const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTec
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../services/route-reorder');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  parseHHMM, minutesToHHMM,
 } = require('../services/scheduling/window-rules');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { openInvoiceFacts } = require('../services/visit-context/balance');
@@ -28,6 +29,7 @@ const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
+const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
 const {
@@ -8115,6 +8117,30 @@ router.post('/', requireAdmin, async (req, res, next) => {
         scheduledServiceId: svc.id,
         source: 'admin_schedule',
       });
+
+      // Consultation-outcomes reconciliation (round 10 fast path — see the
+      // RECONCILIATION MODEL note atop consultation-outcomes.js; the hourly
+      // sweep, reconcileOpenConsultationOutcomes, is the completeness
+      // guarantee behind this and every other booking path). Same guarded
+      // call admin-leads.js's schedule-appointment uses: isQualifyingSaleBooking
+      // reads straight off `svc` (this INSERT's own RETURNING row) — no
+      // extra query — and a Waves Assessment booked directly off this
+      // calendar tool is excluded the same way admin-leads.js excludes one
+      // (an assessment is never itself a win). Best-effort,
+      // savepoint-isolated inside markWonForCustomer (waves-db §5b).
+      if (!(await require('../services/assessment-booking').isAssessmentBooking(svc, trx))
+        && require('../services/consultation-outcomes').isQualifyingSaleBooking(svc)) {
+        // round 12 fix (codex P1 audit, post-push): this route is an
+        // office/admin tool — never pass svc.technician_id as a
+        // closeout-detection hint. That field is the visit's ASSIGNEE, not
+        // who booked it; an office admin assigning a new visit to the
+        // consultation's own technician is an ordinary office booking, not
+        // a door-side close. No real "booked by" signal exists on
+        // scheduled_services today (see WON_VIA PROVENANCE atop
+        // consultation-outcomes.js).
+        await require('../services/consultation-outcomes')
+          .markWonForCustomer(customerId, { via: 'office_booking', trx });
+      }
 
       // Create recurring instances from the dates precomputed (and locked)
       // above. Children resolve the CURRENT catalog identity from the
@@ -16683,6 +16709,358 @@ async function runRecurringSeriesMaintenance(conn, svc) {
   }
 }
 
+// One auto-extend step for an ONGOING series already past its trigger check
+// (the completion path's upcomingCount < 2, or a topUpRecurringSeriesLocked
+// horizon loop). Extracted from runRecurringSeriesMaintenanceLocked so both
+// callers share the exact candidate-date search, insert, prepay coverage,
+// post-insert cancellation re-check, add-on mirror, and visit-groups stamp —
+// forking this logic would let the two paths drift on cadence/blackout/
+// pricing rules. `parent` must already be the fresh, overlay-applied row
+// (overlayRecurringTemplateOverrides); `svcLike` is read only for
+// applyExtensionPrepayCoverage's term-discovery hint (annual_prepay_term_id)
+// — the completion path passes the triggering svc row, topUp passes `parent`
+// itself (no separate triggering row exists there). `opts.maxDate` (ET date
+// string), when set, refuses any candidate past it instead of inserting —
+// topUp's horizon/annual-prepay-term_end cap; omitted (the completion path)
+// the search is unbounded except by the existing 12-cadence-step attempt
+// budget, byte-identical to before this extraction. `opts.checkUnbillable`
+// (bool), when true, refuses (never inserts) a candidate the shared
+// seriesExtensionUnbillable verdict rejects — topUp's OFFICE-writer-class
+// billable-amount gate, checked against this ACTUAL candidate date; omitted
+// (the completion path), the gate is never consulted, byte-identical to
+// before this extraction (owner ruling: warn at completion, don't block it).
+// `opts.normalizeOffHourStart` (bool), when true, floors an off-hour
+// parent.window_start to the hour and recomputes the end from duration for
+// this insert only — topUp's guard against minting a stack of off-hour
+// rows from a legacy template (AGENTS.md: windows start on the hour); a
+// windowless template is untouched either way. Omitted (the completion
+// path), the window is copied verbatim, byte-identical to before this
+// extraction. Top-up v1 excludes every annual-prepay series outright
+// (topupSeriesSkipReason, below) rather than reproducing the coverage
+// authority's own term-selection logic a second time — the existing
+// activation-time seeder (ensureCoverageRowsForTerm) already keeps a
+// prepay customer's covered rows booked; see the module header for the
+// scope-cut rationale.
+// Pure (no DB) off-hour window floor for the top-up path — shared by
+// topUpRecurringSeriesLocked's upfront per-series check and
+// extendSeriesOnceLocked's own per-insert normalization, so the exact same
+// arithmetic decides both "should this series even be attempted" and "what
+// window does the insert actually use." Returns null when nothing needs
+// normalizing (a windowless template, or a start already on the hour AND
+// a stored windowEnd that already matches the duration-derived one) — the
+// caller keeps its existing window fields. Returns `{ start, end }` — the
+// VALIDATED pair, never the caller's stale stored one — whenever EITHER the
+// start needed flooring OR the stored windowEnd disagrees with the
+// duration-derived end (Codex GitHub r7 P2: a 19:00 start with a 60-minute
+// duration but a stored end of 21:00 — left over from an earlier duration
+// change, or edited independently — used to validate fine as 19:00-20:00
+// (start already on the hour, so the old code returned null) and then
+// insert the stale 19:00-21:00 anyway, since the caller's own window_end was
+// never touched). Returns `{ unplaceable: true }` when the FINAL window
+// (floored start, if flooring was needed, with its duration-derived end)
+// fails the SAME validator every other admin write path runs through
+// (assertAdminAppointmentWindow, window-rules.js) — never a narrower
+// reimplementation of just its midnight-overflow case. That narrower check
+// (Codex GitHub r3 P2: never build an out-of-range "24:15" end) covered a
+// start needing flooring whose duration pushed past 24:00, but skipped
+// validation ENTIRELY for a start that was already on the hour — so an
+// already-on-the-hour "21:00" template with a 60-minute duration (ending
+// 22:00, past the 20:00 admin day bound) would insert unchecked (Codex
+// GitHub r6 P2). The caller skips the series (or refuses the insert) on
+// `unplaceable` either way.
+function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
+  if (!windowStart) return null;
+  const startMin = parseHHMM(windowStart);
+  const needsFlooring = startMin != null && startMin % 60 !== 0;
+  const candidateStart = needsFlooring ? minutesToHHMM(startMin - (startMin % 60)) : windowStart;
+  let validated;
+  try {
+    validated = assertAdminAppointmentWindow({ windowStart: candidateStart, durationMinutes });
+  } catch {
+    return { unplaceable: true };
+  }
+  // A missing stored end is stale too: persist the duration-derived end, or
+  // every child keeps a null end and the missed-service sweep
+  // (window_end || window_start) reads the visit as over at its start (Codex r8 P2).
+  const endStale = windowEnd == null || windowEnd === '' || parseHHMM(windowEnd) !== parseHHMM(validated.window_end);
+  if (!needsFlooring && !endStale) return null;
+  return { start: validated.window_start, end: validated.window_end };
+}
+
+// Returns the spawned-visit payload (for the caller's post-commit reminder
+// registration) when a row landed and survived the cancellation re-check,
+// else null.
+async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opts = {}) {
+  const { maxDate = null } = opts;
+  let spawnedVisit = null;
+  // Find the latest LIVE visit (pending/confirmed or completed) to
+  // calculate the next date — shared anchor query (cancelled/rescheduled
+  // exclusion + booster exclusion rationale on the helper).
+  const latest = await latestLiveSeriesVisit(conn, parentId);
+  if (latest) {
+    const rOpts = {
+      ...recurrenceOrdinalOptions(parent.scheduled_date, {
+        nth: parent.recurring_nth,
+        weekday: parent.recurring_weekday,
+      }),
+      intervalDays: parent.recurring_interval_days,
+    };
+    const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
+    // B6: auto-extend DATES honor the customer's live weekday
+    // preference even on legacy series; the STAMPED flag stays the
+    // operator's raw value (provenance — see reconcile).
+    const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
+    const skipParent = skipParentStamp || await customerPrefersNoWeekends(conn, parent.customer_id);
+    const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
+    // opts.normalizeOffHourStart (topUp only — never set by the completion
+    // path, so its own behavior, including any legacy off-hour template, is
+    // unchanged): a legacy 09:15/09:30 template otherwise gets copied onto
+    // every one of up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN unattended
+    // inserts, minting a stack of rows assertAdminAppointmentWindow would
+    // reject outright on any admin-facing write (AGENTS.md: appointment
+    // windows start on the hour). Floors an ACTUAL off-hour start to the
+    // hour and recomputes the end from the row's own duration — never
+    // invents an hour for a windowless template (parent.window_start falsy
+    // passes through unchanged, same placeholder behavior as today).
+    // Computed HERE, before the candidate search, and used for BOTH the
+    // occupancy clash probe below and the eventual insert — probing with
+    // the original off-hour window while inserting the floored one let a
+    // real conflict slip past the probe (Codex GitHub r2 P1).
+    let nextWindowStart = parent.window_start;
+    let nextWindowEnd = parent.window_end;
+    if (opts.normalizeOffHourStart) {
+      const normalized = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
+      if (normalized) {
+        if (normalized.unplaceable) {
+          // topUpRecurringSeriesLocked already skips the series upfront on
+          // this exact condition (skipped: 'window_unplaceable') — reached
+          // here only in defense-in-depth (a direct extendSeriesOnceLocked
+          // caller). Never build an out-of-range "24:15" time; refuse
+          // rather than insert.
+          logger.warn(`[recurring-topup] parent=${parentId} window_start ${parent.window_start} + duration would push past 24:00 — refusing to insert`);
+          return spawnedVisit;
+        }
+        nextWindowStart = normalized.start;
+        nextWindowEnd = normalized.end;
+        logger.warn(`[recurring-topup] parent=${parentId} window_start ${parent.window_start} is off-hour — flooring to ${nextWindowStart} for this top-up insert`);
+      }
+    }
+    // The clash probe must see the SAME window the insert will actually
+    // use — a plain `parent` reference when nothing changed (identical
+    // object, no extra allocation on the completion path or an on-the-hour
+    // top-up template).
+    const clashProbeTemplate = (nextWindowStart === parent.window_start && nextWindowEnd === parent.window_end)
+      ? parent
+      : { ...parent, window_start: nextWindowStart, window_end: nextWindowEnd };
+    // Pre-load every active date on this series so the auto-extend
+    // insert dedupes against future booster rows — shared preload
+    // (booster double-book rationale on the helper).
+    const existingDates = await loadActiveSeriesDates(conn, parentId);
+    const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
+    // Advance until we find an open date or give up. Each step
+    // moves one cadence interval forward from latestStr; capped to
+    // avoid runaway loops on degenerate patterns.
+    let attempt = 1;
+    let nextStr = null;
+    while (attempt <= 12) {
+      const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
+      const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
+      if (!candidate) {
+        attempt++;
+        continue;
+      }
+      if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
+        attempt++;
+        continue;
+      }
+      // Never seed a past-dated visit (+ its reminder) off a stale anchor.
+      if (candidate <= etDateString()) {
+        attempt++;
+        continue;
+      }
+      // topUp's horizon / annual-prepay term_end cap — refuse rather than
+      // insert (never a compensating delete after the fact): a candidate
+      // past the cap is not "the next date", it's "stop for this series".
+      if (maxDate && candidate > maxDate) {
+        attempt++;
+        continue;
+      }
+      if (existingDates.has(candidate)) { attempt++; continue; }
+      // The blackout nudge can land a candidate on an adjacent day
+      // another visit already occupies (the series dedupe above only
+      // covers THIS series) — probe global occupancy before accepting,
+      // skipping clashing dates to the next cadence step.
+      if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) { attempt++; continue; }
+      nextStr = candidate;
+      break;
+    }
+    // Re-check the ongoing flag immediately before inserting: it was
+    // read once at the top of this block, and a cancellation (the
+    // portal auto-processor or an admin churn) can stop the series
+    // while the slower candidate/add-on math above runs. Without
+    // this, the insert would put a fresh visit — with
+    // recurring_ongoing=true, so it keeps regenerating — on a
+    // customer who just cancelled.
+    let stillOngoing = true;
+    if (nextStr && cols.recurring_ongoing) {
+      const freshParent = await conn('scheduled_services')
+        .where({ id: parentId })
+        .first('recurring_ongoing');
+      stillOngoing = !!(freshParent && freshParent.recurring_ongoing);
+    }
+    if (!nextStr) {
+      logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — every candidate within 12 cadence steps already booked`);
+    } else if (!stillOngoing) {
+      logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
+    } else {
+      const childIdentity = await resolveSeriesChildIdentity(conn, parent);
+      const nextData = {
+        customer_id: parent.customer_id,
+        technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
+        scheduled_date: nextStr,
+        window_start: nextWindowStart, window_end: nextWindowEnd,
+        service_type: childIdentity.service_type, status: 'pending',
+        time_window: parent.time_window, zone: parent.zone,
+        estimated_duration_minutes: parent.estimated_duration_minutes,
+        is_recurring: true, recurring_pattern: parent.recurring_pattern,
+        recurring_parent_id: parentId,
+      };
+      if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
+      if (cols.skip_weekends) nextData.skip_weekends = skipParentStamp;
+      if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
+      if (cols.service_id && childIdentity.service_id) nextData.service_id = childIdentity.service_id;
+      if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+      const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
+      copyLineDiscountFields(nextData, extensionPriceParent, cols);
+      if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
+      copyAppointmentDiscountFields(nextData, parent, cols);
+      copyBillToFields(nextData, parent, cols);
+      copyStampedServiceAddressFields(nextData, parent, cols);
+      await anchorSoleProperty(nextData, cols, conn);
+      // Required scope must be readable before creating any child.
+      const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
+      // Legacy-series root freeze (Codex round 2 P1) — see
+      // freezeLegacySeriesRootCaps's own comment. Only one date is
+      // ever placed per auto-extend call, so no per-date loop to hoist
+      // this out of.
+      await freezeLegacySeriesRootCaps(conn, parent, cols, parentAddons);
+      const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
+      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates, skipParent);
+      // Anchored-split series (self-booked funnels, wizard plans): the
+      // PARENT's estimated_price carries the annual's remainder cents
+      // and every seeded follow-up bills the even quotient. Templating
+      // the extension off the parent re-billed those cents on every
+      // renewal visit (owner ruling 2026-08-27). Use the series'
+      // per-visit amount instead when the parent is a remainder-bearing
+      // anchor — an existing follow-up priced within $1 below it.
+      applyStoredVisitFinancials(nextData, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
+      // Canonical restack (GATE_DISCOUNT_STACKING): restates the frozen
+      // fields the two copy* calls and applyStoredVisitFinancials just
+      // wrote — line_discount_dollars, discount_dollars, estimated_price
+      // — against THIS occurrence's own due add-ons; no-op off (see
+      // applyDiscountStackRestack). The returned array threads through
+      // to insertRecurringChildAddons below so each due add-on's own
+      // discount restates the same way. discountCaps is the REAL
+      // catalog cap for the primary + every due add-on's own discount.
+      const discountCaps = discountStackingLive()
+        ? await loadDiscountCapsById(conn, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
+        : null;
+      const restackedAddonDollars = applyDiscountStackRestack(nextData, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
+      // Pricing-regime provenance — see restackStoredVisitFinancials's
+      // own comment.
+      if (discountStackingLive()) stampPricingRegimeMarker(nextData, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
+      // Extension rows keep invoice-on-complete stamping — sibling-
+      // resolved so the freshest office billing intent wins (see
+      // resolveSeriesCreateInvoiceOnComplete). Without it a
+      // pay-per-visit customer's extension visit completes UNINVOICED.
+      if (cols.create_invoice_on_complete) {
+        const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
+        if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
+      }
+      // opts.checkUnbillable (topUp only — never set by the completion
+      // path, so its own behavior is unchanged): the SAME shared verdict
+      // every OFFICE series writer consults, run against THIS ACTUAL
+      // candidate date and its real due add-ons — price varies by date
+      // (e.g. an annual-only add-on not due on every occurrence), so a
+      // single upfront probe date could pass while a later candidate in
+      // the same horizon run is genuinely unbillable (Codex pre-push P1).
+      // Refuses rather than inserts — never a compensating delete.
+      if (opts.checkUnbillable) {
+        const unbillable = await seriesExtensionUnbillable(conn, {
+          parent, dates: [nextStr], cols, parentAddons, storedDiscountScope,
+          blackoutDates: autoExtendBlackoutDates, skipParent,
+          seriesCioc: nextData.create_invoice_on_complete,
+        });
+        if (unbillable) {
+          logger.warn(`[recurring-topup] Auto-extend skipped for parent=${parentId} — ${nextStr} would be unbillable`);
+          return spawnedVisit;
+        }
+      }
+      const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
+      // Annual-prepay coverage for the row we just inserted.
+      //
+      // The auto-extend used to build its next visit with no prepay
+      // field at all, so a prepay customer's extension read as UNCOVERED
+      // and billed again for service the prepay had already bought.
+      // Deliberately delegated rather than computed here: the coverage
+      // budget has ONE authority. applyPrepaidCoverageForTerm selects
+      // through coverageRowsForTerm, which caps the set at
+      // coverage_visit_count (committed rows first, date-ordered), skips
+      // completed rows for reconcilePendingWindowCompletions to settle,
+      // skips rows a different term or an out-of-band cash/check/Zelle
+      // payment already covers, and slices by position so the remainder
+      // cents land on the final visit. A second allocator here could
+      // only disagree with it.
+      //
+      // Runs on `conn`, so it commits or rolls back with the extension.
+      // The transient completion-race bell is quiet (this fires per
+      // generated visit and reconciliation settles that case); the
+      // cancelled-paid-slot bell still rings — nothing re-seeds it.
+      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr);
+      // Post-insert re-check closes the remaining race: a
+      // cancellation can stop the series between the pre-insert
+      // read above and this insert. The row hasn't been mirrored,
+      // broadcast, or given a reminder yet, so compensating is a
+      // plain delete — guarded on status='pending' so if the
+      // cancellation sweep already flipped it, the cancelled row
+      // (and its history) is left intact. Either way the add-on
+      // mirror + reminder registration below are skipped, so a
+      // stale reminder can't be minted after the sweep's
+      // reminder-cancel step already ran.
+      let autoExtLive = true;
+      if (cols.recurring_ongoing && autoExtRow?.id) {
+        const parentNow = await conn('scheduled_services')
+          .where({ id: parentId })
+          .first('recurring_ongoing');
+        if (!parentNow || !parentNow.recurring_ongoing) {
+          autoExtLive = false;
+          const removed = await conn('scheduled_services')
+            .where({ id: autoExtRow.id, status: 'pending' })
+            .del();
+          logger.info(`[recurring] Auto-extend ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped during completion processing`);
+        }
+      }
+      // Persist all due scope before the wrapper can observe a committed
+      // extension or register its reminder.
+      if (autoExtLive && autoExtRow?.id) {
+        await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars);
+        // Visit groups: stamp ONLY after the post-insert cancellation
+        // re-check passes — stamping earlier could mint a visit whose
+        // member this same transaction compensating-deletes.
+        await require('../services/visit-groups').maybeGroupRow(autoExtRow.id, { database: conn, createdBy: 'dispatch' });
+        spawnedVisit = {
+          scheduledServiceId: autoExtRow.id,
+          customerId: parent.customer_id,
+          scheduledDate: nextStr,
+          windowStart: parent.window_start,
+          serviceType: childIdentity.service_type,
+        };
+      }
+    }
+  }
+  return spawnedVisit;
+}
+
 // The lock-held body: returns the spawned-visit payload (for the wrapper's
 // post-commit reminder registration) when an auto-extend row
 // landed and survived the cancellation re-check, else null.
@@ -16720,205 +17098,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
     const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
 
     if (isOngoing && upcomingCount < 2) {
-      // Find the latest LIVE visit (pending/confirmed or completed) to
-      // calculate the next date — shared anchor query (cancelled/rescheduled
-      // exclusion + booster exclusion rationale on the helper).
-      const latest = await latestLiveSeriesVisit(conn, parentId);
-      if (latest) {
-        const rOpts = {
-          ...recurrenceOrdinalOptions(parent.scheduled_date, {
-            nth: parent.recurring_nth,
-            weekday: parent.recurring_weekday,
-          }),
-          intervalDays: parent.recurring_interval_days,
-        };
-        const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
-        // B6: auto-extend DATES honor the customer's live weekday
-        // preference even on legacy series; the STAMPED flag stays the
-        // operator's raw value (provenance — see reconcile).
-        const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
-        const skipParent = skipParentStamp || await customerPrefersNoWeekends(conn, parent.customer_id);
-        const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
-        // Pre-load every active date on this series so the auto-extend
-        // insert dedupes against future booster rows — shared preload
-        // (booster double-book rationale on the helper).
-        const existingDates = await loadActiveSeriesDates(conn, parentId);
-        const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-        // Advance until we find an open date or give up. Each step
-        // moves one cadence interval forward from latestStr; capped to
-        // avoid runaway loops on degenerate patterns.
-        let attempt = 1;
-        let nextStr = null;
-        while (attempt <= 12) {
-          const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-          const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
-          if (!candidate) {
-            attempt++;
-            continue;
-          }
-          if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
-            attempt++;
-            continue;
-          }
-          // Never seed a past-dated visit (+ its reminder) off a stale anchor.
-          if (candidate <= etDateString()) {
-            attempt++;
-            continue;
-          }
-          if (existingDates.has(candidate)) { attempt++; continue; }
-          // The blackout nudge can land a candidate on an adjacent day
-          // another visit already occupies (the series dedupe above only
-          // covers THIS series) — probe global occupancy before accepting,
-          // skipping clashing dates to the next cadence step.
-          if (await seriesCandidateDateClashes(conn, parent, candidate)) { attempt++; continue; }
-          nextStr = candidate;
-          break;
-        }
-        // Re-check the ongoing flag immediately before inserting: it was
-        // read once at the top of this block, and a cancellation (the
-        // portal auto-processor or an admin churn) can stop the series
-        // while the slower candidate/add-on math above runs. Without
-        // this, the insert would put a fresh visit — with
-        // recurring_ongoing=true, so it keeps regenerating — on a
-        // customer who just cancelled.
-        let stillOngoing = true;
-        if (nextStr && cols.recurring_ongoing) {
-          const freshParent = await conn('scheduled_services')
-            .where({ id: parentId })
-            .first('recurring_ongoing');
-          stillOngoing = !!(freshParent && freshParent.recurring_ongoing);
-        }
-        if (!nextStr) {
-          logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — every candidate within 12 cadence steps already booked`);
-        } else if (!stillOngoing) {
-          logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
-        } else {
-          const childIdentity = await resolveSeriesChildIdentity(conn, parent);
-          const nextData = {
-            customer_id: parent.customer_id,
-            technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
-            scheduled_date: nextStr,
-            window_start: parent.window_start, window_end: parent.window_end,
-            service_type: childIdentity.service_type, status: 'pending',
-            time_window: parent.time_window, zone: parent.zone,
-            estimated_duration_minutes: parent.estimated_duration_minutes,
-            is_recurring: true, recurring_pattern: parent.recurring_pattern,
-            recurring_parent_id: parentId,
-          };
-          if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
-          if (cols.skip_weekends) nextData.skip_weekends = skipParentStamp;
-          if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
-          if (cols.service_id && childIdentity.service_id) nextData.service_id = childIdentity.service_id;
-          if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
-          const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
-          copyLineDiscountFields(nextData, extensionPriceParent, cols);
-          if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
-          copyAppointmentDiscountFields(nextData, parent, cols);
-          copyBillToFields(nextData, parent, cols);
-          copyStampedServiceAddressFields(nextData, parent, cols);
-          await anchorSoleProperty(nextData, cols, conn);
-          // Required scope must be readable before creating any child.
-          const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
-          // Legacy-series root freeze (Codex round 2 P1) — see
-          // freezeLegacySeriesRootCaps's own comment. Only one date is
-          // ever placed per auto-extend call, so no per-date loop to hoist
-          // this out of.
-          await freezeLegacySeriesRootCaps(conn, parent, cols, parentAddons);
-          const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
-          const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates, skipParent);
-          // Anchored-split series (self-booked funnels, wizard plans): the
-          // PARENT's estimated_price carries the annual's remainder cents
-          // and every seeded follow-up bills the even quotient. Templating
-          // the extension off the parent re-billed those cents on every
-          // renewal visit (owner ruling 2026-08-27). Use the series'
-          // per-visit amount instead when the parent is a remainder-bearing
-          // anchor — an existing follow-up priced within $1 below it.
-          applyStoredVisitFinancials(nextData, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
-          // Canonical restack (GATE_DISCOUNT_STACKING): restates the frozen
-          // fields the two copy* calls and applyStoredVisitFinancials just
-          // wrote — line_discount_dollars, discount_dollars, estimated_price
-          // — against THIS occurrence's own due add-ons; no-op off (see
-          // applyDiscountStackRestack). The returned array threads through
-          // to insertRecurringChildAddons below so each due add-on's own
-          // discount restates the same way. discountCaps is the REAL
-          // catalog cap for the primary + every due add-on's own discount.
-          const discountCaps = discountStackingLive()
-            ? await loadDiscountCapsById(conn, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
-            : null;
-          const restackedAddonDollars = applyDiscountStackRestack(nextData, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
-          // Pricing-regime provenance — see restackStoredVisitFinancials's
-          // own comment.
-          if (discountStackingLive()) stampPricingRegimeMarker(nextData, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
-          // Extension rows keep invoice-on-complete stamping — sibling-
-          // resolved so the freshest office billing intent wins (see
-          // resolveSeriesCreateInvoiceOnComplete). Without it a
-          // pay-per-visit customer's extension visit completes UNINVOICED.
-          if (cols.create_invoice_on_complete) {
-            const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
-            if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
-          }
-          const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
-          // Annual-prepay coverage for the row we just inserted.
-          //
-          // The auto-extend used to build its next visit with no prepay
-          // field at all, so a prepay customer's extension read as UNCOVERED
-          // and billed again for service the prepay had already bought.
-          // Deliberately delegated rather than computed here: the coverage
-          // budget has ONE authority. applyPrepaidCoverageForTerm selects
-          // through coverageRowsForTerm, which caps the set at
-          // coverage_visit_count (committed rows first, date-ordered), skips
-          // completed rows for reconcilePendingWindowCompletions to settle,
-          // skips rows a different term or an out-of-band cash/check/Zelle
-          // payment already covers, and slices by position so the remainder
-          // cents land on the final visit. A second allocator here could
-          // only disagree with it.
-          //
-          // Runs on `conn`, so it commits or rolls back with the extension.
-          // The transient completion-race bell is quiet (this fires per
-          // generated visit and reconciliation settles that case); the
-          // cancelled-paid-slot bell still rings — nothing re-seeds it.
-          await applyExtensionPrepayCoverage(conn, parent, svc, nextStr);
-          // Post-insert re-check closes the remaining race: a
-          // cancellation can stop the series between the pre-insert
-          // read above and this insert. The row hasn't been mirrored,
-          // broadcast, or given a reminder yet, so compensating is a
-          // plain delete — guarded on status='pending' so if the
-          // cancellation sweep already flipped it, the cancelled row
-          // (and its history) is left intact. Either way the add-on
-          // mirror + reminder registration below are skipped, so a
-          // stale reminder can't be minted after the sweep's
-          // reminder-cancel step already ran.
-          let autoExtLive = true;
-          if (cols.recurring_ongoing && autoExtRow?.id) {
-            const parentNow = await conn('scheduled_services')
-              .where({ id: parentId })
-              .first('recurring_ongoing');
-            if (!parentNow || !parentNow.recurring_ongoing) {
-              autoExtLive = false;
-              const removed = await conn('scheduled_services')
-                .where({ id: autoExtRow.id, status: 'pending' })
-                .del();
-              logger.info(`[recurring] Auto-extend ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped during completion processing`);
-            }
-          }
-          // Persist all due scope before the wrapper can observe a committed
-          // extension or register its reminder.
-          if (autoExtLive && autoExtRow?.id) {
-            await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars);
-            // Visit groups: stamp ONLY after the post-insert cancellation
-            // re-check passes — stamping earlier could mint a visit whose
-            // member this same transaction compensating-deletes.
-            await require('../services/visit-groups').maybeGroupRow(autoExtRow.id, { database: conn, createdBy: 'dispatch' });
-            spawnedVisit = {
-              scheduledServiceId: autoExtRow.id,
-              customerId: parent.customer_id,
-              scheduledDate: nextStr,
-              windowStart: parent.window_start,
-              serviceType: childIdentity.service_type,
-            };
-          }
-        }
-      }
+      spawnedVisit = await extendSeriesOnceLocked(conn, parent, parentId, cols, svc);
     } else if (!isOngoing && upcomingCount === 0) {
       // Fixed plan just finished — queue an alert if table exists and not already open
       try {
@@ -16939,6 +17119,496 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
     }
   }
   return spawnedVisit;
+}
+
+// Nightly top-up horizon fill: keeps an ONGOING recurring plan booked out to
+// `horizonDays` (default 365 — RECURRING_TOPUP_HORIZON_DAYS) by repeatedly
+// calling extendSeriesOnceLocked, the SAME candidate-search/insert/prepay/
+// add-on/visit-groups logic the completion path's single-visit auto-extend
+// uses — just looped to a horizon instead of triggered once at
+// upcomingCount < 2. Assumes the caller already holds the per-parent
+// advisory lock + the customer-comms lock (mirrors
+// runRecurringSeriesMaintenanceLocked's own "Locked" split): this lets a dry
+// run (the ops script's default mode, and GATE_RECURRING_SERIES_TOPUP's
+// off-shadow pass) run this EXACT code path inside a transaction it rolls
+// back and never reach the reminder side effect, which always opens its OWN
+// committing transaction (appointment-reminders.js#registerAppointment) and
+// so can never itself be part of a caller-managed rollback.
+//
+// Eligibility (returns { spawnedVisits: [], skipped: <reason> } otherwise,
+// never throws for an ordinary ineligible series): must be_recurring with a
+// recurring_pattern and recurring_ongoing=true (a non-ongoing fixed plan has
+// its own plan_ending alert path — never topped up here); the customer must
+// have no deleted_at, no GENUINE service hold (service_paused_at set with
+// any reason other than the billing-only, auto-clearable
+// 'autopay_final_failure' — see TOPUP_CUSTOMER_INELIGIBILITY_RULES),
+// active !== false, and a pipeline_stage outside FORMER_CUSTOMER_STAGES
+// (customer-stages.js — the one churned/former vocabulary every KPI/
+// eligibility surface shares) — read with FOR UPDATE, the same row lock
+// PUT /:id/stage takes, so a concurrent stage save serializes against this
+// run instead of racing it. A TRY-lock on the same per-customer namespace
+// annual-prepay term CREATION serializes on must also succeed
+// ('annual_prepay_busy' on a miss — a term is being created for this
+// customer right now, retried next run) before the series itself is
+// checked to not touch annual prepay at all (topupSeriesSkipReason/
+// isAnnualPrepaySeries — v1 scope cut, see that function's own comment,
+// and the try-lock's own comment above its call site for why a term-
+// creation race needs this and why it's a try-lock, not a blocking one).
+// Its window_start, once floored to the hour, must not push its
+// duration-derived end past 24:00 (normalizeTopUpWindow —
+// 'window_unplaceable').
+//
+// Hard-capped at TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN inserts per call — a
+// runaway pattern or a horizon misconfiguration can never seed an unbounded
+// number of rows in one run.
+const TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN = 24;
+
+// Table-driven customer eligibility for the top-up (one independent check
+// per row, evaluated in order) — dedupes the branch-per-reason shape into a
+// single loop so a new disqualifying condition is one more row, not one more
+// `if`. Reused nowhere else today; kept next to its one caller.
+// service_paused_at is set two ways, and only one of them is a genuine
+// scheduling hold (Codex GitHub round 2 P1). billing-cron sets it with
+// reason 'autopay_final_failure' when the 3-retry ladder exhausts — that
+// stops the DUES CRON only; migration 20260801200000 (billing-copy-no-
+// false-interruption) is explicit that this reason has "no scheduling
+// consumer" anywhere in the app, and visits continue on schedule. An
+// operator can also set the SAME column by hand for a genuine whole-
+// account hold (any OTHER reason value, e.g. the 2026-09-11 owner-directed
+// pause) — billing-pause.js's own contract already draws this exact line
+// ("ONLY 'autopay_final_failure' pauses auto-clear... a pause an operator
+// set by hand is a human decision"). Reuse that constant rather than
+// hand-rolling a second copy of the distinction. An unset/unknown reason
+// on a paused row is treated as a hold (fail closed — never top up a
+// customer someone paused without a legible, auto-clearable reason).
+const TOPUP_CUSTOMER_INELIGIBILITY_RULES = [
+  ['customer_deleted', (c) => !!c.deleted_at],
+  ['customer_service_held', (c) => !!c.service_paused_at && c.service_pause_reason !== AUTO_CLEARABLE_REASON],
+  ['customer_inactive', (c) => c.active === false],
+  ['customer_churned', (c) => FORMER_CUSTOMER_STAGES.includes(c.pipeline_stage)],
+];
+function topupCustomerSkipReason(customer) {
+  if (!customer) return 'customer_not_found';
+  const hit = TOPUP_CUSTOMER_INELIGIBILITY_RULES.find(([, test]) => test(customer));
+  return hit ? hit[0] : null;
+}
+
+// Top-up v1 scope cut (Codex GitHub rounds 2-3): the customer-wide,
+// service-matched annual-prepay term_end cap this lane originally shipped
+// with kept landing findings on a fresh site every round — structural, not
+// a one-off bug (deciding whether an unrelated service's term applies to
+// THIS series, re-selecting which term "wins" a renewal chain, keeping a
+// newly-inserted row's coverage stamp in sync with a second allocator).
+// A prepay customer's covered rows are already seeded at term activation
+// (ensureCoverageRowsForTerm, annual-prepay-renewals.js) — that's the ONE
+// authority for prepay coverage — so v1 simply never touches an
+// annual-prepay series rather than reproducing its term-selection logic a
+// second time here. Deliberately NOT scoped by service (unlike the removed
+// term-cap's scan): v1 excludes the customer's WHOLE prepay footprint,
+// never judging whether a term on one service should constrain a
+// different one — that judgment call is exactly what kept producing fresh
+// findings. Follow-up: route prepay top-up through the existing coverage
+// authority instead of a parallel one.
+//
+// A series is excluded when EITHER: the root or any of its rows already
+// carries ANNUAL prepay coverage specifically — annual_prepay_term_id set,
+// OR prepaid_method is the annual writer's own method (ANNUAL_PREPAY_METHOD,
+// 'annual_prepay_invoice') — the SQL twin of prepaid-series.js's own
+// hasAnnualCoverage(row), reused rather than a second hand-rolled
+// definition of "this row carries annual coverage". Matching ANY non-null
+// prepaid_method here (the pre-fix version) was wrong: a single ordinary
+// cash/Zelle stamp on one visit (POST /api/admin/schedule/:id/prepaid) has
+// nothing to do with the annual mechanism, and would have marked the WHOLE
+// family annual forever (Codex GitHub r6 P1). OR the customer holds a term
+// that still counts as a live prepay footprint — see isCustomerPrepayLive's
+// own comment for why that's TWO predicates, not the single date-only OR
+// r5 shipped (Codex GitHub r7 P1: a refunded/voided/chargeback-lost term
+// could carry a future term_end and so over-excluded under r5, keeping a
+// customer who is genuinely back on ordinary billing skipped until then).
+async function isCustomerPrepayLive(conn, customerId) {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  const { INVOICE_CANCELLED_STATUSES } = require('../services/annual-prepay-invoice-statuses');
+  // (a) Reuse coveredTermsAsOf(conn, null) — the SAME canonical "is this
+  // term's paid coverage still live" query the completion gate
+  // (annualPrepayCoversVisit) and the renewal sweep share, so this can
+  // never drift from what they treat as covered. `null` skips its window
+  // filter (returns every still-validly-paid term regardless of window);
+  // restrict here to THIS customer and to a term whose OWN window hasn't
+  // ended (term_end unset or >= today) — active/renewal_pending, a PAID
+  // payment_pending, and a decided-and-paid term all match, and
+  // coveredTermsAsOf's own invoice/payment guards already exclude a
+  // voided, cancelled, refunded or chargeback-lost one. Called through the
+  // module object, not destructured, so a test can jest.spyOn it directly
+  // — the fake connection builder used elsewhere in this suite has no
+  // leftJoin to model the real query's join.
+  const coveredNow = await AnnualPrepayRenewals.coveredTermsAsOf(conn, null)
+    .where('t.customer_id', customerId)
+    .where(function inWindow() {
+      this.whereNull('t.term_end').orWhere('t.term_end', '>=', etDateString());
+    })
+    .first('t.id');
+  if (coveredNow) return true;
+  // (b) A payment_pending term whose invoice is NOT cancelled/void/
+  // refunded — still genuinely awaiting payment, so coveredTermsAsOf's own
+  // "actually PAID" gate correctly leaves it out of (a), but it is still
+  // expected to activate and seed its own coverage rows
+  // (ensureCoverageRowsForTerm) once paid. Top-up must not race that —
+  // booking a batch of visits now that the activation would then need to
+  // reconcile with. A pending term whose invoice WAS voided/cancelled/
+  // refunded is genuinely dead (never activates) and does not exclude.
+  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const termHasDisputeMarker = !!((await conn('annual_prepay_terms').columnInfo()) || {}).dispute_suspended_at;
+  const pendingUnresolved = await conn('annual_prepay_terms as t')
+    .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.customer_id', customerId)
+    .where('t.status', AnnualPrepayRenewals.PAYMENT_PENDING_STATUS)
+    // Only a CURRENT, UNDISPUTED unpaid term still expected to activate.
+    // An expired unpaid term is moot (defaultAnnualPrepayTermStart), and a
+    // dispute-suspended term was demoted to payment_pending precisely so
+    // ordinary billing and visits continue
+    // (suspendActiveTermsForDisputedInvoice) — neither excludes (Codex r8 P1).
+    .where(function currentWindow() {
+      this.whereNull('t.term_end').orWhere('t.term_end', '>=', etDateString());
+    })
+    .modify((q) => { if (termHasDisputeMarker) q.whereNull('t.dispute_suspended_at'); })
+    .whereRaw(
+      `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
+      cancelledStatuses,
+    )
+    .first('t.id');
+  return !!pendingUnresolved;
+}
+async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
+  if (cols.annual_prepay_term_id || cols.prepaid_method) {
+    // Only UPCOMING live rows are evidence. Completed rows keep their
+    // stamps, and clearPrepaidStampsForTerm deliberately retains the term
+    // link on cleared rows for audit, so historical/audit links must not
+    // mark a plan that has returned to ordinary billing as prepaid forever
+    // (Codex GitHub r9 P1). A live term is still caught by
+    // isCustomerPrepayLive below via the canonical coveredTermsAsOf.
+    const stampedRow = await conn('scheduled_services')
+      .where(function seriesRows() {
+        this.where('recurring_parent_id', parentId).orWhere('id', parentId);
+      })
+      .whereNotIn('status', ASSIGNMENT_TERMINAL_STATUSES)
+      .where('scheduled_date', '>=', etDateString())
+      .where(function stamped() {
+        if (cols.prepaid_method) this.orWhere('prepaid_method', ANNUAL_PREPAY_METHOD);
+        if (cols.annual_prepay_term_id && !cols.prepaid_method) this.orWhereNotNull('annual_prepay_term_id');
+      })
+      .first('id');
+    if (stampedRow) return true;
+  }
+  return isCustomerPrepayLive(conn, parent.customer_id);
+}
+
+// A held family (lawn_care / mosquito / tree_shrub — cancellation-
+// resolution/holds.js's startHold, HOLDABLE_FAMILIES) promises "no visits
+// before resume_on": every one of the family's upcoming visits was moved out
+// to no earlier than that date and the monthly component (when the customer
+// is on one) suspended. Top-up must honor that same promise rather than
+// booking a fresh visit into the held window. Codex GitHub r6 P1.
+//
+// Reuses holds.js's own family classifier (familyOfServiceRow,
+// cancellation-processor.js — the SAME function the hold itself, its
+// familyUpcomingVisits, and every other cancellation surface use to decide
+// which family a scheduled_services row belongs to) rather than a second,
+// hand-rolled service-type-to-family map that could disagree with it. A
+// series whose family isn't one of HOLDABLE_FAMILIES (e.g. pest_control) can
+// never have a plan_holds row at all (startHold refuses any other family),
+// so this always returns false for it without even querying.
+//
+// "Active" uses the EXACT status/column semantics runPlanHoldLifecycle
+// itself reads: status: 'active' AND resume_on in the future. A hold whose
+// resume_on has already arrived is not fenced here — startHold moves every
+// visit in the family to no earlier than resume_on, so a visit ON that date
+// is exactly what the hold always intended to let through once it ends;
+// runPlanHoldLifecycle's own cron flips status to 'resumed' shortly after,
+// independently of top-up.
+async function isFamilyOnPlanHold(conn, parent, parentId) {
+  const { HOLDABLE_FAMILIES } = require('../services/cancellation-resolution/holds');
+  const { familyOfServiceRow } = require('../services/cancellation-processor');
+  const svc = parent.service_id
+    ? await conn('services').where({ id: parent.service_id }).first('service_key', 'name')
+    : null;
+  const family = familyOfServiceRow({ ...parent, service_key: svc?.service_key, service_name: svc?.name });
+  if (!family || !HOLDABLE_FAMILIES.includes(family)) return false;
+  const activeHold = await conn('plan_holds')
+    .where({ customer_id: parent.customer_id, family_key: family, status: 'active' })
+    .where('resume_on', '>', etDateString())
+    .first('id');
+  return !!activeHold;
+}
+
+// Table-driven (async — needs a DB read, unlike the synchronous customer
+// rules above) so a future prepay-aware top-up is one more row, not a
+// rewritten function.
+const TOPUP_SERIES_INELIGIBILITY_RULES = [
+  ['annual_prepay_series', isAnnualPrepaySeries],
+  ['plan_hold', isFamilyOnPlanHold],
+];
+async function topupSeriesSkipReason(conn, parent, parentId, cols) {
+  for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
+    // Sequential, not parallel: one rule today, and each is a DB read, so
+    // there's nothing to gain from Promise.all here and it'd only cost
+    // clarity.
+    if (await test(conn, parent, parentId, cols)) return reason;
+  }
+  return null;
+}
+
+// Reads a pg_try_advisory_xact_lock(...)::AS locked result the same way
+// customer-comms-lock.js's own tryLockCustomerComms does (knex's raw()
+// result shape differs by driver/version — `{ rows: [...] }` vs a bare
+// array — and Postgres can hand back either JS `true`/`false` or the
+// literal driver strings 't'/'f'). Pulled out as its own function rather
+// than inlined so this shape-unwrapping doesn't count against
+// topUpRecurringSeriesLocked's own complexity.
+function advisoryTryLockAcquired(rawResult) {
+  const row = rawResult && rawResult.rows
+    ? rawResult.rows[0]
+    : (Array.isArray(rawResult) ? rawResult[0] : null);
+  return !!(row && (row.locked === true || row.locked === 't'));
+}
+
+async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } = {}) {
+  const cols = await conn('scheduled_services').columnInfo();
+  let parent = await conn('scheduled_services').where({ id: parentId }).first();
+  if (!parent) return { spawnedVisits: [], skipped: 'not_found' };
+  // Only a series ROOT may be topped up. A child id (e.g. a mistaken
+  // `--parent` in the ops script) would otherwise pass every check below and
+  // spawn grandchildren pointing at the child — rows outside the root's
+  // cancellation/maintenance scope that no later sweep discovers (Codex r1).
+  if (parent.recurring_parent_id) return { spawnedVisits: [], skipped: 'not_series_root' };
+  // Series-scope price/service overrides beat the parent's own columns —
+  // same overlay the completion path applies before reading recurring_*.
+  parent = overlayRecurringTemplateOverrides(parent, cols);
+
+  if (!parent.is_recurring || !parent.recurring_pattern) {
+    return { spawnedVisits: [], skipped: 'not_recurring' };
+  }
+  const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
+  if (!isOngoing) return { spawnedVisits: [], skipped: 'not_ongoing' };
+
+  // FOR UPDATE (Codex GitHub r3 P1): the SAME row lock PUT /:id/stage takes
+  // (admin-customers.js) before it writes pipeline_stage — same row, same
+  // lock kind, taken here BEFORE any scheduled_services write in this
+  // transaction (the stage route never locks scheduled_services, so this
+  // ordering can't form a new deadlock cycle with it). Without this, an
+  // unlocked read here could land between a concurrent active→churned
+  // stage save's own read and its commit, letting this run insert visits
+  // for a customer the OTHER transaction is one write away from churning.
+  const customer = await conn('customers').where({ id: parent.customer_id })
+    .forUpdate()
+    .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
+  const customerSkip = topupCustomerSkipReason(customer);
+  if (customerSkip) return { spawnedVisits: [], skipped: customerSkip };
+
+  // TRY-lock the SAME per-customer annual-prepay advisory namespace term
+  // CREATION serializes on (admin-customers.js's lockAndAssertNoAnnualPrepayOverlap
+  // and admin-invoices.js's coverage-enable path — both take it as the FIRST
+  // lock of their transaction, before any row lock) — Codex GitHub r4 P1.
+  // Without this, the prepay-exclusion check below only ever reflects
+  // whatever was true the instant it ran: a payment_pending term can commit
+  // for this exact customer moments later, mid-loop, and this run would
+  // never notice and keep inserting visits a fresh term now covers.
+  //
+  // Lock-order analysis (why a TRY-lock, not a blocking one): every known
+  // acquirer of this namespace (both call sites above, verified by grep —
+  // there are no others) takes it as the very first thing in its own
+  // transaction, before any row lock, and NEVER while already holding the
+  // maintenance lock, the customer-comms lock, or a customers-row FOR
+  // UPDATE — none of those three are things a term-creation transaction
+  // touches at all. So a BLOCKING acquire here, even after this function's
+  // own maintenance/comms/customer-row locks, could only ever wait on a
+  // term-creation transaction that is itself never waiting on any of THIS
+  // transaction's locks — no cycle exists among the paths that exist
+  // today. But proving that stays true for every future caller of this
+  // namespace is a standing burden this function shouldn't own, and the
+  // seeder right next to lockAndAssertNoAnnualPrepayOverlap
+  // (tryLockCustomerComms, customer-comms-lock.js) already answers the
+  // identical question the same way: use a non-blocking try instead of
+  // relitigating full-codebase lock order on every future change. A
+  // try-lock can never be the "waiting" side of a deadlock — it succeeds
+  // or fails immediately — so this choice is safe regardless of what any
+  // future acquirer of this namespace does.
+  //
+  // A miss means a term-creation transaction is genuinely in flight for
+  // this exact customer right now; skip rather than race it — the next
+  // night's run (or the next cron tick) retries. A hit holds the SAME
+  // namespace for the rest of THIS transaction, so no new term can commit
+  // underneath this series while it's being topped up, and the
+  // prepay-exclusion check right below now runs under that guarantee.
+  const { ANNUAL_PREPAY_LOCK_NS } = require('./admin-customers')._private;
+  const prepayLockResult = await conn.raw(
+    'SELECT pg_try_advisory_xact_lock(?, hashtext(?)) AS locked',
+    [ANNUAL_PREPAY_LOCK_NS, String(parent.customer_id)],
+  );
+  if (!advisoryTryLockAcquired(prepayLockResult)) return { spawnedVisits: [], skipped: 'annual_prepay_busy' };
+
+  const seriesSkip = await topupSeriesSkipReason(conn, parent, parentId, cols);
+  if (seriesSkip) return { spawnedVisits: [], skipped: seriesSkip };
+
+  // Pure/no-DB — depends only on parent.window_start/window_end/duration,
+  // so it's the SAME verdict extendSeriesOnceLocked's own per-insert
+  // normalization would reach on every attempt this run; check once
+  // upfront rather than discover it 24 times (Codex GitHub r3 P2 — never
+  // build an out-of-range "24:15" end time).
+  if (normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end)?.unplaceable) {
+    return { spawnedVisits: [], skipped: 'window_unplaceable' };
+  }
+
+  const todayStr = etDateString();
+  const effectiveHorizon = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), horizonDays));
+
+  const spawnedVisits = [];
+  // The raw (non-fast-forwarded) date of the series' latest live visit as of
+  // the START of this run — reporting-only (the ops script's "current
+  // booked-through date" column); captured on the first iteration so a
+  // series already past the horizon (spawnedVisits stays empty) still
+  // reports what it currently has on the books.
+  let priorBookedThrough = null;
+  while (spawnedVisits.length < TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN) {
+    // Re-check ongoing every iteration — a churn/cancel landing mid-loop
+    // (same rationale as extendSeriesOnceLocked's own pre-insert re-check)
+    // must stop further inserts, not just the one already in flight.
+    if (cols.recurring_ongoing) {
+      const freshOngoing = await conn('scheduled_services').where({ id: parentId }).first('recurring_ongoing');
+      if (!freshOngoing || !freshOngoing.recurring_ongoing) break;
+    }
+    const latest = await latestLiveSeriesVisit(conn, parentId);
+    if (!latest) break;
+    if (priorBookedThrough === null) priorBookedThrough = dateOnly(latest.scheduled_date) || null;
+    const rOpts = {
+      ...recurrenceOrdinalOptions(parent.scheduled_date, {
+        nth: parent.recurring_nth,
+        weekday: parent.recurring_weekday,
+      }),
+      intervalDays: parent.recurring_interval_days,
+    };
+    // seriesExtendAnchor already fast-forwards a stale anchor to today (or
+    // returns the raw date unchanged when it's today-or-future) — exactly
+    // "the last booked date" this horizon check needs, with no extra query.
+    const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
+    if (latestStr >= effectiveHorizon) break;
+    // checkUnbillable: the SAME shared verdict every OFFICE series writer
+    // consults (seriesExtensionUnbillable) before adding a visit — the
+    // completion-time single-visit auto-extend deliberately skips it
+    // (owner ruling: warn at completion, never block a tech closing out
+    // today's job over a future pricing question), but this unattended
+    // loop can mint up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN rows with no
+    // human reviewing any of them — exactly the "quietly commit the
+    // business to a stack of unbillable visits" risk that gate exists to
+    // catch, so top-up belongs with the OFFICE-writer class. Checked
+    // against THIS actual candidate date and its real due add-ons inside
+    // extendSeriesOnceLocked (price varies by date), not a coarse upfront
+    // guess — a series can fill partway then stop exactly where billability
+    // breaks down, same as running out of horizon or hitting the cap.
+    const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, {
+      maxDate: effectiveHorizon, checkUnbillable: true, normalizeOffHourStart: true,
+    });
+    if (!spawned) break;
+    spawnedVisits.push(spawned);
+  }
+  // Reporting-only fields for the caller (the ops script's printed line,
+  // the sweep's summary) — not an insert payload, so read into locals
+  // first: series-child-catalog-identity.test.js's source guard bans the
+  // literal child-row shape this would otherwise textually resemble.
+  const reportedServiceType = parent.service_type;
+  const reportedPattern = parent.recurring_pattern;
+  return {
+    spawnedVisits, skipped: null, effectiveHorizon,
+    priorBookedThrough, customerId: parent.customer_id,
+    serviceType: reportedServiceType, recurringPattern: reportedPattern,
+  };
+}
+
+// The writing wrapper — same shape as runRecurringSeriesMaintenance: takes
+// the per-parent advisory lock + the customer-comms lock, runs the horizon
+// loop, and (matching the completion path's convention) registers a
+// reminder for every spawned visit once it's visible to a fresh connection.
+// ALWAYS opens and commits its OWN transaction (Codex GitHub r4 P2) —
+// never runs inside a transaction the caller already has open. A caller-
+// supplied open transaction used to be accepted (`conn.isTransaction`) and
+// would self-deadlock: registerSpawnedVisitReminder below inserts through
+// a FRESH connection with a foreign key to the just-inserted
+// scheduled_services row, and Postgres blocks that insert until the
+// referencing row's own transaction commits — but that transaction is
+// THIS caller's, and the caller is synchronously awaiting this very call
+// before it can commit, so neither side could ever finish. Nothing in
+// this codebase ever exercised that path (verified: the sweep and the ops
+// script both call this with the plain `db` handle, never an open
+// transaction). REJECTED outright now, not "fixed" by opening a nested
+// transaction on the caller's conn — Codex's local pre-push audit caught
+// that a first attempt at this (unconditionally calling conn.transaction())
+// does NOT actually solve it: calling .transaction() on a conn that is
+// ITSELF already a transaction opens a knex/Postgres SAVEPOINT, not an
+// independent, separately-committing transaction, and releasing a
+// savepoint does not make its writes visible outside the OUTER
+// transaction — which this function does not own and cannot commit. The
+// self-deadlock is identical either way. There is no way to make this
+// safe short of not registering reminders until the OUTER transaction
+// commits, which this function has no visibility into, so it refuses
+// instead: see the isTransaction check below, and use
+// topUpRecurringSeriesLocked/topUpRecurringSeriesWithLocks directly
+// inside your own transaction, registering reminders yourself after your
+// own commit, if that's what you need.
+// Exported for the nightly cron (services/recurring-series-topup.js) and
+// the one-shot ops script's --apply mode. For a dry run / the gate-off
+// shadow pass, call topUpRecurringSeriesLocked directly inside a
+// transaction the caller rolls back — see that function's header for why
+// reminders can't ride along.
+// Takes the same per-parent maintenance lock + customer-comms fence as the
+// completion path, then runs the top-up loop. Shared by the committing
+// wrapper below and the sweep's rollback-only dry run, so a shadow/preview
+// pass is serialized against concurrent completions, cancellations and
+// merge-undos exactly like a real run (Codex r1). Both locks are xact-scoped
+// advisory locks, so a dry run's rollback releases them.
+async function topUpRecurringSeriesWithLocks(trx, parentId, opts = {}) {
+  await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+  const parentRow = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
+  if (!parentRow) return topUpRecurringSeriesLocked(trx, parentId, opts);
+  await lockCustomerComms(trx, parentRow.customer_id);
+  // Rung-6 re-lock (mirrors runRecurringSeriesMaintenanceLocked's own
+  // comment): a merge undo can repoint the parent to a different customer
+  // while this call waited on the comms lock above. Re-read and lock the
+  // FRESH owner too, so the insert loop below is fenced against THAT
+  // customer's undo/offboarding, not a stale one. A row that moved AGAIN
+  // under the second lock defers this whole run to the next tick rather
+  // than inserting under a still-stale owner's fence.
+  const relocked = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
+  if (relocked && relocked.customer_id !== parentRow.customer_id) {
+    await lockCustomerComms(trx, relocked.customer_id);
+    const relockedAgain = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
+    if (!relockedAgain || relockedAgain.customer_id !== relocked.customer_id) {
+      logger.warn(`[recurring-topup] parent ${parentId} owner changed under the comms fence (merge-undo) — deferring top-up to the next tick`);
+      return { spawnedVisits: [], skipped: 'owner_changed_under_fence' };
+    }
+  }
+  return topUpRecurringSeriesLocked(trx, parentId, opts);
+}
+
+async function topUpRecurringSeries(conn, parentId, opts = {}) {
+  if (conn.isTransaction) {
+    throw new Error('topUpRecurringSeries must not be called with an already-open transaction — it registers a reminder for each spawned visit through a FRESH connection right after commit, and a nested savepoint on your transaction would not make its inserts visible outside it. Call with the plain db handle, or drive topUpRecurringSeriesWithLocks/topUpRecurringSeriesLocked yourself inside your own transaction and register reminders after your own commit.');
+  }
+  const result = await conn.transaction((trx) => topUpRecurringSeriesWithLocks(trx, parentId, opts));
+  for (const spawnedVisit of result.spawnedVisits) {
+    // No confirmation SMS (sendConfirmation:false, matching every other
+    // spawned/extended child) and no other customer comms — this only
+    // registers the visit for the existing 72h/24h reminder cron.
+    await registerSpawnedVisitReminder({
+      scheduledServiceId: spawnedVisit.scheduledServiceId,
+      customerId: spawnedVisit.customerId,
+      scheduledDate: spawnedVisit.scheduledDate,
+      windowStart: spawnedVisit.windowStart,
+      serviceType: spawnedVisit.serviceType,
+      source: 'recurring_auto_extend',
+    });
+    await cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, 'recurring-topup');
+    logger.info(`[recurring-topup] Topped up ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
+  }
+  return result;
 }
 
 // PUT /api/admin/schedule/:id/status — change status with automations.
@@ -22664,6 +23334,18 @@ router._test = {
   applyExtensionPrepayCoverage,
   seriesTermIds,
   coveringTermForDate,
+  extendSeriesOnceLocked,
+  topUpRecurringSeries,
+  topUpRecurringSeriesWithLocks,
+  topUpRecurringSeriesLocked,
+  topupSeriesSkipReason,
+  isAnnualPrepaySeries,
+  isCustomerPrepayLive,
+  isFamilyOnPlanHold,
+  normalizeTopUpWindow,
+  TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
+  latestLiveSeriesVisit,
+  acquireRecurringSeriesMaintenanceLock,
   normalizePriceServiceScope,
   computePriceServiceGroupChanges,
   pickUnpinnedGroupFields,
@@ -22681,6 +23363,12 @@ module.exports = router;
 // route-load cycle) by services/recurring-series-extend.js so the dispatch
 // completion routes run the same refill/alert logic as this route's step 4b.
 module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
+// Shared nightly horizon top-up (writing wrapper + lock-held body) —
+// consumed lazily by services/recurring-series-topup.js (the cron + the
+// one-shot ops script), same avoid-a-route-load-cycle reason as above.
+module.exports.topUpRecurringSeries = topUpRecurringSeries;
+module.exports.topUpRecurringSeriesLocked = topUpRecurringSeriesLocked;
+module.exports.topUpRecurringSeriesWithLocks = topUpRecurringSeriesWithLocks;
 // Shared "your appointment moved" notice (arrival-window copy, recipient
 // routing, terminal/slot recheck, guarded reminder close/re-arm) — consumed
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go

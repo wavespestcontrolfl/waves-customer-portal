@@ -20,7 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
-const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
@@ -297,6 +297,19 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       err.statusCode = 409;
       throw err;
     }
+    // The county-roll address block (and every other off-surface marker)
+    // is judged on the LOCKED anchor and reasserted on the write: a flag
+    // stamped after the public eligibility read must not revive the row
+    // and text a link that 404s (codex #4667 r22 P1).
+    if (require('../utils/estimate-claim-sql').estimateOffCustomerSurface({ estimate_data: anchor.estimate_data })) {
+      const err = new Error('Estimate changed while extending — retry.');
+      err.statusCode = 409;
+      // A recognizable code so the public token route answers its generic
+      // 404 (the row is off-surface for this bearer), never a 500 that
+      // tells the token apart from an unknown one (codex #4667 r30 P0).
+      err.code = 'OFF_CUSTOMER_SURFACE';
+      throw err;
+    }
     if (await fixedBidBlocksExtension(trx, { ...estimate, estimate_data: anchor.estimate_data })) {
       const err = validationError('This bid or a grouped property has a fixed validity date. Contact the office to revise the proposal.');
       err.code = 'FIXED_BID_VALIDITY';
@@ -313,6 +326,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       // have preceded the hold. Zero rows → the same 409 as any other
       // concurrent change; the public route releases its burn on it.
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
       .update(updates);
     if (!updated) {
       const err = new Error('Estimate changed while extending — retry.');
@@ -349,6 +363,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         // …nor a HELD sibling (clarify re-price): it cannot render either.
         .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+        // A sibling under the county-roll address block stays as it is —
+        // the group renderer drops it as off-surface (codex r23 P2).
+        .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
         .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
         // Atomic belt to the pre-mutation verdict (uncapped codex P0 r20):
         // while the gate is on a sibling that fails the authority predicate
@@ -441,8 +458,113 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // 2026-07-11). Plumbing failures (URL shortener, lead lookup, provider)
   // degrade to an unsent-SMS result instead; the admin notification/response
   // carry the reason.
-  let smsResult = { sent: false, reason: 'silent' };
+  // The notification legs run under the DELIVERY CLAIM (codex #4667 r41
+  // P1): the extension committed above, and a county-roll hold landing
+  // between it and the provider calls would archive or hide the quote
+  // while the text and email still carry its link. The withdrawal refuses
+  // to commit while a claim is fresh, so the claim is taken in a short
+  // locked transaction that re-judges the row's surface first; no claim
+  // (off-surface since the write, or another send's claim live) → no
+  // notification, reported as such. Token-fenced release after both legs
+  // (the anchor's shared release also completes a deferred invalidation).
+  // Same post-write invariant: never throws.
+  const deliveryClaimToken = require('crypto').randomUUID();
+  let claimHeld = false;
   if (!silent) {
+    try {
+      claimHeld = await db.transaction(async (trx) => {
+        // Group advisory lock BEFORE the anchor row lock (pre-push audit P1
+        // after r42): concurrent extensions on two members of one group
+        // would otherwise each hold their anchor and wait on the other's
+        // sibling stamp; the grouped send's claim takes the same lock.
+        if (estimate.estimate_group_id) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['estimate-group-send', String(estimate.estimate_group_id)]);
+        }
+        const row = await trx('estimates')
+          .where({ id: estimate.id })
+          .whereNull('archived_at')
+          .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
+          .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+          .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+          .forUpdate()
+          .first('id');
+        if (!row) return false;
+        // No link-visible sibling may be off-surface (codex #4667 r43 P1):
+        // the sibling revive above skips a blocked sibling, so the group
+        // link the text and email carry would render without that
+        // property — the notification is withheld instead (the extension
+        // itself stands; staff see the hold on the estimate).
+        // The visible sibling set is LOCKED (anchor first, then siblings in
+        // id order — the grouped send claims in the same order) before its
+        // verdicts are judged, so a withdrawal cannot flag a sibling between
+        // this check and the claim stamp below (pre-push audit P1 after
+        // r43): its per-row write waits on the lock and then meets the
+        // fresh claim.
+        let visibleSiblingIds = [];
+        if (estimate.estimate_group_id) {
+          const siblings = await trx('estimates')
+            .where({ estimate_group_id: estimate.estimate_group_id })
+            .whereNot({ id: estimate.id })
+            .whereNull('archived_at')
+            // …'sending' too — the renderer's link-visible scope includes it (codex r51 P1).
+            .whereIn('status', ['sending', 'sent', 'viewed', 'expired'])
+            // …published ones only — the renderer's rule, as the admin send
+            // selector applies it (pre-push audit P1 after r45): a
+            // never-delivered expired_unsent sibling is not on the link.
+            .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")
+            .orderBy('id')
+            .forUpdate()
+            .select('id', 'estimate_data');
+          const { estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
+          if (siblings.some((sib) => estimateOffCustomerSurface({ estimate_data: sib.estimate_data }))) return false;
+          visibleSiblingIds = siblings.map((sib) => sib.id);
+        }
+        const claimedAt = new Date().toISOString();
+        const CLAIM_STAMP_SQL = "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)";
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, deliveryClaimToken]),
+          updated_at: trx.fn.now(),
+        });
+        // …and every other LINK-VISIBLE group member (codex #4667 r42 P1):
+        // the extended token renders the group's published siblings, so a
+        // county hold landing on one of them before the provider call would
+        // make it vanish from the link the text and email carry. Same
+        // token; released with the anchor. A sibling under another send's
+        // fresh claim keeps that one.
+        if (visibleSiblingIds.length) {
+          const stamped = await trx('estimates')
+            .whereIn('id', visibleSiblingIds)
+            .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+            .update({
+              estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, deliveryClaimToken]),
+              updated_at: trx.fn.now(),
+            });
+          // EVERY visible sibling must carry this token (codex r44 P1): a
+          // sibling under another send's live claim is skipped by the
+          // predicate, and once that owner releases it a lookup could
+          // quarantine it before the provider call — so the notification
+          // is withheld rather than sent for an incomplete link.
+          // …by ROLLING BACK this claim transaction (pre-push audit P1
+          // after r44): a plain false would commit the anchor's and the
+          // other siblings' stamps as orphaned claims that block edits and
+          // make withdrawals answer 503 for the claim's TTL.
+          if (Number(stamped) !== visibleSiblingIds.length) {
+            throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });
+          }
+        }
+        return true;
+      });
+    } catch (err) {
+      // The throw above (and any db error) rolled the whole claim back —
+      // nothing is left stamped, so no release is owed.
+      logger.warn(`[estimate-extension] delivery claim not taken for estimate ${estimate.id} — notifications withheld: ${err.code || err.name || 'db_error'}`);
+      claimHeld = false;
+    }
+  }
+  let smsResult = { sent: false, reason: 'silent' };
+  if (!silent && !claimHeld) {
+    smsResult = { sent: false, reason: 'off_surface_before_notification' };
+  } else if (!silent) {
     try {
       if (!estimate.customer_phone) {
         smsResult = { sent: false, reason: 'no_phone' };
@@ -512,7 +634,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // idempotency key is scoped per grant (id + new expiry) so a later, further
   // extension emails again while accidental double-fires of THIS grant don't.
   let emailResult = { sent: false, reason: 'silent' };
-  if (!silent) {
+  if (!silent && !claimHeld) {
+    emailResult = { sent: false, reason: 'off_surface_before_notification' };
+  } else if (!silent) {
     try {
       if (!estimate.customer_email) {
         emailResult = { sent: false, reason: 'no_email' };
@@ -555,6 +679,15 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   }
 
   logger.info(`[estimate-extension] Extended estimate ${estimate.id} by ${parsedDays}d to ${newExpiry.toISOString()} via ${entryPoint} (sms=${smsResult.sent ? 'sent' : smsResult.reason || 'skipped'}, email=${emailResult.sent ? 'sent' : emailResult.reason || 'skipped'})`);
+  if (claimHeld) {
+    try {
+      const adminEstimates = require('../routes/admin-estimates');
+      await adminEstimates.clearEstimateDeliveryClaim(estimate.id, deliveryClaimToken);
+      await adminEstimates.clearGroupSiblingDeliveryClaims(estimate, deliveryClaimToken);
+    } catch (err) {
+      logger.warn(`[estimate-extension] delivery claim release failed for estimate ${estimate.id} (ages out by TTL): ${err.code || err.name || 'db_error'}`);
+    }
+  }
   return { newExpiry, status: revivedStatus || estimate.status, smsResult, emailResult };
 }
 

@@ -1,0 +1,374 @@
+// The property lookup's county-roll house-number audit, as a lead-level
+// flag. The address panel already raises a HIGH `address` verify flag when
+// the county roll cannot match the typed house number (or the geocoder
+// snapped it to a neighbour), but the quote intake never read it: live
+// 2026-09-14, a typo'd house number that does not exist on an established
+// street became the lead AND the customer address, and the estimate went
+// out to it. Both intake stages persist this on the lead's extracted_data
+// (public-property-lookup at the authoritative lookup, public-quote at
+// calculate), always from a SERVER-trusted profile, never the client's
+// `enriched` payload. Only the audit's own numbers ride along — the nearest
+// numbers are context for the callback, not corrections. Returns null when
+// the roll vouched for the number or never answered (a GIS outage yields
+// no audit at all).
+// `evidenceAt`: when the audit came from a CACHED profile, the flag's
+// stamp is the evidence time (the audit's own stamp, else the cache save
+// time), never "now" — a staff confirmation that committed after the
+// cache but before this derivation must outrank it under the locked
+// reconciliation (pre-push audit P1 on r24).
+function deriveAddressUnverified(enriched, address = null, { evidenceAt = null } = {}) {
+  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  const flag = flags.find((f) => f && f.field === 'address' && f.priority === 'HIGH' && f.reason);
+  if (!flag) return null;
+  const audit = enriched?.addressAudit && typeof enriched.addressAudit === 'object' ? enriched.addressAudit : {};
+  const nearest = Array.isArray(audit.nearestNumbers)
+    ? audit.nearestNumbers.map(String).filter(Boolean).slice(0, 5)
+    : [];
+  return {
+    source: 'county_roll',
+    reason: String(flag.reason).slice(0, 600),
+    county: audit.county || null,
+    house_number: audit.houseNumber != null ? String(audit.houseNumber) : null,
+    street_exists: typeof audit.streetExists === 'boolean' ? audit.streetExists : null,
+    nearest_numbers: nearest,
+    // The address the roll judged, so a later address edit on the lead
+    // (customer-address fanout, an operator) retires the flag on display
+    // without every correction path having to know about it (codex r2 P2).
+    address_line1: String(address?.line1 || '').trim() || null,
+    city: String(address?.city || '').trim() || null,
+    state: String(address?.state || '').trim().toUpperCase().slice(0, 2) || null,
+    zip: zip5(address?.zip) || null,
+    flagged_at: evidenceStamp(audit.auditedAt) || evidenceStamp(evidenceAt) || new Date().toISOString(),
+  };
+}
+const evidenceStamp = (v) => { const t = Date.parse(v || ''); return t ? new Date(t).toISOString() : null; };
+
+const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+const lineKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+// Street line with any inline unit stripped ("1260 Example St Apt 4" →
+// "1260 example st"): the audited house number is the same with or
+// without the unit, on every comparison (pre-push audit P1).
+// …with the street suffix canonicalized (St == Street, Dr == Drive) so a
+// spelling difference between the two stages never reads as a different
+// premise (pre-push audit P1).
+const streetKeyNoUnit = (v) => {
+  const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
+  const text = String(v || '');
+  return lineKey(normalizeStreetLine(splitStreetLineUnit(text).street || text));
+};
+const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+
+// Same premise: same street line and, where both sides carry one, the same
+// ZIP and the same city — the public route accepts a ZIP-less address, and
+// a street name that repeats across cities is exactly the audit's own
+// warning (codex #4667 r3 P2).
+function sameLocality(a, b) {
+  const za = zip5(a?.zip);
+  const zb = zip5(b?.zip);
+  if (za && zb && za !== zb) return false;
+  const ca = cityKey(a?.city);
+  const cb = cityKey(b?.city);
+  if (ca && cb && ca !== cb) return false;
+  // State too — the route accepts an explicit state (codex r4 P2).
+  const sa = String(a?.state || '').trim().toUpperCase();
+  const sb = String(b?.state || '').trim().toUpperCase();
+  return !sa || !sb || sa === sb;
+}
+
+// A lookup-stage snapshot (leads.extracted_data written by
+// public-property-lookup) answers for THIS address only: same street line
+// and, where both carry one, the same ZIP. A visitor who changed the
+// address between the two stages gets no carried-over flag.
+function snapshotCoversAddress(snapshot, address) {
+  const prior = snapshot?.address;
+  if (!prior || typeof prior !== 'object' || !address) return false;
+  if (!streetKeyNoUnit(prior.line1) || streetKeyNoUnit(prior.line1) !== streetKeyNoUnit(address.line1)) return false;
+  return sameLocality(prior, address);
+}
+
+// The persisted flag off a lead snapshot, shape-checked: the only source a
+// later stage may recover from. Never the snapshot's `enriched` — after a
+// /calculate that is the client's own submission.
+function recoverAddressUnverified(snapshot) {
+  const flag = snapshot?.address_unverified;
+  if (!flag || typeof flag !== 'object' || flag.source !== 'county_roll' || typeof flag.reason !== 'string' || !flag.reason) return null;
+  return {
+    source: 'county_roll',
+    reason: flag.reason.slice(0, 600),
+    county: typeof flag.county === 'string' ? flag.county.slice(0, 40) : null,
+    house_number: flag.house_number != null ? String(flag.house_number).slice(0, 12) : null,
+    street_exists: typeof flag.street_exists === 'boolean' ? flag.street_exists : null,
+    nearest_numbers: Array.isArray(flag.nearest_numbers) ? flag.nearest_numbers.map(String).filter(Boolean).slice(0, 5) : [],
+    address_line1: typeof flag.address_line1 === 'string' ? flag.address_line1.slice(0, 120) : null,
+    city: typeof flag.city === 'string' ? flag.city.slice(0, 60) : null,
+    state: typeof flag.state === 'string' ? flag.state.trim().toUpperCase().slice(0, 2) || null : null,
+    zip: zip5(flag.zip) || null,
+    flagged_at: typeof flag.flagged_at === 'string' ? flag.flagged_at : new Date().toISOString(),
+  };
+}
+
+// Does a stored flag describe THIS address? Judged on the flag's own
+// stamped street/locality — never the snapshot's `address`, which a
+// prefill attach or a later stage has already overwritten with the new
+// address (pre-push audit P1). An older flag with no stamp is trusted for
+// the snapshot's address by the caller's snapshot check.
+function flagCoversAddress(flag, address) {
+  if (!flag || typeof flag !== 'object' || !address) return false;
+  if (!flag.address_line1) return true;
+  if (streetKeyNoUnit(flag.address_line1) !== streetKeyNoUnit(address.line1)) return false;
+  return sameLocality(flag, address);
+}
+
+// Two DISPLAY addresses ("<street line>, <City>, FL <zip>") name the same
+// premise: same street line with any unit stripped, same locality where
+// both carry one. A unit added on a repeat run is the same audited house
+// number (pre-push audit P1). Either side missing a street → false.
+// `requireLocality`: BOTH sides must carry a city and a ZIP and they must
+// agree — the cross-lead publication withdrawal uses this stricter form,
+// so a street-only submission can never match a published estimate for
+// that street in some other town (pre-push audit P1).
+// One display address ("<street line>, [<unit>,] <City>, FL <zip>") into
+// its parts. The normalizer may emit the unit as its OWN comma segment:
+// the city is the first later segment that is neither a unit line nor the
+// "FL 34219" tail, and the ZIP comes from that tail only (a five-digit
+// house number is not a ZIP). Shared by the premise comparison and the
+// staff clean-verdict stamp (pre-push audit P1).
+// '#' has no word boundary of its own ("# 4" is a unit segment too —
+// pre-push audit P1 on r24).
+const UNIT_SEGMENT = /^(?:#|(?:apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\b)/i;
+const STATE_ZIP_SEGMENT = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$/i;
+// A ZIP-less submission ends in a BARE state segment (", FL") — a region,
+// never the floor designator (codex #4667 r26 P1).
+const STATE_ONLY_SEGMENT = /^[a-z]{2}$/i;
+const isUnitSegment = (part) => UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part) && !STATE_ONLY_SEGMENT.test(part);
+function parseDisplayAddress(text) {
+  // The repository's unit-first forms ("Apt 4, 123 Main St, …", "Unit 204
+  // 123 Main St") are normalized first, or the unit reads as the street
+  // and the street as the city (codex #4667 r32 P1).
+  const { splitUnitFirstLine } = require('../utils/address-normalizer');
+  const unitFirst = splitUnitFirstLine(String(text || ''));
+  const source = unitFirst ? unitFirst.rest : String(text || '');
+  const parts = source.split(',').map((part) => part.trim()).filter(Boolean);
+  const streetLine = parts[0] || '';
+  // …never a bare ZIP / ZIP+4 segment ("1260 Example St, 34219"): the
+  // staff-correction fan-out writes this city into lead and customer
+  // records (pre-push audit P1 after r42).
+  const ZIP_ONLY_SEGMENT = /^\d{5}(?:-\d{4})?$/;
+  const city = parts.slice(1).find((part) => !isUnitSegment(part) && !STATE_ZIP_SEGMENT.test(part) && !STATE_ONLY_SEGMENT.test(part) && !ZIP_ONLY_SEGMENT.test(part)) || '';
+  const tail = parts.slice(1).find((part) => STATE_ZIP_SEGMENT.test(part) || /^\d{5}(?:-\d{4})?$/.test(part)) || '';
+  const stateOnly = parts.slice(1).find((part) => STATE_ONLY_SEGMENT.test(part)) || '';
+  const state = (tail.match(/^([a-z]{2})\s*\d{5}/i) || [null, stateOnly || null])[1];
+  // The complete corrected door for record fan-out: the street line with
+  // any inline unit peeled, plus the unit from either the line or its own
+  // comma segment (codex #4667 r14 P1).
+  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const split = splitStreetLineUnit(streetLine);
+  // "FL 34219" starts with the floor designator — the state/ZIP tail is
+  // never a unit segment.
+  // EVERY unit segment is kept, in order ("Bldg 2, Apt 4" is one door,
+  // not the building alone) — a truncated unit would fan out to the lead
+  // and customer records (pre-push audit P1 on r24).
+  const unitSegments = parts.slice(1).filter(isUnitSegment);
+  const line1 = String(split.street || streetLine).trim();
+  const unit = [unitFirst?.unit, split.unit, ...unitSegments].map((part) => String(part || '').trim()).filter(Boolean).join(' ') || null;
+  return { streetLine, line1, unit, street: streetKeyNoUnit(streetLine), city, state: state ? state.toUpperCase() : null, zip: zip5(tail) };
+}
+
+function samePremiseDisplay(a, b, { requireLocality = false } = {}) {
+  const x = parseDisplayAddress(a);
+  const y = parseDisplayAddress(b);
+  if (!x.street || x.street !== y.street) return false;
+  if (requireLocality && (!cityKey(x.city) || !cityKey(y.city) || !x.zip || !y.zip)) return false;
+  return sameLocality(x, y);
+}
+
+// Did the county roll ANSWER on this profile? The audit object is present
+// whenever the roll replied (match or not); a GIS outage yields no audit
+// at all (auditAddressHouseNumber). Only an answer may clear a prior flag.
+// A county-backed record whose house number agreed with the typed one
+// skips the audit (property-lookup-v2 runs it only when county evidence is
+// missing or the record's number disagrees) — that is a vouch, not an
+// outage, and must clear a prior flag (pre-push audit P1). The profile
+// says which via addressVerdict; older cached profiles fall back to the
+// audit object alone.
+function countyRollAnswered(enriched) {
+  if (!enriched || typeof enriched !== 'object') return false;
+  if (enriched.addressAudit && typeof enriched.addressAudit === 'object') return true;
+  return enriched.addressVerdict === 'audited' || enriched.addressVerdict === 'county_record';
+}
+
+// The flag this run should persist: a fresh verdict when the roll answered,
+// else the prior server-written flag for the same address. A transient
+// outage on a recalculation must not erase an authoritative earlier
+// warning and mint a self-book link for a still-unverified address
+// (codex #4667 r5 P1). `prior` is already address-matched by the caller.
+function nextAddressUnverified({ enriched = null, profileFound = false, prior = null, evidenceAt = null } = {}) {
+  const derived = profileFound ? deriveAddressUnverified(enriched, null, { evidenceAt }) : null;
+  if (derived) return derived;
+  if (profileFound && countyRollAnswered(enriched)) return null;
+  return prior || null;
+}
+
+// Does a staff CLEAN verdict (stamped on the lead by an estimate revise —
+// a corrected premise or an explicit confirmation) outrank the cached
+// county audit /calculate re-reads? A cache-only re-read obtains no new
+// evidence, so an audit cached at or before the verdict must not derive
+// a fresh flag and undo the confirmation on the next recalculation; only
+// a profile cached AFTER it may flag again. An unstamped cache row counts
+// as older (pre-push audit P1 on #4667).
+// When a lookup result's county audit was actually obtained: the marker's
+// own stamp (a live audit or a backfill on a cache hit) beats the cache
+// row's save time, which a backfill does not refresh (codex #4667 r12 P1).
+// Older persisted markers carry no stamp — fall back to the cache time.
+function auditEvidenceAt(result) {
+  return result?.enriched?.addressAudit?.auditedAt
+    || result?.propertyRecord?._addressAudit?.auditedAt
+    || result?.meta?.cachedAt
+    || null;
+}
+
+function cachedAuditSuperseded({ leadCleanVerdict = false, profileFound = false, cachedAt = null, cleanEvidenceAt = null } = {}) {
+  if (!leadCleanVerdict || !profileFound) return false;
+  return !((Date.parse(cachedAt || '') || 0) > (Date.parse(cleanEvidenceAt || '') || 0));
+}
+
+// The server-owned verdict each intake stage records for the address it
+// judged: 'flagged' (a flag stands — fresh or carried), 'clean' (the roll
+// answered and vouched), 'unanswered' (no county signal). A CLEAN verdict
+// is what supersedes older lead, draft and withdrawn-publication
+// warnings for the same premise — record-less clean lookups are never
+// cached, so without it the next /calculate would treat the cache miss as
+// missing evidence and recover a stale flag (pre-push audit P1).
+function buildAddressVerdict({ flag = null, enriched = null, profileFound = false, address = null } = {}) {
+  const status = flag ? 'flagged' : (profileFound && countyRollAnswered(enriched) ? 'clean' : 'unanswered');
+  return {
+    status,
+    address_line1: String(address?.line1 || '').trim() || null,
+    city: String(address?.city || '').trim() || null,
+    state: String(address?.state || '').trim().toUpperCase().slice(0, 2) || null,
+    zip: zip5(address?.zip) || null,
+    at: new Date().toISOString(),
+  };
+}
+
+// Does a snapshot's stored verdict say THIS premise is clean?
+// `requireLocality`: for CROSS-lead reuse both sides must carry a city and
+// ZIP and they must agree — a street-only request must not be cleared by
+// a clean verdict for that street in another town (codex #4667 r11 P1).
+function cleanVerdictCovers(snapshot, address, { requireLocality = false } = {}) {
+  const verdict = snapshot?.address_verdict;
+  if (!verdict || typeof verdict !== 'object' || verdict.status !== 'clean' || !verdict.address_line1) return false;
+  if (requireLocality && (!cityKey(verdict.city) || !cityKey(address?.city) || !verdict.zip || !zip5(address?.zip))) return false;
+  return flagCoversAddress({ ...verdict, reason: 'clean' }, address);
+}
+
+// The advisory-lock key both intake and booking take around a contact
+// pair's address verdict, so a /calculate persisting a flag and a booking
+// confirm rechecking it serialize (no phantom lead row between the read
+// and the insert — codex #4667 r11 P1).
+function contactPairLockKey(email, phone) {
+  const ten = String(phone || '').replace(/\D/g, '').slice(-10);
+  return `address-verdict:${String(email || '').toLowerCase().trim()}:${ten}`;
+}
+
+// ONE contact-pair verdict read + ONE precedence decision, shared by the
+// public lookup, /calculate and their callers (codex #4667 r44 P2): the
+// rows under the typed email + phone that carry either verdict key, the
+// newest flag covering the premise, and the newest clean verdict covering
+// it (the caller's OWN lead is judged on the premise alone — a staff
+// confirmation of a street-only intake carries no locality; other leads
+// need the complete locality).
+async function loadContactVerdicts(conn, { email, phone, premise, ownLeadId = null }) {
+  const rows = await conn('leads')
+    .whereNull('deleted_at')
+    .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(phone).replace(/\D/g, '').slice(-10)])
+    .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+    .select('id', 'extracted_data');
+  const parse = (row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data);
+  const flags = rows
+    .map((row) => recoverAddressUnverified(parse(row)))
+    .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, premise))
+    .sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0));
+  const newestFlag = flags[0] || null;
+  const newestCleanAt = rows
+    .map((row) => ({ own: ownLeadId != null && String(row.id) === String(ownLeadId), snap: parse(row) }))
+    .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, premise, { requireLocality: !own }))
+    .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
+    .reduce((max, at) => Math.max(max, at), 0);
+  return { rows, newestFlag, newestFlagAt: newestFlag ? (Date.parse(newestFlag.flagged_at || '') || 0) : 0, newestCleanAt };
+}
+// The two-way precedence decision over those verdicts plus this run's own
+// evidence: { newerFlag } when a covering flag is newer than every clean
+// verdict (stored or this run's), { newerClean } when a stored clean verdict
+// is newer than every flag, and { newerFlag } again when the run's own /
+// carried block is older than a stored flag (so writes carry the newest
+// evidence); else {}.
+function reconcileVerdictPrecedence({ verdicts, blocked = null, extraFlags = [], cleanAt = 0 }) {
+  const flags = [verdicts?.newestFlag, ...extraFlags].filter(Boolean)
+    .sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0));
+  const newestFlag = flags[0] || null;
+  const newestFlagAt = newestFlag ? (Date.parse(newestFlag.flagged_at || '') || 0) : 0;
+  const newestClean = verdicts?.newestCleanAt || 0;
+  const effectiveCleanAt = Math.max(cleanAt || 0, newestClean);
+  if (!blocked && newestFlag && newestFlagAt > effectiveCleanAt) return { newerFlag: newestFlag };
+  if (blocked && newestClean > newestFlagAt) return { newerClean: new Date(newestClean).toISOString() };
+  if (blocked && newestFlag && newestFlag !== blocked && newestFlagAt > (Date.parse(blocked.flagged_at || '') || 0)) return { newerFlag: newestFlag };
+  return {};
+}
+
+// The lookup stage's UNDER-LOCK precedence over its pre-lock answer (codex
+// #4667 r45 P2 — one reusable decision, not a branch tree in the route):
+// given the pre-lock triple (addressUnverified / staffCleanAt /
+// cachedAuditStale), the clean verdict and newest covering flag found
+// under the lock, and this run's own county evidence time, returns the
+// triple to persist.
+function applyLookupVerdictPrecedence({
+  addressUnverified, staffCleanAt, cachedAuditStale,
+  lockedCleanAt, newerFlag, newerFlagAt = 0, evidenceAt = 0, profileFound = false, cachedAt = null,
+}) {
+  const lockedAt = Date.parse(lockedCleanAt || '') || 0;
+  // A RECOVERED flag (no county answer this run — an outage or an
+  // unanswered profile, evidenceAt 0) is judged against the clean verdict
+  // by its OWN flagged_at, never by the profile's cache time (pre-push
+  // audit P1 after r45): a staff confirmation newer than the flag clears
+  // it whether or not an unanswered profile was cached after that.
+  if (addressUnverified && !evidenceAt && lockedAt && lockedAt > (Date.parse(addressUnverified.flagged_at || '') || 0)
+    && !(newerFlag && newerFlagAt > lockedAt)) {
+    return { addressUnverified: null, staffCleanAt: lockedCleanAt, cachedAuditStale: true };
+  }
+  // A cached audit this run carried is superseded by a NEWER staff clean
+  // verdict committed since.
+  if (addressUnverified && profileFound && lockedCleanAt
+    && cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt, cleanEvidenceAt: lockedCleanAt })) {
+    return { addressUnverified: null, staffCleanAt: lockedCleanAt, cachedAuditStale: true };
+  }
+  // A clean run adopts a covering flag committed since that outranks both
+  // this run's evidence and any stored clean verdict.
+  if (!addressUnverified && newerFlag && newerFlagAt > evidenceAt && !(lockedAt && lockedAt > newerFlagAt)) {
+    return { addressUnverified: newerFlag, staffCleanAt: null, cachedAuditStale: false };
+  }
+  // Already superseded before the lock: a NEWER clean verdict a concurrent
+  // staff confirmation committed since is the one to persist, or the write
+  // would replace it with the older pre-lock timestamp and let an
+  // intervening sibling flag win.
+  if (!addressUnverified && cachedAuditStale && lockedAt && lockedAt > (Date.parse(staffCleanAt || '') || 0)) {
+    return { addressUnverified, staffCleanAt: lockedCleanAt, cachedAuditStale };
+  }
+  // An already-flagged lookup carrying an OLDER cached flag adopts the
+  // newer flag another request stored, so the lead and the quarantine
+  // carry the newest negative evidence.
+  if (addressUnverified && newerFlag && newerFlag !== addressUnverified
+    && newerFlagAt > (Date.parse(addressUnverified.flagged_at || '') || 0)) {
+    return { addressUnverified: newerFlag, staffCleanAt, cachedAuditStale };
+  }
+  return { addressUnverified, staffCleanAt, cachedAuditStale };
+}
+
+module.exports = {
+  cachedAuditSuperseded,
+  auditEvidenceAt, deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey };
+module.exports.streetKeyNoUnit = streetKeyNoUnit;
+module.exports.loadContactVerdicts = loadContactVerdicts;
+module.exports.reconcileVerdictPrecedence = reconcileVerdictPrecedence;
+module.exports.applyLookupVerdictPrecedence = applyLookupVerdictPrecedence;

@@ -1717,6 +1717,22 @@ function seededRowPin(row, offerLat, offerLng) {
 // transaction, and post-commit seeding/reminders/SMS/lead-conversion. Does NOT check
 // the selfBooking gate (the caller decides). Returns a discriminated result
 // { ok:true, body } | { ok:false, status, error }; throws on unexpected errors.
+// County records could not confirm the house number the quote was priced
+// at (public-quote address_unverified): the office confirms the address on
+// the callback before anything is scheduled. Same shape as the other
+// createSelfBooking refusals (the route maps status + error to the reply).
+// `lead` is an untrusted correlation value: a malformed one is ignored
+// (never cast into a UUID column — 22P02 would 500 an otherwise valid
+// booking; codex r9 P2).
+const LEAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const ADDRESS_UNVERIFIED_REFUSAL = () => ({
+  ok: false,
+  status: 409,
+  code: 'ADDRESS_UNVERIFIED',
+  error: 'County records could not confirm this house number. Our office will verify the address with you before scheduling.',
+});
+
 async function createSelfBooking(payload = {}) {
     const {
       estimate_id, estimate_share_token, pricing_estimate_id, estimate_token, customer_id, lead_id,
@@ -1922,6 +1938,36 @@ async function createSelfBooking(payload = {}) {
     // the customer would bypass the phone-on-file guard. It is used only as a
     // "this booking came from an estimate deep link" signal for the
     // customer-derived lead conversion after the booking commits (see below).
+    // …and, fail-closed, as the carrier of the quote's county-roll address
+    // verdict (public-quote address_unverified): a bare /book link minted
+    // by a run with no draft has no handoff token for the draft predicate
+    // to refuse, so the flag is enforced here — against the ADDRESS being
+    // booked, never as identity (a forged lead id can only block a booking
+    // at a premise the roll could not match, never enable one). Only when
+    // the submitted address is the flagged premise (codex #4667 r6 P1).
+    // The lead-named verdict is judged ONLY inside the booking transaction
+    // below, where it can be reconciled with newer clean verdicts for the
+    // contact pair under the shared advisory lock (codex r11 P2).
+    // The same verdict on a TOKEN-VERIFIED pricing handoff, checked
+    // unconditionally — before any booking write and regardless of the
+    // customers-only gate or an authenticated customer: the draft
+    // predicate's refusal only ever ran inside the gate branch, so an
+    // earlier valid handoff could still create a single appointment at the
+    // flagged address (pre-push audit P1 on #4667).
+    if (pricing_estimate_id && estimate_token) {
+      try {
+        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+        if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+          const handoffDraft = await db('estimates').where({ id: pricing_estimate_id }).first('estimate_data');
+          const data = typeof handoffDraft?.estimate_data === 'string'
+            ? (() => { try { return JSON.parse(handoffDraft.estimate_data); } catch { return null; } })()
+            : handoffDraft?.estimate_data;
+          if (data?.addressUnverified === true) return ADDRESS_UNVERIFIED_REFUSAL();
+        }
+      } catch (handoffErr) {
+        logger.warn(`[booking] handoff address-verdict check failed: ${handoffErr.code || handoffErr.name || 'error'}`);
+      }
+    }
 
     // Customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY, owner directive
     // 2026-07-23): with no verified customer (portal bearer) and no
@@ -2324,6 +2370,11 @@ async function createSelfBooking(payload = {}) {
     // catch below rolls the profile back for the failures that can only be
     // detected under the advisory locks.)
     let createdCustomerId = null;
+    // The parent customer_accounts row this request minted (none when the
+    // contact attached to an existing account) — rolled back with the
+    // profile on a refused booking, or each retry would strand another
+    // unreachable account (codex #4667 r16 P2).
+    let createdAccountId = null;
     if (willCreateCustomer) {
       // Account layer: attach-or-create so the new profile is login-complete
       // (portal refresh sessions FK customer_accounts). The phone-on-file gate
@@ -2337,6 +2388,10 @@ async function createSelfBooking(payload = {}) {
         phone: phoneDigits,
         email: new_customer.email || null,
       });
+      // Only an account this request PROVABLY minted (the helper's explicit
+      // flag) is ever rolled back — never an existing profile-less account
+      // that merely looks unmatched (pre-push audit P1).
+      if (account?.accountId && account.created === true) createdAccountId = account.accountId;
       const [created] = await db('customers').insert(applyContactNormalization({
         account_id: account.accountId,
         is_primary_profile: !account.existingCustomer,
@@ -2769,6 +2824,66 @@ async function createSelfBooking(payload = {}) {
       // of the self-serve notice window — unset (default) skips the lock
       // AND the re-check below; the primitives themselves are unchanged.
       if (selfBookDayCapEnabled()) await acquireSelfBookingDayCapLock(trx, slotDateStr);
+      // The county-roll ADDRESS-VERDICT contact-pair locks, BEFORE the
+      // customer-comms fence (pre-push audit P1 after r41): the staff
+      // revision of a flagged draft and the website publication both take
+      // address-verdict first and customer-comms after, so this booking's
+      // former comms → address-verdict order could deadlock against them.
+      // Pair identities are read here (reads, not evidence); the verdict
+      // itself is still judged after the comms fence, before any row is
+      // written.
+      let contactEmail = null;
+      let namedPairEmail = null;
+      let namedPairPhone = null;
+      let customerPairEmail = null;
+      let customerPairPhone = null;
+      const reconcilePairs = [];
+      {
+      // The contact pair's email: the form's, else the email of the lead
+      // the link NAMES — a bare /book?lead=<id> link with the optional
+      // email cleared must still be judged against the newer flagged
+      // lead a repeat lookup minted for the same phone and premise
+      // (codex r28 P1). The named lead's email is an identity, not
+      // evidence, so it is read before the lock.
+      contactEmail = String(new_customer?.email || '').trim() || null;
+      // …and the named lead's STORED pair, always (codex r37 P1): the form
+      // lets the visitor edit both fields, so a newer flagged lead under
+      // the original pair must still be judged — this pair is negative-
+      // only evidence (it can refuse, never clear).
+      if (LEAD_ID_RE.test(String(lead_id || ''))) {
+        const namedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('email', 'phone');
+        namedPairEmail = String(namedLead?.email || '').trim() || null;
+        namedPairPhone = String(namedLead?.phone || '').replace(/\D/g, '') || null;
+        if (!contactEmail) contactEmail = namedPairEmail;
+      }
+      // …and the RESOLVED customer's stored pair when the form supplied no
+      // contact (an authenticated or reservice booking carries the account,
+      // not new_customer): the stored premise it books can still carry a
+      // matching flagged lead (codex r37 P1).
+      // …ALWAYS, not only when the form omitted a field: a confirm that
+      // changes either contact value would otherwise skip the stored pair
+      // and a flagged lead under it (codex r39 P1).
+      if (custId) {
+        const storedCustomer = await trx('customers').where({ id: custId }).whereNull('deleted_at').first('email', 'phone');
+        customerPairEmail = String(storedCustomer?.email || '').trim() || null;
+        customerPairPhone = String(storedCustomer?.phone || '').replace(/\D/g, '') || null;
+      }
+      if (contactEmail && phoneDigits) reconcilePairs.push([contactEmail, phoneDigits]);
+      if (customerPairEmail && customerPairPhone && !reconcilePairs.some(([e, p]) => e.toLowerCase() === customerPairEmail.toLowerCase() && p.slice(-10) === customerPairPhone.slice(-10))) {
+        reconcilePairs.push([customerPairEmail, customerPairPhone]);
+      }
+      if (namedPairEmail && namedPairPhone && !reconcilePairs.some(([e, p]) => e.toLowerCase() === namedPairEmail.toLowerCase() && p.slice(-10) === namedPairPhone.slice(-10))) {
+        reconcilePairs.push([namedPairEmail, namedPairPhone]);
+      }
+      {
+        const { contactPairLockKey } = require('../services/lead-address-unverified');
+        // Both pairs' locks, in deterministic key order.
+        const keys = [...new Set(reconcilePairs.map(([e, p]) => contactPairLockKey(e, p)))].sort();
+        for (const key of keys) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
+        }
+      }
+      }
       // Rung 6 (occupancy.js ORDERING CONTRACT): the appointment insert
       // below resolves its comms recipients LIVE from the customer row, so
       // it must serialize against a concurrent customer-merge undo's
@@ -2817,6 +2932,137 @@ async function createSelfBooking(payload = {}) {
               isOperational: true,
               code: 'CUSTOMER_CHANGED_RETRY',
             });
+          }
+        }
+      }
+
+      // The county-roll address verdict, rechecked UNDER ROW LOCKS held
+      // through this transaction — the unlocked reads above can observe a
+      // clean draft / lead while a concurrent /calculate commits the flag
+      // before the appointment rows below are inserted (pre-push audit
+      // P1 on #4667). The ROW locks below are taken AFTER every scheduling
+      // rung and the customer-comms lock (the ordering contract in
+      // scheduling/occupancy.js: a merge-undo holds comms before it locks
+      // journaled estimates — locking the estimate first would deadlock
+      // against it), and BEFORE either booking row is written; the route
+      // maps ADDRESS_UNVERIFIED to the same 409 as the early checks.
+      {
+        const { recoverAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
+        const parseData = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
+        const refuse = () => {
+          throw Object.assign(new Error('County records could not confirm this house number. Our office will verify the address with you before scheduling.'), {
+            statusCode: 409, isOperational: true, code: 'ADDRESS_UNVERIFIED',
+          });
+        };
+        // The contact-pair advisory lock is taken BEFORE any estimate row
+        // lock — the same order the lookup stage and /calculate use
+        // (advisory lock, then estimate rows), so a flagged lookup
+        // withdrawing this draft and this confirm cannot deadlock (codex
+        // r19 P2).
+        // The contact pairs and their advisory locks were taken ABOVE, before
+        // the customer-comms fence (pre-push audit P1 after r41).
+        // The customer row BEFORE the DRAFT estimate row (codex r38 P2): the
+        // Customer 360 edit and the website publication lock the customer
+        // first and then the draft, so the reverse order here would
+        // deadlock a booking against them. Only the draft handoff — a
+        // PUBLISHED row (the share-token entry) is locked estimate-first by
+        // acceptance and the service-mix mutations, so that path keeps the
+        // estimate-first order (codex r39 P1). A re-lock later is a no-op.
+        if (custId && pricing_estimate_id && estimate_token) {
+          await trx('customers').where({ id: custId }).forUpdate().first('id');
+        }
+        if (pricing_estimate_id && estimate_token) {
+          const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+          if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+            const lockedDraft = await trx('estimates').where({ id: pricing_estimate_id }).forUpdate().first('estimate_data');
+            if (parseData(lockedDraft?.estimate_data)?.addressUnverified === true) refuse();
+          }
+        }
+        // The share-token estimate entry (estimate_id + estimate_share_token)
+        // resolves a customer from the estimate itself; its own stored
+        // verdict is rechecked under the row lock too (pre-push audit P1).
+        if (estimate?.id && estimate_share_token && String(estimate.token || '') === String(estimate_share_token)) {
+          const lockedShared = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data');
+          if (parseData(lockedShared?.estimate_data)?.addressUnverified === true) refuse();
+        }
+        // The premise being booked: the submitted new-customer address, else
+        // the resolved customer's on-file address (an existing customer
+        // booking without an address payload — pre-push audit P1).
+        let submitted = new_customer?.address_line1 ? {
+          line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
+        } : null;
+        if (!submitted && custId) {
+          const onFileCustomer = await trx('customers').where({ id: custId }).first('address_line1', 'city', 'state', 'zip');
+          if (onFileCustomer?.address_line1) {
+            submitted = { line1: onFileCustomer.address_line1, city: onFileCustomer.city, state: onFileCustomer.state, zip: onFileCustomer.zip };
+          }
+        }
+        // Serialized with /calculate's verdict publication on the same
+        // contact pair (codex r11 P1): a flag being persisted for this
+        // email + phone lands before or after this whole recheck, never
+        // as a phantom row in between.
+        const { cleanVerdictCovers } = require('../services/lead-address-unverified');
+        // Newest clean verdict for this premise across the contact pair —
+        // computed FIRST so the lead-named flag below can be superseded by
+        // it too (codex r11 P2).
+        // …PER contact pair (codex r41 P1): a clean verdict a visitor just
+        // earned under a different email + phone must not supersede the
+        // flag an older link's pair still carries for the same premise —
+        // only evidence from the SAME pair supersedes that pair's flag.
+        const pairKeyOf = (row) => `${String(row?.email || '').toLowerCase()}|${String(row?.phone || '').replace(/\D/g, '').slice(-10)}`;
+        const newestCleanByPair = new Map();
+        let contactSnapshots = [];
+        if (submitted && reconcilePairs.length) {
+          const contactLeads = await trx('leads')
+            .whereNull('deleted_at')
+            .where((q) => {
+              for (const [e, p] of reconcilePairs) {
+                q.orWhere((pair) => pair
+                  .whereRaw('LOWER(email) = ?', [e.toLowerCase()])
+                  .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [p.slice(-10)]));
+              }
+            })
+            .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+            .forUpdate()
+            .select('id', 'email', 'phone', 'extracted_data');
+          contactSnapshots = contactLeads
+            .map((row) => ({ pairKey: pairKeyOf(row), snap: parseData(row.extracted_data) }))
+            .filter((entry) => entry.snap);
+          // The lead the link NAMES is judged on the unit-insensitive
+          // premise alone (a staff confirmation of a street-only intake
+          // carries no locality); other leads need the complete locality
+          // (codex r20 P1) — the same rule /calculate and the lookup apply.
+          const namedLeadId = LEAD_ID_RE.test(String(lead_id || '')) ? String(lead_id) : null;
+          for (const row of contactLeads) {
+            const own = namedLeadId != null && String(row.id) === namedLeadId;
+            const snap = parseData(row.extracted_data);
+            if (!snap || !cleanVerdictCovers(snap, submitted, { requireLocality: !own })) continue;
+            const at = Date.parse(snap.address_verdict?.at || '') || 0;
+            const key = pairKeyOf(row);
+            newestCleanByPair.set(key, Math.max(newestCleanByPair.get(key) || 0, at));
+          }
+        }
+        if (LEAD_ID_RE.test(String(lead_id || '')) && submitted) {
+          const lockedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').forUpdate().first('email', 'phone', 'extracted_data');
+          const flag = recoverAddressUnverified(parseData(lockedLead?.extracted_data));
+          const cleanForPair = lockedLead ? (newestCleanByPair.get(pairKeyOf(lockedLead)) || 0) : 0;
+          if (flag && flagCoversAddress(flag, submitted) && !(cleanForPair && cleanForPair > (Date.parse(flag.flagged_at || '') || 0))) refuse();
+        }
+        // The CURRENT contact-and-premise verdict too, not only the lead
+        // the link names: a repeat lookup mints a NEW lead whose flag
+        // commits before the shared draft is re-locked, and an old link
+        // confirming in that window would see only the older clean lead
+        // (codex r9 P1). Both typed contact factors bind the lookup.
+        if (submitted && contactSnapshots.length) {
+          for (const { pairKey, snap } of contactSnapshots) {
+            const flag = recoverAddressUnverified(snap);
+            // Stamped flags only across leads (an unstamped one would match
+            // any address) — pre-push audit P1.
+            if (!flag || !flag.address_line1 || !flagCoversAddress(flag, submitted)) continue;
+            const flaggedAt = Date.parse(flag.flagged_at || '') || 0;
+            const cleanForPair = newestCleanByPair.get(pairKey) || 0;
+            if (cleanForPair && cleanForPair > flaggedAt) continue;
+            refuse();
           }
         }
       }
@@ -3305,7 +3551,7 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
@@ -3319,6 +3565,16 @@ async function createSelfBooking(payload = {}) {
           await db('customers').where({ id: createdCustomerId }).del().catch((delErr) => {
             logger.warn(`[booking:confirm] Could not roll back just-created customer ${createdCustomerId}: ${delErr.message}`);
           });
+          if (createdAccountId) {
+            // Only while nothing else references the account (the profile
+            // above was its sole child).
+            const stillReferenced = await db('customers').where({ account_id: createdAccountId }).first('id').catch(() => ({ id: 'unknown' }));
+            if (!stillReferenced) {
+              await db('customer_accounts').where({ id: createdAccountId }).del().catch((delErr) => {
+                logger.warn(`[booking:confirm] Could not roll back just-created account: ${delErr.code || delErr.name || 'error'}`);
+              });
+            }
+          }
         }
         // code rides along so the reservice route can distinguish the lane
         // dedupe from a slot race; /confirm's response shape is unchanged
@@ -5284,6 +5540,9 @@ router.post('/confirm', bookingConfirmLimiter, bookingConfirmDailyLimiter, async
     if (!result.ok) {
       return res.status(result.status).json({
         error: result.error,
+        // The documented conflict code (ADDRESS_UNVERIFIED and the slot
+        // races) so clients can tell this 409 from the others.
+        ...(result.code ? { code: result.code } : {}),
         // Customers-only refusal carries its forward action (the quote
         // wizard) so the client never renders a dead end.
         ...(result.customersOnly ? { customersOnly: true, quoteUrl: result.quoteUrl } : {}),

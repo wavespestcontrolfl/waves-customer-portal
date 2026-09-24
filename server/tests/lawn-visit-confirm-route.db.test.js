@@ -63,6 +63,10 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     if (owned) await owned.dispose();
   });
 
+  // The run's immutable scores_adjusted snapshot IS the AI's read (owner
+  // ruling 2026-09-24: lawn scores are read-only from photos) — it mirrors
+  // `scores` by default, exactly like the real /assess writer. A test that
+  // wants an AI-blank (fillable) key passes it as `null` in `scores`.
   async function seed(scores = {}, { run = true, service = false } = {}) {
     const f = await fixture(mockKnex);
     const visit = service ? await f.visit() : null;
@@ -74,9 +78,9 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     if (run) await mockKnex('lawn_assessment_runs').insert({
       assessment_id: assessment.id, customer_id: f.customerId, status: 'complete',
       prompt_version: 'route-fixture', context_hash: 'c'.repeat(64),
-      observations: MODEL_TEXT, scores_adjusted: JSON.stringify(COMPLETE),
+      observations: MODEL_TEXT, scores_adjusted: JSON.stringify({ ...UNKNOWN, ...scores }),
       findings: JSON.stringify([{ finding_id: 'F1', name: 'Weed pressure', label: 'weed pressure', confidence: 'moderate', severity: 'moderate', urgency: 'monitor' }]),
-      reconciliation: JSON.stringify({ published_observations: copy.NO_OBSERVATIONS, stress_damage_override: null }),
+      reconciliation: JSON.stringify({ published_observations: copy.NO_OBSERVATIONS }),
     });
     return { assessment, f, visit };
   }
@@ -279,12 +283,107 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(require('../services/logger').error).toHaveBeenCalledTimes(1);
   });
 
+  test('legacy confirmation with an empty payload derives a missing Stress, never 0', async () => {
+    const { assessment } = await seed({ ...COMPLETE, fungus_control: 75, thatch_level: 85, stress_damage: null }, { run: false });
+    const result = await request(assessment.id, { adjustedScores: {} });
+    expect(result.body.assessment.stress_damage).toBe(75);
+    // Calibration compares against the final saved scores, not the sparse
+    // (typed-only) request payload.
+    await drain();
+    const [, , techScores] = intel.recordTechCalibration.mock.calls.at(-1);
+    expect(techScores).toMatchObject({ fungus_control: 75, thatch_level: 85, stress_damage: 75 });
+    expect(Object.values(techScores).every((v) => v !== undefined)).toBe(true);
+  });
+
+  test('legacy sparse confirmation keeps unknown scores blank and derives Stress from known components only', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null, thatch_level: 85, stress_damage: null }, { run: false });
+    const result = await request(assessment.id, { adjustedScores: {} });
+    // Blank scores keep a legacy assessment pending, like the run-backed path.
+    expect(result.body).toMatchObject({ success: true, confirmed: false, missingScores: ['color_health', 'fungus_control'] });
+    expect(result.body.assessment).toMatchObject({ confirmed_by_tech: false, color_health: null, fungus_control: null, thatch_level: 85, stress_damage: null, overall_score: null });
+    await drain();
+    expect(intel.emitHealthSignal).not.toHaveBeenCalled();
+
+    // Filling the blanks confirms it.
+    const done = await request(assessment.id, { adjustedScores: { color_health: 70, fungus_control: 60 } });
+    expect(done.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, fungus_control: 60, stress_damage: 60 });
+  });
+
+  test('a legacy partial fill stays correctable on the next save', async () => {
+    const blanks = { ...COMPLETE, color_health: null, fungus_control: null, thatch_level: 85, stress_damage: null };
+    const { assessment } = await seed(blanks, { run: false });
+    const first = await request(assessment.id, { adjustedScores: { fungus_control: 60 } });
+    expect(first.body).toMatchObject({ confirmed: false, missingScores: ['color_health'] });
+    const second = await request(assessment.id, { adjustedScores: { fungus_control: 40, color_health: 70 } });
+    expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, fungus_control: 40, color_health: 70, stress_damage: 40 });
+  });
+
+  test('a pending legacy save keeps the notes and stress flags it was sent', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null }, { run: false });
+    const result = await request(assessment.id, { adjustedScores: { observations: 'Tech note' }, stress_flags: { drought_stress: true } });
+    expect(result.body).toMatchObject({ confirmed: false, missingScores: ['color_health'] });
+    const row = await read(assessment.id);
+    expect(row.observations).toBe('Tech note');
+    expect(row.confirmed_by_tech).toBe(false);
+    expect(row.stress_flags).toMatchObject({ drought_stress: true });
+    // adjusted_scores (the AI read) is untouched while pending.
+    const snapshot = typeof row.adjusted_scores === 'string' ? JSON.parse(row.adjusted_scores) : row.adjusted_scores;
+    expect(snapshot.color_health ?? null).toBeNull();
+  });
+
+  test('legacy calibration never fabricates an AI Stress from blank components', async () => {
+    const { assessment } = await seed({ ...COMPLETE, fungus_control: null, thatch_level: null, stress_damage: null }, { run: false });
+    await request(assessment.id, { adjustedScores: { fungus_control: 70, thatch_level: 80 } });
+    await drain();
+    const [, aiScores] = intel.recordTechCalibration.mock.calls.at(-1);
+    expect(aiScores.stress_damage ?? null).toBeNull();
+  });
+
+  test('two concurrent legacy fills of different blanks both survive', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null, thatch_level: null }, { run: false });
+    await Promise.all([
+      request(assessment.id, { adjustedScores: { color_health: 70 } }),
+      request(assessment.id, { adjustedScores: { fungus_control: 60 } }),
+    ]);
+    const row = await read(assessment.id);
+    expect(row).toMatchObject({ color_health: 70, fungus_control: 60 });
+  });
+
+  test('clearing an earlier legacy fill (posted as null) removes it', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false });
+    await request(assessment.id, { adjustedScores: { fungus_control: 60 } });
+    const cleared = await request(assessment.id, { adjustedScores: { fungus_control: null, color_health: 70 } });
+    expect(cleared.body).toMatchObject({ confirmed: false, missingScores: ['fungus_control'] });
+    expect(cleared.body.assessment.fungus_control).toBeNull();
+  });
+
+  test('legacy reload sends the server AI read, so a partial fill stays editable', async () => {
+    const { assessment, visit } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false, service: true });
+    await request(assessment.id, { adjustedScores: { fungus_control: 60 } });
+    const reloaded = await reloadService(visit.id);
+    expect(reloaded.visitAssessment).toBeNull();
+    // fungus was filled by the technician, not read by the AI — still blank here.
+    expect(reloaded.aiScores).toMatchObject({ turf_density: 80, color_health: null, fungus_control: null });
+    expect(reloaded.assessment.fungus_control).toBe(60);
+  });
+
+  test('a legacy explicit Stress entry survives a later partial save', async () => {
+    const blanks = { ...COMPLETE, color_health: null, fungus_control: 75, thatch_level: 85, stress_damage: null };
+    const { assessment } = await seed(blanks, { run: false });
+    const first = await request(assessment.id, { adjustedScores: { stress_damage: 40 } });
+    expect(first.body).toMatchObject({ confirmed: false, missingScores: ['color_health'] });
+    const second = await request(assessment.id, { adjustedScores: { color_health: 70 } });
+    expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, stress_damage: 40 });
+  });
+
   test.each([false, true])('legacy confirmation works when the optional run table is missing: %s', async (missingTable) => {
     const { assessment } = await seed(COMPLETE, { run: false });
     if (missingTable) await mockKnex.schema.renameTable('lawn_assessment_runs', 'temporarily_missing_runs');
     try {
+      // turf_density is AI-known here (80, from COMPLETE) — the override is
+      // ignored; the free-text observations edit is unaffected.
       const result = await request(assessment.id, { adjustedScores: { turf_density: 72, observations: 'Technician legacy text' } });
-      expect(result.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 72, observations: 'Technician legacy text' } });
+      expect(result.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 80, observations: 'Technician legacy text' } });
       expect(result.body).not.toHaveProperty('confirmed');
       await drain();
       expect(delivery).not.toHaveBeenCalled();

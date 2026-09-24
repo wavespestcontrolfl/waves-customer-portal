@@ -387,6 +387,16 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
     expect(calls.forUpdate).toBe(false);
   });
 
+  test('a sibling under the county-roll address block refuses the group at request time (codex #4667 r30 P1)', async () => {
+    const flagged = { id: 'est-sib', status: 'draft', pricing_authority: 'SERVER', estimate_data: JSON.stringify({ addressUnverified: true }) };
+    const { database } = fakeDatabase([flagged]);
+    expect(await findGroupSiblingBlockingSend(anchor, { database })).toEqual({ sibling: flagged, statusCode: 409, code: 'ADDRESS_UNVERIFIED' });
+    const { blockingSiblingMessage } = adminEstimatesRouter._internals;
+    expect(blockingSiblingMessage({ sibling: flagged, code: 'ADDRESS_UNVERIFIED' }, 'scheduling')).toMatch(/county records could not confirm/);
+    const clean = { ...flagged, estimate_data: JSON.stringify({ addressUnverified: false }) };
+    expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([clean]).database })).toBeNull();
+  });
+
   test('forUpdate locks the sibling rows for the caller\'s scheduling transaction (GH codex P2 r5)', async () => {
     const { database, calls } = fakeDatabase([]);
     expect(await findGroupSiblingBlockingSend(anchor, { database, forUpdate: true })).toBeNull();

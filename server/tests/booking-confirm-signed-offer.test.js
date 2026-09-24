@@ -356,7 +356,9 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       // The rung-6 comms fence re-reads the fingerprint columns under the
       // lock — serve the same row as the db-level pre-fence read so the
       // compare passes and the flow reaches the insert.
-      const b = { where: () => b, first: async () => CUST };
+      // …and the county-verdict stored-pair read (#4667: email + phone of
+      // the resolved customer, before the comms fence) — same row.
+      const b = { where: () => b, whereNull: () => b, first: async () => CUST };
       return b;
     }
     if (table === 'estimates') {

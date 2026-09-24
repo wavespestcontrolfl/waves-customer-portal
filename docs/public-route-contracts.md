@@ -934,6 +934,123 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+Address-verification guard (2026-09-23): when the SERVER-trusted property
+profile (the cache-only `performPropertyLookup` re-read, or the lookup
+stage's own server-written `extracted_data.address_unverified` on the
+visitor's ownership-matched lead row — never the client's `enriched`
+payload) carries a HIGH `address` verify flag from the county-roll
+house-number audit, the run withholds the self-book handoff entirely: no
+`/book` link, no estimate handoff token, no website publication
+(`booking_url` null). The price still returns and the lead / estimate
+still persist; the lead's `extracted_data.address_unverified` records the
+audit (reason, county, typed number, nearest roll numbers, the judged
+street/city/state/ZIP) for the callback, and a later run over a clean
+address clears it (the key is always written, null when clean). The draft
+estimate carries the same verdict as `estimate_data.addressUnverified`
+(always written), which `wizardDraftSelfServeBookable` refuses — so a
+booking link minted by an EARLIER clean run over the same draft dies on
+its live recheck at `/api/booking/confirm` once the address is flagged,
+and a staff revision of the draft preserves the marker. A website estimate
+an earlier run already PUBLISHED for the same lead — or, since a repeat
+lookup mints a new lead row, for the same typed email AND phone AND the
+complete judged premise (street with any unit stripped, and a city and ZIP
+present on both sides and equal) — is archived on the flagged run
+(expired rows included when they were delivered or viewed, since the
+public extension could otherwise revive them; a never-delivered expired
+legacy row is left alone, having no revival path; the block on an
+expired row is lifted by a later clean county answer, otherwise the
+office re-quotes; and the withdrawal refuses with a retryable 503 while
+any matched row carries a live delivery claim, checked again on each
+write), with
+the sent/viewed, unarchived, not-price-locked predicates re-applied on
+the archive write itself (`website_quote_withdrawn_address_unverified`
+audit event), so its old token neither renders nor accepts — and the row's
+`estimate_data.addressUnverified` marker is itself an off-customer-surface
+verdict (`estimateOffCustomerSurface`: view, server page, accept, asks;
+`/decline`'s guard answers the same generic 404 for it, never the
+re-price hold's 409),
+so a generic unarchive or a withdrawal that failed to land still cannot
+revive the link; the archived row keeps the verdict
+(`estimate_data.addressUnverified` + `addressUnverifiedFlag`), and a later
+run for the same email, phone and complete premise recovers it when the
+roll does not answer. Each stage also records a server-owned
+`extracted_data.address_verdict` (clean / flagged / unanswered, stamped
+with the judged premise): a CLEAN verdict from the lookup stage stands in
+for a roll answer at `/calculate` (record-less clean lookups are never
+cached) and supersedes older lead, draft and withdrawn-publication
+warnings for that premise — including the verdict on withdrawn
+publications for the same email, phone and premise, which a clean run
+marks superseded (`addressUnverifiedSupersededAt`) so no later outage run
+can recover it. A bare `/book?lead=<id>` link (a run that minted no draft
+carries no handoff token) is enforced at `/api/booking/confirm` too: when
+the lead named by `lead` carries a server-written `address_unverified`
+flag that covers the submitted premise, the booking is refused with 409
+`code: "ADDRESS_UNVERIFIED"` — the lead id stays untrusted for identity (a forged
+id can only block a booking at a flagged premise, never enable one). A
+token-verified pricing handoff (`pricing_estimate_id` + `estimate_token`)
+whose draft carries `addressUnverified: true` is refused the same way,
+unconditionally — before any booking write, whatever the customers-only
+gate or the bearer's authentication; both verdicts are rechecked under row
+locks inside the booking transaction itself, so a flag committed between
+the early read and the insert still refuses (409, code
+`ADDRESS_UNVERIFIED`), and the in-transaction recheck also consults every
+lead for the typed email AND phone whose flag covers the submitted premise
+(a repeat lookup's newer lead). If the flagged run's publication
+withdrawal transaction fails, `/calculate` answers 503 (retry) rather than
+leaving an earlier publication live. The public lookup response never carries the profile's
+internal `addressVerdict` trust marker (stripped with `subdivisionMedian`);
+the lead-level verdict is derived server-side. `/calculate` publishes the
+lead's verdict under a contact-pair advisory lock (`address-verdict`,
+email + last-ten-digit phone) that `/api/booking/confirm` takes before its
+recheck, so no flag lands as a phantom row between that recheck and the
+insert. Staff clear the draft's marker by
+revising the estimate with a changed PREMISE (house number / street /
+locality — a unit-only edit is not a correction) or an explicit
+`confirmAddress: true` on the revise request (the builder's "I confirmed
+this address" control; edit-source reports the standing flag as
+`addressUnverified`); the admin send guard refuses a still-flagged
+estimate with 409 `ADDRESS_UNVERIFIED` since the customer link would not
+render. A staff confirmation stamps a clean verdict on the linked lead
+that outranks the CACHED county audit it answered (a cache-only re-read on
+the next `/calculate` obtains no new evidence); only a profile cached after
+the confirmation may flag the premise again (the lookup stage applies the
+same rule to a cache-hit audit; the audit's own `auditedAt` stamp is the
+evidence time, so a live backfill on a cache hit is fresh), and a cached
+clean answer is evidence from its cache time, so a flag committed after that
+stamp outranks it. A flag on the visitor's own lookup-stage lead is recovered by lead id
+alone (a negative verdict, so a corrected email does not drop it); a
+premise correction on the estimate moves the lead's address columns with
+it; every send claim and the final pre-provider check reassert the block.
+The locked reconciliation runs both ways: a newer
+clean verdict (a staff confirmation, a clean lookup) supersedes a recovered
+flag and a newer flag supersedes a recovered clean verdict, judged by
+timestamps under the contact-pair lock; the visitor's own lead's clean
+verdict is judged on the unit-insensitive premise alone (its locality may
+be incomplete), other leads' need the complete locality. Withdrawn-publication
+verdicts are superseded only after the locked reconciliation, and a flagged rerun withdraws website publications in
+every non-terminal delivery state (sent, viewed, scheduled, sending,
+send_failed) and stamps the block on matching legacy quote-wizard rows
+(any of those states or draft) without archiving them; a clean verdict that
+supersedes the warning also lifts the block on those unarchived legacy
+rows; `/calculate` re-reconciles under the
+contact-pair lock again right before it persists a draft verdict (a flag
+committed meanwhile is carried onto the draft, never overwritten by a
+stale clean marker); a lookup whose verdict/quarantine transaction rolls
+back answers 503, never a successful lookup; the lookup stage
+re-reconciles the contact pair under the lock before publishing (a newer
+clean verdict outranks a cached audit) and takes the advisory lock before
+any estimate row lock, the same order the booking confirm uses; it
+applies the same quarantine when it persists a flagged verdict
+(`services/website-quote-withdrawal.js`). A premise correction on the
+estimate moves the linked customer through the established address-change
+path (coordinates cleared, primary property synced, snapshots fanned out,
+guarded re-geocode after commit) when that customer still lived at the
+rejected premise. A roll that never answered (GIS
+outage) is not a fresh flag — but it does not clear one either: the prior
+server-written flag for the same address carries forward until the roll
+answers clean, and an existing draft's own `addressUnverified` marker is
+carried over under its row lock (handoff withheld) when the run got no
+roll answer and the draft's address is unchanged.
 Request shape: either `services` keyed by the engine
 keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 `serviceKey` / `service_key` from the `/api/public/services/menu` payload,

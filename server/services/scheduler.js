@@ -695,6 +695,58 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // HOURLY :27 — Consultation-outcome reconciliation sweep. THE COMPLETENESS
+  // GUARANTEE behind the direct hooks at admin-leads.js/admin-schedule.js
+  // (see the RECONCILIATION MODEL note atop consultation-outcomes.js): those
+  // two hooks are the fast path at the two main manual-booking routes, but
+  // wiring markWonForCustomer into every scheduled_services insert site
+  // one-by-one does not converge (estimate-accept, proposal-win, the
+  // funnel, voice-relay confirm, re-service, and whatever ships next all
+  // create real bookings too). This sweep scans every open (warm/cold)
+  // consultation outcome within its 90-day attribution window and re-runs
+  // the SAME evidence check (findSaleEvidenceForConsultation) the hooks
+  // use, so any OTHER insert path is reconciled within the hour regardless.
+  // Idempotent (the guarded UPDATE only ever touches a still-open row) and
+  // best-effort per row (one row's failure is logged and skipped, never
+  // aborts the rest of the sweep). Ungated — ordinarily-dark by construction
+  // rather than behind a GATE_*: a no-op beyond a handful of row-lock
+  // queries whenever there are no open outcomes to reconcile. See
+  // server/services/consultation-outcomes.js.
+  //
+  // Round 12 fix (codex P1 scheduler.js:6918, post-push): this registration
+  // MUST sit above the GATE_CRON_JOBS early return below — the comment
+  // above already said "ungated," but the registration itself was placed
+  // BELOW that return, so with cron jobs off (GATE_CRON_JOBS=false) this
+  // cron.schedule call was never reached at all: nothing reconciled
+  // bookings from any no-hook path (e.g. booking.js's public booking flow)
+  // while crons were off. Registered here, alongside settleDeadRunning and
+  // the cancel-notice boundary maintenance above — the established pattern
+  // in this function for "runs regardless of GATE_CRON_JOBS."
+  // =========================================================================
+  cron.schedule('27 * * * *', async () => {
+    try {
+      await runExclusive('consultation-outcome-reconcile', async () => {
+        const { reconcileOpenConsultationOutcomes } = require('./consultation-outcomes');
+        const result = await reconcileOpenConsultationOutcomes();
+        if (result.won > 0 || result.no_show_repaired > 0 || result.reopened > 0 || result.errors > 0) {
+          logger.info(`[consultation-outcome-reconcile] scanned=${result.scanned} won=${result.won} no_show_repaired=${result.no_show_repaired || 0} reopened=${result.reopened || 0} errors=${result.errors}`);
+        }
+        // Codex #4710 r15 P2 :733: errors > 0 must FAIL job health, same
+        // guard the auto-dispatch cron above uses — reconcileOpenConsultationOutcomes
+        // is best-effort per row (one row's failure never aborts the sweep),
+        // but a sweep that logged errors and still resolved read as a green
+        // consultation-outcome-reconcile in job_health, hiding a degraded
+        // pass (e.g. a systemic evidence-lookup failure) behind a "success".
+        if (result.errors > 0) {
+          throw new Error(`consultation-outcome reconcile sweep unhealthy: errors=${result.errors} scanned=${result.scanned}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Consultation-outcome reconcile tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.
   if (!isEnabled('cronJobs')) {
@@ -6674,6 +6726,49 @@ function initScheduledJobs() {
       logger.info(`[terminal-cleanup] ok — deleted ${deleted} expired handoff token(s) in ${Date.now() - started}ms`);
     } catch (err) {
       logger.error(`[terminal-cleanup] failed after ${Date.now() - started}ms: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 1:50AM — Recurring-series top-up sweep.
+  //
+  // The completion-time auto-extend (runRecurringSeriesMaintenance) only
+  // fires when a visit is COMPLETED and only ever adds ONE visit — a tech
+  // who leaves a visit on_site/unclosed stalls it, so an ongoing plan can run
+  // dry with nothing booked ahead (prod audit 2026-09-24: 4 ongoing plans
+  // with nothing booked, 17 with one visit left). This sweep tops every
+  // eligible ongoing plan up to RECURRING_TOPUP_HORIZON_DAYS (default 365)
+  // by looping the SAME extend step the completion path uses — see
+  // services/recurring-series-topup.js and routes/admin-schedule.js's
+  // topUpRecurringSeries / extendSeriesOnceLocked. No customer
+  // communication beyond the ordinary 72h/24h reminder registration every
+  // spawned visit already gets.
+  //
+  // GATE_RECURRING_SERIES_TOPUP ships DARK (off unless exactly 'true'): off,
+  // this still runs a SHADOW pass (dryRun — the real eligibility + extend
+  // loop inside a transaction it rolls back) and logs only the count it
+  // would have inserted. runExclusive: a deploy overlap must not double-
+  // insert the same top-up pass.
+  // =========================================================================
+  cron.schedule('50 1 * * *', async () => {
+    try {
+      await runExclusive('recurring-series-topup', async () => {
+        const { recurringSeriesTopUpLive } = require('../config/feature-gates');
+        const { runRecurringSeriesTopUpSweep } = require('./recurring-series-topup');
+        const summary = await runRecurringSeriesTopUpSweep({ dryRun: !recurringSeriesTopUpLive() });
+        // Per-series isolation stays intact (each failure was already
+        // caught and tallied inside the sweep, so one bad series never
+        // stopped another) — but a summary with errors must not read as a
+        // clean run to job_health: throw an aggregate here so runExclusive
+        // records this tick as failed (Codex GitHub r2 P2) and the existing
+        // job-health/regression surfaces pick it up like any other failed
+        // cron.
+        if (summary.errors.length) {
+          throw new Error(`recurring-series-topup: ${summary.errors.length}/${summary.scanned} series failed — first: ${summary.errors[0].parentId}: ${summary.errors[0].error}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Recurring-series top-up sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
