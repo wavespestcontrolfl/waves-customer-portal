@@ -70,8 +70,8 @@ async function insertThread({
   return conversationId;
 }
 
-async function getLog() {
-  const response = await fetch(`${baseUrl}/communications/log`, {
+async function getLog(query = '') {
+  const response = await fetch(`${baseUrl}/communications/log${query}`, {
     headers: { Authorization: 'Bearer qa' },
   });
   return { status: response.status, body: await response.json() };
@@ -92,10 +92,12 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
         media jsonb DEFAULT '[]', author_type text, delivery_status text, message_type text, is_read boolean, read_at timestamptz,
         metadata jsonb DEFAULT '{}', twilio_sid text, created_at timestamptz DEFAULT now());
       CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), twilio_sid text, direction text,
-        message_type text, status text, metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
+        message_type text, status text, customer_id uuid, from_phone text, to_phone text,
+        metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
       CREATE TEMP TABLE messaging_audit_log (id bigserial PRIMARY KEY, provider_message_id text, channel text,
         metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
       CREATE TEMP TABLE message_drafts (id uuid PRIMARY KEY, intent text, sms_log_id uuid);
+      CREATE TEMP TABLE blocked_numbers (id uuid PRIMARY KEY, number text);
     `);
   });
   afterAll(async () => {
@@ -103,7 +105,54 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     await mockPg?.rollback(); await database?.destroy();
   });
   beforeEach(async () => {
-    await mockPg.raw('TRUNCATE customers, conversations, messages, sms_log, messaging_audit_log, message_drafts');
+    await mockPg.raw('TRUNCATE customers, conversations, messages, sms_log, messaging_audit_log, message_drafts, blocked_numbers');
+  });
+
+  test('pending search returns the matching peer history with the unanswered row first', async () => {
+    const conversationId = await insertThread({ contactPhone: '+19415559870', body: 'Can you confirm the visit?' });
+    const pending = await mockPg('messages').where({ conversation_id: conversationId }).first();
+    await mockPg('messages').insert({
+      id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'outbound',
+      body: 'Earlier estimate details', message_type: 'reminder', delivery_status: 'sent',
+      created_at: new Date(new Date(pending.created_at).getTime() - 1000),
+    });
+    await insertThread({ contactPhone: '+19415559871', body: 'A different pending question?' });
+    const first = await getLog('?needsResponse=true&search=estimate&limit=1');
+    expect(first.status).toBe(200);
+    expect(first.body.messages.map(row => row.id)).toEqual([pending.id]);
+    expect(first.body.hasMore).toBe(true);
+    const second = await getLog('?needsResponse=true&search=estimate&limit=1&page=2');
+    expect(second.status).toBe(200);
+    expect(second.body.messages.map(row => row.body)).toEqual(['Earlier estimate details']);
+    expect(second.body.hasMore).toBe(false);
+
+    await mockPg('messages').where({ id: pending.id }).update({ is_read: true });
+    expect((await getLog('?needsResponse=true&search=estimate')).body.messages).toHaveLength(2);
+    await mockPg('messages').insert({
+      id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'outbound',
+      body: 'Confirmed.', message_type: 'manual', delivery_status: 'sent',
+      created_at: new Date(new Date(pending.created_at).getTime() + 1000),
+    });
+    expect((await getLog('?needsResponse=true&search=estimate')).body.messages).toEqual([]);
+  });
+
+  test('pending search supports multiple matching rows across multiple peers', async () => {
+    await insertThread({ contactPhone: '+19415559870', body: 'Can you confirm the estimate?' });
+    await insertThread({ contactPhone: '+19415559871', body: 'Can you revise the estimate?' });
+    const result = await getLog('?needsResponse=true&search=estimate');
+    expect(result.status).toBe(200);
+    expect(result.body.messages).toHaveLength(2);
+  });
+
+  test('pending search does not match recruiting-only history hidden from the reader', async () => {
+    const conversationId = await insertThread({ contactPhone: '+19415559870', body: 'Can you confirm the visit?' });
+    await mockPg('messages').insert({
+      id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'outbound',
+      body: 'Private interview link', message_type: 'job_invite', delivery_status: 'sent',
+    });
+    const result = await getLog('?needsResponse=true&search=interview');
+    expect(result.status).toBe(200);
+    expect(result.body.messages).toEqual([]);
   });
 
   test('an unlinked +44 sender sharing a US customer\'s last 10 digits resolves to NO customer', async () => {

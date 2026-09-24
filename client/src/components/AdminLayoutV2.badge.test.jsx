@@ -69,7 +69,7 @@ describe("AdminLayoutV2 Messages badge", () => {
   it("names the count for screen readers and keeps the inbox as the destination", async () => {
     unread.value = 5;
     mount();
-    const link = await screen.findByRole("link", { name: /Communications.*5 unread conversations/ });
+    const link = await screen.findByRole("link", { name: /Communications.*5 conversations needing a reply/ });
     expect(link).toHaveAttribute("href", "/admin/communications");
     expect(link).toHaveTextContent("5");
   });
@@ -77,7 +77,7 @@ describe("AdminLayoutV2 Messages badge", () => {
   it("caps a backlog at 99+", async () => {
     unread.value = 240;
     mount();
-    const link = await screen.findByRole("link", { name: /Communications.*240 unread conversations/ });
+    const link = await screen.findByRole("link", { name: /Communications.*240 conversations needing a reply/ });
     expect(link).toHaveTextContent("99+");
   });
 });

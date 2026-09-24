@@ -12,11 +12,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
-const {
-  draftIdSql,
-  draftReplyToMessageIdSql,
-  loadPriorOutboundBodies,
-} = require('../services/sms-response-policy');
+const { draftIdSql, draftReplyToMessageIdSql, loadPriorOutboundBodies, phoneIdentitySql } = require('../services/sms-response-policy');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -1667,7 +1663,10 @@ router.post('/call', async (req, res, next) => {
 // table since PR 2; sms_log still gets dual-written for legacy consumers).
 router.get('/log', async (req, res, next) => {
   try {
-    const { customerId, direction, messageType, page, limit, search } = req.query;
+    const { customerId, direction, messageType, page, limit, search, needsResponse } = req.query;
+    if (![undefined, 'true', 'false'].includes(needsResponse)) {
+      return res.status(400).json({ error: 'Invalid needs-response filter' });
+    }
     const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', messages.metadata->>'draft_id')");
     const responseReplyToMessageId = draftReplyToMessageIdSql('mdx.sms_log_id');
 
@@ -1710,8 +1709,7 @@ router.get('/log', async (req, res, next) => {
         'sms_audit.metadata as response_audit_metadata',
         'sms_answer.is_click_followup as response_is_click_followup',
         'sms_answer.reply_to_message_id as response_reply_to_message_id',
-      )
-      .orderBy('messages.created_at', 'desc');
+      );
 
     // Recruiting threads (applicant texts carry a bearer interview link) are
     // owner-only — see utils/recruiting-thread-scope.js.
@@ -1737,11 +1735,35 @@ router.get('/log', async (req, res, next) => {
     if (customerId) query = query.where('conversations.customer_id', customerId);
     if (direction) query = query.where('messages.direction', direction);
     if (messageType) query = query.where('messages.message_type', messageType);
+    if (needsResponse === 'true') {
+      const { countUnreadInboundSms } = require('../services/inbound-sms-read');
+      const pending = await countUnreadInboundSms({
+        excludePhones: ADMIN_PHONES,
+        customerId,
+        role: req.techRole,
+        includePending: true,
+      });
+      const pendingIds = pending.pendingMessageIds;
+      const visiblePeer = phoneIdentitySql("COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '')");
+      const candidatePeer = phoneIdentitySql("COALESCE(NULLIF(pending_conversation.contact_phone, ''), pending_customer.phone, '')");
+      // Candidate ids never leave the server. They select peer membership,
+      // then the ordinary route scopes still govern every history row.
+      query = query.whereRaw(`${visiblePeer} IN (
+        SELECT DISTINCT ${candidatePeer}
+        FROM messages pending_message
+        JOIN conversations pending_conversation ON pending_conversation.id = pending_message.conversation_id
+        LEFT JOIN customers pending_customer ON pending_customer.id = pending_conversation.customer_id
+        WHERE pending_message.id = ANY (?::uuid[])
+      )`, [pendingIds]);
+      // Put one exact pending row per endpoint ahead of its history so old
+      // work is immediately visible even when the peer has a long thread.
+      query = query.orderByRaw('CASE WHEN messages.id = ANY (?::uuid[]) THEN 0 ELSE 1 END', [pendingIds]);
+    }
 
     const searchTerm = typeof search === 'string' ? search.trim() : '';
     if (searchTerm) {
       const like = `%${searchTerm}%`;
-      query = query.where(b => b
+      const matchingMessages = (needsResponse === 'true' ? query.clone().clearSelect().clearOrder() : query).where(b => b
         .where('customers.first_name', 'ilike', like)
         .orWhere('customers.last_name', 'ilike', like)
         .orWhereRaw("(customers.first_name || ' ' || customers.last_name) ILIKE ?", [like])
@@ -1750,7 +1772,15 @@ router.get('/log', async (req, res, next) => {
         .orWhere('customers.phone', 'ilike', like)
         .orWhere('messages.body', 'ilike', like)
       );
+      if (needsResponse === 'true') {
+        const visiblePeer = phoneIdentitySql("COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '')");
+        // Reuse every visibility/filter constraint when selecting peers. Return
+        // their history, including pending rows whose body did not match search.
+        query = query.whereIn(db.raw(visiblePeer), matchingMessages.select(db.raw(visiblePeer)));
+      }
     }
+
+    query = query.orderBy('messages.created_at', 'desc').orderBy('messages.id', 'desc');
 
     const requestedPage = parsePositiveInt(page) || 1;
     const requestedLimit = parsePositiveInt(limit) || DEFAULT_SMS_LOG_LIMIT;
