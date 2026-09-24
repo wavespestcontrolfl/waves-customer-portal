@@ -310,6 +310,9 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
       return { id: runId, state: 'complete', results: results.length };
     }, { recordHealth: false });
     if (wasLockSkipped(outcome)) {
+      // Another invocation holds this job. A duplicate must not fail its
+      // durable row while the owning runner is still in flight.
+      if (outcome.reason === 'lease_held') return outcome;
       throw new Error(`gratitude_qualification_lock_${outcome.reason}`);
     }
     return outcome;
