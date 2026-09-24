@@ -320,14 +320,26 @@ Please search for current FL and federal tax changes, then provide your analysis
     try {
       // Same effective/expiry bound as TaxCalculator.calculateTax — a staged
       // future-dated rate must not show as current before its start date
-      // (audit r1-billing-1).
+      // (audit r1-billing-1). A superseded row that was staged rather than
+      // explicitly retired can still satisfy that bound once its successor's
+      // date arrives, so keep only the newest effective row per county —
+      // the same "orderBy effective_date desc, take one" selection
+      // calculateTax applies (codex P1: this previously returned both rows
+      // for a county whose staged rate had gone live).
       const nowET = etDateString();
-      return await db('tax_rates')
+      const rows = await db('tax_rates')
         .where('active', true)
         .andWhere('effective_date', '<=', nowET)
         .andWhere(function () {
           this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
-        });
+        })
+        .orderBy('effective_date', 'desc');
+      const seenCounties = new Set();
+      return rows.filter((row) => {
+        if (seenCounties.has(row.county)) return false;
+        seenCounties.add(row.county);
+        return true;
+      });
     } catch { return []; }
   }
 

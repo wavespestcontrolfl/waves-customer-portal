@@ -165,10 +165,22 @@ router.post('/rates', async (req, res, next) => {
     // effective_date <= today. Only a same-day-or-past post retires the
     // previous row immediately (audit r1-billing-1 — a future post used to
     // retire the current rate and activate the new one on insert).
-    const isImmediate = effectiveDate <= etDateString();
+    const nowET = etDateString();
+    const isImmediate = effectiveDate <= nowET;
     await db.transaction(async (trx) => {
       if (isImmediate) {
-        await trx('tax_rates').where({ county: countyKey, active: true }).update({ active: false, expiry_date: effectiveDate });
+        // Bounded the same way calculateTax reads "current": only the row
+        // presently in force is retired. Without this bound, a same-day
+        // correction posted while a LATER rate is already staged would
+        // deactivate that staged future row too (codex P0) — it must
+        // survive untouched until its own effective_date arrives.
+        await trx('tax_rates')
+          .where({ county: countyKey, active: true })
+          .andWhere('effective_date', '<=', nowET)
+          .andWhere(function () {
+            this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
+          })
+          .update({ active: false, expiry_date: effectiveDate });
       }
       await trx('tax_rates').insert({
         county: countyKey, state: 'FL', state_rate: parsedStateRate, county_surtax: parsedCountySurtax,
