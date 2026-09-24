@@ -238,6 +238,10 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
       expect.objectContaining({ customer_id: 'cust-b' }),
     ]));
     expect(result.message).toBe('Billing wound down for 2 customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.');
+    // Codex #4715 r2 P2: the card renders `warning` first and hides
+    // `message` on a partial update — the wind-down sentence must ride in
+    // `warning` too, not only in `message`.
+    expect(result.warning).toContain('Billing wound down for 2 customer(s)');
   });
 
   test('bulk_update_customers (per-row path, churn + address combined) reports billing_wound_down_count only for the row that committed', async () => {
@@ -264,6 +268,10 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
       expect.objectContaining({ customer_id: 'cust-b' }),
     ]));
     expect(result.message).toBe('Billing wound down for 1 customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.');
+    // Codex #4715 r2 P2: same as the fast CASE path — `warning` must carry
+    // the wind-down sentence too, since the card hides `message` when a
+    // `warning` is also present.
+    expect(result.warning).toContain('Billing wound down for 1 customer(s)');
   });
 });
 

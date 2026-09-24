@@ -1626,6 +1626,15 @@ async function bulkUpdateCustomers(customerIds, updates) {
     if (!count && skippedRows.length) {
       return { error: 'None of the approved customers could be updated (deleted/merged since the card was pending, or still billing/scheduled for a churn move) — nothing was updated.', skipped_customers: skippedRows };
     }
+    // Codex #4715 r1 P2: the completed card renders `message`. Codex #4715
+    // r2 P2: on a PARTIAL update the card renders `warning` FIRST and hides
+    // `message` entirely — so a wind-down sentence appended only to
+    // `message` would silently disappear whenever skipped rows are also
+    // present. Built once and appended to `warning` below (as well as kept
+    // in `message`) so the operator sees it either way.
+    const woundDownMessage = churnWoundDownCount
+      ? `Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`
+      : null;
     return {
       success: true,
       updated_count: count,
@@ -1637,15 +1646,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // a churn move) still billing/scheduled.
       ...(skippedRows.length ? {
         skipped_customers: skippedRows,
-        warning: `${skippedRows.length} approved customer(s) were NOT updated — see skipped_customers for why.`,
+        warning: `${skippedRows.length} approved customer(s) were NOT updated — see skipped_customers for why.${woundDownMessage ? ` ${woundDownMessage}` : ''}`,
       } : {}),
       // Churn billing disarm disclosure (GitHub Codex #4684 r4) — how many
       // of the approved rows actually went through churnGuardForRow's
       // wind-down (a blocked row lands in skipped_customers instead).
-      // `message` is what the completed card renders (Codex #4715 r1 P2).
-      ...(churnWoundDownCount ? {
+      ...(woundDownMessage ? {
         billing_wound_down_count: churnWoundDownCount,
-        message: `Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`,
+        message: woundDownMessage,
       } : {}),
     };
   }
@@ -1806,6 +1814,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
   logger.info(`[intelligence-bar] Bulk updated ${count} customers (address path):`, logUpdates);
   notifyBulkLaneStamps(perRowLaneStampIds);
 
+  // Codex #4715 r1 P2: the completed card renders `message`. Codex #4715 r2
+  // P2: on a PARTIAL update the card renders `warning` FIRST and hides
+  // `message` entirely — appended to `warning` below (as well as kept in
+  // `message`) so the operator sees it either way.
+  const woundDownMessage = churnWoundDownCount
+    ? `Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`
+    : null;
   return {
     success: true,
     updated_count: count,
@@ -1815,14 +1830,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
       errors,
       // The confirm card renders `warning` — a partial bulk update must never
       // read as a clean Done (W0B).
-      warning: `${errors.length} of ${count + errors.length} customers were NOT updated (${errors.length === 1 ? 'it' : 'they'} no longer resolved at commit); ${count} updated.`,
+      warning: `${errors.length} of ${count + errors.length} customers were NOT updated (${errors.length === 1 ? 'it' : 'they'} no longer resolved at commit); ${count} updated.${woundDownMessage ? ` ${woundDownMessage}` : ''}`,
     } : {}),
     // Churn billing disarm disclosure (GitHub Codex #4684 r4) — same
-    // contract as the fast CASE path above. `message` is what the completed
-    // card renders (Codex #4715 r1 P2).
-    ...(churnWoundDownCount ? {
+    // contract as the fast CASE path above.
+    ...(woundDownMessage ? {
       billing_wound_down_count: churnWoundDownCount,
-      message: `Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`,
+      message: woundDownMessage,
     } : {}),
   };
 }
