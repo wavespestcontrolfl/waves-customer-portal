@@ -138,7 +138,11 @@ describe('codex r43', () => {
 describe('codex r44', () => {
   test('the extension withholds notification unless every visible sibling took the claim', () => {
     const ext = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
-    expect(ext).toContain('if (Number(stamped) !== visibleSiblingIds.length) return false;');
+    // …by rolling the claim transaction back, never by committing partial stamps.
+    expect(ext).toContain("if (Number(stamped) !== visibleSiblingIds.length) {\n            throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });");
+    const adm = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    expect(adm).toContain("if (Number(stamped) !== siblingIds.length) {\n            throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });");
+    expect(adm).toContain("if (claimErr?.code === 'SIBLING_CLAIM_UNAVAILABLE') return 'sibling_claim_unavailable';");
   });
   test('never-published expired siblings are outside both link-visible selectors', () => {
     const adm = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');

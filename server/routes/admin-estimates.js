@@ -2666,7 +2666,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         // sibling already under another send's fresh claim keeps that one.
         const siblingIds = linkVisibleGroupIds.filter((id) => String(id) !== String(estimate.id));
         if (siblingIds.length) {
-          await trx('estimates')
+          const stamped = await trx('estimates')
             .whereIn('id', siblingIds)
             .whereNull('archived_at')
             .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
@@ -2677,9 +2677,20 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               ),
               updated_at: trx.fn.now(),
             });
+          // EVERY link-visible sibling must carry this token (pre-push audit
+          // P1 after r44): a sibling under another sender's live claim could
+          // be released and quarantined before the provider handoff. The
+          // throw rolls this claim transaction back (no orphaned stamps);
+          // the send releases to send_failed below.
+          if (Number(stamped) !== siblingIds.length) {
+            throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });
+          }
         }
       }
       return null;
+    }).catch((claimErr) => {
+      if (claimErr?.code === 'SIBLING_CLAIM_UNAVAILABLE') return 'sibling_claim_unavailable';
+      throw claimErr;
     });
     if (invalidatedNow) {
       if (invalidatedNow === 'saved_offer_changed') {
@@ -2690,7 +2701,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         .update({ status: 'send_failed', last_send_error: invalidatedNow, updated_at: db.fn.now() });
       const err = new Error(invalidatedNow === 'reprice_pending'
         ? "This estimate is being re-priced from the customer's bedroom answer — the replacement draft is on its way. Nothing was sent."
-        : 'This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
+        : invalidatedNow === 'sibling_claim_unavailable'
+          ? 'Another send of this group is still delivering — retry in a few minutes. Nothing was sent.'
+          : 'This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
       err.statusCode = 409;
       throw err;
     }

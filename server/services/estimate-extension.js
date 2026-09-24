@@ -539,11 +539,19 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           // predicate, and once that owner releases it a lookup could
           // quarantine it before the provider call — so the notification
           // is withheld rather than sent for an incomplete link.
-          if (Number(stamped) !== visibleSiblingIds.length) return false;
+          // …by ROLLING BACK this claim transaction (pre-push audit P1
+          // after r44): a plain false would commit the anchor's and the
+          // other siblings' stamps as orphaned claims that block edits and
+          // make withdrawals answer 503 for the claim's TTL.
+          if (Number(stamped) !== visibleSiblingIds.length) {
+            throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });
+          }
         }
         return true;
       });
     } catch (err) {
+      // The throw above (and any db error) rolled the whole claim back —
+      // nothing is left stamped, so no release is owed.
       logger.warn(`[estimate-extension] delivery claim not taken for estimate ${estimate.id} — notifications withheld: ${err.code || err.name || 'db_error'}`);
       claimHeld = false;
     }
