@@ -24,6 +24,7 @@ import { isAcceptedSms } from "../../../utils/sms-delivery";
 import { adminFetch } from "../../../utils/admin-fetch";
 import { notifyUnreadChanged } from "../../../hooks/useUnreadConversations";
 import { getAdminUser } from "../../../lib/adminAuth";
+import { combineAppendedDraft, consultationLineOf } from "../../../lib/composerLinks";
 import AuthenticatedCallAudio from "../AuthenticatedCallAudio";
 import { deliveryLabel, formatDuration } from "./activity";
 import { etDateString, formatETDate, formatETTime } from "../../../lib/timezone";
@@ -152,33 +153,11 @@ function MessageBubble({ m }) {
   );
 }
 
-// The first http(s) URL a text contains, and the host it points at (scheme
-// + path ignored) — used to recognize "this line is a previously-inserted
-// bearer link" the same way CommunicationsPageV2.jsx's stripLinkLines does,
-// generalized to "same short-link host" rather than "the exact same URL":
-// each consultation mint is a FRESH short code (a new 14-day token), so a
-// second insert never matches the first insert's literal URL the way a
-// static link would.
-//
-// Scheme-free links count too (Codex #4709 P1): the SMS template renderer
-// strips https://, so the real consultation line reads "wavespest.co/l/abc".
-// A scheme-free match needs a dotted host AND a path, so ordinary prose
-// ("it's Waves.") never reads as a URL.
-// No regex lookbehind (Codex #4709 r5 P2): Safari/WKWebView before 16.4
-// cannot parse it, and this panel runs on phones. The boundary is a
-// captured leading start-of-text or separator instead.
-function firstUrlIn(text) {
-  const str = String(text || "");
-  const withScheme = str.match(/https?:\/\/\S+/i);
-  if (withScheme) return withScheme[0];
-  const bare = str.match(/(^|[\s(<"'])((?:[a-z0-9-]+\.)+[a-z]{2,}\/\S+)/i);
-  return bare ? bare[2] : null;
-}
-function urlHost(url) {
-  if (!url) return null;
-  const withScheme = /^https?:\/\//i.test(url) ? url : `https://${url}`;
-  try { return new URL(withScheme).host.toLowerCase(); } catch { return null; }
-}
+// firstUrlIn / urlHost / consultationLineOf / combineAppendedDraft live in
+// ../../../lib/composerLinks — shared with CommunicationsPageV2.jsx's own
+// consultation re-insert handling (Codex #4709 P2). See that module for
+// the reasoning (scheme-free links, no regex lookbehind for old Safari,
+// the remembered-line/URL/wording+host fallback chain, footer dedup).
 
 // initialDraft only SEEDS an empty draft — an existing per-identity draft
 // (sessionStorage) wins over it, same as opening the panel fresh. A caller
@@ -203,66 +182,6 @@ function urlHost(url) {
 // remembered yet (a fresh session, or storage unavailable) — narrower than
 // "same host alone" so an unrelated short link still survives on a first
 // insert.
-const CONSULTATION_WORDING_RE = /consultation/i;
-// The single line inside a consultation appendDraft that carries its URL —
-// what's remembered (by the caller, alongside the draft write) and what
-// combineAppendedDraft below matches on the NEXT insert. Pure: reads
-// nothing, has no side effect, so calling it twice (as the mount race
-// below does) is harmless.
-function consultationLineOf(addition) {
-  const text = String(addition || "");
-  const host = urlHost(firstUrlIn(text));
-  if (!host) return null;
-  const lines = text.split("\n");
-  return lines.find((line) => urlHost(firstUrlIn(line)) === host) || lines[0];
-}
-// combineAppendedDraft is PURE — no storage reads or writes. `remembered`
-// (the previously inserted consultation line) is read by the CALLER before
-// any state update (Codex #4709 P1): React StrictMode runs a setState
-// updater twice with the same previous draft, so an updater that read the
-// remembered line and then overwrote it would see the NEW line on its
-// second run and fail to strip the old link. The caller persists the draft
-// and the new remembered line outside the updater.
-function combineAppendedDraft(existing, addition, remembered) {
-  if (!addition) return existing;
-  const base = String(existing || "");
-  const newHost = urlHost(firstUrlIn(addition));
-  if (newHost) {
-    // The remembered line is trusted only while it is still in the draft
-    // verbatim (Codex #4709 r5 P2): an operator edit to that line leaves the
-    // memory stale, and exact matching would then keep the old invite. Fall
-    // back to the wording + host heuristic in that case.
-    const rememberedPresent = remembered && base.split("\n").includes(remembered);
-    // An EDITED remembered line is still found by its own link (Codex #4709
-    // r10 P2) — the URL the operator did not change — so rewording the
-    // invite ("inspection" for "consultation") never leaves the old bearer
-    // behind. The wording + host heuristic is only for when nothing is
-    // remembered at all.
-    // ...and when the remembered URL itself was edited away (Codex #4709 r14
-    // P2), the wording + host heuristic takes over.
-    const rememberedUrl = remembered ? firstUrlIn(remembered) : null;
-    const baseLines = base.split("\n");
-    const rememberedUrlPresent = Boolean(rememberedUrl) && baseLines.some((line) => line.includes(rememberedUrl));
-    const isPriorClauseLine = (line) => {
-      if (rememberedPresent) return line === remembered;
-      if (rememberedUrlPresent) return line.includes(rememberedUrl);
-      return urlHost(firstUrlIn(line)) === newHost && CONSULTATION_WORDING_RE.test(line);
-    };
-    // The replaced invite's own footer (the STOP line) goes with it, so the
-    // new one is never doubled.
-    const replacing = baseLines.some(isPriorClauseLine);
-    const additionFooters = new Set(addition.split("\n").map((line) => line.trim()).filter((line) => line && !firstUrlIn(line)));
-    const withoutPriorClause = baseLines
-      .filter((line) => !isPriorClauseLine(line) && !(replacing && additionFooters.has(line.trim())))
-      .join("\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-    return withoutPriorClause ? `${withoutPriorClause}\n\n${addition}` : addition;
-  }
-  const trimmedBase = base.replace(/\s+$/, "");
-  return trimmedBase ? `${trimmedBase}\n\n${addition}` : addition;
-}
-
 export default function CustomerSmsPanel({ customer, open, onClose, onSent, leadId, initialDraft = "", appendDraft = "" }) {
   const isMobile = useIsMobile();
   const customerId = customer?.id ? String(customer.id) : null;

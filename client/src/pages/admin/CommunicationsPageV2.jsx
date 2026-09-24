@@ -62,7 +62,7 @@ import React, {
   useRef,
 } from "react";
 import useLinkLibrary from "../../hooks/useLinkLibrary";
-import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause } from "../../lib/composerLinks";
+import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause, combineAppendedDraft, consultationLineOf } from "../../lib/composerLinks";
 import {
   Bell,
   Bot,
@@ -1146,6 +1146,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
   // strip contract as insertedResched/insertedReservice above.
   const [insertingCustomerLink, setInsertingCustomerLink] = useState(null);
+  // The last "Free consultation" clause inserted into THIS draft — kept
+  // separately from insertedCustomerLinks so an operator's edit to the
+  // inserted link (which makes that kind's tracked url unrecognizable)
+  // doesn't lose the memory a repeat insert needs to find and replace it.
+  // { line, recipientKey, customerId } | null. See insertCustomerLinkLine.
+  const consultationLineRef = useRef(null);
 
   // Filters
   const [dirFilter, setDirFilter] = useState("all");
@@ -2318,16 +2324,46 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // canceled — reuse means the fresh insert hands back the same shared row
   // anyway. A standalone line (Auto Pay: the reviewed SMS template, already
   // greeted) goes in as-is; the generic prefill wraps the others.
+  //
+  // Consultation is a special case (Codex #4709 P2): its short link mints a
+  // FRESH short code on every insert (a new 14-day token), so prevUrl above
+  // never matches a repeat insert's literal URL the way a static link does
+  // — and an operator edit to even one character of the inserted URL makes
+  // that insert's OWN url unrecognizable too, so the recipient-change
+  // effect below silently forgets the tracked entry and a re-insert then
+  // has nothing to strip: the edited dead link stays AND a second full
+  // invitation (with its own STOP disclosure) gets appended. Reuses
+  // CustomerSmsPanel's already-reviewed merge (composerLinks.js): exact
+  // remembered line → remembered line's URL still present → wording+host
+  // heuristic, with the replaced invite's own footer lines dropped so
+  // they're never doubled. consultationLineRef survives independently of
+  // insertedCustomerLinks so an edit that makes bodyHasLink(url) false
+  // doesn't lose the memory needed to find and replace it.
   const insertCustomerLinkLine = ({ kind, channel, d, requestRecipientKey, linkCustomerId }) => {
     const clause = String(d.line || "").trim() || `${d.url}`;
     const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
-    const prevUrl = insertedCustomerLinks[kind]?.url || null;
-    setMsgBody((b) => {
-      const base = prevUrl ? stripLinkLines(b, prevUrl) : b;
-      return base.trim()
-        ? `${base.replace(/\s+$/, "")}\n\n${clause}`
-        : prefill || clause;
-    });
+    if (kind === "consultation") {
+      const addition = prefill || clause;
+      const remembered = consultationLineRef.current
+        && consultationLineRef.current.recipientKey === requestRecipientKey
+        && consultationLineRef.current.customerId === (linkCustomerId || null)
+        ? consultationLineRef.current.line
+        : null;
+      setMsgBody((b) => combineAppendedDraft(b, addition, remembered));
+      consultationLineRef.current = {
+        line: consultationLineOf(addition),
+        recipientKey: requestRecipientKey,
+        customerId: linkCustomerId || null,
+      };
+    } else {
+      const prevUrl = insertedCustomerLinks[kind]?.url || null;
+      setMsgBody((b) => {
+        const base = prevUrl ? stripLinkLines(b, prevUrl) : b;
+        return base.trim()
+          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+          : prefill || clause;
+      });
+    }
     setInsertedCustomerLinks((m) => ({
       ...m,
       [kind]: {
