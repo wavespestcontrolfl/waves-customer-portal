@@ -9,9 +9,6 @@ Existing content safety, privacy, schema, topic, image, and SEO gates still run.
 - Managed writers submit section questions and direct answers through
   `validate_answer_plan` before `emit_draft`. Three unsuccessful plan checks
   exhaust the session's plan budget.
-- The plan hook applies to every managed `refresh` brief while enabled,
-  including non-blog refreshes; they incur the same plan/retry budget. Signed
-  evidence enforcement remains limited to Astro blog paths in this rollout.
 - Draft review checks answer-first sections, independently inventoried claims,
   standalone passages, title fulfillment, and specific, useful writing. Every
   check must complete explicitly; errors are not passes.
