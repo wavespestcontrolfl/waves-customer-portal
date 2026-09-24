@@ -31,6 +31,15 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   coveredTermsAsOf: jest.fn(),
   annualPrepayCoversVisit: jest.fn(),
 }));
+jest.mock('../services/scheduling/occupancy', () => ({
+  // acquireOccupancyLock/acquireOccupancyLocks are real (pure lock-key
+  // helpers other writers use, untouched by topUp) — only the DB-backed
+  // conflict probe is mocked, so a test can inspect exactly which window it
+  // was asked to check without needing the fake connection to model
+  // findConflictingVisits' own SQL shape.
+  ...jest.requireActual('../services/scheduling/occupancy'),
+  findConflictingVisits: jest.fn(),
+}));
 
 const adminScheduleRouter = require('../routes/admin-schedule');
 const {
@@ -38,7 +47,11 @@ const {
 } = adminScheduleRouter._test;
 const AppointmentReminders = require('../services/appointment-reminders');
 const { coveredTermsAsOf, annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
-beforeEach(() => { annualPrepayCoversVisit.mockReset().mockResolvedValue(true); });
+const { findConflictingVisits } = require('../services/scheduling/occupancy');
+beforeEach(() => {
+  annualPrepayCoversVisit.mockReset().mockResolvedValue(true);
+  findConflictingVisits.mockReset().mockResolvedValue([]);
+});
 const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -364,6 +377,26 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
     for (const row of inserted) {
       expect(row.window_start).toBe('09:00');
       expect(row.window_end).toBe('10:00');
+    }
+  });
+
+  test('the occupancy clash probe checks the SAME normalized window the insert uses, not the original off-hour one (Codex GitHub r2 P1)', async () => {
+    // A 09:30-10:30 template probed with its own (unnormalized) window
+    // could pass beside an existing 08:00-09:30 visit, then insert at the
+    // floored 09:00-10:00 — which DOES overlap that same visit. The probe
+    // must be asked about the window that actually gets written.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '09:30', window_end: '10:30',
+        estimated_duration_minutes: 60,
+      },
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(findConflictingVisits).toHaveBeenCalled();
+    for (const call of findConflictingVisits.mock.calls) {
+      expect(call[0].windowStart).toBe('09:00');
+      expect(call[0].windowEnd).toBe('10:00');
     }
   });
 

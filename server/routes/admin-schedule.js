@@ -14796,6 +14796,39 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
     const skipParent = skipParentStamp || await customerPrefersNoWeekends(conn, parent.customer_id);
     const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
+    // opts.normalizeOffHourStart (topUp only — never set by the completion
+    // path, so its own behavior, including any legacy off-hour template, is
+    // unchanged): a legacy 09:15/09:30 template otherwise gets copied onto
+    // every one of up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN unattended
+    // inserts, minting a stack of rows assertAdminAppointmentWindow would
+    // reject outright on any admin-facing write (AGENTS.md: appointment
+    // windows start on the hour). Floors an ACTUAL off-hour start to the
+    // hour and recomputes the end from the row's own duration — never
+    // invents an hour for a windowless template (parent.window_start falsy
+    // passes through unchanged, same placeholder behavior as today).
+    // Computed HERE, before the candidate search, and used for BOTH the
+    // occupancy clash probe below and the eventual insert — probing with
+    // the original off-hour window while inserting the floored one let a
+    // real conflict slip past the probe (Codex GitHub r2 P1).
+    let nextWindowStart = parent.window_start;
+    let nextWindowEnd = parent.window_end;
+    if (opts.normalizeOffHourStart && nextWindowStart) {
+      const startMin = parseHHMM(nextWindowStart);
+      if (startMin != null && startMin % 60 !== 0) {
+        const flooredMin = startMin - (startMin % 60);
+        const durationMin = Number.parseInt(parent.estimated_duration_minutes, 10);
+        nextWindowStart = minutesToHHMM(flooredMin);
+        nextWindowEnd = minutesToHHMM(flooredMin + (Number.isInteger(durationMin) && durationMin > 0 ? durationMin : 60));
+        logger.warn(`[recurring-topup] parent=${parentId} window_start ${parent.window_start} is off-hour — flooring to ${nextWindowStart} for this top-up insert`);
+      }
+    }
+    // The clash probe must see the SAME window the insert will actually
+    // use — a plain `parent` reference when nothing changed (identical
+    // object, no extra allocation on the completion path or an on-the-hour
+    // top-up template).
+    const clashProbeTemplate = (nextWindowStart === parent.window_start && nextWindowEnd === parent.window_end)
+      ? parent
+      : { ...parent, window_start: nextWindowStart, window_end: nextWindowEnd };
     // Pre-load every active date on this series so the auto-extend
     // insert dedupes against future booster rows — shared preload
     // (booster double-book rationale on the helper).
@@ -14834,7 +14867,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // another visit already occupies (the series dedupe above only
       // covers THIS series) — probe global occupancy before accepting,
       // skipping clashing dates to the next cadence step.
-      if (await seriesCandidateDateClashes(conn, parent, candidate)) { attempt++; continue; }
+      if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) { attempt++; continue; }
       nextStr = candidate;
       break;
     }
@@ -14857,29 +14890,6 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     } else if (!stillOngoing) {
       logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
     } else {
-      // opts.normalizeOffHourStart (topUp only — never set by the
-      // completion path, so its own behavior, including any legacy
-      // off-hour template, is unchanged): a legacy 09:15/09:30 template
-      // otherwise gets copied onto every one of up to
-      // TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN unattended inserts, minting a
-      // stack of rows assertAdminAppointmentWindow would reject outright on
-      // any admin-facing write (AGENTS.md: appointment windows start on the
-      // hour). Floors an ACTUAL off-hour start to the hour and recomputes
-      // the end from the row's own duration — never invents an hour for a
-      // windowless template (parent.window_start falsy passes through
-      // unchanged, same placeholder behavior as today).
-      let nextWindowStart = parent.window_start;
-      let nextWindowEnd = parent.window_end;
-      if (opts.normalizeOffHourStart && nextWindowStart) {
-        const startMin = parseHHMM(nextWindowStart);
-        if (startMin != null && startMin % 60 !== 0) {
-          const flooredMin = startMin - (startMin % 60);
-          const durationMin = Number.parseInt(parent.estimated_duration_minutes, 10);
-          nextWindowStart = minutesToHHMM(flooredMin);
-          nextWindowEnd = minutesToHHMM(flooredMin + (Number.isInteger(durationMin) && durationMin > 0 ? durationMin : 60));
-          logger.warn(`[recurring-topup] parent=${parentId} window_start ${parent.window_start} is off-hour — flooring to ${nextWindowStart} for this top-up insert`);
-        }
-      }
       const childIdentity = await resolveSeriesChildIdentity(conn, parent);
       const nextData = {
         customer_id: parent.customer_id,
