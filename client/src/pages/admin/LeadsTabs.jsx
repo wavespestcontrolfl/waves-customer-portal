@@ -35,11 +35,11 @@ import {
 } from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
-const CONTACT_EVIDENCE_LABELS = {
-  live_conversation: "Contacted after a live conversation",
-  assessment_booked: "Contacted after an assessment was booked",
-  assessment_completed: "Contacted after an assessment was completed",
-};
+const CONTACT_EVIDENCE_LABELS = new Map([
+  ["live_conversation", "Contacted after a live conversation"],
+  ["assessment_booked", "Contacted after an assessment was booked"],
+  ["assessment_completed", "Contacted after an assessment was completed"],
+]);
 
 function contactEvidenceDetails(activity) {
   if (activity?.activity_type !== "status_change" || !activity.metadata)
@@ -55,7 +55,7 @@ function contactEvidenceDetails(activity) {
     return null;
   }
 
-  const label = CONTACT_EVIDENCE_LABELS[metadata?.evidenceType];
+  const label = CONTACT_EVIDENCE_LABELS.get(metadata?.evidenceType);
   if (!label) return null;
 
   const evidenceId = String(metadata?.evidenceId || "").trim();

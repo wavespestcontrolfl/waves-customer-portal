@@ -157,6 +157,7 @@ describe('Pipeline queue navigation', () => {
       { id: 'activity-live', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'AI Call Processor', created_at: '2040-09-05T17:00:00Z', metadata: JSON.stringify({ evidenceType: 'live_conversation', evidenceId: 'call-evidence-1234567890' }) },
       { id: 'activity-booked', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'Fixture operator', created_at: '2040-09-05T18:00:00Z', metadata: { evidenceType: 'assessment_booked', evidenceId: 'booking_fixture_2' } },
       { id: 'activity-completed', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'system', created_at: '2040-09-05T19:00:00Z', metadata: JSON.stringify({ evidenceType: 'assessment_completed', evidenceId: '<unsafe>' }) },
+      { id: 'activity-unsupported', activity_type: 'status_change', description: 'Unsupported automation remains visible', performed_by: 'system', created_at: '2040-09-05T20:00:00Z', metadata: JSON.stringify({ evidenceType: '__proto__', evidenceId: 'unsupported-fixture' }) },
     ];
     fetch.mockImplementation(async (url, opts) => String(url).endsWith('/admin/leads/lead-qa')
       ? { ok: true, json: async () => ({ lead, activities, calls: [] }) }
@@ -169,6 +170,7 @@ describe('Pipeline queue navigation', () => {
     expect(screen.getByText(/Evidence reference call-evi.*7890/)).toBeInTheDocument();
     expect(screen.queryByText(/unsafe/)).not.toBeInTheDocument();
     expect(screen.getByText(/AI Call Processor/)).toBeInTheDocument();
+    expect(screen.getByText('Unsupported automation remains visible')).toBeInTheDocument();
   });
   it('keeps automated contact evidence hidden by default', async () => {
     const base = fetch.getMockImplementation();
