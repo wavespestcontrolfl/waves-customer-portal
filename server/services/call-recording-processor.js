@@ -1182,10 +1182,6 @@ function summarizeKnownCaller(customer) {
   const stage = String(customer.pipeline_stage || '').trim().toLowerCase();
   const isExistingCustomer = FAIL_OPEN_CUSTOMER_STAGES.has(stage);
   const hasAddress = !!String(customer.address_line1 || '').trim();
-  const hasValidatedAddress = hasAddress
-    && !!String(customer.zip || '').trim()
-    && Number.isFinite(Number(customer.latitude)) && Number.isFinite(Number(customer.longitude))
-    && customer.latitude !== null && customer.longitude !== null;
   return {
     name: name || null,
     // The matched row's identity — carried alongside the on-file address so a
@@ -1203,16 +1199,14 @@ function summarizeKnownCaller(customer) {
     // churned accounts likewise fall back to normal review.
     isExistingCustomer,
     hasAddress,
-    // Owner ruling 2026-09-24: a NEW LEAD whose on-file address was already
-    // validated — geocoded (lat/lng present) with a street and ZIP, i.e. a
-    // web quote form or an earlier call that passed address validation — is
-    // trusted for the on-file address rule the same way an active customer
-    // is. Six of the nine address blocks filed on linked customers in the
-    // week to 2026-09-23 were exactly this: a form lead calling back and not
-    // reciting the address already on file. Other open-lead stages and every
-    // terminal stage stay untrusted.
-    hasValidatedAddress,
-    addressTrusted: isExistingCustomer || (stage === 'new_lead' && hasValidatedAddress),
+    pipelineStage: stage || null,
+    // Whether the on-file address may satisfy the address flags without
+    // being restated. Established customers: yes. A new_lead earns it only
+    // through trustValidatedNewLeadAddress (a server-side validation of the
+    // on-file address at call time — owner ruling 2026-09-24), which also
+    // marks the trust addressOnly so it never lifts the confidence checks.
+    addressTrusted: isExistingCustomer,
+    addressOnly: false,
     // The on-file address components, for the fail-open V1 conflict check: a
     // legacy V1 address that conflicts with them (different street, unit,
     // city, or ZIP) is a NEW address that must hold for review, never
@@ -1227,14 +1221,52 @@ function summarizeKnownCaller(customer) {
   };
 }
 
+// Owner ruling 2026-09-24: a NEW LEAD who already has an address on file (a
+// web quote form, an earlier call) is trusted for the on-file address rule
+// the same way an active customer is — six of the nine address blocks filed
+// on linked customers in the week to 2026-09-23 were a form lead calling
+// back and not reciting the address they had typed. Stored columns prove
+// nothing by themselves (/public-quote persists client-supplied lat/lng
+// unbound to the address — codex #4685 r1 P1), so the on-file street + ZIP
+// is validated server-side HERE, at call time, and trusted only on a
+// validated_accept verdict inside the service area. The trust is
+// addressOnly: it satisfies the address flags and nothing else — the
+// low-confidence exemptions stay reserved for established customers
+// (codex #4685 r1 P1). Other open-lead stages and terminal stages never
+// qualify. Fail closed on any validator error or non-accept status.
+async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress } = {}) {
+  if (!knownCaller || knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
+  const line1 = String(knownCaller.addressLine1 || '').trim();
+  const zip = String(knownCaller.addressZip || '').trim();
+  if (!line1 || !zip) return knownCaller;
+  const lines = [line1];
+  if (knownCaller.addressLine2) lines.push(String(knownCaller.addressLine2).trim());
+  lines.push([knownCaller.addressCity, `${SERVICE_STATE} ${zip}`].filter(Boolean).join(', '));
+  let verdict = null;
+  try {
+    verdict = await validate({ addressLines: lines, administrativeArea: SERVICE_STATE });
+  } catch (err) {
+    logger.warn(`[call-proc] on-file address validation skipped for new lead ${knownCaller.id}: ${err.message}`);
+    return knownCaller;
+  }
+  const accepted = verdict?.status === 'validated_accept' && verdict?.inServiceArea === true;
+  knownCaller.onFileAddressValidation = verdict?.status || null;
+  if (!accepted) return knownCaller;
+  knownCaller.addressTrusted = true;
+  knownCaller.addressOnly = true;
+  return knownCaller;
+}
+
 // The fail-open routing input for a known caller: null unless their on-file
 // address is trusted (a customer we actively serve, or a new lead whose
-// address was already validated — see summarizeKnownCaller.addressTrusted),
-// else the on-file address components so the gate can tell a RESTATED
-// on-file address from a new one (statesNewAddress).
+// on-file address just validated — see trustValidatedNewLeadAddress), else
+// the on-file address components so the gate can tell a RESTATED on-file
+// address from a new one (statesNewAddress). addressOnly rides along so the
+// gate lifts address flags and nothing else for a new lead.
 function failOpenKnownCustomer(knownCaller) {
   if (!knownCaller || !knownCaller.addressTrusted) return null;
   return {
+    addressOnly: knownCaller.addressOnly === true,
     hasAddress: knownCaller.hasAddress,
     addressLine1: knownCaller.addressLine1 || null,
     addressLine2: knownCaller.addressLine2 || null,
@@ -7734,7 +7766,7 @@ const CallRecordingProcessor = {
           ? await db('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()
           : null)
         : await findCustomerForCallContact(contactPhone, {});
-      knownCaller = summarizeKnownCaller(knownCustomer);
+      knownCaller = await trustValidatedNewLeadAddress(summarizeKnownCaller(knownCustomer));
     } catch (e) {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
@@ -17561,6 +17593,7 @@ CallRecordingProcessor._test = {
   classifyCallerAccount,
   summarizeKnownCaller,
   failOpenKnownCustomer,
+  trustValidatedNewLeadAddress,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,
