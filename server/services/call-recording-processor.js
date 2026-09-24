@@ -1240,14 +1240,37 @@ function summarizeKnownCaller(customer) {
 // pass and the offline routing audits (buildFailOpenRoutingContext, which
 // replays the verdict production persisted on ai_validation) reach the same
 // knownCustomer from the same evidence (codex #4685 r2 P1).
+// The address components a verdict was judged on, so a replayed verdict
+// can be bound to the record it vouched for (codex #4685 r4 P2): a lead
+// whose saved address changed after the call must not inherit an old
+// validated_accept.
+function onFileAddressJudged(knownCaller, storedState) {
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  return {
+    line1: norm(knownCaller.addressLine1), line2: norm(knownCaller.addressLine2),
+    city: norm(knownCaller.addressCity), state: norm(storedState), zip: norm(knownCaller.addressZip),
+  };
+}
+function judgedAddressMatches(judged, knownCaller) {
+  if (!judged) return false;
+  const now = onFileAddressJudged(knownCaller, normalizeState(String(knownCaller.addressState || '').trim()) || SERVICE_STATE);
+  return ['line1', 'line2', 'city', 'zip'].every((k) => String(judged[k] || '') === now[k]);
+}
 function applyOnFileAddressVerdict(knownCaller, verdict) {
   if (!knownCaller) return knownCaller;
   const status = verdict?.status || null;
-  knownCaller.onFileAddressVerdict = status ? { status, inServiceArea: verdict?.inServiceArea ?? null } : null;
+  knownCaller.onFileAddressVerdict = status
+    ? { status, inServiceArea: verdict?.inServiceArea ?? null, ...(verdict?.address ? { address: verdict.address } : {}) }
+    : null;
   if (knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
   if (!(status === 'validated_accept' && verdict?.inServiceArea === true)) return knownCaller;
+  // A verdict carries the address it judged; the record must still match it.
+  if (!judgedAddressMatches(verdict.address, knownCaller)) return knownCaller;
   knownCaller.addressTrusted = true;
   knownCaller.addressOnly = true;
+  // The proof snapshot carries the state that was validated, never the
+  // spelled-out or blank stored value (codex #4685 r4 P2).
+  knownCaller.addressState = String(verdict.address.state || SERVICE_STATE).toUpperCase();
   return knownCaller;
 }
 
@@ -1276,17 +1299,19 @@ async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAd
   if (rawState && storedState !== SERVICE_STATE) {
     return applyOnFileAddressVerdict(knownCaller, { status: 'stored_state_outside_service_area', inServiceArea: false });
   }
+  const judgedState = storedState || SERVICE_STATE;
+  const address = onFileAddressJudged(knownCaller, judgedState);
   const lines = [line1];
   if (knownCaller.addressLine2) lines.push(String(knownCaller.addressLine2).trim());
-  lines.push([knownCaller.addressCity, `${storedState || SERVICE_STATE} ${zip}`].filter(Boolean).join(', '));
+  lines.push([knownCaller.addressCity, `${judgedState} ${zip}`].filter(Boolean).join(', '));
   let verdict = null;
   try {
     verdict = await validate({ addressLines: lines, administrativeArea: SERVICE_STATE });
   } catch (err) {
     logger.warn(`[call-proc] on-file address validation skipped for new lead ${knownCaller.id}: ${err.message}`);
-    return applyOnFileAddressVerdict(knownCaller, { status: 'validator_error', inServiceArea: null });
+    return applyOnFileAddressVerdict(knownCaller, { status: 'validator_error', inServiceArea: null, address });
   }
-  return applyOnFileAddressVerdict(knownCaller, verdict);
+  return applyOnFileAddressVerdict(knownCaller, { status: verdict?.status || null, inServiceArea: verdict?.inServiceArea ?? null, address });
 }
 
 // The fail-open routing input for a known caller: null unless their on-file

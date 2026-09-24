@@ -1018,7 +1018,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     const accept = jest.fn(async () => ({ status: 'validated_accept', inServiceArea: true }));
     const trusted = await trustValidatedNewLeadAddress(lead(), { validate: accept });
     expect(accept).toHaveBeenCalledWith({ addressLines: ['1234 Sample Palm Dr', 'Unit 2', 'Venice, FL 34292'], administrativeArea: 'FL' });
-    expect(trusted).toMatchObject({ addressTrusted: true, addressOnly: true, onFileAddressVerdict: { status: 'validated_accept', inServiceArea: true } });
+    expect(trusted).toMatchObject({ addressTrusted: true, addressOnly: true, addressState: 'FL', onFileAddressVerdict: { status: 'validated_accept', inServiceArea: true, address: { line1: '1234 sample palm dr', line2: 'unit 2', city: 'venice', state: 'fl', zip: '34292' } } });
     expect(failOpenKnownCustomer(trusted)).toEqual({ addressOnly: true, hasAddress: true, addressLine1: '1234 Sample Palm Dr', addressLine2: 'Unit 2', addressCity: 'Venice', addressZip: '34292' });
     // Judged once per pass: a second call does not re-validate.
     await trustValidatedNewLeadAddress(trusted, { validate: accept });
@@ -1038,7 +1038,9 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(outOfState).toMatchObject({ addressTrusted: false, onFileAddressVerdict: { status: 'stored_state_outside_service_area', inServiceArea: false } });
     // "Florida" spelled out is Florida (r3 P2); an unrecognisable state fails closed.
     const spelled = jest.fn(async () => ({ status: 'validated_accept', inServiceArea: true }));
-    expect((await trustValidatedNewLeadAddress(lead({ state: 'Florida' }), { validate: spelled })).addressTrusted).toBe(true);
+    const spelledOut = await trustValidatedNewLeadAddress(lead({ state: 'Florida' }), { validate: spelled });
+    expect(spelledOut).toMatchObject({ addressTrusted: true, addressState: 'FL' });   // the proof snapshot carries the validated state (r4 P2)
+    expect((await trustValidatedNewLeadAddress(lead({ state: null }), { validate: spelled })).addressState).toBe('FL');
     expect(spelled).toHaveBeenCalledWith({ addressLines: ['1234 Sample Palm Dr', 'Unit 2', 'Venice, FL 34292'], administrativeArea: 'FL' });
     const junk = jest.fn();
     expect((await trustValidatedNewLeadAddress(lead({ state: 'ZZ' }), { validate: junk })).onFileAddressVerdict.status).toBe('stored_state_outside_service_area');
@@ -1075,14 +1077,19 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(failOpenKnownCustomer(null)).toBeNull();
     // The offline audits mirror production from the persisted verdict, never a fresh lookup (r2 P1).
     const customer = { id: 'lead-1', first_name: 'Form', pipeline_stage: 'new_lead', address_line1: '1234 Sample Palm Dr', city: 'Venice', state: 'FL', zip: '34292' };
-    const live = buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: { status: 'validated_accept', inServiceArea: true } } }, customer, contactPhone: '+19415550100', failOpenEnabled: true });
+    const judged = { line1: '1234 sample palm dr', line2: '', city: 'venice', state: 'fl', zip: '34292' };
+    const verdict = { status: 'validated_accept', inServiceArea: true, address: judged };
+    const live = buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: verdict } }, customer, contactPhone: '+19415550100', failOpenEnabled: true });
     expect(live.options.knownCustomer).toMatchObject({ addressOnly: true, addressLine1: '1234 Sample Palm Dr' });
-    const stringified = buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: JSON.stringify({ on_file_address_validation: { status: 'validated_accept', inServiceArea: true } }) }, customer, contactPhone: '+19415550100', failOpenEnabled: true });
+    const stringified = buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: JSON.stringify({ on_file_address_validation: verdict }) }, customer, contactPhone: '+19415550100', failOpenEnabled: true });
     expect(stringified.options.knownCustomer?.addressOnly).toBe(true);
-    for (const av of [null, {}, { on_file_address_validation: null }, { on_file_address_validation: { status: 'missing_component', inServiceArea: true } }]) {
+    // A verdict vouches only for the address it judged: a lead whose saved address changed since is not trusted (r4 P2); a verdict with no address never is.
+    expect(buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: verdict } }, customer: { ...customer, address_line1: '99 Moved Ln' }, failOpenEnabled: true }).options.knownCustomer).toBeNull();
+    expect(buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: { status: 'validated_accept', inServiceArea: true } } }, customer, failOpenEnabled: true }).options.knownCustomer).toBeNull();
+    for (const av of [null, {}, { on_file_address_validation: null }, { on_file_address_validation: { status: 'missing_component', inServiceArea: true, address: judged } }]) {
       expect(buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: av }, customer, contactPhone: '+19415550100', failOpenEnabled: true }).options.knownCustomer).toBeNull();
     }
-    expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer, failOpenEnabled: true, onFileAddressVerdict: { status: 'validated_accept', inServiceArea: true } }).options.knownCustomer?.addressOnly).toBe(true);
+    expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer, failOpenEnabled: true, onFileAddressVerdict: verdict }).options.knownCustomer?.addressOnly).toBe(true);
     expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer: { ...customer, pipeline_stage: 'won' }, failOpenEnabled: true }).options.knownCustomer).toMatchObject({ addressOnly: false });
   });
 
