@@ -80,36 +80,27 @@ test('gate off is an exact canonical-send pass-through', async () => {
 
 test.each([
   ['blocks on', true, 'AUTO_REPLY_IN_FLIGHT'],
-  ['passes through without', false, null],
-])('gate off after activation %s an outstanding gratitude claim', async (_label, claimed, code) => {
+  ['reserves and sends without', false, null],
+])('gate off after activation %s an outstanding claim under the thread-lock reservation', async (_label, claimed, code) => {
+  // A retained uncertain claim, or an old instance still claiming during a
+  // rolling disable, is serialized by reserveHumanReply's lock — never a
+  // lockless snapshot.
   mockGate.activatedAt = new Date('2026-09-24T12:00:00Z');
-  const autoSend = require('../services/sms-auto-send');
-  const claim = jest.spyOn(autoSend, 'hasActiveAutoSendClaim').mockResolvedValue(claimed);
-  try {
-    const result = await sendManualCustomerSms(input());
-    expect(claim).toHaveBeenCalledWith(expect.any(Function), { threadLast10: '9415550100', customerId: 'customer-1' });
-    if (code) {
-      expect(result).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', code });
-      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-    } else {
-      expect(mockSendCustomerMessage).toHaveBeenCalledWith(input());
-    }
-    expect(mockReserveHumanReply).not.toHaveBeenCalled();
-  } finally {
-    claim.mockRestore();
-  }
-});
+  if (claimed) mockReserveHumanReply.mockResolvedValue({ ...reservation(), reservationId: null, autoSendInFlight: true });
 
-test('gate off after activation fails closed when the claim lookup errors', async () => {
-  mockGate.activatedAt = new Date('2026-09-24T12:00:00Z');
-  const autoSend = require('../services/sms-auto-send');
-  const claim = jest.spyOn(autoSend, 'hasActiveAutoSendClaim').mockRejectedValue(new Error('db down'));
-  try {
-    const result = await sendManualCustomerSms(input());
-    expect(result).toMatchObject({ sent: false, code: 'MANUAL_REPLY_RESERVATION_FAILED' });
+  const result = await sendManualCustomerSms(input());
+
+  expect(mockReserveHumanReply).toHaveBeenCalledWith(expect.objectContaining({
+    to: '+19415550100', customerId: 'customer-1', blockOnActiveManualReservation: true,
+  }));
+  if (code) {
+    expect(result).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', code });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-  } finally {
-    claim.mockRestore();
+  } else {
+    expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415550100',
+      providerHandoffReservation: expect.anything(),
+    }));
   }
 });
 

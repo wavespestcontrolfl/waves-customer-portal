@@ -510,6 +510,35 @@ test('a sweep-wide refusal stops the sweep after one attempt', async () => {
   expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
 
+test('one sweep hashes the pinned sources once and hands the digest to every candidate', async () => {
+  const qualification = require('../services/sms-gratitude-qualification');
+  const digest = jest.spyOn(qualification, 'sourceSha256').mockReturnValue('f'.repeat(64));
+  try {
+    mockState.candidateRows = [
+      sweepCandidate({ id: '10000000-0000-4000-8000-000000000001', sms_log_id: '20000000-0000-4000-8000-000000000001', draft_response: 'Not the approved reply' }),
+      sweepCandidate(),
+    ];
+    await autoSend.processGratitudeAutoSendCandidates({ now: new Date() });
+    expect(digest).toHaveBeenCalledTimes(1);
+    expect(graduation.evaluateAutoSendEligibility).toHaveBeenCalledWith(expect.objectContaining({
+      intent: GRATITUDE_INTENT, gratitudeSourceDigest: 'f'.repeat(64),
+    }));
+  } finally {
+    digest.mockRestore();
+  }
+});
+
+test('demoting the intent during provider preparation blocks the final handoff', async () => {
+  sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
+    mockState.intentMode = 'shadow';
+    const verdict = await providerPreSendCheck({ dbi: db });
+    return verdict.ok
+      ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'e'.repeat(32)}` }
+      : { sent: false, deliveryOutcome: 'not_sent', code: verdict.code };
+  });
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'mode_not_autosend' });
+});
+
 // Simulate provider preparation before the distinct final SMS predicate.
 // The provider mock is reached only after the caller's boundary verdict.
 test.each([false, true])('the final thread lock covers the SDK and observes publication while waiting (%s)', async (publishWhileWaiting) => {

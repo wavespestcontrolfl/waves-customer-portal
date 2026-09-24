@@ -557,7 +557,11 @@ async function autoSendReadiness(params, gratitudeLane) {
   }
 
   // (4) Server-enforced graduation eligibility — re-checked live every send.
-  const elig = await require('./sms-graduation').evaluateAutoSendEligibility({ intent, voiceProfileVersion: profile.version });
+  const elig = await require('./sms-graduation').evaluateAutoSendEligibility({
+    intent,
+    voiceProfileVersion: profile.version,
+    gratitudeSourceDigest: params.gratitudeSourceDigest,
+  });
   if (!elig.eligible) {
     logger.info(`[sms-auto-send] intent=${intent} not eligible; blockers: ${(elig.blockers || []).join(' | ')}`);
     return { reason: 'not_eligible' };
@@ -630,9 +634,11 @@ function gratitudeHandoffCheck(claim) {
       now: new Date(),
       activatedAt: gratitudeActivation(),
     });
+    const modeRow = await dbi('sms_intent_modes').where({ intent: GRATITUDE_INTENT }).first('mode');
     const reason = pendingWork ? 'pending_work'
       : advanced ? 'thread_advanced'
-      : timing || (!isEnabled('smsGratitudeReplies') ? 'gate_off' : null);
+      : timing || (!isEnabled('smsGratitudeReplies') ? 'gate_off' : null)
+        || (modeRow?.mode !== AUTOSEND_MODE ? 'mode_not_autosend' : null);
     return reason ? { ok: false, code: reason, reason } : { ok: true };
   };
 }
@@ -864,6 +870,9 @@ async function processGratitudeAutoSendCandidates({ limit = 200, now = new Date(
 
   let sent = 0;
   let attempted = 0;
+  // Deployed sources cannot change within one sweep: hash them once.
+  const gratitudeSourceDigest = candidates.length
+    ? require('./sms-gratitude-qualification').sourceSha256() : null;
   for (const row of candidates) {
     const metadata = jsonObject(row.intended_actions);
     // Shape/provenance filtering above is only a cheap scan optimization. The
@@ -884,6 +893,7 @@ async function processGratitudeAutoSendCandidates({ limit = 200, now = new Date(
       promptVersion: row.prompt_version,
       schedulingIntent: row.scheduling_intent === true,
       voiceProfileVersion: metadata.voice_profile_version ?? null,
+      gratitudeSourceDigest,
     });
     if (result.sent) sent += 1;
     if (SWEEP_WIDE_REFUSALS.has(result.reason)) break;

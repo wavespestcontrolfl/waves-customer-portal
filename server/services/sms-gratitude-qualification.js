@@ -92,7 +92,7 @@ function sourceSha256() {
   return hash.digest('hex');
 }
 
-async function readCurrent({ dbi }) {
+async function readCurrent({ dbi, sourceDigest }) {
   const { fixtureSha256 } = loadGratitudeExam();
   const verifierFallbackModel = MODELS.TEXT_POLICIES?.deepAnalysis?.fallback?.model;
   if (!drafter.PROMPT_VERSION || typeof drafter.VERIFY_ENABLED !== 'boolean'
@@ -124,7 +124,7 @@ async function readCurrent({ dbi }) {
     voiceProfileVersion: appliedVoiceProfile?.version ?? null,
     voiceProfileTextSha256: appliedVoiceProfile
       ? sha256(String(appliedVoiceProfile.profile_text || '')) : null,
-    sourceSha256: sourceSha256(),
+    sourceSha256: sourceDigest,
     sourceFiles: [...SOURCE_FILES],
   };
   return {
@@ -210,7 +210,7 @@ async function createGratitudeQualification({ dbi = db, triggeredBy = null } = {
       }
     }
 
-    const current = await readCurrent({ dbi: trx });
+    const current = await readCurrent({ dbi: trx, sourceDigest: sourceSha256() });
     const snapshot = {
       state: 'running',
       triggeredBy: typeof triggeredBy === 'string' ? triggeredBy.slice(0, 100) : null,
@@ -262,7 +262,7 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
         active = parseSnapshot(latest?.input_snapshot);
         return { id: runId, state: active?.state || 'missing', skipped: true, reason: 'run_not_running' };
       }
-      const current = await readCurrent({ dbi });
+      const current = await readCurrent({ dbi, sourceDigest: sourceSha256() });
       if (!same(active.pins, current.pins)
           || !same(active.frozenVoiceProfile, current.voiceProfile)
           || current.pins.verifier.enabled !== true) {
@@ -341,7 +341,9 @@ async function runGratitudeQualification({ dbi = db, runId } = {}) {
   }
 }
 
-async function evaluateGratitudeQualification({ dbi = db, voiceProfileVersion } = {}) {
+// sourceDigest lets one delayed-send sweep hash the pinned sources once
+// (sourceSha256) and reuse that digest for every candidate it evaluates.
+async function evaluateGratitudeQualification({ dbi = db, voiceProfileVersion, sourceDigest = null } = {}) {
   const verdict = (qualified, reason, extra = {}) => ({
     eligible: qualified,
     blockers: qualified ? [] : [`Gratitude qualification blocked: ${String(reason).replaceAll('_', ' ')}.`],
@@ -355,7 +357,7 @@ async function evaluateGratitudeQualification({ dbi = db, voiceProfileVersion } 
       .orderBy('created_at', 'desc').first('id', 'input_snapshot', 'created_at');
     const snapshot = parseSnapshot(row?.input_snapshot);
     if (!snapshot || snapshot.state !== 'complete') return verdict(false, snapshot?.state || 'no_complete_run');
-    const current = await readCurrent({ dbi });
+    const current = await readCurrent({ dbi, sourceDigest: sourceDigest || sourceSha256() });
     if (!same(snapshot.pins, current.pins)) return verdict(false, 'pins_changed', { runId: row.id });
     if (voiceProfileVersion !== undefined
         && (voiceProfileVersion ?? null) !== (current.pins.voiceProfileVersion ?? null)) {
@@ -375,6 +377,7 @@ async function evaluateGratitudeQualification({ dbi = db, voiceProfileVersion } 
 }
 
 module.exports = {
+  sourceSha256,
   createGratitudeQualification,
   runGratitudeQualification,
   evaluateGratitudeQualification,
