@@ -154,6 +154,14 @@
  *   consultation self-booked:" — no other customer comms beyond
  *   createSelfBooking's own standard confirmation.
  *
+ *   An unlinked lead whose phone matches an existing customer
+ *   (`leadContactVerified`) only reuses that customer when the phone is
+ *   independently corroborated — an inbound-call lead's caller ID, or an
+ *   SMS-delivered token's `channel` claim — never a bare public-form
+ *   submission. Otherwise it always gets its own separate prospect profile
+ *   and never sees another customer's visit data, reschedule URL, or
+ *   booking (Codex pre-push P1, 2026-09-24).
+ *
  * POST /:token/waitlist — the out-of-area stop's one-field ask: inserts (or
  *   no-ops on) a newsletter_subscribers row tagged `expansion_waitlist:<county>`
  *   at status `waitlist` — deliberately NOT `active` (buildSubscriberQuery in
@@ -614,54 +622,116 @@ async function createCustomerForLead(dbConn, lead, address, location, account) {
   return created;
 }
 
-// Which of an existing phone-matched account's LIVE properties an unlinked
-// lead actually belongs to: the one whose address matches (streetKey —
-// the same canonical, suffix-normalized comparison admin-customers.js's
-// own duplicate-profile confirm gate uses, services/customer-properties.js),
-// or, when the lead has no address text to compare at all, the account's
-// primary (or only) property. Returns null when ensureCustomerAccount found
-// no existing customer (ordinary new-account create applies), or when an
+// Whether an unlinked lead's own contact fields are trustworthy enough to
+// bind this booking onto an EXISTING customer a phone match finds (Codex
+// pre-push P1, 2026-09-24 — partly reverses round 10). A public form's
+// phone AND email are both unverified claims: submitting a victim's phone
+// number would otherwise read that victim's visit date, hand back a BEARER
+// /reschedule URL, or book straight onto the victim's account. PHONE ONLY —
+// an email match is never grounds to trust the match (matchExistingAccountProfile
+// never matches on email anyway) — and only when the phone itself is
+// independently corroborated: the lead originated from an inbound call
+// (leads.first_contact_channel === 'call' — Twilio caller ID, not a typed
+// form field) or this consultation token's own `channel` claim records it
+// was delivered by SMS to that exact phone number
+// (verifyLeadConsultationToken — server/utils/lead-consultation-token.js).
+// Anything else (a web-form or email-delivered lead) is UNVERIFIED.
+function leadContactVerified(lead, token) {
+  if (!lead) return false;
+  if (lead.first_contact_channel === 'call') return true;
+  return token?.channel === 'sms';
+}
+
+// Round 11 (Codex pre-push P1, 2026-09-24): a "small tolerance" for two
+// coordinate pairs describing the SAME rooftop across two geocode passes —
+// wide enough to absorb ordinary geocoder jitter, narrow enough that a
+// genuinely different nearby address never slips through (~300m at SWFL's
+// latitude).
+const PROPERTY_COORD_TOLERANCE_DEGREES = 0.003;
+function coordsClose(a, b) {
+  if (a?.lat == null || a?.lng == null || b?.lat == null || b?.lng == null) return false;
+  return Math.abs(parseFloat(a.lat) - parseFloat(b.lat)) <= PROPERTY_COORD_TOLERANCE_DEGREES
+    && Math.abs(parseFloat(a.lng) - parseFloat(b.lng)) <= PROPERTY_COORD_TOLERANCE_DEGREES;
+}
+
+// Which of an existing phone-matched account's LIVE properties a VERIFIED
+// unlinked lead actually belongs to: the one whose FULL normalized address
+// matches (streetKey — the same canonical, suffix-normalized street
+// comparison admin-customers.js's own duplicate-profile confirm gate uses —
+// AND zip, services/customer-properties.js), OR whose stored coordinates
+// fall within a small tolerance of the validated location when the zip
+// itself doesn't line up (a customer's zip on file can be stale even
+// though the rooftop is the same) — never a bare street-name match, which
+// would treat "123 Main St" in one zip as the same property as "123 Main
+// St" in another (Codex pre-push P1, 2026-09-24). When the lead has no
+// address text to compare at all, falls back to the account's primary (or
+// only) property. Returns null when ensureCustomerAccount found no
+// existing customer (ordinary new-account create applies), or when an
 // address WAS supplied but matches none of the account's live properties —
 // a genuinely different property, created under the SAME account by the
 // caller rather than reused.
-async function matchExistingAccountProfile(dbConn, account, addressLine1) {
+async function matchExistingAccountProfile(dbConn, account, address, location) {
   if (!account?.existingCustomer) return null;
-  const { streetKey } = require('../services/customer-properties');
+  const { streetKey, normalizeZip } = require('../services/customer-properties');
   const profiles = await dbConn('customers')
     .where({ account_id: account.accountId })
     .whereNull('deleted_at')
     .orderBy('is_primary_profile', 'desc')
     .orderBy('created_at', 'asc');
   const rows = profiles.length ? profiles : [account.existingCustomer];
+  const addressLine1 = address?.line1;
   const key = addressLine1 ? streetKey(addressLine1) : null;
   if (!key) return rows[0];
-  return rows.find((row) => streetKey(row.address_line1) === key) || null;
+  const zip = normalizeZip(address?.zip);
+  return rows.find((row) => {
+    if (streetKey(row.address_line1) !== key) return false;
+    if (zip && normalizeZip(row.zip) === zip) return true;
+    return coordsClose({ lat: row.latitude, lng: row.longitude }, location);
+  }) || null;
 }
 
 // The ONE place an unlinked lead gets attached to a customer record. Resolves
 // ensureCustomerAccount exactly once (it can WRITE — attaching a legacy
 // row's account, or minting a fresh customer_accounts row — so it must never
-// run twice for the same commit), then either reuses a matching existing
-// property (re-running eligibility against ITS OWN visits under the lead
-// lock before anything else, so an existing open assessment short-circuits
-// to already_booked instead of being missed) or provisions a new property
-// under the same account (Codex pre-push P1, 2026-09-24). Returns
-// `{ eligibility }` (a non-ok short-circuit — the caller returns it as-is,
-// same shape every other eligibility short-circuit in this file uses) or
-// `{ customer }`.
-async function resolveOrLinkCustomerForLead(trx, freshLead, resolved) {
+// run twice for the same commit). UNVERIFIED (leadContactVerified false):
+// bypasses phone/email matching entirely (forceNewAccount + ignorePhoneMatch
+// — the same admin "create a separate customer" escape hatch
+// findAccountByContact already offers, silent here since an anonymous
+// public commit can't be asked to confirm) so a submitted victim's phone
+// can NEVER bind this booking onto their real account — a coincidental or
+// malicious phone match becomes a genuine duplicate prospect, the office's
+// merge problem, never a security hole. VERIFIED: reuses a matching
+// existing property (re-running eligibility against ITS OWN visits under
+// the lead lock before anything else, so an existing open assessment
+// short-circuits to already_booked instead of being missed) and returns
+// the MATCHED row's own stored location (when it has one) so the caller's
+// existing slot re-validation re-checks the booking against the real
+// property and fails closed (SLOT_TAKEN) on any mismatch — never provisions
+// a duplicate profile there. Otherwise provisions a new property under the
+// (matched or freshly created) account. Returns `{ eligibility }` (a
+// non-ok short-circuit — the caller returns it as-is, same shape every
+// other eligibility short-circuit in this file uses) or `{ customer,
+// location? }`.
+async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   const { ensureCustomerAccount } = require('./admin-customers');
+  const verifiedContact = leadContactVerified(freshLead, token);
   const account = await ensureCustomerAccount(trx, {
     firstName: freshLead.first_name || 'New Lead',
     lastName: freshLead.last_name || '',
     phone: freshLead.phone || '',
     email: freshLead.email || null,
+    ...(verifiedContact ? {} : { forceNewAccount: true, ignorePhoneMatch: true }),
   });
-  const matched = await matchExistingAccountProfile(trx, account, resolved.address?.line1);
-  if (matched) {
-    const eligibility = await resolveEligibility(trx, freshLead, matched);
-    if (eligibility.state !== 'ok') return { eligibility };
-    return { customer: matched };
+  if (verifiedContact) {
+    const matched = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
+    if (matched) {
+      const eligibility = await resolveEligibility(trx, freshLead, matched);
+      if (eligibility.state !== 'ok') return { eligibility };
+      const matchedLocation = matched.latitude != null && matched.longitude != null
+        ? { lat: parseFloat(matched.latitude), lng: parseFloat(matched.longitude) }
+        : resolved.location;
+      return { customer: matched, location: matchedLocation };
+    }
   }
   const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
   return { customer: created };
@@ -942,9 +1012,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         // 2026-09-24). Its eligibility short-circuit (already_booked on
         // the MATCHED customer's own open assessment) takes priority over
         // ever linking or inserting anything.
-        const linkResult = await resolveOrLinkCustomerForLead(trx, freshLead, resolved);
+        const linkResult = await resolveOrLinkCustomerForLead(trx, freshLead, resolved, verified);
         if (linkResult.eligibility) return { eligibility: linkResult.eligibility };
         provisioned = linkResult.customer;
+        // A reused (verified) profile's OWN stored location, when it has
+        // one — never the lead's pre-lock resolved.location — so the
+        // existing "location differs from pre-lock" re-check below
+        // re-validates the slot against the REAL property and fails
+        // closed (SLOT_TAKEN) on any mismatch instead of booking a
+        // technician dispatched for a different address (Codex pre-push
+        // P1, 2026-09-24).
+        if (linkResult.location) location = linkResult.location;
         await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
       } else {
         // finalizeBookingLocation (not raw resolveServiceAddress) — the
@@ -1037,8 +1115,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
 
       // Re-validate the chosen slot when the fresh location differs from
-      // what it was checked against pre-lock (only possible when another
-      // commit's address won above) — and return the MATCHED slot object,
+      // what it was checked against pre-lock — another commit's address
+      // won above, OR (round 11) a verified unlinked lead reused an
+      // existing property whose own stored location differs from the
+      // lead's pre-lock resolved one — and return the MATCHED slot object,
       // not just a boolean: a different location can carry a different
       // technician/end_time for the same start_time, and the booking call
       // below must use the refreshed slot's own fields, never the original
@@ -1243,6 +1323,7 @@ router._test = {
   resolveEligibility,
   buildAvailabilityForLead,
   matchExistingAccountProfile,
+  leadContactVerified,
   COMMIT_LOCK_NS,
 };
 

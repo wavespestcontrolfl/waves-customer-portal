@@ -29,14 +29,20 @@ function consultationSmsLineFor(url) {
 
 // The long URL for a lead id, independent of the short-url wrapper — the
 // recurring-lead email PR renders this (or a shortened form of it) directly
-// into the send-time template.
-function consultationUrlForLead(leadId) {
-  const token = mintLeadConsultationToken(leadId);
+// into the send-time template. `channel` (round 11, Codex pre-push P1,
+// 2026-09-24) is an OPTIONAL delivery-channel claim minted into the token
+// itself (server/utils/lead-consultation-token.js) — omitted here (the
+// default), a link is UNVERIFIED delivery; a future SMS send passes
+// `'sms'` so inspection-public.js's leadContactVerified can trust that this
+// exact link reached the lead's own phone. Never set it for an email send —
+// only an SMS send is evidence the phone itself received the link.
+function consultationUrlForLead(leadId, channel) {
+  const token = mintLeadConsultationToken(leadId, undefined, channel);
   if (!token) return null;
   return `${publicPortalUrl()}/inspection/${token}`;
 }
 
-async function buildLeadConsultationLink(leadOrId) {
+async function buildLeadConsultationLink(leadOrId, { channel } = {}) {
   try {
     if (!leadInspectionLinkLive()) {
       return { url: null, line: '', reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)' };
@@ -51,7 +57,7 @@ async function buildLeadConsultationLink(leadOrId) {
     if (!lead) return { url: null, line: '', reason: 'Lead not found' };
     if (!lead.phone) return { url: null, line: '', reason: 'Lead has no phone number' };
 
-    const longUrl = consultationUrlForLead(lead.id);
+    const longUrl = consultationUrlForLead(lead.id, channel);
     if (!longUrl) return { url: null, line: '', reason: 'Could not build a consultation link (no signing secret configured)' };
 
     const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000);

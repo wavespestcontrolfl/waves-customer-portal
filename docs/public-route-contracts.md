@@ -1596,7 +1596,10 @@ route 404s while off). Token: `mintLeadConsultationToken` /
 `verifyLeadConsultationToken` (`utils/lead-consultation-token.js`) — a
 14-day HMAC namespaced `lead-consultation:` (never interchangeable with the
 lead-prefill token) carrying the lead id IN the token
-(`<leadId>.<exp>.<sig>`), so no DB lookup is needed to resolve identity. A
+(`<leadId>.<exp>.<sig>`, or `<leadId>.<exp>.<channel>.<sig>` when minted
+with an optional signed `channel` claim — `'sms'` is the only value
+`leadContactVerified` trusts, set by an SMS send; omitted by default, which
+is UNVERIFIED delivery), so no DB lookup is needed to resolve identity. A
 well-formed but past-TTL token answers 200 `{ state: 'expired' }` (re-
 verified with the TTL check isolated to nowSec=0, which never trips since
 `exp` is always minted positive); a malformed/mis-signed token 404s. 60
@@ -1671,7 +1674,13 @@ lanes and would false-hit on an unrelated open re-service). The lead gets
 else on the lead changes — status/pipeline_stage/converted_at/member_since
 all stay untouched (`promoteCustomerOnBooking`'s own
 `isAssessmentServiceType` guard, matching `admin-leads.js`'s identical
-assessment posture). The free-text note rides
+assessment posture). An unlinked lead whose phone matches an existing
+customer (`leadContactVerified`) only reuses that customer when the phone
+is independently corroborated — an inbound-call lead's caller ID, or an
+SMS-delivered token's `channel` claim — never a bare public-form
+submission; otherwise it always gets its own separate prospect profile and
+never sees another customer's visit data, reschedule URL, or booking
+(Codex pre-push P1, 2026-09-24). The free-text note rides
 `scheduled_services.internal_notes` (never `notes`, which is customer/tech
 visible) via a best-effort post-commit update. `SLOT_TAKEN` 409 mirrors
 reservice-public's shape (fresh `availability` attached). Office alert:

@@ -23,40 +23,56 @@ function secret() {
   return process.env.LEAD_PREFILL_SECRET || process.env.JWT_SECRET || '';
 }
 
-function sign(leadId, exp) {
+function sign(leadId, exp, channel) {
+  const payload = channel
+    ? `lead-consultation:${leadId}:${exp}:${channel}`
+    : `lead-consultation:${leadId}:${exp}`;
   return crypto.createHmac('sha256', secret())
-    .update(`lead-consultation:${leadId}:${exp}`)
+    .update(payload)
     .digest('base64url');
 }
 
-// Mint a token for a lead id. `nowSec` is injectable for tests. Returns null
-// if there is no id or no secret configured (fail closed — no token, no link).
-function mintLeadConsultationToken(leadId, nowSec = Math.floor(Date.now() / 1000)) {
+// Mint a token for a lead id. `nowSec` is injectable for tests. `channel`
+// (round 11, Codex pre-push P1, 2026-09-24) is an OPTIONAL delivery-channel
+// claim — undefined by default, so every existing caller keeps minting the
+// same 3-segment `<leadId>.<exp>.<sig>` token byte-for-byte. When a caller
+// (the PR4 SMS send) passes `channel: 'sms'`, it becomes part of the SIGNED
+// payload and rides as a 4th segment (`<leadId>.<exp>.<channel>.<sig>`) —
+// signed in, not just appended, so it can be neither spliced onto an
+// existing token (the signature wouldn't match) nor stripped off a
+// channeled one to downgrade it (same reason). inspection-public.js's
+// leadContactVerified reads `channel === 'sms'` as proof this exact link
+// was delivered by text to the lead's own phone, one of the two ways an
+// unlinked lead's phone match is trusted enough to reuse an existing
+// customer. Returns null if there is no id or no secret configured (fail
+// closed — no token, no link).
+function mintLeadConsultationToken(leadId, nowSec = Math.floor(Date.now() / 1000), channel) {
   if (!leadId || !secret()) return null;
   const exp = nowSec + TTL_SECONDS;
-  return `${leadId}.${exp}.${sign(leadId, exp)}`;
+  const sig = sign(leadId, exp, channel);
+  return channel ? `${leadId}.${exp}.${channel}.${sig}` : `${leadId}.${exp}.${sig}`;
 }
 
-// Verify a token, returning `{ leadId }` on success or null on any
-// malformed/expired/mismatched token. Constant-time signature compare.
+// Verify a token, returning `{ leadId }` (or `{ leadId, channel }` for a
+// channel-carrying token) on success, or null on any malformed/expired/
+// mismatched token. Constant-time signature compare.
 function verifyLeadConsultationToken(token, nowSec = Math.floor(Date.now() / 1000)) {
   if (!token || !secret()) return null;
-  const raw = String(token);
-  const firstDot = raw.indexOf('.');
-  const lastDot = raw.lastIndexOf('.');
-  if (firstDot <= 0 || lastDot <= firstDot) return null;
-  const leadId = raw.slice(0, firstDot);
-  const exp = Number(raw.slice(firstDot + 1, lastDot));
-  const sig = raw.slice(lastDot + 1);
+  const parts = String(token).split('.');
+  if (parts.length !== 3 && parts.length !== 4) return null;
+  const leadId = parts[0];
+  const exp = Number(parts[1]);
+  const channel = parts.length === 4 ? parts[2] : undefined;
+  const sig = parts[parts.length - 1];
   if (!leadId || !Number.isFinite(exp) || exp < nowSec) return null;
-  const expected = sign(leadId, exp);
+  const expected = sign(leadId, exp, channel);
   if (sig.length !== expected.length) return null;
   try {
     if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
   } catch {
     return null;
   }
-  return { leadId };
+  return channel ? { leadId, channel } : { leadId };
 }
 
 module.exports = { mintLeadConsultationToken, verifyLeadConsultationToken, TTL_SECONDS };

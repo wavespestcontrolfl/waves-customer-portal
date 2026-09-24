@@ -1115,125 +1115,275 @@ describe('POST /:token commit', () => {
   // Round 10, Codex pre-push P1, 2026-09-24 (inspection-public.js:585): an
   // unlinked lead whose phone matches an existing customer used to get a
   // WHOLE SECOND property profile unconditionally — eligibility and dedupe
-  // never even looked at the matched customer's own visits. These three
-  // exercise resolveOrLinkCustomerForLead end-to-end through the commit
-  // handler; ensureCustomerAccount itself is mocked (see the top of this
-  // file) so each test controls the phone-match result directly.
+  // never even looked at the matched customer's own visits. Round 11 (same
+  // P1, next audit round) tightened this: round 10's reuse ran for ANY
+  // unlinked lead, but an unlinked lead's phone/email come straight off a
+  // public form and are unverified — reusing on a bare match let someone
+  // submit a victim's phone, receive the link at their own contact info,
+  // and read the victim's visit date / get a bearer reschedule URL / book
+  // on the victim's account. Reuse now requires leadContactVerified: the
+  // lead itself came from an inbound call (leads.first_contact_channel),
+  // or the token's own `channel` claim says it was delivered by SMS.
+  // ensureCustomerAccount itself is mocked (see the top of this file) so
+  // each test controls the phone-match result directly.
   describe('unlinked lead, phone matches an existing customer (P1 :585)', () => {
     const MATCH_ADDRESS = '123 Palm Ave, Bradenton, FL 34209';
-    const existingCustomerAt = (line1) => ({
+    const existingCustomerAt = (line1, extra = {}) => ({
       id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
       address_line1: line1, city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+      ...extra,
+    });
+    const mockOneSlot = () => mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
     });
 
-    test('an open assessment on the matched profile → already_booked, no new profile, nothing linked', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: null };
-      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
-      mockBuildAvailability.mockResolvedValueOnce({
-        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    describe('verified (inbound-call lead)', () => {
+      test('an open assessment on the matched profile → already_booked, no new profile, nothing linked', async () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        mockOneSlot();
+        const existingCustomer = existingCustomerAt('123 Palm Ave');
+        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        listResults.scheduled_services = [
+          { id: 'ss-9', scheduled_date: FUTURE_DATE, window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok9' },
+        ];
+
+        const token = mintLeadConsultationToken(LEAD_ID);
+        const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body.state).toBe('already_booked');
+        expect(res.body.rescheduleUrl).toBe('/reschedule/abc123');
+        expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+        expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
+        expect(updateCalls.some((c) => c.table === 'leads')).toBe(false);
+        expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.not.objectContaining({ forceNewAccount: true }));
       });
-      const existingCustomer = existingCustomerAt('123 Palm Ave');
-      mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
-      listResults.scheduled_services = [
-        { id: 'ss-9', scheduled_date: FUTURE_DATE, window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok9' },
-      ];
 
-      const token = mintLeadConsultationToken(LEAD_ID);
-      const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
+      test('same address (street + zip), no open visits → reuses the existing property profile, never a new one', async () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        mockOneSlot();
+        const existingCustomer = existingCustomerAt('123 Palm Ave');
+        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        listResults.scheduled_services = [];
+        firstResults.scheduled_services = { id: 'ss-reuse', reschedule_token: 'tok-reuse' };
 
-      expect(res.statusCode).toBe(200);
-      expect(res.body.state).toBe('already_booked');
-      expect(res.body.rescheduleUrl).toBe('/reschedule/abc123');
-      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
-      expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
-      expect(updateCalls.some((c) => c.table === 'leads')).toBe(false);
+        const token = mintLeadConsultationToken(LEAD_ID);
+        const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body.success).toBe(true);
+        expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toEqual(existingCustomer);
+        expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
+        expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'cust-9')).toBe(true);
+      });
+
+      test('a genuinely new address → a new profile under the SAME account, never a new customer_accounts row', async () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        mockOneSlot();
+        // The matched account's existing property is a DIFFERENT street —
+        // MATCH_ADDRESS below matches none of it.
+        const existingCustomer = existingCustomerAt('9 Other Rd');
+        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        listResults.scheduled_services = [];
+        listResults.customers = [existingCustomer];
+        insertResults.customers = [{ id: 'new-cust-2', account_id: 'acct-9' }];
+        firstResults.scheduled_services = { id: 'ss-new2', reschedule_token: 'tok-new2' };
+
+        const token = mintLeadConsultationToken(LEAD_ID);
+        const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body.success).toBe(true);
+        const customerInsert = insertCalls.find((c) => c.table === 'customers');
+        expect(customerInsert).toBeTruthy();
+        expect(customerInsert.payload.account_id).toBe('acct-9'); // same account — never a new customer_accounts row
+        expect(customerInsert.payload.profile_label).toBe('Additional property');
+        expect(customerInsert.payload.address_line1).toBe('123 Palm Ave');
+        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe('new-cust-2');
+        expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'new-cust-2')).toBe(true);
+      });
+
+      test('coords mismatch on the matched row → re-validates the slot against ITS stored location and fails closed (SLOT_TAKEN), never books', async () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        mockOneSlot(); // satisfies the pre-lock anti-forgery day check only
+        // Matches by full address (street + zip) — the OR branch that never
+        // required coordinate agreement — but its OWN stored coordinates
+        // are nowhere near the freshly geocoded MATCH_ADDRESS location
+        // (default mockGeocode: {lat:27.4, lng:-82.5}), so the matched
+        // row's location must win and be re-validated, not the pre-lock one.
+        const existingCustomer = existingCustomerAt('123 Palm Ave', { latitude: 32.7555, longitude: -97.3308 });
+        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        listResults.scheduled_services = [];
+        // No second mockBuildAvailability value queued — the re-validation
+        // call at the matched row's own (far-away) location falls back to
+        // afterEach's default { slots: [], days: [] }, so no slot survives.
+
+        const token = mintLeadConsultationToken(LEAD_ID);
+        const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
+
+        expect(res.statusCode).toBe(409);
+        expect(res.body.code).toBe('SLOT_TAKEN');
+        expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+        expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
+        // buildAvailabilityForLead: [0] the pre-lock day check at the lead's
+        // OWN resolved location, [1] phase 1's re-validation at the MATCHED
+        // row's own (far-away) location — not the pre-lock one — and [2]
+        // the SLOT_TAKEN handler's refreshed-availability call.
+        expect(mockBuildAvailability).toHaveBeenCalledTimes(3);
+        expect(mockBuildAvailability.mock.calls[1][0]).toEqual(expect.objectContaining({ lat: 32.7555, lng: -97.3308 }));
+      });
     });
 
-    test('same address, no open visits → reuses the existing property profile, never a new one', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: null };
-      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
-      mockBuildAvailability.mockResolvedValueOnce({
-        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    describe('unverified (public-form lead)', () => {
+      test('victim phone matches an existing customer WITH an open assessment → a new prospect profile, no visit data, no reschedule URL, booking lands on the prospect', async () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: null }; // no first_contact_channel — a plain web-form lead
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        mockOneSlot();
+        const victim = existingCustomerAt('123 Palm Ave');
+        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-victim', existingCustomer: null, matchType: null });
+        // The victim's own open assessment sits in the mock's shared table —
+        // if resolveOrLinkCustomerForLead ever reused the victim, THIS is
+        // what it would surface as already_booked.
+        listResults.scheduled_services = [
+          { id: 'ss-victim', scheduled_date: FUTURE_DATE, window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok-victim' },
+        ];
+        insertResults.customers = [{ id: 'prospect-1', account_id: 'acct-victim' }];
+        firstResults.scheduled_services = { id: 'ss-prospect', reschedule_token: 'tok-prospect' };
+
+        const token = mintLeadConsultationToken(LEAD_ID); // no channel — unverified delivery
+        const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
+
+        // Never the victim's data: no already_booked short-circuit, no
+        // victim visit/rescheduleUrl anywhere in the response.
+        expect(res.statusCode).toBe(200);
+        expect(res.body.state).not.toBe('already_booked');
+        expect(JSON.stringify(res.body)).not.toContain('tok-victim');
+        // ensureCustomerAccount was told to bypass phone matching entirely.
+        expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ forceNewAccount: true, ignorePhoneMatch: true }),
+        );
+        // The booking lands on the freshly created PROSPECT, never the victim.
+        expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe('prospect-1');
+        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).not.toBe(victim.id);
+        const customerInsert = insertCalls.find((c) => c.table === 'customers');
+        expect(customerInsert).toBeTruthy();
+        expect(customerInsert.payload.profile_label).toBe('Primary'); // a genuinely separate account, not "Additional property"
+        expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'prospect-1')).toBe(true);
       });
-      const existingCustomer = existingCustomerAt('123 Palm Ave');
-      mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
-      listResults.scheduled_services = [];
-      firstResults.scheduled_services = { id: 'ss-reuse', reschedule_token: 'tok-reuse' };
 
-      const token = mintLeadConsultationToken(LEAD_ID);
-      const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
+      test('an SMS-channel token still counts as verified even though the lead itself is a form lead', async () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: null }; // form lead
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        mockOneSlot();
+        const existingCustomer = existingCustomerAt('123 Palm Ave');
+        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        listResults.scheduled_services = [];
+        firstResults.scheduled_services = { id: 'ss-sms', reschedule_token: 'tok-sms' };
 
-      expect(res.statusCode).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
-      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toEqual(existingCustomer);
-      expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
-      expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'cust-9')).toBe(true);
-    });
+        const token = mintLeadConsultationToken(LEAD_ID, undefined, 'sms'); // this exact link was texted to the lead's phone
+        const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
 
-    test('a genuinely new address → a new profile under the SAME account, never a new customer_accounts row', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: null };
-      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
-      mockBuildAvailability.mockResolvedValueOnce({
-        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+        expect(res.statusCode).toBe(200);
+        expect(res.body.success).toBe(true);
+        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toEqual(existingCustomer);
+        expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.not.objectContaining({ forceNewAccount: true }));
       });
-      // The matched account's existing property is a DIFFERENT street —
-      // MATCH_ADDRESS below matches none of it.
-      const existingCustomer = existingCustomerAt('9 Other Rd');
-      mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
-      listResults.scheduled_services = [];
-      listResults.customers = [existingCustomer];
-      insertResults.customers = [{ id: 'new-cust-2', account_id: 'acct-9' }];
-      firstResults.scheduled_services = { id: 'ss-new2', reschedule_token: 'tok-new2' };
-
-      const token = mintLeadConsultationToken(LEAD_ID);
-      const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
-
-      expect(res.statusCode).toBe(200);
-      expect(res.body.success).toBe(true);
-      const customerInsert = insertCalls.find((c) => c.table === 'customers');
-      expect(customerInsert).toBeTruthy();
-      expect(customerInsert.payload.account_id).toBe('acct-9'); // same account — never a new customer_accounts row
-      expect(customerInsert.payload.profile_label).toBe('Additional property');
-      expect(customerInsert.payload.address_line1).toBe('123 Palm Ave');
-      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe('new-cust-2');
-      expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'new-cust-2')).toBe(true);
     });
   });
 });
 
-describe('matchExistingAccountProfile unit coverage (P1 :585)', () => {
+describe('leadContactVerified unit coverage (P1 :585, round 11)', () => {
+  const { leadContactVerified } = inspectionPublicRouter._test;
+
+  test('no lead → false', () => {
+    expect(leadContactVerified(null, { channel: 'sms' })).toBe(false);
+  });
+
+  test('an inbound-call lead → true regardless of the token', () => {
+    expect(leadContactVerified({ first_contact_channel: 'call' }, undefined)).toBe(true);
+    expect(leadContactVerified({ first_contact_channel: 'call' }, { leadId: 'x' })).toBe(true);
+  });
+
+  test('an sms-channel token → true even for a form lead', () => {
+    expect(leadContactVerified({ first_contact_channel: 'form' }, { leadId: 'x', channel: 'sms' })).toBe(true);
+  });
+
+  test('a form lead with no channel claim → false', () => {
+    expect(leadContactVerified({ first_contact_channel: 'form' }, { leadId: 'x' })).toBe(false);
+    expect(leadContactVerified({ first_contact_channel: 'form' }, undefined)).toBe(false);
+  });
+
+  test('an email-channel claim is never trusted (phone-only)', () => {
+    expect(leadContactVerified({ first_contact_channel: 'email' }, { leadId: 'x', channel: 'email' })).toBe(false);
+  });
+});
+
+describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightening)', () => {
   const { matchExistingAccountProfile } = inspectionPublicRouter._test;
 
   test('no existingCustomer on the account → null (ordinary new-account create applies)', async () => {
-    expect(await matchExistingAccountProfile(db, { accountId: 'acct-1', existingCustomer: null }, '123 Palm Ave')).toBe(null);
+    expect(await matchExistingAccountProfile(db, { accountId: 'acct-1', existingCustomer: null }, { line1: '123 Palm Ave' }, null)).toBe(null);
   });
 
   test('no address to compare → falls back to the primary/only live property', async () => {
     const primary = { id: 'cust-1', is_primary_profile: true, address_line1: '1 Main St' };
     listResults.customers = [primary, { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main St' }];
     const account = { accountId: 'acct-1', existingCustomer: primary };
-    expect(await matchExistingAccountProfile(db, account, null)).toEqual(primary);
+    expect(await matchExistingAccountProfile(db, account, null, null)).toEqual(primary);
   });
 
-  test('address matches a live profile (streetKey, suffix-normalized) → that profile', async () => {
-    const match = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main Street' };
-    listResults.customers = [{ id: 'cust-1', is_primary_profile: true, address_line1: '1 Elsewhere Rd' }, match];
+  test('street + zip both match (streetKey, suffix-normalized) → that profile, coordinates never checked', async () => {
+    const match = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main Street', zip: '34209' };
+    listResults.customers = [{ id: 'cust-1', is_primary_profile: true, address_line1: '1 Elsewhere Rd', zip: '34209' }, match];
     const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
-    expect(await matchExistingAccountProfile(db, account, '2 Main St')).toEqual(match);
+    expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, null)).toEqual(match);
   });
 
-  test('address matches no live profile → null, a genuinely new property', async () => {
-    listResults.customers = [{ id: 'cust-1', is_primary_profile: true, address_line1: '1 Elsewhere Rd' }];
+  // Round 11 (Codex pre-push P1, 2026-09-24): a bare street-name match used
+  // to be enough — "123 Main St" in one zip is not the same property as
+  // "123 Main St" in another.
+  test('street matches but zip differs AND stored coordinates are far from the validated location → null, never reused', async () => {
+    const wrongZip = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main Street', zip: '99999', latitude: 40.0, longitude: -100.0 };
+    listResults.customers = [wrongZip];
     const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
-    expect(await matchExistingAccountProfile(db, account, '99 Nowhere Ave')).toBe(null);
+    const validated = { lat: 27.4, lng: -82.5 };
+    expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, validated)).toBe(null);
+  });
+
+  test('street matches, zip differs, but stored coordinates ARE within tolerance of the validated location → matches anyway (stale zip on file)', async () => {
+    const staleZip = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main Street', zip: '99999', latitude: 27.401, longitude: -82.501 };
+    listResults.customers = [staleZip];
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    const validated = { lat: 27.4, lng: -82.5 };
+    expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, validated)).toEqual(staleZip);
+  });
+
+  test('street matches, zip differs, stored coordinates JUST outside tolerance → null', async () => {
+    const farRow = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main Street', zip: '99999', latitude: 27.41, longitude: -82.51 };
+    listResults.customers = [farRow];
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    const validated = { lat: 27.4, lng: -82.5 };
+    expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, validated)).toBe(null);
+  });
+
+  test('address matches no live profile at all → null, a genuinely new property', async () => {
+    listResults.customers = [{ id: 'cust-1', is_primary_profile: true, address_line1: '1 Elsewhere Rd', zip: '34209' }];
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    expect(await matchExistingAccountProfile(db, account, { line1: '99 Nowhere Ave', zip: '34209' }, null)).toBe(null);
   });
 
   test('no live profiles come back from the query → falls back to the existingCustomer row itself', async () => {
-    const existingCustomer = { id: 'cust-1', address_line1: '5 Palm Ave' };
+    const existingCustomer = { id: 'cust-1', address_line1: '5 Palm Ave', zip: '34209' };
     listResults.customers = [];
     const account = { accountId: 'acct-1', existingCustomer };
-    expect(await matchExistingAccountProfile(db, account, '5 Palm Ave')).toEqual(existingCustomer);
+    expect(await matchExistingAccountProfile(db, account, { line1: '5 Palm Ave', zip: '34209' }, null)).toEqual(existingCustomer);
   });
 });
 

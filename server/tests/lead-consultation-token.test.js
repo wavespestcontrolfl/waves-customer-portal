@@ -99,4 +99,42 @@ describe('lead consultation token', () => {
     const [, exp, sig] = consultToken.split('.');
     expect(verifyLeadPrefillToken(LEAD, `${exp}.${sig}`, NOW)).toBe(false);
   });
+
+  // Round 11 — Codex pre-push P1, 2026-09-24: the optional `channel` claim
+  // (server/services/lead-consultation-link.js passes it through from a
+  // future SMS send) is signed IN, not just appended — inspection-public.js's
+  // leadContactVerified trusts `channel === 'sms'` as proof this exact link
+  // reached the lead's own phone, so it must be exactly as tamper-proof as
+  // the lead id and expiry.
+  describe('optional channel claim', () => {
+    test('mint → verify round-trip with a channel carries it as a 4th segment', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW, 'sms');
+      expect(token).toEqual(expect.stringMatching(new RegExp(`^${LEAD}\\.\\d+\\.sms\\.[A-Za-z0-9_-]+$`)));
+      expect(verifyLeadConsultationToken(token, NOW)).toEqual({ leadId: LEAD, channel: 'sms' });
+    });
+
+    test('no channel passed → byte-identical 3-segment token to every existing caller, no channel key on the payload', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW);
+      expect(token).toEqual(expect.stringMatching(new RegExp(`^${LEAD}\\.\\d+\\.[A-Za-z0-9_-]+$`)));
+      expect(verifyLeadConsultationToken(token, NOW)).toEqual({ leadId: LEAD });
+    });
+
+    test('splicing a channel segment onto an unchanneled token does not verify (signature does not match)', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW);
+      const [leadId, exp, sig] = token.split('.');
+      expect(verifyLeadConsultationToken(`${leadId}.${exp}.sms.${sig}`, NOW)).toBeNull();
+    });
+
+    test('stripping the channel segment off a channeled token does not downgrade it to verify unchanneled', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW, 'sms');
+      const [leadId, exp, , sig] = token.split('.');
+      expect(verifyLeadConsultationToken(`${leadId}.${exp}.${sig}`, NOW)).toBeNull();
+    });
+
+    test('swapping the channel value does not verify (a different channel is a different signed payload)', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW, 'sms');
+      const [leadId, exp, , sig] = token.split('.');
+      expect(verifyLeadConsultationToken(`${leadId}.${exp}.email.${sig}`, NOW)).toBeNull();
+    });
+  });
 });

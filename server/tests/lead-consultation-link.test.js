@@ -127,6 +127,18 @@ describe('buildLeadConsultationLink — gate on', () => {
     expect(result.url).toBeNull();
     expect(mockDb).not.toHaveBeenCalled();
   });
+
+  // Round 11 — Codex pre-push P1, 2026-09-24: an explicit { channel: 'sms' }
+  // option rides into the minted token (createShortCode receives the LONG
+  // url, so its own 4-segment token is directly observable here).
+  test('{ channel: "sms" } mints a channel-carrying token into the short-url wrap', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    await buildLeadConsultationLink(LEAD_ID, { channel: 'sms' });
+    expect(createShortCode).toHaveBeenCalledWith(
+      expect.stringMatching(new RegExp(`/inspection/${LEAD_ID}\\.\\d+\\.sms\\.[A-Za-z0-9_-]+$`)),
+      expect.any(Object),
+    );
+  });
 });
 
 describe('consultationUrlForLead', () => {
@@ -139,6 +151,19 @@ describe('consultationUrlForLead', () => {
     delete process.env.LEAD_PREFILL_SECRET;
     delete process.env.JWT_SECRET;
     expect(consultationUrlForLead(LEAD_ID)).toBeNull();
+  });
+
+  // Round 11 — Codex pre-push P1, 2026-09-24: the optional channel claim
+  // (the PR4 SMS send's evidence that THIS link reached the lead's own
+  // phone) threads through to the minted token.
+  test('an explicit channel mints a token carrying it', () => {
+    const url = consultationUrlForLead(LEAD_ID, 'sms');
+    expect(url).toMatch(new RegExp(`^https://portal\\.wavespestcontrol\\.com/inspection/${LEAD_ID}\\.\\d+\\.sms\\.[A-Za-z0-9_-]+$`));
+  });
+
+  test('no channel passed → the plain 3-segment token, unchanged from every other caller', () => {
+    const url = consultationUrlForLead(LEAD_ID);
+    expect(url.split('/inspection/')[1].split('.')).toHaveLength(3);
   });
 });
 
