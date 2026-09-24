@@ -17510,6 +17510,28 @@ async function pickTopUpWinnerId(conn, pool) {
   }
   return winner.id;
 }
+// Never let a sibling that isn't itself top-up eligible win the ranking —
+// a candidate with an unplaceable window, no recurring_pattern, or its
+// OWN annual-prepay stamp would still win here on billability + recency
+// alone, then refuse everything on its own turn instead
+// (window_unplaceable / not_recurring / annual_prepay_series), silently
+// starving BOTH series forever (Codex GitHub guards-follow-up P1).
+// Reuses the SAME non-recursive checks topUpRecurringSeriesLocked itself
+// runs around this very rule — the two structural gates it checks before
+// ever reaching TOPUP_SERIES_INELIGIBILITY_RULES, plus isAnnualPrepaySeries
+// itself (the first rule in that table, and the only one of the other two
+// that can differ PER SERIES rather than per customer+family) — never a
+// third parallel definition of "is this series usable." plan_hold is
+// deliberately not re-checked here: it's keyed on (customer_id,
+// family_key) alone, identical for every candidate in this pool by
+// construction (same customer, same family already established below),
+// and parent already cleared it before this rule ever ran.
+async function isCandidateTopUpEligible(conn, row, cols) {
+  if (!row.is_recurring || !row.recurring_pattern) return false;
+  if (normalizeTopUpWindow(row.window_start, row.estimated_duration_minutes, row.window_end)?.unplaceable) return false;
+  if (await isAnnualPrepaySeries(conn, row, row.id, cols)) return false;
+  return true;
+}
 async function isSupersededSeries(conn, parent, parentId, cols) {
   const family = await seriesFamilyOf(conn, parent);
   if (!family) return false;
@@ -17537,6 +17559,12 @@ async function isSupersededSeries(conn, parent, parentId, cols) {
     if (rowFamily !== family) continue;
     const rowPropertyKey = await seriesPropertyKey(conn, row, cols);
     if (rowPropertyKey !== propertyKey) continue;
+    // An ineligible sibling is never a real competitor for the winner
+    // slot — it's excluded from the pool entirely rather than merely
+    // deprioritized, so it can neither win (see above) nor suppress the
+    // parent by being counted as "the" duplicate when it's really just
+    // dead weight that will refuse its own top-up regardless.
+    if (!(await isCandidateTopUpEligible(conn, row, cols))) continue;
     duplicates.push(row);
   }
   if (!duplicates.length) return false;
@@ -23581,6 +23609,7 @@ router._test = {
   isFamilyOnPlanHold,
   isSupersededSeries,
   isCandidateTopUpBillable,
+  isCandidateTopUpEligible,
   pickTopUpWinnerId,
   normalizeTopUpWindow,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,

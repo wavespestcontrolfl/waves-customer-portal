@@ -730,10 +730,14 @@ function supersededScenario(roots) {
   const byId = new Map(roots.map((r) => [r.id, r]));
   familyOfServiceRow.mockImplementation((row) => byId.get(row.id)?.familyKey ?? null);
   const rowShape = (r) => ({
-    id: r.id, customer_id: r.customerId ?? 5, is_recurring: true, recurring_pattern: 'weekly',
+    id: r.id, customer_id: r.customerId ?? 5, is_recurring: r.isRecurring !== false,
+    // undefined stays undefined (falsy) rather than the 'weekly' default —
+    // r.recurringPattern === null models a sibling that lost its pattern
+    // (the not_recurring case isCandidateTopUpEligible must catch).
+    recurring_pattern: r.recurringPattern !== undefined ? r.recurringPattern : 'weekly',
     recurring_ongoing: r.recurringOngoing !== false, scheduled_date: r.latestDate || daysOut(0),
     property_id: r.propertyId, service_id: 1, created_at: r.createdAt || '2020-01-01T00:00:00Z',
-    estimated_duration_minutes: 60,
+    estimated_duration_minutes: r.estimatedDurationMinutes ?? 60,
     // Billable by default (via seriesExtensionUnbillable, the real gate) —
     // `billable: false` sets both fields unbillable; an explicit
     // `createInvoiceOnComplete`/`estimatedPrice` overrides either alone
@@ -742,7 +746,7 @@ function supersededScenario(roots) {
     // proxy let through).
     create_invoice_on_complete: r.createInvoiceOnComplete ?? (r.billable !== false),
     estimated_price: r.estimatedPrice !== undefined ? r.estimatedPrice : (r.billable !== false ? '150.00' : null),
-    window_start: null, window_end: null,
+    window_start: r.windowStart ?? null, window_end: r.windowEnd ?? null,
     // Only set for an UNLINKED root exercising the service-address fallback.
     service_address_line1: r.serviceAddressLine1 || null,
   });
@@ -925,6 +929,42 @@ describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Co
     expect(billableResult.skipped).not.toBe('superseded_series');
     const zeroPriceResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
     expect(zeroPriceResult.skipped).not.toBe('superseded_series');
+  });
+
+  test('a later-dated sibling with an UNPLACEABLE window never wins — excluded from the pool entirely (Codex GitHub guards follow-up P2)', async () => {
+    // Without an eligibility filter, root 99 (billable, a coincidentally
+    // LATER live visit, but a window assertAdminAppointmentWindow itself
+    // refuses — 21:00 + 60min ends at 22:00, past the 20:00 admin day
+    // bound) would be crowned winner on billability + recency alone,
+    // suppressing root 10 as superseded_series. Root 99 would then refuse
+    // its OWN top-up as window_unplaceable on every future run, so NEITHER
+    // series would ever replenish again.
+    const roots = [
+      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
+      {
+        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z',
+        windowStart: '21:00', windowEnd: '22:00',
+      },
+    ];
+    const olderResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(olderResult.skipped).not.toBe('superseded_series');
+    const unplaceableResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
+    // Faces its own real gate honestly — never mislabeled superseded_series.
+    expect(unplaceableResult.skipped).toBe('window_unplaceable');
+  });
+
+  test('a later-dated sibling with no recurring_pattern never wins — excluded from the pool entirely (Codex GitHub guards follow-up P2)', async () => {
+    const roots = [
+      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
+      {
+        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z',
+        recurringPattern: null,
+      },
+    ];
+    const olderResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(olderResult.skipped).not.toBe('superseded_series');
+    const notRecurringResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
+    expect(notRecurringResult.skipped).toBe('not_recurring');
   });
 });
 
