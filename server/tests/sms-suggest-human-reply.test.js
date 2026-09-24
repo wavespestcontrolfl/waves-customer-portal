@@ -13,19 +13,23 @@ const { isEnabled } = require('../config/feature-gates');
 const { hasActiveAutoSendClaim } = require('../services/sms-auto-send');
 const suggest = require('../services/sms-suggest-mode');
 
-function trxWith({ pending = [], parked = [] } = {}) {
+function trxWith({ pending = [], parked = [], activeManualReservation = null } = {}) {
   const inserted = [];
+  const chains = {};
+  const reservationFirst = jest.fn(async () => activeManualReservation);
   const trx = jest.fn((table) => {
     const chain = {};
     for (const m of ['leftJoin', 'where', 'whereRaw', 'whereNot', 'whereIn']) chain[m] = jest.fn(() => chain);
     chain.select = jest.fn(async () => pending);
+    chain.first = table === 'sms_log' ? reservationFirst : jest.fn(async () => null);
     chain.update = jest.fn(() => ({ returning: jest.fn(async () => parked) }));
     chain.insert = jest.fn((row) => { inserted.push({ table, row }); return { returning: jest.fn(async () => [{ id: 'resv-1' }]) }; });
+    (chains[table] = chains[table] || []).push(chain);
     return chain;
   });
   trx.raw = jest.fn(async () => undefined);
   db.transaction = jest.fn(async (cb) => cb(trx));
-  return { trx, inserted };
+  return { trx, inserted, reservationFirst, chains };
 }
 
 beforeEach(() => { jest.clearAllMocks(); isEnabled.mockReturnValue(false); });
@@ -54,6 +58,93 @@ test('with auto-send on: backs off an active claim, else leaves the sending mark
   const out = await suggest.reserveHumanReply({ to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'hi', adminUserId: 'tech-1' });
   expect(out.reservationId).toBe('resv-1');
   expect(inserted[0]).toMatchObject({ table: 'sms_log', row: { direction: 'outbound', status: 'sending', message_type: 'manual', to_phone: '+19415550100', from_phone: '+19413529161', admin_user_id: 'tech-1' } });
+});
+
+test('the gratitude-only gate observes the same active auto-send claim', async () => {
+  isEnabled.mockImplementation((name) => name === 'smsGratitudeReplies');
+  hasActiveAutoSendClaim.mockResolvedValueOnce(true);
+  trxWith();
+
+  const out = await suggest.reserveHumanReply({
+    to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'hi',
+  });
+
+  expect(out).toEqual(expect.objectContaining({ reservationId: null, autoSendInFlight: true }));
+  expect(hasActiveAutoSendClaim).toHaveBeenCalledWith(expect.any(Function), {
+    threadLast10: '9415550100', customerId: 'c1',
+  });
+});
+
+test('wrapper opt-in blocks a recent unresolved manual reservation under the thread lock', async () => {
+  isEnabled.mockImplementation((name) => name === 'smsGratitudeReplies');
+  const { trx, inserted, reservationFirst, chains } = trxWith({ activeManualReservation: { id: 'prior-reservation' } });
+
+  const out = await suggest.reserveHumanReply({
+    to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'retry',
+    blockOnActiveManualReservation: true,
+  });
+
+  expect(out).toEqual(expect.objectContaining({
+    reservationId: null, autoSendInFlight: false, manualReplyInFlight: true,
+  }));
+  expect(reservationFirst).toHaveBeenCalledWith('id');
+  expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(reservationFirst.mock.invocationCallOrder[0]);
+  expect(chains.sms_log[0].where).toHaveBeenCalledWith('created_at', '>=', expect.any(Date));
+  expect(chains.sms_log[0].whereRaw).toHaveBeenCalledWith(
+    "metadata->>'manual_send_reservation' = 'true'",
+  );
+  expect(chains.sms_log[0].whereRaw).toHaveBeenCalledWith(
+    "metadata->>'manual_wrapper_reservation' = 'true'",
+  );
+  expect(chains.sms_log[0].whereRaw).toHaveBeenCalledWith(
+    expect.stringContaining("ELSE '+' ||"),
+    ['9415550100'],
+  );
+  expect(inserted).toEqual([]);
+});
+
+test('wrapper opt-in stamps the narrow durable marker on a new reservation', async () => {
+  isEnabled.mockImplementation((name) => name === 'smsGratitudeReplies');
+  const { inserted } = trxWith();
+
+  const out = await suggest.reserveHumanReply({
+    to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'new reply',
+    blockOnActiveManualReservation: true,
+  });
+
+  expect(out.reservationId).toBe('resv-1');
+  expect(JSON.parse(inserted[0].row.metadata)).toMatchObject({
+    manual_send_reservation: true,
+    manual_wrapper_reservation: true,
+    provider_outcome_uncertain: true,
+  });
+});
+
+test('wrapper retry lookup keeps the full international phone identity', async () => {
+  isEnabled.mockImplementation((name) => name === 'smsGratitudeReplies');
+  const { chains } = trxWith();
+
+  await suggest.reserveHumanReply({
+    to: '+442079460958', customerId: 'c1', fromNumber: '+19413529161', body: 'international',
+    blockOnActiveManualReservation: true,
+  });
+
+  expect(chains.sms_log[0].whereRaw).toHaveBeenCalledWith(
+    expect.stringContaining("ELSE '+' ||"),
+    ['+442079460958'],
+  );
+});
+
+test('existing reserve callers do not check or block on a manual reservation without opt-in', async () => {
+  const { inserted, reservationFirst } = trxWith({ activeManualReservation: { id: 'prior-reservation' } });
+
+  const out = await suggest.reserveHumanReply({
+    to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'ordinary caller',
+  });
+
+  expect(out.manualReplyInFlight).toBeUndefined();
+  expect(reservationFirst).not.toHaveBeenCalled();
+  expect(inserted).toEqual([]);
 });
 
 function settleDb({ stale = [] } = {}) {

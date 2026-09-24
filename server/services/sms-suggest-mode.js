@@ -33,6 +33,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { REPLY_RESERVATION_HOLD_HOURS } = require('./messaging/review-ask-reservation');
+const { phoneIdentityKey } = require('../utils/phone');
+const { phoneIdentitySql } = require('./sms-response-policy');
 
 // The graduation ladder. 'auto_send' is the top rung — its delivery path
 // lives in sms-auto-send.js and only fires behind GATE_SMS_AUTO_SEND with a
@@ -118,7 +121,7 @@ const EXPIRY_HOURS = 48;
 // provider_outcome_uncertain before treating it as an ordinary orphan.
 // Bounded terminal settlement, not a resend: reopening only returns the
 // linked decision(s) to pending_review for operator visibility.
-const UNCERTAIN_RESERVATION_HOLD_HOURS = 24;
+const UNCERTAIN_RESERVATION_HOLD_HOURS = REPLY_RESERVATION_HOLD_HOURS;
 
 // Human-authored/approved outbounds that really left the system — the same
 // ground-truth allowlists the shadow judge pairs against (sms-shadow-judge).
@@ -696,10 +699,12 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
 async function createReplyHoldingReservation(dbh, {
   to, customerId = null, fromNumber, body, adminUserId = null,
   agentDecisionId = null, parkedDecisionIds = [], reservationKind = 'manual', uncertain = false,
+  manualWrapperReservation = false,
 }) {
   const metadata = {
     [`${reservationKind}_send_reservation`]: true,
     ...(uncertain ? { provider_outcome_uncertain: true } : {}),
+    ...(manualWrapperReservation ? { manual_wrapper_reservation: true } : {}),
     ...(agentDecisionId ? { agent_decision_id: agentDecisionId } : {}),
     ...(parkedDecisionIds.length ? { parked_decision_ids: parkedDecisionIds } : {}),
   };
@@ -717,6 +722,25 @@ async function createReplyHoldingReservation(dbh, {
     })
     .returning('id');
   return row?.id || null;
+}
+
+// Wrapper-only retry interlock. An uncertain manual attempt may already have
+// reached the provider, so another wrapper-managed send to the same thread
+// must wait for reconciliation. This runs under lockSuggestThread and uses
+// the same 24-hour bound as the shared reservation readers/recovery policy.
+// Other reserveHumanReply callers retain their existing behavior unless they
+// explicitly opt in.
+async function hasActiveManualReplyReservation(dbh, { threadIdentity }) {
+  if (!threadIdentity) return false;
+  const cutoff = new Date(Date.now() - UNCERTAIN_RESERVATION_HOLD_HOURS * 60 * 60 * 1000);
+  const row = await dbh('sms_log')
+    .where({ direction: 'outbound', status: 'sending' })
+    .whereRaw("metadata->>'manual_send_reservation' = 'true'")
+    .whereRaw("metadata->>'manual_wrapper_reservation' = 'true'")
+    .where('created_at', '>=', cutoff)
+    .whereRaw(`${phoneIdentitySql("BTRIM(COALESCE(to_phone, ''))")} = ?`, [threadIdentity])
+    .first('id');
+  return Boolean(row);
 }
 
 async function settleReplyHoldingReservation({ reservationId, uncertain = false, acceptedResult = null }) {
@@ -772,8 +796,12 @@ async function settleReplyHoldingReservation({ reservationId, uncertain = false,
  * parkedDecisionIds) so a crash between Twilio's accept and settle is
  * recovered by the orphan sweep, exactly as the composer's send is.
  */
-async function reserveHumanReply({ to, customerId = null, fromNumber, body, adminUserId = null }) {
+async function reserveHumanReply({
+  to, customerId = null, fromNumber, body, adminUserId = null,
+  blockOnActiveManualReservation = false,
+}) {
   const threadLast10 = String(to || '').replace(/\D/g, '').slice(-10) || null;
+  const threadIdentity = phoneIdentityKey(to);
   // Cutoff for the post-send stale sweep: a suggestion for an inbound that
   // arrives AFTER this was never on the operator's screen and keeps its card.
   const startedAt = new Date();
@@ -783,11 +811,25 @@ async function reserveHumanReply({ to, customerId = null, fromNumber, body, admi
   const { isEnabled } = require('../config/feature-gates');
   return db.transaction(async (trx) => {
     await lockSuggestThread(trx, threadLast10);
-    const autoSendEnabled = isEnabled('smsAutoSend');
+    // Either autonomous lane can own the shared thread claim. Gratitude is
+    // intentionally independent of the general gate, so a manual reply must
+    // still observe its in-flight claim when only the narrow gate is enabled.
+    const autoSendEnabled = isEnabled('smsAutoSend') || isEnabled('smsGratitudeReplies');
     if (autoSendEnabled) {
       if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
         return { ...base, parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: true };
       }
+    }
+    if (blockOnActiveManualReservation
+      && await hasActiveManualReplyReservation(trx, { threadIdentity })) {
+      return {
+        ...base,
+        parkedDecisionIds: [],
+        heldDecisionIds: [],
+        reservationId: null,
+        autoSendInFlight: false,
+        manualReplyInFlight: true,
+      };
     }
     const parkedDecisionIds = await parkThreadSuggestions({ phoneLast10: threadLast10 }, trx);
     // The gate controls only the autonomous-send interlock. A manual reply
@@ -799,6 +841,7 @@ async function reserveHumanReply({ to, customerId = null, fromNumber, body, admi
         // transaction failure aborts first, and any later transport timeout
         // already has durable uncertainty linkage.
         uncertain: true,
+        manualWrapperReservation: blockOnActiveManualReservation,
       })
       : null;
     return { ...base, parkedDecisionIds, heldDecisionIds: parkedDecisionIds, reservationId, autoSendInFlight: false };

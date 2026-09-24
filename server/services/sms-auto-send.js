@@ -601,6 +601,15 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
       })
       .whereRaw("COALESCE(metadata->>'review_ask_reservation', 'false') != 'true'")
       .where('created_at', '<', cutoff)
+      // Wrapper-managed no-card sends have no linked decision to keep their
+      // uncertain reservation alive. Preserve that narrow marker for the
+      // same bounded 24-hour window the retry interlock observes.
+      .whereRaw(`NOT (
+        status = 'sending'
+        AND COALESCE(metadata->>'manual_wrapper_reservation', 'false') = 'true'
+        AND COALESCE(metadata->>'provider_outcome_uncertain', 'false') = 'true'
+        AND created_at >= ?
+      )`, [uncertainCutoff])
       .where(function settledOrOrdinaryReservation() {
         this.whereRaw("metadata->>'provider_outcome_uncertain' IS DISTINCT FROM 'true'")
           .orWhereNotExists(function liveLinkedDecision() {
