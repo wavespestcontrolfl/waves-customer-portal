@@ -172,26 +172,34 @@ function priceIdentityMatches(a, b) {
 // non-null fields win; `base`'s non-null fields fill whatever overlay
 // leaves null/absent.
 //
-// caller_response / accepted are handled separately from the generic
-// non-null-wins rule (codex #4722 r2 push-gate P1): caller_response is
-// EXPLICITLY nullable ('not_at_issue'/null are real, meaningful values, not
-// "absent"), so an overlay that sets it — even to null — must win outright,
-// never be filtered out by the generic "skip null" rule. accepted is purely
-// DERIVED from caller_response, so it is re-derived from the merged
-// caller_response afterward rather than merged field-by-field — otherwise a
-// stale accepted from the base could survive alongside a caller_response
-// that no longer supports it.
+// caller_response / accepted are handled as ONE unit, separately from the
+// generic non-null-wins rule (codex #4722 r2 push-gate P1s): by the time
+// this runs, both `base` and `overlay` already went through
+// normalizePriceEntry, so each one's own (caller_response, accepted) pair
+// is already internally consistent. Splitting them back apart — e.g.
+// re-deriving `accepted` from whichever `caller_response` the merge
+// happens to end up with — can resurrect a stale value that never came
+// from the side that's actually supposed to win:
+//   - overlay sets caller_response (even null): its own already-derived
+//     accepted travels WITH it, never re-derived from an unrelated
+//     caller_response inherited from base.
+//   - overlay omits caller_response but sets an explicit accepted (a
+//     legacy accepted-only shape): that accepted wins outright, and any
+//     caller_response inherited from base is cleared rather than left
+//     contradicting it.
+//   - overlay contributes neither: base's pair is untouched.
 function mergePriceEntries(base, overlay) {
   const merged = { ...base };
   for (const [key, value] of Object.entries(overlay)) {
-    if (key === 'caller_response') continue; // handled below
+    if (key === 'caller_response' || key === 'accepted') continue; // handled below
     if (value !== null && value !== undefined) merged[key] = value;
   }
   if ('caller_response' in overlay) {
     merged.caller_response = overlay.caller_response;
-  }
-  if ('caller_response' in merged) {
-    merged.accepted = normalizePriceEntry(merged).accepted;
+    merged.accepted = overlay.accepted !== undefined ? overlay.accepted : normalizePriceEntry(merged).accepted;
+  } else if (overlay.accepted !== null && overlay.accepted !== undefined) {
+    merged.accepted = overlay.accepted;
+    delete merged.caller_response;
   }
   return merged;
 }
@@ -202,9 +210,15 @@ function mergePriceEntries(base, overlay) {
 // value. When the selected prices[] entry describes the SAME price as the
 // existing `price` (same amount_usd/amount_max_usd/unit), they're merged
 // rather than one wholesale-replacing the other, so neither side's detail
-// is lost. A different price replaces outright, as before. A `price` with
-// no `prices` array (the common single-price case) is left alone beyond
-// its own accepted derivation above.
+// is lost. A different price replaces outright, as before. The merged/
+// selected primary is then written back into `prices[]` itself, at index
+// 0 (the canonical position the schema/prompt document), so a reader of
+// `prices[]` alone — never touching the sibling `price` field — sees the
+// SAME enriched entry rather than a sparser, stale echo (codex #4722 r2
+// push-gate P1: the Calls tab "All prices" row reads prices[] directly,
+// and a stale entry there could misrepresent a caller-mentioned price's
+// stated_by). A `price` with no `prices` array (the common single-price
+// case) is left alone beyond its own accepted derivation above.
 function normalizeServiceRequestPricing(serviceRequest) {
   if (!serviceRequest || typeof serviceRequest !== 'object') return serviceRequest;
   if (serviceRequest.price === undefined && !Array.isArray(serviceRequest.prices)) return serviceRequest;
@@ -222,11 +236,15 @@ function normalizeServiceRequestPricing(serviceRequest) {
       // above — checking caller_response alone would miss that entry and
       // fall through to prices[0], demoting a genuinely accepted price
       // (codex #4722 r1 push-gate P1).
-      const accepted = result.prices.find((p) => p && p.accepted === true);
-      const selected = accepted || result.prices[0];
-      result.price = (result.price && priceIdentityMatches(result.price, selected))
+      const acceptedIndex = result.prices.findIndex((p) => p && p.accepted === true);
+      const selectedIndex = acceptedIndex >= 0 ? acceptedIndex : 0;
+      const selected = result.prices[selectedIndex];
+      const primary = (result.price && priceIdentityMatches(result.price, selected))
         ? mergePriceEntries(result.price, selected)
         : selected;
+      result.price = primary;
+      const rest = result.prices.filter((_, i) => i !== selectedIndex);
+      result.prices = [primary, ...rest];
     }
   }
   return result;

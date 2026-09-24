@@ -872,6 +872,45 @@ describe('normalize extraction v2', () => {
         const result = normalizeExtractionV2(extraction);
         expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', caller_response: null, accepted: null, stated_by: 'agent' });
       });
+
+      // codex #4722 r2 push-gate P1 (2nd round): a same-identity prices[]
+      // entry that sets an explicit accepted (a valid, optional-field,
+      // caller_response-less shape) must win outright — re-deriving from
+      // an inherited caller_response instead would resurrect a stale
+      // acceptance the overlay never claimed. The stale caller_response is
+      // cleared rather than left contradicting the winning accepted.
+      test('a same-identity entry with an explicit accepted but no caller_response of its own wins, clearing the inherited caller_response', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', accepted: false },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', accepted: false, stated_by: 'agent' });
+        expect(result.service_request.price).not.toHaveProperty('caller_response');
+      });
+
+      // codex #4722 r2 push-gate P1 (2nd round): the merged/enriched
+      // primary must be written back into prices[0] itself, not just into
+      // the sibling `price` field — a reader of prices[] alone (the Calls
+      // tab "All prices" row) must see the SAME enriched entry, never a
+      // sparser stale echo that drops stated_by and could misattribute a
+      // caller-mentioned price to the agent by default.
+      test('writes the merged primary entry back into prices[0], not just into price', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 40, unit: 'per_month', caller_response: 'not_at_issue', accepted: null, stated_by: 'caller', evidence_quote: 'a competitor charges forty a month',
+        };
+        extraction.service_request.prices = [
+          // Same price, sparser — missing stated_by/evidence_quote.
+          { amount_usd: 40, unit: 'per_month', caller_response: 'not_at_issue' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 40, unit: 'per_month', stated_by: 'caller' });
+        expect(result.service_request.prices[0]).toEqual(result.service_request.price);
+      });
     });
 
     test('a single price with no prices array is left alone (only accepted derivation applies)', () => {
