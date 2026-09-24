@@ -1748,11 +1748,23 @@ async function commitVerdict(conn, leadId, token, customerId) {
 
 // The first non-ok eligibility across the booked profile and the lead's
 // other profiles, else the booked profile's own.
+// The ALREADY_BOOKED answer from FRESH state only: the lead reloaded, its
+// trusted customer re-resolved with the token, and the profile set built
+// without any caller-supplied seed — so nothing is revealed about a
+// customer the token no longer has authority over.
+async function trustedLeadWideEligibility(leadId, token) {
+  const freshLead = await loadLead(db, leadId);
+  if (!freshLead) return { state: 'gone', visit: null, rescheduleUrl: null };
+  const trusted = await loadTrustedCustomer(db, freshLead, token);
+  const profileIds = await trustedLeadProfileIds(db, leadId, token, trusted?.id || null);
+  return leadWideEligibility(freshLead, trusted, profileIds);
+}
+
 async function leadWideEligibility(lead, custRow, profileIds) {
   const own = await resolveEligibility(db, lead, custRow);
   if (own.state !== 'ok') return own;
   for (const id of profileIds) {
-    if (String(id) === String(custRow.id)) continue;
+    if (custRow && String(id) === String(custRow.id)) continue;
     const profile = await loadCustomer(db, id);
     const other = profile ? await resolveEligibility(db, lead, profile) : null;
     if (other && other.state !== 'ok') return other;
@@ -1802,7 +1814,7 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId, { includeMer
 // A failed createSelfBooking mapped to the page's responses: ALREADY_BOOKED
 // resolves to GET's already_booked shape; a 409 is SLOT_TAKEN with fresh
 // times; anything else passes through.
-async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, profileIds = [], verified }) {
+async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, verified }) {
   // A validated, in-area address the lead supplied through their own
   // link stays on the customer even when this attempt fails (owner
   // ruling 2026-09-24): undoing it raced concurrent bookings that had
@@ -1824,8 +1836,10 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
     // (no profile shows why) would then mislabel a genuine conversion as
     // already_booked. Reload the lead fresh so 'converted' resolves
     // directly, matching what actually made the commit ineligible.
-    const freshLead = await loadLead(db, lead.id);
-    return res.json(eligibilityResponse(await leadWideEligibility(freshLead || lead, custRow, profileIds), leadPayload));
+    // Every detail in this answer goes through the trust rules afresh
+    // (Codex #4737 r12 pre-push P0): the pre-booking custRow / profile set
+    // could name a customer this token lost authority over since.
+    return res.json(eligibilityResponse(await trustedLeadWideEligibility(lead.id, verified), leadPayload));
   }
   // An address/account edit under the booking fence (Codex #4737 r8 + r9
   // P2s): fresh times at the customer's CURRENT pin.
@@ -2015,8 +2029,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id) } });
 
     if (!result.ok) {
-      const profileIds = result.code === 'ALREADY_BOOKED' ? await resolveCustomerIds(db) : [custRow.id];
-      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, profileIds, verified });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, verified });
     }
 
     return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));

@@ -648,6 +648,29 @@ describe('Codex #4737 r11 P2s: availability eligibility; race refresh never at a
   });
 });
 
+describe('Codex #4737 r12 pre-push P0: an ALREADY_BOOKED answer never reveals a customer the token lost', () => {
+  test('ALREADY_BOOKED after a phone change → already_booked with no visit and no reschedule link', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      // Staff moves the customer to another phone; the customer now has an
+      // open assessment the token must not see.
+      firstResults.customers = { ...firstResults.customers, phone: '9415559999' };
+      listResults.scheduled_services = [
+        { id: 'ss-private', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'private-tok' },
+      ];
+      return { ok: false, status: 409, error: 'You already have a consultation on the books.', code: 'ALREADY_BOOKED' };
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.body).toMatchObject({ state: 'already_booked', visit: null, rescheduleUrl: null });
+    expect(JSON.stringify(res.body)).not.toContain('private-tok');
+  });
+});
+
 describe('Codex #4737 r10 pre-push P0: a race that ends the token\'s authority returns no customer details', () => {
   test('CUSTOMER_CHANGED_RETRY after a phone change → 422 address_unresolved, no address, no availability', async () => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
