@@ -386,6 +386,85 @@ describe('InspectionPage booking', () => {
   });
 });
 
+// Codex pre-push P1, round 8, 2026-09-24 — an addressless lead's held
+// resolvedAddress must survive EVERY availability refresh path, not just
+// the address gate's own initial resolve. Before this fix, "Show all open
+// times" and the SLOT_TAKEN-without-availability fallback both called a
+// bare GET with no address, which re-answered needs_address:true and
+// yanked the picker back to a blank address form mid-session.
+describe('InspectionPage availability refresh keeps a held address (P1, round 8)', () => {
+  it('"Show all open times" after an AI search POSTs the held address — keeps the picker, never re-shows needs_address', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })),
+      availability: jsonResponse({ availability: okPayload().availability, needs_address: false }),
+      findSlots: jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }),
+    });
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/find-slots'))).toBe(true));
+
+    fetchMock.mockClear();
+    fireEvent.click(await screen.findByRole('button', { name: 'Show all open times' }));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url, opts]) => String(url).includes('/availability') && opts?.method === 'POST');
+      expect(call).toBeTruthy();
+      expect(JSON.parse(call[1].body)).toEqual({ address: '123 Palm Ave, Bradenton, FL 34209' });
+    });
+    // Never a bare GET on the reset — that would have dropped the address
+    // and re-answered needs_address:true.
+    expect(fetchMock.mock.calls.some(([url, opts]) => String(url).endsWith('/inspection/deadbeef') && !opts?.method)).toBe(false);
+
+    // The picker survives — never re-shows the address form.
+    expect(screen.queryByText(/where should we come by/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toBeInTheDocument();
+  });
+
+  it('a SLOT_TAKEN response with no fresh availability falls back to the SAME address-aware refresh, never a bare GET', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })),
+      availability: jsonResponse({ availability: okPayload().availability, needs_address: false }),
+      // No `availability` field — the server's own refresh attempt came
+      // back empty, forcing the client-side fallback.
+      post: jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN' }, 409),
+    });
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+
+    fetchMock.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+
+    expect(await screen.findByText(/just taken/i)).toBeInTheDocument();
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url, opts]) => String(url).includes('/availability') && opts?.method === 'POST');
+      expect(call).toBeTruthy();
+      expect(JSON.parse(call[1].body)).toEqual({ address: '123 Palm Ave, Bradenton, FL 34209' });
+    });
+    expect(fetchMock.mock.calls.some(([url, opts]) => String(url).endsWith('/inspection/deadbeef') && !opts?.method)).toBe(false);
+
+    // Still on the picker (slot cleared, but no address form).
+    expect(screen.queryByText(/where should we come by/i)).not.toBeInTheDocument();
+  });
+});
+
 describe('InspectionPage ?slot= preselect', () => {
   it('preselects the requested slot without a click', async () => {
     stubFetch({ get: jsonResponse(okPayload()) });

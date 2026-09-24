@@ -47,6 +47,25 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// Inspection only — the ONE network call that resolves availability for a
+// SUPPLIED address (Codex pre-push P1, 2026-09-24): the address gate's own
+// resolve (InspectionAddressGate, a separate component) and the page's own
+// refreshInspectionAvailability (reset / SLOT_TAKEN recovery) both call
+// this exact function, so the request shape can never drift between them.
+// Returns the raw fetch Response alongside the parsed body so each caller
+// keeps its own status/error handling (the gate shows inline recovery UI;
+// the page-level refresh just needs the availability payload).
+async function postInspectionAvailability(token, address, { signal } = {}) {
+  const res = await fetch(`${API_BASE}/public/inspection/${token}/availability`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address }),
+    signal,
+  });
+  const body = await res.json().catch(() => ({}));
+  return { res, body };
+}
+
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const S = {
   page: '#FAF8F3',
@@ -976,12 +995,7 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
     setError(null);
     setOutOfArea(null);
     try {
-      const res = await fetch(`${API_BASE}/public/inspection/${token}/availability`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address: value }),
-      });
-      const body = await res.json().catch(() => ({}));
+      const { res, body } = await postInspectionAvailability(token, value);
       if (res.status === 422 && body.error === 'out_of_area') {
         setOutOfArea({ county: body.county || null });
         return;
@@ -1371,6 +1385,34 @@ export default function ScheduleFlowPage({ flow }) {
     setData((prev) => (prev ? { ...prev, ...patch } : prev));
   }, []);
 
+  // Inspection only — the ONE client helper that refreshes availability on
+  // any post-load path (Codex pre-push P1, 2026-09-24): "Show all open
+  // times" after an AI search, and the SLOT_TAKEN recovery fallback, both
+  // call this. When a resolvedAddress is held (the address gate already
+  // resolved one this page-life — a lead with no address on file), it
+  // POSTs that address through postInspectionAvailability (the SAME call
+  // the address gate itself makes) and MERGES the result into `data`,
+  // never replacing it wholesale — a bare GET on availabilityUrl (no
+  // address) would re-answer needs_address:true for an addressless lead
+  // and yank the picker back to a blank address form mid-session. When the
+  // lead already has an address on file (no resolvedAddress held), the
+  // plain GET is correct and unchanged — same as every other flow.
+  const refreshInspectionAvailability = useCallback(async ({ signal } = {}) => {
+    if (flow === 'inspection' && resolvedAddress) {
+      const { res, body } = await postInspectionAvailability(token, resolvedAddress, { signal });
+      if (signal?.aborted) return;
+      if (!res.ok) throw new Error(body.error || 'availability refresh failed');
+      mergeData({ availability: body.availability, needs_address: false });
+      return;
+    }
+    const res = await fetch(availabilityUrl, { signal });
+    if (signal?.aborted) return;
+    if (!res.ok) throw new Error('availability refresh failed');
+    const body = await res.json();
+    if (signal?.aborted) return;
+    setData(body);
+  }, [flow, resolvedAddress, token, availabilityUrl, mergeData]);
+
   // Waves AI date/time search — swaps in the matching window's availability
   // (same shape the GET returns) and hands the summary line back to the
   // card. Throwing lets the card show its own call-us fallback line.
@@ -1410,11 +1452,8 @@ export default function ScheduleFlowPage({ flow }) {
     setSelectedSlot(null);
     const signal = loadAbortRef.current?.signal;
     try {
-      const res = await fetch(availabilityUrl, { signal });
-      if (!res.ok) return;
-      const body = await res.json();
+      await refreshInspectionAvailability({ signal });
       if (signal?.aborted) return;
-      setData(body);
       setAiFiltered(false);
       setAiSession((n) => n + 1); // remount the card → clears its recap/query
     } catch { /* keep the filtered calendar + reset link */ }
@@ -1477,6 +1516,15 @@ export default function ScheduleFlowPage({ flow }) {
         setAiSession((n) => n + 1); // remount the card — its recap is stale too
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
+        } else if (flow === 'inspection') {
+          // The server's own refresh attempt came back empty — fall back
+          // to a client-side refresh through the SAME address-aware helper
+          // showAllTimes uses, never the bare load()/GET below: an
+          // addressless lead's held resolvedAddress must not be dropped
+          // here either (Codex pre-push P1, 2026-09-24).
+          try {
+            await refreshInspectionAvailability();
+          } catch { /* keep the current calendar rather than blanking it */ }
         } else {
           await load();
         }
