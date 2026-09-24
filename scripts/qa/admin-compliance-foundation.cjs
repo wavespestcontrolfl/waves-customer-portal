@@ -141,7 +141,7 @@ async function main() {
       await page.getByText('Synthetic treatment', { exact: true }).first().waitFor();
       await page.screenshot({ path: path.join(output, `${name}-dashboard.png`), fullPage: true });
 
-      await page.getByRole('button', { name: 'Application Log' }).click();
+      await page.getByRole('button', { name: 'Applications' }).click();
       // The waiter is armed before the fill that triggers the request: the
       // synthetic route fulfils immediately, so a listener installed after the
       // action can miss the response and time out on a page that behaved.
@@ -153,7 +153,7 @@ async function main() {
       await downloadPromise;
       await page.screenshot({ path: path.join(output, `${name}-application-log.png`), fullPage: true });
 
-      await page.getByRole('button', { name: 'Product Limits' }).click();
+      await page.getByRole('button', { name: 'Limits' }).click();
       await page.getByLabel('Customer ID').fill('customer-1');
       await page.getByRole('button', { name: 'Check Limits' }).click();
       await page.getByText('Synthetic annual limit').waitFor();

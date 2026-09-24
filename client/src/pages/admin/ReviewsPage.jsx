@@ -40,7 +40,7 @@ const REVIEWS_LEAF_SECTIONS = [
   },
   {
     key: "outreach",
-    label: "Outreach",
+    label: "Requests",
     Icon: Send,
   },
   {

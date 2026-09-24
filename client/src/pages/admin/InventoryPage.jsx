@@ -110,7 +110,7 @@ const TAB_GROUPS = [
   },
   {
     key: "vendors",
-    label: "Vendors",
+    label: "Sourcing",
     Icon: Store,
     tabs: ["price-sync", "approvals", "vendors", "scrape"],
   },

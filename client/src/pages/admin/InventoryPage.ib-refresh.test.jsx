@@ -105,9 +105,9 @@ test('inventory group and leaf changes are URL-backed and preserve unrelated URL
   mount('source=audit', { hash: '#evidence' });
   await screen.findByText('Products');
 
-  fireEvent.click(screen.getByRole('button', { name: 'Vendors' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Sourcing' }));
   expect(screen.getByTestId('location')).toHaveTextContent('?source=audit&tab=price-sync#evidence');
-  fireEvent.click(screen.getAllByRole('button', { name: 'Vendors', exact: true }).find((button) => !button.closest('nav')));
+  fireEvent.click(screen.getByRole('button', { name: 'Vendors', exact: true }));
   expect(screen.getByTestId('location')).toHaveTextContent('?source=audit&tab=vendors#evidence');
   fireEvent.click(screen.getByText('Browser Back'));
   await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('?source=audit&tab=price-sync#evidence'));

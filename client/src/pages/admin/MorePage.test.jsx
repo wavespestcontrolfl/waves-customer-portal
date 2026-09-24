@@ -39,30 +39,30 @@ describe("MorePage — the mobile Settings tab", () => {
     expect(screen.getByRole('link', { name: 'Contracts', exact: true })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Operations', exact: true }));
     expect(screen.getByRole('link', { name: 'Assessments', exact: true })).toHaveAttribute('href', '/admin/lawn-assessments?tab=field');
-    expect(screen.getByRole('link', { name: 'System health', exact: true })).toHaveAttribute('href', '/admin/tool-health');
-    expect(screen.getByRole('link', { name: 'Early feature access', exact: true })).toHaveAttribute('href', '/admin/_design-system/flags');
+    expect(screen.getByRole('link', { name: 'Health', exact: true })).toHaveAttribute('href', '/admin/tool-health');
+    expect(screen.getByRole('link', { name: 'Features', exact: true })).toHaveAttribute('href', '/admin/_design-system/flags');
     expect(screen.getByRole('link', { name: 'Account', exact: true })).toHaveAttribute('href', '/admin/settings?tab=general');
-    expect(screen.getByRole('link', { name: 'Agent Ops', exact: true })).toHaveAttribute('href', '/admin/agents');
+    expect(screen.getByRole('link', { name: 'Agents', exact: true })).toHaveAttribute('href', '/admin/agents');
   });
 
-  it('keeps Contracts and System health owner-only in the grouped technician directory', () => {
+  it('keeps Contracts and Health owner-only in the grouped technician directory', () => {
     renderMore('technician', true);
     expect(screen.queryByRole('button', { name: 'Customers', exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Settings', exact: true })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Portal Usage', exact: true })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Usage', exact: true })).toBeVisible();
   });
   it("is titled Settings and lists the Settings leaves inline instead of a Settings nav row", () => {
     renderMore();
     expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
     // Inline leaves deep-link into SettingsPage tabs…
     expect(screen.getByRole("link", { name: /^Account$/ })).toHaveAttribute("href", "/admin/settings?tab=general");
-    expect(screen.getByRole("link", { name: /Blackout Days/ })).toHaveAttribute("href", "/admin/settings?tab=blackout-days");
+    expect(screen.getByRole("link", { name: /Blackouts/ })).toHaveAttribute("href", "/admin/settings?tab=blackout-days");
     expect(screen.getAllByRole("link", { name: /^Integrations$/ })).toHaveLength(1);
     expect(screen.queryByRole("link", { name: /^Tap to Pay$/ })).not.toBeInTheDocument();
     // …and there is no single "Settings" row pointing at a second index page.
     expect(screen.queryByRole("link", { name: /^Settings$/ })).not.toBeInTheDocument();
     // Standalone leaves that only the old mobile Settings index linked survive…
-    expect(screen.getByRole("link", { name: /Early feature access/ })).toHaveAttribute("href", "/admin/_design-system/flags");
+    expect(screen.getByRole("link", { name: /Features/ })).toHaveAttribute("href", "/admin/_design-system/flags");
     // …while destinations already in the nav sections are not repeated.
     expect(screen.getAllByRole("link", { name: /^Invoices$/ })).toHaveLength(1);
     expect(screen.getByRole("link", { name: /^Invoices$/ })).toHaveAttribute("href", "/admin/invoices");
@@ -72,8 +72,8 @@ describe("MorePage — the mobile Settings tab", () => {
   it("hides owner-only Settings leaves from a technician", () => {
     renderMore("tech");
     expect(screen.getByRole("link", { name: /^Account$/ })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /Blackout Days/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /KPI Targets/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Blackouts/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Targets/ })).not.toBeInTheDocument();
   });
 
   it("clears Email recovery and pending callbacks when signing out on mobile", () => {
