@@ -107,12 +107,21 @@ const TaxCalculator = {
     // legacy row when NO active row exists at all — that precedence let a
     // backfilled active row win over a later, still-effective legacy
     // predecessor (codex round-5 P0).
+    // The one `active` shape that IS honored: a row switched off with NO
+    // expiry at all (hand-edited or seeded that way) has no window to
+    // reason about and was deliberately disabled — it must never be
+    // charged again just because it carries the newest effective_date
+    // (fallback-auditor P1 on 9bc52bc07c). Every legacy shape above
+    // carries an expiry, so this excludes nothing those rulings protect.
     const nowET = todayET();
     const taxRate = await conn('tax_rates')
       .where({ county })
       .andWhere('effective_date', '<=', nowET)
       .andWhere(function () {
         this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
+      })
+      .andWhere(function () {
+        this.where('active', true).orWhereNotNull('expiry_date');
       })
       .orderBy('effective_date', 'desc')
       .first();

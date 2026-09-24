@@ -146,7 +146,10 @@ function withRateStatus(rows, nowET) {
   });
   const currentIdByCounty = new Map();
   for (const [county, indices] of byCounty) {
-    const eligible = indices.filter((i) => eachEff[i] <= nowET && (!eachExp[i] || eachExp[i] > nowET));
+    // Mirrors the readers' window, including their one honored `active`
+    // shape: a row switched off with no expiry is never 'current'.
+    const eligible = indices.filter((i) => eachEff[i] <= nowET && (!eachExp[i] || eachExp[i] > nowET)
+      && (rows[i].active || eachExp[i]));
     if (eligible.length) {
       eligible.sort((a, b) => eachEff[b].localeCompare(eachEff[a]));
       currentIdByCounty.set(county, rows[eligible[0]].id);

@@ -328,11 +328,17 @@ Please search for current FL and federal tax changes, then provide your analysis
       // active or not, is the one row per county calculateTax would also
       // select (codex round-1 P1 dropping the county entirely, round-5 P0
       // ranking an active backfill over a later legacy row).
+      // A row switched off with NO expiry (active:false, expiry_date null)
+      // is deliberately disabled and is excluded here exactly as
+      // calculateTax excludes it (fallback-auditor P1 on 9bc52bc07c).
       const nowET = etDateString();
       const rows = await db('tax_rates')
         .andWhere('effective_date', '<=', nowET)
         .andWhere(function () {
           this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
+        })
+        .andWhere(function () {
+          this.where('active', true).orWhereNotNull('expiry_date');
         })
         .orderBy('effective_date', 'desc');
       const seenCounties = new Set();

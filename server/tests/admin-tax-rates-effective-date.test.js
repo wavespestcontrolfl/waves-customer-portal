@@ -456,6 +456,53 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   });
 });
 
+(process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('a row switched off with no expiry is never charged again (fallback-auditor P1 on 9bc52bc07c)', () => {
+  const county = 'Sarasota';
+  const customerId = randomUUID();
+  const disabledEffective = etDateString(addETDays(new Date(), -10));
+  let restoreCounty;
+
+  beforeAll(async () => {
+    restoreCounty = await snapshotCounty(county);
+    await db('customers').insert({
+      id: customerId, first_name: 'TaxDisabledRow', last_name: 'Commercial', phone: '9415550192',
+      email: `tax-disabled-${customerId}@example.com`, zip: '34236', property_type: 'commercial',
+    });
+    // Newest effective_date for the county, deliberately switched off by
+    // hand with no expiry — the readers select by window and no longer
+    // gate on `active`, so without the null-expiry exclusion this 9%
+    // would outrank the real 7% row on every invoice.
+    await db('tax_rates').insert({
+      county, state: 'FL', state_rate: 0.06, county_surtax: 0.03, combined_rate: 0.09,
+      effective_date: disabledEffective, expiry_date: null, active: false, notes: 'disabled by hand',
+    });
+  });
+
+  afterAll(async () => {
+    await db('customers').where({ id: customerId }).del();
+    await restoreCounty();
+  });
+
+  test('calculateTax, the advisor, and GET /rates all keep the baseline row', async () => {
+    const r = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 100);
+    expect(r.rate).toBeCloseTo(0.07, 6);
+    expect(r.amount).toBe(7);
+
+    const TaxAdvisor = require('../services/tax-advisor');
+    const advisorRows = (await TaxAdvisor.getCurrentTaxRates()).filter((row) => row.county === county);
+    expect(advisorRows).toHaveLength(1);
+    expect(parseFloat(advisorRows[0].combined_rate)).toBeCloseTo(0.07, 6);
+
+    const { body } = await withServer((base) => fetch(`${base}/admin/tax/rates`)
+      .then(async (res) => ({ status: res.status, body: await res.json() })));
+    const sarasota = body.rates.filter((row) => row.county === county);
+    const current = sarasota.filter((row) => row.status === 'current');
+    expect(current).toHaveLength(1);
+    expect(parseFloat(current[0].combinedRate)).toBeCloseTo(0.07, 6);
+    expect(sarasota.find((row) => parseFloat(row.combinedRate) === 0.09).status).toBe('superseded');
+  });
+});
+
 // No database needed: validation runs (and rejects) before the route ever
 // touches tax_rates, so this runs unconditionally.
 describe('POST /admin/tax/rates rejects malformed rate strings before retiring anything (codex round-1 P1)', () => {
