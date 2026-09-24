@@ -550,10 +550,37 @@ it('VISIT_CHANGED_RETRY: the save is refused with a clear message and nothing si
   fireEvent.change(notes, { target: { value: 'Updated note' } });
   await waitForMoneyReady();
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
-  expect(await screen.findByRole('alert')).toHaveTextContent(/changed since it opened/);
+  // GitHub Codex round 20 P2 (#4657, :3498): the fixed stacked-discount copy
+  // is now only the fallback for an EMPTY server message — the server's own
+  // message ('stale', forwarded as e.message by adminFetch) is shown
+  // instead, since this same code covers route/window/grouping/legacy-price/
+  // preview-drift reasons too, each with its own actionable text.
+  expect(await screen.findByRole('alert')).toHaveTextContent('stale');
   expect(onSaved).not.toHaveBeenCalled();
   // The modal stays open with the edit intact — nothing was silently lost.
   expect(screen.getByDisplayValue('Updated note')).toBeInTheDocument();
+});
+
+it('round 20 P2 (:3498): VISIT_CHANGED_RETRY shows the server\'s own actionable message, not the fixed stacked-discount copy', async () => {
+  vi.stubGlobal('fetch', mockFetch({
+    stackingEnabled: true,
+    onUpdateDetails: async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: 'This appointment moved while saving — reload and save again.',
+        code: 'VISIT_CHANGED_RETRY',
+      }),
+    }),
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  // Without the fix this reads the fixed stacked-discount copy instead.
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'This appointment moved while saving — reload and save again.',
+  );
 });
 
 it('save-lock: a double click while a discounted save is in flight posts exactly once', async () => {
@@ -2006,6 +2033,24 @@ it('round 16 P2 (:5318): a CONFIRMED preview of a legitimately unpriced visit re
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
   expect(totalText()).toBe('Not priced');
   expect(screen.queryByText('Confirming…')).not.toBeInTheDocument();
+});
+
+// :3330 — a save after the CONFIRMED-but-unpriced preview above has to
+// witness that confirmed state too. Sending no expectedTotal at all here is
+// indistinguishable from "never previewed", so a stale save could silently
+// overwrite a price a concurrent editor just confirmed.
+it('round 20 P1 (:3330): a save after a CONFIRMED preview resolving to no total sends expectedTotal: null, the confirmed-unpriced witness', async () => {
+  vi.stubGlobal('fetch', previewUnpricedFetch(undiscountedVisit));
+  render(<Harness service={undiscountedVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  // The key itself must be present (an explicit null), not merely absent —
+  // without the fix this omits the key entirely, same as never previewed.
+  expect('expectedTotal' in body).toBe(true);
+  expect(body.expectedTotal).toBe(null);
 });
 
 // ---------------------------------------------------------------------

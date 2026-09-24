@@ -1355,8 +1355,13 @@ describe('addonRowIdsDrifted (round 14 P1: add-on identities rechecked under the
 // the PUT never received it back, so a catalog change between preview and
 // save could persist a different total than the one the operator actually
 // confirmed. previewTotalDrifted is the pure comparison the route's own
-// post-plan witness check (:11355) is built on.
-describe('previewTotalDrifted (round 15 P1: the preview-total witness)', () => {
+// post-plan witness check (:11355) is built on. Extended GitHub Codex
+// round 20 P1 (#4657, :3330) to a three-way contract: undefined
+// expectedTotal means no witness was posted and never drifts; a finite
+// number witnesses a priced preview (existing rule); null witnesses a
+// CONFIRMED unpriced preview ("Not priced") and drifts only if the plan
+// would actually persist a price.
+describe('previewTotalDrifted (round 15 P1 + round 20 P1: the preview-total witness)', () => {
   test('an exact match never drifts', () => {
     expect(previewTotalDrifted(150, 150)).toBe(false);
     expect(previewTotalDrifted(0, 0)).toBe(false);
@@ -1377,10 +1382,22 @@ describe('previewTotalDrifted (round 15 P1: the preview-total witness)', () => {
     expect(previewTotalDrifted(0, undefined)).toBe(true);
   });
 
-  test('no witness posted (undefined or null expectedTotal) never drifts, whatever the plan', () => {
+  test('undefined expectedTotal (no witness posted) never drifts, whatever the plan', () => {
     expect(previewTotalDrifted(undefined, 150)).toBe(false);
     expect(previewTotalDrifted(undefined, undefined)).toBe(false);
-    expect(previewTotalDrifted(null, 150)).toBe(false);
+    expect(previewTotalDrifted(undefined, null)).toBe(false);
+  });
+
+  test('null expectedTotal (confirmed "Not priced") drifts against a plan that would persist a real price', () => {
+    expect(previewTotalDrifted(null, 150)).toBe(true);
+    expect(previewTotalDrifted(null, 0)).toBe(true);
+  });
+
+  test('null expectedTotal does not drift against a plan that leaves the price untouched (undefined)', () => {
     expect(previewTotalDrifted(null, undefined)).toBe(false);
+  });
+
+  test('null expectedTotal does not drift against a plan that itself plans null (still unpriced)', () => {
+    expect(previewTotalDrifted(null, null)).toBe(false);
   });
 });

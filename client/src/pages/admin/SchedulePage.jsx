@@ -3326,8 +3326,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           // "don't check" contract, and a notes-only save whose money can
           // never change (saveTouchesMoney false) may never even get a
           // resolved preview total to send.
+          // GitHub Codex round 20 P1 (#4657, :3330): a CONFIRMED preview
+          // that resolved to no priceable total ("Not priced" — total null
+          // with moneyPreviewFresh true, r16 :5318) also has to witness that
+          // confirmed state. Sending undefined there is indistinguishable
+          // from never having previewed at all, so a concurrent save that
+          // priced the visit in the meantime could be silently overwritten
+          // by this stale, still-unpriced save. Server contract: key absent
+          // → no check; explicit null → refuse if the server's own plan
+          // would persist a price; a number → must match exactly.
           expectedTotal:
-            typeof appointmentTotal === "number" ? appointmentTotal : undefined,
+            moneyPreviewFresh && moneyPreview.total == null
+              ? null
+              : typeof appointmentTotal === "number" ? appointmentTotal : undefined,
         }),
       });
       if (notifyOnMove && result?.notificationSent === false) {
@@ -3502,7 +3513,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // refused rather than silently overwriting the concurrent change.
         // Nothing here was written; reopening shows the current numbers
         // rather than this modal silently retrying a stale preview.
-        setSaveError("This appointment's stacked discounts changed since it opened (likely another save). Close and reopen it to see the current numbers, then save again.");
+        // GitHub Codex round 20 P2 (#4657, :3498): the server returns this
+        // SAME code for route changes, moved/resized windows, grouping
+        // changes, the legacy-price CAS, and now preview-total drift too —
+        // each with its own actionable message — but the fixed stacked-
+        // discount copy here was shown for every one of them regardless.
+        // The error middleware forwards the body's `error` as e.message
+        // (adminFetch), so show the server's own message and fall back to
+        // the stacked-discount copy only when it's empty.
+        setSaveError(e.message || "This appointment's stacked discounts changed since it opened (likely another save). Close and reopen it to see the current numbers, then save again.");
       } else {
         setSaveError("Save failed: " + e.message);
       }

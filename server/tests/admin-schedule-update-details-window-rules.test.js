@@ -494,7 +494,7 @@ test('an address change combined with a cadence rewrite is refused under lock be
   expect(handler.slice(trxStart, refuse)).not.toMatch(/\.(update|insert|del|delete)\(/);
 });
 
-describe('expectedTotal witness — GitHub Codex round 15 P1 (#4657, :11355)', () => {
+describe('expectedTotal witness — GitHub Codex round 15 P1 (#4657, :11355); round 20 P1 (#4657, :3330)', () => {
   test('a non-numeric expectedTotal is refused 422 before any DB work', async () => {
     db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
     const { status, body } = await put({ notes: 'x', expectedTotal: 'lots' });
@@ -503,11 +503,24 @@ describe('expectedTotal witness — GitHub Codex round 15 P1 (#4657, :11355)', (
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  test('null expectedTotal is treated as "no witness" — never refused', async () => {
+  test('null expectedTotal (confirmed "Not priced") against a schedule-only edit proceeds — the plan leaves estimated_price untouched, matching the confirmed unpriced state', async () => {
     db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
     const { status } = await put({ scheduledDate: '2099-02-01', expectedTotal: null });
     expect(status).toBe(418);
     expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('null expectedTotal (confirmed "Not priced") against a genuine estimatedPrice edit refuses 409 VISIT_CHANGED_RETRY — the plan would silently persist a real price against a witnessed unpriced preview', async () => {
+    db.mockImplementation(() => {
+      const c = chain({ ...STORED, estimated_price: 100 });
+      c.columnInfo = jest.fn().mockResolvedValue({ estimated_price: {} });
+      return c;
+    });
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status, body } = await put({ estimatedPrice: 150, expectedTotal: null });
+    expect(status).toBe(409);
+    expect(body.code).toBe('VISIT_CHANGED_RETRY');
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('a witnessed save that never plans a price (a schedule-only edit) refuses 409 VISIT_CHANGED_RETRY / PREVIEW_TOTAL_DRIFT before opening the transaction', async () => {

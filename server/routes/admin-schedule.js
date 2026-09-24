@@ -1512,16 +1512,24 @@ function addonRowIdsDrifted(expectedIds, freshIds) {
   return false;
 }
 
-// GitHub Codex round 15 P1 (#4657, :3019): the client gates Save on a
-// server preview (POST /:id/update-details/preview returns
-// `total: updates.estimated_price ?? null`), but the PUT never received
-// that confirmed total back — if catalog amounts/caps/eligibility changed
-// between preview and save, the PUT could silently persist a different
-// total than the one the operator actually confirmed. No witness (no
-// expectedTotal posted) never drifts — only a save that opted into the
-// witness is held to it.
+// GitHub Codex round 15 P1 (#4657, :3019); extended GitHub Codex round 20 P1
+// (#4657, :3330): the client gates Save on a server preview (POST
+// /:id/update-details/preview returns `total: updates.estimated_price ?? null`),
+// but the PUT never received that confirmed total back — if catalog
+// amounts/caps/eligibility changed between preview and save, the PUT could
+// silently persist a different total than the one the operator actually
+// confirmed. Three-way contract on expectedTotal: undefined means no witness
+// was posted (no fresh preview) and never drifts; a finite number witnesses
+// a priced preview and drifts unless the plan persists that same number
+// (existing rule); null witnesses a CONFIRMED unpriced preview ("Not
+// priced") and drifts only if the plan would actually persist a price —
+// a plan that leaves estimated_price undefined, or itself plans null,
+// still matches the confirmed unpriced state.
 function previewTotalDrifted(expectedTotal, plannedEstimatedPrice) {
-  if (expectedTotal === undefined || expectedTotal === null) return false;
+  if (expectedTotal === undefined) return false;
+  if (expectedTotal === null) {
+    return plannedEstimatedPrice !== undefined && plannedEstimatedPrice !== null;
+  }
   if (plannedEstimatedPrice === undefined) return true;
   return Math.abs(Number(plannedEstimatedPrice) - Number(expectedTotal)) >= 0.005;
 }
@@ -2021,6 +2029,41 @@ function assertNewStackGroupConflicts(rows) {
       seen.push(row);
     }
   }
+}
+
+// GitHub Codex round 20 P2 (#4657, :10541): pulled out of the update-details
+// route's inline map for testability — mirrors discountStackGroupRowsForPricing's
+// own separation for the creation route. A persisted add-on row scopes on
+// its own row id (submittedAddonId), so two separate EXISTING rows always
+// get distinct scopes; but two NEW lines (no submittedAddonId yet) with the
+// same service used to fall back to the shared submittedServiceId, so
+// picking the same non-stackable preset on both read as one line clashing
+// with itself in assertNewStackGroupConflicts — even though persisted rows
+// get distinct row-id scopes and the client permits the same preset on
+// different lines. Falls back to the line's own index instead, never the
+// shared service id.
+function addonStackGroupConflictRows(normalizedAddons, groupMetaById) {
+  return (normalizedAddons || [])
+    .map((l, i) => {
+      const id = l.discount?.discountId;
+      const meta = id ? groupMetaById.get(String(id)) : null;
+      if (!meta) return null;
+      return {
+        ...meta,
+        scope: l.submittedAddonId || `addon-${i}`,
+        // GitHub Codex round 11 on #4657 (P1, :10415): the SAME freshness
+        // verdict normalization already reached for this line
+        // (discountTermChanged = isNewAddonDiscount WITH the line's gross
+        // and resolved service identity). Re-calling isNewAddonDiscount
+        // here without those two inputs called a same-preset stamp "not
+        // new" after a reprice or a service swap, so a grandfathered visit
+        // could re-apply a conflicting tier past assertNewStackGroupConflicts.
+        // A line whose discount resolved (meta non-null) has
+        // discountTermChanged === its own lineDiscountIsNew.
+        _isNew: !!l.discountTermChanged,
+      };
+    })
+    .filter(Boolean);
 }
 
 async function resolveLineDiscount(input, baseAmount, customer, serviceContext = {}) {
@@ -10531,28 +10574,7 @@ async function computeUpdateDetailsFinancialPlan({
             const meta = id ? groupMetaById.get(String(id)) : null;
             return meta ? [{ ...meta, scope: 'primary', _isNew: false }] : [];
           })(),
-          ...normalizedAddons
-            .map((l, i) => {
-              const id = l.discount?.discountId;
-              const meta = id ? groupMetaById.get(String(id)) : null;
-              if (!meta) return null;
-              return {
-                ...meta,
-                scope: l.submittedAddonId || l.submittedServiceId || `addon-${i}`,
-                // GitHub Codex round 11 on #4657 (P1, :10415): the SAME
-                // freshness verdict normalization already reached for this
-                // line (discountTermChanged = isNewAddonDiscount WITH the
-                // line's gross and resolved service identity). Re-calling
-                // isNewAddonDiscount here without those two inputs called a
-                // same-preset stamp "not new" after a reprice or a service
-                // swap, so a grandfathered visit could re-apply a conflicting
-                // tier past assertNewStackGroupConflicts. A line whose
-                // discount resolved (meta non-null) has discountTermChanged
-                // === its own lineDiscountIsNew.
-                _isNew: !!l.discountTermChanged,
-              };
-            })
-            .filter(Boolean),
+          ...addonStackGroupConflictRows(normalizedAddons, groupMetaById),
         ];
         assertNewStackGroupConflicts(groupConflictRows);
 
@@ -21586,6 +21608,8 @@ function blackoutDateString(value) {
 router._test = {
   addonRowIdsDrifted,
   previewTotalDrifted,
+  addonStackGroupConflictRows,
+  assertNewStackGroupConflicts,
   scheduledServicesDiscountProvenanceColumns,
   resetDiscountProvenanceColumnCache,
   weeklyBlackoutRefreshDates,
