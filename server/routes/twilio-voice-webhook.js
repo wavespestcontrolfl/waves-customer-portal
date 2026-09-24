@@ -1668,10 +1668,12 @@ router.post('/call-complete', async (req, res) => {
     // notified the caller that the call may be recorded/transcribed/
     // AI-processed BEFORE the dial bridged. That same call is still
     // in progress here, so the consent persists into the voicemail
-    // path. We add a brief reaffirmation before <Record> for clarity
-    // and to cover the edge case where WAVES_VOICEMAIL_URL doesn't
-    // include disclosure language (asset content is opaque to repo —
-    // tracked as a separate audit item).
+    // path. That /voice disclosure is the ONLY notice on this path
+    // (2026-09-24): neither greeting mode in appendVoicemailRecording
+    // reaffirms it — the short <Say> carries no recording language and
+    // the recorded asset's content is opaque to the repo. Any change
+    // that drops or bypasses the /voice disclosure must restore a
+    // reaffirmation here before <Record>.
     if (shouldRecordVoicemail) {
       const twiml = new VoiceResponse();
       let handedToAgent = false;
