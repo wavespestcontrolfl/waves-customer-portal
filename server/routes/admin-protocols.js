@@ -811,6 +811,43 @@ function unmatchedPricedProtocolLines(items) {
 // (COGS) total — the same data the 2026-08-25 inventory role lockdown made
 // owner-only. Technicians keep the recipe (rates, mixing order, label
 // fields); pricing/materialCost fields are stripped.
+// codex round 1 P1: the structured cost fields were stripped, but item.raw
+// (and visit.primary/secondary, which item.raw lines are parsed FROM) still
+// carry the protocol's own priced-line convention verbatim — e.g. "K-Flow
+// 0-0-25 ($2.18)" — which ProtocolReferenceTabV2.jsx renders unconditionally.
+// Strip every dollar-figure token: the parenthesized "($x.xx)" / "($x+$y)" /
+// "($x est)" cost-tag convention (isPricedProtocolLine's own pattern), and
+// any bare "$N" left over (e.g. "OPTIONAL if requested — $15",
+// ">$60 YTD = reprice flag").
+function stripPriceTokensFromText(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/\s*\([^)]*\$[^)]*\)/g, '')
+    .replace(/[<>]?\$\s?\d[\d,.]*/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+(\n|$)/g, '$1')
+    .trim();
+}
+
+// Deep, whole-payload backstop for the same rule: any string anywhere in
+// the lawn-mix response (visit.primary/secondary, an unmatched-line
+// warning message, a mixingOrder instruction that falls back to item.raw
+// when the catalog product has no mixing_instructions, …) gets every
+// dollar-figure token stripped for a non-admin viewer. Field-level
+// stripping above (stripLawnMixItemPricing, materialCostSummary: null)
+// stays the primary mechanism; this closes every path that copies raw
+// protocol-line text into the response instead of a structured field.
+function deepStripPriceTokens(value) {
+  if (typeof value === 'string') return stripPriceTokensFromText(value);
+  if (Array.isArray(value)) return value.map(deepStripPriceTokens);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) out[key] = deepStripPriceTokens(val);
+    return out;
+  }
+  return value;
+}
+
 function stripLawnMixItemPricing(item) {
   const stripMix = (mix) => {
     if (!mix) return mix;
@@ -824,6 +861,7 @@ function stripLawnMixItemPricing(item) {
   }
   return {
     ...item,
+    raw: stripPriceTokensFromText(item.raw),
     product,
     jobMix: stripMix(item.jobMix),
     fullTankMix: stripMix(item.fullTankMix),
@@ -986,7 +1024,8 @@ router.get('/lawn-mix', async (req, res, next) => {
       });
     }
 
-    res.json({
+    const seesPricing = viewerSeesPricing(req);
+    const payload = {
       track: { key: trackKey, name: track.name },
       month,
       visit: {
@@ -1009,15 +1048,16 @@ router.get('/lawn-mix', async (req, res, next) => {
         expiresAt: calibration.expires_at || null,
       } : null,
       areaSqft,
-      materialCostSummary: viewerSeesPricing(req) ? materialCostSummary : null,
-      items: viewerSeesPricing(req) ? items : items.map(stripLawnMixItemPricing),
-      selectedItems: viewerSeesPricing(req) ? selectedItems : selectedItems.map(stripLawnMixItemPricing),
+      materialCostSummary: seesPricing ? materialCostSummary : null,
+      items: seesPricing ? items : items.map(stripLawnMixItemPricing),
+      selectedItems: seesPricing ? selectedItems : selectedItems.map(stripLawnMixItemPricing),
       mixingOrder: buildMixOrder(selectedItems.map((item) => ({
         raw: item.raw,
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
       }))),
       warnings,
-    });
+    };
+    res.json(seesPricing ? payload : deepStripPriceTokens(payload));
   } catch (err) { next(err); }
 });
 

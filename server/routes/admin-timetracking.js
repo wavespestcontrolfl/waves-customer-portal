@@ -223,6 +223,14 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
 
     const isAdminRequest = isAdminCaller(req);
     res.json({
+      // codex round-1 P2: the projected summaries drop job_count/
+      // total_job_minutes/revenue_generated/utilization_pct entirely for a
+      // technician, but TimeTrackingPage.jsx defaults each to 0 and renders
+      // it as a real metric (a technician would see "$0 revenue" /
+      // "0% utilization" for a coworker instead of "not shown"). This flag
+      // tells the client which shape it got so it can hide those tiles/
+      // columns instead of rendering an absent value as a real zero.
+      viewerRole: isAdminRequest ? 'admin' : 'technician',
       activeShifts: isAdminRequest ? liveStatus : liveStatus.map(techSafeActiveShift),
       todaySummaries: isAdminRequest ? todaySummaries : todaySummaries.map(techSafeDailySummary),
       weekDailies: isAdminRequest ? weekDailies : weekDailies.map(techSafeDailySummary),

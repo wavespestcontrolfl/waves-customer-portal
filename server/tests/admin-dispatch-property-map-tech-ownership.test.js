@@ -86,21 +86,54 @@ const OTHER_CUSTOMER = 'cust-other';
 const ASSIGNED_TECH = 'tech-B';
 const ACTOR = { techRole: 'technician', technicianId: 'tech-A' };
 
+// The fixture row this whole file exercises. scheduled_date is set fresh
+// (today, ET) in beforeEach for the "current assignment" cases and moved
+// stale (>7 days old, technicianCurrentVisitFilter's TECH_ACCESS_WINDOW_DAYS)
+// for the codex round-1 P1 regression below.
+let fixtureRow;
+
 beforeEach(() => {
+  fixtureRow = {
+    id: 'svc-1', customer_id: OTHER_CUSTOMER, technician_id: ASSIGNED_TECH,
+    service_type: 'pest', status: 'completed', scheduled_date: '2026-09-23',
+    latitude: 27.3364, longitude: -82.5307,
+  };
   mockDbCurrent = (table) => {
     const chain = {};
     const methods = [
-      'where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'andWhere',
+      'where', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'andWhere',
       'orWhere', 'join', 'leftJoin', 'select', 'orderBy', 'groupBy', 'limit', 'offset',
     ];
     for (const m of methods) chain[m] = () => chain;
+    chain.modify = (fn) => { fn(chain); return chain; };
     chain.catch = () => chain;
-    if (String(table).startsWith('scheduled_services')) {
-      chain.first = async () => ({
-        id: 'svc-1', customer_id: OTHER_CUSTOMER, technician_id: ASSIGNED_TECH,
-        service_type: 'pest', scheduled_date: '2026-09-23',
-        latitude: 27.3364, longitude: -82.5307,
-      });
+    if (table === 'scheduled_services as ss') {
+      // The coordinate/customer read — always finds the row (no ownership
+      // logic here; the canonical predicate below is the actual gate).
+      chain.where = () => chain;
+      chain.first = async () => ({ ...fixtureRow });
+      chain.then = (resolve) => Promise.resolve([]).then(resolve);
+    } else if (table === 'scheduled_services') {
+      // technicianCurrentVisitFilter's own query: table-qualified
+      // where/whereNotIn/where-comparison calls actually filter the fixture
+      // row here, so a mock that ignored them could not tell a real fix
+      // from a no-op.
+      const predicate = { eq: {}, notIn: {}, cmp: [] };
+      chain.where = (col, opOrVal, val) => {
+        if (val !== undefined) predicate.cmp.push([col, opOrVal, val]);
+        else if (typeof opOrVal === 'function') opOrVal.call(chain);
+        else predicate.eq[col] = opOrVal;
+        return chain;
+      };
+      chain.whereNotIn = (col, vals) => { predicate.notIn[col] = vals; return chain; };
+      const cmp = (a, op, v) => (op === '>=' ? a >= v : op === '>' ? a > v : op === '<=' ? a <= v : op === '<' ? a < v : a === v);
+      chain.first = async () => {
+        const row = fixtureRow;
+        const eqOk = Object.entries(predicate.eq).every(([k, v]) => row[k.replace(/^scheduled_services\./, '')] === v);
+        const notInOk = Object.entries(predicate.notIn).every(([k, vals]) => !vals.includes(row[k.replace(/^scheduled_services\./, '')]));
+        const cmpOk = predicate.cmp.every(([k, op, v]) => cmp(row[k.replace(/^scheduled_services\./, '')], op, v));
+        return (eqOk && notInOk && cmpOk) ? { ...row } : undefined;
+      };
       chain.then = (resolve) => Promise.resolve([]).then(resolve);
     } else if (table === 'property_geometries') {
       chain.first = async () => ({ zoom: 20 });
@@ -132,11 +165,40 @@ describe('GET /:serviceId/property-map technician ownership', () => {
     expect(res.body).toEqual({ error: 'Not assigned to this service', code: 'service_not_assigned' });
   });
 
-  test('property-map should answer 403 to a technician not assigned to the visit (BUG: returns 200 + full payload)', async () => {
+  test("property-map answers 404 to a technician not assigned to the visit (technicianCurrentVisitFilter's no-existence-oracle contract)", async () => {
     const res = await invoke('/:serviceId/property-map', { serviceId: 'svc-1' }, ACTOR);
-    // Documented actual so the failure output is self-explaining:
-     
-    console.log('ACTUAL property-map response:', res.statusCode, JSON.stringify(res.body));
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(404);
+  });
+
+  test("codex round-1 P1 — the canonical current-assignment predicate (not a bare technician_id compare) is applied: a STALE visit (>7 days old) assigned to the SAME technician is refused too", async () => {
+    fixtureRow.technician_id = 'tech-A';
+    fixtureRow.status = 'completed';
+    fixtureRow.scheduled_date = '2020-01-01'; // far outside TECH_ACCESS_WINDOW_DAYS
+    const res = await invoke('/:serviceId/property-map', { serviceId: 'svc-1' }, ACTOR);
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('a dead-status visit (cancelled) assigned to the same technician is refused, even scheduled today', async () => {
+    fixtureRow.technician_id = 'tech-A';
+    fixtureRow.status = 'cancelled';
+    fixtureRow.scheduled_date = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+    const res = await invoke('/:serviceId/property-map', { serviceId: 'svc-1' }, ACTOR);
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('control: a technician CAN read the map for their own current assignment', async () => {
+    fixtureRow.technician_id = 'tech-A';
+    fixtureRow.status = 'confirmed';
+    fixtureRow.scheduled_date = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+    const res = await invoke('/:serviceId/property-map', { serviceId: 'svc-1' }, ACTOR);
+    expect(res.statusCode).toBe(200);
+  });
+
+  test('control: an admin request is unscoped regardless of assignment/staleness', async () => {
+    fixtureRow.technician_id = 'tech-B';
+    fixtureRow.status = 'completed';
+    fixtureRow.scheduled_date = '2020-01-01';
+    const res = await invoke('/:serviceId/property-map', { serviceId: 'svc-1' }, { techRole: 'admin', technicianId: 'admin-1' });
+    expect(res.statusCode).toBe(200);
   });
 });

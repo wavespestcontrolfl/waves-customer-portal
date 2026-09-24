@@ -20,7 +20,7 @@ const db = require('../models/db');
 const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
@@ -484,7 +484,6 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
       .select(
         'ss.id',
         'ss.customer_id',
-        'ss.technician_id',
         // The zone-marking map must center on the BOOKED parcel: visit coords
         // first; the primary home only for non-divergent stamps — a divergent
         // stamp with no coords degrades to the map's missing_coordinates
@@ -498,14 +497,20 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
     // Ownership: a technician token must not read the precise coordinates,
     // treatment-zone layout and termite/rodent station map of a customer the
     // technician is not currently serving (ADMIN-BUG-R35; the customer-scoped
-    // sibling below is already requireAdmin).
-    {
-      const ownershipError = completionOwnershipError({
-        role: req.techRole,
-        actorTechnicianId: req.technicianId,
-        assignedTechnicianId: svc.technician_id,
-      });
-      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    // sibling below is already requireAdmin). A bare technician_id compare
+    // (completionOwnershipError) would keep authorizing a visit long after
+    // it went dead or aged out — the CANONICAL current-assignment predicate
+    // (technicianCurrentVisitFilter: dead statuses excluded, 7-day access
+    // window) is the one every other per-visit tech read in this file is
+    // supposed to use (codex round-1 P1). Re-queried against the unaliased
+    // table because the predicate's columns are table-qualified to
+    // `scheduled_services.*`, not this route's `ss` alias.
+    if (isTechnicianRequest(req)) {
+      const current = await db('scheduled_services')
+        .where('scheduled_services.id', req.params.serviceId)
+        .modify((q) => technicianCurrentVisitFilter(req, q))
+        .first('id');
+      if (!current) return res.status(404).json({ error: 'Service not found' });
     }
     // Number(null) is 0 — a finite value that would sail past the payload's
     // missing_coordinates check and center the map at 0,0 (codex round-9 P2).
@@ -2237,9 +2242,26 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // takeover); an unverified explicit confirm still commits, just as an
         // OFFICE confirm — the card funnel runs, which is the fail-closed
         // direction.
-        if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
-          const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
+        // codex round-1 P1: ownership was decided from the pre-transaction
+        // `svc` snapshot — assignDispatchJob (or any other reassignment)
+        // landing between that read and this transaction leaves the status
+        // CAS itself untouched (it keys on fromStatus, not technician_id),
+        // so the FORMER technician's transition still commits against the
+        // newly-reassigned visit. Every ordinary technician transition now
+        // gets the SAME row-locked re-verification the field-confirm path
+        // already ran only for itself; a mismatch aborts before
+        // transitionJobStatus ever runs.
+        let lockedRow = null;
+        if (req.techRole === 'technician' && req.technicianId) {
+          lockedRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
             .first('technician_id', 'customer_confirmed', 'status');
+          const stillAssigned = !!lockedRow && String(lockedRow.technician_id || '') === String(req.technicianId);
+          if (!stillAssigned) {
+            throw Object.assign(new Error('Not assigned to this service'), { code: 'REASSIGNED_MID_FLIGHT' });
+          }
+        }
+        if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
+          const locked = lockedRow;
           fieldConfirmVerified = !!locked
             && String(locked.technician_id || '') === String(req.technicianId)
             && locked.customer_confirmed !== true
@@ -2313,6 +2335,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
         });
       });
     } catch (err) {
+      if (err && err.code === 'REASSIGNED_MID_FLIGHT') {
+        return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+      }
       // transitionJobStatus throws when fromStatus mismatch — surface
       // as 409 so the client can refetch and retry. Other errors
       // bubble to the outer next(err).

@@ -116,6 +116,32 @@ test('lawn-mix: a technician token gets no per-product vendor pricing and no mat
   expect(body.items[0].jobMix?.materialCost ?? null).toBeNull();
 });
 
+test("lawn-mix: codex round-1 P1 — item.raw and visit.primary/secondary still carried the priced-line text verbatim (ProtocolReferenceTabV2.jsx renders it unconditionally); no '$' digit anywhere in the technician response now", async () => {
+  const body = await callAsTechnician('/lawn-mix', { track: 'st_augustine', month: 'Sep', lawnSqft: '8000' });
+  expect(body.items[0].raw).not.toMatch(/\$/);
+  expect(body.items[0].raw).toContain('K-Flow 0-0-25');
+  expect(body.visit.primary).not.toMatch(/\$/);
+  expect(JSON.stringify(body)).not.toMatch(/\$\s?\d/);
+});
+
+test('lawn-mix: control — an admin token still sees the priced-line text verbatim', async () => {
+  const body = await callAsTechnician('/lawn-mix', { track: 'st_augustine', month: 'Sep', lawnSqft: '8000' }, { techRole: 'admin', technicianId: 'admin-1' });
+  expect(body.items[0].raw).toContain('$2.18');
+  expect(body.visit.primary).toContain('$2.18');
+});
+
+test("lawn-mix: an unmatched priced line's warning message and lines[] also lose their dollar figures for a technician", async () => {
+  protocols.lawn.st_augustine.visits = [{
+    month: 'Sep', visit: 9, notes: '', primary: 'Some Unmatched Product Spray ($4.50)', secondary: '',
+  }];
+  const body = await callAsTechnician('/lawn-mix', { track: 'st_augustine', month: 'Sep', lawnSqft: '8000' });
+  const warning = body.warnings.find((w) => w.code === 'unmatched_product');
+  expect(warning).toBeTruthy();
+  expect(warning.message).not.toMatch(/\$/);
+  expect(warning.lines.join(' ')).not.toMatch(/\$/);
+  expect(JSON.stringify(body)).not.toMatch(/\$\s?\d/);
+});
+
 test("lawn/command-center: requireAdmin sits directly in front of the handler, and it is the REAL requireAdmin (not this file's no-op mock)", () => {
   const layer = adminProtocolsRouter.stack.find((l) => l.route?.path === '/lawn/command-center' && l.route.methods.get);
   expect(layer).toBeTruthy();

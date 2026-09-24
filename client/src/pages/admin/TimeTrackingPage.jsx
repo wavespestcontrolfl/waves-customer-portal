@@ -337,7 +337,7 @@ export default function TimeTrackingPage() {
 // =============================================================================
 // DASHBOARD TAB
 // =============================================================================
-function DashboardTab({ showToast }) {
+export function DashboardTab({ showToast }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -371,6 +371,13 @@ function DashboardTab({ showToast }) {
     );
 
   const { activeShifts, todaySummaries, weekDailies, allTechs } = data;
+  // codex round-1 P2: a technician response's summaries have no job_count/
+  // total_job_minutes/revenue_generated/utilization_pct at all (server-side
+  // projection, admin-timetracking.js GET /) — the reduces below still
+  // default a missing field to 0, so without this flag a technician would
+  // see "$0 revenue" / "0% utilization" for a coworker rendered as a real
+  // number instead of hidden.
+  const isRestrictedViewer = data.viewerRole === "technician";
 
   // Today totals
   const todayShiftMin = todaySummaries.reduce(
@@ -514,23 +521,29 @@ function DashboardTab({ showToast }) {
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "1fr 1fr 1fr",
+                    gridTemplateColumns: isRestrictedViewer ? "1fr" : "1fr 1fr 1fr",
                     gap: 8,
                   }}
                 >
                   {" "}
                   <MiniStat label="Hours" value={dayHrs.toFixed(1)} />{" "}
-                  <MiniStat label="Jobs" value={dayJobs} />{" "}
-                  <MiniStat label="Revenue" value={fmt(dayRev)} />{" "}
+                  {!isRestrictedViewer && (
+                    <>
+                      <MiniStat label="Jobs" value={dayJobs} />{" "}
+                      <MiniStat label="Revenue" value={fmt(dayRev)} />{" "}
+                    </>
+                  )}
                 </div>
-                {/* Utilization ring */}
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  {" "}
-                  <UtilRing pct={dayUtil} size={32} />{" "}
-                  <span style={{ fontSize: 11, color: D.muted }}>
-                    Utilization: {dayUtil.toFixed(0)}%
-                  </span>{" "}
-                </div>{" "}
+                {/* Utilization ring — hidden for a restricted (technician) viewer: utilization_pct is never sent */}
+                {!isRestrictedViewer && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {" "}
+                    <UtilRing pct={dayUtil} size={32} />{" "}
+                    <span style={{ fontSize: 11, color: D.muted }}>
+                      Utilization: {dayUtil.toFixed(0)}%
+                    </span>{" "}
+                  </div>
+                )}{" "}
               </div>
             );
           })}
@@ -549,7 +562,9 @@ function DashboardTab({ showToast }) {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(5, 1fr)",
+          gridTemplateColumns: isMobile
+            ? "repeat(2, 1fr)"
+            : `repeat(${isRestrictedViewer ? 2 : 5}, 1fr)`,
           gap: 12,
           marginBottom: 24,
         }}
@@ -565,13 +580,20 @@ function DashboardTab({ showToast }) {
           value={fmt(todayLaborCost)}
           color={D.amber}
         />{" "}
-        <StatCard label="Revenue" value={fmt(todayRevenue)} color={D.green} />{" "}
-        <StatCard label="Jobs Done" value={todayJobs} color={D.purple} />{" "}
-        <StatCard
-          label="Utilization"
-          value={fmtPct(todayUtil)}
-          color={todayUtil >= 70 ? D.green : todayUtil >= 50 ? D.amber : D.red}
-        />{" "}
+        {/* Revenue / Jobs Done / Utilization all derive from fields the
+            server never sends a restricted (technician) viewer — hide
+            rather than render the 0-default as a real metric. */}
+        {!isRestrictedViewer && (
+          <>
+            <StatCard label="Revenue" value={fmt(todayRevenue)} color={D.green} />{" "}
+            <StatCard label="Jobs Done" value={todayJobs} color={D.purple} />{" "}
+            <StatCard
+              label="Utilization"
+              value={fmtPct(todayUtil)}
+              color={todayUtil >= 70 ? D.green : todayUtil >= 50 ? D.amber : D.red}
+            />{" "}
+          </>
+        )}
       </div>
       {/* This Week Bar Chart */}
       <div
@@ -595,7 +617,8 @@ function DashboardTab({ showToast }) {
         >
           {" "}
           <span style={{ fontSize: 12, color: D.muted }}>
-            Week total: {fmtHrs(weekShiftMin)} | Revenue: {fmt(weekRevenue)} |
+            Week total: {fmtHrs(weekShiftMin)}
+            {!isRestrictedViewer && <> | Revenue: {fmt(weekRevenue)}</>} |{" "}
             OT: {fmtHrs(weekOT)}
           </span>{" "}
         </div>{" "}
