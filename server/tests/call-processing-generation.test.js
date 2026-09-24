@@ -559,10 +559,16 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     const claim = pub.slice(pub.indexOf('const autoClaimed = await db(\'estimates\')'), pub.indexOf('extension_auto_granted_at: db.fn.now()'));
     expect(claim).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
     const ext = fs.readFileSync(path.join(__dirname, '../services/estimate-extension.js'), 'utf8');
-    expect(ext).toContain("const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL } = require('../utils/estimate-claim-sql');");
-    expect(ext.split('.whereRaw(REPRICE_PENDING_ABSENT_SQL)').length - 1).toBe(2);
+    expect(ext).toContain("const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');");
+    // Each write pinned separately: the guarded expiry update, the sibling
+    // revive, and the notification-leg delivery claim (codex #4667 r41).
     const guarded = ext.slice(ext.indexOf('const updated = await trx(\'estimates\')'), ext.indexOf('.update(updates);'));
     expect(guarded).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
+    const siblings = ext.slice(ext.lastIndexOf('.whereNot({ id: estimate.id })'), ext.indexOf('followup_expiring_sent: true,'));
+    expect(siblings).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
+    const notifyClaim = ext.slice(ext.indexOf('const deliveryClaimToken = '), ext.indexOf('let smsResult = '));
+    expect(notifyClaim).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
+    expect(ext.split('.whereRaw(REPRICE_PENDING_ABSENT_SQL)').length - 1).toBe(3);
   });
 });
 
