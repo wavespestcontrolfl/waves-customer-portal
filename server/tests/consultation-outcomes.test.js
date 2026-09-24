@@ -553,6 +553,34 @@ describe('recordOutcome — success + upsert', () => {
     expect(new Date(saved.follow_up_at).toISOString()).toBe('2026-09-25T09:00:00.000Z');
   });
 
+  test('Codex #4710 r13 P2: a naive followUpAt in the fall-back DST fold (occurs twice) is rejected', async () => {
+    // 2026-11-01 is the November fall-back Sunday: 01:00-01:59 ET happens
+    // twice (once EDT, once EST). A naive value there is ambiguous —
+    // parseETDateTime would silently keep the first (EDT) occurrence,
+    // which could fire the follow-up an hour earlier than typed.
+    const fakeDb = seededDb();
+    await expect(recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt: '2026-11-01T01:30' },
+      { trx: fakeDb },
+    )).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+  });
+
+  test('Codex #4710 r13 P2: the same fall-back hour with an explicit offset names one instant and is accepted', async () => {
+    const saved = await recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt: '2026-11-01T01:30-05:00' },
+      { trx: seededDb() },
+    );
+    expect(new Date(saved.follow_up_at).toISOString()).toBe('2026-11-01T06:30:00.000Z');
+  });
+
+  test('Codex #4710 r13 P2: a normal naive follow-up time outside the DST fold is still accepted', async () => {
+    const saved = await recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt: '2026-11-02T09:00' },
+      { trx: seededDb() },
+    );
+    expect(new Date(saved.follow_up_at).toISOString()).toBe(parseETDateTime('2026-11-02T09:00').toISOString());
+  });
+
   test('P1-B: an invalid followUpAt is rejected with 400 before any write', async () => {
     const fakeDb = seededDb();
     await expect(recordOutcome(
@@ -1968,6 +1996,20 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
     expect(stats.median_days_to_close).toBe(0);
   });
 
+  test('Codex #4710 r13 P2: a no-show visit whose stale outcome is still `won` counts only as no_show, not as a win', async () => {
+    // markNoShow's outcome write is best-effort (NOWAIT customer lock busy,
+    // or ON CONFLICT ... IGNORE when the prior outcome is already 'won') —
+    // the visit's status commits to 'no_show' while consultation_outcomes
+    // still holds the old outcome until the hourly repair pass catches up.
+    const visits = [
+      { status: 'no_show', scheduled_date: '2026-09-11', technician_id: 't1', technician_name: 'Adam', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-10T15:00:00Z') },
+    ];
+    const stats = await consultationStats({ trx: statsDb(visits) });
+    expect(stats.won).toBe(0);
+    expect(stats.no_show).toBe(1);
+    expect(stats.won_by_via).toEqual({});
+  });
+
   test('round 12 (P2 :411): won rows count once in `won` with a won_by_via breakdown (no permanently-zero at-door metric)', async () => {
     const visits = [
       {
@@ -2372,5 +2414,56 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
     expect(result.reopened).toBe(0);
     expect(fakeDb.__store.consultation_outcomes.every((r) => r.outcome === 'won')).toBe(true);
+  });
+
+  test('Codex #4710 r13 P2: the visit is locked (forNoKeyUpdate) while its evidence is rejudged, under the already-held customer lock', async () => {
+    // Outcome stays 'won' (live evidence still stands, stampOnly branch) so
+    // this row is NOT re-selected by the ordinary win pass that runs after
+    // reopenWinsWithDeadEvidence within the same sweep (that pass only
+    // picks up CONVERTIBLE_OUTCOMES = warm/cold/lost, and it has its own,
+    // separate forNoKeyUpdate call via lockedConsultationVisit) — isolating
+    // the lock call under test to reopenWinsWithDeadEvidence's own read.
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-1', created_at: new Date('2026-09-12T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' },
+      ],
+    });
+    let sawVisitLock = false;
+    let customerLockedBeforeVisitLock = false;
+    let customerLocked = false;
+    // The fake table shim's forNoKeyUpdate is a no-op (returns the same
+    // chainable api) — wrap it per-table so the visit-lock call is
+    // observable, same technique as the customer -> visit lock-order test
+    // above.
+    const spyDb = (name) => {
+      const q = fakeDb(name);
+      if (name === 'customers') {
+        const orig = q.forNoKeyUpdate;
+        q.forNoKeyUpdate = (...args) => { customerLocked = true; return orig.apply(q, args); };
+      }
+      if (name === 'scheduled_services') {
+        const orig = q.forNoKeyUpdate;
+        q.forNoKeyUpdate = (...args) => {
+          sawVisitLock = true;
+          if (customerLocked) customerLockedBeforeVisitLock = true;
+          return orig.apply(q, args);
+        };
+      }
+      return q;
+    };
+    spyDb.raw = fakeDb.raw;
+    spyDb.transaction = async (fn) => fn(spyDb);
+    db.mockImplementation(spyDb);
+    db.transaction = spyDb.transaction;
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.reopened).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('won');
+    expect(sawVisitLock).toBe(true);
+    expect(customerLockedBeforeVisitLock).toBe(true);
   });
 });

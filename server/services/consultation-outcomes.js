@@ -34,7 +34,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const {
+  etDateString, addETDays, parseETDateTime, etWallClockOccurrences,
+} = require('../utils/datetime-et');
 const { isAssessmentBooking } = require('./assessment-booking');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
@@ -367,7 +369,14 @@ function isValidFollowUpAt(followUpAt) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York', hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
   }).formatToParts(parsed).map((p) => [p.type, p.value]));
-  return etDateString(parsed) === naive[1] && parts.hour === naive[2] && parts.minute === naive[3];
+  if (etDateString(parsed) !== naive[1] || parts.hour !== naive[2] || parts.minute !== naive[3]) return false;
+  // Codex #4710 r13 P2: on the November fall-back day, a naive wall time in
+  // the repeated hour (e.g. "2026-11-01T01:30") occurs TWICE — once in EDT,
+  // once in EST — and parseETDateTime silently keeps the first occurrence.
+  // Reject rather than guess which one the technician meant; an explicit
+  // offset/Z value already names its instant and is never ambiguous, so
+  // this check applies only to the naive branch.
+  return etWallClockOccurrences(parsed) === 1;
 }
 
 function defaultFollowUpAt(outcome, followUpAt) {
@@ -1300,8 +1309,12 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
         });
         // The CONSULTATION must still have happened (Codex #4710 r4 P2): a
         // no-show becomes lost/no_show (markNoShow's own shape); a cancelled,
-        // skipped or rescheduled one returns to its prior outcome.
-        const consultation = await locked('scheduled_services').where({ id: row.scheduled_service_id }).first('status', 'scheduled_date', 'window_start');
+        // skipped or rescheduled one returns to its prior outcome. Locked
+        // (Codex #4710 r13 P2) under the customer lock already held above
+        // (customer -> visit order preserved): without this, dispatch could
+        // move the consultation between this read and rejudgeLiveWin's
+        // decision, crediting a win to a sale that now predates it.
+        const consultation = await locked('scheduled_services').where({ id: row.scheduled_service_id }).forNoKeyUpdate().first('status', 'scheduled_date', 'window_start');
         if (!consultation || DEAD_CONSULTATION_STATUSES.includes(consultation.status)) {
           const cleared = consultation?.status === 'no_show'
             ? clearWin('lost', { lost_reason: 'no_show' })
@@ -1532,11 +1545,18 @@ const OUTCOME_BREAKDOWNS = {
 
 // The outcome a visit counts under, or null. A consultation cancelled,
 // skipped or rescheduled after its outcome was recorded never happened
-// (Codex #4710 r9 P2), so its outcome is not counted; a no-show still counts
-// under its lost/no_show outcome.
+// (Codex #4710 r9 P2), so its outcome is not counted; a no-show counts ONLY
+// under its own lost/no_show outcome (Codex #4710 r13 P2). markNoShow's
+// write is best-effort — it can roll back (a busy NOWAIT customer lock) or
+// no-op (ON CONFLICT ... IGNORE when the prior outcome is already won) — so
+// a no_show visit's `outcome` column can still hold a stale warm/cold/won
+// row until the hourly repair pass fixes it. Counting that stale outcome
+// here would double-count the visit (once under no_show, once under its old
+// outcome); only the row markNoShow itself would have written qualifies.
 function countedOutcome(v) {
   if (!v.outcome) return null;
-  if (DEAD_CONSULTATION_STATUSES.includes(v.status) && v.status !== 'no_show') return null;
+  if (v.status === 'no_show') return v.outcome === 'lost' && v.lost_reason === 'no_show' ? v.outcome : null;
+  if (DEAD_CONSULTATION_STATUSES.includes(v.status)) return null;
   return v.outcome;
 }
 
