@@ -4281,12 +4281,14 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         // ?date= (opens that day) and ?appointment= (opens that visit's
         // detail sheet). Nothing reads a service id. Land on the earliest
         // affected day, focused on the first untimed conflict when there is one.
-        const affectedDates = [...dueConflicts.map((c) => c.date), ...(cardOnly ? [] : [...overlapDates, ...preserved.map((c) => c.date)])]
-          .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d))).sort();
-        const focusConflict = dueConflicts.find((c) => c.date === affectedDates[0]);
-        const link = affectedDates.length
-          ? `/admin/dispatch?tab=schedule&date=${affectedDates[0]}${focusConflict ? `&appointment=${encodeURIComponent(focusConflict.id)}` : ''}`
-          : '/admin/dispatch?tab=schedule';
+        // An untimed conflict outranks earlier preserved/overlap days: it is
+        // the visit that still needs a time, so it gets the focus (codex r2).
+        const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d));
+        const focusConflict = [...dueConflicts].filter((c) => isDate(c.date)).sort((a, b) => a.date.localeCompare(b.date))[0] || null;
+        const otherDates = cardOnly ? [] : [...overlapDates, ...preserved.map((c) => c.date)].filter(isDate).sort();
+        const link = focusConflict
+          ? `/admin/dispatch?tab=schedule&date=${focusConflict.date}&appointment=${encodeURIComponent(focusConflict.id)}`
+          : otherDates.length ? `/admin/dispatch?tab=schedule&date=${otherDates[0]}` : '/admin/dispatch?tab=schedule';
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
           preserved.length ? 'Recurring move needs a future visit review'
