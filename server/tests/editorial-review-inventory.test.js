@@ -39,7 +39,16 @@ describe('editorial review document inventory', () => {
 
 test('keeps factual prose that begins with a word also used in calls to action', () => {
   const passage = 'Contact with treated surfaces kills 90% of ants.';
-  expect(analyzeDocument(`# Guide\n\n${passage}`, 'Guide').passages).toEqual([expect.objectContaining({ text: passage })]);
+  const analysis = analyzeDocument(`# Guide\n\n${passage}`, 'Guide');
+  expect(analysis.passages).toEqual([expect.objectContaining({ text: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
+});
+
+test('keeps factual sections whose headings begin with a decorative heading word', () => {
+  const passage = 'Contact insecticides kill ants when they touch treated surfaces.';
+  const analysis = analyzeDocument(`## Contact insecticides\n${passage}`, 'Guide');
+  expect(analysis.sections).toEqual([expect.objectContaining({ heading: 'Contact insecticides', lead: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
 });
 
 test('rejects repairs that change MDX tag nesting', () => {
