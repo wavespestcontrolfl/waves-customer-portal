@@ -331,6 +331,51 @@ postgres('scheduled_services PUT /:id/update-details — add-on discount catalog
     return { statusCode, payload };
   }
 
+  // Follow-up to #4657 (owner-approved 2026-09-24): the generic row-version
+  // CAS. A write to a column NO field comparator lists (internal_notes),
+  // landing between the pre-transaction plan and the locked re-read, is
+  // refused with 409 VISIT_CHANGED_RETRY / ROW_VERSION_DRIFT — and the same
+  // save with no concurrent write commits normally.
+  test('row-version CAS: a concurrent write to an UNLISTED column between the plan and the lock is refused 409; the quiet save commits', async () => {
+    const realTrx = trx;
+    // The route's own `db.transaction(...)` is the seam between "plan read"
+    // and "locked re-read": inject the concurrent write right there.
+    const injected = new Proxy(realTrx, {
+      apply(target, _thisArg, args) { return target(...args); },
+      get(target, prop) {
+        if (prop === 'transaction') {
+          return async (...args) => {
+            await realTrx('scheduled_services').where({ id: visitId }).update({ internal_notes: 'written by another operator' });
+            return realTrx.transaction(...args);
+          };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    require('../models/db').connection = injected;
+    // The retry refusal is an operational error the route hands to next()
+    // (this helper rethrows it); accept a rendered 409 response too.
+    let refused;
+    try {
+      refused = await put(visitId, { primaryLinePrice: 120, addons: [] });
+    } catch (err) {
+      refused = { statusCode: err.statusCode || err.status, payload: { code: err.code, reason: err.reason } };
+    } finally {
+      require('../models/db').connection = realTrx;
+    }
+    expect(refused.statusCode).toBe(409);
+    expect(refused.payload.code).toBe('VISIT_CHANGED_RETRY');
+    expect(refused.payload.reason).toBe('ROW_VERSION_DRIFT');
+    const untouched = await realTrx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(untouched.estimated_price)).toBe(100); // nothing was written by the refused save
+
+    const { statusCode } = await put(visitId, { primaryLinePrice: 120, addons: [] });
+    expect(statusCode).toBe(200);
+    const saved = await realTrx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(saved.estimated_price)).toBe(120);
+  });
+
   test('a NEW 20%-off-capped-at-$5 add-on discount on an unmarked visit saves capped at $5, never the raw uncapped $20', async () => {
     const { statusCode } = await put(visitId, {
       primaryLinePrice: 100,
