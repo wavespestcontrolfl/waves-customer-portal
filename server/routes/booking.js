@@ -2813,14 +2813,41 @@ async function createSelfBooking(payload = {}) {
         // (codex r28 P1). The named lead's email is an identity, not
         // evidence, so it is read before the lock.
         let contactEmail = String(new_customer?.email || '').trim() || null;
-        if (!contactEmail && LEAD_ID_RE.test(String(lead_id || ''))) {
-          const namedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('email');
-          contactEmail = String(namedLead?.email || '').trim() || null;
+        // …and the named lead's STORED pair, always (codex r37 P1): the form
+        // lets the visitor edit both fields, so a newer flagged lead under
+        // the original pair must still be judged — this pair is negative-
+        // only evidence (it can refuse, never clear).
+        let namedPairEmail = null;
+        let namedPairPhone = null;
+        if (LEAD_ID_RE.test(String(lead_id || ''))) {
+          const namedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('email', 'phone');
+          namedPairEmail = String(namedLead?.email || '').trim() || null;
+          namedPairPhone = String(namedLead?.phone || '').replace(/\D/g, '') || null;
+          if (!contactEmail) contactEmail = namedPairEmail;
+        }
+        // …and the RESOLVED customer's stored pair when the form supplied no
+        // contact (an authenticated or reservice booking carries the account,
+        // not new_customer): the stored premise it books can still carry a
+        // matching flagged lead (codex r37 P1).
+        let customerPairEmail = null;
+        let customerPairPhone = null;
+        if (custId && (!contactEmail || !phoneDigits)) {
+          const storedCustomer = await trx('customers').where({ id: custId }).whereNull('deleted_at').first('email', 'phone');
+          customerPairEmail = String(storedCustomer?.email || '').trim() || null;
+          customerPairPhone = String(storedCustomer?.phone || '').replace(/\D/g, '') || null;
+        }
+        const reconcilePairs = [];
+        if (contactEmail && phoneDigits) reconcilePairs.push([contactEmail, phoneDigits]);
+        if (customerPairEmail && customerPairPhone) reconcilePairs.push([customerPairEmail, customerPairPhone]);
+        if (namedPairEmail && namedPairPhone && !reconcilePairs.some(([e, p]) => e.toLowerCase() === namedPairEmail.toLowerCase() && p.slice(-10) === namedPairPhone.slice(-10))) {
+          reconcilePairs.push([namedPairEmail, namedPairPhone]);
         }
         {
           const { contactPairLockKey } = require('../services/lead-address-unverified');
-          if (contactEmail && phoneDigits) {
-            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, phoneDigits)]);
+          // Both pairs' locks, in deterministic key order.
+          const keys = [...new Set(reconcilePairs.map(([e, p]) => contactPairLockKey(e, p)))].sort();
+          for (const key of keys) {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
           }
         }
         if (pricing_estimate_id && estimate_token) {
@@ -2859,11 +2886,16 @@ async function createSelfBooking(payload = {}) {
         // it too (codex r11 P2).
         let newestClean = 0;
         let contactSnapshots = [];
-        if (submitted && contactEmail && phoneDigits) {
+        if (submitted && reconcilePairs.length) {
           const contactLeads = await trx('leads')
             .whereNull('deleted_at')
-            .whereRaw('LOWER(email) = ?', [contactEmail.toLowerCase()])
-            .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits.slice(-10)])
+            .where((q) => {
+              for (const [e, p] of reconcilePairs) {
+                q.orWhere((pair) => pair
+                  .whereRaw('LOWER(email) = ?', [e.toLowerCase()])
+                  .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [p.slice(-10)]));
+              }
+            })
             .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
             .forUpdate()
             .select('id', 'extracted_data');

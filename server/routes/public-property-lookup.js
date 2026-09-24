@@ -664,6 +664,17 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       });
     } catch (verdictErr) {
       logger.error(`[public-property-lookup] address verdict publication failed — refusing the lookup: ${verdictErr.code || verdictErr.name || 'error'}`);
+      // The captured lead already committed WITHOUT its flag (the stage
+      // write above): a visitor who abandons after this 503 would leave a
+      // pipeline row with no callback warning and no send guards. Fail
+      // CLOSED: mark the derived flag on the lead outside the rolled-back
+      // transaction, best-effort (codex r37 P1).
+      if (addressUnverified && lead?.id) {
+        await db('leads').where({ id: lead.id }).update({
+          extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: addressUnverified })]),
+          updated_at: new Date(),
+        }).catch((markErr) => logger.error(`[public-property-lookup] fail-closed lead mark failed: ${markErr.code || markErr.name || 'error'}`));
+      }
       return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
     }
 

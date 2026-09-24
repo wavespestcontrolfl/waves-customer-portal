@@ -8957,7 +8957,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // { success, alreadyAccepted } shape; blocking outright is strictly
       // tighter and consistent with the rest of the route.
       if (!isEstimateCustomerViewable(estimate)) {
-        return res.status(409).json({ error: 'Estimate is no longer active' });
+        const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
       }
       // Retry of an already-accepted estimate (e.g. the first response was
       // lost in transit): rebuild the FULL success payload from persisted
@@ -9007,7 +9008,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });
     }
     if (!isEstimateAcceptActive(estimate)) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
 
     const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
@@ -14229,7 +14231,8 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       })
       .update(writes);
     if (!tierUpdateCount) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
 
     // Notify admin of tier selection \u2014 only on an actual CHANGE. Re-clicking
@@ -14538,7 +14541,8 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
         updated_at: db.fn.now(),
       });
     if (!bondUpdateCount) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
     clearEstimatePricingCache(estimate.id);
     logger.info(`[estimate] ${estimate.id}: bond term -> ${outcome.selectedBondTerm || 'none'} ($${monthlyTotal}/mo, $${annualTotal}/yr)`);
@@ -14801,7 +14805,8 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
         updated_at: db.fn.now(),
       });
     if (!updateCount) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
     clearEstimatePricingCache(estimate.id);
     logger.info(`[estimate] ${estimate.id}: commercial interior service -> ${included ? 'included' : 'excluded'} ($${monthlyTotal}/mo, $${annualTotal}/yr)`);
@@ -15634,7 +15639,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
     if (!updateCount) {
-      return { status: 409, body: ({ error: 'Estimate is no longer active' }) };
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return { status: zeroRowStatus, body: zeroRowMutationBody(zeroRowStatus) };
     }
 
     clearEstimatePricingCache(estimate.id);
@@ -15833,7 +15839,8 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
         updated_at: db.fn.now(),
       });
     if (!prefUpdateCount) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
     clearEstimatePricingCache(estimate.id);
 
@@ -16647,7 +16654,8 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       // the same generic 404 as the pre-read path, not a "no longer active"
       // hint that the token maps to a real estimate.
       if (!freshGuard.ok) return res.status(freshGuard.status).json({ error: freshGuard.error });
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
 
     // Refund any acceptance deposit the customer paid before declining \u2014
@@ -18580,6 +18588,20 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (estimate.status === 'expired') return true;
   return !!(estimate.expires_at && new Date(estimate.expires_at) < now);
 }
+
+// A zero-row atomic mutation write (the CAS lost, or a marker predicate
+// refused it): re-read the row and answer the token route's GENERIC 404
+// when it is now off-surface (the county-roll address block among the
+// markers) — a 409 there would confirm the token maps to a real estimate
+// (codex #4667 r37 P0). Every other zero-row cause keeps its 409.
+async function zeroRowMutationStatus(estimateId) {
+  try {
+    const fresh = await db('estimates').where({ id: estimateId }).first('estimate_data', 'archived_at');
+    if (!fresh || fresh.archived_at || estimateOffCustomerSurface(fresh)) return 404;
+  } catch { /* fall through to the 409 */ }
+  return 409;
+}
+const zeroRowMutationBody = (status) => (status === 404 ? { error: 'Estimate not found' } : { error: 'Estimate is no longer active' });
 
 function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   if (!estimate) {
