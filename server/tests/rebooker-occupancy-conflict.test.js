@@ -632,6 +632,13 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
+      // tech-out P1: the non-anchor sibling save-time eligibility
+      // re-check (rebooker.js ~2856) now also queries technicians /
+      // technician_absences for a sibling whose date changes — a
+      // plain active, non-absent default so this router doesn't have
+      // to know about a check unrelated to what this test asserts.
+      if (table === 'technicians') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: 'tech-9', name: 'Tech', employment_status: 'active', field_dispatchable: true }) });
+      if (table === 'technician_absences') return chain({ whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(undefined) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -730,6 +737,13 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
       if (table === 'appointment_reminders') return chain({ first: jest.fn().mockResolvedValue(null), select: jest.fn(async () => actor === 'customer_reminder_race' ? [futureReminder] : []) });
+      // tech-out P1: the non-anchor sibling save-time eligibility
+      // re-check (rebooker.js ~2856) now also queries technicians /
+      // technician_absences for a sibling whose date changes — a
+      // plain active, non-absent default so this router doesn't have
+      // to know about a check unrelated to what this test asserts.
+      if (table === 'technicians') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: 'tech-9', name: 'Tech', employment_status: 'active', field_dispatchable: true }) });
+      if (table === 'technician_absences') return chain({ whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(undefined) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -880,6 +894,13 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
       if (table === 'appointment_reminders') return reminderQueue.shift();
+      // tech-out P1: the non-anchor sibling save-time eligibility
+      // re-check (rebooker.js ~2856) now also queries technicians /
+      // technician_absences for a sibling whose date changes — a
+      // plain active, non-absent default so this router doesn't have
+      // to know about a check unrelated to what this test asserts.
+      if (table === 'technicians') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: 'tech-9', name: 'Tech', employment_status: 'active', field_dispatchable: true }) });
+      if (table === 'technician_absences') return chain({ whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(undefined) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -960,6 +981,13 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
+      // tech-out P1: the non-anchor sibling save-time eligibility
+      // re-check (rebooker.js ~2856) now also queries technicians /
+      // technician_absences for a sibling whose date changes — a
+      // plain active, non-absent default so this router doesn't have
+      // to know about a check unrelated to what this test asserts.
+      if (table === 'technicians') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: 'tech-9', name: 'Tech', employment_status: 'active', field_dispatchable: true }) });
+      if (table === 'technician_absences') return chain({ whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(undefined) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');

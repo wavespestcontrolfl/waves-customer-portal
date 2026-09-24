@@ -2857,6 +2857,18 @@ class SmartRebooker {
           const anchorKeptTechId = anchorTechChanges ? (options.technicianId || null) : (sib.technician_id || null);
           await assertAssignableSlotTechnician(anchorKeptTechId, trx, String(date).split('T')[0]);
         }
+        // Same save-time eligibility check for every NON-anchor sibling
+        // that lands on a new date (tech-out P1): a follower keeps its own
+        // technician_id (siblings never take options.technicianId — that
+        // only ever retargets the anchor), but that tech may be marked out
+        // on the follower's NEW date even though the anchor's date is fine.
+        // A same-date landing keeps whatever the row already had and needs
+        // no re-check (that combination was already accepted before this
+        // move).
+        if (!isAnchor && sibDateChanges) {
+          const sibKeptTechId = sib.technician_id || null;
+          await assertAssignableSlotTechnician(sibKeptTechId, trx, String(date).split('T')[0]);
+        }
         if (anchorTechChanges) {
           updateData.technician_id = options.technicianId || null;
           // Tech change also invalidates the sequence (same rule as the

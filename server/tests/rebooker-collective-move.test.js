@@ -1125,6 +1125,68 @@ describe('rescheduleSeries — one recorded operation', () => {
   });
 });
 
+describe('tech-out P1: retained-tech eligibility on non-anchor siblings', () => {
+  const sib = (id, date, extra = {}) => ({
+    id, status: 'confirmed', scheduled_date: date, window_start: '09:00:00', window_end: '11:00:00', technician_id: null, route_order: 3, ...extra,
+  });
+
+  test('a follower sibling landing on its retained technician\'s absence date refuses the series move (SLOT_TAKEN)', async () => {
+    // Weekly cadence, occurrenceIndex 1 (second row): projected from the new
+    // anchor TARGET (dayOffset(12)) is TARGET + 7 = dayOffset(19) — same
+    // reprojection the "writes a committed series_moves row" test above
+    // asserts for svc-2. The follower KEEPS its own technician (siblings
+    // never take options.technicianId — see the code comment at the check
+    // site), and that tech is marked out on ITS destination date, not the
+    // anchor's.
+    const followerDest = dayOffset(19);
+    const { trx } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1, { technician_id: 'tech-9' })]);
+    const baseImpl = trx.getMockImplementation();
+    trx.mockImplementation((table) => {
+      if (table === 'technician_absences') {
+        const c = chain({ whereNull: jest.fn().mockReturnThis() });
+        c.first = jest.fn(async () => {
+          const wheres = c.where.mock.calls.map((args) => args[0]);
+          const hit = wheres.some((w) => w && typeof w === 'object'
+            && w.technician_id === 'tech-9' && w.absence_date === followerDest);
+          return hit ? { id: 'absence-1' } : undefined;
+        });
+        return c;
+      }
+      return baseImpl(table);
+    });
+
+    // assertAssignableSlotTechnician (the same unchanged wrapper the anchor
+    // path already used) translates the underlying TECH_NOT_ASSIGNABLE into
+    // the same customer-safe SLOT_TAKEN 409 every other ineligible-tech slot
+    // offer surfaces as (mirrors rebooker-occupancy-conflict.test.js's
+    // "date-only move that keeps its technician is refused..." assertion).
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS))
+      .rejects.toMatchObject({
+        status: 409, statusCode: 409, code: 'SLOT_TAKEN', message: expect.stringContaining('no longer available'),
+      });
+  });
+
+  test('a same-date follower (its projected date matches what it already has) performs no absence read at all', async () => {
+    // Same weekly cadence: svc-2's stored date is ALREADY dayOffset(19), the
+    // date this move would project it onto — so this move does not actually
+    // change svc-2's date, and the new check must not run for it.
+    const followerCurrent = dayOffset(19);
+    const { trx, updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', followerCurrent, { technician_id: 'tech-9' })]);
+
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+
+    expect(result.success).toBe(true);
+    // The follower still commits (date unchanged, everything else about the
+    // move proceeds normally) — this is not a no-op skip of the whole row.
+    expect(updates[1].update).toHaveBeenCalled();
+    // Neither eligibility table was ever touched for this sibling: the
+    // anchor's own tech is null (no-op, no query) and the follower's date
+    // didn't change (gated out before assertAssignableSlotTechnician runs).
+    expect(trx.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
+    expect(trx.mock.calls.some(([table]) => table === 'technician_absences')).toBe(false);
+  });
+});
+
 describe('previewSeriesMove', () => {
   test('counts come from the same sibling selection + projector as the move; conflicts probed per projected sibling', async () => {
     const anchor = anchorRow();

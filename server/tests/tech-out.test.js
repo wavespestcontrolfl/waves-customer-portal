@@ -190,6 +190,10 @@ describe('markTechOut', () => {
     const techRead = trx.__chains.find((x) => x.table === 'technicians').c;
     expect(techRead.forUpdate).toHaveBeenCalled();
     expect(lockTechDays).toHaveBeenCalledWith(trx, [{ techId: TECH.id, date: DATE }]);
+    // Lock ORDER matches every assignment writer: the tech-day fence first,
+    // then the technician row — a concurrent assignment queues on the fence
+    // instead of deadlocking against a row lock taken in the other order.
+    expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(techRead.forUpdate.mock.invocationCallOrder[0]);
     // dayStopsQuery ran on the transaction, scoped to the absent tech, on_site excluded / en_route kept.
     expect(dayStopsQuery).toHaveBeenCalledWith(trx, expect.objectContaining({
       dateStr: DATE, technicianId: TECH.id,

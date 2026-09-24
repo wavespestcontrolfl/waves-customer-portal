@@ -15,8 +15,8 @@
  * every assignment writer that threads the destination date (board drag,
  * schedule edit, rebooker date moves, lead/booking/IB creation) refuses the
  * absent tech for that day. Mark-out runs in ONE transaction that first
- * takes the technician row FOR UPDATE and the tech-day fence, so an
- * in-flight assignment (FOR SHARE on the same row, same fence) finishes
+ * takes the tech-day fence and then the technician row FOR UPDATE (the
+ * same order assignment writers use), so an in-flight assignment finishes
  * before the day is snapshotted — nothing can land on the day between the
  * snapshot and the absence becoming visible.
  */
@@ -179,12 +179,14 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
   }
 
   return db.transaction(async (trx) => {
-    // Serialize with assignment writers: they read this row FOR SHARE and
-    // take the same tech-day fence before writing (dispatch-assignment.js,
-    // rebooker.js). Lock order matches theirs — tech row, then day.
+    // Serialize with assignment writers: they take the tech-day fence FIRST
+    // and then read this row FOR SHARE inside the transaction
+    // (dispatch-assignment.js applyAssignment, rebooker.js, the IB movers).
+    // Same order here — fence, then the row FOR UPDATE — so a concurrent
+    // mark-out and assignment queue on the fence instead of deadlocking.
+    await lockTechDays(trx, [{ techId: technicianId, date }]);
     const tech = await trx('technicians').where({ id: technicianId }).forUpdate().first('id', 'name');
     if (!tech) throw serviceError(400, 'VALIDATION', 'Technician not found');
-    await lockTechDays(trx, [{ techId: technicianId, date }]);
 
     let absence;
     try {

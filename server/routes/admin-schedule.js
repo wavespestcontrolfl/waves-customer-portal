@@ -7160,6 +7160,19 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // covers a stale picker and the auto-assign path alike; recurring
       // children below inherit this row's tech, so one check fences both.
       await assertAssignableTechnician(resolvedTechId, { conn: trx, date: String(scheduledDate).slice(0, 10) });
+      // The recurring-child and booster loops below insert this SAME
+      // resolvedTechId on OTHER dates (tech-out P1) — the parent-date check
+      // above can't see a tech marked out on one of those occurrence dates.
+      // plannedChildDates/plannedBoosterDates are fully computed (and
+      // locked) above, so every distinct destination date is checked once,
+      // here, before either insert loop runs — an absence on any occurrence
+      // date refuses the whole create instead of partially inserting a series.
+      if (resolvedTechId) {
+        const childBoosterDates = new Set([...plannedChildDates, ...plannedBoosterDates].filter(Boolean));
+        for (const occDate of childBoosterDates) {
+          await assertAssignableTechnician(resolvedTechId, { conn: trx, date: occDate });
+        }
+      }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
