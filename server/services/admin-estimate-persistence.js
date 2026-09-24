@@ -3353,7 +3353,13 @@ async function reviseAdminEstimate({
       // address); an explicit CONFIRMATION of a street-only intake only
       // clears the flag and stamps the verdict, so the same-door premise
       // check suffices (codex r23 P1).
-      const leadStillPrior = !!leadRow && leadSameDoor && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address, { requireLocality: corrected }));
+      // A correction that COMPLETES a street-only prior (adds the city /
+      // ZIP) cannot demand a locality the prior never had: the lead that
+      // still names that street-only premise is reconciled on the
+      // unit-insensitive premise alone, or it would keep its flag while
+      // the estimate clears (pre-push audit P1 after r28).
+      const priorHasLocality = !!(priorParsed.city && priorParsed.zip);
+      const leadStillPrior = !!leadRow && leadSameDoor && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address, { requireLocality: corrected && priorHasLocality }));
       if (leadStillPrior) await trx('leads').where({ id: writtenData.lead_id }).update({
         extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
         ...(corrected && parsed.line1 ? {
