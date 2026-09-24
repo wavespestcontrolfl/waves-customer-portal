@@ -171,10 +171,27 @@ function priceIdentityMatches(a, b) {
 // that detail even though both describe the same price. `overlay`'s
 // non-null fields win; `base`'s non-null fields fill whatever overlay
 // leaves null/absent.
+//
+// caller_response / accepted are handled separately from the generic
+// non-null-wins rule (codex #4722 r2 push-gate P1): caller_response is
+// EXPLICITLY nullable ('not_at_issue'/null are real, meaningful values, not
+// "absent"), so an overlay that sets it — even to null — must win outright,
+// never be filtered out by the generic "skip null" rule. accepted is purely
+// DERIVED from caller_response, so it is re-derived from the merged
+// caller_response afterward rather than merged field-by-field — otherwise a
+// stale accepted from the base could survive alongside a caller_response
+// that no longer supports it.
 function mergePriceEntries(base, overlay) {
   const merged = { ...base };
   for (const [key, value] of Object.entries(overlay)) {
+    if (key === 'caller_response') continue; // handled below
     if (value !== null && value !== undefined) merged[key] = value;
+  }
+  if ('caller_response' in overlay) {
+    merged.caller_response = overlay.caller_response;
+  }
+  if ('caller_response' in merged) {
+    merged.accepted = normalizePriceEntry(merged).accepted;
   }
   return merged;
 }

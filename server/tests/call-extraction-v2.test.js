@@ -836,6 +836,42 @@ describe('normalize extraction v2', () => {
         expect(result.service_request.price).toEqual({ amount_usd: 90, amount_max_usd: null, unit: 'per_quarter', caller_response: 'accepted', accepted: true });
         expect(result.service_request.price).not.toHaveProperty('tier_mentioned');
       });
+
+      // codex #4722 r2 push-gate P1: the generic "overlay's non-null fields
+      // win" rule must NOT apply to caller_response/accepted — null is a
+      // real, meaningful caller_response value ('not_at_issue' is not
+      // null, but a null caller_response must still win over a stale base
+      // value), and accepted is purely derived from it. A merge that
+      // filtered out a null caller_response, or merged accepted field-by-
+      // field instead of re-deriving it, would resurrect a stale
+      // acceptance the call no longer supports.
+      test('merging a same-identity prices[] entry with caller_response not_at_issue clears a stale accepted, never resurrects it', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent', tier_mentioned: 'gold',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'not_at_issue' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({
+          amount_usd: 65, unit: 'one_time', caller_response: 'not_at_issue', accepted: null,
+          // Merge still fills the gap from the richer existing price.
+          stated_by: 'agent', tier_mentioned: 'gold',
+        });
+      });
+
+      test('an explicit null caller_response on the selected entry wins over the existing price\'s caller_response, and accepted is re-derived to null', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: null },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', caller_response: null, accepted: null, stated_by: 'agent' });
+      });
     });
 
     test('a single price with no prices array is left alone (only accepted derivation applies)', () => {
