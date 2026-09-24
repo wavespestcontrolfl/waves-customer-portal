@@ -2713,6 +2713,33 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(refusal.error).toMatch(/different lead/);
   });
 
+  // Codex #4709 r3 P1: two open leads sharing a phone — a link minted for
+  // lead A must not go out through lead B's send.
+  test('expectedLeadId: a link minted for a different lead on the same phone is refused; the matching lead passes', async () => {
+    wireConsultation();
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100', null, 'lead-2');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different lead/);
+    wireConsultation();
+    expect(await checkConsultationLinkSend(BODY, '9415550100', null, 'lead-1')).toBeNull();
+  });
+
+  test('expectedLeadId threads through bearerLinkSendCheck', async () => {
+    wireConsultation();
+    const result = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null, expectedLeadId: 'lead-2' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/different lead/);
+  });
+
+  test('bodyCarriesConsultationLink: true only when a consultation short code is present', async () => {
+    const { bodyCarriesConsultationLink } = require('../services/composer-customer-links');
+    wireConsultation();
+    expect(await bodyCarriesConsultationLink(BODY)).toBe(true);
+    wireConsultation({ codeRows: [] });
+    expect(await bodyCarriesConsultationLink(BODY)).toBe(false);
+    expect(await bodyCarriesConsultationLink('Hi there, see you Tuesday.')).toBe(false);
+  });
+
   test('wired into bearerLinkSendCheck — the generic /admin/communications/sms route inherits the same re-check', async () => {
     wireConsultation({ leadRow: { ...LEAD_ROW, status: 'won', converted_at: new Date('2026-01-01') } });
     const result = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null });

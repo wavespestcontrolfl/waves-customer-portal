@@ -114,7 +114,7 @@ describe('Pipeline queue navigation', () => {
         if (opts?.method === 'POST') {
           return { ok: true, json: async () => ({ url: 'https://waves.link/l/abc123', line: "Hi QA, it's Waves. Pick a time...\n\n", standalone: true }) };
         }
-        return { ok: true, json: async () => ({ available: true }) };
+        return { ok: true, json: async () => ({ enabled: true, available: true }) };
       }
       return base(url, opts);
     });
@@ -133,6 +133,24 @@ describe('Pipeline queue navigation', () => {
     expect(options.initialDraft).toBeUndefined();
     // The mint (POST) fired exactly once, only after the click.
     expect(consultationCalls().filter((c) => c.options?.method === 'POST')).toHaveLength(1);
+  });
+
+  // Codex #4709 r3 P1: with GATE_LEAD_INSPECTION_LINK dark the probe says
+  // enabled:false and the Leads page renders no consultation button at all.
+  it('omits Send consultation link while the gate is dark', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      if (String(url).includes('/consultation-link')) {
+        calls.push({ path: String(url), options: opts });
+        return { ok: true, json: async () => ({ enabled: false, available: false, reason: 'switched off' }) };
+      }
+      return base(url, opts);
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    await waitFor(() => expect(calls.some(({ path }) => path.includes('/admin/leads/lead-qa/consultation-link'))).toBe(true));
+    await screen.findByRole('button', { name: 'Message' });
+    expect(screen.queryByRole('button', { name: 'Send consultation link' })).toBeNull();
   });
 
   // Pre-push Codex P2: the ?lead= deep-link expansion path skipped the

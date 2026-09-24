@@ -2068,6 +2068,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                   >
                                     Message
                                   </Button>{" "}
+                                  {/* Omitted unless the probe says the gate is live (Codex #4709 r3 P1). */}
+                                  {consultationLinks[lead.id]?.enabled === true && (
                                   <Button
                                     variant={"secondary"}
                                     disabled={
@@ -2088,7 +2090,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     onClick={() => sendConsultationLink(lead)}
                                   >
                                     Send consultation link
-                                  </Button>{" "}
+                                  </Button>
+                                  )}{" "}
                                   <Button
                                     variant={"primary"}
                                     onClick={() => {

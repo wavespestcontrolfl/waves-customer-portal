@@ -1324,7 +1324,7 @@ router.post('/:id/send-sms', async (req, res, next) => {
     // whole bearerLinkSendCheck, which needs customer/account context this
     // route doesn't have.
     const { checkConsultationLinkSend } = require('../services/composer-customer-links');
-    const consultationRefusal = await checkConsultationLinkSend(message, String(lead.phone || '').replace(/\D/g, '').slice(-10));
+    const consultationRefusal = await checkConsultationLinkSend(message, String(lead.phone || '').replace(/\D/g, '').slice(-10), null, lead.id);
     if (consultationRefusal) {
       return res.status(409).json({ error: consultationRefusal.error });
     }

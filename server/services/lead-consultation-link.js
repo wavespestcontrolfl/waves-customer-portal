@@ -118,10 +118,17 @@ const CONSULTATION_SMS_TEMPLATE_KEY = 'lead_consultation_link';
  * call here: it is pure HMAC computation with no DB write, unlike the
  * short_codes insert that follows it in the real builder.
  */
+// `enabled` tells the Leads page whether to render the control at all
+// (Codex #4709 r3 P1): false only when the gate is dark, so staff never see
+// a consultation button while the feature is off.
 async function consultationLinkAvailable(leadOrId) {
   if (!leadInspectionLinkLive()) {
-    return { available: false, reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)' };
+    return { enabled: false, available: false, reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)' };
   }
+  return { enabled: true, ...(await probeLeadConsultationLink(leadOrId)) };
+}
+
+async function probeLeadConsultationLink(leadOrId) {
   const leadId = typeof leadOrId === 'string' ? leadOrId : leadOrId?.id;
   if (!leadId) return { available: false, reason: 'No lead to build a consultation link for' };
   const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');

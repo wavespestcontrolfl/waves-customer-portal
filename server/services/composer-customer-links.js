@@ -1372,7 +1372,8 @@ async function checkContractLinks(ctx, contracts) {
 // primitive every other bearer check in this file binds by — rather than a
 // customerId/leadId param, so the identical check works unmodified from
 // either route: the consultation lead's OWN phone must be the destination.
-async function checkConsultationLinkSend(body, toLast10, ctx = null) {
+// The consultation short_codes rows a body carries (empty when none).
+async function consultationShortRows(body) {
   const runs = decodedRuns(body);
   const hosts = ownedPortalHosts();
   const codes = [...new Set(
@@ -1381,8 +1382,24 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null) {
       .filter(Boolean)
       .map((code) => code.toLowerCase())
   )];
-  if (!codes.length) return null;
-  const rows = await db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id');
+  if (!codes.length) return [];
+  return db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id');
+}
+
+// Codex #4709 r3 P1: the composer route checks this BEFORE its phone-only
+// recruiting diversion, so a consultation text never rides an applicant
+// thread past the consultation checks.
+async function bodyCarriesConsultationLink(body) {
+  return (await consultationShortRows(body)).length > 0;
+}
+
+// expectedLeadId (Codex #4709 r3 P1): when the sending route knows which
+// lead it is texting (the Leads page's /:id/send-sms, or the composer's
+// lead-only leadId), every consultation link in the body must belong to
+// THAT lead. Two open leads sharing a phone otherwise let lead A's bearer
+// go out while the activity lands on lead B.
+async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLeadId = null) {
+  const rows = await consultationShortRows(body);
   if (!rows.length) return null;
   const { leadInspectionLinkLive } = require('../config/feature-gates');
   if (!leadInspectionLinkLive()) {
@@ -1402,6 +1419,9 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null) {
     }
     if (digitsLast10(lead.phone) !== String(toLast10 || '')) {
       return refuseSend('This consultation link belongs to a different lead — remove it before sending.');
+    }
+    if (expectedLeadId && String(row.lead_id) !== String(expectedLeadId)) {
+      return refuseSend('This consultation link was made for a different lead — remove it and insert a fresh one.');
     }
     // Pre-push Codex P1: a verified consultation link is a bearer like any
     // other — omitted from ctx.bearers, it silently skipped the shared
@@ -1467,7 +1487,9 @@ async function checkCardLinks(ctx, cards) {
 // would pass ownership and even adopt that customer while the provider
 // texts the other country (GH Codex #3844 r10 P1) — a bearer never goes to
 // a non-US destination.
-async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestination = true, contractId = null } = {}) {
+async function bearerLinkSendCheck(body, toLast10, {
+  trustedCustomerId, usDestination = true, contractId = null, expectedLeadId = null,
+} = {}) {
   const ctx = {
     runs: decodedRuns(body),
     body,
@@ -1477,6 +1499,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     usDestination,
     bearers: 0, // verified bearers seen — the owner rule below applies to any
     contractId,
+    expectedLeadId,
   };
   const cards = [];
   const contracts = [];
@@ -1493,7 +1516,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     // checked by destination phone alone (ctx.toLast10), independent of
     // ctx.trustedCustomerId, so this same check works unmodified from the
     // lead-only /admin/leads/:id/send-sms route too (see that route).
-    () => checkConsultationLinkSend(ctx.body, ctx.toLast10, ctx),
+    () => checkConsultationLinkSend(ctx.body, ctx.toLast10, ctx, ctx.expectedLeadId),
   ];
   for (const check of checks) {
     const refusal = await check();
@@ -2445,6 +2468,7 @@ module.exports = {
   immediateOnlyLinkSendCheck,
   bearerLinkSendCheck,
   checkConsultationLinkSend,
+  bodyCarriesConsultationLink,
   markStatementsSent,
   markPrepGuidesSent,
   recheckPrepLinks,

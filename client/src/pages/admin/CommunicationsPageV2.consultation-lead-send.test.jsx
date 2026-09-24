@@ -52,6 +52,7 @@ it("keeps the lead-only consultation send on /admin/communications/sms, carrying
     firstName: "Jamie",
     leadId: "lead-99",
   };
+  responses["/admin/communications/link-library"] = { links: [], consultationLinksEnabled: true };
   responses["/admin/communications/attach"] = { attachments: [attachment] };
   responses["/admin/communications/sms"] = { sent: true, providerMessageId: "SMbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
 
@@ -95,4 +96,14 @@ it("keeps the lead-only consultation send on /admin/communications/sms, carrying
   // confirms the send itself went through and was accepted.
   await screen.findByText(/Provider accepted/);
   expect(onSent).not.toHaveBeenCalled();
+});
+
+// Codex #4709 r3 P1: with GATE_LEAD_INSPECTION_LINK dark the Quick Links
+// sheet omits "Free consultation" entirely.
+it("omits Free consultation from Quick Links while the gate is dark", async () => {
+  responses["/admin/communications/link-library"] = { links: [], consultationLinksEnabled: false };
+  render(<SmsTab active onSent={vi.fn()} />, { wrapper: MemoryRouter });
+  fireEvent.click(await screen.findByRole("button", { name: "Quick Links" }));
+  await screen.findByRole("button", { name: /Referral link/i });
+  expect(screen.queryByRole("button", { name: /Free consultation/i })).toBeNull();
 });

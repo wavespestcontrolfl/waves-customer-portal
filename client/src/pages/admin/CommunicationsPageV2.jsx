@@ -891,7 +891,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
   useEffect(() => { if (linkRequest > 0) setShowLinkSheet(true); }, [linkRequest]);
-  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled } = useLinkLibrary(active && showLinkSheet);
+  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled, consultationLinksEnabled } = useLinkLibrary(active && showLinkSheet);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
@@ -2209,10 +2209,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // get a 403, so those rows are admin-only; the static rows stay staff-wide.
   const insertSheetLinks = useMemo(
     () => [
-      ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim())) && (l.key !== "receipt" || receiptLinksEnabled)),
+      ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim()))
+        && (l.key !== "receipt" || receiptLinksEnabled)
+        && (l.key !== "consultation" || consultationLinksEnabled)),
       ...(libraryLinks || []),
     ],
-    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled],
+    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled, consultationLinksEnabled],
   );
 
   const handleInsertSheetPick = (link, channel = null) => {

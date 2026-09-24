@@ -374,7 +374,7 @@ describe('consultationLinkAvailable (read-only probe — never mints)', () => {
   test('gate off: unavailable, no DB touched', async () => {
     process.env.GATE_LEAD_INSPECTION_LINK = 'false';
     const result = await consultationLinkAvailable(LEAD_ID);
-    expect(result).toEqual({ available: false, reason: expect.stringMatching(/switched off/i) });
+    expect(result).toEqual({ enabled: false, available: false, reason: expect.stringMatching(/switched off/i) });
     expect(mockDb).not.toHaveBeenCalled();
     expect(createShortCode).not.toHaveBeenCalled();
   });
@@ -385,26 +385,26 @@ describe('consultationLinkAvailable (read-only probe — never mints)', () => {
       sms_templates: chainBuilder({ firstRow: { is_active: true } }),
     };
     const result = await consultationLinkAvailable(LEAD_ID);
-    expect(result).toEqual({ available: true });
+    expect(result).toEqual({ enabled: true, available: true });
     expect(createShortCode).not.toHaveBeenCalled();
   });
 
   test('missing lead: unavailable, "Lead not found"', async () => {
     mockBuilders = { leads: chainBuilder({ firstRow: null }) };
     const result = await consultationLinkAvailable(LEAD_ID);
-    expect(result).toEqual({ available: false, reason: 'Lead not found' });
+    expect(result).toEqual({ enabled: true, available: false, reason: 'Lead not found' });
   });
 
   test('a closed/converted lead: unavailable with the specific reason', async () => {
     mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'won', converted_at: new Date('2026-01-01') } }) };
     const result = await consultationLinkAvailable(LEAD_ID);
-    expect(result).toEqual({ available: false, reason: 'That lead has already converted or closed' });
+    expect(result).toEqual({ enabled: true, available: false, reason: 'That lead has already converted or closed' });
   });
 
   test('a lead with no phone: unavailable', async () => {
     mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: null, status: 'new', converted_at: null } }) };
     const result = await consultationLinkAvailable(LEAD_ID);
-    expect(result).toEqual({ available: false, reason: expect.stringMatching(/no phone/i) });
+    expect(result).toEqual({ enabled: true, available: false, reason: expect.stringMatching(/no phone/i) });
   });
 
   test('no signing secret configured: unavailable (checked without minting — pure HMAC, no DB write)', async () => {
@@ -412,7 +412,7 @@ describe('consultationLinkAvailable (read-only probe — never mints)', () => {
     delete process.env.JWT_SECRET;
     mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }) };
     const result = await consultationLinkAvailable(LEAD_ID);
-    expect(result).toEqual({ available: false, reason: expect.stringMatching(/secret/i) });
+    expect(result).toEqual({ enabled: true, available: false, reason: expect.stringMatching(/secret/i) });
   });
 
   test('an admin-DISABLED template: unavailable with the same reason the render-time check uses', async () => {
@@ -421,6 +421,6 @@ describe('consultationLinkAvailable (read-only probe — never mints)', () => {
       sms_templates: chainBuilder({ firstRow: { is_active: false } }),
     };
     const result = await consultationLinkAvailable(LEAD_ID);
-    expect(result).toEqual({ available: false, reason: 'template disabled' });
+    expect(result).toEqual({ enabled: true, available: false, reason: 'template disabled' });
   });
 });

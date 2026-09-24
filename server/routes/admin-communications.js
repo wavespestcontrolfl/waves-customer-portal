@@ -482,6 +482,12 @@ router.post('/sms', async (req, res, next) => {
     // ordinary path (Codex r16 P1).
     const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
     if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
+      // Codex #4709 r3 P1: a consultation link never goes out on the
+      // applicant rail — that path skips the gate/expiry/lead checks and the
+      // lead audit. Refuse rather than divert.
+      if (await require('../services/composer-customer-links').bodyCarriesConsultationLink(cleanBody)) {
+        return res.status(409).json({ error: 'This number is an active job applicant — consultation links cannot go out on the applicant thread. Remove the link or text the lead from the Leads page.' });
+      }
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
       if (media.length > 0) return res.status(400).json({ error: 'Attachments are not supported for applicant texts' });
       const RecruitingComms = require('../services/recruiting-comms');
@@ -718,6 +724,9 @@ router.post('/sms', async (req, res, next) => {
         // sharing them with a customer's US number is a different phone.
         usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
         contractId: contractId && UUID_RE.test(String(contractId)) ? String(contractId) : null,
+        // Codex #4709 r3 P1: a lead-only composer send binds its
+        // consultation links to that exact lead.
+        expectedLeadId: trustedCustomerId ? null : trustedLeadId,
       });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
@@ -2983,7 +2992,15 @@ router.get('/link-library', async (req, res) => {
       linkLibrary.listLinks(),
       linkLibrary.sitemapLastSyncedAt(),
     ]);
-    res.json({ links, lastSyncedAt, receiptLinksEnabled: require('../config/feature-gates').isEnabled('composerReceiptLinks') });
+    const featureGates = require('../config/feature-gates');
+    res.json({
+      links,
+      lastSyncedAt,
+      receiptLinksEnabled: featureGates.isEnabled('composerReceiptLinks'),
+      // Codex #4709 r3 P1: the composer omits "Free consultation" while
+      // GATE_LEAD_INSPECTION_LINK is dark.
+      consultationLinksEnabled: featureGates.leadInspectionLinkLive(),
+    });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);
     res.status(500).json({ error: err.message });

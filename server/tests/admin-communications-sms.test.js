@@ -2681,3 +2681,33 @@ describe('leadId in the body (consultation lead-only fallback): the send stays o
     expect(claimUpdates.some((u) => u.status === 'accepted')).toBe(true);
   });
 });
+
+// Codex #4709 r3 P1: a lead-only consultation text to a number that is also
+// an active job applicant must not divert onto the recruiting rail, where
+// the consultation gate/expiry/lead checks and the lead audit never run.
+test('a consultation link to an active applicant phone is refused before the recruiting diversion', async () => {
+  const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+  isRecruitingPhone.mockResolvedValue(true);
+  sendCustomerMessage.mockClear();
+  db.mockImplementation((table) => {
+    const b = makeUniversalBuilder();
+    if (table === 'short_codes') {
+      b.select = jest.fn(async () => [{ code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'aaaaaaaa-1111-4111-8111-111111111111' }]);
+    }
+    return b;
+  });
+  try {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Pick a time: wavespest.co/l/cons1', leadId: 'aaaaaaaa-1111-4111-8111-111111111111' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/active job applicant/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  } finally {
+    isRecruitingPhone.mockResolvedValue(false);
+  }
+});
