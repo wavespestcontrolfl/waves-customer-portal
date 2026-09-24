@@ -865,7 +865,11 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   // already exists (assignment, reminders), so silently closing the only
   // warning would leave it scheduled at the rejected number — explicit
   // cancel-or-review work is filed instead (codex r36 P1).
-  const retainedNeedsCorrection = !!retained && decision.confirmed;
+  // Judged on the LIVE retained row alone, not the card's scheduling
+  // status: a claimed card can keep its unconfirmed snapshot while a
+  // reprocess confirmed the appointment and retained a visit (codex r38
+  // P1) — that visit still needs correction or cancellation work.
+  const retainedNeedsCorrection = !!retained;
   if (decision.file || retainedNeedsCorrection) {
     const { buildTriageItem } = require('../services/call-routing-gates');
     const taskSummary = retained && decision.scheduleDenied
