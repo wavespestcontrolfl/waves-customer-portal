@@ -980,6 +980,7 @@ describe('model vocabulary slips are normalized before schema validation (audit 
     const many = { commitments: Array.from({ length: 13 }, () => item()) };
     expect(normalizeModelOutput(many).commitments).toHaveLength(12);
     expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most three quotes per commitment/);
+    expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most twelve commitments/);
   });
   test('the prompt names the channel vocabulary', () => {
     const prompt = buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' });

@@ -128,7 +128,7 @@ function normalizeModelOutput(parsed) {
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
-const EXTRACTOR_VERSION = 'commitments-v8';
+const EXTRACTOR_VERSION = 'commitments-v9';
 const IDENTITY_UNRESOLVED_INCOMPLETE = 'incomplete_extraction';
 const IDENTITY_UNRESOLVED_AMBIGUOUS = 'reconciliation_ambiguity';
 
@@ -499,7 +499,7 @@ A commitment is something one party explicitly said they would do after the call
 - "customer": the caller agreed to do something (send photos, confirm a date, call back, provide information such as an address or gate code, make a payment).
 
 Rules — these are strict:
-1. Only list what was actually SAID. Do not infer a promise from context, tone, or what a good agent would normally do. If nobody committed to anything, return {"commitments": []}.
+1. Only list what was actually SAID. Do not infer a promise from context, tone, or what a good agent would normally do. If nobody committed to anything, return {"commitments": []}. List at most twelve commitments, the most consequential first.
 2. Every commitment needs at least one VERBATIM quote copied exactly from the transcript (same words, same spelling), with the speaker who said it — at most three quotes per commitment. Do not paraphrase the quote.
 3. "due_text" is the timing of THIS promised action as spoken ("by tomorrow morning", "later today", "after the inspection") or null. "due_at" is an ISO 8601 timestamp with the -04:00/-05:00 Eastern offset ONLY when that timing names a specific day/time relative to the call date (${when} Eastern); otherwise null. Never use the existing or requested appointment date as the delivery time. "due_type" is "deadline" ONLY when the agent explicitly promises this action BY, BEFORE, or NO LATER THAN due_at; it is "floor" when the agent says to send it AT or AFTER due_at, and null when due_at is null or timing is unclear. A deadline on another action (such as a callback) does not make the link delivery a deadline.
 4. "confidence" is how sure you are that the quoted words constitute a real commitment (0 to 1).
