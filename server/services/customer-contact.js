@@ -226,16 +226,34 @@ function getReceiptEmailRecipients(customer, prefs = {}) {
   return getInvoiceEmailRecipients(customer, prefs);
 }
 
+// The portal-wide "Email Messages" kill switch and the "Service Complete
+// Report" toggle both apply to the service-report email, the way the
+// grouped-visit twin (visit-completion-summary.js summaryEmailRecipients)
+// and the SMS leg (messaging/policy.js purpose 'service_completion' ->
+// prefsColumn 'service_completed') already enforce them. Exported
+// separately from getServiceReportEmailRecipients (below) so a caller whose
+// skip-reason text drives closeout classification (service-report/
+// email-delivery.js) can tell "the customer explicitly opted out" apart
+// from "there's no recipient on file" / "the prefs lookup failed" — all
+// three collapse to the same empty recipients array otherwise, but they are
+// very different things for a closeout alert (one is a policy choice that
+// needs no staff action; the others are real gaps).
+function serviceReportEmailOptedOut(prefs) {
+  return prefs?.email_enabled === false || prefs?.service_completed === false;
+}
+
 function getServiceReportEmailRecipients(customer, prefs = {}) {
   if (!customer) return [];
-  // The portal-wide "Email Messages" kill switch and the "Service Complete
-  // Report" toggle both apply here too, the way the grouped-visit twin
-  // (visit-completion-summary.js summaryEmailRecipients) and the SMS leg
-  // (messaging/policy.js purpose 'service_completion' -> prefsColumn
-  // 'service_completed') already enforce them. This resolver previously
-  // only consulted service_report_notify_primary/_billing, so an opted-out
-  // customer still got the report email + PDF after every completed visit.
-  if (prefs?.email_enabled === false || prefs?.service_completed === false) return [];
+  // This resolver previously only consulted
+  // service_report_notify_primary/_billing, so an opted-out customer still
+  // got the report email + PDF after every completed visit. A failed prefs
+  // lookup (PREFS_UNAVAILABLE) must fail CLOSED here too: it matches
+  // neither boolean check in serviceReportEmailOptedOut, and without this
+  // the service-contact loop right after would still add secondary
+  // recipients (the per-recipient notifyPrimary/notifyBilling checks only
+  // suppress the primary/billing contact, not the service contacts already
+  // pushed).
+  if (prefsUnavailable(prefs) || serviceReportEmailOptedOut(prefs)) return [];
   const primary = getPrimaryContact(customer);
   const recipients = [];
 
@@ -382,6 +400,7 @@ module.exports = {
   getInvoiceEmailRecipients,
   getReceiptEmailRecipients,
   getServiceReportEmailRecipients,
+  serviceReportEmailOptedOut,
   getRecipientsForPurpose,
   hasDistinctServiceContact,
   isSecondaryProfile,

@@ -90,6 +90,41 @@ test('a monthly-rate typo fix alone sends nothing with no notify flag; notifyCus
   expect(mockMembershipEmail.sendMembershipUpdated).toHaveBeenCalledTimes(2);
 });
 
+// Codex round-1 P2 follow-up: an inferred monthly member (billing_mode NULL,
+// a real tier, a positive rate — resolveBillingLane infers monthly_membership
+// from the rate alone) whose rate drops from positive to zero must still
+// fire membership.updated when notifyCustomer:true — this is a real dues
+// change to zero, not a rate-only edit on a lane that never bills the rate.
+// resolveBillingLane(after) alone would read 'per_visit' once the rate hits
+// zero (the inference needs BOTH a real tier AND rate > 0), which would
+// wrongly look like "rate-only on an unbilled lane" if only the after-side
+// lane were checked.
+test('an inferred monthly member (billing_mode NULL) whose rate drops to zero still fires membership.updated with notifyCustomer:true', async () => {
+  const INFERRED_MONTHLY_MEMBER = {
+    id: 'customer-2', account_id: 'account-1', first_name: 'Robin', last_name: 'Member', active: true,
+    pipeline_stage: 'active_customer', waveguard_tier: 'Silver', waveguard_tier_source: 'manual',
+    monthly_rate: 65, billing_mode: null, deleted_at: null,
+  };
+  mockState.initial = { ...INFERRED_MONTHLY_MEMBER };
+  mockState.locked = { ...INFERRED_MONTHLY_MEMBER };
+
+  const layer = router.stack.find((e) => e.route?.path === '/:id' && e.route?.methods?.put);
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+  const req = { params: { id: 'customer-2' }, body: { monthlyRate: 0, notifyCustomer: true }, technicianId: 'admin-1', ip: '127.0.0.1', get: jest.fn(() => 'jest') };
+  const result = { status: 200, body: null, error: null };
+  const res = { status(c) { result.status = c; return res; }, json(p) { result.body = p; return res; } };
+  await handler(req, res, (e) => { result.error = e; });
+  if (result.error) throw result.error;
+
+  expect(result.status).toBe(200);
+  expect(mockMembershipEmail.sendMembershipUpdated).toHaveBeenCalledTimes(1);
+  expect(mockMembershipEmail.sendMembershipUpdated.mock.calls[0][0]).toMatchObject({
+    customerId: 'customer-2',
+    before: expect.objectContaining({ monthly_rate: 65 }),
+    after: expect.objectContaining({ monthly_rate: 0 }),
+  });
+});
+
 test('deactivating a member record (active=false) sends nothing with no notify flag; notifyCustomer:true fires membership.canceled "Account deactivated"', async () => {
   const silent = await saveCustomer({ active: false });
   expect(silent.status).toBe(200);

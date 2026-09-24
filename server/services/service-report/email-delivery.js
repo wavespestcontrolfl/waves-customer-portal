@@ -14,7 +14,7 @@ const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { dateOnlyStamp, formatReadyTime } = require('./time-format');
-const { getServiceReportEmailRecipients, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
+const { getServiceReportEmailRecipients, serviceReportEmailOptedOut, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
 const { inspectionCreditReportNote } = require('../inspection-credit');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
@@ -487,7 +487,17 @@ async function sendServiceReportV1Email(recordId, {
     phone: service.customer_phone,
     ...Object.fromEntries(SERVICE_CONTACT_COLUMNS.map((column) => [column, service[column]])),
   }, prefs || {});
-  if (!recipients.length) return { ok: false, skipped: true, error: 'No service report recipient email' };
+  if (!recipients.length) {
+    // Distinguish a customer's own opt-out (a policy choice — closeout-
+    // status.js classifies "suppressed"-prefixed skip text as not_required
+    // and raises no alert) from a genuine missing-recipient gap or an
+    // unreadable prefs row (the generic message below, classified as a real
+    // failure so staff still see it).
+    const error = serviceReportEmailOptedOut(prefs)
+      ? 'Suppressed: customer opted out of service report email'
+      : 'No service report recipient email';
+    return { ok: false, skipped: true, error };
+  }
 
   const reportToken = token || service.report_view_token;
   if (!reportToken) return { ok: false, error: 'Missing report token' };

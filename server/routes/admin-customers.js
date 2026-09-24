@@ -4202,15 +4202,26 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       } else if (notifyCustomer && membershipFieldChanged && afterHasMembership) {
         // Never send the "your plan pricing was updated" notice for a rate
         // that lane never bills: when the ONLY membership field that moved
-        // is monthly_rate and the resolved lane isn't monthly_membership,
-        // nothing the customer is actually charged changed (157 of 159
-        // per-application customers carry a stale rate they are never
-        // billed — audit 2026-08-01), so skip the send even though the
-        // operator opted in to notifying.
+        // is monthly_rate and the lane isn't monthly_membership, nothing the
+        // customer is actually charged changed (157 of 159 per-application
+        // customers carry a stale rate they are never billed — audit
+        // 2026-08-01), so skip the send even though the operator opted in
+        // to notifying. Both sides must resolve OFF the monthly lane, and
+        // the stored billing_mode must not have moved either — an inferred
+        // monthly member (billing_mode NULL, a real tier, a positive rate)
+        // whose rate drops to zero would otherwise flip resolveBillingLane's
+        // inference to per_visit on the AFTER side alone and wrongly read as
+        // "rate-only on an unbilled lane", suppressing a real dues change to
+        // zero for a customer who WAS billed monthly.
         const tierUnchanged = comparableMembershipTier(committedBefore.waveguard_tier) === comparableMembershipTier(committedAfter.waveguard_tier);
+        const billingModeUnchanged = (committedBefore.billing_mode || null) === (committedAfter.billing_mode || null);
         const { resolveBillingLane } = require('../services/billing-lane');
-        const resolvedLane = resolveBillingLane(committedAfter).mode;
-        const rateOnlyOnUnbilledLane = tierUnchanged && resolvedLane !== 'monthly_membership';
+        const resolvedLaneBefore = resolveBillingLane(committedBefore).mode;
+        const resolvedLaneAfter = resolveBillingLane(committedAfter).mode;
+        const rateOnlyOnUnbilledLane = tierUnchanged
+          && billingModeUnchanged
+          && resolvedLaneBefore !== 'monthly_membership'
+          && resolvedLaneAfter !== 'monthly_membership';
         if (!rateOnlyOnUnbilledLane) {
           void AccountMembershipEmail.sendMembershipUpdated({
             customerId: req.params.id,

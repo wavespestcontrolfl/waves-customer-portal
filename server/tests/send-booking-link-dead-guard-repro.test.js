@@ -105,8 +105,12 @@ const ESTIMATE = {
 
 // The live appointment that every real booking path produces. Mutable
 // status per test (LINKED_APPT_STATUS) so a skipped/no-show linked visit
-// can be exercised without duplicating the whole fixture.
+// can be exercised without duplicating the whole fixture. LINKED_APPT_EXPIRED
+// simulates an abandoned self-booking hold whose reservation_expires_at has
+// passed — the row is still there (the 15-minute sweep hasn't reclaimed it
+// yet) but is no longer "live".
 let LINKED_APPT_STATUS = 'confirmed';
+let LINKED_APPT_EXPIRED = false;
 function linkedAppt() {
   return {
     id: 'ss-1',
@@ -116,6 +120,7 @@ function linkedAppt() {
     scheduled_date: TOMORROW,
     window_start: '09:00',
     service_type: 'German Roach Treatment',
+    reservation_expires_at: LINKED_APPT_EXPIRED ? '2020-01-01T00:00:00.000Z' : null,
   };
 }
 
@@ -123,7 +128,7 @@ const scheduledServicesQueries = [];
 
 function makeBuilder(table) {
   const b = { table, wheres: [] };
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotIn', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereIn', 'andWhere', 'whereNot', 'forUpdate', 'select', 'orderBy', 'limit', 'modify']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotIn', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereIn', 'orWhereRaw', 'andWhere', 'whereNot', 'forUpdate', 'select', 'orderBy', 'limit', 'modify']) {
     b[m] = jest.fn((...args) => {
       if (typeof args[0] === 'function') args[0].call(b, b);
       b.wheres.push([m, ...args]);
@@ -136,7 +141,9 @@ function makeBuilder(table) {
       scheduledServicesQueries.push(b.wheres.slice());
       // Answer like a real DB: the row matches on source_estimate_id (how
       // it is actually linked) or on its own id, but only when its status
-      // isn't excluded by a whereNotIn('status', [...]) on this query.
+      // isn't excluded by a whereNotIn('status', [...]) on this query, AND
+      // only when the reservation-liveness predicate (whereNull/orWhereRaw
+      // on reservation_expires_at) doesn't exclude an expired hold.
       const flat = JSON.stringify(b.wheres);
       const bySource = b.wheres.some(([m, a]) => m === 'where' && a && typeof a === 'object' && String(a.source_estimate_id) === 'est-1')
         || b.wheres.some(([m, a, v]) => m === 'where' && a === 'source_estimate_id' && String(v) === 'est-1')
@@ -145,7 +152,10 @@ function makeBuilder(table) {
       if (!bySource && !byId) return null;
       const excludedStatuses = b.wheres.find(([m, col]) => m === 'whereNotIn' && col === 'status')?.[2] || [];
       if (excludedStatuses.includes(LINKED_APPT_STATUS)) return null;
-      return { ...linkedAppt() };
+      const appt = linkedAppt();
+      const checksReservationLiveness = b.wheres.some(([m, col]) => m === 'whereNull' && col === 'reservation_expires_at');
+      if (checksReservationLiveness && appt.reservation_expires_at && new Date(appt.reservation_expires_at) <= new Date()) return null;
+      return appt;
     }
     return null;
   });
@@ -171,6 +181,7 @@ describe('AUDIT r1-estimates-2: send-booking-link on an already-booked estimate'
     scheduledServicesQueries.length = 0;
     ESTIMATE_DATA_OVERRIDE = null;
     LINKED_APPT_STATUS = 'confirmed';
+    LINKED_APPT_EXPIRED = false;
     db.mockImplementation((table) => makeBuilder(table));
   });
 
@@ -222,4 +233,35 @@ describe('AUDIT r1-estimates-2: send-booking-link on an already-booked estimate'
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     },
   );
+
+  // Codex round-1 P2 follow-up: a customer who abandons a self-booking hold
+  // (never completes /book) leaves a pending scheduled_services row with
+  // this source_estimate_id link and a reservation_expires_at in the past —
+  // the 15-minute sweep hasn't reclaimed it yet. That dead hold must not
+  // block staff from sending a real, working booking link.
+  test('an EXPIRED reservation hold (abandoned self-booking, pending status) does NOT block a fresh booking link', async () => {
+    LINKED_APPT_STATUS = 'pending';
+    LINKED_APPT_EXPIRED = true;
+    const res = await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/estimates/est-1/send-booking-link`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      });
+      return { status: r.status, body: await r.json() };
+    });
+    expect(res.status).toBe(200);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a LIVE (not yet expired) reservation hold still blocks a fresh booking link', async () => {
+    LINKED_APPT_STATUS = 'pending';
+    LINKED_APPT_EXPIRED = false;
+    const res = await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/estimates/est-1/send-booking-link`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      });
+      return { status: r.status, body: await r.json() };
+    });
+    expect(res.status).toBe(409);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
 });

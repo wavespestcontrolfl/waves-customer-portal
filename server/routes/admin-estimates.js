@@ -4969,7 +4969,13 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     // TERMINAL_STATUSES (cancelled/completed/no_show/skipped/rescheduled),
     // the same terminal set waveguard-existing-services.js uses, so a
     // skipped or no-show visit doesn't block a legitimate replacement
-    // booking link.
+    // booking link. A row is only truly "booked" once reservation_expires_at
+    // is cleared (or still in the future) — the same liveness predicate
+    // slot-reservation.js's own conflict checks use — because a customer who
+    // abandoned a self-booking hold stays a pending row with this
+    // source_estimate_id link until the 15-minute sweep reclaims it; without
+    // this an abandoned hold would block the very replacement link staff are
+    // trying to send.
     try {
       const estData = typeof estimate.estimate_data === 'string'
         ? JSON.parse(estimate.estimate_data)
@@ -4982,6 +4988,9 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
           if (linkedSvcId) q.orWhere({ id: linkedSvcId });
         })
         .whereNotIn('status', TERMINAL_STATUSES)
+        .andWhere((q) => {
+          q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
+        })
         .first();
       if (linked) {
         return res.status(409).json({
