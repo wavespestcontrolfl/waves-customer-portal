@@ -114,7 +114,18 @@ function independentStressFloor(run) {
 // signal, including fungus/thatch, was unknown) — the one case where
 // stress_damage is itself fillable/derivable rather than AI-fixed.
 // `undefined` (no run) leaves the floor to the stored value below.
-function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor, aiScores } = {}) {
+//
+// `stressExplicit`: the ONLY thing that makes a genuinely AI-blank
+// stress_damage stick across a later partial save that doesn't repeat it —
+// a technician's direct entry (this request's `adjustedScores.stress_damage`,
+// or a persisted marker of an earlier one; see confirmScores). Anything else
+// stored on the row (assessment.stress_damage) is never treated as sticky on
+// its own, because it may only be a PREVIOUS auto-derivation from
+// then-current components — using it as a floor/return value would freeze a
+// stale answer and stop a later fungus/thatch correction from ever moving
+// Stress again (Codex P1 2026-09-24). With no explicit fill, Stress is
+// ALWAYS re-derived fresh from the currently-known components + floor.
+function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor, aiScores, stressExplicit } = {}) {
   const adjusted = adjustedScores && typeof adjustedScores === 'object' ? adjustedScores : {};
   const ai = aiScores && typeof aiScores === 'object' ? aiScores : null;
   const present = (value) => value != null && value !== '';
@@ -147,10 +158,11 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
     final.stress_damage = ai ? scoreValue(ai.stress_damage) : scoreValue(assessment.stress_damage);
   } else if (numericOverride(adjusted.stress_damage)) {
     final.stress_damage = scoreValue(adjusted.stress_damage);
-  } else if (present(assessment.stress_damage)) {
-    // A technician's earlier fill (this key was AI-blank) sticks across a
-    // later partial save that doesn't repeat it.
-    final.stress_damage = scoreValue(assessment.stress_damage);
+  } else if (known(stressExplicit)) {
+    // A technician's earlier EXPLICIT fill (this key was AI-blank) sticks
+    // across a later partial save that doesn't repeat it. An auto-derived
+    // value that was never explicitly entered is NOT sticky — see below.
+    final.stress_damage = scoreValue(stressExplicit);
   } else {
     const floor = stressFloor === undefined ? null : stressFloor;
     const parts = [final.fungus_control, final.thatch_level, floor]
@@ -191,9 +203,20 @@ function overallScoreFor(finalScores, calculateOverallScore) {
 function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
   const adjusted = adjustedScores || {};
   const aiScores = runAiScores(run);
+  // The ONLY thing that can make an AI-blank stress_damage stick across a
+  // later partial save: this request's own explicit fill, or a marker of an
+  // earlier one persisted on the assessment row's adjusted_scores snapshot
+  // (written back by the caller alongside decision.stressExplicit — see
+  // confirmLockedRun). Never assessment.stress_damage itself, which may only
+  // be a PREVIOUS auto-derivation (Codex P1 2026-09-24).
+  const previousExplicit = parseJsonObject(assessment?.adjusted_scores)?.stress_damage_explicit;
+  const stressExplicit = numericOverride(adjusted.stress_damage)
+    ? scoreValue(adjusted.stress_damage)
+    : (known(previousExplicit) ? previousExplicit : null);
   const finalScores = resolveConfirmScores(assessment, adjusted, scoreValue, {
     ...(run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {}),
     aiScores,
+    stressExplicit,
   });
   const confirmed = scoresComplete(finalScores);
   return {
@@ -202,6 +225,7 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
     confirmed,
     missing: missingScores(finalScores),
     aiScores,
+    stressExplicit,
     calibrationEligible: confirmed && SCORE_KEYS.some((key) => known(aiScores[key])),
   };
 }

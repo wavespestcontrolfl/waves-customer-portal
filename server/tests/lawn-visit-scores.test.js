@@ -157,6 +157,47 @@ describe('confirm scores are read-only from the AI; a blank AI read is the one f
       expect(filled.confirmed).toBe(true);
     });
 
+    test('an auto-derived (never explicit) stress_damage re-derives after a component correction, while an explicit fill sticks (Codex P1 2026-09-24)', () => {
+      const options = { scoreValue, calculateOverallScore: () => 77 };
+      const run = {
+        status: 'complete',
+        scores_adjusted: JSON.stringify({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }),
+      };
+      let assessment = { turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null, adjusted_scores: null };
+      const persist = (decision) => ({
+        ...assessment, ...decision.finalScores,
+        adjusted_scores: JSON.stringify({ ...decision.finalScores, stress_damage_explicit: decision.stressExplicit }),
+      });
+
+      // Save 1: fill fungus=80 only — Stress auto-derives to 80 (the only
+      // known component), but this was never an explicit entry.
+      const first = visit.confirmScores(assessment, run, { fungus_control: 80 }, options);
+      expect(first.finalScores).toMatchObject({ fungus_control: 80, stress_damage: 80 });
+      expect(first.stressExplicit).toBeNull();
+      assessment = persist(first);
+
+      // Save 2: correct fungus down to 40 and fill thatch=90 — Stress MUST
+      // re-derive to 40, not stay frozen at the earlier auto-derived 80
+      // (this was the reported bug: preserving any previously saved value,
+      // including one automatically derived, prevented this correction).
+      const second = visit.confirmScores(assessment, run, { fungus_control: 40, thatch_level: 90 }, options);
+      expect(second.finalScores.stress_damage).toBe(40);
+      expect(second.stressExplicit).toBeNull();
+      assessment = persist(second);
+
+      // Save 3: the technician now directly enters Stress=65 — an explicit
+      // fill, recorded as such.
+      const third = visit.confirmScores(assessment, run, { stress_damage: 65 }, options);
+      expect(third.finalScores.stress_damage).toBe(65);
+      expect(third.stressExplicit).toBe(65);
+      assessment = persist(third);
+
+      // Save 4: a further component edit without resending Stress — the
+      // EXPLICIT 65 sticks, unlike the earlier auto-derived value.
+      const fourth = visit.confirmScores(assessment, run, { color_health: 70 }, options);
+      expect(fourth.finalScores.stress_damage).toBe(65);
+    });
+
     test('an incomplete/snapshot-less run has no immutable AI read to enforce, so its keys stay editable (unchanged legacy-style fallback)', () => {
       const assessment = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
       const quiet = { status: 'complete', scores_raw: '{}', severities: JSON.stringify({ fungal_activity: sig('severe'), insect_damage: sig('unknown', 'unknown', ''), drought_stress: sig('unknown', 'unknown', ''), mechanical_damage: sig('none') }) };

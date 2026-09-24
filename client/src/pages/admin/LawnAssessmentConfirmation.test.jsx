@@ -106,6 +106,31 @@ it('keeps a pending assessment out of closeout and allows a later completed conf
   expect(screen.queryByText(message)).toBeNull();
 });
 
+it('keeps a technician-filled AI-blank metric editable after reload, without reopening an AI-known one (Codex P1 2026-09-24)', async () => {
+  // fungus_control was AI-blank; an earlier partial save already filled it
+  // to 60 — the run's immutable snapshot still says the AI never knew it, so
+  // the input must stay open (pre-filled, correctable), not collapse to a
+  // fixed "60/100" just because the assessment row now has a value.
+  loadedAssessment = { ...assessment, fungus_control: 60 };
+  visitAssessment = {
+    runId: 'fixture-run', status: 'complete',
+    aiScores: { turf_density: 80, weed_suppression: 80, color_health: null, fungus_control: null, thatch_level: 85, stress_damage: 85 },
+  };
+  render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+  await screen.findByRole('button', { name: 'Confirm assessment' });
+  const fungusInput = screen.getByLabelText('Enter Fungus control');
+  expect(fungusInput.value).toBe('60');
+  fireEvent.change(fungusInput, { target: { value: '40' } });
+  // thatch_level is genuinely AI-known (85, matching both the row and the
+  // snapshot) — no input for it, ever.
+  expect(screen.queryByLabelText('Enter Thatch condition')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith('lawn-assessment/confirm'))).toBe(true));
+  const sent = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
+  expect(sent.adjustedScores.fungus_control).toBe(40);
+  expect(sent.adjustedScores.thatch_level).toBe(85);
+});
+
 it.each([null, 0])('preserves an unavailable or genuinely zero score when reloading and posting: %s', async (value) => {
   const expected = Object.fromEntries(Object.keys(scores).map((key) => [key, value]));
   loadedAssessment = { ...assessment, ...expected };

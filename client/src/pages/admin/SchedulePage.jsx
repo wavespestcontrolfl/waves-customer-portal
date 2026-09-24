@@ -9809,6 +9809,30 @@ function parseAssessmentScores(row = {}) {
   return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
+// The AI's own read — used ONLY to decide which metrics stay editable, never
+// what's displayed (that's techScores/scoreSource, which may already hold a
+// technician's earlier fill of a genuinely blank metric from a prior partial
+// save). Run-backed: the run's immutable scores_adjusted snapshot
+// (visitAssessment.aiScores from the server), which a save never touches —
+// so a metric a technician already filled correctly stays editable instead
+// of looking "AI-known" just because it now has a value (Codex P1
+// 2026-09-24). Legacy (no run, visitAssessment null): the assessment row's
+// own RAW columns, mirroring the server's legacy /confirm rule exactly —
+// including that stress_damage is read raw, never parseAssessmentScores's
+// derived worst-of-fungus/thatch guess, which could already be non-null
+// while the server still considers Stress unknown.
+function resolveAiScores(assessment = {}, visitAssessment) {
+  if (visitAssessment?.aiScores) return visitAssessment.aiScores;
+  const raw = (a, b) => lawnScores.lawnScoreValue(assessment[a] ?? assessment[b]);
+  return {
+    turf_density: raw("turf_density", "turfDensity"),
+    weed_suppression: raw("weed_suppression", "weedSuppression"),
+    color_health: raw("color_health", "colorHealth"),
+    fungus_control: raw("fungus_control", "fungusControl"),
+    thatch_level: raw("thatch_level", "thatchLevel"),
+    stress_damage: raw("stress_damage", "stressDamage"),
+  };
+}
 
 function LawnPreviousVisitCard({ service }) {
   const [state, setState] = useState({ loading: true, row: null, error: false });
@@ -9944,6 +9968,7 @@ function LawnAssessmentCompletionBlock({
           assessment,
           adjustedScores: scores,
           displayScores: scores,
+          aiScores: resolveAiScores(assessment, data.visitAssessment),
           observations: assessment.observations || "",
         });
         setTechScores(scores);
@@ -10035,7 +10060,7 @@ function LawnAssessmentCompletionBlock({
         return;
       }
       const scores = response.adjustedScores || response.displayScores || {};
-      setResult(response);
+      setResult({ ...response, aiScores: resolveAiScores(response.assessment, response.visitAssessment) });
       setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations !== undefined ? response.assessment.observations : response.observations));
       setTechScores({ ...scores });
       setConfirmedId(null);
@@ -10101,10 +10126,15 @@ function LawnAssessmentCompletionBlock({
   const confirmed = !!confirmedId;
   // Keep the usual four controls; expose underlying scores only when the
   // saved assessment lacks them. Keep them editable until the save completes.
+  // Same rule as the aiValue check below: whether an underlying signal is
+  // AI-blank comes from result.aiScores (the immutable read), never the
+  // mutable assessment row — otherwise a prior save's fill of a genuinely
+  // blank Fungus/Thatch would hide the tile entirely on reload instead of
+  // keeping it open for correction (Codex P1 2026-09-24).
   const metrics = [...LAWN_ASSESSMENT_METRICS, ...[
     { key: "fungus_control", label: "Fungus control" },
     { key: "thatch_level", label: "Thatch condition" },
-  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.assessment?.[metric.key]) == null)];
+  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]) == null)];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -10241,15 +10271,17 @@ function LawnAssessmentCompletionBlock({
           <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
             {metrics.map((metric) => {
               const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
-              // Whether the AI itself knew this metric — fixed at analysis
-              // time (result.adjustedScores/displayScores), never from
-              // scoreSource, so a fill-in input stays open (still editable,
-              // still shows what was typed) once the tech starts typing into
-              // a metric the AI left blank, instead of collapsing to
-              // read-only the moment it first has a value.
-              const aiValue = lawnScores.lawnScoreValue(
-                (result?.adjustedScores ?? result?.displayScores)?.[metric.key],
-              );
+              // Whether the AI itself knew this metric — from result.aiScores
+              // (the run's immutable snapshot, or the assessment's raw
+              // columns for a legacy no-run row; see resolveAiScores), never
+              // from scoreSource or the mutable assessment row a reload
+              // reads back. A prior save's tech fill of a genuinely blank
+              // metric must not look "AI-known" just because it now has a
+              // value (Codex P1 2026-09-24) — and a fill-in input stays open
+              // (still editable, still shows what was typed) once the tech
+              // starts typing, instead of collapsing to read-only the moment
+              // it first has a value.
+              const aiValue = lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]);
               return (
                 <div
                   key={metric.key}

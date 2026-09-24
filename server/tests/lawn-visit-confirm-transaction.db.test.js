@@ -139,6 +139,18 @@ const SCORING = {
     expect(third.assessment).toMatchObject({ fungus_control: 60, stress_damage: 73 });
   });
 
+  test('an auto-derived (never explicit) stress_damage re-derives after a component correction, instead of freezing stale (Codex P1 2026-09-24)', async () => {
+    const { assessment } = await seed();
+    // Save 1: fill fungus=80 only — Stress auto-derives to 80 (the only
+    // known component), never an explicit entry.
+    const first = await save(assessment.id, { adjustedScores: { fungus_control: 80 } });
+    expect(first.assessment).toMatchObject({ fungus_control: 80, stress_damage: 80 });
+    // Save 2: correct fungus down to 40 and fill thatch=90 — Stress MUST
+    // re-derive to 40, not stay frozen at the earlier auto-derived 80.
+    const second = await save(assessment.id, { adjustedScores: { fungus_control: 40, thatch_level: 90 } });
+    expect(second.assessment).toMatchObject({ fungus_control: 40, thatch_level: 90, stress_damage: 40 });
+  });
+
   test('retries return the frozen assessment and review without repeating protocol writes', async () => {
     const { assessment } = await seed(COMPLETE);
     const persistChecks = jest.fn(async (row, trx) => {
