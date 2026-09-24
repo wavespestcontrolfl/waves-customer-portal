@@ -19,10 +19,10 @@
  *     A candidate has already RESERVED its vision slot, so suppressing the
  *     legacy draft always leaves the text with a triage run.
  *   runPhotoTriage — takes that candidacy (the classifier is never re-run),
- *     runs the assessment, parks the draft. An assessment that fails with no
- *     row clears the stamp again (released, logged at error); once the paid
- *     analysis produced a row the stamp stays, and a draft failure is logged
- *     at error naming the kept assessment.
+ *     runs the assessment, parks the draft. A failure before the paid
+ *     analysis starts clears the stamp again (released, logged at error);
+ *     once the analysis started the stamp stays spent, and a later failure
+ *     is logged at error (naming the kept assessment when one exists).
  * Every guard runs before any paid call:
  *   - gate off → fully inert (no DB read, no model call);
  *   - no image media, tech lines, and the AI assistant line are skipped;
@@ -326,9 +326,11 @@ async function runPhotoTriage(candidacy) {
   if (!candidacy?.candidate) return { status: 'skipped', reason: candidacy?.reason || 'not_candidate' };
   const { intent, messageId, images } = candidacy;
 
-  // No assessment row → the run left nothing behind: clear the reservation
-  // so the message is not marked triaged and the failure is off today's
-  // budget.
+  // A failure BEFORE the paid analysis started (photo fetch / validation)
+  // clears the reservation: the message is not marked triaged and the
+  // failure is off today's budget. Once the analysis started the stamp
+  // stays spent whatever happens next — releasing it would let repeated
+  // failures exceed PHOTO_TRIAGE_DAILY_CAP.
   let created;
   try {
     created = await createAdminAssessment({
@@ -336,10 +338,13 @@ async function runPhotoTriage(candidacy) {
       source: ASSESSMENT_SOURCE,
       message_photos: images.map((item) => ({ message_id: messageId, key: item.key })),
     });
-    if (created.error) throw new Error(`assessment refused (${created.status || 'error'})`);
   } catch (err) {
-    logger.error(`[photo-triage] assessment failed for message ${messageId}; vision slot released: ${err.message}`);
-    await releaseVisionSlot(messageId);
+    created = { error: err.message, analysisStarted: err.analysisStarted === true };
+  }
+  if (created.error) {
+    const spent = created.analysisStarted === true;
+    logger.error(`[photo-triage] assessment failed for message ${messageId}; vision slot ${spent ? 'kept (analysis started)' : 'released'}: ${created.error}`);
+    if (!spent) await releaseVisionSlot(messageId);
     return { status: 'skipped', reason: 'assessment_failed' };
   }
 

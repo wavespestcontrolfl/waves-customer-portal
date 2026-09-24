@@ -20,6 +20,7 @@ function resetState() {
     pendingWhere: [],
     raws: [],
     draftInsertFails: false,
+    messageLookupFails: false,
   });
 }
 resetState();
@@ -47,7 +48,10 @@ function mockQuery(table) {
     if (table === 'technicians') return mockState.tech;
     if (table === 'notification_prefs') return mockState.prefs;
     if (table === 'message_drafts as md') return mockState.pendingDraft.shift() || null;
-    if (table === 'messages') return mockState.message;
+    if (table === 'messages') {
+      if (mockState.messageLookupFails) throw new Error('messages lookup timeout');
+      return mockState.message;
+    }
     if (table === 'conversations') return mockState.conversationCustomerId ? { customer_id: mockState.conversationCustomerId } : null;
     if (table === 'customers') return mockState.customerRow;
     return null;
@@ -382,22 +386,40 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
     expect(mockState.inserts.message_drafts).toBeUndefined();
   });
 
-  test('a pipeline refusal (vision unavailable) releases the vision slot, logs an error, parks nothing', async () => {
+  test('a failure BEFORE paid analysis (S3 fetch refused) releases the vision slot', async () => {
+    mockGetPhotoBuffer.mockRejectedValueOnce(new Error('S3 timeout'));
+    await expect(triageInboundPhotoText(input())).resolves.toEqual({ status: 'skipped', reason: 'assessment_failed' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(
+      new RegExp(`^\\[photo-triage\\] assessment failed for message ${MESSAGE_ID}; vision slot released: `),
+    ));
+    expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }, { photo_triage_at: null }]);
+    expect(mockLadder).not.toHaveBeenCalled();
+  });
+
+  test('a thrown failure BEFORE paid analysis releases the vision slot', async () => {
+    const candidacy = await triage.assessPhotoTriageCandidacy(input());
+    mockState.messageLookupFails = true;
+    await expect(triage.runPhotoTriage(candidacy)).resolves.toEqual({ status: 'skipped', reason: 'assessment_failed' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('vision slot released: messages lookup timeout'));
+    expect(mockState.updates.at(-1).patch).toEqual({ photo_triage_at: null });
+  });
+
+  test('a refusal AFTER paid analysis started (vision unavailable) keeps the slot spent', async () => {
     mockIdentifyPest.mockResolvedValue({ ok: false, reason: 'vision_unavailable' });
     await expect(triageInboundPhotoText(input({ body: 'bugs everywhere' })))
       .resolves.toEqual({ status: 'skipped', reason: 'assessment_failed' });
-    expect(logger.error).toHaveBeenCalledWith(
-      `[photo-triage] assessment failed for message ${MESSAGE_ID}; vision slot released: assessment refused (503)`,
-    );
-    expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }, { photo_triage_at: null }]);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(
+      `[photo-triage] assessment failed for message ${MESSAGE_ID}; vision slot kept (analysis started):`,
+    ));
+    expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }]);
     expect(mockState.inserts.message_drafts).toBeUndefined();
   });
 
-  test('a thrown assessment releases the vision slot', async () => {
-    mockLadder.mockRejectedValue(new Error('S3 timeout'));
+  test('a throw AFTER paid analysis started (ladder error) keeps the slot spent', async () => {
+    mockLadder.mockRejectedValue(new Error('unusable model response'));
     await expect(triageInboundPhotoText(input())).resolves.toEqual({ status: 'skipped', reason: 'assessment_failed' });
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('vision slot released: S3 timeout'));
-    expect(mockState.updates.at(-1).patch).toEqual({ photo_triage_at: null });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('vision slot kept (analysis started): unusable model response'));
+    expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }]);
   });
 
   test('a failed draft insert AFTER paid analysis keeps the slot spent and names the kept assessment', async () => {

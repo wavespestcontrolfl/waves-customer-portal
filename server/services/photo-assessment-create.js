@@ -394,10 +394,27 @@ async function createAdminAssessment({ type, source, ...body }) {
 
   const { contactSnapshot, addressSnapshot, prospectNote } = buildSnapshots(body, customerContact);
 
+  // Everything above is free (validation, S3 fetch, lookups); from here on
+  // the paid vision analysis has started. Callers that budget vision runs
+  // (the photo-text triage) read analysisStarted on a refusal or a thrown
+  // error to tell a free failure from a spent one.
+  try {
+    return await analyzeAndStore({
+      type, source, config, photos, prospectNote, leadId, customerId, contactSnapshot, addressSnapshot,
+    });
+  } catch (err) {
+    err.analysisStarted = true;
+    throw err;
+  }
+}
+
+async function analyzeAndStore({
+  type, source, config, photos, prospectNote, leadId, customerId, contactSnapshot, addressSnapshot,
+}) {
   const analysis = type === 'lawn'
     ? await runLawnAnalysis(photos, prospectNote, source)
     : await runPestAnalysis(photos, prospectNote);
-  if (analysis.error) return { error: analysis.error, status: 503 };
+  if (analysis.error) return { error: analysis.error, status: 503, analysisStarted: true };
 
   const [row] = await db(config.table).insert({
     mode: 'prospect',
