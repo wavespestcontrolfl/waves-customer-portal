@@ -290,6 +290,9 @@ function validateVisitPhotos(photos) {
     }
     zones.push(normalizePhotoZone(photo.zone));
   }
+  // The slider pairs against one Front photo, so the API enforces what the
+  // drawer's picker does.
+  if (zones.filter((zone) => zone === 'front').length > 1) return { error: 'Only one photo can be the Front photo', zones: [] };
   return { error: null, zones };
 }
 

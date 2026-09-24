@@ -68,6 +68,7 @@ describe('photo contract', () => {
     expect(visit.validateVisitPhotos([photo('')]).error).toMatch(/base64/i);
     expect(visit.validateVisitPhotos([photo('a', 'garage')]).error).toMatch(/front, close_up, trouble/);
     expect(visit.validateVisitPhotos([photo('a', 'Front'), photo('b'), photo('c', 'trouble')])).toEqual({ error: null, zones: ['front', null, 'trouble'] });
+    expect(visit.validateVisitPhotos([photo('a', 'front'), photo('b', 'front')]).error).toMatch(/only one photo can be the front/i);
     // Retired zone labels (pre 2026-09-24 rename) are no longer accepted for a
     // NEW photo upload — no live caller sends them.
     expect(visit.validateVisitPhotos([photo('a', 'back')]).error).toMatch(/front, close_up, trouble/);

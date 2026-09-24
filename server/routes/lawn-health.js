@@ -223,13 +223,15 @@ router.get('/:customerId', async (req, res, next) => {
     // Build before/after data
     let beforeAfter = null;
     if (assessments.length >= 2) {
-      const initialPhotos = await db('lawn_assessment_photos')
-        .where({ assessment_id: initial.id, customer_visible: true })
+      const pairCandidates = (assessmentId) => db('lawn_assessment_photos')
+        .where({ assessment_id: assessmentId, customer_visible: true })
         .orderByRaw('is_best_photo DESC, quality_score DESC, photo_order ASC');
+      // Every photo, not the 5-photo gallery slice: the Front may rank lower.
+      const [initialPhotos, latestCandidates] = await Promise.all([pairCandidates(initial.id), pairCandidates(latest.id)]);
 
       // Same pairing rule as the service report: Front pairs Front; close-up
       // and trouble photos never stand in as progress.
-      const { before: initialBest, after: latestBest } = pairBeforeAfterPhotos(initialPhotos, latestPhotos);
+      const { before: initialBest, after: latestBest } = pairBeforeAfterPhotos(initialPhotos, latestCandidates);
 
       const calcOverall = (a) => lawnOverall(a);
 

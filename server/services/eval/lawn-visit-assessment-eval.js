@@ -426,7 +426,15 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
       if (testCase.incompletePhotos) { skipped.push({ assessmentId: testCase.assessmentId, reason: 'incomplete stored photo set' }); continue; }
       let photos;
       try {
-        photos = await Promise.all(testCase.photos.map(async (photo) => ({ ...(await deps.loadPhoto(photo.s3Key)), zone: photo.zone })));
+        // Retired zones (back/side, pre 2026-09-24) and any Front after the
+        // first replay as unlabeled, so historical cases still validate
+        // instead of being skipped.
+        let frontSeen = false;
+        photos = await Promise.all(testCase.photos.map(async (photo) => {
+          let zone = normalizePhotoZone(photo.zone);
+          if (zone === 'front') { if (frontSeen) zone = null; frontSeen = true; }
+          return { ...(await deps.loadPhoto(photo.s3Key)), zone };
+        }));
       } catch (err) {
         skipped.push({ assessmentId: testCase.assessmentId, reason: `photo read failed: ${err.message}` });
         log(`skip ${testCase.assessmentId}: ${err.message}`);
