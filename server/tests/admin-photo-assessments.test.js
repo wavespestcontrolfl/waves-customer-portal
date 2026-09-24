@@ -1413,6 +1413,33 @@ describe('tree & shrub — third assessment type', () => {
     });
   });
 
+  test.each([
+    ['above the 0-100 range', 250],
+    ['below the 0-100 range', -5],
+    ['a numeric string', '80'],
+    ['NaN', NaN],
+    ['a boolean (num(false) would read 0)', false],
+  ])('a numeric score that is %s counts as unscored → 503, no row', async (_label, bad) => {
+    mockAnalyzeTreeShrub.mockResolvedValue(visionResult({ ...HEDGE_CLOSEUP, foliage_fullness: bad }));
+    await withServer(async (base) => {
+      const res = await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] });
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toMatch(/Could not analyze every photo/);
+      expect(inserts.tree_shrub_identifications).toBeUndefined();
+      expect(storeFunnelPhotos).not.toHaveBeenCalled();
+    });
+  });
+
+  test('range-boundary scores (0 and 100) are accepted and stored as-is', async () => {
+    mockAnalyzeTreeShrub.mockResolvedValue(visionResult({ ...HEDGE_CLOSEUP, foliage_fullness: 100, leaf_color_vigor: 0 }));
+    await withServer(async (base) => {
+      expect((await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] })).status).toBe(201);
+      const contract = JSON.parse(inserts.tree_shrub_identifications[0].report_contract);
+      expect(contract.scores.foliageFullness).toBe(100);
+      expect(contract.scores.leafColorVigor).toBe(0);
+    });
+  });
+
   test('one provider omitting a field the other read is still complete (the engine uses the available read)', async () => {
     const { pest_signals: _omitted, ...geminiRead } = HEDGE_CLOSEUP;
     mockAnalyzeTreeShrub.mockResolvedValue({ claude: HEDGE_CLOSEUP, gemini: geminiRead, composite: HEDGE_CLOSEUP, divergenceFlags: [] });

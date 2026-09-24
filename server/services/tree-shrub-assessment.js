@@ -55,6 +55,13 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
+// The vision prompt's score schema — the canonical field lists and numeric
+// range the prompt states, every merge below iterates, and
+// isCompleteVisionResult validates against.
+const NUMERIC_SCORE_FIELDS = ['foliage_fullness', 'leaf_color_vigor'];
+const NUMERIC_SCORE_RANGE = { min: 0, max: 100 };
+const SEVERITY_SCORE_FIELDS = ['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical'];
+
 const VISION_PROMPT = `You are a tree & shrub (landscape ornamental) plant-health assessment tool for a professional lawn & pest company in Southwest Florida. Analyze the provided photo of shrubs, hedges, palms, trees, or landscape beds and return ONLY a JSON object with the scores below. Base your analysis strictly on what is visible.
 
 You flag SIGNALS, never a confirmed diagnosis. Report pest-pressure and disease-like SIGNALS — never assert an "infestation" or a confirmed "disease".
@@ -81,8 +88,8 @@ Write "observations" as ONE concise, plain-English paragraph for a homeowner —
 
 Return this exact JSON structure and nothing else — no markdown, no backticks, no preamble:
 {
-  "foliage_fullness": <number 0-100>,
-  "leaf_color_vigor": <number 0-100>,
+  "foliage_fullness": <number ${NUMERIC_SCORE_RANGE.min}-${NUMERIC_SCORE_RANGE.max}>,
+  "leaf_color_vigor": <number ${NUMERIC_SCORE_RANGE.min}-${NUMERIC_SCORE_RANGE.max}>,
   "pest_signals": <"none" | "minor" | "moderate" | "severe">,
   "disease_signals": <"none" | "minor" | "moderate" | "severe">,
   "water_heat_stress": <"none" | "minor" | "moderate" | "severe">,
@@ -96,10 +103,6 @@ const SEVERITY_DISPLAY = { none: 95, minor: 75, moderate: 50, severe: 20 };
 const SEVERITY_INDEX = { none: 0, minor: 1, moderate: 2, severe: 3 };
 const SEVERITY_REVERSE = ['none', 'minor', 'moderate', 'severe'];
 
-// The vision prompt's score schema — the canonical field lists every merge
-// below iterates and isCompleteVisionResult validates against.
-const NUMERIC_SCORE_FIELDS = ['foliage_fullness', 'leaf_color_vigor'];
-const SEVERITY_SCORE_FIELDS = ['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical'];
 
 function num(v) {
   if (v === null || v === undefined || v === '') return null;
@@ -247,12 +250,20 @@ function averageScores(claude, gemini) {
   return { composite, divergenceFlags };
 }
 
-// A provider's reading of one field is valid when it is a finite number (0-100
-// fields) or an exact severity word — never the "none"/95 default the scorers
-// fall back to for an omitted or unrecognized value.
+// A numeric score reading is a real JSON number inside the prompt's stated
+// range. Stricter than num(), which coerces booleans (false → 0) and numeric
+// strings, and than clampScore, which would turn 250 or -5 into a
+// legitimate-looking 100 or 0. NaN/Infinity fail the range comparison.
+function isInRangeScore(value) {
+  return typeof value === 'number' && value >= NUMERIC_SCORE_RANGE.min && value <= NUMERIC_SCORE_RANGE.max;
+}
+
+// A provider's reading of one field is valid when it is an in-range number
+// (numeric fields) or an exact severity word — never the "none"/95 default
+// the scorers fall back to for an omitted or unrecognized value.
 function isValidScoreReading(field, value) {
   return NUMERIC_SCORE_FIELDS.includes(field)
-    ? num(value) != null
+    ? isInRangeScore(value)
     : SEVERITY_INDEX[String(value).trim().toLowerCase()] != null;
 }
 
@@ -751,6 +762,7 @@ module.exports = {
   VISION_PROMPT,
   SEVERITY_DISPLAY,
   NUMERIC_SCORE_FIELDS,
+  NUMERIC_SCORE_RANGE,
   SEVERITY_SCORE_FIELDS,
   isCompleteVisionResult,
   toCategoryScores,

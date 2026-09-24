@@ -19,6 +19,7 @@ const {
   buildTreeShrubAssessmentReportData,
   isCompleteVisionResult,
   NUMERIC_SCORE_FIELDS,
+  NUMERIC_SCORE_RANGE,
   SEVERITY_SCORE_FIELDS,
   VISION_PROMPT,
 } = require('../services/tree-shrub-assessment');
@@ -373,6 +374,39 @@ describe('isCompleteVisionResult — every schema field read, never a silent def
     expect(r.composite.pest_signals).toBe('moderate'); // the dilution being guarded
     expect(isCompleteVisionResult(r)).toBe(false);
     expect(isCompleteVisionResult(result({ ...full, foliage_fullness: '' }, full))).toBe(false);
+  });
+
+  it('the numeric range is the one the prompt states for every numeric field', () => {
+    for (const f of NUMERIC_SCORE_FIELDS) {
+      expect(VISION_PROMPT).toContain(`"${f}": <number ${NUMERIC_SCORE_RANGE.min}-${NUMERIC_SCORE_RANGE.max}>`);
+    }
+    expect(NUMERIC_SCORE_RANGE).toEqual({ min: 0, max: 100 });
+  });
+
+  it.each([
+    ['above range', 101],
+    ['far above range', 250],
+    ['below range', -1],
+    ['far below range', -5],
+    ['numeric string', '80'],
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['boolean false (num() would read 0)', false],
+    ['boolean true', true],
+  ])('rejects a numeric score that is %s', (_label, bad) => {
+    expect(isCompleteVisionResult(result({ ...full, leaf_color_vigor: bad }, full))).toBe(false);
+    expect(isCompleteVisionResult(result(full, { ...full, foliage_fullness: bad }))).toBe(false);
+  });
+
+  it('accepts the range boundaries and fractional in-range scores', () => {
+    for (const ok of [0, 100, 55.5]) {
+      expect(isCompleteVisionResult(result({ ...full, foliage_fullness: ok, leaf_color_vigor: ok }, null))).toBe(true);
+    }
+  });
+
+  it('rejects a non-string severity (boolean / number)', () => {
+    expect(isCompleteVisionResult(result({ ...full, pest_signals: false }, null))).toBe(false);
+    expect(isCompleteVisionResult(result({ ...full, pest_signals: 0 }, null))).toBe(false);
   });
 
   it('accepts one provider omitting a field the other read validly', () => {
