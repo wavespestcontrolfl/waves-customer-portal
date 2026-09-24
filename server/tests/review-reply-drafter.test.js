@@ -646,7 +646,7 @@ describe('verifyReplyText — public-surface safety net', () => {
     // Dana, Thanks for the ..." used to collide because the greeting ate 2
     // of the 5 compared words, leaving only "thanks for the" as the signal.
     const genuinelyDifferentPrior = good('Hi Dana,\n\nThanks for the wonderful review, we hope your week goes great and the ants stay far away for good this time around here.');
-    const genuinelyDifferentDraft = good('Hi Dana,\n\nThanks for the kind mention, Marcus is glad the ants in your kitchen are finally gone.');
+    const genuinelyDifferentDraft = good('Hi Dana,\n\nThanks for the nice note, Marcus is glad the ants in your kitchen are finally gone.');
     expect(verify(genuinelyDifferentDraft, grounding(), { recentReplies: [genuinelyDifferentPrior] })).toBeNull();
   });
   test('the greeting is mandatory: "Hi <reviewer first name>," or "Hello there,"', () => {
@@ -690,6 +690,32 @@ describe('2026-09-24 fix: sentence-initial gerunds pass, servicesPerformed words
   test('an on-time claim the reviewer did not make is still rejected', () => {
     const g = tylerGrounding('Adam fixed our cockroach problem quickly.');
     expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nGlad Adam was on time with the treatment.'), g)).toBe('unlisted_experience_claim');
+  });
+});
+
+describe('2026-09-24 P1 fix: worked/handled negation restored, compliment adjectives restored, outcome fallback widened', () => {
+  test('a negated outcome the review stated is still caught: "did not work" blocks "Glad the treatment worked."', () => {
+    const g = grounding({ text: 'The treatment did not work.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the treatment worked. Thanks for choosing us.'), g)).toBe('negated_review_claim');
+  });
+  test('a compliment the reviewer did not make is still rejected: "helpful and thorough" with no such praise in the review', () => {
+    const g = grounding({ text: 'Marcus came out and finished the job.', mentionedTechNames: ['Marcus'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad to hear it. Our team was helpful and thorough.'), g)).toBe('unlisted_experience_claim');
+  });
+  test('"got much much better" licenses an outcome word the review did not literally use ("handled")', () => {
+    const g = grounding({ text: 'Our ant situation got much much better.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the ants are handled.'), g)).toBeNull();
+  });
+  test('"under control" licenses an outcome word the review did not literally use ("handled")', () => {
+    const g = grounding({ text: 'Our spider issues are under control.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the spiders are handled.'), g)).toBeNull();
+  });
+  test('sentence-initial gerunds from the earlier fix still pass (regression guard)', () => {
+    const g = grounding({ firstName: 'Tyler', text: 'We had a cockroach problem in our kitchen from the previous owners. Adam was able to quickly find their nest and explain how he was going to take care of them.', mentionedTechNames: ['Adam'], topics: ['technician', 'pest'], forbiddenNames: ['Bob'] });
+    g.allow.names = ['Tyler', 'Adam'];
+    g.allow.serviceWords = ['cockroach', 'treatment'];
+    expect(Drafter.verifyReplyText(good("Hi Tyler,\n\nGood to hear Adam found the source and explained the plan. Working around your schedule is part of the job, and we'll pass your note along."), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad the treatment handled it and the visit went well.'), g)).toBeNull();
   });
 });
 
