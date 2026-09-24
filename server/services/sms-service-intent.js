@@ -26,10 +26,11 @@
  *   }>
  *
  * Only meaningful for a message that already carries an image. Same shape
- * of decision: regex fast path first (a "what is this" question, a subject
- * word WITH a problem cue, or an EMPTY caption — a bare photo is a
- * show-and-ask), Claude FAST for everything else, including subject-only
- * captions such as a receipt or a scheduling note that mentions the lawn.
+ * of decision: regex fast path first (an identification question such as
+ * "what is this", a subject word WITH a symptom/sighting word, or an EMPTY
+ * caption — a bare photo is a show-and-ask; any paperwork or scheduling
+ * word vetoes the fast path), Claude FAST for everything else, including
+ * subject-only captions and ordinary questions.
  */
 
 const logger = require('./logger');
@@ -161,11 +162,15 @@ const PHOTO_TREE_SHRUB_WORDS = [
 ];
 // Subject words that say "diagnose this" without leaning lawn or pest.
 const PHOTO_NEUTRAL_WORDS = ['fungus', 'fungi', 'mold', 'mushroom', 'mushrooms'];
-const PHOTO_QUESTION_RE = /\b(what(?:['’]?s| is| are)? (?:this|that|these|those|it)\b|what(?:['’]?s| is) wrong|what(?:['’]?s| is) going on|can you tell|could you tell|any idea|identify|what kind of|what type of|\b(?:is|are) (?:this|that|these|those|it)\b)/i;
+// Identification questions only — "can you tell me when…" / "is this the
+// invoice…" are ordinary questions and go to the model.
+const PHOTO_QUESTION_RE = /\b(what(?:['’]?s| is| are)? (?:this|that|these|those|it)\b|what(?:['’]?s| is) wrong|what(?:['’]?s| is) going on|any idea what|identify|what kind of|what type of)/i;
 // A subject word alone is not a diagnosis request ("Attached is my receipt
-// for lawn service"): the fast path also needs a problem cue — a question
-// mark or a symptom/sighting word. Subject-only captions go to the model.
-const PHOTO_PROBLEM_RE = /\?|\b(wrong|problem|issue|help|dead|dying|brown|yellow(?:ing)?|patch(?:es|y)?|spots?|holes?|damaged?|eat(?:ing|en)?|chew(?:ed|ing)?|sick|diseased?|infest(?:ed|ation)?|everywhere|all over|taking over|spreading|popping up|found|seeing|spotted|crawling|nests?|mounds?|droppings|swarm(?:ing)?|bites?|stung)\b/i;
+// for lawn service"): the fast path also needs a symptom/sighting word.
+const PHOTO_PROBLEM_RE = /\b(wrong|problem|dead|dying|brown|yellow(?:ing)?|patch(?:es|y)?|spots?|holes?|damaged?|eat(?:ing|en)?|chew(?:ed|ing)?|sick|diseased?|infest(?:ed|ation)?|everywhere|all over|taking over|spreading|popping up|found|seeing|spotted|crawling|nests?|mounds?|droppings|swarm(?:ing)?|bites?|stung)\b/i;
+// Paperwork / scheduling words veto the fast path: such a caption goes to
+// the model even when it also reads like a question about a photo.
+const PHOTO_NON_DIAGNOSTIC_RE = /\b(invoice|receipt|bill(?:ed|ing)?|charge[ds]?|pay(?:ment)?|paid|price|quote|estimate|schedul\w*|reschedul\w*|appointment|visit|come (?:out|by)|tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|gate|code|address|screenshot)\b/i;
 
 // TODO(tree_shrub): tree/shrub photos run the pest identifier until the
 // tree_shrub assessment type lands in its own PR; flip this constant then.
@@ -194,7 +199,7 @@ function regexClassifyPhoto(body) {
     ...PHOTO_LAWN_WORDS, ...PHOTO_PEST_WORDS, ...PHOTO_TREE_SHRUB_WORDS, ...PHOTO_NEUTRAL_WORDS,
   ]);
   const diagnostic = PHOTO_QUESTION_RE.test(text) || (subject && PHOTO_PROBLEM_RE.test(text));
-  if (!diagnostic) return null;
+  if (!diagnostic || PHOTO_NON_DIAGNOSTIC_RE.test(text)) return null;
   return { intent: 'photo_diagnosis', assessmentType: photoAssessmentType(lower), method: 'regex' };
 }
 

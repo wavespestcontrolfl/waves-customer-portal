@@ -22,12 +22,12 @@ describe('regex fast path', () => {
     ['what is this in my lawn?', 'lawn'],
     ['Brown patches all over the grass', 'lawn'],
     ['weeds taking over the yard', 'lawn'],
-    ['fungus on the turf?', 'lawn'],
+    ['fungus spreading on the turf', 'lawn'],
     ['found these bugs in the kitchen', 'pest'],
-    ['are these termites', 'pest'],
+    ['what are these, termites?', 'pest'],
     ['ants everywhere', 'pest'],
     // A tie between lawn and pest words runs the pest identifier.
-    ['bugs in my lawn?', 'pest'],
+    ['bugs in my lawn eating it', 'pest'],
     ['seeing bugs all over the lawn', 'pest'],
     ['whats this', 'pest'],
     ["what's wrong with it", 'pest'],
@@ -54,7 +54,14 @@ describe('regex fast path', () => {
     'Here is the gate code for the yard',
     'Lawn guy can come Tuesday',
     'Photo of the pest control invoice',
-  ])('a subject word without a problem cue is not fast-pathed: %p goes to the model', async (body) => {
+    // Ordinary questions and paperwork/scheduling captions, even with a
+    // subject word or an identification phrase, are the model's call.
+    'Can you tell me when lawn service is scheduled?',
+    'Is this the lawn invoice you need?',
+    'What is this charge on my invoice?',
+    'Brown spots in the lawn, can you come out tomorrow',
+    'are these termites',
+  ])('not fast-pathed: %p goes to the model', async (body) => {
     mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'none' } });
     await expect(classifyPhotoDiagnosisIntent(body)).resolves.toEqual({ intent: null, assessmentType: null, method: 'ai' });
     expect(mockDispatch).toHaveBeenCalledTimes(1);
