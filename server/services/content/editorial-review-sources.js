@@ -32,6 +32,7 @@ function normalizeRequestedSources(sourceUrls) {
     try {
       const parsed = new URL(String(raw));
       if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('unsupported protocol');
+      parsed.hash = '';
       normalized = parsed.toString();
     } catch {
       errors.push(`Invalid source URL: ${String(raw).slice(0, 200)}`);
@@ -49,6 +50,7 @@ async function fetchSources(sourceUrls) {
   const records = [];
   const errors = [...normalized.errors];
   for (const url of normalized.urls) {
+    if (!remaining) { errors.push(`Total source evidence exceeds ${LIMITS.totalSourceChars} characters.`); break; }
     const page = await fetchPage(url, { timeoutMs: 10000, maxRedirects: 3 });
     if (!page || page.blocked || !page.html || page.status < 200 || page.status >= 300) {
       errors.push(`Source could not be safely retrieved: ${url}`);
@@ -62,7 +64,6 @@ async function fetchSources(sourceUrls) {
     const text = htmlText(page.html);
     if (!text) { errors.push(`Source contained no reviewable text: ${url}`); continue; }
     const excerptLength = Math.max(0, Math.min(LIMITS.sourceChars, remaining));
-    if (!excerptLength) { errors.push(`Total source evidence exceeds ${LIMITS.totalSourceChars} characters.`); break; }
     const finalUrl = page.finalUrl || url;
     const excerpt = text.slice(0, excerptLength);
     records.push({
