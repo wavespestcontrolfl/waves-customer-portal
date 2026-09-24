@@ -227,7 +227,11 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // Promise cards can gain another commitment while this action waits for
     // the call lock. The operator must review that newer payload before a
     // Resolve/Dismiss settles every commitment now attached to the card.
+    // …and house-number conflict cards, whose Resolve / Dismiss settle the
+    // held appointment from the payload (codex r22 P1): the single-card
+    // actions carry expected_updated_at like the verdict route.
     if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
+      || item.reason_code === 'on_file_house_number_conflict'
       || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
