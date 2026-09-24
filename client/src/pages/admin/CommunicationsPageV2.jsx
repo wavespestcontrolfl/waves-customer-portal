@@ -818,7 +818,13 @@ const ANALYZE_PHOTOS_MAX = 5;
 // per message, since one MMS can carry several photos.
 function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, onCreated }) {
   const [type, setType] = useState("lawn");
-  const [selectedIndices, setSelectedIndices] = useState(() => new Set());
+  // Selections are keyed by the photo's own S3 key (globally unique), NOT
+  // array index — the inbox polls every ~30s and can replace `photos` with a
+  // new array (a fresh inbound MMS shifts everything newest-first) while
+  // this dialog sits open. Index-based selection would then silently submit
+  // whatever photo happened to land on the same position instead of what the
+  // operator actually checked.
+  const [selectedKeys, setSelectedKeys] = useState(() => new Set());
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -827,7 +833,7 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
     if (!open) return;
     setType("lawn");
     // Most recent photo (index 0 — the list is already newest-first) starts checked.
-    setSelectedIndices(new Set(photos.length ? [0] : []));
+    setSelectedKeys(new Set(photos.length ? [photos[0].key] : []));
     setNote("");
     setError("");
     setBusy(false);
@@ -836,13 +842,13 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
     // deliberately left out of the deps for that reason.
   }, [open]);
 
-  const toggle = (index) => {
-    setSelectedIndices((prev) => {
+  const toggle = (key) => {
+    setSelectedKeys((prev) => {
       const next = new Set(prev);
-      if (next.has(index)) {
-        next.delete(index);
+      if (next.has(key)) {
+        next.delete(key);
       } else if (next.size < ANALYZE_PHOTOS_MAX) {
-        next.add(index);
+        next.add(key);
       }
       return next;
     });
@@ -850,7 +856,7 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
 
   const submit = async () => {
     if (busy) return;
-    const selected = photos.filter((_, i) => selectedIndices.has(i));
+    const selected = photos.filter((p) => selectedKeys.has(p.key));
     if (!selected.length) {
       setError("Select at least one photo.");
       return;
@@ -895,18 +901,18 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
         ) : null}
         <div>
           <label className="block text-[13px] text-zinc-500 mb-1">
-            Photos ({selectedIndices.size}/{ANALYZE_PHOTOS_MAX} selected)
+            Photos ({selectedKeys.size}/{ANALYZE_PHOTOS_MAX} selected)
           </label>
           {photos.length === 0 ? (
             <div className="text-[14px] text-zinc-500">No inbound photos in this thread.</div>
           ) : (
             <div className="grid grid-cols-3 gap-2">
-              {photos.map((p, i) => {
-                const checked = selectedIndices.has(i);
-                const capped = !checked && selectedIndices.size >= ANALYZE_PHOTOS_MAX;
+              {photos.map((p) => {
+                const checked = selectedKeys.has(p.key);
+                const capped = !checked && selectedKeys.size >= ANALYZE_PHOTOS_MAX;
                 return (
                   <label
-                    key={`${p.messageId}-${p.key}`}
+                    key={p.key}
                     className={cn(
                       "relative block rounded-sm border-hairline overflow-hidden cursor-pointer",
                       checked ? "border-zinc-900" : "border-zinc-300",
@@ -923,7 +929,7 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
                       <Checkbox
                         checked={checked}
                         disabled={capped || busy}
-                        onChange={() => toggle(i)}
+                        onChange={() => toggle(p.key)}
                       />
                     </div>
                   </label>
@@ -940,7 +946,7 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
       </DialogBody>
       <DialogFooter>
         <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
-        <Button onClick={submit} disabled={busy || !selectedIndices.size}>{busy ? "Analyzing…" : "Run analysis"}</Button>
+        <Button onClick={submit} disabled={busy || !selectedKeys.size}>{busy ? "Analyzing…" : "Run analysis"}</Button>
       </DialogFooter>
     </Dialog>
   );
@@ -1055,20 +1061,24 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [activeThread, setActiveThread] = useState(null);
   // Flat, newest-first list of every inbound MMS photo in the OPEN thread —
   // one entry per media item (a single MMS can carry several) — for the
-  // Analyze photos dialog. thread.messages is already newest-first (see the
-  // `threads` useMemo below), so no re-sort is needed here.
+  // Analyze photos dialog. Sourced from activeThread.messages in the general
+  // inbox view; a customer-profile mount (Customer360) never populates
+  // activeThread, so it reads customerMessages instead — same message shape,
+  // just not guaranteed pre-sorted, hence the explicit sort here.
   const analyzablePhotos = useMemo(() => {
-    if (!activeThread) return [];
+    const source = customer ? customerMessages : activeThread?.messages;
+    if (!Array.isArray(source)) return [];
     const items = [];
-    for (const m of activeThread.messages) {
+    for (const m of source) {
       if (m.direction !== "inbound" || !Array.isArray(m.media)) continue;
       for (const media of m.media) {
         if (!media?.url || !media?.key) continue;
-        items.push({ messageId: m.id, key: media.key, url: media.url });
+        items.push({ messageId: m.id, key: media.key, url: media.url, createdAt: m.createdAt });
       }
     }
+    items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     return items;
-  }, [activeThread]);
+  }, [customer, customerMessages, activeThread]);
   const [smsSearch, setSmsSearch] = useState("");
   // Blocked senders (blocked_numbers). /log does not exclude them, so a
   // just-blocked thread would otherwise be rebuilt on reload and keep
@@ -3318,8 +3328,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           open={active && showAnalyzeDialog}
           onClose={() => setShowAnalyzeDialog(false)}
           photos={analyzablePhotos}
-          customerId={activeThread?.customerId || null}
-          customerName={activeThread?.customerName || null}
+          customerId={customer?.id || activeThread?.customerId || null}
+          customerName={customer ? getCustomerOptionName(customer) : activeThread?.customerName || null}
           onCreated={(type, id) => navigate(`/admin/lawn-assessments?open=${type}:${id}`)}
         />
         {sendResult && (
