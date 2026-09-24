@@ -1403,7 +1403,10 @@ router.post('/:id/send-sms', async (req, res, next) => {
     let linkedOwnerId = null;
     if (lead.customer_id) {
       const linked = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('id', 'phone');
-      if (linked && String(linked.phone || '').replace(/\D/g, '').slice(-10) === destLast10) linkedOwnerId = linked.id;
+      // Full phone identity (Codex #4709 r20 P1): an international customer
+      // number sharing the lead's last ten digits is a different phone.
+      const { phoneIdentityKey } = require('../utils/phone');
+      if (linked && phoneIdentityKey(linked.phone) && phoneIdentityKey(linked.phone) === phoneIdentityKey(lead.phone)) linkedOwnerId = linked.id;
     }
     const bearerCheck = await bearerLinkSendCheck(
       message,

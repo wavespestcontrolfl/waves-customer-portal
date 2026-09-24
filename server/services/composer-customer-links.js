@@ -540,7 +540,25 @@ function stillEncoded(text) {
 // batched short_codes lookup per 500 candidates, never truncated. A hit
 // means the bearer rides somewhere other than a link the send check
 // validates, so the send is refused.
-const CONSULTATION_CODE_SHAPE = /^[a-hjkmnp-z2-9]{10,11}$/i;
+// short-url.js generateCode's ambiguity-free alphabet; consultation codes
+// are 10–11 chars of it with no prefix.
+// A run on a host we own is scanned without that host (our own hostname
+// cannot carry a bearer, and its labels are code-shaped); any other run is
+// scanned whole.
+function ownedHostStripped(run, hosts) {
+  try {
+    const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`);
+    if ([].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, '')) && !url.username && !url.password) {
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+  } catch { /* not a URL — scanned whole */ }
+  return run;
+}
+const CODE_ALPHABET_RUN_RE = /[a-hjkmnp-z2-9]{10,}/gi;
+// A signed consultation token's shape: <leadId>.<exp>[.<channel>].<43-char
+// base64url signature>; the lead id is tried whole and as its trailing
+// uuid, so a prefix glued onto it cannot hide the token.
+const SIGNED_TOKEN_RE = /([A-Za-z0-9-]+)(\.\d{9,11}(?:\.sms-[0-9a-f]{16})?\.[A-Za-z0-9_-]{43})/g;
 async function strayConsultationCredentialPresent(runs, hosts) {
   const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
   const codes = new Set();
@@ -549,16 +567,21 @@ async function strayConsultationCredentialPresent(runs, hosts) {
     const canonical = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, ANY_SCHEME)
       || canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME);
     if (canonical) continue;
-    const decoded = fullyDecoded(run);
+    const decoded = fullyDecoded(ownedHostStripped(run, hosts));
     // Escapes that survive the cap could still hide a bearer — refuse.
     if (stillEncoded(decoded)) return true;
-    for (const piece of decoded.split(/[^A-Za-z0-9._-]+/).filter(Boolean)) {
-      if (piece.includes('.') && verifyLeadConsultationToken(piece, 0)) return true;
-      // Only the consultation code SHAPE (short-url.js generateCode: 10–11
-      // chars of its ambiguity-free alphabet, no prefix for this kind) — so
-      // ordinary words never cost a lookup, and no real code is skipped.
-      for (const part of piece.split('.')) {
-        if (CONSULTATION_CODE_SHAPE.test(part)) codes.add(part.toLowerCase());
+    // Signed tokens by their own fixed shape ANYWHERE in the text (Codex
+    // #4709 r20 P1): uuid.exp[.channel].43-char signature, so affixes glued
+    // on either side never hide one.
+    for (const m of decoded.matchAll(SIGNED_TOKEN_RE)) {
+      if (verifyLeadConsultationToken(m[0], 0) || verifyLeadConsultationToken(`${m[1].slice(-36)}${m[2]}`, 0)) return true;
+    }
+    // Short codes: every 10- and 11-char window of every run of the code
+    // alphabet (r20 P1 — "<code>_go", "x<code>" and the like).
+    for (const m of decoded.matchAll(CODE_ALPHABET_RUN_RE)) {
+      const text = m[0].toLowerCase();
+      for (const len of [10, 11]) {
+        for (let i = 0; i + len <= text.length; i += 1) codes.add(text.slice(i, i + len));
       }
     }
   }
@@ -1677,6 +1700,11 @@ async function bearerLinkSendCheck(body, toLast10, {
     if (refusal) return refusal;
   }
   if (ctx.bearers && !ctx.usDestination) return refuseSend(NON_US_REFUSAL);
+  // One text, one consultation lead (Codex #4709 r20 P2): links for two
+  // leads would leave neither auditable and compete in one message.
+  if ((ctx.consultationLeadIds?.length || 0) > 1) {
+    return refuseSend('This text has consultation links for more than one lead — keep just one and send again.');
+  }
   const out = {
     ok: true,
     ...(cards.length ? { cards } : {}),

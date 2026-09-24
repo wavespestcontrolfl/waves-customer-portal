@@ -62,7 +62,7 @@ import React, {
   useRef,
 } from "react";
 import useLinkLibrary from "../../hooks/useLinkLibrary";
-import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause, combineAppendedDraft, consultationLineOf } from "../../lib/composerLinks";
+import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause, combineAppendedDraft, consultationLineOf, removeConsultationClause } from "../../lib/composerLinks";
 import {
   Bell,
   Bot,
@@ -2595,6 +2595,23 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       }
     }
   }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId, sending]);
+
+  // The remembered consultation clause follows the same recipient rule even
+  // after an edit made its tracked URL unrecognizable (Codex #4709 r20 P2):
+  // a recipient/customer change strips it and forgets it.
+  useEffect(() => {
+    const remembered = consultationLineRef.current;
+    if (!remembered || sending) return;
+    const currentRecipient = toNumber.trim();
+    const currentRecipientKey = currentRecipient ? smsThreadKey(currentRecipient) : "";
+    if (currentRecipientKey === remembered.recipientKey && (selectedCustomerId || null) === remembered.customerId) return;
+    consultationLineRef.current = null;
+    const stripped = removeConsultationClause(msgBody, remembered.line);
+    if (stripped !== msgBody) {
+      setMsgBody(stripped);
+      setSendResult({ ok: true, text: "Customer link removed — the recipient changed." });
+    }
+  }, [msgBody, toNumber, selectedCustomerId, sending]);
 
   // The sheet's full list: the customer group first, then the library rows.
   // Every dynamic row dispatches to a requireAdmin endpoint (reschedule-link,

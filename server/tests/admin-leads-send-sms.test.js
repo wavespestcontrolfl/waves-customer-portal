@@ -249,6 +249,23 @@ describe('a consultation short code in the message is re-checked at THIS send bo
     }
   });
 
+  // Codex #4709 r20 P1: an international linked number sharing the lead's
+  // last ten digits is NOT adopted as the owner of an ordinary text.
+  test('a linked customer on an international number with the same last ten digits is not adopted as the owner', async () => {
+    const original = lead.customer_id;
+    lead.customer_id = 'c1';
+    linkedCustomerRow = { id: 'c1', phone: '+449415550103' };
+    try {
+      const response = await send({ message: 'Running a little late today.', to: '+19415550103' });
+      expect(response.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1' }));
+    } finally {
+      linkedCustomerRow = null;
+      lead.customer_id = original;
+    }
+  });
+
   test('the number belongs to more than one live customer → 409, never sent', async () => {
     ownerRows = [{ id: 'c1' }, { id: 'c2' }];
     try {

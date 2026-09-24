@@ -93,6 +93,31 @@ export function consultationLineOf(addition) {
 // read the remembered line and then overwrote it would see the NEW line on
 // its second run and fail to strip the old link. Callers persist the draft
 // and the new remembered line outside the updater.
+// Which draft lines are the prior consultation clause: the remembered line
+// verbatim, else any line still holding its URL, else consultation wording
+// on the same short-link host.
+function priorClauseMatcher(baseLines, remembered, host, rememberedPresent = remembered && baseLines.includes(remembered)) {
+  const rememberedUrl = remembered ? firstUrlIn(remembered) : null;
+  const rememberedUrlPresent = Boolean(rememberedUrl) && baseLines.some((line) => line.includes(rememberedUrl));
+  return (line) => {
+    if (rememberedPresent) return line === remembered;
+    if (rememberedUrlPresent) return line.includes(rememberedUrl);
+    return Boolean(host) && urlHost(firstUrlIn(line)) === host && CONSULTATION_WORDING_RE.test(line);
+  };
+}
+
+// The remembered consultation clause removed from a draft — even when the
+// operator edited its link (Codex #4709 r20 P2: a recipient change must not
+// carry the previous lead's invite to the new recipient).
+export function removeConsultationClause(existing, remembered) {
+  const base = String(existing || "");
+  if (!remembered) return base;
+  const baseLines = base.split("\n");
+  const isPrior = priorClauseMatcher(baseLines, remembered, urlHost(firstUrlIn(remembered)));
+  if (!baseLines.some(isPrior)) return base;
+  return baseLines.filter((line) => !isPrior(line)).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function combineAppendedDraft(existing, addition, remembered) {
   if (!addition) return existing;
   const base = String(existing || "");
@@ -110,14 +135,8 @@ export function combineAppendedDraft(existing, addition, remembered) {
     // remembered at all.
     // ...and when the remembered URL itself was edited away (Codex #4709 r14
     // P2), the wording + host heuristic takes over.
-    const rememberedUrl = remembered ? firstUrlIn(remembered) : null;
     const baseLines = base.split("\n");
-    const rememberedUrlPresent = Boolean(rememberedUrl) && baseLines.some((line) => line.includes(rememberedUrl));
-    const isPriorClauseLine = (line) => {
-      if (rememberedPresent) return line === remembered;
-      if (rememberedUrlPresent) return line.includes(rememberedUrl);
-      return urlHost(firstUrlIn(line)) === newHost && CONSULTATION_WORDING_RE.test(line);
-    };
+    const isPriorClauseLine = priorClauseMatcher(baseLines, remembered, newHost, rememberedPresent);
     // The replaced invite's own footer (the STOP line) goes with it, so the
     // new one is never doubled.
     const replacing = baseLines.some(isPriorClauseLine);

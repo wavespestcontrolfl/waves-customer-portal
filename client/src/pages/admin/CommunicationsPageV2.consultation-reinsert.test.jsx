@@ -88,3 +88,4 @@ it("replaces an edited consultation link on re-insert instead of appending a sec
   expect(finalBody.match(/Reply STOP to opt out\./g) || []).toHaveLength(1);
   expect(finalBody.match(/token2/g) || []).toHaveLength(1);
 });
+

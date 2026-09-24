@@ -132,7 +132,9 @@ jest.mock('../services/review-request', () => ({
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, fn) => fn()) }));
 
 let mockBuilders = {};
-const mockDb = jest.fn((table) => mockBuilders[table]);
+// short_codes defaults to an empty lookup: the stray-credential scan
+// (Codex #4709 r20) checks code-shaped windows in every message.
+const mockDb = jest.fn((table) => mockBuilders[table] || (table === 'short_codes' ? chainBuilder({ rows: [] }) : undefined));
 jest.mock('../models/db', () => mockDb);
 
 const { openBalanceSummary } = require('../services/open-balance');
@@ -2823,6 +2825,41 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     const refusal = await checkConsultationLinkSend(BODY, '9415550100');
     expect(refusal.ok).toBe(false);
     expect(refusal.error).toMatch(/not valid/);
+  });
+
+  // Codex #4709 r20 P1: attacker affixes around a code or token never hide it.
+  test('a consultation code or signed token with glued-on affixes in a foreign wrapper → refused and fenced', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    const withCode = (rows) => ({
+      short_codes: chainBuilder({ rows }),
+      leads: chainBuilder({ firstRow: LEAD_ROW }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    });
+    for (const wrapper of ['https://tracker.example/?next=kq7mtr2xab_go', 'https://tracker.example/?next=zzkq7mtr2xab']) {
+      mockBuilders = withCode([{ code: 'kq7mtr2xab', kind: 'consultation' }]);
+      expect(await immediateOnlyLinkSendCheck(wrapper)).toEqual({ present: true, label: 'Consultation link' });
+      // The bare code itself was among the looked-up windows.
+      const looked = mockBuilders.short_codes.whereIn.mock.calls.flatMap(([, values]) => values || []);
+      expect(looked).toContain('kq7mtr2xab');
+    }
+    // Real lead ids are UUIDs — the prefix is peeled off the uuid tail.
+    const tokenWrapped = `https://tracker.example/?t=x${mintLeadConsultationToken('5b8d1c9e-4a2f-4b6e-9c3d-8e7f6a5b4c3d')}_go`;
+    wireConsultation({ codeRows: [] });
+    expect((await checkConsultationLinkSend(`Pick a time: ${tokenWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+  });
+
+  // Codex #4709 r20 P2: links for two different leads in one text → refused.
+  test('a body with consultation links for two leads is refused', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const host = 'wavespest.co';
+    wireConsultation({ codeRows: [] });
+    mockBuilders.leads = chainBuilder({ firstRow: { ...LEAD_ROW } });
+    mockBuilders.customers = chainBuilder({ rows: [] });
+    const body = `Pick a time: ${host}/inspection/${mintLeadConsultationToken('lead-1')} or ${host}/inspection/${mintLeadConsultationToken('lead-2')} Reply STOP to opt out.`;
+    const refusal = await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null });
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/more than one lead/);
   });
 
   // Codex #4709 r14 P1: on a shared phone, a lead linked to customer A never
