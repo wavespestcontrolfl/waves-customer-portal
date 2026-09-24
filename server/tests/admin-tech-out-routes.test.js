@@ -104,18 +104,6 @@ describe('admin-tech-out routes', () => {
     }));
   });
 
-  test('POST 200s (not 201) when markTechOut resumed an incomplete prior redistribution', async () => {
-    techOut.techOutEnabled.mockReturnValue(true);
-    const absence = { id: 'abs-1', technician_id: TECH_ID, reason: 'sick' };
-    const summary = { total: 2, moved: [], parked: [], failed: [], status: 'complete' };
-    techOut.markTechOut.mockResolvedValue({ absence, summary, resumed: true });
-
-    const res = await run('post', '/:technicianId', { body: { reason: 'sick' } });
-
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ absence, summary });
-  });
-
   test('POST maps a VALIDATION error (bad reason) to 400', async () => {
     techOut.techOutEnabled.mockReturnValue(true);
     techOut.markTechOut.mockRejectedValue(Object.assign(
@@ -160,15 +148,4 @@ describe('admin-tech-out routes', () => {
     expect(notFound.body).toEqual({ error: 'not_out' });
   });
 
-  test('DELETE maps REDISTRIBUTION_RUNNING to 409 redistribution_running (tech-out P1)', async () => {
-    techOut.techOutEnabled.mockReturnValue(true);
-    techOut.clearTechOut.mockRejectedValue(Object.assign(
-      new Error('still running'), { status: 409, code: 'REDISTRIBUTION_RUNNING' },
-    ));
-
-    const res = await run('delete', '/:technicianId');
-
-    expect(res.statusCode).toBe(409);
-    expect(res.body).toEqual({ error: 'redistribution_running' });
-  });
 });

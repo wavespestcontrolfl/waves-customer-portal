@@ -2,7 +2,7 @@
  * Admin API for "tech out today" (GATE_TECH_OUT_REDISTRIBUTE).
  *
  *   GET    /api/admin/tech-out/:technicianId?date=   current absence for that tech+date
- *   POST   /api/admin/tech-out/:technicianId         mark out + redistribute the day
+ *   POST   /api/admin/tech-out/:technicianId         mark out + park the day's stops as ranked alerts
  *   DELETE /api/admin/tech-out/:technicianId?date=   clear the absence (does not move stops back)
  *
  * Gate checked at call time on every handler — off answers 404 { enabled: false },
@@ -39,15 +39,14 @@ router.post('/:technicianId', async (req, res, next) => {
   if (!techOutEnabled()) return res.status(404).json({ enabled: false });
   try {
     const { date, reason, note } = req.body || {};
-    const { absence, summary, resumed } = await markTechOut({
+    const { absence, summary } = await markTechOut({
       technicianId: req.params.technicianId,
       date: date || etDateString(),
       reason,
       note,
       actorId: req.technicianId,
     });
-    // 200 for a resume of an existing (incomplete) absence, 201 for a fresh mark.
-    res.status(resumed ? 200 : 201).json({ absence, summary });
+    res.status(201).json({ absence, summary });
   } catch (err) {
     if (err.code === 'ALREADY_OUT') return res.status(409).json({ error: 'already_out' });
     if (err.code === 'PAST_DATE') return res.status(409).json({ error: 'past_date' });
@@ -69,7 +68,6 @@ router.delete('/:technicianId', async (req, res, next) => {
     res.json({ absence, resolvedAlerts });
   } catch (err) {
     if (err.code === 'NOT_OUT') return res.status(404).json({ error: 'not_out' });
-    if (err.code === 'REDISTRIBUTION_RUNNING') return res.status(409).json({ error: 'redistribution_running' });
     next(err);
   }
 });

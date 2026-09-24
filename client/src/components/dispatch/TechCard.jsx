@@ -115,7 +115,11 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
       // <DispatchMap>'s onJobDragEnd hit-tests document.elementFromPoint
       // and walks up to find an ancestor with this attribute. The id
       // value is the technicians.id passed to PUT /jobs/:id/assign.
-      data-tech-card-id={tech.id}
+      // Omitted entirely for an out tech — DispatchMap's hit-test only
+      // matches this attribute, so an out card is never a drop target
+      // (no ancestor to `.closest()` onto), while the card stays
+      // selectable via onClick above.
+      {...(tech.out_today ? {} : { 'data-tech-card-id': tech.id })}
       className={cn(
         'block w-full text-left mb-2 u-focus-ring rounded-md',
         'transition-shadow',
@@ -124,15 +128,16 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
         // CSS-only hover highlight via the parent's data attribute would
         // be cleaner, but a prop keeps the contract explicit + makes
         // the affordance testable. The dashed border signals "you can
-        // drop here" without competing with the selected ring.
-        isDropTarget && 'ring-2 ring-dashed ring-waves-blue ring-offset-1'
+        // drop here" without competing with the selected ring. Never
+        // shown for an out tech — it can't be a drop target (see above).
+        !tech.out_today && isDropTarget && 'ring-2 ring-dashed ring-waves-blue ring-offset-1'
       )}
     >
       <Card
         className={cn(
           'cursor-pointer hover:bg-zinc-50',
           selected && 'border-zinc-900',
-          isDropTarget && 'bg-zinc-50'
+          !tech.out_today && isDropTarget && 'bg-zinc-50'
         )}
       >
         <div className="flex items-center gap-3 px-3 pt-3">

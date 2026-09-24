@@ -211,9 +211,16 @@ export default function TechOutSection({ techId, techName, onChanged }) {
 
   if (absence) {
     const redistribution = absence.redistribution || {};
+    // Park-only foundation (Codex r4 on PR #4678): a mark-out parks EVERY
+    // open stop as a "Needs a decision" alert and moves nothing
+    // automatically — moved/failed ship empty until the follow-up PR adds
+    // automatic reassignment. The stat cells for moved/failed are noise
+    // when they're always zero, so they (and the moved list) only render
+    // once that follow-up actually starts populating them.
     const moved = redistribution.moved || [];
     const parked = redistribution.parked || [];
     const failed = redistribution.failed || [];
+    const showStatCells = moved.length > 0 || failed.length > 0;
     return (
       <Card className="p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
@@ -221,22 +228,30 @@ export default function TechOutSection({ techId, techName, onChanged }) {
             Out today · {REASON_LABELS[absence.reason] || absence.reason}
           </Badge>
         </div>
-        <div className="grid grid-cols-3 gap-2 mb-3">
-          <div className="text-center">
-            <div className="text-18 tabular-nums text-ink-primary">{moved.length}</div>
-            <div className="text-11 text-ink-tertiary">moved</div>
-          </div>
-          <div className="text-center">
-            <div className="text-18 tabular-nums text-ink-primary">{parked.length}</div>
-            <div className="text-11 text-ink-tertiary">need a decision</div>
-          </div>
-          <div className="text-center">
-            <div className={cn('text-18 tabular-nums', failed.length > 0 ? 'text-alert-fg' : 'text-ink-primary')}>
-              {failed.length}
-            </div>
-            <div className="text-11 text-ink-tertiary">failed</div>
-          </div>
+        <div className="text-14 text-ink-primary mb-3">
+          {parked.length} stop{parked.length === 1 ? '' : 's'} parked in the Action Queue — decide who to move
         </div>
+        {showStatCells && (
+          <div
+            className={cn(
+              'grid gap-2 mb-3',
+              moved.length > 0 && failed.length > 0 ? 'grid-cols-2' : 'grid-cols-1'
+            )}
+          >
+            {moved.length > 0 && (
+              <div className="text-center">
+                <div className="text-18 tabular-nums text-ink-primary">{moved.length}</div>
+                <div className="text-11 text-ink-tertiary">moved</div>
+              </div>
+            )}
+            {failed.length > 0 && (
+              <div className="text-center">
+                <div className="text-18 tabular-nums text-alert-fg">{failed.length}</div>
+                <div className="text-11 text-ink-tertiary">failed</div>
+              </div>
+            )}
+          </div>
+        )}
         {moved.length > 0 && (
           <div className="mb-3">
             {moved.map((m) => (
@@ -298,7 +313,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
       ) : (
         <div>
           <div className="text-14 text-ink-primary mb-3">
-            Reassign {techName}&apos;s stops to the rest of the crew and park what can&apos;t move?
+            Mark {techName} out and park today&apos;s stops for a decision?
           </div>
           {submitError && <div className="text-14 text-alert-fg mb-3">{submitError}</div>}
           <div className="flex items-center gap-2">

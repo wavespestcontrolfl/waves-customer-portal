@@ -154,6 +154,18 @@ export default function TechDrawer({ techId, onClose, onAbsenceChanged }) {
     if (techId) fetchTech(techId);
   }, [techId, fetchTech]);
 
+  // TechOutSection's onChanged fires after a mark-out/clear mutation.
+  // onAbsenceChanged (the parent's callback) only refreshes the board
+  // roster — this drawer's own `tech` state (today's counts, route,
+  // out_today badge) would otherwise stay stale until the next open.
+  // Re-running fetchTech(techId) rides the same seq-ref race guard as
+  // every other fetch, so a stale response from a since-superseded
+  // selection still can't clobber newer state.
+  const handleAbsenceChanged = useCallback(() => {
+    onAbsenceChanged?.();
+    if (techId) fetchTech(techId);
+  }, [onAbsenceChanged, fetchTech, techId]);
+
   const open = !!techId;
 
   return (
@@ -237,7 +249,7 @@ export default function TechDrawer({ techId, onClose, onAbsenceChanged }) {
               </Card>
             </div>
 
-            <TechOutSection techId={techId} techName={tech.name} onChanged={onAbsenceChanged} />
+            <TechOutSection techId={techId} techName={tech.name} onChanged={handleAbsenceChanged} />
 
             <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary mb-2">
               Today's route

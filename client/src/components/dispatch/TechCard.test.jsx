@@ -59,3 +59,66 @@ describe('out_today (Codex P2 on PR #4678)', () => {
     expect(screen.queryByText('Out')).toBeNull();
   });
 });
+
+describe('out_today disables the drop target (Codex r4 P2 on PR #4678)', () => {
+  it('renders no [data-tech-card-id] and no drop-target highlight for an out tech, even while isDropTarget is true', () => {
+    const tech = {
+      id: 'tech-1',
+      name: 'Tech One',
+      status: 'idle',
+      current_job_id: null,
+      out_today: true,
+      today_completed: 0,
+      today_total: 0,
+      location_updated_at: null,
+    };
+    const { container } = render(
+      <TechCard tech={tech} jobs={new Map()} selected={false} onSelect={vi.fn()} isDropTarget={true} />
+    );
+
+    // DispatchMap's onJobDragEnd hit-test only matches this attribute
+    // (document.elementFromPoint(...).closest('[data-tech-card-id]')) — an
+    // out card must not be findable as a drop target at all.
+    expect(container.querySelector('[data-tech-card-id]')).toBeNull();
+    // The dashed drop-zone ring and its Card highlight must not render
+    // either, even though isDropTarget is true.
+    expect(container.querySelector('.ring-dashed')).toBeNull();
+  });
+
+  it('stays selectable (onClick still fires) for an out tech with no drop-target attribute', () => {
+    const onSelect = vi.fn();
+    const tech = {
+      id: 'tech-1',
+      name: 'Tech One',
+      status: 'idle',
+      current_job_id: null,
+      out_today: true,
+      today_completed: 0,
+      today_total: 0,
+      location_updated_at: null,
+    };
+    render(<TechCard tech={tech} jobs={new Map()} selected={false} onSelect={onSelect} isDropTarget={false} />);
+
+    screen.getByRole('button').click();
+    expect(onSelect).toHaveBeenCalledWith('tech-1');
+  });
+
+  it('renders [data-tech-card-id] and the drop-target highlight for a normal tech when isDropTarget is true', () => {
+    const tech = {
+      id: 'tech-2',
+      name: 'Tech Two',
+      status: 'idle',
+      current_job_id: null,
+      out_today: false,
+      today_completed: 0,
+      today_total: 0,
+      location_updated_at: null,
+    };
+    const { container } = render(
+      <TechCard tech={tech} jobs={new Map()} selected={false} onSelect={vi.fn()} isDropTarget={true} />
+    );
+
+    expect(container.querySelector('[data-tech-card-id="tech-2"]')).not.toBeNull();
+    expect(container.querySelector('.ring-dashed')).not.toBeNull();
+  });
+});

@@ -30,7 +30,7 @@ describe('not out today', () => {
     await screen.findByText('Availability');
 
     fireEvent.click(screen.getByRole('button', { name: 'Mark out today' }));
-    expect(await screen.findByText(/Reassign Tech One's stops to the rest of the crew/)).toBeInTheDocument();
+    expect(await screen.findByText(/Mark Tech One out and park today's stops for a decision/)).toBeInTheDocument();
 
     let releasePost;
     fetch.mockImplementationOnce(() => new Promise((resolve) => { releasePost = resolve; }));
@@ -93,14 +93,37 @@ describe('out today', () => {
     fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence }) });
   });
 
-  it('shows the redistribution summary counts and moved stops', async () => {
+  it('shows the parked-count primary line, the moved stat cell (non-empty), and moved stops', async () => {
     render(<TechOutSection techId="tech-1" techName="Tech One" />);
     expect(await screen.findByText('Out today · Emergency')).toBeInTheDocument();
-    expect(screen.getByText('2')).toBeInTheDocument(); // moved
-    expect(screen.getByText('1')).toBeInTheDocument(); // parked
+    expect(screen.getByText('1 stop parked in the Action Queue — decide who to move')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument(); // moved stat cell
+    expect(screen.getByText('moved')).toBeInTheDocument();
+    expect(screen.queryByText('failed')).toBeNull(); // failed stat cell absent — empty array
     expect(screen.getByText('→ Tech Two')).toBeInTheDocument();
     expect(screen.getByText('→ Tech Three')).toBeInTheDocument();
-    expect(screen.getByText(/Parked stops are in the Action Queue/)).toBeInTheDocument();
+    expect(screen.getByText(/Parked stops are in the Action Queue as/)).toBeInTheDocument();
+  });
+
+  it('park-only foundation: renders just the parked-count line and hint text, with no stat cells or moved list, when moved and failed are empty', async () => {
+    fetch.mockReset();
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        enabled: true,
+        absence: {
+          id: 'abs-2', technician_id: 'tech-1', absence_date: '2026-09-23', reason: 'sick', note: null,
+          redistribution: { total: 2, moved: [], parked: [{ job_id: 'j1', alert_id: 'alert-1', bump_order: 1 }, { job_id: 'j2', alert_id: 'alert-2', bump_order: 2 }], failed: [] },
+        },
+      }),
+    });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    expect(await screen.findByText('Out today · Sick')).toBeInTheDocument();
+    expect(screen.getByText('2 stops parked in the Action Queue — decide who to move')).toBeInTheDocument();
+    expect(screen.queryByText('moved')).toBeNull();
+    expect(screen.queryByText('failed')).toBeNull();
+    expect(screen.queryByText(/→ /)).toBeNull();
+    expect(screen.getByText(/Parked stops are in the Action Queue as/)).toBeInTheDocument();
   });
 
   it('clears the absence via DELETE on "Tech is back" and refetches', async () => {
