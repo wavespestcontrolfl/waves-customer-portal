@@ -22,9 +22,11 @@ const ORIGINAL_ENV = { ...process.env };
 // Every assertion is about the DEFAULT watermark policy or an explicit toggle:
 // never inherit an operator's ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS from
 // the environment, and hand it back afterwards.
-beforeEach(() => { jest.clearAllMocks(); delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; });
+// The legacy chain assertions count fetch calls per leg: run them logo-free
+// (the uniform-logo describe block opts back in explicitly).
+beforeEach(() => { jest.clearAllMocks(); delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; process.env.BLOG_IMAGE_UNIFORM_LOGO = 'false'; });
 afterEach(() => {
-  for (const k of ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'BLOG_IMAGE_PROVIDER', 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS']) {
+  for (const k of ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'BLOG_IMAGE_PROVIDER', 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS', 'BLOG_IMAGE_UNIFORM_LOGO']) {
     if (ORIGINAL_ENV[k] === undefined) delete process.env[k];
     else process.env[k] = ORIGINAL_ENV[k];
   }
@@ -188,10 +190,12 @@ describe('buildPrompt', () => {
     expect(buildPrompt({ keyword: 'k', topic: 'lead', mode: 'blog-body', shot: 'action' })).toMatch(uniform);
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(uniform);
     expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/never a blue shirt, never khaki or tan pants/);
-    // A captioned infographic about an inspection can still draw a technician
-    // icon, so it carries the line too (Codex P2 on #4696).
-    const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' } });
-    expect(info).toMatch(uniform);
+    // An infographic draws no people at all — neither a uniform line nor the
+    // logo reference (Codex r3 P2 on #4761, superseding the #4696 P2).
+    const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' }, uniformLogo: true });
+    expect(info).not.toMatch(uniform);
+    expect(info).toMatch(/Do not draw people, technician figures, faces, hands or mascots/);
+    expect(info).not.toMatch(/reference image/);
     expect(info).toMatch(/plain light background/);
   });
 
@@ -468,5 +472,164 @@ describe('gemini image-native models', () => {
     expect(prompt).toContain('#FFD700');
     expect(prompt).toContain('no teal');
     expect(prompt).not.toContain('#0ea5e9');
+  });
+});
+
+// ── Waves uniform logo reference (owner directive 2026-09-24) ─────────
+
+describe('uniform logo reference (owner directive 2026-09-24: logo on cap + right chest)', () => {
+  const LOGO = Buffer.from('89504e470d0a1a0a', 'hex');
+  test('the bundled asset exists and the kill switch reads only an explicit false', () => {
+    expect(require('fs').existsSync(_internals.UNIFORM_LOGO_PATH)).toBe(true);
+    delete process.env.BLOG_IMAGE_UNIFORM_LOGO;
+    expect(_internals.uniformLogoEnabled()).toBe(true);
+    process.env.BLOG_IMAGE_UNIFORM_LOGO = 'false';
+    expect(_internals.uniformLogoEnabled()).toBe(false);
+    expect(_internals.loadUniformLogo()).toBeNull();
+  });
+
+  test('buildPrompt with the reference puts the logo on the cap and RIGHT chest, nowhere else; without it the logo stays off', () => {
+    const withLogo = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }), uniformLogo: true });
+    expect(withLogo).toMatch(/Waves logo — reproduced faithfully from the attached reference image — as a small badge on the wearer's RIGHT chest/);
+    expect(withLogo).toMatch(/cap that is either light blue or red with that same Waves logo centered on the front/);
+    expect(withLogo).toMatch(/ONLY on the technician's cap and right chest/);
+    expect(withLogo).toMatch(/other than the Waves logo on the technician's cap and right chest\./);
+    expect(withLogo).toMatch(/brand marks other than the Waves logo on the technician's cap and chest — equipment and vehicles are generic and unbranded/);
+    expect(withLogo).not.toMatch(/carry no readable logo/);
+    const without = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }) });
+    expect(without).toMatch(/shirt and cap carry no readable logo or lettering/);
+    expect(without).toMatch(/No text, words, letters, numbers, watermarks, or logos anywhere in the image\./);
+    expect(without).not.toMatch(/reference image/);
+  });
+
+  test('an infographic never carries the reference (it draws no people), even when asked', async () => {
+    const info = buildPrompt({ title: 'X', mode: 'blog-body', plan: { style: 'infographic', setting: 'three-step row', vantage: 'straight-on' }, captions: ['One'], uniformLogo: true });
+    expect(info).not.toMatch(/reference image/);
+    expect(info).toMatch(/Do not draw people/);
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'X', mode: 'blog-body', plan: { style: 'infographic', setting: 'three-step row', vantage: 'straight-on' }, captions: ['One'], uniformLogo: true });
+    expect(r.logoReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+  });
+
+  test('OpenAI legs post the reference to /v1/images/edits as multipart; the result says logoReference', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }), uniformLogo: true });
+    expect(r.logoReference).toBe(true);
+    expect(r.prompt).toMatch(/attached reference image/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://api.openai.com/v1/images/edits');
+    expect(opts.body).toBeInstanceOf(FormData);
+    expect(opts.headers['Content-Type']).toBeUndefined();
+    expect(opts.body.get('model')).toBe('gpt-image-2');
+    expect(opts.body.get('size')).toBe('1536x1024');
+    expect(opts.body.get('quality')).toBe('high');
+    const file = opts.body.get('image[]');
+    expect(file).toBeInstanceOf(Blob);
+    expect(file.type).toBe('image/png');
+    expect(file.size).toBe(LOGO.length);
+    expect(r.attempts[0]).toMatchObject({ provider: 'gpt-image-2', logoReference: true });
+  });
+
+  test('uniformLogo: null (or the kill switch) keeps the plain generations call and no logo line', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: null });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true });
+    expect(r.logoReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+    expect(r.prompt).not.toMatch(/reference image/);
+  });
+
+  test('the reference is OPT-IN per call: a caller that does not ask (social tile, newsletter) never gets it even with the asset loaded', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'Test', mode: 'social-square' });
+    expect(r.logoReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+    expect(r.prompt).toMatch(/carry no readable logo or lettering/);
+  });
+
+  test('a caller-supplied custom prompt never gets the reference attached', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ prompt: 'custom', mode: 'blog-hero', uniformLogo: true });
+    expect(r.logoReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+  });
+
+  test('a leg that REJECTS the request with the reference (non-retryable 4xx) is retried once logo-free before the chain moves on', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn()
+      .mockReturnValueOnce(err(400, 'unsupported reference'))
+      .mockReturnValueOnce(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/edits');
+    expect(mockFetch.mock.calls[1][0]).toBe('https://api.openai.com/v1/images/generations');
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body).model).toBe('gpt-image-2');
+    expect(r.model).toBe('gpt-image-2');
+    expect(r.logoReference).toBe(false);
+    expect(r.prompt).not.toMatch(/reference image/);
+    expect(r.attempts.map((a) => `${a.provider}:${a.logoReference}`)).toEqual(['gpt-image-2:true', 'gpt-image-2:false']);
+  });
+
+  test('an auth/model failure or an empty response with the reference is NOT retried logo-free — only a 400/413/415/422 is (Codex r1 P2 on #4761)', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    for (const first of [err(404, 'model_not_found'), err(401, 'bad key'), ok({ data: [{}] })]) {
+      const mockFetch = jest.fn().mockReturnValueOnce(first).mockReturnValueOnce(ok(OPENAI_OK_BODY));
+      const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5', fetchFn: mockFetch, uniformLogo: LOGO });
+      const r = await gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true });
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch.mock.calls.map((c) => c[0].split('/').pop())).toEqual(['edits', 'edits']);
+      expect(r.model).toBe('gpt-image-1.5');
+      expect(r.logoReference).toBe(true);
+    }
+    expect([..._internals.REFERENCE_REJECT_STATUSES].sort()).toEqual([400, 413, 415, 422]);
+  });
+
+  test('a rejected reference on one leg does not strip it from the next leg', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn()
+      .mockReturnValueOnce(err(400, 'unsupported reference'))
+      .mockReturnValueOnce(err(400, 'still no'))
+      .mockReturnValueOnce(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true });
+    expect(mockFetch.mock.calls.map((c) => c[0].split('/').pop())).toEqual(['edits', 'generations', 'edits']);
+    expect(r.model).toBe('gpt-image-1.5');
+    expect(r.logoReference).toBe(true);
+  });
+
+  test('a retryable failure (429/5xx/timeout) WITH the reference falls straight through to the next provider — never a second call on the same leg (fallback P1 on ae29283fcc)', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.GEMINI_API_KEY = 'g-test';
+    const mockFetch = jest.fn((url) => (url.includes('openai') ? err(500) : ok(GEMINI_OK_BODY)));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5,gemini-image', fetchFn: mockFetch, allowPixelWatermark: true, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true });
+    expect(r.model).toBe('gemini-image');
+    expect(r.logoReference).toBe(false);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch.mock.calls.map((c) => c[0].split('/').pop())).toEqual(['edits', 'edits', expect.stringMatching(/generateContent/)]);
+    expect(r.attempts.map((a) => `${a.provider}:${a.logoReference}`)).toEqual(['gpt-image-2:true', 'gpt-image-1.5:true', 'gemini-image:false']);
+    expect(r.prompt).not.toMatch(/reference image/);
+  });
+
+  test('the logo-free retry of a rejected leg runs inside the same deadline (a spent budget skips it)', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    let t = 0;
+    const now = () => t;
+    const mockFetch = jest.fn(() => { t += 10_000_000; return err(400, 'rejected'); });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, now, chainBudgetMs: 400_000, uniformLogo: LOGO });
+    await expect(gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true })).rejects.toThrow(/all providers failed/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });

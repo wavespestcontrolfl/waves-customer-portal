@@ -7,6 +7,10 @@ function todayET() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 }
 
+const CANONICAL_COUNTY_KEYS = new Map(
+  ['Manatee', 'Sarasota', 'Charlotte', 'Lee', 'Collier', 'DeSoto'].map((county) => [county.toLowerCase(), county]),
+);
+
 const TaxCalculator = {
 
   /**
@@ -92,9 +96,37 @@ const TaxCalculator = {
       return { rate: defaultRate, amount, taxable: true, county: 'unknown', reason: 'Default FL rate (county could not be inferred from ZIP)' };
     }
 
+    // Bound by effective_date so a staged future-dated rate (posted ahead of
+    // its start date) never applies before it takes effect, and by
+    // expiry_date so a retired rate never resurfaces (audit r1-billing-1).
+    // Deliberately NOT filtered by `active`: a backfilled correction posted
+    // after a later rate is already in force inserts its own active:true
+    // row, and a rate staged by the OLD (pre-fix) route can leave a
+    // still-genuinely-current predecessor marked active:false — in both
+    // cases `active` no longer tracks which row actually covers today. The
+    // single ordering rule below (newest effective_date whose window covers
+    // today, active or not) picks the same row calculateTax's own
+    // date-bounded selection should for every one of those shapes,
+    // instead of an `active`-gated primary query only falling back to a
+    // legacy row when NO active row exists at all — that precedence let a
+    // backfilled active row win over a later, still-effective legacy
+    // predecessor (codex round-5 P0).
+    // The one `active` shape that IS honored: a row switched off with NO
+    // expiry at all (hand-edited or seeded that way) has no window to
+    // reason about and was deliberately disabled — it must never be
+    // charged again just because it carries the newest effective_date
+    // (fallback-auditor P1 on 9bc52bc07c). Every legacy shape above
+    // carries an expiry, so this excludes nothing those rulings protect.
+    const nowET = todayET();
     const taxRate = await conn('tax_rates')
-      .where({ county, active: true })
-      .whereNull('expiry_date')
+      .where({ county })
+      .andWhere('effective_date', '<=', nowET)
+      .andWhere(function () {
+        this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
+      })
+      .andWhere(function () {
+        this.where('active', true).orWhereNotNull('expiry_date');
+      })
       .orderBy('effective_date', 'desc')
       .first();
 
@@ -113,6 +145,19 @@ const TaxCalculator = {
   /**
    * Map SWFL ZIP codes to county names.
    */
+  /**
+   * The spelling every reader matches EXACTLY: inferCountyFromZip's return
+   * values, plus DeSoto (service-area county with interior caps). A rate
+   * stored under any other casing of these names is invisible to
+   * calculateTax and getCurrentTaxRates, so the write path must key on
+   * this and never on whatever a legacy row happened to carry (codex
+   * round-4 P1). Returns null for a county no reader knows.
+   */
+  canonicalCountyKey(name) {
+    const key = String(name || '').trim().toLowerCase();
+    return CANONICAL_COUNTY_KEYS.get(key) || null;
+  },
+
   inferCountyFromZip(zip) {
     if (!zip) return null;
     const z = String(zip).substring(0, 5);

@@ -562,6 +562,55 @@ test('assign_technician: grouped stops disclose the visit-membership seam effect
   expect(mk(false).effects.some((e) => /grouped visit/.test(e.label))).toBe(false);
 });
 
+test('assign_technician: terminal exclusions are disclosed on the exact-effects card (Codex round 1 P1)', () => {
+  const withSkips = buildContract({
+    toolName: 'assign_technician',
+    params: { service_ids: ['s1', 's2'], technician_name: 'Luis' },
+    displayParams: { technician_name: 'Luis' },
+    preview: {
+      proposal: true,
+      stops: [{ id: 's1', customer: 'acct-7002', current_tech: 'Unassigned' }],
+      skipped_terminal: [{ id: 's2', status: 'completed', customer: 'acct-7003' }],
+    },
+  });
+  const withoutSkips = buildContract({
+    toolName: 'assign_technician',
+    params: { service_ids: ['s1'], technician_name: 'Luis' },
+    displayParams: { technician_name: 'Luis' },
+    preview: { proposal: true, stops: [{ id: 's1', customer: 'acct-7002', current_tech: 'Unassigned' }] },
+  });
+  const label = withSkips.effects.map((e) => e.label).find((l) => /will NOT be reassigned/.test(l));
+  expect(label).toMatch(/1 stop\(s\) are in a terminal status/);
+  // Codex round 3 P1: the card names WHICH stops stay behind (customer, id,
+  // status), never just how many.
+  expect(label).toMatch(/acct-7003 #s2 \(completed\)/);
+  expect(withoutSkips.effects.some((e) => /terminal status/.test(e.label))).toBe(false);
+});
+
+test('swap_tech_assignments: terminal exclusions are disclosed on the exact-effects card (Codex round 1 P1)', () => {
+  const withSkips = buildContract({
+    toolName: 'swap_tech_assignments',
+    params: { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis' },
+    displayParams: { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis' },
+    preview: {
+      proposal: true,
+      stops: { Adam: [], Luis: [{ id: 'b1', service_type: 'Lawn' }] },
+      skipped_terminal: [{ id: 'a1', status: 'no_show' }, { id: 'a2', status: 'skipped' }],
+    },
+  });
+  const withoutSkips = buildContract({
+    toolName: 'swap_tech_assignments',
+    params: { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis' },
+    displayParams: { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis' },
+    preview: { proposal: true, stops: { Adam: [{ id: 'a1', service_type: 'Lawn' }], Luis: [] } },
+  });
+  const label = withSkips.effects.map((e) => e.label).find((l) => /will NOT be swapped/.test(l));
+  expect(label).toMatch(/2 stop\(s\) are in a terminal status/);
+  // Codex round 3 P1: each excluded stop is listed by id and status.
+  expect(label).toMatch(/#a1 \(no_show\), #a2 \(skipped\)/);
+  expect(withoutSkips.effects.some((e) => /terminal status/.test(e.label))).toBe(false);
+});
+
 test('unit-only address edit (address_line2) carries the address fan-out disclosure (GH r14 P2)', () => {
   const c = buildContract({ toolName: 'update_customer', params: { customer_id: 'c9', updates: { address_line2: 'Unit 4B' } }, displayParams: { customer_id: 'c9', updates: { address_line2: 'Unit 4B' } } });
   expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Address change also clears saved coordinates/));

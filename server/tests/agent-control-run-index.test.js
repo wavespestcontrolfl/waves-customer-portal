@@ -150,10 +150,10 @@ describe('adapters project onto the canonical shape', () => {
     const path = require('path');
     const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
     // workflow ids: each producer's WORKFLOW constant
-    const producers = ['services/sms-suggest-mode.js', 'services/sms-auto-send.js', 'services/reschedule-intent-flagger.js', 'services/completion-comms-guard.js', 'services/contact-correction.js', 'services/estimate-conversion-agent.js'];
+    const producers = ['services/sms-suggest-mode.js', 'services/sms-auto-send.js', 'services/sms-gratitude-qualification.js', 'services/reschedule-intent-flagger.js', 'services/completion-comms-guard.js', 'services/contact-correction.js', 'services/estimate-conversion-agent.js'];
     const workflows = new Set();
     for (const f of producers) for (const m of read(f).matchAll(/const [A-Z_]*WORKFLOW = '([a-z_]+)'/g)) workflows.add(m[1]);
-    expect(workflows.size).toBeGreaterThanOrEqual(6);
+    expect(workflows.size).toBeGreaterThanOrEqual(7);
     for (const w of workflows) expect(agentDecisions.WORKFLOW_MAP).toHaveProperty(w);
     // statuses: sms-auto-send's lifecycle constants + the literals the other producers write on agent_decisions rows
     const statuses = new Set(['pending_review', 'scheduled', 'superseded', 'expired', 'ignored', 'shadow', 'reviewed', 'auto_resolved', 'auto_applied']);
@@ -187,6 +187,12 @@ describe('adapters project onto the canonical shape', () => {
     // auto-send: in flight, sent, failed
     expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'sending' })).toMatchObject({ lifecycle: 'running', laneId: 'sms_draft', area: 'sms' });
     expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'auto_sent' })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' });
+    expect(agentDecisions.fromRow({ ...base, workflow: 'sms_gratitude_qualification', status: 'initiated' }))
+      .toMatchObject({ lifecycle: 'running', laneId: 'sealed_eval', area: 'sms' });
+    expect(agentDecisions.fromRow({ ...base, workflow: 'sms_gratitude_qualification', status: 'failed' }))
+      .toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'provider', laneId: 'sealed_eval', area: 'sms' });
+    expect(agentDecisions.fromRow({ ...base, workflow: 'sms_gratitude_qualification', status: 'qualification_failed', correction_note: 'false_positive' }))
+      .toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incorrect', errorCode: 'qualification_failed', errorMessage: 'false_positive', laneId: 'sealed_eval', area: 'sms' });
     const failed = agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'auto_send_failed', correction_note: 'Auto-send did not go out: quiet hours' });
     expect(failed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'provider', errorCode: 'auto_send_failed', errorMessage: 'Auto-send did not go out: quiet hours', detail: 'Auto-send did not go out: quiet hours' });
     expect(agentDecisions.fromRow({ ...base, status: 'auto_sent', correction_note: 'n/a' })).toMatchObject({ errorCode: null, errorMessage: null, detail: null });

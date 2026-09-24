@@ -213,7 +213,7 @@ async function loadPremiumRows(record, knex = db) {
     // gauge even when the labels were edited in Settings.
     knex('pest_pressure_scores')
       .where({ service_record_id: record.id })
-      .first('displayed_score', 'label_name', 'is_overridden')
+      .first('displayed_score', 'label_name', 'is_overridden', 'config_snapshot')
       .catch(() => null),
   ]);
 
@@ -386,6 +386,14 @@ function unfilteredBody(primaryMove, finding) {
 // The persisted label only describes the number it was calculated for; a
 // pressure that differs from that row's displayed score (or no row at all)
 // falls back to the six-band default scale.
+function snapshotLabels(pressureScoreRow) {
+  let snapshot = pressureScoreRow?.config_snapshot;
+  if (typeof snapshot === 'string') {
+    try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+  }
+  return Array.isArray(snapshot?.labels) && snapshot.labels.length ? snapshot.labels : null;
+}
+
 function pressureLabelName(pressure, pressureScoreRow) {
   const stored = pressureScoreRow?.displayed_score;
   // An admin override changes displayed_score but not label_name, so an
@@ -394,7 +402,9 @@ function pressureLabelName(pressure, pressureScoreRow) {
     && stored != null && Number(stored) === Number(pressure)) {
     return pressureScoreRow.label_name;
   }
-  return resolveLabel(pressure, DEFAULT_CONFIG.labels)?.name || 'Tracking';
+  // Otherwise resolve against the label set the score was calculated with
+  // (a customized scale stays customized), then the six-band default.
+  return resolveLabel(pressure, snapshotLabels(pressureScoreRow) || DEFAULT_CONFIG.labels)?.name || 'Tracking';
 }
 
 function buildPropertyDefenseStatusContext({ record, findings = [], applications = [], zones = [], pressureTrend, pressureScoreRow = null } = {}) {

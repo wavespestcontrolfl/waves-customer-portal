@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -29,6 +30,14 @@ function jsonResponse(body = {}) {
       return this;
     },
   });
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }
 
 function RouterState() {
@@ -190,5 +199,283 @@ describe("SEOPage workspace navigation", () => {
       "page",
     );
     expect(await screen.findByText("SEO dashboard fixture")).toBeInTheDocument();
+  });
+
+  it("does not restore a skipped backlink from an older automatic refresh", async () => {
+    const staleQueue = deferred();
+    let queueReads = 0;
+    fetch.mockImplementation((url, options = {}) => {
+      const route = String(url);
+      if (route.endsWith("/admin/seo/backlinks")) return jsonResponse({});
+      if (route.includes("/admin/backlink-agent/queue?")) {
+        queueReads += 1;
+        if (queueReads === 1) {
+          return jsonResponse({
+            items: [
+              {
+                id: "queue-1",
+                url: "https://stale.example/page",
+                domain: "stale.example",
+                source: "manual",
+                status: "pending",
+              },
+            ],
+          });
+        }
+        if (queueReads === 2) return staleQueue.promise;
+        return jsonResponse({ items: [] });
+      }
+      if (route.endsWith("/admin/backlink-agent/stats")) {
+        return jsonResponse({ total: 1, pending: 1 });
+      }
+      if (route.endsWith("/admin/backlink-agent/profiles")) {
+        return jsonResponse({ profiles: [] });
+      }
+      if (route.endsWith("/admin/backlink-agent/targets")) {
+        return jsonResponse({ targets: [] });
+      }
+      if (
+        route.endsWith("/admin/backlink-agent/queue/queue-1/skip") &&
+        options.method === "POST"
+      ) {
+        return jsonResponse({});
+      }
+      return jsonResponse({});
+    });
+
+    renderPage(["/admin/seo?workspace=authority&view=backlinks"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Agent" }));
+    expect(await screen.findByText("stale.example")).toBeInTheDocument();
+
+    fireEvent(window, new Event("online"));
+    await waitFor(() => expect(queueReads).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    await waitFor(() =>
+      expect(screen.queryByText("stale.example")).not.toBeInTheDocument(),
+    );
+
+    await act(async () => {
+      staleQueue.resolve(
+      await jsonResponse({
+        items: [
+          {
+            id: "queue-1",
+            url: "https://stale.example/page",
+            domain: "stale.example",
+            source: "manual",
+            status: "pending",
+          },
+        ],
+      }),
+      );
+    });
+    expect(screen.queryByText("stale.example")).not.toBeInTheDocument();
+  });
+
+  it("keeps an owner action error through failed and recovered queue refreshes", async () => {
+    const ownerQueue = {
+      gateOn: true,
+      cards: [
+        {
+          domain: {
+            id: "domain-1",
+            domain: "owner.example",
+            domain_rating: 20,
+            organic_traffic: 100,
+            spam_score: 1,
+            score: 50,
+            competitors_linked: 0,
+          },
+          placement: {
+            id: "placement-1",
+            status: "placed",
+            location_key: "-",
+            claimed_at: null,
+            follow_up_status: null,
+          },
+          path: null,
+          rows: [
+            {
+              id: "row-1",
+              dimension: "communication",
+              action: "outreach_followup",
+              level: "owner",
+              reason: "Owner follow-up",
+              approvable: true,
+              approved: false,
+              draft: {
+                to: "editor@example.com",
+                subject: "Following up",
+                body: "Hello",
+                review: { clean: true },
+                recipient_review: { kind: "clear" },
+              },
+            },
+          ],
+          decidable: false,
+          d30_confidence: null,
+          price_tolerance_cents: 0,
+        },
+      ],
+    };
+    let ownerQueueReads = 0;
+    let readMode = "success";
+    fetch.mockImplementation((url, options = {}) => {
+      const route = String(url);
+      if (route.endsWith("/admin/backlink-agent/owner-queue")) {
+        ownerQueueReads += 1;
+        if (readMode === "fail") {
+          return Promise.reject(new Error("Owner queue read failed"));
+        }
+        return jsonResponse(ownerQueue);
+      }
+      if (
+        route.endsWith(
+          "/admin/backlink-agent/prospects/placement-1/outreach/reconcile",
+        ) && options.method === "POST"
+      ) {
+        return Promise.reject(new Error("Skip action failed"));
+      }
+      if (route.endsWith("/admin/backlink-agent/stats")) {
+        return jsonResponse({ total: 0, pending: 0 });
+      }
+      if (route.endsWith("/admin/backlink-agent/profiles")) {
+        return jsonResponse({ profiles: [] });
+      }
+      if (route.endsWith("/admin/backlink-agent/targets")) {
+        return jsonResponse({ targets: [] });
+      }
+      if (route.includes("/admin/backlink-agent/queue?")) {
+        return jsonResponse({ items: [] });
+      }
+      return jsonResponse({});
+    });
+
+    renderPage(["/admin/seo?workspace=authority&view=backlinks"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Agent" }));
+    expect(await screen.findByText("owner.example")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Skip the follow-up" }));
+    expect(await screen.findByText("Skip action failed")).toBeInTheDocument();
+
+    readMode = "fail";
+    const readsBeforeFailure = ownerQueueReads;
+    fireEvent(window, new Event("online"));
+    await waitFor(() => expect(ownerQueueReads).toBeGreaterThan(readsBeforeFailure));
+    expect(await screen.findByText("Owner queue read failed")).toBeInTheDocument();
+    expect(screen.getByText("Skip action failed")).toBeInTheDocument();
+
+    readMode = "success";
+    const readsBeforeRecovery = ownerQueueReads;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(ownerQueueReads).toBeGreaterThan(readsBeforeRecovery));
+    await waitFor(() =>
+      expect(screen.queryByText("Owner queue read failed")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("Skip action failed")).toBeInTheDocument();
+  });
+
+  it("resumes owner queue refreshes after draft values return to their server values", async () => {
+    const ownerQueue = {
+      gateOn: true,
+      cards: [
+        {
+          domain: {
+            id: "domain-1",
+            domain: "restored.example",
+            domain_rating: 20,
+            organic_traffic: 100,
+            spam_score: 1,
+            score: 50,
+            competitors_linked: 0,
+          },
+          placement: {
+            id: "placement-1",
+            status: "live",
+            live_url: "https://restored.example/original",
+            location_key: "-",
+            claimed_at: null,
+            follow_up_status: null,
+          },
+          submission_ambiguity: {
+            id: "attempt-1",
+            evidence_url: null,
+          },
+          path: null,
+          rows: [
+            {
+              id: "row-1",
+              dimension: "payment",
+              action: "purchase",
+              level: "owner",
+              reason: "Owner payment",
+              approvable: true,
+              approved: false,
+              quote_cents: 12500,
+            },
+          ],
+          decidable: false,
+          d30_confidence: null,
+          price_tolerance_cents: 0,
+        },
+      ],
+    };
+    let ownerQueueReads = 0;
+    fetch.mockImplementation((url) => {
+      const route = String(url);
+      if (route.endsWith("/admin/backlink-agent/owner-queue")) {
+        ownerQueueReads += 1;
+        return jsonResponse(ownerQueue);
+      }
+      if (route.endsWith("/admin/backlink-agent/stats")) {
+        return jsonResponse({ total: 0, pending: 0 });
+      }
+      if (route.endsWith("/admin/backlink-agent/profiles")) {
+        return jsonResponse({ profiles: [] });
+      }
+      if (route.endsWith("/admin/backlink-agent/targets")) {
+        return jsonResponse({ targets: [] });
+      }
+      if (route.includes("/admin/backlink-agent/queue?")) {
+        return jsonResponse({ items: [] });
+      }
+      return jsonResponse({});
+    });
+
+    renderPage(["/admin/seo?workspace=authority&view=backlinks"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Agent" }));
+    expect(await screen.findByText("restored.example")).toBeInTheDocument();
+
+    const placementUrl = screen.getByLabelText("Confirmed publisher URL");
+    fireEvent.change(placementUrl, {
+      target: { value: "https://restored.example/edited" },
+    });
+    placementUrl.blur();
+    const readsBeforeUrlEdit = ownerQueueReads;
+    fireEvent(window, new Event("online"));
+    await act(async () => Promise.resolve());
+    expect(ownerQueueReads).toBe(readsBeforeUrlEdit);
+
+    fireEvent.change(placementUrl, {
+      target: { value: "https://restored.example/original" },
+    });
+    placementUrl.blur();
+    fireEvent(window, new Event("online"));
+    await waitFor(() => expect(ownerQueueReads).toBeGreaterThan(readsBeforeUrlEdit));
+
+    const amount = screen.getByRole("spinbutton");
+    fireEvent.change(amount, { target: { value: "130.00" } });
+    amount.blur();
+    const readsBeforeAmountEdit = ownerQueueReads;
+    fireEvent(window, new Event("online"));
+    await act(async () => Promise.resolve());
+    expect(ownerQueueReads).toBe(readsBeforeAmountEdit);
+
+    fireEvent.change(amount, { target: { value: "125" } });
+    amount.blur();
+    fireEvent(window, new Event("online"));
+    await waitFor(() =>
+      expect(ownerQueueReads).toBeGreaterThan(readsBeforeAmountEdit),
+    );
   });
 });

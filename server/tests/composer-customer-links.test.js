@@ -24,6 +24,12 @@ jest.mock('../services/referral-engine', () => ({
   resolvePromoter: jest.fn(),
   getLiveSettings: jest.fn(async () => ({ program_active: true })),
 }));
+// buildConsultationLink's own lead-resolution logic (customerId vs a
+// caller-supplied leadId override) is what this file tests; the SMS-
+// template render + fallback contract is lead-consultation-link.test.js's.
+jest.mock('../services/lead-consultation-link', () => ({
+  buildLeadConsultationSmsLine: jest.fn(),
+}));
 jest.mock('../routes/estimate-public', () => ({
   isEstimateCustomerViewable: jest.fn(),
   findLinkedUpcomingAppointment: jest.fn(),
@@ -32,7 +38,12 @@ jest.mock('../routes/estimate-public', () => ({
 jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn(), setupLinkIneligibility: jest.fn(), KIND: 'customer' }));
 // Only the Auto Pay and receipt picker gates read true — every other gate (the
 // pricing-authority send gate the estimate builder consults) stays off.
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => ['autopayCustomerSms', 'composerReceiptLinks'].includes(g)) }));
+// leadInspectionLinkLive defaults true — checkConsultationLinkSend's own
+// describe block below controls it per test.
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn((g) => ['autopayCustomerSms', 'composerReceiptLinks'].includes(g)),
+  leadInspectionLinkLive: jest.fn(() => true),
+}));
 jest.mock('../services/appointment-card-request', () => ({
   claimCardLinkSend: jest.fn(),
   markCardLinkSendOutcome: jest.fn(),
@@ -110,6 +121,7 @@ jest.mock('../services/payer-statement-settle', () => ({
 // the mocked render mirrors that, and the comparison helper is the real
 // contract the builder must use.
 jest.mock('../routes/admin-sms-templates', () => ({
+  hasStopLine: (body) => /Reply STOP to opt out\./.test(String(body || '')),
 }));
 jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
@@ -120,7 +132,9 @@ jest.mock('../services/review-request', () => ({
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, fn) => fn()) }));
 
 let mockBuilders = {};
-const mockDb = jest.fn((table) => mockBuilders[table]);
+// short_codes defaults to an empty lookup: the stray-credential scan
+// (Codex #4709 r20) checks code-shaped windows in every message.
+const mockDb = jest.fn((table) => mockBuilders[table] || (table === 'short_codes' ? chainBuilder({ rows: [] }) : undefined));
 jest.mock('../models/db', () => mockDb);
 
 const { openBalanceSummary } = require('../services/open-balance');
@@ -141,6 +155,7 @@ const {
   buildLatestEstimateLink,
   buildReviewRequestLink,
   buildReferralLink,
+  buildConsultationLink,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
   buildAppointmentPageLink,
@@ -469,6 +484,70 @@ describe('buildReferralLink', () => {
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/not active/);
     expect(resolvePromoter).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildConsultationLink', () => {
+  // Codex #4709 r15 P2: no caller-supplied lead override — an extra
+  // argument is ignored; the customer's own newest open lead is used.
+  test('an extra lead id argument is ignored — the customer lookup decides', () => {
+    expect(buildConsultationLink.length).toBe(1);
+  });
+
+  test('resolves the customer\'s newest non-deleted OPEN lead', async () => {
+    const leads = chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris', phone: '+19415550111' } });
+    mockBuilders = { leads, customers: chainBuilder({ firstRow: { phone: '+19415550111' } }) };
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/xyz', line: 'line\n\n', standalone: true });
+    const r = await buildConsultationLink('c1');
+    expect(r.url).toBe('https://waves.link/l/xyz');
+    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-newest', 'Chris');
+    // The open-lead predicate rides on this same query (lead-statuses.js's
+    // applyOpenLeadPredicate, shared with resolveConsultationLeadOnly in
+    // admin-communications.js — pre-push Codex P1).
+    const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+    expect(leads.whereIn).toHaveBeenCalledWith('status', OPEN_LEAD_STATUSES);
+    expect(leads.whereNull).toHaveBeenCalledWith('converted_at');
+  });
+
+  // Pre-push Codex P1: the newest-lead lookup had no status/converted_at
+  // check at all — an existing customer's won/lost lead was still the
+  // "newest lead" the query would return. The predicate now excludes it at
+  // the query itself (mocked here as the query finding nothing, the same
+  // as a real WHERE clause would), landing on the same "no lead" outcome
+  // as a customer with no lead on file at all — never a fallback mint.
+  const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+
+  test('the customer\'s only lead is already converted: excluded by the open-lead predicate, same "no lead" outcome', async () => {
+    const leads = chainBuilder({ firstRow: null });
+    mockBuilders = { leads };
+    const r = await buildConsultationLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/no lead/i);
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+    const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+    expect(leads.whereIn).toHaveBeenCalledWith('status', OPEN_LEAD_STATUSES);
+    expect(leads.whereNull).toHaveBeenCalledWith('converted_at');
+  });
+
+  test('the resolved lead\'s phone differs from the customer\'s number: a reason, no mint', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris', phone: '+19415559999' } }),
+      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
+    };
+    const r = await buildConsultationLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/phone differs/);
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+  });
+
+  // Codex #4709 r4 P2: a malformed override answers with a reason, never a
+  // Postgres uuid-syntax 500.
+  test('no lead on file for the customer: a reason, no link, builder never called', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: null }) };
+    const r = await buildConsultationLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/no lead/i);
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
   });
 });
 
@@ -1409,6 +1488,25 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck('evil.example/l/Ab12cD')).toEqual({ present: false });
   });
 
+  // Pre-push Codex P1: consultation is always short-wrapped (the long
+  // /inspection/:token form never rides an SMS raw), so its own target
+  // never matches a long-form regex — presence is judged by
+  // short_codes.kind, like appointment/service_report/receipt above.
+  // Local audit P1 (#4709 r5): a pasted long-form /inspection/<token> URL is
+  // fenced from scheduled/draft sends exactly like its short wrapper.
+  test('a long-form /inspection/<token> consultation URL is immediate-only too', async () => {
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck('Pick a time: https://wavespest.co/inspection/lead-1.1999999999.abcdef Reply STOP to opt out.'))
+      .toEqual({ present: true, label: 'Consultation link' });
+    expect(await immediateOnlyLinkSendCheck('See you Tuesday.')).toEqual({ present: false });
+  });
+
+  test('a consultation link (branded short form of kind consultation) is immediate-only — its 14-day token TTL fences a scheduled send past it', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'cons1', kind: 'consultation', target_url: 'https://portal.wavespestcontrol.com/inspection/abc.123.def' } }) };
+    expect(await immediateOnlyLinkSendCheck('Pick a time: wavespest.co/l/cons1')).toEqual({ present: true, label: 'Consultation link' });
+  });
+
   test('a statement pay link and a visit-lane card request are immediate-only; a customer-kind /secure link is the Auto Pay seam\'s', async () => {
     expect(await immediateOnlyLinkSendCheck(`Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`)).toEqual({ present: true, label: 'Statement pay' });
     mockBuilders = { appointment_card_requests: chainBuilder({ firstRow: { kind: 'visit' } }) };
@@ -1422,6 +1520,8 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   const PREP = 'a'.repeat(32);
 
   test('a canonical contract link is present; a look-alike host or a nested URL is not', async () => {
+    // Foreign URLs are also scanned for consultation short codes (r15).
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
     expect(await expiringLinkSendCheck('Sign here: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Contract signing' });
     expect(await expiringLinkSendCheck('https://portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY.')).toEqual({ present: true, label: 'Contract signing' });
     expect(await expiringLinkSendCheck('portal.wavespestcontrol.com.evil.example/contract/abcDEF123_-xyz789QWERTY')).toEqual({ present: false });
@@ -2505,5 +2605,423 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(await markCardRequestSends({ stamp, cards })).toBe(false);
       expect(markCardLinkSendOutcome).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+// Pre-push Codex P1: a consultation short code re-checked at the actual SEND
+// boundary — distinct from immediateOnlyLinkSendCheck (which only fences
+// SCHEDULING it). Called both from this file's own bearerLinkSendCheck
+// (POST /admin/communications/sms) and directly from admin-leads.js's POST
+// /:id/send-sms (which has no other bearer kind to check).
+describe('checkConsultationLinkSend (send-time re-check of a consultation short code)', () => {
+  const { checkConsultationLinkSend, bearerLinkSendCheck } = require('../services/composer-customer-links');
+  const { leadInspectionLinkLive } = require('../config/feature-gates');
+  const BODY = 'Pick a time: wavespest.co/l/cons1 Reply STOP to opt out.';
+  const LEAD_ROW = { id: 'lead-1', phone: '+19415550100', status: 'new', converted_at: null };
+  // target_url: the redirect's own signed token, re-verified at send (r19 P2).
+  const CODE_ROW = { code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1', target_url: `https://portal.wavespestcontrol.com/inspection/${require('../utils/lead-consultation-token').mintLeadConsultationToken('lead-1')}` };
+
+  function wireConsultation({ codeRows = [CODE_ROW], leadRow = LEAD_ROW, templateRow = { is_active: true } } = {}) {
+    mockBuilders = {
+      short_codes: chainBuilder({ rows: codeRows }),
+      leads: chainBuilder({ firstRow: leadRow }),
+      sms_templates: chainBuilder({ firstRow: templateRow }),
+    };
+  }
+
+  beforeEach(() => {
+    leadInspectionLinkLive.mockReturnValue(true);
+  });
+
+  test('no /l/ run in the body → null, no queries', async () => {
+    wireConsultation();
+    expect(await checkConsultationLinkSend('Hi there, see you Tuesday.', '9415550100')).toBeNull();
+  });
+
+  test('an /l/ code that is not a consultation short code (no matching row) → null', async () => {
+    wireConsultation({ codeRows: [] });
+    expect(await checkConsultationLinkSend(BODY, '9415550100')).toBeNull();
+  });
+
+  test('a live, open, matching-phone consultation link → null (passes)', async () => {
+    wireConsultation();
+    expect(await checkConsultationLinkSend(BODY, '9415550100')).toBeNull();
+  });
+
+  // Codex #4709 r4 P1: the operator deleted the STOP line after inserting.
+  test('the required STOP line was removed from the body → refused', async () => {
+    wireConsultation();
+    const refusal = await checkConsultationLinkSend('Pick a time: wavespest.co/l/cons1', '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/Reply STOP to opt out/);
+  });
+
+  // Codex #4709 r5 P1: the template kill switch is re-read at the send.
+  test('the consultation template was disabled (or is missing) since the insert → refused', async () => {
+    wireConsultation({ templateRow: { is_active: false } });
+    expect((await checkConsultationLinkSend(BODY, '9415550100')).error).toMatch(/template is switched off/);
+    wireConsultation({ templateRow: null });
+    expect((await checkConsultationLinkSend(BODY, '9415550100')).error).toMatch(/template is switched off/);
+  });
+
+  // Codex #4709 r5 P1: the standalone Leads send path enforces the US-only rule itself.
+  test('a non-US destination on the standalone (no ctx) path → refused', async () => {
+    wireConsultation();
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100', null, 'lead-1', { usDestination: false });
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/US number/);
+  });
+
+  // Codex #4709 r7 P2: an explicit http:// consultation link (short or long)
+  // would expose the bearer before any HTTPS redirect — refused.
+  test('an explicit http:// consultation link is refused, short or long form', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    wireConsultation();
+    const shortRefusal = await checkConsultationLinkSend('Pick a time: http://wavespest.co/l/cons1 Reply STOP to opt out.', '9415550100');
+    expect(shortRefusal.error).toMatch(/must use https/);
+    wireConsultation({ codeRows: [] });
+    const longRefusal = await checkConsultationLinkSend(`Pick a time: http://wavespest.co/inspection/${mintLeadConsultationToken('lead-1')} Reply STOP to opt out.`, '9415550100');
+    expect(longRefusal.error).toMatch(/must use https/);
+  });
+
+  // Codex #4709 r12 P1: a SIGNED consultation token wrapped in a foreign
+  // host (tracker/redirector) is refused, not ignored as "no bearer".
+  test('a signed consultation token on a host we do not own → refused', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    wireConsultation({ codeRows: [] });
+    const refusal = await checkConsultationLinkSend(`Pick a time: https://tracker.example/inspection/${mintLeadConsultationToken('lead-1')} Reply STOP to opt out.`, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/another website/);
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck(`https://tracker.example/inspection/${mintLeadConsultationToken('lead-1')}`))
+      .toEqual({ present: true, label: 'Consultation link' });
+  });
+
+  // Codex #4709 r13 P1: the generated consultation SHORT code wrapped in a
+  // foreign host is refused at send and parked by the fence.
+  test('a consultation short code under a host we do not own → refused and fenced', async () => {
+    mockBuilders = {
+      short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+      leads: chainBuilder({ firstRow: LEAD_ROW }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    const refusal = await checkConsultationLinkSend('Pick a time: https://tracker.example/l/kq7mtr2xab Reply STOP to opt out.', '9415550100');
+    expect(refusal.error).toMatch(/another website/);
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    expect(await immediateOnlyLinkSendCheck('https://tracker.example/l/kq7mtr2xab')).toEqual({ present: true, label: 'Consultation link' });
+  });
+
+  // Codex #4709 r14 P1: a bearer hidden in a foreign URL's query or
+  // fragment — encoded or not — is refused and fenced too.
+  test('a consultation bearer inside a foreign URL query/fragment → refused and fenced', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    const token = mintLeadConsultationToken('lead-1');
+    const inner = `https://portal.wavespestcontrol.com/inspection/${token}`;
+    for (const wrapper of [
+      `https://tracker.example/?next=${inner}`,
+      `https://tracker.example/?next=${encodeURIComponent(inner)}`,
+      `https://tracker.example/#${encodeURIComponent(encodeURIComponent(inner))}`,
+    ]) {
+      wireConsultation({ codeRows: [] });
+      const refusal = await checkConsultationLinkSend(`Pick a time: ${wrapper} Reply STOP to opt out.`, '9415550100');
+      expect(refusal.error).toMatch(/another website/);
+      mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+      expect(await immediateOnlyLinkSendCheck(wrapper)).toEqual({ present: true, label: 'Consultation link' });
+    }
+    mockBuilders = {
+      short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+      leads: chainBuilder({ firstRow: LEAD_ROW }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    const shortWrapped = `https://tracker.example/?u=${encodeURIComponent('https://wavespest.co/l/kq7mtr2xab')}`;
+    expect((await checkConsultationLinkSend(`Pick a time: ${shortWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+    expect(await immediateOnlyLinkSendCheck(shortWrapped)).toEqual({ present: true, label: 'Consultation link' });
+  });
+
+  // Codex #4709 r15 P1: no route marker needed — a raw signed token or a
+  // consultation short code in any foreign URL parameter is caught.
+  test('a raw consultation credential in a generic foreign parameter → refused and fenced', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    const tokenWrapped = `https://tracker.example/?token=${mintLeadConsultationToken('lead-1')}`;
+    wireConsultation({ codeRows: [] });
+    expect((await checkConsultationLinkSend(`Pick a time: ${tokenWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck(tokenWrapped)).toEqual({ present: true, label: 'Consultation link' });
+
+    const codeWrapped = 'https://tracker.example/r?code=kq7mtr2xab';
+    mockBuilders = {
+      short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+      leads: chainBuilder({ firstRow: LEAD_ROW }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    expect((await checkConsultationLinkSend(`Pick a time: ${codeWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+    expect(await immediateOnlyLinkSendCheck(codeWrapped)).toEqual({ present: true, label: 'Consultation link' });
+
+    // ...and in the URL authority: a subdomain label or the userinfo (r16).
+    for (const wrapper of ['https://kq7mtr2xab.tracker.example/', 'https://kq7mtr2xab@tracker.example/x']) {
+      mockBuilders = {
+        short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+        leads: chainBuilder({ firstRow: LEAD_ROW }),
+        sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+      };
+      expect((await checkConsultationLinkSend(`Pick a time: ${wrapper} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+      expect(await immediateOnlyLinkSendCheck(wrapper)).toEqual({ present: true, label: 'Consultation link' });
+    }
+    // An ordinary foreign link with no credential is left alone.
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck('https://maps.example/place?id=abcde12345')).toEqual({ present: false });
+  });
+
+  // Codex #4709 r17 P1s: no trailing slash, and no candidate cap — the
+  // whole message is scanned, so a code after 150 decoys is still found.
+  test('a consultation code in a bare foreign hostname, after many decoys, or in plain text → refused and fenced', async () => {
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    const decoys = Array.from({ length: 150 }, (_, i) => `abcdefgh${String(i).padStart(3, '2').replace(/[01]/g, '9')}`).join('/');
+    for (const text of [
+      'https://kq7mtr2xab.tracker.example',
+      `https://tracker.example/${decoys}/kq7mtr2xab`,
+      'your code is kq7mtr2xab',
+    ]) {
+      mockBuilders = {
+        short_codes: chainBuilder({ rows: [{ code: 'kq7mtr2xab', kind: 'consultation', expires_at: new Date(Date.now() + 86400e3), lead_id: 'lead-1' }] }),
+        leads: chainBuilder({ firstRow: LEAD_ROW }),
+        sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+      };
+      expect((await checkConsultationLinkSend(`Pick a time: ${text} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+      expect(await immediateOnlyLinkSendCheck(text)).toEqual({ present: true, label: 'Consultation link' });
+    }
+  });
+
+  // Codex #4709 r19 P1: decoded until stable — five encoding levels still
+  // expose the bearer; escapes that would survive fail closed.
+  test('a bearer percent-encoded five levels deep in a foreign wrapper → refused and fenced', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    let inner = `https://portal.wavespestcontrol.com/inspection/${mintLeadConsultationToken('lead-1')}`;
+    for (let i = 0; i < 5; i += 1) inner = encodeURIComponent(inner).replace(/\./g, '%2E');
+    const wrapper = `https://tracker.example/?u=${inner}`;
+    wireConsultation({ codeRows: [] });
+    expect((await checkConsultationLinkSend(`Pick a time: ${wrapper} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck(wrapper)).toEqual({ present: true, label: 'Consultation link' });
+  });
+
+  // Codex #4709 r19 P1: an international owner number sharing the lead's
+  // US last ten digits is not the same phone.
+  test('a linked customer on an international number sharing the last ten digits → refused', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-1' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+449415550100' } });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different phone/);
+  });
+
+  // Codex #4709 r19 P2: the short code's own signed target is re-verified.
+  test('a short code whose target token no longer verifies (rotated secret) → refused as not valid', async () => {
+    wireConsultation({ codeRows: [{ ...CODE_ROW, target_url: 'https://portal.wavespestcontrol.com/inspection/lead-1.9999999999.forged' }] });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/not valid/);
+  });
+
+  // Codex #4709 r20 P1: attacker affixes around a code or token never hide it.
+  test('a consultation code or signed token with glued-on affixes in a foreign wrapper → refused and fenced', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    const withCode = (rows) => ({
+      short_codes: chainBuilder({ rows }),
+      leads: chainBuilder({ firstRow: LEAD_ROW }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    });
+    for (const wrapper of ['https://tracker.example/?next=kq7mtr2xab_go', 'https://tracker.example/?next=zzkq7mtr2xab']) {
+      mockBuilders = withCode([{ code: 'kq7mtr2xab', kind: 'consultation' }]);
+      expect(await immediateOnlyLinkSendCheck(wrapper)).toEqual({ present: true, label: 'Consultation link' });
+      // The bare code itself was among the looked-up windows.
+      const looked = mockBuilders.short_codes.whereIn.mock.calls.flatMap(([, values]) => values || []);
+      expect(looked).toContain('kq7mtr2xab');
+    }
+    // Real lead ids are UUIDs — the prefix is peeled off the uuid tail.
+    const tokenWrapped = `https://tracker.example/?t=x${mintLeadConsultationToken('5b8d1c9e-4a2f-4b6e-9c3d-8e7f6a5b4c3d')}_go`;
+    wireConsultation({ codeRows: [] });
+    expect((await checkConsultationLinkSend(`Pick a time: ${tokenWrapped} Reply STOP to opt out.`, '9415550100')).error).toMatch(/another website/);
+  });
+
+  // Codex #4709 r20 P2: links for two different leads in one text → refused.
+  test('a body with consultation links for two leads is refused', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const host = 'wavespest.co';
+    wireConsultation({ codeRows: [] });
+    mockBuilders.leads = chainBuilder({ firstRow: { ...LEAD_ROW } });
+    mockBuilders.customers = chainBuilder({ rows: [] });
+    const body = `Pick a time: ${host}/inspection/${mintLeadConsultationToken('lead-1')} or ${host}/inspection/${mintLeadConsultationToken('lead-2')} Reply STOP to opt out.`;
+    const refusal = await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null });
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/more than one lead/);
+  });
+
+  // Codex #4709 r14 P1: on a shared phone, a lead linked to customer A never
+  // rides a send for customer B.
+  test('a linked lead whose customer is not the selected customer → refused', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-a' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415550100' } });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100', { trustedCustomerId: 'cust-b', bearers: 0 });
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different customer/);
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-a' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415550100' } });
+    expect(await checkConsultationLinkSend(BODY, '9415550100', { trustedCustomerId: 'cust-a', bearers: 0 })).toBeNull();
+  });
+
+  // Codex #4709 r13 P2: the validated lead rides back for outreach bookkeeping.
+  test('bearerLinkSendCheck returns the validated consultation lead id', async () => {
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [] });
+    expect((await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null })).consultationLeadId).toBe('lead-1');
+  });
+
+  // Codex #4709 r5 P1: a pasted long /inspection/<token> URL is checked too.
+  test('a long-form /inspection/<token> link is verified like its short wrapper', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const host = 'wavespest.co'; // the owned short host BODY already uses
+    const good = mintLeadConsultationToken('lead-1');
+    wireConsultation({ codeRows: [] });
+    expect(await checkConsultationLinkSend(`Pick a time: ${host}/inspection/${good} Reply STOP to opt out.`, '9415550100')).toBeNull();
+    wireConsultation({ codeRows: [] });
+    const other = await checkConsultationLinkSend(`Pick a time: ${host}/inspection/${good} Reply STOP to opt out.`, '9995551234');
+    expect(other.error).toMatch(/different lead/);
+    wireConsultation({ codeRows: [] });
+    const forged = await checkConsultationLinkSend(`Pick a time: ${host}/inspection/lead-1.9999999999.bad Reply STOP to opt out.`, '9415550100');
+    expect(forged.error).toMatch(/not valid/);
+    wireConsultation({ codeRows: [] });
+    const expired = await checkConsultationLinkSend(`Pick a time: ${host}/inspection/${mintLeadConsultationToken('lead-1', 1000)} Reply STOP to opt out.`, '9415550100');
+    expect(expired.error).toMatch(/expired/);
+  });
+
+  // Codex #4709 r10 P1: a lead linked to a customer whose phone changed
+  // must not carry its bearer to the stale intake number.
+  test('a linked lead whose customer now has a different phone → refused', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-1' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415559999' } });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different phone/);
+  });
+
+  test('Codex #4709 r11 P1: a lead linked to an ARCHIVED customer → refused (fails closed)', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, customer_id: 'cust-archived' } });
+    mockBuilders.customers = chainBuilder({ firstRow: null });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/archived/);
+  });
+
+  test('the gate went off since the insert → refused', async () => {
+    wireConsultation();
+    leadInspectionLinkLive.mockReturnValue(false);
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/switched off|GATE_LEAD_INSPECTION_LINK/);
+  });
+
+  test('the short code itself expired since the insert → refused', async () => {
+    wireConsultation({ codeRows: [{ ...CODE_ROW, expires_at: new Date(Date.now() - 1000) }] });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/expired/);
+  });
+
+  test('the lead converted or closed since the insert → refused', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, status: 'won', converted_at: new Date('2026-01-01') } });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/converted or closed/);
+  });
+
+  test('the lead was deleted since the insert → refused', async () => {
+    wireConsultation({ leadRow: null });
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/converted or closed/);
+  });
+
+  test('the destination phone is not this lead\'s own phone → refused (never a different lead\'s invite)', async () => {
+    wireConsultation();
+    const refusal = await checkConsultationLinkSend(BODY, '9995551234');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different lead/);
+  });
+
+  // Codex #4709 r3 P1: two open leads sharing a phone — a link minted for
+  // lead A must not go out through lead B's send.
+  test('expectedLeadId: a link minted for a different lead on the same phone is refused; the matching lead passes', async () => {
+    wireConsultation();
+    const refusal = await checkConsultationLinkSend(BODY, '9415550100', null, 'lead-2');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/different lead/);
+    wireConsultation();
+    expect(await checkConsultationLinkSend(BODY, '9415550100', null, 'lead-1')).toBeNull();
+  });
+
+  test('Codex #4709 r9 P1: expectedLeadId binds even with customer context', async () => {
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [{ id: 'c1' }] });
+    const result = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: 'c1', expectedLeadId: 'lead-2' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/different lead/);
+  });
+
+  test('expectedLeadId threads through bearerLinkSendCheck', async () => {
+    wireConsultation();
+    const result = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null, expectedLeadId: 'lead-2' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/different lead/);
+  });
+
+  test('bodyCarriesConsultationLink: true only when a consultation short code is present', async () => {
+    const { bodyCarriesConsultationLink } = require('../services/composer-customer-links');
+    wireConsultation();
+    expect(await bodyCarriesConsultationLink(BODY)).toBe(true);
+    wireConsultation({ codeRows: [] });
+    expect(await bodyCarriesConsultationLink(BODY)).toBe(false);
+    expect(await bodyCarriesConsultationLink('Hi there, see you Tuesday.')).toBe(false);
+  });
+
+  test('wired into bearerLinkSendCheck — the generic /admin/communications/sms route inherits the same re-check', async () => {
+    wireConsultation({ leadRow: { ...LEAD_ROW, status: 'won', converted_at: new Date('2026-01-01') } });
+    const result = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/converted or closed/);
+  });
+
+  // Pre-push Codex P1: checkConsultationLinkSend validated but never
+  // registered the bearer in ctx.bearers, so a verified consultation link
+  // skipped BOTH shared bearerLinkSendCheck protections below — the non-US-
+  // destination rejection and the customer-owner recovery. Registered now
+  // (third `ctx` arg, only when called from bearerLinkSendCheck).
+  test('a consultation-only body to a non-US destination is refused — the bearer is registered even though consultation binds by lead phone, not customer ownership', async () => {
+    wireConsultation();
+    const result = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null, usDestination: false });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/US number/);
+  });
+
+  test('customer-owner recovery runs for a consultation bearer — exactly one live customer on the number rides back as customerId', async () => {
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [{ id: 'c1' }] });
+    expect(await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null }))
+      .toEqual({ ok: true, customerId: 'c1', consultationLeadId: 'lead-1' });
+    // Several live customers on the number: never an arbitrary pick.
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [{ id: 'c1' }, { id: 'c2' }] });
+    const refusal = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null });
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/more than one customer/);
+    // None on the number (the ordinary case — a not-yet-converted lead): stays a lead.
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [] });
+    expect(await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, consultationLeadId: 'lead-1' });
   });
 });

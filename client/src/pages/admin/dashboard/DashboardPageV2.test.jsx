@@ -2,7 +2,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DashboardPageV2 from "../DashboardPageV2";
 import { adminFetch } from "../../../utils/admin-fetch";
@@ -293,9 +293,10 @@ describe("DashboardPageV2 sections", () => {
         level: 1,
       }),
     ).toHaveClass("text-22");
-    expect(screen.getByRole("button", { name: "Refresh" })).toHaveClass(
-      "ui-control-comfortable",
-    );
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Updated /)).not.toBeInTheDocument();
+    const heading = screen.getByRole("heading", { name: /Good (morning|afternoon|evening), Waves/, level: 1 });
+    expect(heading.nextElementSibling).toHaveTextContent(/ · /);
 
     // One anchor <section> per command-center section.
     for (const id of ["today", "growth", "profit", "retention", "cash"]) {
@@ -441,7 +442,7 @@ describe("DashboardPageV2 sections", () => {
       ? Promise.reject(new Error("Unavailable")) : fetchFixture(path, options));
     renderPage();
     await screen.findByText("profitability is unavailable.");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    await act(async () => {});
     const retry = screen.getAllByRole("button", { name: "Try again" })[0];
     const completedCalls = adminFetch.mock.calls.length;
     adminFetch.mockImplementation(() => new Promise(() => {}));
@@ -449,7 +450,7 @@ describe("DashboardPageV2 sections", () => {
     fireEvent.click(retry);
 
     await waitFor(() => expect(screen.queryAllByRole("button", { name: "Try again" })).toHaveLength(0));
-    expect(screen.getByRole("button", { name: "Refreshing", exact: true })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Refresh", exact: true })).not.toBeInTheDocument();
     expect(adminFetch).toHaveBeenCalledTimes(completedCalls + 4);
     fireEvent.click(retry);
     expect(adminFetch).toHaveBeenCalledTimes(completedCalls + 4);
@@ -461,24 +462,24 @@ describe("DashboardPageV2 sections", () => {
     adminFetch.mockImplementation((path, options) => path.split("?")[0] === limitedPath
       ? Promise.reject(error) : fetchFixture(path, options));
     renderPage();
-    await screen.findByText("Too many requests. Wait a few seconds, then use Refresh.");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    await screen.findByText("Too many requests. The dashboard will retry automatically.");
+    await act(async () => {});
     expect(screen.queryAllByRole("button", { name: "Try again" })).toHaveLength(0);
     expect(screen.queryByText(/Some dashboard data could not be refreshed/)).not.toBeInTheDocument();
 
     adminFetch.mockImplementation(fetchFixture);
-    fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
+    await act(async () => window.dispatchEvent(new Event("focus")));
     await waitFor(() => expect(screen.queryByText(/Too many requests/)).not.toBeInTheDocument());
   });
 
   it("keeps current-period KPI values visible after a failed refresh", async () => {
     renderPage();
     await screen.findByText("3/6 jobs");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    await act(async () => {});
     const fetchFixture = adminFetch.getMockImplementation();
     adminFetch.mockImplementation((path, options) => path.includes("/core-kpis")
       ? Promise.reject(new Error("Unavailable")) : fetchFixture(path, options));
-    fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
+    await act(async () => window.dispatchEvent(new Event("focus")));
     await screen.findByText(/Previously loaded values may be out of date/);
     expect(screen.getByText("3/6 jobs")).toBeInTheDocument();
     expect(screen.queryByText("Failed to load KPIs for this period")).not.toBeInTheDocument();

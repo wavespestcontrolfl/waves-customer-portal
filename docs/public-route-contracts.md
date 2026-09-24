@@ -407,6 +407,13 @@ runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
+the photo-text triage (`services/photo-text-triage.js`) likewise runs after
+acknowledgment under `GATE_PHOTO_TRIAGE` (default off) for an ordinary
+inbound carrying an image: the admin photo assessment (paid vision, one run
+per message, capped per ET day by `PHOTO_TRIAGE_DAILY_CAP`, default 20; its
+caption classifier by `PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP`) and one pending
+owner-approval reply draft, which replaces the legacy AI draft for that
+message — never a send, no response change;
 unknown domain/van-tracking SMS stays unlinked in the inbox and does not
 create customer/account rows or guess a customer name from message prose.
 Substantive messages ring a per-message `new_lead` bell/push linking to the
@@ -976,6 +983,24 @@ lookup-measured or customer-confirmed lot (owner ruling 2026-09-03; the
 recurring program joined this contract then, so a direct-API caller that
 posts an unconfirmed `lotSqFt` with `mosquito` now receives a manual
 quote where it previously received a price)).
+
+Keyed quote-on-request (a catalog `serviceKey`/`service_key` whose row is
+`public_quote_selectable=true` but carries NO `PUBLIC_QUOTE_REQUESTS` entry,
+`services/public-services-menu.js`): the route skips the pricing engine
+entirely and calls `quoteOnRequestEstimate` (`routes/public-quote.js`) —
+the lead is captured with `leads.service_key` + `service_interest` set to
+the catalog name verbatim, zero totals, no self-book handoff — and the
+response is `202 { quote_required: true, service, reason:
+'quote_on_request', service_interest, message }`. `message` is a generic
+"{catalog name} is priced by our team, not the calculator — we'll send
+your estimate shortly." UNLESS the key carries its own service-specific
+copy. `mosquito_misting_system` (Mosquito Misting System Service, catalog
+row `20260924000020_mosquito_misting_catalog_row`; no engine pricer —
+misting is quoted after an on-site design visit) is the one keyed
+exception today: its `message` is "Mosquito misting systems are designed
+and priced on site — we'll call to schedule your free design visit."
+instead of the generic copy. No pricing, no self-book slot, no new auth
+surface — additive response-copy branching only.
 
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run

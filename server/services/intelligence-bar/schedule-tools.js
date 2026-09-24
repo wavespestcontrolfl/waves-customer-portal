@@ -768,16 +768,18 @@ async function optimizeTechRoute(input) {
 
 
 async function assignTechnician(input, actionContext = {}) {
-  const { service_ids: serviceIds, technician_name: techName, confirmed } = input;
+  const { service_ids: rawServiceIds, technician_name: techName, confirmed } = input;
+  let serviceIds = rawServiceIds;
   let tech = await db('technicians').whereILike('name', `%${techName}%`).first();
   if (!tech) return { error: `Technician "${techName}" not found` };
 
-  const services = await db('scheduled_services')
+  const allServices = await db('scheduled_services')
     .whereIn('scheduled_services.id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .leftJoin('technicians as cur_tech', 'scheduled_services.technician_id', 'cur_tech.id')
     .select(
       'scheduled_services.id',
+      'scheduled_services.status',
       'customers.first_name', 'customers.last_name',
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
@@ -798,7 +800,28 @@ async function assignTechnician(input, actionContext = {}) {
       'cur_tech.name as current_tech_name',
     );
 
-  if (!services.length) return { error: 'No services found for the given IDs' };
+  if (!allServices.length) return { error: 'No services found for the given IDs' };
+
+  // Terminal rows are one-way — reassigning a completed/no_show/skipped
+  // visit silently rewrites who performed it (pay validation, tech stats,
+  // visit history all read scheduled_services.technician_id), while the
+  // REST reassign path (assignDispatchJob) already refuses the same rows
+  // with a 409. Fence here the same way moveStopsToDay fences a terminal
+  // move: drop them from the preview/commit set and disclose what was left
+  // behind, refusing outright when nothing remains.
+  const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
+  const services = allServices.filter((s) => !TERMINAL_APPOINTMENT_STATUSES.includes(String(s.status)));
+  // Each excluded stop is named (customer + id + status) so the card can
+  // list exactly WHICH stops the operator is approving to leave behind, not
+  // just how many (Codex round 3 P1); the list rides the fingerprinted
+  // preview like `stops` does.
+  const skippedTerminal = allServices
+    .filter((s) => TERMINAL_APPOINTMENT_STATUSES.includes(String(s.status)))
+    .map((s) => ({ id: s.id, status: s.status, customer: `${s.first_name || ''} ${s.last_name || ''}`.trim() }));
+  if (!services.length) {
+    return { error: 'All matching stops are in a terminal status (completed/cancelled/skipped/no_show) — nothing to reassign' };
+  }
+  serviceIds = services.map((s) => s.id);
 
   const stops = services.map(s => ({
     id: s.id,
@@ -820,7 +843,10 @@ async function assignTechnician(input, actionContext = {}) {
       would_assign_to_id: String(tech.id),
       stop_count: stops.length,
       stops,
-      note: `Would reassign ${stops.length} stop(s) to ${tech.name}. Re-call with confirmed:true to apply.`,
+      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+      note: `Would reassign ${stops.length} stop(s) to ${tech.name}.`
+        + (skippedTerminal.length ? ` ${skippedTerminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be reassigned.` : '')
+        + ' Re-call with confirmed:true to apply.',
     };
   }
 
@@ -880,17 +906,29 @@ async function assignTechnician(input, actionContext = {}) {
       { techId: s.current_tech_id, date: s.scheduled_date_str },
       { techId: tech.id, date: s.scheduled_date_str },
     ]));
-    // Re-assert the approved snapshot UNDER the tech-day locks (same
+    // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE),
+    // checked once per distinct destination day the selected stops land on
+    // — a tech marked out for even one of several dates in this bulk assign
+    // must refuse the whole call, not silently accept the days it's clear
+    // for (the absence read per date is cheap; see swapTechAssignments for
+    // the same date-threaded pattern). Runs BEFORE the row locks below: a
+    // refused tech never takes FOR UPDATE locks on the stops.
+    const destDates = [...new Set(services.map((s) => s.scheduled_date_str))];
+    for (const d of destDates) {
+      await assertAssignableTechnician(tech.id, { conn: trx, date: d });
+    }
+    // Re-read the approved set UNDER the tech-day locks — one live read
+    // serves both checks below. Re-assert the approved snapshot (same
     // contract as swap_tech_assignments): the pre-lock read above chose the
     // lock keys, so any drift between it and the locked rows means the
     // fence may not cover the real source day — refuse rather than commit
     // an unapproved overwrite.
+    const live = await trx('scheduled_services')
+      .whereIn('id', serviceIds)
+      .forUpdate()
+      .select('id', 'status', 'technician_id', 'visit_id', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"));
+    const liveById = new Map(live.map((r) => [String(r.id), r]));
     if (approvedStops) {
-      const live = await trx('scheduled_services')
-        .whereIn('id', serviceIds)
-        .forUpdate()
-        .select('id', 'technician_id', 'visit_id', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"));
-      const liveById = new Map(live.map((r) => [String(r.id), r]));
       const changed = live.length !== services.length
         || services.some((s) => {
           const l = liveById.get(String(s.id));
@@ -907,6 +945,21 @@ async function assignTechnician(input, actionContext = {}) {
         throw err;
       }
     }
+    // Terminal-status re-check UNCONDITIONAL (Codex round 1 P1): the
+    // in-trx UPDATE's whereNotIn fence below silently drops a row that
+    // turned completed/cancelled/skipped/no_show between the preview read
+    // and this lock — without this check the batch still reports
+    // success:true for the ORIGINAL approved count and the grouped-visit
+    // repair loop still runs against every original id, including the one
+    // that was never touched. Abort the whole batch instead: the card
+    // shows exactly which stop(s) drifted and the operator re-asks.
+    const nowTerminal = live.filter((l) => TERMINAL_APPOINTMENT_STATUSES.includes(String(l.status)));
+    if (nowTerminal.length) {
+      const err = new Error('assign_now_terminal');
+      err.previewChanged = true;
+      err.nowTerminal = nowTerminal.map((l) => ({ id: l.id, status: l.status }));
+      throw err;
+    }
     // route_order: null ONLY for rows whose technician actually CHANGES —
     // the old sequence number is meaningless in the day the stop joins
     // (NULL appends after the ordered run; every consumer sorts
@@ -914,33 +967,51 @@ async function assignTechnician(input, actionContext = {}) {
     // already on tech.id are a no-op reassignment: clearing them would
     // erase a valid manual/optimized position (uncapped audit r25 P1) —
     // the predicate is on the row value the UPDATE itself observes.
-    // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE),
-    // checked once per distinct destination day the selected stops land on
-    // — a tech marked out for even one of several dates in this bulk assign
-    // must refuse the whole call, not silently accept the days it's clear
-    // for (the absence read per date is cheap; see swapTechAssignments for
-    // the same date-threaded pattern).
-    const destDates = [...new Set(services.map((s) => s.scheduled_date_str))];
-    for (const d of destDates) {
-      await assertAssignableTechnician(tech.id, { conn: trx, date: d });
-    }
-    const [{ count: alreadyOn }] = await trx('scheduled_services')
-      .whereIn('id', serviceIds)
-      .where('technician_id', tech.id)
-      .count('id as count');
+    // No-op split from the LOCKED live rows (not a separate count query):
+    // the commit-count guard below compares the UPDATE's touched rows
+    // against exactly this set.
+    const nonNoOpIds = live.filter((l) => String(l.technician_id || '') !== String(tech.id)).map((l) => l.id);
+    const alreadyOn = live.length - nonNoOpIds.length;
     // The COMMITTED schedule of every reassigned row rides back for the
     // notices (pre-push audit P1): a same-day window edit landing between
     // the card's read and this lock must not make the "new visit" card
     // describe the old window.
     committedAssignRows = await trx('scheduled_services')
       .whereIn('id', serviceIds)
+      // Belt-and-braces (ADMIN-BUG-R56): serviceIds is already narrowed to
+      // non-terminal rows above and re-verified live just above, but the
+      // in-trx UPDATE — the decisive write — must never depend on either of
+      // those alone.
+      // NULL-safe (Codex round 3 P2): scheduled_services.status is nullable
+      // and `NULL NOT IN (...)` is never true, so a bare whereNotIn would
+      // drop a legacy null-status row the preview and the live re-read both
+      // treated as open — the UPDATE would touch zero rows and the count
+      // guard below would report preview_changed on every retry.
+      .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_APPOINTMENT_STATUSES))
       .whereRaw('technician_id IS DISTINCT FROM ?', [tech.id])
       .update({ technician_id: tech.id, route_order: null, updated_at: new Date() })
       .returning(['id', 'scheduled_date', 'window_start', 'window_end']);
-    return committedAssignRows.length + Number(alreadyOn);
+    // Contract-drift guard, not a silent partial success (Codex round 1
+    // P1): every row the live re-read found still needing reassignment
+    // must be a row the UPDATE actually touched — any mismatch means the
+    // two reads disagree in a way the operator must see, never a quiet
+    // undercount reported as success:true.
+    if (committedAssignRows.length !== nonNoOpIds.length) {
+      const err = new Error('assign_commit_count_mismatch');
+      err.previewChanged = true;
+      throw err;
+    }
+    return committedAssignRows.length + alreadyOn;
     });
   } catch (err) {
     if (err && err.previewChanged) {
+      if (err.nowTerminal && err.nowTerminal.length) {
+        return {
+          error: `${err.nowTerminal.length} of these stop(s) turned completed/cancelled/skipped/no_show just before this was applied — nothing was reassigned. Ask again for a fresh card.`,
+          preview_changed: true,
+          skipped_terminal: err.nowTerminal,
+        };
+      }
       return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
     }
     throw err;
@@ -990,6 +1061,7 @@ async function assignTechnician(input, actionContext = {}) {
     assigned_count: count,
     technician: tech.name,
     stops,
+    ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(groupWarning ? { warning: groupWarning } : {}),
   };
 }
@@ -1581,9 +1653,41 @@ async function swapTechAssignments(input, actionContext = {}) {
   if (!techA) return { error: `Tech "${techAName}" not found` };
   if (!techB) return { error: `Tech "${techBName}" not found` };
 
-  // Get both sets of services
-  const aServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techA.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
-  const bServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techB.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
+  // ADMIN-BUG-R56: the old exclusion list ['cancelled','completed','rescheduled']
+  // omitted 'skipped' and 'no_show' — both terminal (proposal-pins.js
+  // TERMINAL_APPOINTMENT_STATUSES) — so a no-show or skipped visit was
+  // parked and re-pointed to the other tech, rewriting who performed it.
+  const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
+  const NON_SWAPPABLE_STATUSES = [...TERMINAL_APPOINTMENT_STATUSES, 'rescheduled'];
+
+  // Get both sets of services — read everything scheduled for each tech that
+  // day, then split into swappable vs. terminal, so the terminal ones can be
+  // disclosed on the card (Codex round 1 P1) instead of silently vanishing
+  // from the swap set with no indication anything was left out.
+  const [aAllRows, bAllRows] = await Promise.all([
+    db('scheduled_services').where({ scheduled_date: date, technician_id: techA.id }),
+    db('scheduled_services').where({ scheduled_date: date, technician_id: techB.id }),
+  ]);
+  const aServices = aAllRows.filter((s) => !NON_SWAPPABLE_STATUSES.includes(String(s.status)));
+  const bServices = bAllRows.filter((s) => !NON_SWAPPABLE_STATUSES.includes(String(s.status)));
+  const skippedTerminalRows = [...aAllRows, ...bAllRows]
+    .filter((s) => TERMINAL_APPOINTMENT_STATUSES.includes(String(s.status)));
+  // Named like assign_technician's exclusions (Codex round 3 P1): the card
+  // lists WHICH stops stay behind (customer + id + status), not just how
+  // many. The raw tech-day rows carry no customer name, so look the few
+  // skipped ones up by id — only when there is something to disclose.
+  const skippedCustomerName = new Map();
+  if (skippedTerminalRows.length) {
+    const custIds = [...new Set(skippedTerminalRows.map((s) => s.customer_id).filter(Boolean))];
+    const custRows = custIds.length
+      ? await db('customers').whereIn('id', custIds).select('id', 'first_name', 'last_name')
+      : [];
+    for (const c of custRows || []) {
+      skippedCustomerName.set(String(c.id), `${c.first_name || ''} ${c.last_name || ''}`.trim());
+    }
+  }
+  const skippedTerminal = skippedTerminalRows
+    .map((s) => ({ id: s.id, status: s.status, customer: skippedCustomerName.get(String(s.customer_id)) || '' }));
 
   if (confirmed !== true) {
     return {
@@ -1604,7 +1708,10 @@ async function swapTechAssignments(input, actionContext = {}) {
         [techA.name]: aServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null, ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}) })),
         [techB.name]: bServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null, ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}) })),
       },
-      note: `Would swap ${aServices.length} stop(s) from ${techA.name} with ${bServices.length} stop(s) from ${techB.name}. Re-call with confirmed:true to apply.`,
+      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+      note: `Would swap ${aServices.length} stop(s) from ${techA.name} with ${bServices.length} stop(s) from ${techB.name}.`
+        + (skippedTerminal.length ? ` ${skippedTerminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be swapped.` : '')
+        + ' Re-call with confirmed:true to apply.',
     };
   }
 
@@ -1628,7 +1735,12 @@ async function swapTechAssignments(input, actionContext = {}) {
   let bIds = [];
   const liveStops = async (trx, techId) => trx('scheduled_services')
     .where({ scheduled_date: date, technician_id: techId })
-    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
+    // NULL-safe, like assign_technician's UPDATE fence (Codex round 3 P2):
+    // status is nullable and `NULL NOT IN (...)` is never true, so a bare
+    // whereNotIn would drop a legacy null-status row the client-side split
+    // above kept as swappable — the membership check would then read
+    // preview_changed on every retry.
+    .where((q) => q.whereNull('status').orWhereNotIn('status', NON_SWAPPABLE_STATUSES))
     .forUpdate()
     .select('id', 'visit_id');
   let committedSwapRows = [];
@@ -1715,6 +1827,7 @@ async function swapTechAssignments(input, actionContext = {}) {
       [techA.name]: { was: aServices.length, now: bServices.length },
       [techB.name]: { was: bServices.length, now: aServices.length },
     },
+    ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(swapGroupWarning ? { warning: swapGroupWarning } : {}),
   };
 }

@@ -89,6 +89,203 @@ describe("CustomerSmsPanel", () => {
     expect(await screen.findByLabelText(/Message to Avery Sample/)).toHaveValue("draft for Avery");
   });
 
+  // Pre-push Codex P2: initialDraft only seeds an EMPTY draft — an existing
+  // stored draft silently wins and a caller's text (e.g. "Send consultation
+  // link") is lost. appendDraft joins onto whatever draft already exists
+  // instead, matching how the Communications composer's own Insert Link
+  // actions add a clause to the current body rather than dropping it.
+  it("appendDraft joins onto an existing draft instead of being silently dropped by it", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem("c360:sms-draft:staff-a:cust-a", "already typed this");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Pick a time: https://waves.link/l/abc\n\n"} />);
+    expect(await screen.findByLabelText(/Message to Avery Sample/))
+      .toHaveValue("already typed this\n\nPick a time: https://waves.link/l/abc\n\n");
+  });
+
+  it("appendDraft with no existing draft becomes the whole body (never dropped for an empty draft either)", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Pick a time: https://waves.link/l/abc\n\n"} />);
+    expect(await screen.findByLabelText(/Message to Avery Sample/))
+      .toHaveValue("Pick a time: https://waves.link/l/abc\n\n");
+  });
+
+  // Pre-push Codex P2: a stored draft that already carries an earlier
+  // consultation insert (the operator collapsed/re-expanded the lead row,
+  // or clicked Send consultation link twice) must not get a SECOND copy —
+  // each mint is a fresh short code, so the new URL never literally
+  // matches the old one; the stale line (remembered verbatim, alongside
+  // the draft — pre-push Codex P1) is replaced in place instead of
+  // appended alongside it.
+  it("appendDraft REPLACES an earlier consultation clause already in the stored draft, instead of appending a second one", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem(
+      "c360:sms-draft:staff-a:cust-a",
+      "Hi Jamie, it's Waves. Pick a time: https://waves.link/l/old111\n\nReply STOP to opt out.",
+    );
+    // The exact URL line an earlier insert remembered — written alongside
+    // the draft by the same code path in real sessions.
+    sessionStorage.setItem("c360:sms-consult-line:staff-a:cust-a", "Hi Jamie, it's Waves. Pick a time: https://waves.link/l/old111");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Hi Jamie, it's Waves. Pick a time: https://waves.link/l/new222\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    expect(box.value).not.toContain("old111");
+    expect(box.value).toContain("new222");
+    expect((box.value.match(/waves\.link/g) || []).length).toBe(1);
+  });
+
+  it("appendDraft leaves unrelated typed text alone while replacing only the stale consultation line", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem(
+      "c360:sms-draft:staff-a:cust-a",
+      "Also, we'll need someone home.\n\nPick a time: https://waves.link/l/old111\n\n",
+    );
+    sessionStorage.setItem("c360:sms-consult-line:staff-a:cust-a", "Pick a time: https://waves.link/l/old111");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Pick a time: https://waves.link/l/new222\n\n"} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    expect(box.value).toContain("Also, we'll need someone home.");
+    expect(box.value).not.toContain("old111");
+    expect(box.value).toContain("new222");
+  });
+
+  // Pre-push Codex P1: every short link (pay, review, estimate,
+  // consultation) shares the same short-link host — combineAppendedDraft
+  // used to drop ANY line on that host, silently deleting a pasted
+  // non-consultation link. With nothing remembered yet for this identity
+  // (a fresh session), the fallback requires the consultation WORDING too,
+  // not just the shared host.
+  it("a draft with a non-consultation short link is preserved when a consultation link is inserted", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem(
+      "c360:sms-draft:staff-a:cust-a",
+      "Here's your invoice: https://waves.link/l/pay1",
+    );
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Pick a time for us to stop by for a free consultation: https://waves.link/l/cons1\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    expect(box.value).toContain("Here's your invoice: https://waves.link/l/pay1");
+    expect(box.value).toContain("free consultation: https://waves.link/l/cons1");
+  });
+
+  // Same fallback, the other half: a stale consultation clause from BEFORE
+  // this remember-the-line fix shipped (draft persisted, no remembered
+  // line yet) is still recognized and replaced — by its wording, not just
+  // its host — rather than left to duplicate forever.
+  it("a stale consultation clause with no remembered line yet is still replaced, by template wording", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem(
+      "c360:sms-draft:staff-a:cust-a",
+      "Pick a time for us to stop by for a free consultation: https://waves.link/l/old111\n\nReply STOP to opt out.",
+    );
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Pick a time for us to stop by for a free consultation: https://waves.link/l/new222\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    expect(box.value).not.toContain("old111");
+    expect(box.value).toContain("new222");
+    expect((box.value.match(/waves\.link/g) || []).length).toBe(1);
+  });
+
+  // Codex #4709 P1: StrictMode runs a setState updater twice with the same
+  // previous draft. The remembered line is read before the update, so both
+  // runs strip the OLD consultation line and the replacement is persisted.
+  it("under StrictMode, re-inserting a consultation link replaces the previous one (draft updater stays pure)", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    const first = "Hi Avery, it's Waves. Pick a time: https://waves.link/l/old111\n\nReply STOP to opt out.";
+    const second = "Hi Avery, it's Waves. Pick a time: https://waves.link/l/new222\n\nReply STOP to opt out.";
+    const { rerender } = render(
+      <React.StrictMode><CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={first} /></React.StrictMode>,
+    );
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("old111"));
+    rerender(<React.StrictMode><CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={second} /></React.StrictMode>);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old111");
+    await waitFor(() => expect(sessionStorage.getItem("c360:sms-draft:staff-a:cust-a")).toContain("new222"));
+    expect(sessionStorage.getItem("c360:sms-draft:staff-a:cust-a")).not.toContain("old111");
+  });
+
+  // Codex #4709 P1: the template renderer strips https://, so the real line
+  // is scheme-free. Re-inserting must still replace the previous invite.
+  it("re-inserting a scheme-free consultation line (the renderer's real output) replaces the previous one", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    const first = "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old111\n\nReply STOP to opt out.";
+    const second = "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/new222\n\nReply STOP to opt out.";
+    const { rerender } = render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={first} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("old111"));
+    rerender(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={second} />);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old111");
+    expect((box.value.match(/wavespest\.co\/l\//g) || []).length).toBe(1);
+  });
+
+  // Codex #4709 r5 P2: the operator edited the inserted line, so the
+  // remembered line is no longer in the draft verbatim — the wording + host
+  // fallback must still replace the old invite.
+  it("replaces an edited consultation line on re-insert (stale remembered line falls back to the heuristic)", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem("c360:sms-consult-line:staff-a:cust-a", "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old111");
+    sessionStorage.setItem("c360:sms-draft:staff-a:cust-a", "Hi Avery!! Pick a time for a free consultation: wavespest.co/l/old111\n\nReply STOP to opt out.");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/new222\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old111");
+  });
+
+  // Codex #4709 r10 P2: rewording the invite (no "consultation" left) must
+  // still replace the old link on re-insert — matched by its own URL.
+  it("an edited invite without the word consultation is still replaced by its remembered link", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem("c360:sms-consult-line:staff-a:cust-a", "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old111");
+    sessionStorage.setItem("c360:sms-draft:staff-a:cust-a", "Hi Avery! Book your free inspection: wavespest.co/l/old111\n\nReply STOP to opt out.");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/new222\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old111");
+  });
+
+  // Codex #4709 r14 P2: an edit to the remembered URL itself falls back to
+  // the wording + host heuristic, and the old STOP footer is not doubled.
+  it("an edited remembered URL falls back to the heuristic and never doubles the STOP line", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    sessionStorage.setItem("c360:sms-consult-line:staff-a:cust-a", "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old111");
+    sessionStorage.setItem("c360:sms-draft:staff-a:cust-a", "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old11X\n\nReply STOP to opt out.");
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={"Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/new222\n\nReply STOP to opt out."} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old11X");
+    expect((box.value.match(/Reply STOP to opt out\./g) || []).length).toBe(1);
+  });
+
   it("sends once per click through the canonical route, pinned to the customer, and keeps the draft on failure", async () => {
     const send = deferred();
     adminFetch.mockImplementation(async (path, options = {}) => {

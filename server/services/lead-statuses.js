@@ -16,6 +16,28 @@ const NON_ENGAGED_LEAD_STATUSES = ['cancelled', 'spam', 'duplicate'];
 // filter to exactly this set.
 const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
 
+// The canonical "still an open, unconverted lead" predicate — status in
+// OPEN_LEAD_STATUSES AND converted_at IS NULL. Applied on a `leads` query
+// builder (any alias) and returned for chaining, the same shape as
+// scopeToProspects below. Callers that pick or validate a lead for the
+// consultation-link feature (composer-customer-links.js's
+// buildConsultationLink — both the newest-lead lookup and the explicit
+// leadIdOverride check — and admin-communications.js's
+// resolveConsultationLeadOnly, both branches) all apply this SAME helper
+// (pre-push Codex P1) rather than each re-deriving the two conditions, so
+// the two files can never drift on what counts as still-open.
+function applyOpenLeadPredicate(query) {
+  return query.whereIn('status', OPEN_LEAD_STATUSES).whereNull('converted_at');
+}
+
+// Same predicate, evaluated against an already-fetched row (status,
+// converted_at) rather than a query builder — for a caller that already
+// holds the row (an explicit-id lookup checking eligibility) and would
+// otherwise re-query just to filter it out.
+function isOpenLeadRow(row) {
+  return !!row && !row.converted_at && OPEN_LEAD_STATUSES.includes(row.status);
+}
+
 // Rows counted as prospects by every lead-volume denominator (the leads
 // analytics overview and its rolling median, the dashboard lead KPIs, the
 // unattributed-leads nag, calculateSourceROI): not a non-engaged status,
@@ -124,6 +146,8 @@ function scopeToProspects(qb, alias = 'leads') {
 module.exports = {
   NON_ENGAGED_LEAD_STATUSES,
   OPEN_LEAD_STATUSES,
+  applyOpenLeadPredicate,
+  isOpenLeadRow,
   scopeToProspects,
   PROSPECT_SCOPE_SQL,
   // exported for tests

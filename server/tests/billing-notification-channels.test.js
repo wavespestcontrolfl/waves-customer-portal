@@ -1,5 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The Comms schema assertion below does not exercise delivery. Isolate its
+// manual sender boundary from provider/router initialization.
+jest.mock('../services/messaging/send-manual-customer-sms', () => ({
+  sendManualCustomerSms: jest.fn(),
+  manualSmsDeliveryState: jest.fn(),
+}));
 
 const { resolvePolicy } = require('../services/messaging/policy');
 const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
