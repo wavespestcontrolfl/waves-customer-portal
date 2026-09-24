@@ -40,17 +40,20 @@ jest.mock('../services/job-status', () => {
 
 jest.mock('../models/db', () => {
   const state = { scheduledServices: [], writes: [], reassignOnTransaction: false, reassignedTo: null };
+  const norm = (c) => String(c).replace(/^scheduled_services\./, '');
+  const cmpOp = (a, op, v) => (op === '>=' ? a >= v : op === '>' ? a > v : op === '<=' ? a <= v : op === '<' ? a < v : a === v);
   const dbFn = (table) => {
     const builder = {
-      _where: {},
+      _where: {}, _notIn: {}, _cmp: [],
       where(w, op, val) {
-        if (w && typeof w === 'object') Object.assign(builder._where, w);
-        else if (val === undefined) builder._where[String(w).replace(/^scheduled_services\./, '')] = op;
+        if (w && typeof w === 'object') { Object.assign(builder._where, w); return builder; }
+        if (val !== undefined) { builder._cmp.push([norm(w), op, val]); return builder; }
+        builder._where[norm(w)] = op;
         return builder;
       },
       andWhere(...a) { return builder.where(...a); },
-      whereNot() { return builder; },
-      whereNotIn() { return builder; },
+      whereNot(col, val) { builder._notIn[norm(col)] = [val]; return builder; },
+      whereNotIn(col, vals) { builder._notIn[norm(col)] = vals; return builder; },
       whereIn() { return builder; },
       whereNull() { return builder; },
       whereRaw() { return builder; },
@@ -60,9 +63,14 @@ jest.mock('../models/db', () => {
       orderBy() { return builder; },
       select() { return builder; },
       returning() { return builder; },
+      _matches(r) {
+        return Object.entries(builder._where).every(([k, v]) => r[k] === v)
+          && Object.entries(builder._notIn).every(([k, vals]) => !vals.includes(r[k]))
+          && builder._cmp.every(([k, op, v]) => cmpOp(r[k], op, v));
+      },
       async first() {
         const rows = table === 'scheduled_services' ? state.scheduledServices : [];
-        const found = rows.find((r) => Object.entries(builder._where).every(([k, v]) => r[k] === v));
+        const found = rows.find((r) => builder._matches(r));
         return found ? { ...found } : undefined;
       },
       then(resolve, reject) {
@@ -70,7 +78,7 @@ jest.mock('../models/db', () => {
       },
       update(u) {
         const rows = table === 'scheduled_services' ? state.scheduledServices : [];
-        const hits = rows.filter((r) => Object.entries(builder._where).every(([k, v]) => r[k] === v));
+        const hits = rows.filter((r) => builder._matches(r));
         state.writes.push({ table, op: 'update', where: { ...builder._where }, u, hit: hits.map((r) => r.id) });
         hits.forEach((r) => Object.assign(r, u));
         builder._lastResult = hits.map((r) => ({ ...r, ...u }));
@@ -172,6 +180,15 @@ test('control: a DIFFERENT target from an already-cancelled visit still 409s (te
   const { status, body } = await put('svc-1', { status: 'en_route' });
   expect(status).toBe(409);
   expect(body.code).toBe('already_terminal');
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+});
+
+test("codex-review P1: allowTerminal is scoped to a TERMINAL same-status resend — a stale (>7 day) re-confirm of an ordinary LIVE status ('confirmed'->'confirmed') is still refused, not silently let through", async () => {
+  db.__state.scheduledServices[0].status = 'confirmed';
+  db.__state.scheduledServices[0].scheduled_date = '2020-01-01'; // outside the 7-day window
+  const { status, body } = await put('svc-1', { status: 'confirmed' });
+  expect(status).toBe(403);
+  expect(body).toEqual({ error: 'Not assigned to this service', code: 'service_not_assigned' });
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
 });
 

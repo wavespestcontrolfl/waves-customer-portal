@@ -2257,11 +2257,20 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // transitionJobStatus ever runs — the SAME check the field-confirm
         // path below reuses instead of re-verifying itself.
         const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status'], {
-          // A same-status resend of an already-terminal row (cancelled/
-          // skipped/no_show) is the one case the terminal-transition check
-          // above explicitly lets through — it must not be re-rejected here
-          // for being terminal (codex-review P1).
-          allowTerminal: toStatus === fromStatus,
+          // A same-status resend of an already-TERMINAL row (cancelled/
+          // skipped — job-status.js's own ONE_WAY_FROM_STATUSES; 'completed'
+          // can't reach here, it's refused earlier as USE_COMPLETION_FLOW,
+          // and 'no_show' has its own dedicated idempotent-retry branch that
+          // returns before this transaction) is the one case the terminal-
+          // transition check above explicitly lets through — it must not be
+          // re-rejected here for being terminal. Scoped to fromStatus
+          // itself being terminal (codex-review P1): a same-status resend
+          // of an ordinary LIVE status (e.g. re-confirming an already-
+          // confirmed visit) is NOT this case and must stay subject to the
+          // full technicianLiveVisitFilter (staleness included) — the
+          // earlier, broader `toStatus === fromStatus` check let a stale
+          // live-status resend bypass the 7-day window too.
+          allowTerminal: toStatus === fromStatus && ['cancelled', 'skipped'].includes(fromStatus),
         });
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = lockedRow;
