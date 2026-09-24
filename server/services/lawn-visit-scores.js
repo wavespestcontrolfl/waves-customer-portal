@@ -209,7 +209,14 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
   // (written back by the caller alongside decision.stressExplicit — see
   // confirmLockedRun). Never assessment.stress_damage itself, which may only
   // be a PREVIOUS auto-derivation (Codex P1 2026-09-24).
-  const previousExplicit = parseJsonObject(assessment?.adjusted_scores)?.stress_damage_explicit;
+  // Rows saved partway before this change carry the entry as the run's
+  // reconciliation.stress_damage_override instead; read it as a fallback so
+  // an in-flight technician entry survives the deploy. Inert once Stress is
+  // AI-known (resolveConfirmScores checks that first).
+  const markerExplicit = parseJsonObject(assessment?.adjusted_scores)?.stress_damage_explicit;
+  const previousExplicit = known(markerExplicit)
+    ? markerExplicit
+    : parseJsonObject(run?.reconciliation)?.stress_damage_override;
   const stressExplicit = numericOverride(adjusted.stress_damage)
     ? scoreValue(adjusted.stress_damage)
     : (known(previousExplicit) ? previousExplicit : null);

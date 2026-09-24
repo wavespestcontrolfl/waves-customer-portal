@@ -198,6 +198,16 @@ describe('confirm scores are read-only from the AI; a blank AI read is the one f
       expect(fourth.finalScores.stress_damage).toBe(65);
     });
 
+    test('a Stress entry saved before this change (run.reconciliation.stress_damage_override) still sticks', () => {
+      const options = { scoreValue, calculateOverallScore: () => 77 };
+      const blank = { turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null };
+      const run = { status: 'complete', scores_adjusted: JSON.stringify(blank), reconciliation: JSON.stringify({ stress_damage_override: 55 }) };
+      const assessment = { ...blank, fungus_control: 90, thatch_level: 85, stress_damage: 55, adjusted_scores: null };
+      const decision = visit.confirmScores(assessment, run, { turf_density: 70 }, options);
+      expect(decision.finalScores.stress_damage).toBe(55);
+      expect(decision.stressExplicit).toBe(55);
+    });
+
     test('an incomplete/snapshot-less run has no immutable AI read to enforce, so its keys stay editable (unchanged legacy-style fallback)', () => {
       const assessment = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
       const quiet = { status: 'complete', scores_raw: '{}', severities: JSON.stringify({ fungal_activity: sig('severe'), insect_damage: sig('unknown', 'unknown', ''), drought_stress: sig('unknown', 'unknown', ''), mechanical_damage: sig('none') }) };
