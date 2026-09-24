@@ -58,6 +58,13 @@ test('keeps prose adjacent to a fenced code block', () => {
   expect(analysis.claims.map((claim) => claim.passage)).toEqual(passages);
 });
 
+test('ignores decorative headings inside fenced examples', () => {
+  const passage = 'Mosquitoes breed in standing water.';
+  const analysis = analyzeDocument(`\`\`\`md\n## Sources\nExample only.\n\`\`\`\n${passage}`, 'Guide');
+  expect(analysis.sections).toEqual([expect.objectContaining({ heading: 'Guide', lead: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
+});
+
 test('keeps deterministic factual claims phrased as questions', () => {
   const passage = 'Did you know termites cause $5 billion in property damage every year?';
   expect(analyzeDocument(passage, 'Guide').claims).toEqual([expect.objectContaining({ passage })]);

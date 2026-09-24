@@ -123,9 +123,10 @@ function templateTokens(document) {
 
 function analyzeDocument(document, title) {
   const { body } = splitFrontmatter(document);
-  const passages = proseParagraphs(body);
+  const visibleBody = maskFencedCode(body);
+  const passages = proseParagraphs(visibleBody);
   return {
-    sections: sectionInventory(body, passages, title),
+    sections: sectionInventory(visibleBody, passages, title),
     passages,
     claims: sentenceCandidates(passages),
     tokens: templateTokens(document),
