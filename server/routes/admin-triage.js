@@ -421,7 +421,9 @@ router.put('/:id/resolve', async (req, res) => {
   try {
     await transition(req, res, 'resolved');
   } catch (err) {
-    logger.error(`[admin-triage] resolve failed: ${err.message}`);
+    // Code/name only: a knex message embeds the bound payload, which the
+    // settlement's task inserts fill with addresses (pre-push audit P1).
+    logger.error(`[admin-triage] resolve failed: ${err.code || err.name || 'error'}`);
     if (err?.statusCode === 409 && !res.headersSent) return res.status(409).json({ error: err.message, code: err.code || null });
     if (!res.headersSent) res.status(500).json({ error: 'Failed to resolve item' });
   }
@@ -432,7 +434,9 @@ router.put('/:id/dismiss', async (req, res) => {
   try {
     await transition(req, res, 'dismissed');
   } catch (err) {
-    logger.error(`[admin-triage] dismiss failed: ${err.message}`);
+    // Code/name only: a knex message embeds the bound payload, which the
+    // settlement's task inserts fill with addresses (pre-push audit P1).
+    logger.error(`[admin-triage] dismiss failed: ${err.code || err.name || 'error'}`);
     if (err?.statusCode === 409 && !res.headersSent) return res.status(409).json({ error: err.message, code: err.code || null });
     if (!res.headersSent) res.status(500).json({ error: 'Failed to dismiss item' });
   }
@@ -1131,7 +1135,9 @@ router.post('/:id/verdict', async (req, res) => {
   } catch (err) {
     if (err.proposalConflict) return res.status(409).json({ error: err.message });
     if (err.statusCode === 409) return res.status(409).json({ error: err.message, code: err.code || null });
-    logger.error(`[admin-triage] verdict failed: ${err.message}`);
+    // Code/name only: a knex message embeds the bound payload, which the
+    // settlement's task inserts fill with addresses (pre-push audit P1).
+    logger.error(`[admin-triage] verdict failed: ${err.code || err.name || 'error'}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to record verdict' });
   }
 });
