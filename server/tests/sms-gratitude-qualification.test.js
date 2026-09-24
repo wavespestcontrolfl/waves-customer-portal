@@ -458,6 +458,7 @@ describe('sms gratitude qualification', () => {
     'server/services/sms-response-policy.js',
     'server/utils/phone.js',
     'server/services/sms-suggest-mode.js',
+    'server/services/sms-graduation.js',
     'server/services/messaging/send-customer-message.js',
     'server/services/messaging/providers/twilio-sms.js',
     'server/services/twilio.js',

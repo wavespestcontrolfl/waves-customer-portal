@@ -48,6 +48,14 @@ jest.mock('../models/db', () => {
       return q;
     });
     q.orWhere = jest.fn(() => q);
+    q.orWhereExists = jest.fn((callback) => {
+      const subquery = {};
+      for (const method of ['select', 'from', 'where', 'whereRaw']) {
+        subquery[method] = jest.fn(() => subquery);
+      }
+      callback.call(subquery);
+      return q;
+    });
     let excludesId = false;
     q.whereNot = jest.fn(() => { excludesId = true; return q; });
     q.first = jest.fn(async () => {

@@ -64,6 +64,37 @@ const attempt = () => autoSend.maybeAutoSend({
   intent: 'general_customer_sms_needs_review', intendedActions: [], actionsVerifiedSafe: true,
 });
 
+test('active-claim SQL extends only linked sending provider uncertainty', async () => {
+  const knex = require('knex')({ client: 'pg' });
+  let compiled;
+  const dbh = (table) => {
+    const query = knex(table);
+    const first = query.first.bind(query);
+    query.first = (...columns) => {
+      compiled = first(...columns).toSQL();
+      return Promise.resolve(null);
+    };
+    return query;
+  };
+  dbh.raw = knex.raw.bind(knex);
+  try {
+    await expect(autoSend.hasActiveAutoSendClaim(dbh, {
+      threadLast10: '2025550101', customerId: '00000000-0000-4000-8000-000000000002',
+    })).resolves.toBe(false);
+  } finally {
+    await knex.destroy();
+  }
+
+  expect(compiled.sql).toContain('or exists');
+  expect(compiled.sql).toContain('"reservation"."status" = ?');
+  expect(compiled.sql).toContain("reservation.metadata->>'auto_send_reservation' = 'true'");
+  expect(compiled.sql).toContain("reservation.metadata->>'provider_outcome_uncertain' = 'true'");
+  expect(compiled.sql).toContain("reservation.metadata->>'agent_decision_id' = ad.id::text");
+  expect(compiled.bindings).toEqual(expect.arrayContaining([
+    autoSend.AUTOSEND_WORKFLOW, autoSend.CLAIM_STATUS, 'outbound', 'sending', '2025550101',
+  ]));
+});
+
 test('an atomic reservation failure prevents provider entry', async () => {
   suggest.createReplyHoldingReservation.mockRejectedValueOnce(new Error('reservation unavailable'));
   await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'error' });

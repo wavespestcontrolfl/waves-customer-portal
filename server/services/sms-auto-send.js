@@ -403,10 +403,9 @@ async function resolveSent({ decisionId, draftId, providerMessageId }) {
   });
 }
 
-// How long an auto-send claim counts as "in flight" for cross-path reservation
-// checks. A real provider call resolves in well under a minute; a longer-lived
-// 'sending' row is an orphan the nightly reconcile will fail, and must NOT
-// block human replies to the thread indefinitely.
+// How long an ordinary auto-send claim counts as "in flight" for cross-path
+// reservation checks. A provider-uncertain reservation extends that fence for
+// the shared bounded reconciliation window below.
 const ACTIVE_CLAIM_MINUTES = 5;
 
 /**
@@ -415,17 +414,31 @@ const ACTIVE_CLAIM_MINUTES = 5;
  * auto_send_failed). The manual/scheduled send paths call this UNDER the shared
  * thread lock before dispatching, so an autonomous reply and a human reply
  * can't both reach the customer in the same window: whichever takes the lock
- * first commits its claim/park, the other sees it and backs off. Scoped to
- * RECENT claims so an orphaned 'sending' row never blocks the inbox for more
- * than the reconcile window. Thread scope = customer phone (last 10), with a
+ * first commits its claim/park, the other sees it and backs off. An ordinary
+ * claim is scoped to RECENT activity so an orphan cannot block indefinitely;
+ * an explicitly provider-uncertain auto reservation stays active for the same
+ * bounded 24-hour window reconciliation protects. Promoted/terminal receipts
+ * are not in-flight fences. Thread scope = customer phone (last 10), with a
  * customer_id fallback.
  */
 async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMinutes = ACTIVE_CLAIM_MINUTES } = {}) {
   if (!threadLast10 && !customerId) return false;
   const cutoff = new Date(Date.now() - recentMinutes * 60 * 1000);
+  const uncertainCutoff = new Date(Date.now() - UNCERTAIN_CLAIM_HOLD_HOURS * 60 * 60 * 1000);
   const q = dbh('agent_decisions as ad')
     .where({ 'ad.workflow': AUTOSEND_WORKFLOW, 'ad.status': CLAIM_STATUS })
-    .where('ad.updated_at', '>', cutoff);
+    .where(function recentOrProviderUncertain() {
+      this.where('ad.updated_at', '>', cutoff)
+        .orWhereExists(function linkedUncertainReservation() {
+          this.select(dbh.raw('1'))
+            .from('sms_log as reservation')
+            .where({ 'reservation.direction': 'outbound', 'reservation.status': 'sending' })
+            .whereRaw("reservation.metadata->>'auto_send_reservation' = 'true'")
+            .whereRaw("reservation.metadata->>'provider_outcome_uncertain' = 'true'")
+            .where('reservation.updated_at', '>=', uncertainCutoff)
+            .whereRaw("reservation.metadata->>'agent_decision_id' = ad.id::text");
+        });
+    });
   if (threadLast10) {
     q.leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
       .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]);

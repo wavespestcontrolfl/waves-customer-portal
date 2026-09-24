@@ -97,6 +97,45 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     return id;
   }
 
+  async function agedAutoClaimReservation({ reservationAgeHours, accepted = false }) {
+    const customerId = randomUUID();
+    const inboundId = randomUUID();
+    await trx('sms_log').insert({
+      id: inboundId, customer_id: customerId, direction: 'inbound',
+      from_phone: '+12025550101', to_phone: '+19413529161', message_body: 'Thanks!',
+      status: 'received', metadata: {}, created_at: old(), updated_at: old(),
+    });
+    const used = await decision({ workflow: autoSend.AUTOSEND_WORKFLOW, status: autoSend.CLAIM_STATUS });
+    await trx('agent_decisions').where({ id: used.id }).update({
+      customer_id: customerId, sms_log_id: inboundId, updated_at: old(),
+    });
+    const reservationId = await suggest.createReplyHoldingReservation(trx, {
+      to: '+12025550101', customerId, fromNumber: '+19413529161', body: 'Our pleasure!',
+      agentDecisionId: used.id, reservationKind: 'auto', uncertain: true,
+    });
+    if (accepted) {
+      expect(await suggest.settleReplyHoldingReservation({
+        reservationId,
+        acceptedResult: { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'9'.repeat(32)}` },
+      })).toBe(true);
+    } else {
+      const agedAt = new Date(Date.now() - reservationAgeHours * 60 * 60 * 1000);
+      await trx('sms_log').where({ id: reservationId }).update({ created_at: agedAt, updated_at: agedAt });
+    }
+    return { customerId, reservationId };
+  }
+
+  test.each([
+    ['a provider-uncertain reservation newer than 24 hours', { reservationAgeHours: 1 }, true],
+    ['an accepted provider receipt', { reservationAgeHours: 1, accepted: true }, false],
+    ['a provider-uncertain reservation older than 24 hours', { reservationAgeHours: 25 }, false],
+  ])('%s controls an auto claim older than the five-minute fast window', async (_label, fixture, expected) => {
+    const { customerId } = await agedAutoClaimReservation(fixture);
+    await expect(autoSend.hasActiveAutoSendClaim(trx, {
+      threadLast10: '2025550101', customerId,
+    })).resolves.toBe(expected);
+  });
+
   test.each([
     ['ordinary unmarked uncertainty keeps the old 30-minute cleanup behavior', 31, false, 1, false],
     ['wrapper uncertainty survives cleanup inside the 24-hour retry hold', 31, true, 0, true],
