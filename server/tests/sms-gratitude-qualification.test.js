@@ -72,7 +72,8 @@ function setSnapshot(row, value) {
   row.input_snapshot = JSON.stringify(value);
 }
 
-function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lockError = null } = {}) {
+function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lockError = null,
+  runExclusiveImpl = null } = {}) {
   jest.resetModules();
   const previousVerify = process.env.SHADOW_DRAFT_VERIFY;
   const previousRevisions = process.env.SHADOW_DRAFT_VERIFY_MAX_REVISIONS;
@@ -98,10 +99,11 @@ function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lock
   jest.doMock('../models/db', () => dbi.dbi);
   jest.doMock('../services/llm/call', () => ({ dispatchWithFallback }));
   jest.doMock('../services/llm/deep', () => ({ createDeepMessage }));
-  const runExclusive = jest.fn(async (_jobName, task) => {
+  const defaultRunExclusive = async (_jobName, task) => {
     if (lockError) throw new Error(lockError);
     return lockOutcome || task();
-  });
+  };
+  const runExclusive = jest.fn(runExclusiveImpl || defaultRunExclusive);
   jest.doMock('../utils/cron-lock', () => ({
     runExclusive,
     wasLockSkipped: result => result?.skipped === true
@@ -272,7 +274,6 @@ describe('sms gratitude qualification', () => {
 
   test.each([
     ['resolved lock skip', { lockOutcome: { skipped: true, reason: 'no_connection' } }, 'gratitude_qualification_lock_no_connection'],
-    ['busy lock skip', { lockOutcome: { skipped: true, reason: 'lease_held' } }, 'gratitude_qualification_lock_lease_held'],
     ['lock exception', { lockError: 'synthetic lock failure' }, 'synthetic lock failure'],
   ])('%s marks the durable run failed', async (_label, lock, failure) => {
     const store = memoryDb();
@@ -286,6 +287,39 @@ describe('sms gratitude qualification', () => {
     );
     expect(generateGroundedDraft).not.toHaveBeenCalled();
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'failed', results: [], failure });
+  });
+
+  test('a duplicate runner covered by the active lease leaves the owner authoritative', async () => {
+    const store = memoryDb();
+    let releaseOwner;
+    let ownerHasLease;
+    let held = false;
+    const ownerPaused = new Promise(resolve => { ownerHasLease = resolve; });
+    const ownerRelease = new Promise(resolve => { releaseOwner = resolve; });
+    const runExclusiveImpl = async (_jobName, task) => {
+      if (held) return { skipped: true, reason: 'lease_held' };
+      held = true;
+      ownerHasLease();
+      await ownerRelease;
+      try { return await task(); } finally { held = false; }
+    };
+    const { qualification, runExclusive, generateGroundedDraft } = loadQualification({
+      dbi: store, runExclusiveImpl,
+    });
+    const run = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+
+    const owner = qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id });
+    await ownerPaused;
+    await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id }))
+      .resolves.toEqual({ skipped: true, reason: 'lease_held' });
+    expect(snapshot(store.rows[0])).toMatchObject({ state: 'running', results: [] });
+    expect(generateGroundedDraft).not.toHaveBeenCalled();
+
+    releaseOwner();
+    await expect(owner).resolves.toMatchObject({ id: run.id, state: 'complete' });
+    expect(runExclusive).toHaveBeenCalledTimes(2);
+    expect(generateGroundedDraft).toHaveBeenCalledTimes(exam.fixtures.length * 2);
+    expect(snapshot(store.rows[0])).toMatchObject({ state: 'complete' });
   });
 
   test('fails closed for verifier-off runs, profile mismatch, and pin drift', async () => {
