@@ -2197,6 +2197,20 @@ async function createOrReuseAdminEstimate({
               ...parseStoredEstimateData(writeFields.estimate_data), manualSendAttempts: existingAttempts,
             });
           }
+          // The county-roll address block rides the LOCKED draft across this
+          // reuse exactly as it rides a revision (pre-push audit P1 after
+          // r45 on #4667): a POST save that reuses the lead's draft at the
+          // same premise keeps the hold; only a premise correction or an
+          // explicit confirmAddress lifts it.
+          {
+            const reuseData = parseStoredEstimateData(writeFields.estimate_data) || {};
+            const lockedReuseData = parseStoredEstimateData(existingEstimate.estimate_data) || {};
+            carryAddressBlockAcrossRevise(reuseData, lockedReuseData, {
+              addressChanged: premiseChanged(existingEstimate.address, writeFields.address),
+              explicitConfirm: body?.confirmAddress === true,
+            });
+            writeFields.estimate_data = JSON.stringify(reuseData);
+          }
           const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };
           assertLeadCanAttachEstimate({
             lead,

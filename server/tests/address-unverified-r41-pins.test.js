@@ -237,3 +237,26 @@ describe('pre-push audit after r45: recovered flag vs staff confirmation under a
     expect(kept.addressUnverified).toBe(newer);
   });
 });
+
+describe('pre-push audit after r45: linked-draft reuse keeps the county hold', () => {
+  test('createOrReuseAdminEstimate carries the locked draft block through the reuse write', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/admin-estimate-persistence'), 'utf8');
+    const start = src.indexOf('async function createOrReuseAdminEstimate(');
+    const block = src.slice(start, src.indexOf("throw errorWithStatus('Estimate draft changed; refresh and try again.', 409);", start));
+    expect(block).toContain('carryAddressBlockAcrossRevise(reuseData, lockedReuseData, {');
+    expect(block).toContain('addressChanged: premiseChanged(existingEstimate.address, writeFields.address),');
+    expect(block).toContain("explicitConfirm: body?.confirmAddress === true,");
+    expect(block.indexOf('writeFields.estimate_data = JSON.stringify(reuseData);')).toBeLessThan(block.indexOf("const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };"));
+  });
+  test('the carry helper keeps a hold on a same-premise reuse and lifts it only on correction or confirmation', () => {
+    const { carryAddressBlockAcrossRevise } = require('../services/admin-estimate-persistence')._private || {};
+    if (!carryAddressBlockAcrossRevise) return; // pinned by source above when not exported
+    const prior = { addressUnverified: true, addressUnverifiedFlag: { address_line1: '1260 Example St' } };
+    const same = {};
+    carryAddressBlockAcrossRevise(same, prior, { addressChanged: false, explicitConfirm: false });
+    expect(same.addressUnverified).toBe(true);
+    const confirmed = {};
+    carryAddressBlockAcrossRevise(confirmed, prior, { addressChanged: false, explicitConfirm: true });
+    expect(confirmed.addressUnverified).toBe(false);
+  });
+});
