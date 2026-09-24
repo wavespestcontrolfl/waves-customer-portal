@@ -702,8 +702,9 @@ function draftRouteFor({ intentName, inboundMessage } = {}) {
  * One draft generation, routed per the SMS reply-drafting split in
  * config/models.js. Any routed miss — missing provider key, provider error,
  * unparseable output — falls back to the opposite provider, so a provider
- * issue never causes a gap. Returns { parsed, model } (model = the
- * one that actually produced the draft, persisted on the row for the judge),
+ * issue never causes a gap. Returns { parsed, model, servedModel }; model
+ * preserves the requested-route contract persisted on live rows, while
+ * servedModel is the provider-reported model used by sealed qualification,
  * or null when both paths are unusable.
  */
 async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault, { pinned = false, metricsLane, laneId } = {}) {
@@ -732,7 +733,11 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
       { laneId, system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );
-    if (routed.ok) return { parsed: parseShadowResponse(routed.text), model: routed.model };
+    if (routed.ok) return {
+      parsed: parseShadowResponse(routed.text),
+      model: routed.model,
+      servedModel: routed.servedModel,
+    };
     logger.warn(`[sms-shadow] both draft providers unavailable (${routed.reason})`);
   } catch (err) {
     logger.warn(`[sms-shadow] draft route dispatch failed (${err.message})`);
@@ -745,10 +750,10 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * adversarial verifier; if the draft asserts facts the context doesn't
  * support, feeds the violations back for a rewrite toward deferral, up to
  * MAX_REVISIONS times. Returns the final draft + loop telemetry
- * { parsed, passes, converged, model, verifierModels }. converged=true means the verifier
- * signed off (or the reply was empty — nothing to assert). model is whichever
- * model produced the FINAL draft (routed default / save-the-sale, or the
- * opposite-provider fallback) — persist it, don't assume a provider. Verify failures
+ * { parsed, passes, converged, model, servedModel, verifierModels }. converged=true means the verifier
+ * signed off (or the reply was empty — nothing to assert). model identifies
+ * the winning requested route; servedModel identifies the provider-reported
+ * model that produced the FINAL draft. Verify failures
  * degrade gracefully: keep the current draft, stop, converged=false — a
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
@@ -803,12 +808,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const voiceProfileVersion = profileApplied ? (voiceProfile?.version ?? null) : null;
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
-    parsed: null, passes: 1, converged: false, model: null, voiceProfileVersion, verifierModels: [],
+    parsed: null, passes: 1, converged: false, model: null, servedModel: null,
+    voiceProfileVersion, verifierModels: [],
   };
-  let { parsed, model } = first;
+  let { parsed, model, servedModel } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
   if (!VERIFY_ENABLED) return {
-    parsed, passes: 1, converged: true, model, voiceProfileVersion, verifierModels: [],
+    parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [],
   };
 
   const verifier = require('./sms-draft-verifier');
@@ -866,10 +872,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     if (!revised) break; // revision unparseable — keep the prior draft
     parsed = revised.parsed;
     model = revised.model;
+    servedModel = revised.servedModel;
     passes += 1;
   }
 
-  return { parsed, passes, converged, model, voiceProfileVersion, verifierModels };
+  return { parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels };
 }
 
 /**

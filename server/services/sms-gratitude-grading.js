@@ -86,6 +86,8 @@ function pairPasses({ fixture, leg, result, pins }) {
     converged: output.converged === true && Number(output.passes) >= 1,
     currentModel: typeof route.model === 'string' && route.model.trim().length > 0
       && output.model === route.model,
+    servedModelCurrent: typeof route.model === 'string' && route.model.trim().length > 0
+      && output.servedModel === route.model,
     profileCurrent: (output.voiceProfileVersion ?? null) === (pinSet.voiceProfileVersion ?? null),
     noMissingInfo: parsed.missingInfo == null || String(parsed.missingInfo).trim() === '',
   };
