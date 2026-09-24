@@ -578,18 +578,25 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
     // with its mirrored [DRAFT] slot compare-and-set on the exact text (a
     // slot someone edited meanwhile is genuinely theirs and stays), same as
     // the under-4★ Post now exit.
-    const cleared = { ...patch, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_version: null, auto_reply_mode: null };
-    const mirrored = isDraftReply(row.review_reply)
-      && stripDraftPrefix(row.review_reply).trim() === String(row.auto_reply_draft).trim();
-    if (mirrored) {
-      const n = await db('google_reviews')
-        .where({ id: row.id, auto_reply_claimed_until: row._claimToken, review_reply: row.review_reply })
-        .update({ ...cleared, review_reply: null, reply_updated_at: null });
-      if ((Array.isArray(n) ? n.length : n) > 0) return true;
-    }
-    return releaseClaim(row, cleared);
+    return releaseDiscardingDraft(row, patch);
   }
   return releaseClaim(row, patch);
+}
+
+// Release the claim with `patch` AND drop the row's stored pipeline draft,
+// plus its mirrored [DRAFT] slot compare-and-set on the exact text (a slot
+// someone edited meanwhile is genuinely theirs and stays).
+async function releaseDiscardingDraft(row, patch) {
+  const cleared = { ...patch, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_version: null, auto_reply_mode: null };
+  const mirrored = row.auto_reply_draft && isDraftReply(row.review_reply)
+    && stripDraftPrefix(row.review_reply).trim() === String(row.auto_reply_draft).trim();
+  if (mirrored) {
+    const n = await db('google_reviews')
+      .where({ id: row.id, auto_reply_claimed_until: row._claimToken, review_reply: row.review_reply })
+      .update({ ...cleared, review_reply: null, reply_updated_at: null });
+    if ((Array.isArray(n) ? n.length : n) > 0) return true;
+  }
+  return releaseClaim(row, cleared);
 }
 
 // What a draft was written FOR. A stored draft may only be reused when the
@@ -741,7 +748,13 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       const attempts = (merged.auto_reply_attempts || 0) + 1;
       if (attempts < MAX_ATTEMPTS) {
         const due = new Date(Date.now() + RETRY_BACKOFF_MIN * attempts * 60000).toISOString();
-        await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: 'provider_unavailable', auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: String(draft.error || '') });
+        const retry = { auto_reply_status: STATUS.FAILED, auto_reply_reason: 'provider_unavailable', auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: String(draft.error || '') };
+        // A stored draft this run re-verified and REJECTED goes now: the
+        // next run sees reason provider_unavailable, which is not a
+        // publish-retry reason, so it could no longer tell the draft was
+        // rejected (Codex #4713 r12).
+        if (reusable && !reuseOk) await releaseDiscardingDraft(row, retry);
+        else await releaseClaim(row, retry);
         return { outcome: 'retry', reason: 'provider_unavailable' };
       }
       if (!(await storeDraft(merged, draft, STATUS.PARKED, 'provider_down', { grounding: snapshot, discardStored: reusable && !reuseOk, fields: { auto_reply_attempts: attempts } }))) return { outcome: 'skipped', reason: 'changed_during_draft' };

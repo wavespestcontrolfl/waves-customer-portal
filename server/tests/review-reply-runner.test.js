@@ -1190,6 +1190,16 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject', auto_reply_draft: null, auto_reply_version: null, review_reply: null });
   });
 
+  test('a reused draft that fails re-verification is cleared before a provider retry is scheduled (Codex #4713 r12)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const fp = Runner.reviewFingerprint(row());
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 0, auto_reply_draft: GOOD_DRAFT.text, review_reply: `[DRAFT] ${GOOD_DRAFT.text}`, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
+    mockVerify.mockReturnValueOnce('repetitive_opening');
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable', error: 'down', mode: 'service_quality', version: 'reply-v1' });
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'provider_unavailable', auto_reply_draft: null, review_reply: null });
+  });
+
   test('a draft kept through a provider outage keeps its OWN grounding stamp (Codex #4713 r11)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     mockDraft.mockResolvedValue({ ok: false, reason: 'provider_unavailable', error: 'down', mode: 'service_quality', version: 'reply-v1' });

@@ -297,6 +297,11 @@ answering explaining walking learning welcoming wishing sending passing putting 
 moving starting switching arriving spending sticking considering choosing trusting reaching
 calling booking scheduling planning noticing nothing everything anything something
 `.split(/\s+/).filter(Boolean));
+// Openers that describe a private interaction (a call, a booking, an
+// arrival, an explanation) are exempt only when the reviewer used the same
+// word — "Calling us was easy" on a "Great service" review invents a call
+// (Codex #4713 r12).
+const INTERACTION_OPENERS = new Set(['calling', 'booking', 'scheduling', 'planning', 'reaching', 'answering', 'explaining', 'arriving', 'sending', 'coming', 'showing', 'checking', 'walking', 'texting', 'emailing', 'talking', 'speaking', 'meeting']);
 // …and a listed opener is exempt only with POSITIVE ordinary-word syntax
 // directly after it: a plural-only verb ("Ants are / love / need"), a
 // determiner ("Finding a", "Skipping the"), or a pronoun.
@@ -585,6 +590,31 @@ function servicePhraseSpans(body, phrases) {
   return spans;
 }
 
+// An account-only service name (one the reviewer did not write) may appear
+// ONLY as a whole sentence in one of these fixed frames (Codex #4713 r12,
+// structural): the account proves the service happened, never how it went.
+// Enumerating outcome words ("worked", "did the trick", "successful", …)
+// never converged — every round found another synonym — so the sentence
+// itself is allowlisted instead of its predicates denylisted.
+const SERVICE_FRAME_HEADS = [
+  'thanks? (?:you )?(?:so much )?for (?:choosing|trusting) us (?:with|for)',
+  '(?:we(?:\'re| are) )?glad (?:we|our team) could help with',
+  '(?:we(?:\'re| are) )?glad you chose(?: us for)?',
+];
+function serviceFrameViolation(body, spans, reviewLower) {
+  const sSpans = sentenceSpans(body);
+  for (const [a, b] of spans) {
+    const phrase = body.slice(a, b);
+    if (reviewLower.replace(/[^a-z0-9]+/g, ' ').includes(phrase.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim())) continue;
+    const sentence = sentenceTextAt(body, sSpans, a)
+      .replace(/^\s*(?:hi|hello|hey|dear)\s+[^,\n]{1,40},\s*/i, '')
+      .trim();
+    const frameRe = new RegExp(`^(?:${SERVICE_FRAME_HEADS.join('|')}) (?:the |your )?${escapeRe(phrase)}(?: (?:at|for) your (?:home|house|property))?[.!]?$`, 'i');
+    if (!frameRe.test(sentence)) return phrase;
+  }
+  return null;
+}
+
 // Sentence spans of `body`, split on . ! ? — module-level (2026-09-24/25
 // complexity fix) so the subject-scoping helpers below are plain functions
 // of their inputs, not closures capturing verifyReplyDetailed's locals.
@@ -645,6 +675,8 @@ function checkServiceClaims(ctx) {
     bodyLower, bodyNeg, categoryWords, genericServiceWords, spans,
   } = ctx;
   const inServicePhraseSpan = (idx) => spans.some(([a, b]) => idx >= a && idx < b);
+  const unframed = serviceFrameViolation(body, spans, reviewLower);
+  if (unframed) return reject('unlisted_service_claim', unframed);
   const bodyNegates = (phrase) => allOccurrencesNegated(bodyLower, phrase, bodyNeg) === true;
   const reviewSupports = (phrase, canon) => {
     const lit = allOccurrencesNegated(reviewLower.replace(/\s+/g, ' '), phrase, reviewNeg);
@@ -968,7 +1000,8 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     // answering, explaining, walking, …) plus the review-word-inflection
     // check above it. A capitalized word not on either list has no
     // provenance from mere morphology.
-    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
+    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))
+      && (!INTERACTION_OPENERS.has(w) || [...reviewWords].some((rw) => stemOf(rw) === stemOf(w)))) continue;
     return reject('unlisted_name', pn[2]);
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
@@ -1122,7 +1155,7 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
     if (a.relationship) lines.push(`Relationship: ${a.relationship === 'recurring' ? 'recurring customer' : 'first visit'}`);
     if (a.tenure) lines.push(`Tenure: ${a.tenure.replace('_', ' ')}`);
     if (a.serviceCategories?.length) lines.push(`Service categories: ${a.serviceCategories.join(', ')}`);
-    if (a.servicesPerformed?.length) lines.push(`Services we have completed for them (public names; you may refer to the service by this name as context, never dates, visit counts, products or prices — refer to a service by its full name exactly as listed): ${a.servicesPerformed.join(', ')}`);
+    if (a.servicesPerformed?.length) lines.push(`Services we have completed for them (public names; you may refer to the service by this name as context, never dates, visit counts, products or prices — refer to a service by its full name exactly as listed, and ONLY in one short sentence of the form "Thanks for choosing us for the <service>." or "Glad we could help with the <service>." — never say how it went): ${a.servicesPerformed.join(', ')}`);
     if (a.city) lines.push(`City: ${a.city}`);
     lines.push('Do not call them a member or mention a plan, program or membership unless the reviewer used that word.');
   } else {

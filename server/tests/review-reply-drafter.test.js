@@ -681,7 +681,7 @@ describe('2026-09-24 fix: sentence-initial gerunds pass, servicesPerformed words
   test('"Working around your schedule…" and sentence-initial "Inheriting…" pass', () => {
     const g = tylerGrounding();
     expect(Drafter.verifyReplyText(good("Hi Tyler,\n\nGood to hear Adam found the source and explained the plan. Working around your schedule is part of the job, and we'll pass your note along."), g)).toBeNull();
-    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad we handled the nest and the cockroach treatment did its job.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad we handled the nest. Thanks for trusting us with the cockroach treatment.'), g)).toBeNull();
   });
   test('a common first name (Kevin) sentence-initial still rejects', () => {
     const g = tylerGrounding();
@@ -788,6 +788,31 @@ describe('2026-09-24 round-6 P1 fixes: outcome idioms, negated membership, reply
     // Rejected either way: "on our plan" is not the review's literal wording.
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for being on our plan.'), genericGrounding('We are not on your plan.'))).toMatch(/^(?:negated_review_claim|unlisted_service_claim)$/);
   });
+  test.each([
+    'Glad the cockroach treatment was successful for you.',
+    'The cockroach treatment brought real relief.',
+    'Thanks for trusting us with the cockroach treatment, it was a success.',
+  ])('an account-only service name outside a fixed frame rejects, whatever the predicate (round 12, structural): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBe('unlisted_service_claim');
+  });
+  test.each([
+    'Thanks for choosing us for the cockroach treatment.',
+    'Glad we could help with the cockroach treatment.',
+    'Glad you chose us for the cockroach treatment at your home.',
+  ])('the fixed frames pass (round 12): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).toBeNull();
+  });
+  test.each([
+    'Calling us was easy, and we appreciate your review.',
+    'Scheduling your appointment went smoothly.',
+    'Planning your visit with us was easy.',
+  ])('an interaction opener the reviewer never used rejects (round 12): %s', (line) => {
+    expect(Drafter.verifyReplyText(good(`Hi Dana,\n\n${line}`), genericGrounding())).not.toBeNull();
+  });
+  test('an interaction opener the reviewer did use still passes (round 12)', () => {
+    const g = genericGrounding('Scheduling was easy and the tech was great.');
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nScheduling should always be that easy.'), g)).toBeNull();
+  });
   test('REPLY_VERSION moved past reply-v1 so stored safe-copy drafts are never reused on a publish retry', () => {
     expect(Drafter.REPLY_VERSION).not.toBe('reply-v1');
   });
@@ -815,7 +840,7 @@ describe('2026-09-24 P1 fix: worked/handled negation restored, compliment adject
     g.allow.names = ['Tyler', 'Adam'];
     g.allow.servicePhrases = ['cockroach treatment'];
     expect(Drafter.verifyReplyText(good("Hi Tyler,\n\nGood to hear Adam found the source and explained the plan. Working around your schedule is part of the job, and we'll pass your note along."), g)).toBeNull();
-    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad we handled the nest and the cockroach treatment did its job.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad we handled the nest. Thanks for trusting us with the cockroach treatment.'), g)).toBeNull();
   });
 });
 
