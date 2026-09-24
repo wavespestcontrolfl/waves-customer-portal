@@ -59,6 +59,7 @@ const STATUS_MAP = Object.freeze({
   auto_sent: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' }, // sms-auto-send SENT_STATUS
   auto_send_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'provider' }, // sms-auto-send FAILED_STATUS
   failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'provider' },
+  qualification_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'incorrect' },
   auto_applied: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' }, // contact-correction
   auto_resolved: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' }, // reschedule-intent-watcher
   reviewed: { lifecycle: 'terminal', result: 'succeeded' },
@@ -87,7 +88,7 @@ const LIVE_STATUSES = Object.freeze(Object.entries(STATUS_MAP).filter(([, m]) =>
 const WORKFLOW_MAP = Object.freeze({
   sms_house_voice_suggest: { laneId: 'sms_suggest', area: 'sms' }, // sms-suggest-mode SUGGEST_WORKFLOW
   sms_house_voice_auto_send: { laneId: 'sms_draft', area: 'sms' }, // sms-auto-send AUTOSEND_WORKFLOW (sends the drafter's draft)
-  sms_gratitude_qualification: { laneId: 'sms_draft', area: 'sms' }, // sms-gratitude-qualification WORKFLOW
+  sms_gratitude_qualification: { laneId: 'sealed_eval', area: 'sms' }, // sms-gratitude-qualification WORKFLOW
   comms_guards: { laneId: null, area: 'sms' }, // reschedule-intent-flagger / completion-comms-guard
   contact_correction: { laneId: 'contact_correction', area: null }, // contact-correction
   estimate_conversion_sms: { laneId: 'estimate_followup', area: null }, // estimate-conversion-agent

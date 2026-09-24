@@ -4,6 +4,7 @@ const exam = require('../config/sms-gratitude-exam.json');
 
 function memoryDb() {
   const rows = [];
+  const hooks = { beforeUpdate: null };
   const profile = { id: 'synthetic-profile', version: 'synthetic-profile-v1', profile_text: 'Use concise, warm replies.' };
   let sequence = 0;
   const dbi = (table) => {
@@ -64,6 +65,7 @@ function memoryDb() {
         return Promise.resolve([row]);
       },
       update(values) {
+        if (hooks.beforeUpdate) hooks.beforeUpdate({ rows, values });
         const found = matching();
         for (const row of found) Object.assign(row, values);
         return Promise.resolve(found.length);
@@ -74,7 +76,7 @@ function memoryDb() {
   dbi.fn = { now: () => new Date('2030-01-01T01:00:00.000Z') };
   dbi.raw = jest.fn(async () => ({ rows: [] }));
   dbi.transaction = jest.fn(async callback => callback(dbi));
-  return { dbi, rows, profile };
+  return { dbi, rows, profile, hooks };
 }
 
 function snapshot(row) {
@@ -245,6 +247,28 @@ describe('sms gratitude qualification', () => {
     expect(store.rows[1].status).toBe('initiated');
   });
 
+  test('stale recovery loses safely when the owner completes after the stale read', async () => {
+    const store = memoryDb();
+    const { qualification } = loadQualification({ dbi: store });
+    const first = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    store.rows[0].created_at = '2000-01-01T00:00:00.000Z';
+    store.hooks.beforeUpdate = () => {
+      store.hooks.beforeUpdate = null;
+      setSnapshot(store.rows[0], {
+        ...snapshot(store.rows[0]), state: 'complete', results: [{ preserved: true }],
+      });
+      Object.assign(store.rows[0], { status: 'shadow', correction_note: null });
+    };
+
+    await expect(qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' }))
+      .rejects.toMatchObject({ code: 'RUN_IN_PROGRESS', runId: first.id, state: 'complete' });
+    expect(store.rows).toHaveLength(1);
+    expect(snapshot(store.rows[0])).toMatchObject({
+      state: 'complete', results: [{ preserved: true }],
+    });
+    expect(store.rows[0]).toMatchObject({ status: 'shadow', correction_note: null });
+  });
+
   test('regrades the persisted result instead of trusting its stored summary', async () => {
     const store = memoryDb();
     const { qualification } = loadQualification({ dbi: store });
@@ -280,7 +304,7 @@ describe('sms gratitude qualification', () => {
     expect(snapshot(store.rows[0])).toMatchObject({
       state: 'complete', summary: { qualified: false, reason: 'false_positive' },
     });
-    expect(store.rows[0]).toMatchObject({ status: 'failed', correction_note: 'false_positive' });
+    expect(store.rows[0]).toMatchObject({ status: 'qualification_failed', correction_note: 'false_positive' });
   });
 
   test.each([
