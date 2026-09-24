@@ -2755,6 +2755,20 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(longRefusal.error).toMatch(/must use https/);
   });
 
+  // Codex #4709 r12 P1: a SIGNED consultation token wrapped in a foreign
+  // host (tracker/redirector) is refused, not ignored as "no bearer".
+  test('a signed consultation token on a host we do not own → refused', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    wireConsultation({ codeRows: [] });
+    const refusal = await checkConsultationLinkSend(`Pick a time: https://tracker.example/inspection/${mintLeadConsultationToken('lead-1')} Reply STOP to opt out.`, '9415550100');
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/another website/);
+    const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+    mockBuilders = { short_codes: chainBuilder({ rows: [] }) };
+    expect(await immediateOnlyLinkSendCheck(`https://tracker.example/inspection/${mintLeadConsultationToken('lead-1')}`))
+      .toEqual({ present: true, label: 'Consultation link' });
+  });
+
   // Codex #4709 r5 P1: a pasted long /inspection/<token> URL is checked too.
   test('a long-form /inspection/<token> link is verified like its short wrapper', async () => {
     const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');

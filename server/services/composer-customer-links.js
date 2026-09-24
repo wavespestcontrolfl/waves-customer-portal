@@ -894,6 +894,15 @@ async function immediateOnlyLinkSendCheck(body) {
   if (linkRuns(runs, /\/inspection\//i).some((run) => canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME))) {
     return { present: true, label: 'Consultation link' };
   }
+  // ...and a SIGNED consultation token on any host (Codex #4709 r12 P1):
+  // parked here so the send-time check refuses it.
+  const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
+  if (linkRuns(runs, /\/inspection\//i).some((run) => {
+    const m = /\/inspection\/([A-Za-z0-9._-]+)/i.exec(run);
+    return m && verifyLeadConsultationToken(m[1], 0);
+  })) {
+    return { present: true, label: 'Consultation link' };
+  }
   return { present: false };
 }
 
@@ -1428,6 +1437,17 @@ async function consultationLinkRows(body) {
       });
     }
   }
+  // A signed consultation token on a host we do NOT own (Codex #4709 r12
+  // P1) — a tracker or redirector wrapping the real link — is refused
+  // outright: the third party could harvest the 14-day bearer.
+  for (const run of linkRuns(runs, /\/inspection\//i)) {
+    let url;
+    try { url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`); } catch { continue; }
+    if ([].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
+    const m = /\/inspection\/([A-Za-z0-9._-]+)\/?$/i.exec(url.pathname);
+    const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
+    if (m && verifyLeadConsultationToken(m[1], 0)) rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
+  }
   const longRuns = linkRuns(runs, /\/inspection\//i);
   const tokenRuns = longRuns
     .map((run) => ({ run, token: canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME) }))
@@ -1488,6 +1508,9 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLea
   }
   const { isOpenLeadRow } = require('./lead-statuses');
   for (const row of rows) {
+    if (row.foreignHost) {
+      return refuseSend('This consultation link is wrapped in another website\'s address — remove it and insert a fresh one.');
+    }
     if (row.plaintext) {
       return refuseSend('Consultation links must use https — remove the http:// link and insert a fresh one.');
     }

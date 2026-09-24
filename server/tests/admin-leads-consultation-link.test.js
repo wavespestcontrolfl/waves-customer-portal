@@ -44,7 +44,7 @@ let lead;
 
 beforeEach(() => {
   jest.clearAllMocks();
-  lead = { id: 'lead-qa', first_name: 'Pat', deleted_at: null, status: 'new', converted_at: null };
+  lead = { id: '4b1c9f2e-1111-4222-8333-0123456789ab', first_name: 'Pat', deleted_at: null, status: 'new', converted_at: null };
   db.mockImplementation((table) => {
     const builder = {
       where: jest.fn(() => builder),
@@ -55,7 +55,7 @@ beforeEach(() => {
   });
 });
 
-async function request(method, leadId = 'lead-qa', token = 'admin') {
+async function request(method, leadId = '4b1c9f2e-1111-4222-8333-0123456789ab', token = 'admin') {
   const app = express();
   app.use(express.json());
   app.use('/admin/leads', router);
@@ -76,7 +76,7 @@ const post = (leadId, token) => request('POST', leadId, token);
 
 describe('GET /:id/consultation-link — availability probe, never mints', () => {
   test('403 for technicians — same router-wide admin gate as every other /admin/leads route', async () => {
-    const { status, body } = await get('lead-qa', 'tech');
+    const { status, body } = await get('4b1c9f2e-1111-4222-8333-0123456789ab', 'tech');
     expect(status).toBe(403);
     expect(body.error).toMatch(/Admin access required/);
     expect(consultationLinkAvailable).not.toHaveBeenCalled();
@@ -86,7 +86,7 @@ describe('GET /:id/consultation-link — availability probe, never mints', () =>
     consultationLinkAvailable.mockResolvedValue({ available: true });
     const { status, body } = await get();
     expect(status).toBe(200);
-    expect(consultationLinkAvailable).toHaveBeenCalledWith('lead-qa');
+    expect(consultationLinkAvailable).toHaveBeenCalledWith('4b1c9f2e-1111-4222-8333-0123456789ab');
     expect(body).toEqual({ available: true });
     // The read-only probe never touches the builder — no short code minted.
     expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
@@ -114,9 +114,18 @@ describe('GET /:id/consultation-link — availability probe, never mints', () =>
   });
 });
 
+describe('Codex #4709 r12 P2: malformed lead ids', () => {
+  test.each(['GET', 'POST'])('%s with a non-UUID id → 400 before any query', async (method) => {
+    const res = await request(method, 'not-a-uuid');
+    expect(res.status).toBe(400);
+    expect(consultationLinkAvailable).not.toHaveBeenCalled();
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /:id/consultation-link — the actual mint, fired only on Send', () => {
   test('403 for technicians — same router-wide admin gate as every other /admin/leads route', async () => {
-    const { status, body } = await post('lead-qa', 'tech');
+    const { status, body } = await post('4b1c9f2e-1111-4222-8333-0123456789ab', 'tech');
     expect(status).toBe(403);
     expect(body.error).toMatch(/Admin access required/);
     expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
@@ -124,7 +133,7 @@ describe('POST /:id/consultation-link — the actual mint, fired only on Send', 
 
   test('404 for a missing or deleted lead', async () => {
     lead = null;
-    const { status, body } = await post('lead-gone');
+    const { status, body } = await post('9d9d9d9d-0000-4000-8000-00000000dead');
     expect(status).toBe(404);
     expect(body.error).toBe('Lead not found');
     expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
@@ -138,7 +147,7 @@ describe('POST /:id/consultation-link — the actual mint, fired only on Send', 
     });
     const { status, body } = await post();
     expect(status).toBe(200);
-    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-qa', 'Pat');
+    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('4b1c9f2e-1111-4222-8333-0123456789ab', 'Pat');
     expect(body).toEqual({
       url: null,
       line: '',

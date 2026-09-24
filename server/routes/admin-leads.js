@@ -1259,6 +1259,11 @@ router.post('/:id/assign', async (req, res, next) => {
 // fired only on the Send consultation link click.
 router.get('/:id/consultation-link', async (req, res, next) => {
   try {
+    // A malformed id is a 400 before any UUID-column query (Codex #4709
+    // r12 P2), never a Postgres uuid-syntax 500.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.id))) {
+      return res.status(400).json({ error: 'Invalid lead id' });
+    }
     const { consultationLinkAvailable } = require('../services/lead-consultation-link');
     const availability = await consultationLinkAvailable(req.params.id);
     res.json(availability);
@@ -1274,6 +1279,11 @@ router.get('/:id/consultation-link', async (req, res, next) => {
 // Send click, not on every row expand.
 router.post('/:id/consultation-link', async (req, res, next) => {
   try {
+    // A malformed id is a 400 before any UUID-column query (Codex #4709
+    // r12 P2), never a Postgres uuid-syntax 500.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.id))) {
+      return res.status(400).json({ error: 'Invalid lead id' });
+    }
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first('id', 'first_name', 'status', 'converted_at');
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     const { isOpenLeadRow } = require('../services/lead-statuses');
