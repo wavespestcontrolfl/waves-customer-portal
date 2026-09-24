@@ -453,9 +453,15 @@ router.post('/assess', async (req, res, next) => {
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
     // Gate on: up to six photos, each optionally labeled with the zone the
-    // technician shot (front / back / side) — the only source of a zone claim.
+    // technician shot (front / close_up / trouble) — the only source of a zone claim.
     const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos) : null;
     if (visitPhotos?.error) return res.status(400).json({ error: visitPhotos.error });
+    // Gate off still records a chosen slot (photoFieldsAt below), so the
+    // one-Front rule is enforced on this path too.
+    if (!visitAssessmentEnabled && Array.isArray(photos)
+      && photos.filter((photo) => visitInput.normalizePhotoZone(photo?.zone) === 'front').length > 1) {
+      return res.status(400).json({ error: 'Only one photo can be the Front photo' });
+    }
 
     // Verify customer exists. The premise AND the move stamp are read in one
     // transaction under the prefs advisory lock — a move committing between
@@ -926,7 +932,15 @@ router.post('/assess', async (req, res, next) => {
     // and the only recorded zone (the report pairs before/after photos by it).
     const photoFieldsAt = visitAssessmentEnabled
       ? (i) => ({ photo_type: visitInput.photoTypeForZone(visitPhotos.zones[i]), zone: visitPhotos.zones[i] })
-      : (i) => ({ photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') });
+      : (i) => {
+        // Gate off: a technician-chosen slot is still recorded (the drawer's
+        // picker is ungated), so close-up/trouble photos stay out of the
+        // report's pairing and fallback. Unlabeled photos keep the legacy
+        // upload-order type.
+        const zone = visitInput.normalizePhotoZone(photos[i]?.zone);
+        if (zone) return { photo_type: visitInput.photoTypeForZone(zone), zone };
+        return { photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') };
+      };
     const photoRecords = [];
     // The stored row per prompt position, with an explicit gap where an
     // insert failed: the run's findings cite 1-based prompt positions, so its

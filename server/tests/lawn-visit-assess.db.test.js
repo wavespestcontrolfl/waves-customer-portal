@@ -29,7 +29,7 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
   let protocol;
   const oldVisitGate = process.env.GATE_LAWN_VISIT_ASSESSMENT;
   const oldHistoryGate = process.env.GATE_LAWN_PROPERTY_HISTORY;
-  const photos = [photo('YQ==', 'front'), photo('Yg==', 'back'), photo('Yw==')];
+  const photos = [photo('YQ==', 'front'), photo('Yg==', 'close_up'), photo('Yw==')];
   const complete = (extra = {}) => ({
     ...answer({ grass_type: 'unknown', findings: [finding({ photo_refs: [1, 3] })] }),
     photo_quality: [{ photo: 1, quality: 'adequate', issue: '' }, { photo: 2, quality: 'poor', issue: 'blurred' }, { photo: 3, quality: 'limited', issue: 'glare' }],
@@ -99,8 +99,8 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     expect(body.visitAssessment).toEqual(runs.responseForRun(run));
     expect(body.visitAssessment).not.toHaveProperty('raw_response');
     expect(body.visitAssessment).not.toHaveProperty('vision_context');
-    expect(photoRows.map((row) => row.photo_type)).toEqual(['front_yard', 'back_yard', 'general']);
-    expect(photoRows.map((row) => row.zone)).toEqual(['front', 'back', null]);
+    expect(photoRows.map((row) => row.photo_type)).toEqual(['front_yard', 'close_up', 'general']);
+    expect(photoRows.map((row) => row.zone)).toEqual(['front', 'close_up', null]);
     expect(photoRows.map((row) => row.customer_visible)).toEqual([true, false, true]);
     expect(photoRows.map((row) => row.is_best_photo)).toEqual([true, false, false]);
   });
@@ -165,6 +165,24 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     expect(await runs.priorAssessmentCount(customerId, mockKnex)).toBe(1);
     await mockKnex('lawn_assessments').where({ customer_id: customerId }).update({ confirmed_by_tech: true });
     expect(await runs.priorAssessmentCount(customerId, mockKnex)).toBe(2);
+  });
+
+  test('gate off still records a technician-chosen slot; unlabeled photos keep the upload-order type', async () => {
+    const customerId = await customer();
+    process.env.GATE_LAWN_VISIT_ASSESSMENT = 'false';
+    const { body } = await request({ customerId, photos });
+    const photoRows = await mockKnex('lawn_assessment_photos').where({ assessment_id: body.assessment.id }).orderBy('photo_order');
+    expect(photoRows.map((row) => row.zone)).toEqual(['front', 'close_up', null]);
+    expect(photoRows.map((row) => row.photo_type)).toEqual(['front_yard', 'close_up', 'trouble_spot']);
+  });
+
+  test('gate off still rejects two Front photos', async () => {
+    const customerId = await customer();
+    process.env.GATE_LAWN_VISIT_ASSESSMENT = 'false';
+    const twoFronts = photos.map((photo) => ({ ...photo, zone: 'front' }));
+    const { status, body } = await request({ customerId, photos: twoFronts });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/only one photo can be the front/i);
   });
 
   test('the optional run table read leaves a caller transaction usable during migration lag', async () => {

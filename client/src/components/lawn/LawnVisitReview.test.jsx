@@ -137,8 +137,17 @@ describe('LawnVisitReview', () => {
     expect(Array.from(rename.options).slice(1).map((option) => option.value)).toEqual(CONDITION_LABEL_VALUES);
     expect(screen.getByLabelText('Technician note for Irregular browning along the driveway'))
       .toHaveValue('Lift test found loose turf.');
-    expect(screen.getByLabelText('Zone for technician detail 1')).toHaveValue('back');
-    expect(screen.getByLabelText('Zone for technician detail 2')).toHaveValue('');
+    const zone1 = screen.getByLabelText('Zone for technician detail 1');
+    expect(zone1).toHaveValue('back');
+    // Owner ruling 2026-09-24: the picker offers Front / Close-up / Trouble —
+    // a retired 'back' value already saved still renders selected but isn't
+    // one of the offered choices.
+    expect(Array.from(zone1.options).map((option) => option.textContent))
+      .toEqual(['Not specified', 'Front', 'Close-up', 'Trouble / watch area', 'Back']);
+    const zone2 = screen.getByLabelText('Zone for technician detail 2');
+    expect(zone2).toHaveValue('');
+    expect(Array.from(zone2.options).map((option) => option.textContent))
+      .toEqual(['Not specified', 'Front', 'Close-up', 'Trouble / watch area']);
   });
 
   it('emits keep, rename, note, observation, add, edit, and remove changes', () => {

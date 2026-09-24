@@ -495,6 +495,21 @@ describe('runner', () => {
     dispatchWithFallback.mockReset();
   });
 
+  test('historical back/side zones and a second Front replay as unlabeled instead of being skipped', async () => {
+    const legacy = evalLib.fixtureCase(row({ id: 'legacy' }), [
+      { id: 'l1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 'l2', s3_key: 'k2', photo_order: 1, zone: 'back' },
+      { id: 'l3', s3_key: 'k3', photo_order: 2, zone: 'front' },
+    ], {});
+    const seen = [];
+    const out = await evalLib.runEval([legacy], {
+      analyzeVisit: async (input) => { seen.push(input.photos.map((p) => p.zone)); return { status: 'unavailable' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    });
+    expect(out.skipped).toEqual([]);
+    expect(seen[0]).toEqual(['front', null, null]);
+  });
+
   const cases = [
     evalLib.fixtureCase(row({ id: 'a1' }), photos, {}),
     evalLib.fixtureCase(row({ id: 'a2', scheduled_date: '2026-07-01' }), [{ id: 'p9', s3_key: 'broken', photo_order: 0 }], {}),
