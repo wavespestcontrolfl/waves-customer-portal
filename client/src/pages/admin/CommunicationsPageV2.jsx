@@ -77,6 +77,7 @@ import {
   Mic,
   MicOff,
   PhoneCall,
+  ScanSearch,
   Sparkles,
   Zap,
   ClipboardList,
@@ -100,6 +101,12 @@ import {
   Badge,
   Button,
   Card,
+  Checkbox,
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  DialogBody,
+  DialogFooter,
   Field,
   Input,
   Textarea,
@@ -801,6 +808,144 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   return `Hi ${first}, it's Waves Pest Control. ${line}`;
 }
 
+const ANALYZE_PHOTOS_MAX = 5;
+
+// "Analyze photos" — pulls inbound MMS photos from the open thread straight
+// into the photo-assessment pipeline (POST /admin/photo-assessments/:type
+// with message_photos, same server-side analysis lawn/pest funnel rows use).
+// `photos` is a flat, newest-first list of { messageId, key, url } built
+// from the active thread's inbound messages — one entry per media item, not
+// per message, since one MMS can carry several photos.
+function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, onCreated }) {
+  const [type, setType] = useState("lawn");
+  const [selectedIndices, setSelectedIndices] = useState(() => new Set());
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    setType("lawn");
+    // Most recent photo (index 0 — the list is already newest-first) starts checked.
+    setSelectedIndices(new Set(photos.length ? [0] : []));
+    setNote("");
+    setError("");
+    setBusy(false);
+    // Only reset when the dialog opens — re-running on every `photos`
+    // recompute would clobber the operator's picks mid-edit. `photos` is
+    // deliberately left out of the deps for that reason.
+  }, [open]);
+
+  const toggle = (index) => {
+    setSelectedIndices((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else if (next.size < ANALYZE_PHOTOS_MAX) {
+        next.add(index);
+      }
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    const selected = photos.filter((_, i) => selectedIndices.has(i));
+    if (!selected.length) {
+      setError("Select at least one photo.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const data = await adminFetch(`/admin/photo-assessments/${type}`, {
+        method: "POST",
+        body: JSON.stringify({
+          message_photos: selected.map((p) => ({ message_id: p.messageId, key: p.key })),
+          customer_id: customerId || undefined,
+          note: note.trim() || undefined,
+        }),
+      });
+      onClose();
+      onCreated(type, data.id);
+    } catch (err) {
+      setError(err.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={busy ? undefined : onClose} aria-label="Analyze photos from this thread">
+      <DialogHeader>
+        <DialogTitle>Analyze photos from this thread</DialogTitle>
+      </DialogHeader>
+      <DialogBody className="space-y-3">
+        <div>
+          <label className="block text-[13px] text-zinc-500 mb-1">Type</label>
+          <Select value={type} onChange={(e) => setType(e.target.value)} disabled={busy}>
+            <option value="lawn">Lawn assessment</option>
+            <option value="pest">Pest identification</option>
+          </Select>
+        </div>
+        {customerId ? (
+          <div>
+            <label className="block text-[13px] text-zinc-500 mb-1">Customer</label>
+            <div className="text-[14px] text-zinc-900">{customerName || "Linked customer"}</div>
+          </div>
+        ) : null}
+        <div>
+          <label className="block text-[13px] text-zinc-500 mb-1">
+            Photos ({selectedIndices.size}/{ANALYZE_PHOTOS_MAX} selected)
+          </label>
+          {photos.length === 0 ? (
+            <div className="text-[14px] text-zinc-500">No inbound photos in this thread.</div>
+          ) : (
+            <div className="grid grid-cols-3 gap-2">
+              {photos.map((p, i) => {
+                const checked = selectedIndices.has(i);
+                const capped = !checked && selectedIndices.size >= ANALYZE_PHOTOS_MAX;
+                return (
+                  <label
+                    key={`${p.messageId}-${p.key}`}
+                    className={cn(
+                      "relative block rounded-sm border-hairline overflow-hidden cursor-pointer",
+                      checked ? "border-zinc-900" : "border-zinc-300",
+                      capped && "opacity-40 cursor-not-allowed",
+                    )}
+                    style={{ aspectRatio: "1 / 1" }}
+                  >
+                    <img
+                      src={p.url}
+                      alt="Inbound MMS attachment"
+                      className="absolute inset-0 w-full h-full object-cover"
+                    />
+                    <div className="absolute top-1 left-1">
+                      <Checkbox
+                        checked={checked}
+                        disabled={capped || busy}
+                        onChange={() => toggle(i)}
+                      />
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div>
+          <label className="block text-[13px] text-zinc-500 mb-1">Note (optional)</label>
+          <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} disabled={busy} />
+        </div>
+        {error ? <div className="text-[14px] text-alert-fg">{error}</div> : null}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+        <Button onClick={submit} disabled={busy || !selectedIndices.size}>{busy ? "Analyzing…" : "Run analysis"}</Button>
+      </DialogFooter>
+    </Dialog>
+  );
+}
+
 // With a customer, render the same composer used by Messages, locked to that
 // profile. The caller keys it by customer id/phone to discard another person's
 // draft, attachments, and minted links when the selected record changes.
@@ -811,6 +956,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // SMS — the AI draft stays pending for the owner (codex P2).
   const smsOutletContext = useOutletContext();
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
+  const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(!customer);
@@ -886,6 +1032,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
+  // Analyze photos — the lawn/pest photo-assessment dialog fed from this
+  // thread's inbound MMS media (see analyzablePhotos below).
+  const [showAnalyzeDialog, setShowAnalyzeDialog] = useState(false);
   // Insert Link sheet — the searchable link library (customer links +
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
@@ -904,6 +1053,22 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // Threading
   const [smsView, setSmsView] = useState("threads");
   const [activeThread, setActiveThread] = useState(null);
+  // Flat, newest-first list of every inbound MMS photo in the OPEN thread —
+  // one entry per media item (a single MMS can carry several) — for the
+  // Analyze photos dialog. thread.messages is already newest-first (see the
+  // `threads` useMemo below), so no re-sort is needed here.
+  const analyzablePhotos = useMemo(() => {
+    if (!activeThread) return [];
+    const items = [];
+    for (const m of activeThread.messages) {
+      if (m.direction !== "inbound" || !Array.isArray(m.media)) continue;
+      for (const media of m.media) {
+        if (!media?.url || !media?.key) continue;
+        items.push({ messageId: m.id, key: media.key, url: media.url });
+      }
+    }
+    return items;
+  }, [activeThread]);
   const [smsSearch, setSmsSearch] = useState("");
   // Blocked senders (blocked_numbers). /log does not exclude them, so a
   // just-blocked thread would otherwise be rebuilt on reload and keep
@@ -2902,6 +3067,20 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 <Link2 size={16} strokeWidth={2.2} aria-hidden />
               )}
             </Button>{" "}
+            {/* Analyze photos — run the inbound MMS photos in this thread
+                through the lawn/pest photo-assessment pipeline. */}
+            <Button
+              variant="secondary"
+              onClick={() => setShowAnalyzeDialog(true)}
+              disabled={!analyzablePhotos.length}
+              title="Run a lawn or pest assessment on photos from this thread"
+              aria-label="Analyze photos"
+              className="sms-writing-tool ui-icon-action"
+              aria-haspopup="dialog"
+              aria-expanded={showAnalyzeDialog}
+            >
+              <ScanSearch size={16} strokeWidth={2.2} aria-hidden />
+            </Button>{" "}
             {/* Plus — attachment menu */}
             <div className="relative">
               {" "}
@@ -3134,6 +3313,14 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             customer: "Personal links — each one is looked up for this recipient",
             website: "Every wavespestcontrol.com page, synced nightly from the sitemap",
           }}
+        />
+        <AnalyzePhotosDialog
+          open={active && showAnalyzeDialog}
+          onClose={() => setShowAnalyzeDialog(false)}
+          photos={analyzablePhotos}
+          customerId={activeThread?.customerId || null}
+          customerName={activeThread?.customerName || null}
+          onCreated={(type, id) => navigate(`/admin/lawn-assessments?open=${type}:${id}`)}
         />
         {sendResult && (
           <div

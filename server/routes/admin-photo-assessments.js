@@ -22,11 +22,15 @@
 
 const express = require('express');
 const crypto = require('crypto');
+const sharp = require('sharp');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const router = express.Router();
 
 const db = require('../models/db');
+const appConfig = require('../config');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { parseStoredMedia, isSignableStoredMediaKey } = require('../services/sms-media');
 const lawnAssessment = require('../services/lawn-assessment');
 const {
   buildDiagnosticReportContract,
@@ -61,6 +65,110 @@ const MAX_PHOTOS = 5;
 const MAX_PHOTO_CHARS = 6_000_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LIBRARY_BY_SLUG = new Map(PEST_LIBRARY.map((e) => [e.slug, e]));
+
+// Inbound MMS photos pulled into an assessment: resized to this max
+// dimension and re-encoded as JPEG so every downstream consumer (vision
+// ladder, funnel photo storage) sees the same shape normalizePhotos always
+// produced — no separate code path for an SMS-sourced photo.
+const MESSAGE_PHOTO_MAX_PX = 1600;
+const MESSAGE_PHOTO_JPEG_QUALITY = 82;
+const MESSAGE_PHOTO_ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+
+const s3 = new S3Client({
+  region: appConfig.s3?.region,
+  credentials: appConfig.s3?.accessKeyId
+    ? { accessKeyId: appConfig.s3.accessKeyId, secretAccessKey: appConfig.s3.secretAccessKey }
+    : undefined,
+});
+
+async function streamToBuffer(stream) {
+  if (!stream) return Buffer.alloc(0);
+  if (typeof stream.transformToByteArray === 'function') {
+    return Buffer.from(await stream.transformToByteArray());
+  }
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+// Resolves one { message_id, key } request-photo entry into a
+// normalizePhotos-shaped { data, mimeType } photo, or an { error, status }
+// describing why it was refused. The key must belong to THIS message's own
+// stored inbound media AND pass isSignableStoredMediaKey — the guard against
+// an admin (or a compromised admin session) reading an arbitrary S3 object
+// by key.
+async function loadMessagePhoto(entry) {
+  const messageId = cleanString(entry?.message_id, 64);
+  const key = typeof entry?.key === 'string' ? entry.key : null;
+  if (!messageId || !UUID_RE.test(messageId) || !key) {
+    return { error: 'Each message_photos entry needs a valid message_id and key', status: 400 };
+  }
+
+  const message = await db('messages').where({ id: messageId }).first();
+  if (!message) return { error: `Message ${messageId} not found`, status: 404 };
+  if (message.direction !== 'inbound') {
+    return { error: `Message ${messageId} is not an inbound message`, status: 400 };
+  }
+
+  const storedMedia = parseStoredMedia(message.media);
+  const mediaItem = storedMedia.find((item) => item && item.key === key);
+  if (!mediaItem || !isSignableStoredMediaKey(key)) {
+    return { error: `Photo key is not available on message ${messageId}`, status: 400 };
+  }
+
+  const declaredMime = cleanString(mediaItem.contentType || mediaItem.mimeType, 80);
+  if (!declaredMime || !MESSAGE_PHOTO_ALLOWED_MIME.has(declaredMime.toLowerCase())) {
+    return { error: `Unsupported photo type on message ${messageId}`, status: 400 };
+  }
+
+  let object;
+  try {
+    object = await s3.send(new GetObjectCommand({ Bucket: appConfig.s3.bucket, Key: key }));
+  } catch (err) {
+    logger.error(`[admin-photo-assessments] S3 fetch failed for ${key}: ${err.message}`);
+    return { error: 'Could not fetch the photo from storage — try again in a moment.', status: 502 };
+  }
+
+  let jpegBuffer;
+  try {
+    const raw = await streamToBuffer(object.Body);
+    jpegBuffer = await sharp(raw)
+      .rotate()
+      .resize(MESSAGE_PHOTO_MAX_PX, MESSAGE_PHOTO_MAX_PX, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: MESSAGE_PHOTO_JPEG_QUALITY })
+      .toBuffer();
+  } catch (err) {
+    logger.error(`[admin-photo-assessments] photo resize failed for ${key}: ${err.message}`);
+    return { error: 'Could not process the photo — try again in a moment.', status: 502 };
+  }
+
+  let conversationCustomerId = null;
+  if (message.conversation_id) {
+    const conversation = await db('conversations').where({ id: message.conversation_id }).select('customer_id').first();
+    conversationCustomerId = conversation?.customer_id || null;
+  }
+
+  return {
+    photo: { data: jpegBuffer.toString('base64'), mimeType: 'image/jpeg' },
+    customerId: conversationCustomerId,
+  };
+}
+
+// Resolves every message_photos entry in order, short-circuiting on the
+// first failure. Returns { photos, customerId } — customerId is the first
+// resolved entry's conversation customer, the same "first rung wins"
+// convention the rest of this file uses for defaulting.
+async function resolveMessagePhotos(entries) {
+  const photos = [];
+  let customerId = null;
+  for (const entry of entries) {
+    const result = await loadMessagePhoto(entry);
+    if (result.error) return { error: result.error, status: result.status };
+    photos.push(result.photo);
+    if (!customerId && result.customerId) customerId = result.customerId;
+  }
+  return { photos, customerId };
+}
 
 const TYPES = {
   lawn: {
@@ -660,7 +768,23 @@ router.post('/:type', async (req, res, next) => {
     if (!config) return undefined;
     const body = req.body || {};
 
-    const photos = normalizePhotos(body.photos);
+    const rawPhotos = Array.isArray(body.photos) ? body.photos.filter(Boolean) : [];
+    const messagePhotoRequests = Array.isArray(body.message_photos) ? body.message_photos.filter(Boolean) : [];
+    if (!rawPhotos.length && !messagePhotoRequests.length) {
+      return res.status(400).json({ error: 'At least one photo is required' });
+    }
+    if (rawPhotos.length + messagePhotoRequests.length > MAX_PHOTOS) {
+      return res.status(400).json({ error: `At most ${MAX_PHOTOS} photos per assessment` });
+    }
+
+    // Pulled BEFORE the vision ladder runs — a bad key or an unreachable S3
+    // object fails the request outright rather than silently dropping a
+    // photo the operator explicitly selected.
+    const messagePhotos = await resolveMessagePhotos(messagePhotoRequests);
+    if (messagePhotos.error) return res.status(messagePhotos.status || 400).json({ error: messagePhotos.error });
+    const messageCustomerId = messagePhotos.customerId;
+
+    const photos = normalizePhotos([...rawPhotos, ...messagePhotos.photos]);
     if (!photos.length || !photos.some((photo) => photo.data)) {
       return res.status(400).json({ error: 'At least one photo is required' });
     }
@@ -679,9 +803,15 @@ router.post('/:type', async (req, res, next) => {
       if (!lead) return res.status(404).json({ error: 'Lead not found' });
       leadId = lead.id;
     }
-    if (body.customer_id) {
-      if (!UUID_RE.test(String(body.customer_id))) return res.status(400).json({ error: 'invalid customer_id' });
-      const customer = await db('customers').where({ id: body.customer_id }).first();
+    // Explicit customer_id wins; otherwise default from the inbound
+    // message's thread. Same existence check either way, so a stale/deleted
+    // customer id never links.
+    const requestedCustomerId = body.customer_id || messageCustomerId;
+    if (requestedCustomerId) {
+      if (body.customer_id && !UUID_RE.test(String(body.customer_id))) {
+        return res.status(400).json({ error: 'invalid customer_id' });
+      }
+      const customer = await db('customers').where({ id: requestedCustomerId }).first();
       if (!customer) return res.status(404).json({ error: 'Customer not found' });
       customerId = customer.id;
     }

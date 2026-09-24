@@ -4,13 +4,21 @@ let mockPhotoRows = [];
 let mockLeadRow = null;
 let mockCustomerRow = null;
 let mockUpdateReturning = {}; // per-table rows resolved by update(...).returning(...)
+// message_id → message row, conversation_id → conversation row — real
+// id-filtered lookups (unlike the other tables here, a test may need two
+// distinct rows in play at once: the requested message and a decoy).
+let mockMessagesById = {};
+let mockConversationsById = {};
 const inserts = {};
 const updates = {};
 
 function builder(table) {
-  const state = { table };
+  const state = { table, where: {} };
   const b = {
-    where: () => b,
+    where: (cond) => {
+      if (cond && typeof cond === 'object') Object.assign(state.where, cond);
+      return b;
+    },
     whereIn: () => b,
     whereNull: () => b,
     orderBy: () => b,
@@ -21,6 +29,8 @@ function builder(table) {
     first: () => {
       if (table === 'leads') return Promise.resolve(mockLeadRow);
       if (table === 'customers') return Promise.resolve(mockCustomerRow);
+      if (table === 'messages') return Promise.resolve(mockMessagesById[state.where.id] || null);
+      if (table === 'conversations') return Promise.resolve(mockConversationsById[state.where.id] || null);
       return Promise.resolve((mockRows[table] || [])[0] || null);
     },
     insert: (obj) => {
@@ -75,6 +85,23 @@ jest.mock('../services/pest-identification', () => {
   return { ...actual, identifyPest: (...args) => mockIdentifyPest(...args) };
 });
 jest.mock('../services/photos', () => ({ getViewUrl: jest.fn(async () => 'https://signed.example/url') }));
+
+// S3 fetch + sharp resize for the message_photos path. mockS3Send resolves
+// a Body with transformToByteArray (matches the AWS SDK v3 stream shape the
+// route's streamToBuffer helper reads); sharp's chain always resolves a
+// fixed re-encoded buffer so tests can assert on it deterministically.
+const mockS3Send = jest.fn();
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn().mockImplementation(() => ({ send: mockS3Send })),
+  GetObjectCommand: jest.fn((input) => ({ __get: input })),
+}));
+const mockResizedJpeg = Buffer.from('resized-jpeg-bytes');
+jest.mock('sharp', () => jest.fn(() => ({
+  rotate: jest.fn().mockReturnThis(),
+  resize: jest.fn().mockReturnThis(),
+  jpeg: jest.fn().mockReturnThis(),
+  toBuffer: jest.fn().mockResolvedValue(mockResizedJpeg),
+})));
 
 const express = require('express');
 const adminRouter = require('../routes/admin-photo-assessments');
@@ -149,9 +176,12 @@ beforeEach(() => {
   mockLeadRow = null;
   mockCustomerRow = null;
   mockUpdateReturning = {};
+  mockMessagesById = {};
+  mockConversationsById = {};
   Object.keys(inserts).forEach((k) => delete inserts[k]);
   Object.keys(updates).forEach((k) => delete updates[k]);
   mockSendEmail.mockResolvedValue({ ok: true, messageId: 'msg-1' });
+  mockS3Send.mockResolvedValue({ Body: { transformToByteArray: async () => Uint8Array.from(Buffer.from('raw-mms-bytes')) } });
 });
 
 describe('GET / (list)', () => {
@@ -556,6 +586,220 @@ describe('POST /:type (admin create)', () => {
       });
       expect(res.status).toBe(503);
       expect(inserts.pest_identifications).toBeUndefined();
+    });
+  });
+});
+
+describe('POST /:type (admin create) — message_photos (inbound MMS)', () => {
+  const MESSAGE_ID = 'dddddddd-eeee-4fff-8000-111111111111';
+  const CONVERSATION_ID = 'eeeeeeee-ffff-4000-8111-222222222222';
+  const CUSTOMER_ID = 'ffffffff-0000-4111-8222-333333333333';
+  const INBOUND_KEY = 'sms-media/inbound/abc123';
+
+  function inboundMessageRow(overrides = {}) {
+    return {
+      id: MESSAGE_ID,
+      conversation_id: CONVERSATION_ID,
+      direction: 'inbound',
+      channel: 'sms',
+      media: JSON.stringify([
+        { key: INBOUND_KEY, contentType: 'image/jpeg', size: 12345 },
+      ]),
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    const actual = jest.requireActual('../services/pest-identification');
+    const entry = actual.PEST_LIBRARY.find((e) => e.slug === 'ghost-ant');
+    mockIdentifyPest.mockResolvedValue({
+      ok: true,
+      identification: { entry, confidence: 'high', category: 'insect', contested: false },
+      perPhoto: [{ entry, confidence: 'high', category: 'insect', agreement: 'match', model_count: 2, observations: ['obs'], distinguishing_features: [], alternate_slugs: [] }],
+      observations: ['obs'],
+      distinguishing_features: [],
+      alternate_slugs: [],
+    });
+  });
+
+  test('accepts a valid inbound key, fetches + resizes it via S3/sharp, and feeds it to the analysis as base64', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(201);
+      expect(mockS3Send).toHaveBeenCalledTimes(1);
+      expect(mockIdentifyPest).toHaveBeenCalledTimes(1);
+      const photosArg = mockIdentifyPest.mock.calls[0][0];
+      expect(photosArg).toHaveLength(1);
+      expect(photosArg[0].mimeType).toBe('image/jpeg');
+      expect(photosArg[0].data).toBe(mockResizedJpeg.toString('base64'));
+      expect(body.id).toBeTruthy();
+    });
+  });
+
+  test('combines message_photos with an uploaded photo up to the 5-photo cap', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          photos: [{ data: 'aGVsbG8=', mimeType: 'image/jpeg' }],
+          message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }],
+        }),
+      });
+      expect(res.status).toBe(201);
+      expect(mockIdentifyPest.mock.calls[0][0]).toHaveLength(2);
+    });
+  });
+
+  test('rejects a key that is not on that message (400, no S3 fetch, no row)', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: 'sms-media/inbound/not-this-one' }] }),
+      });
+      expect(res.status).toBe(400);
+      expect(mockS3Send).not.toHaveBeenCalled();
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(inserts.pest_identifications).toBeUndefined();
+    });
+  });
+
+  test('rejects a key that is on the message but not in a signable prefix (400)', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow({
+      media: JSON.stringify([{ key: 'private/other-bucket-object', contentType: 'image/jpeg' }]),
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: 'private/other-bucket-object' }] }),
+      });
+      expect(res.status).toBe(400);
+      expect(mockS3Send).not.toHaveBeenCalled();
+    });
+  });
+
+  test('rejects an outbound message (400, no S3 fetch)', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow({ direction: 'outbound' });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] }),
+      });
+      expect(res.status).toBe(400);
+      expect(mockS3Send).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a nonexistent message is a 404', async () => {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] }),
+      });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  test('an unsupported media type on the message is rejected (400, no S3 fetch)', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow({
+      media: JSON.stringify([{ key: INBOUND_KEY, contentType: 'video/mp4' }]),
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] }),
+      });
+      expect(res.status).toBe(400);
+      expect(mockS3Send).not.toHaveBeenCalled();
+    });
+  });
+
+  test('an S3 fetch failure is a 502 and is logged at error level', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    mockS3Send.mockRejectedValue(new Error('NoSuchKey'));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] }),
+      });
+      expect(res.status).toBe(502);
+      expect(require('../services/logger').error).toHaveBeenCalled();
+      expect(inserts.pest_identifications).toBeUndefined();
+    });
+  });
+
+  test('defaults customer_id from the message thread when customer_id is omitted', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    mockConversationsById[CONVERSATION_ID] = { id: CONVERSATION_ID, customer_id: CUSTOMER_ID };
+    mockCustomerRow = { id: CUSTOMER_ID };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] }),
+      });
+      expect(res.status).toBe(201);
+      expect(inserts.pest_identifications[0].customer_id).toBe(CUSTOMER_ID);
+    });
+  });
+
+  test('an explicit customer_id wins over the message thread default', async () => {
+    const EXPLICIT_CUSTOMER = 'aaaaaaaa-1111-4222-8333-444444444444';
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    mockConversationsById[CONVERSATION_ID] = { id: CONVERSATION_ID, customer_id: CUSTOMER_ID };
+    mockCustomerRow = { id: EXPLICIT_CUSTOMER };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }], customer_id: EXPLICIT_CUSTOMER }),
+      });
+      expect(res.status).toBe(201);
+      expect(inserts.pest_identifications[0].customer_id).toBe(EXPLICIT_CUSTOMER);
+    });
+  });
+
+  test('a defaulted customer_id that no longer exists is a 404', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    mockConversationsById[CONVERSATION_ID] = { id: CONVERSATION_ID, customer_id: CUSTOMER_ID };
+    mockCustomerRow = null;
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] }),
+      });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  test('more than 5 combined photos is a 400 before any S3 fetch', async () => {
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          photos: [1, 2, 3, 4].map(() => ({ data: 'aGVsbG8=', mimeType: 'image/jpeg' })),
+          message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }, { message_id: MESSAGE_ID, key: INBOUND_KEY }],
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(mockS3Send).not.toHaveBeenCalled();
     });
   });
 });
