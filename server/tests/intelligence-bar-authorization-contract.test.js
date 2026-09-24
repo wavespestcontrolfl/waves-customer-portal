@@ -295,7 +295,7 @@ test('a churn stage move discloses the billing disarm (GitHub Codex #4684 r4); o
   const single = buildContract({ toolName: 'update_customer', params: { customer_id: 'c1', updates: { pipeline_stage: 'churned' } }, displayParams: { updates: { pipeline_stage: 'churned' } } });
   const billingLine = single.effects.find((e) => e.kind === 'billing' && /Auto Pay/.test(e.label));
   expect(billingLine).toBeDefined();
-  expect(billingLine.label).toBe('Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — REFUSED at commit if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file');
+  expect(billingLine.label).toBe('Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — REFUSED at commit if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file; an already-churned customer whose billing is already off is not re-checked — only saved-method Auto Pay and armed retries are repaired');
   // The generic lifecycle-stamps line stays alongside the new billing line.
   expect(single.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Stage → churned also stamps lifecycle fields/));
 
@@ -314,7 +314,7 @@ test('bulk churn stage move discloses the per-customer billing disarm with the "
   });
   const billingLine = bulk.effects.find((e) => e.kind === 'billing' && /Auto Pay/.test(e.label));
   expect(billingLine).toBeDefined();
-  expect(billingLine.label).toBe('For each of 3 customers: Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — skipped at commit and reported back (not updated), never silently if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file');
+  expect(billingLine.label).toBe('For each of 3 customers: Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — skipped at commit and reported back (not updated), never silently if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file; an already-churned customer whose billing is already off is not re-checked — only saved-method Auto Pay and armed retries are repaired');
 
   // A single-id bulk call gets no "For each of N" prefix (n === 1).
   const bulkOne = buildContract({
