@@ -494,7 +494,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     });
     let addressUnverified = cachedAuditStale
       ? null
-      : nextAddressUnverified({ enriched: result.enriched, profileFound: !!result?.enriched, prior: priorAddressUnverified });
+      // The cached audit's own evidence time, never this request's: an old
+      // negative audit revisited today must not outrank a newer clean cached
+      // result (codex r37 P1) — the same option /calculate passes.
+      : nextAddressUnverified({ enriched: result.enriched, profileFound: !!result?.enriched, prior: priorAddressUnverified, evidenceAt: auditEvidenceAt(result) });
     if (addressUnverified && !addressUnverified.address_line1) {
       Object.assign(addressUnverified, {
         address_line1: String(normalizedAddress.line1 || '').trim() || null,
