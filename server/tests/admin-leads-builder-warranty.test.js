@@ -69,6 +69,7 @@ function primeUpdate(captured, existing = { id: 'lead-1', status: 'new' }) {
       q.where = jest.fn(() => q);
       q.whereNull = jest.fn(() => q);
       q.first = jest.fn(async () => existing);
+      q.forUpdate = jest.fn(() => q);
       q.update = jest.fn((patch) => {
         captured.update = patch;
         return { returning: jest.fn(async () => [{ ...existing, ...patch }]) };
@@ -84,6 +85,7 @@ function primeUpdate(captured, existing = { id: 'lead-1', status: 'new' }) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  db.transaction = jest.fn(async (work) => work(db));
 });
 
 describe('builder warranty fields on leads', () => {
