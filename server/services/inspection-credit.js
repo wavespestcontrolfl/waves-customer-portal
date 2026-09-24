@@ -808,7 +808,7 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
       const bookingRow = await trx('scheduled_services')
         .where({ id: bookingId })
         .forUpdate()
-        .first('status', 'customer_id', 'is_callback');
+        .first('status', 'customer_id', 'is_callback', 'service_type', 'service_id');
       if (!bookingRow
         || NON_LIVE_APPOINTMENT_STATUSES.includes(String(bookingRow.status || '').toLowerCase())
         || (bookingRow.customer_id != null && String(bookingRow.customer_id) !== String(customerId))) {
@@ -825,6 +825,14 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
       // member-covered and included-child bookings legitimately carry.
       if (bookingRow.is_callback === true) {
         const e = new Error('booking is a free callback — no credit to mint against');
+        e.inspectionCreditSkip = 'booking_not_live';
+        throw e;
+      }
+      // A free Waves Assessment (the consultation-booking page books one
+      // with is_callback false) carries no collectible work either — never
+      // a credit to mint against (Codex #4737 r2 P1).
+      if (await require('./assessment-booking').isAssessmentBooking(bookingRow, trx)) {
+        const e = new Error('booking is a free assessment — no credit to mint against');
         e.inspectionCreditSkip = 'booking_not_live';
         throw e;
       }
@@ -1440,12 +1448,14 @@ async function rebindRedeemedOffer(offerId, bookingId) {
       const booking = await trx('scheduled_services')
         .where({ id: bookingId })
         .forUpdate()
-        .first('status', 'is_callback');
+        .first('status', 'is_callback', 'service_type', 'service_id');
       if (!booking
         || NON_LIVE_APPOINTMENT_STATUSES.includes(String(booking.status || '').toLowerCase())
         // A free callback can never hold a credit (r36 P2) — the same
-        // exclusion the mint's locked revalidation applies.
-        || booking.is_callback === true) {
+        // exclusion the mint's locked revalidation applies; a free
+        // assessment likewise (Codex #4737 r2 P1).
+        || booking.is_callback === true
+        || await require('./assessment-booking').isAssessmentBooking(booking, trx)) {
         return;
       }
       await trx('inspection_credit_offers')

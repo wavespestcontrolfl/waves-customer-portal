@@ -96,7 +96,7 @@ describe('subscribeOrResubscribe — existing "waitlist" row (P1 :1087)', () => 
     expect(update.payload.unsubscribed_at).toBeUndefined();
   });
 
-  test('a TRUSTED signup (requireConfirmation:false) promotes waitlist straight to active — no confirmation email needed', async () => {
+  test('Codex #4737 r2 P1: a TRUSTED flow (requireConfirmation:false — e.g. the customer bulk import) never promotes a waitlist row; it is skipped untouched', async () => {
     firstResults.newsletter_subscribers = { ...WAITLIST_ROW };
 
     const result = await subscribeOrResubscribe({
@@ -106,12 +106,8 @@ describe('subscribeOrResubscribe — existing "waitlist" row (P1 :1087)', () => 
       linkCustomer: false,
     });
 
-    expect(result.action).toBe('resubscribed');
-    const update = updateCalls.find((c) => c.table === 'newsletter_subscribers');
-    expect(update.payload.status).toBe('active');
-    expect(update.payload.confirmed_at).toBeInstanceOf(Date);
-    expect(update.payload.confirmation_sent_at).toBeUndefined();
-    expect(update.payload.confirmation_token).toBeUndefined();
+    expect(result.action).toBe('skipped_waitlist');
+    expect(updateCalls.some((c) => c.table === 'newsletter_subscribers')).toBe(false);
   });
 });
 

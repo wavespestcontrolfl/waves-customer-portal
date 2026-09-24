@@ -384,6 +384,17 @@ app.use('/api/public/a2a', (req, res, next) => {
   }
   next();
 });
+// Consultation booking page (routes/inspection-public.js): same
+// unobservable-when-dark contract as the public MCP/A2A guards above — ahead
+// of the global /api limiter and JSON parsing, so while
+// GATE_LEAD_INSPECTION_LINK is off every request is a uniform 404, never a
+// 429/413/400 (Codex #4737 r2 P0). Call-time gate read.
+app.use('/api/public/inspection', (req, res, next) => {
+  if (!require('./config/feature-gates').leadInspectionLinkLive()) {
+    return res.status(404).json({ error: 'not_found' });
+  }
+  next();
+});
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 app.use('/api/', limiter);
 

@@ -307,6 +307,17 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     expect(source).toContain("whereRaw('COALESCE(s.is_callback, false) = false')");
   });
 
+  // Codex #4737 r2 P1: the consultation page books a Waves Assessment with
+  // is_callback false — still free, still never a credit.
+  it('a free Waves Assessment booking never mints either', async () => {
+    mockBookings = [{ id: 'svc-2', created_at: new Date('2026-08-10'), status: 'confirmed', is_callback: false, service_type: 'Waves Assessment' }];
+    mockEvents = [{ created_at: new Date('2026-08-10') }];
+    mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ redeemed: 0, amount: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
   it('NO booking event → nothing minted, deferred to the sweep (r28 P2)', async () => {
     // A reused row (graduated hold, adopted appointment) carries a
     // reservation/placeholder created_at — falling back to it when the

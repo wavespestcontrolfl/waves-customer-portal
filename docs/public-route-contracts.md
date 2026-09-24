@@ -1597,9 +1597,14 @@ route 404s while off). Token: `mintLeadConsultationToken` /
 14-day HMAC namespaced `lead-consultation:` (never interchangeable with the
 lead-prefill token) carrying the lead id IN the token
 (`<leadId>.<exp>.<sig>`, or `<leadId>.<exp>.<channel>.<sig>` when minted
-with an optional signed `channel` claim — `'sms'` is the only value
-`leadContactVerified` trusts, set by an SMS send; omitted by default, which
-is UNVERIFIED delivery), so no DB lookup is needed to resolve identity. A
+with an optional signed `channel` claim — the only claim
+`leadContactVerified` trusts is the phone-bound `smsChannelFor(lead.phone)`
+value (`sms-<digest of the phone's last ten digits>`), which
+`buildLeadConsultationLink(id, { channel: 'sms' })` signs from the freshly
+loaded lead phone; a bare `'sms'` claim is rejected, and a claim for any
+other phone stops counting once the lead's phone changes. Omitted by
+default, which is UNVERIFIED delivery), so no DB lookup is needed to resolve
+identity. A
 well-formed but past-TTL token answers 200 `{ state: 'expired' }` (re-
 verified with the TTL check isolated to nowSec=0, which never trips since
 `exp` is always minted positive); a malformed/mis-signed token 404s. 60

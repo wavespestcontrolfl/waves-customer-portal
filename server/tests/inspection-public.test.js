@@ -1446,6 +1446,22 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
 // source rather than re-deriving line numbers by hand, so this fails loudly
 // the moment a new call site is added anywhere but inside
 // finalizeBookingLocation's own body.
+// Codex #4737 r2 P0: the dark 404 must come before the global /api limiter
+// and the JSON parsers, or a dark route leaks 429/413/400.
+describe('structural: the inspection dark guard precedes global /api middleware', () => {
+  test('server/index.js mounts the leadInspectionLinkLive guard before the /api limiter and express.json', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+    const guard = src.indexOf("app.use('/api/public/inspection', (req, res, next) => {");
+    expect(guard).toBeGreaterThan(-1);
+    expect(src.slice(guard, guard + 200)).toContain('leadInspectionLinkLive()');
+    expect(guard).toBeLessThan(src.indexOf("app.use('/api/', limiter);"));
+    const firstJsonParser = src.search(/app\.use\([^)]*express\.json/);
+    expect(firstJsonParser === -1 || guard < firstJsonParser).toBe(true);
+  });
+});
+
 describe('structural: finalizeBookingLocation is the sole producer of a booking location', () => {
   const fs = require('fs');
   const path = require('path');
