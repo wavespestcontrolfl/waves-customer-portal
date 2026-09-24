@@ -13829,7 +13829,7 @@ const CallRecordingProcessor = {
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = defaultTechnicianId;
                     try {
-                      await assertAssignableTechnician(reuseTechId, { conn: trx });
+                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day });
                     } catch (eligErr) {
                       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                       logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
@@ -14348,7 +14348,7 @@ const CallRecordingProcessor = {
                 // triage note already says who was auto-assigned (or nobody).
                 if (insertData.technician_id) {
                   try {
-                    await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10) });
                   } catch (eligErr) {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);

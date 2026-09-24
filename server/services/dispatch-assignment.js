@@ -169,9 +169,25 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   }
 
   // Save-time eligibility (422 TECH_NOT_ASSIGNABLE): a stale board that still
-  // offers a tech who has since gone prospective/inactive/office-only cannot
-  // complete the assignment.
-  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn }) : null;
+  // offers a tech who has since gone prospective/inactive/office-only, or one
+  // marked out for this job's date (technician_absences), cannot complete
+  // the assignment.
+  // Read on the CALLER'S connection (its trx when it hands one in): a read
+  // on the plain pool from inside a caller-owned transaction would check out
+  // a second connection per call and, under a saturated pool, wait on the
+  // very transaction holding the first (pre-push auditor P1 on #4678). The
+  // FOR SHARE this takes inside a trx no longer orders against anything:
+  // tech-out's mark-out holds only the tech-day fence and never locks the
+  // technician row. The authoritative, locked re-check still runs after the
+  // fence inside applyAssignment.
+  //
+  // `noticeSnapshot?.date`: a caller whose SAME transaction is about to move
+  // the visit to a new date (the edit modal: tech + date in one save) passes
+  // that destination date here, so eligibility is checked against the day
+  // the tech will actually be on, not the row's stale stored date. Falls
+  // back to the row's own date when no snapshot date is given.
+  const eligibilityDate = dateOnly(noticeSnapshot?.date) || dateOnly(job.scheduled_date);
+  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn, date: eligibilityDate }) : null;
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -184,10 +200,6 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   const fromTechId = job.technician_id || null;
   let updatedRow;
   const applyAssignment = async (assignmentTrx) => {
-    // Re-checked FOR SHARE on the writing trx: a Team-tab offboarding or
-    // field-eligibility removal (FOR UPDATE) cannot slip between the
-    // pre-transaction read above and this commit.
-    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx });
     // Tech-day membership fence (scheduling/tech-day-lock.js): reassignment
     // moves the stop between two tech-days on the same date — the nightly
     // reorder's membership read is only safe against writers holding the
@@ -196,6 +208,10 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     // how the driver parses DATE columns. route_order: null drops the OLD
     // tech's sequence number — consumers append NULLs last; carrying the
     // stale number would interleave it into the new tech's run.
+    //
+    // Read BEFORE the re-checked eligibility assert below so that assert can
+    // thread this same date into its technician_absences check (a tech
+    // marked out for the job's actual day cannot receive it here either).
     const { lockTechDays } = require('./scheduling/tech-day-lock');
     const dayRow = await assignmentTrx('scheduled_services')
       .where({ id: jobId })
@@ -206,6 +222,17 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
         { techId: newTechId, date: dayRow.day },
       ]);
     }
+    // Re-checked FOR SHARE on the writing trx, AFTER the fence: a Team-tab
+    // offboarding or field-eligibility removal (FOR UPDATE) cannot slip
+    // between the read above and this commit, and a mark-out that committed
+    // while we waited on the fence is seen here (tech-out's mark-out takes
+    // the fence and never the technician row, so there is no order to keep).
+    //
+    // Same noticeSnapshot?.date override as the pre-check above: the locked
+    // re-check must agree with the pre-check on which day is authoritative,
+    // or a caller moving the date could pass the pre-check against the new
+    // day and then get silently re-checked against the old one here.
+    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx, date: dateOnly(noticeSnapshot?.date) || dayRow?.day });
     // CAS on the PRE-LOCK tech + day (uncapped audit r29 P1): job and
     // fromTechId were read before the advisory locks, so a writer that
     // committed while we waited may have already assigned this job (its
