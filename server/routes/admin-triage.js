@@ -1271,8 +1271,10 @@ router.post('/:id/verdict', async (req, res) => {
     // customer, an invalid time, an insert failure) keep recording the
     // call's routing feedback (codex r37 P2).
     const recoveryPayload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+    // The conflict SUBTYPE marker only — the generic writer stamps
+    // dispute_customer_id for every linked customer too (codex r38 P1).
     const conflictRecoveryTask = item.reason_code === 'auto_booking_skipped_after_approval'
-      && (!!recoveryPayload?.dispute_customer_id || CONFLICT_RECOVERY_REASONS.has(String(recoveryPayload?.skipped_reason || '')));
+      && CONFLICT_RECOVERY_REASONS.has(String(recoveryPayload?.skipped_reason || ''));
     if (!conflictRecoveryTask) await upsertFeedback({
       callLogId: item.call_log_id,
       triageItemId: id,

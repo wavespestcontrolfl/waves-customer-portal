@@ -15427,12 +15427,24 @@ const CallRecordingProcessor = {
                   // onto that task instead — never a "book another" task
                   // beside a live appointment (codex r30 P1).
                   if (!noted) {
+                    // A standing task already carrying the DENIAL subtype keeps
+                    // its cancel-or-review instructions — only the visit id is
+                    // attached; every other standing task takes the correction
+                    // subtype (codex r38 P1).
                     const merged = await ttrx('triage_items')
                       .where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })
                       .whereIn('status', ['open', 'in_progress'])
                       .update({
-                        payload: ttrx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retained_service_id: svc.id, skipped_reason: 'address_correction_needed_on_retained_visit' })]),
-                        summary: `Address confirmed on file after a house-number dispute — the retained appointment (visit ${svc.id}) still carries the disputed number; correct its address, do not book a second one`,
+                        payload: ttrx.raw(
+                          "CASE WHEN COALESCE(payload->>'skipped_reason', '') = 'retained_visit_review_after_denial' "
+                          + "THEN COALESCE(payload, '{}'::jsonb) || ?::jsonb "
+                          + "ELSE COALESCE(payload, '{}'::jsonb) || ?::jsonb END",
+                          [JSON.stringify({ retained_service_id: svc.id }), JSON.stringify({ retained_service_id: svc.id, skipped_reason: 'address_correction_needed_on_retained_visit' })],
+                        ),
+                        summary: ttrx.raw(
+                          "CASE WHEN COALESCE(payload->>'skipped_reason', '') = 'retained_visit_review_after_denial' THEN summary ELSE ? END",
+                          [`Address confirmed on file after a house-number dispute — the retained appointment (visit ${svc.id}) still carries the disputed number; correct its address, do not book a second one`],
+                        ),
                         updated_at: new Date(),
                       });
                     // No open task either (the card was DENIED between the
