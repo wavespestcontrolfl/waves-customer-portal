@@ -1085,6 +1085,8 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(stringified.options.knownCustomer?.addressOnly).toBe(true);
     // A verdict vouches only for the address it judged: a lead whose saved address changed since is not trusted (r4 P2); a verdict with no address never is.
     expect(buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: verdict } }, customer: { ...customer, address_line1: '99 Moved Ln' }, failOpenEnabled: true }).options.knownCustomer).toBeNull();
+    expect(buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: verdict } }, customer: { ...customer, state: 'GA' }, failOpenEnabled: true }).options.knownCustomer).toBeNull();   // state is part of the binding (r5 P2)
+    expect(buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: verdict } }, customer: { ...customer, state: 'Florida' }, failOpenEnabled: true }).options.knownCustomer?.addressOnly).toBe(true);
     expect(buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: { status: 'validated_accept', inServiceArea: true } } }, customer, failOpenEnabled: true }).options.knownCustomer).toBeNull();
     for (const av of [null, {}, { on_file_address_validation: null }, { on_file_address_validation: { status: 'missing_component', inServiceArea: true, address: judged } }]) {
       expect(buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: av }, customer, contactPhone: '+19415550100', failOpenEnabled: true }).options.knownCustomer).toBeNull();

@@ -1254,7 +1254,7 @@ function onFileAddressJudged(knownCaller, storedState) {
 function judgedAddressMatches(judged, knownCaller) {
   if (!judged) return false;
   const now = onFileAddressJudged(knownCaller, normalizeState(String(knownCaller.addressState || '').trim()) || SERVICE_STATE);
-  return ['line1', 'line2', 'city', 'zip'].every((k) => String(judged[k] || '') === now[k]);
+  return ['line1', 'line2', 'city', 'state', 'zip'].every((k) => String(judged[k] || '') === now[k]);
 }
 function applyOnFileAddressVerdict(knownCaller, verdict) {
   if (!knownCaller) return knownCaller;
