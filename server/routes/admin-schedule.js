@@ -14782,7 +14782,7 @@ function normalizeTopUpWindow(windowStart, durationMinutes) {
   let validated;
   try {
     validated = assertAdminAppointmentWindow({ windowStart: candidateStart, durationMinutes });
-  } catch (err) {
+  } catch {
     return { unplaceable: true };
   }
   if (!needsFlooring) return null;
