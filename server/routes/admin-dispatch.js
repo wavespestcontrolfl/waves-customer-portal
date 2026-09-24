@@ -4276,13 +4276,23 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         if (!cardOnly && overlapDates.length) parts.push(result.arrivalWindowDates?.length
           ? `${overlapDates.length} occurrence(s) need route review to keep every promised arrival window (${overlapDates.join(', ')}) — check those days' routes`
           : `${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
+        // Deep link: DispatchPageV2 reads ?date= (opens that day) and
+        // ?appointment= (opens that visit's detail sheet); nothing reads a
+        // service id. Land on the earliest affected day, focused on the
+        // first untimed conflict when there is one.
+        const affectedDates = [...dueConflicts.map((c) => c.date), ...(cardOnly ? [] : [...overlapDates, ...preserved.map((c) => c.date)])]
+          .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d))).sort();
+        const focusConflict = dueConflicts.find((c) => c.date === affectedDates[0]);
+        const link = affectedDates.length
+          ? `/admin/dispatch?date=${affectedDates[0]}${focusConflict ? `&appointment=${encodeURIComponent(focusConflict.id)}` : ''}`
+          : '/admin/dispatch';
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
           preserved.length ? 'Recurring move needs a future visit review'
             : dueConflicts.length ? 'Series move left visits without a time window'
               : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { bell: true, link: `/admin/schedule?service=${serviceId}`, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
+          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
         );
         if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');
