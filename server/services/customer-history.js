@@ -489,7 +489,7 @@ async function listCustomerComms(db, customer, query = {}) {
         END = ?`,
         [primaryPhoneKey],
       ))
-      .orderBy('m.created_at', 'desc')
+      .orderByRaw(`${receiptProjection.effectiveCreatedAtSql} DESC`)
       .orderBy('m.id', 'desc')
       .limit(1);
     const composerPriorOutboundBodies = await loadPriorOutboundBodies(db, composerRows, {

@@ -593,6 +593,7 @@ router.post('/sms', async (req, res) => {
         const inserted = await db('sms_log').insert({
           customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
           message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
+          created_at: optOut.appliedAt,
           metadata: JSON.stringify({
             ...solicitationMeta,
             opt_out_reason: optCommand.reason,

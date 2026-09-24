@@ -717,6 +717,9 @@ test('STOP with a failed inbox, then START, then the old STOP retry preserves ne
     sql: 'LEAST(created_at, ?::timestamptz)',
     bindings: [mockOptoutReceipts.get('SM-synthetic-solicitation').applied_at],
   });
+  expect(mockWrites.find(({ table, row }) => (
+    table === 'sms_log' && row.twilio_sid === 'SM-synthetic-solicitation'
+  )).row.created_at).toBe(mockOptoutReceipts.get('SM-synthetic-solicitation').applied_at);
   expect(recordSuppression).toHaveBeenCalledTimes(1);
   expect(recipient.mock.calls.map(call => call[1])).toEqual(['declined', 'confirmed']);
   expect(mockWrites.filter(({ table }) => table === 'notification_prefs').map(({ row }) => row.sms_enabled))
