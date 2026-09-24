@@ -14484,27 +14484,34 @@ const CallRecordingProcessor = {
                       // Under the triage-call lock, and on a MISS (the card
                       // was settled meanwhile) the owed visit 2 gets its own
                       // card — never silently lost (codex r23 P1).
-                      await lockTriageCall(trx, call.id);
-                      const followUpPlanPayload = { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null };
-                      const stamped = await trx('triage_items')
-                        .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
-                        .whereIn('status', ['open', 'in_progress'])
-                        .update({
-                          payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ follow_up_plan: followUpPlanPayload })]),
-                          updated_at: new Date(),
-                        });
-                      if (!stamped) {
-                        await trx('triage_items')
-                          .insert(buildTriageItem({
-                            callLogId: call.id,
-                            flag: 'attached_booking_followup_unbooked',
-                            extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
-                            severity: 'advisory',
-                            extraPayload: { skipped_reason: 'house_number_disputed', follow_up_plan: followUpPlanPayload },
-                          }))
-                          .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                          .ignore();
-                      }
+                      // Inside a SAVEPOINT (nested knex transaction): a failed
+                      // statement would otherwise abort the whole booking
+                      // transaction (25P02) and the swallowed error would turn
+                      // the hold's commit into a rollback, losing the card
+                      // silently (pre-push audit P1 after r27).
+                      await trx.transaction(async (sp) => {
+                        await lockTriageCall(sp, call.id);
+                        const followUpPlanPayload = { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null };
+                        const stamped = await sp('triage_items')
+                          .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+                          .whereIn('status', ['open', 'in_progress'])
+                          .update({
+                            payload: sp.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ follow_up_plan: followUpPlanPayload })]),
+                            updated_at: new Date(),
+                          });
+                        if (!stamped) {
+                          await sp('triage_items')
+                            .insert(buildTriageItem({
+                              callLogId: call.id,
+                              flag: 'attached_booking_followup_unbooked',
+                              extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
+                              severity: 'advisory',
+                              extraPayload: { skipped_reason: 'house_number_disputed', follow_up_plan: followUpPlanPayload },
+                            }))
+                            .onConflict(sp.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                            .ignore();
+                        }
+                      });
                     } catch (planErr) {
                       logger.warn(`[call-proc] could not note the promised follow-up on the conflict card for ${maskSid(callSid)}: ${planErr.code || planErr.name || 'db_error'}`);
                     }
