@@ -161,4 +161,51 @@ describe('ReportIssueOverlay mount safety', () => {
     expect(screen.getByRole('button', { name: 'Inside Home' })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.queryByLabelText('Remove photo 1')).not.toBeInTheDocument();
   });
+
+  // Photo ID's 'request' / 'inspection' / 'unclear' next steps land here
+  // specifically because the server decided this is NOT an automatic
+  // re-service (a 'reservice' next step links straight to /reservice/:token
+  // from the sheet itself and never opens this overlay). The generic
+  // schedule-derived streamline handoff must not second-guess that and swap
+  // the prefilled ticket for its own "book a free re-service" CTA — doing so
+  // would silently drop the note/photos the customer already provided
+  // (Codex r3 P1).
+  it('a Photo ID handoff is never overridden by the generic reservice streamline, even when that lane is granted', async () => {
+    echo.value = undefined;
+    const api = (await import('../utils/api')).default;
+    api.getSchedule.mockResolvedValueOnce({
+      upcoming: [], overlayHandoff: true, reservice: { url: '/reservice/tok-1', lanes: ['pest'] }, propertyScope: undefined,
+    });
+    render(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{ category: 'pest_issue', location: 'inside_home', note: 'Found ants by the sink', photos: [] }}
+      />,
+    );
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
+    expect(screen.getByLabelText("Describe what's happening")).toHaveValue('Found ants by the sink');
+    expect(screen.queryByText('Covered — book your free re-service')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Book a free re-service' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /submit request/i })).toBeInTheDocument();
+  });
+
+  // Same granted lane, but reached the ORDINARY way (no Photo ID handoff) —
+  // the streamline CTA must still appear. Pins that the suppression above is
+  // scoped to the handoff, not a global regression of the existing feature.
+  it('the same granted reservice lane still streamlines an ordinary (non-Photo-ID) pest ticket', async () => {
+    echo.value = undefined;
+    const api = (await import('../utils/api')).default;
+    const { fireEvent } = await import('@testing-library/react');
+    api.getSchedule.mockResolvedValueOnce({
+      upcoming: [], overlayHandoff: true, reservice: { url: '/reservice/tok-1', lanes: ['pest'] }, propertyScope: undefined,
+    });
+    render(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope />);
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: /pest issue/i }));
+    expect(await screen.findByText('Covered — book your free re-service')).toBeInTheDocument();
+    // Rendered twice (body card + sticky footer CTA) when the lane is granted.
+    for (const link of screen.getAllByRole('link', { name: 'Book a free re-service' })) {
+      expect(link).toHaveAttribute('href', '/reservice/tok-1');
+    }
+  });
 });

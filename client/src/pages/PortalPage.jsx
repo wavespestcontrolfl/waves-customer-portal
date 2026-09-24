@@ -14499,7 +14499,15 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   const propertyAddressShown = scopeStale ? 'Refreshing your property selection…' : propertyAddress;
   const overlayHandoff = !scopeStale && !!scheduleData?.overlayHandoff;
   const handoffLane = category === 'pest_issue' ? 'pest' : category === 'lawn_concern' ? 'lawn' : null;
-  const pickerHandoffUrl = overlayHandoff && handoffLane && scheduleData?.reservice?.url
+  // A Photo ID handoff (initialValues set) already made its OWN next-step
+  // decision server-side — 'reservice' goes straight to the /reservice/:token
+  // link from the sheet itself and never opens this overlay at all; 'request'
+  // / 'inspection' / 'unclear' land here specifically because Photo ID
+  // decided this is NOT an automatic re-service. This generic
+  // schedule-derived streamline must not override that with its own "book
+  // your free re-service" CTA — doing so would silently swap out the
+  // prefilled note/photos for an unrelated picker (Codex r3 P1).
+  const pickerHandoffUrl = !initialValues && overlayHandoff && handoffLane && scheduleData?.reservice?.url
     && (scheduleData.reservice.lanes || []).includes(handoffLane)
     ? scheduleData.reservice.url
     : null;
