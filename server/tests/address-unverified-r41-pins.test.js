@@ -198,3 +198,15 @@ describe('codex r45', () => {
     expect(src).toContain('const lifted = await liftLegacyBlocksForCleanVerdict(trx, {');
   });
 });
+
+describe('pre-push audit after r45: draft refreshes never overwrite a live delivery claim', () => {
+  test('both refresh writes carry the not-live predicate and a refused refresh is retryable with no handoff', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    expect(src).toContain("const refreshedExisting = await trx('estimates').where({ id: existingEst.id }).whereRaw(CLAIM_NOT_LIVE).update({");
+    expect(src).toContain("if (refreshedExisting === 1) {\n            draftEstimateId = existingEst.id;\n          } else {\n            draftReconcileFailed = true;");
+    const dup = src.indexOf(".where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })");
+    const dupBlock = src.slice(dup, dup + 2500);
+    expect(dupBlock).toContain(".whereRaw(require('../utils/estimate-claim-sql').DELIVERY_CLAIM_NOT_LIVE_SQL)");
+    expect(dupBlock).toContain('draftReconcileFailed = true;');
+  });
+});

@@ -3229,7 +3229,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             if (rec.newerClean) { carried = false; clearedUnderLock = true; addressUnverified = null; cleanEvidenceAt = rec.newerClean; }
           }
           if (carried) draftAddressBlockCarried = true;
-          await trx('estimates').where({ id: existingEst.id }).update({
+          // Never over a LIVE delivery claim (pre-push audit P1 after r45):
+          // this whole-blob refresh would erase the delivering_at / token
+          // another request holds across its provider sends, and a flag
+          // stamped here would then be withdrawn under nobody's claim. A
+          // refused refresh is retryable: no handoff is minted for it.
+          const { DELIVERY_CLAIM_NOT_LIVE_SQL: CLAIM_NOT_LIVE } = require('../utils/estimate-claim-sql');
+          const refreshedExisting = await trx('estimates').where({ id: existingEst.id }).whereRaw(CLAIM_NOT_LIVE).update({
             ...estFields,
             ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag, addressUnverifiedClearedBy: null } } : {}),
             ...(clearedUnderLock ? { estimate_data: { ...estimateDataObj, addressUnverified: false, addressUnverifiedFlag: null } } : {}),
@@ -3237,7 +3243,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             archived_at: null,
             updated_at: new Date(),
           });
-          draftEstimateId = existingEst.id;
+          if (refreshedExisting === 1) {
+            draftEstimateId = existingEst.id;
+          } else {
+            draftReconcileFailed = true;
+            logger.info(`[public-quote] wizard draft ${existingEst.id} is under a live delivery claim — refresh refused, no handoff minted for lead ${lead.id} (retryable)`);
+          }
         });
       } else {
         await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
@@ -3281,6 +3292,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 if (carried) draftAddressBlockCarried = true;
                 const refreshed = await trx('estimates')
                   .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
+                  // …never over a LIVE delivery claim (pre-push audit P1
+                  // after r45) — same rule as the lead-keyed refresh above.
+                  .whereRaw(require('../utils/estimate-claim-sql').DELIVERY_CLAIM_NOT_LIVE_SQL)
                   .update({
                     ...estFields,
                     ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag, addressUnverifiedClearedBy: null } } : {}),
@@ -3291,6 +3305,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 if (refreshed === 1) {
                   draftEstimateId = duplicateBlock.existingEstimateId;
                   logger.info(`[public-quote] Estimate mirror refreshed wizard draft ${duplicateBlock.existingEstimateId} for lead ${lead.id} (same-phone re-run)`);
+                } else {
+                  // The locked row was live but the guarded write landed
+                  // nowhere: a delivery claim is live on it — retryable.
+                  draftReconcileFailed = true;
+                  logger.info(`[public-quote] wizard draft ${duplicateBlock.existingEstimateId} is under a live delivery claim — refresh refused, no handoff minted for lead ${lead.id} (retryable)`);
                 }
               } else {
                 logger.info(`[public-quote] Wizard draft ${duplicateBlock.existingEstimateId} changed under lock (promoted/archived) — refresh skipped, no handoff minted for lead ${lead.id}`);
