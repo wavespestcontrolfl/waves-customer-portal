@@ -156,3 +156,20 @@ describe('inspection labels stay inspections (2026-09-24 round-8 P1)', () => {
     expect(mappedServiceLabel(raw)).toBe(expected);
   });
 });
+
+describe('family matches must also end a word (2026-09-24 round-9 P1)', () => {
+  test.each(['Tentative Appointment', 'Advanced Service', 'Soda Blasting', 'Antique Cleanup'])('%s maps to nothing', (raw) => {
+    expect(mappedServiceLabel(raw)).toBeNull();
+  });
+  test.each([
+    ['Tent Fumigation', 'Tent Fumigation'],
+    ['Lawn Fertilization', 'Lawn Fertilization'],
+    ['Core Aeration', 'Lawn Aeration'],
+    ['Termite Treatment', 'Termite Treatment'],
+    ['Mole Trapping', 'Mole Control'],
+    ['Advance Termite Bait', 'Termite Bait Monitoring'],
+    ['Wasps', 'Stinging Insect Removal'],
+  ])('%s → %s still maps', (raw, expected) => {
+    expect(mappedServiceLabel(raw)).toBe(expected);
+  });
+});

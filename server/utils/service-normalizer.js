@@ -183,14 +183,19 @@ const INSPECTION_LABEL_RE = /inspect|assessment|estimat|consultation/i;
 const INSPECTION_FAMILY = { types: new Set(['WDO Inspection', 'Termite Inspection', 'Waves Assessment', 'Inspection']), fallback: 'Inspection' };
 const TREE_SHRUB_FAMILY = { types: new Set(['Tree & Shrub Care', 'Palm Injection', 'Arborjet Treatment']), fallback: 'Tree & Shrub Care' };
 // The legacy map patterns are prefix stems ("fertil", "aerat"), not
-// word-bounded, so /ant\s*treatment/ also matches inside "Plant Treatment"
-// and /tent/ inside "Content". For a public label only a match that begins
-// a word counts (2026-09-24 round-7 P1) — stems may still run past the end
-// of a word ("Fertilization", "Ants").
+// word-bounded: /ant\s*treatment/ matches inside "Plant Treatment" (round-7
+// P1), /tent/ inside "Tentative" and /advance/ inside "Advanced" (round-9
+// P1). For a public label a match must begin a word AND end one — either on
+// a word boundary or on one of these inflection endings of the stem
+// ("Fertil|ization", "Aerat|ion", "Roach|es", "Treat|ment").
+const STEM_ENDINGS_RE = /^(?:s|es|e|ed|er|ers|ing|ping|ion|ions|ation|ations|ization|izations|izer|izers|ment|ments)$/i;
 function matchesAtWordStart(re, text) {
   const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   for (const m of text.matchAll(g)) {
-    if (m.index === 0 || !/[a-z0-9]/i.test(text[m.index - 1])) return true;
+    if (m[0].length === 0) continue;
+    if (m.index > 0 && /[a-z0-9]/i.test(text[m.index - 1])) continue;
+    const tail = text.slice(m.index + m[0].length).match(/^[a-z0-9]*/i)[0];
+    if (!tail || STEM_ENDINGS_RE.test(tail)) return true;
   }
   return false;
 }

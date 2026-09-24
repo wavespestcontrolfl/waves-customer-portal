@@ -771,6 +771,11 @@ describe('2026-09-24 round-6 P1 fixes: outcome idioms, negated membership, reply
     g.allow.names = [name];
     expect(Drafter.verifyReplyText(good(`Hi ${name},\n\nGlad to hear it, and thanks for writing.`), g)).toBeNull();
   });
+  test.each([["O'Neil", 'Neil'], ['Mary-Jane', 'Jane']])('a piece of a punctuated name is not sourced outside the whole name (round 9): %s', (name, piece) => {
+    const g = grounding({ firstName: name, text: 'Great service.', mentionedTechNames: [], topics: [] });
+    g.allow.names = [name];
+    expect(Drafter.verifyReplyText(good(`Hi ${name},\n\n${piece} was glad to help.`), g)).toBe('unlisted_name');
+  });
   test('REPLY_VERSION moved past reply-v1 so stored safe-copy drafts are never reused on a publish retry', () => {
     expect(Drafter.REPLY_VERSION).not.toBe('reply-v1');
   });

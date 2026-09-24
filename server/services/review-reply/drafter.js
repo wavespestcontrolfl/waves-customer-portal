@@ -836,13 +836,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   // names the reviewer wrote. Any other active technician's name, and any
   // reviewer name seen in the recent replies the model was shown (their
   // greetings), is a leak. Case-insensitive.
-  // A punctuated allowed name ("O'Neil", "Mary-Jane") is scanned below as
-  // its pieces, so each piece is allowed too (round-8 P2: the mandated
-  // "Hi O'Neil," greeting otherwise rejected every draft and parked the row).
-  const allowedNames = new Set((grounding.allow.names || []).flatMap((n) => {
-    const lower = n.toLowerCase();
-    return [lower, ...lower.split(/['’-]+/).filter(Boolean)];
-  }));
+  const allowedNames = new Set((grounding.allow.names || []).map((n) => n.toLowerCase()));
   const knownNames = new Set([
     ...(grounding.allow.forbiddenNames || []),
     ...recentReplies.map((r) => greetingName(r)).filter(Boolean),
@@ -889,6 +883,18 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     while ((cm = re.exec(body)) !== null) citySpans.push([cm.index, cm.index + cm[0].length]);
   }
   const inCitySpan = (idx) => citySpans.some(([a, b]) => idx >= a && idx < b);
+  // A punctuated allowed name ("O'Neil", "Mary-Jane") is scanned below as
+  // pieces; a piece is sourced ONLY inside an occurrence of the whole name
+  // (round-8 P2 greeting fix, scoped by round-9 P1: a bare "Neil" or "Jane"
+  // elsewhere is still an unsourced name).
+  const nameSpans = [];
+  for (const name of grounding.allow.names || []) {
+    if (!/['’-]/.test(name)) continue;
+    const re = new RegExp(`(?<![\\p{L}'’-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}’-])`, 'giu');
+    let nm;
+    while ((nm = re.exec(body)) !== null) nameSpans.push([nm.index, nm.index + nm[0].length]);
+  }
+  const inNameSpan = (idx) => nameSpans.some(([a, b]) => idx >= a && idx < b);
   // A lowercase name after a staff role noun ("our technician kevin") is a
   // name too (codex r59): it must be the reviewer's word or an allowed name.
   const roleNameRe = /\b(?:tech(?:nician)?|inspector|specialist|team\s+member|crew\s+member|technician\s+named|rep|representative|manager|owner|guy|gal|man|lady|woman|fella)\s+([a-z][a-z'-]{1,20})\b/g;
@@ -921,6 +927,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   while ((bw = bareWordRe.exec(body)) !== null) {
     const w = bw[1];
     if (!COMMON_FIRST_NAMES.has(w)) continue;
+    if (inNameSpan(bw.index + bw[0].length - w.length)) continue;
     if (allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || cityWords.has(w)) continue;
     if (DUAL_USE_FIRST_NAMES.has(w) && inProseContext(body, bw.index + bw[0].length - w.length, w)) continue;
     return reject('unlisted_name', w);
@@ -929,7 +936,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   const properNounRe = /(^|[^\p{L}'])(\p{Lu}[\p{Ll}'-]+|\p{Lu}{2,})/gu;
   let pn;
   while ((pn = properNounRe.exec(body)) !== null) {
-    if (inCitySpan(pn.index + pn[1].length)) continue;
+    if (inCitySpan(pn.index + pn[1].length) || inNameSpan(pn.index + pn[1].length)) continue;
     const before = body.slice(0, pn.index + pn[1].length);
     // Sentence-initial = start of text, after terminal punctuation, or the
     // first word of a new line (the greeting line ends with a comma).
