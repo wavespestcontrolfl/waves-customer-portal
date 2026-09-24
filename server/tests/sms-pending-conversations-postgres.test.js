@@ -151,6 +151,22 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
   });
 
+  test('null legacy draft evidence falls through to canonical while malformed evidence fails closed', async () => {
+    const candidate = await seed({ body: 'Please answer this question' });
+    const draftId = randomUUID();
+    await mockTrx('message_drafts').insert({
+      id: draftId, sms_log_id: candidate.smsLogId, intent: 'customer_reply',
+    });
+    const reply = await seed({
+      direction: 'outbound', messageType: 'ai_approved', metadata: { draft_id: draftId },
+    });
+    await mockTrx('sms_log').where({ twilio_sid: reply.sid }).update({ metadata: { draft_id: null } });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+
+    await mockTrx('sms_log').where({ twilio_sid: reply.sid }).update({ metadata: { draft_id: 'malformed' } });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+  });
+
   test('missing, proactive, and ambiguous draft provenance fail closed', async () => {
     const candidate = await seed({ body: 'Please help' });
     await seed({ direction: 'outbound', messageType: 'ai_approved' });
@@ -261,7 +277,7 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await mockTrx.raw('ANALYZE messages; ANALYZE conversations');
     mockRawCalls.length = 0;
     await countPendingSmsConversations();
-    const [sql, bindings] = mockRawCalls.find(([statement]) => statement.includes('WITH base_sms AS'));
+    const [sql, bindings] = mockRawCalls.find(([statement]) => statement.includes('WITH canonical_sms AS'));
     const explained = await mockTrx.raw(`EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`, bindings);
     const nodes = [];
     const collect = node => { nodes.push(node); (node.Plans || []).forEach(collect); };

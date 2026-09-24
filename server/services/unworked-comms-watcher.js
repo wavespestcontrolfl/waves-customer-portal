@@ -26,6 +26,7 @@ const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
+const { loadPendingSmsConversations } = require('./sms-pending-conversations');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
 const watcherDisabled = () => ['1', 'true', 'on']
@@ -45,28 +46,9 @@ const MAX_PER_SECTION = 12;
 // itself the emergency the overflow count reports, and rows re-enter the
 // visible window as older ones resolve.
 const MAX_REQUEST_ROWS = 25;
-// Outbound types that count as a human answer — automated broadcasts
-// (reminders, en-route, receipts, review asks) must not clear a waiting
-// customer from the digest (codex #3232 r1).
-// Canonical human-authored types ONLY (codex r8): estimate_sent can be
-// an automated lane send for a SEPARATE matter — treating it as an
-// answer advanced the marker and lost the waiting item permanently.
-// ai_assistant = the conversational AI's own successful answer — a real
-// reply for thread-clearing purposes (codex r20). The reschedule watcher
-// keeps its stricter list (the AI stands down on reschedule intent).
-const {
-  HUMAN_REPLY_TYPES: HUMAN_REPLY_TYPE_VALUES,
-  DRAFT_REPLY_TYPES: DRAFT_REPLY_TYPE_VALUES,
-  draftIdSql,
-} = require('./sms-response-policy');
-const HUMAN_REPLY_TYPES = `(${HUMAN_REPLY_TYPE_VALUES.map((type) => `'${type}'`).join(', ')})`;
-const DRAFT_REPLY_TYPES = `(${DRAFT_REPLY_TYPE_VALUES.map((type) => `'${type}'`).join(', ')})`;
-const OUTBOUND_DRAFT_ID_SQL = draftIdSql(`COALESCE((
-  SELECT mal.metadata->>'draft_id'
-  FROM messaging_audit_log mal
-  WHERE mal.provider_message_id = os.twilio_sid AND mal.channel = 'sms'
-  ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
-), os.metadata->>'draft_id')`);
+// The unanswered lane delegates its response and message-type rules to the
+// same reader used by the inbox badge, while retaining this digest's cap and
+// recovery horizon.
 
 // Scan window: since the previous SUCCESSFUL send (the ops_email_send_state
 // marker), bounded to 7 days — windows tile exactly run-to-run, including
@@ -496,125 +478,12 @@ async function loadDroppedFollowUps(cutoff = new Date(), { includeExpired = fals
 // Lane 3: threads whose last message today is inbound — customer waiting.
 // Peer preserves international identity; NANP keeps its domestic key.
 async function loadUnansweredThreads(cutoff = new Date(), { includeExpired = false } = {}) {
-  const phoneKey = (column) => {
-    const digits = `REGEXP_REPLACE(COALESCE(${column}, ''), '[^0-9]', '', 'g')`;
-    return `(CASE WHEN ${digits} = '' THEN ''
-      WHEN ${digits} ~ '^1[0-9]{10}$' THEN RIGHT(${digits}, 10)
-      WHEN ${digits} ~ '^[0-9]{10}$' AND COALESCE(${column}, '') NOT LIKE '+%' THEN ${digits}
-      ELSE '+' || ${digits} END)`;
-  };
-  const { rows } = await db.raw(
-    `
-    WITH last_inbound AS (
-      -- Endpoint-scoped (codex r45): conversations are unique per
-      -- (peer, our number) — a later text to the AI number must not
-      -- swallow an unanswered HQ thread from the same phone.
-      SELECT DISTINCT ON (peer, endpoint) id, peer, endpoint, message_body, metadata, created_at
-      FROM (
-        SELECT id, message_body, metadata, created_at, from_phone,
-               ${phoneKey('from_phone')} AS peer,
-               ${phoneKey('to_phone')} AS endpoint
-        FROM sms_log
-        -- Rolling 7-day live worklist (codex r15): an unanswered thread
-        -- must reappear until answered — the marker window stranded
-        -- overflow rows.
-        WHERE (CAST(:includeExpired AS boolean) OR created_at >= now() - interval '30 days')
-          AND created_at <= :cutoff
-          AND direction = 'inbound'
-          -- reschedule_reply rows are machine-handled by RescheduleSMS,
-          -- whose confirmation goes out BEFORE the inbound row is
-          -- persisted — they are never 'unanswered' (codex r29).
-          AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply')
-          -- Applicant replies (job_applicant_reply) are owner-only recruiting
-          -- threads answered through the recruiting rail (job_owner_reply),
-          -- which is not a customer reply type — never a "waiting customer"
-          -- in this digest (codex #4623 r14).
-          AND COALESCE(message_type, '') NOT LIKE 'job\\_%'
-      ) inbound
-      WHERE peer <> ''
-        -- A sender marked spam in the inbox (blocked_numbers) is not
-        -- "waiting on a reply" — nobody may answer it and the block drops
-        -- its next text before it is logged.
-        AND NOT EXISTS (
-          SELECT 1 FROM blocked_numbers b
-          WHERE ${phoneKey('b.number')} = inbound.peer
-        )
-      ORDER BY peer, endpoint, created_at DESC
-    )
-    SELECT l.peer, l.message_body, l.created_at,
-           NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
-           cu.id AS customer_id,
-           COUNT(*) OVER () AS total_count
-    FROM last_inbound l
-    LEFT JOIN LATERAL (
-      -- Single-match only (mirrors the webhook rule): two customers on one
-      -- number must not link the thread to an arbitrary record (codex r3).
-      SELECT c2.id, c2.first_name, c2.last_name FROM customers c2
-      WHERE c2.deleted_at IS NULL
-        AND ${phoneKey("c2.phone")}  = l.peer
-        AND NOT EXISTS (
-          SELECT 1 FROM customers c3
-          WHERE c3.deleted_at IS NULL AND c3.id <> c2.id
-            AND ${phoneKey("c3.phone")}  = l.peer
-        )
-      LIMIT 1
-    ) cu ON true
-    -- Standalone courtesy closers ("Thanks!", "Got it") END a thread.
-    -- Applied AFTER the latest-row selection (codex r34/r46): a closing
-    -- "Thanks!" retires the conversation instead of being filtered
-    -- pre-DISTINCT and resurfacing the older substantive message.
-    -- NOTE: regex question-mark quantifiers below are backslash-escaped
-    -- for knex, which consumes bare question marks as positional bindings
-    -- even alongside named bindings (comments included) and fed pg empty
-    -- parameters, failing this whole lane at runtime.
-    -- Closers the webhook already resolved on arrival (context-aware
-    -- isCourtesyOnly, sms_log.metadata.courtesyOnly) are retired too.
-    WHERE COALESCE(l.metadata->>'courtesyOnly', '') <> 'true'
-      -- An enforced pitch retires the thread only when it is the latest
-      -- inbound. A later genuine message must become actionable again.
-      AND COALESCE(l.metadata->'spam_verdict'->>'enforced', '') <> 'true'
-      AND TRIM(COALESCE(l.message_body, '')) !~* '^(thanks\\?( you| u)\\?|thank you( so much| very much)\\?|ty|tysm|got it|perfect|great|awesome|ok(ay)\\?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
-    -- Answered = a HUMAN outbound after the last inbound. Automated
-    -- broadcasts (reminders, receipts, review asks) must not clear a
-    -- waiting customer (codex #3232 r1).
-    AND NOT EXISTS (
-      SELECT 1 FROM sms_log os
-      WHERE os.direction = 'outbound'
-        AND os.message_type IN ${HUMAN_REPLY_TYPES}
-        -- Approved/revised sends answer ONLY the exact legacy inbound their
-        -- draft names. The send wrapper stamps draft_id in the audit row;
-        -- older paths may carry it on sms_log.metadata. The shared reader
-        -- precedence is latest audit, then legacy metadata; missing or
-        -- malformed evidence fails closed. Manual and conversational-AI
-        -- replies retain their ordinary thread/time behavior.
-        AND (os.message_type NOT IN ${DRAFT_REPLY_TYPES} OR EXISTS (
-          SELECT 1 FROM message_drafts mdx
-          WHERE mdx.id = ${OUTBOUND_DRAFT_ID_SQL}
-            AND mdx.sms_log_id = l.id
-            AND COALESCE(mdx.intent, '') <> 'click_followup'
-        ))
-        AND os.status IN ('queued', 'sent', 'delivered')
-        AND os.created_at > l.created_at
-        AND ${phoneKey("os.to_phone")}  = l.peer
-        -- Same-endpoint reply (codex r45): the conversation model is
-        -- unique per (contact, our number).
-        AND ${phoneKey("os.from_phone")}  = l.endpoint
-    )
-    -- A later STOP ends the thread: an opted-out customer must not be
-    -- surfaced as waiting for a reply nobody may send (codex r4).
-    AND NOT EXISTS (
-      SELECT 1 FROM sms_log oo
-      WHERE oo.direction = 'inbound'
-        AND oo.message_type = 'opt_out'
-        AND oo.created_at > l.created_at
-        AND ${phoneKey("oo.from_phone")}  = l.peer
-    )
-    ORDER BY l.created_at DESC
-    LIMIT :cap
-    `,
-    { cap: MAX_PER_SECTION, cutoff, includeExpired },
-  );
-  return rows;
+  return loadPendingSmsConversations({
+    cutoff,
+    includeExpired,
+    includeLegacyOnly: true,
+    limit: MAX_PER_SECTION,
+  });
 }
 
 // Lane 4: open service_requests past their promised response window.

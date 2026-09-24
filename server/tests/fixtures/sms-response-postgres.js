@@ -2,7 +2,10 @@
 // Call inside the suite transaction; all objects are rolled back at teardown.
 async function createSmsResponseTables(trx) {
   await trx.raw(`
-      CREATE TABLE customers (id uuid PRIMARY KEY, phone varchar(32));
+      CREATE TABLE customers (
+        id uuid PRIMARY KEY, phone varchar(32), first_name text, last_name text,
+        deleted_at timestamptz
+      );
       CREATE TABLE conversations (id uuid PRIMARY KEY, customer_id uuid, channel varchar(20), contact_phone varchar(32), our_endpoint_id varchar(100));
       CREATE TABLE messages (
         id uuid PRIMARY KEY, conversation_id uuid NOT NULL, channel varchar(20), direction varchar(12),
