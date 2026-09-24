@@ -19,9 +19,12 @@ const OPENAI_OK_BODY = { data: [{ b64_json: 'AAAA' }] };
 const GEMINI_OK_BODY = { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'BBBB' } }] } }] };
 
 const ORIGINAL_ENV = { ...process.env };
-beforeEach(() => { jest.clearAllMocks(); });
+// Every assertion is about the DEFAULT watermark policy or an explicit toggle:
+// never inherit an operator's ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS from
+// the environment, and hand it back afterwards.
+beforeEach(() => { jest.clearAllMocks(); delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; });
 afterEach(() => {
-  for (const k of ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'BLOG_IMAGE_PROVIDER']) {
+  for (const k of ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'BLOG_IMAGE_PROVIDER', 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS']) {
     if (ORIGINAL_ENV[k] === undefined) delete process.env[k];
     else process.env[k] = ORIGINAL_ENV[k];
   }
@@ -36,16 +39,70 @@ describe('parseChain', () => {
     // legacy 'gemini' text-model slug is env-only.
     // Bake-off 2026-09-05: Nano Banana Pro second (fast, cheaper, close on
     // photo/cartoon); gpt-image-1 stays the last fallback.
-    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gemini-image-pro', 'gpt-image-1.5', 'gemini-image-best', 'gemini-image', 'gpt-image-1']);
+    // OpenAI-only since 2026-09-24 (owner: no invisible watermarks — every
+    // Gemini image model embeds SynthID in the pixels).
+    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
   });
-  test('respects env override', () => {
-    expect(parseChain('gemini,gpt-image-2')).toEqual(['gemini', 'gpt-image-2']);
+  test('respects env override (chain mechanics, watermark policy explicitly relaxed)', () => {
+    expect(parseChain('gemini,gpt-image-2', { allowPixelWatermark: true })).toEqual(['gemini', 'gpt-image-2']);
   });
   test('drops unknown providers', () => {
     expect(parseChain('made-up-1,gpt-image-2,nothing')).toEqual(['gpt-image-2']);
   });
   test('trims whitespace + lowercases', () => {
-    expect(parseChain(' GPT-Image-2 , Gemini ')).toEqual(['gpt-image-2', 'gemini']);
+    expect(parseChain(' GPT-Image-2 , Gemini ', { allowPixelWatermark: true })).toEqual(['gpt-image-2', 'gemini']);
+  });
+});
+
+describe('no pixel-watermarked providers (owner directive 2026-09-24)', () => {
+  const { pixelWatermarkAllowed, PIXEL_WATERMARK_OVERRIDE_ENV } = require('../services/content/image-generator')._internals;
+  test('every Gemini image slug is tagged pixelWatermark; no OpenAI slug is', () => {
+    for (const [slug, cfg] of Object.entries(MODEL_MAP)) {
+      if (cfg.api === 'gemini') expect(cfg.pixelWatermark).toBe('synthid');
+      else expect(cfg.pixelWatermark).toBeUndefined();
+    }
+  });
+  test('the default chain names no watermarking provider', () => {
+    expect(DEFAULT_CHAIN.split(',').some((s) => MODEL_MAP[s].pixelWatermark)).toBe(false);
+  });
+  test('an env chain naming Gemini slugs is filtered to its OpenAI legs', () => {
+    expect(parseChain('gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1')).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    expect(parseChain('gemini-image-best,gemini-image,gemini')).toEqual([]);
+  });
+  test('the override must be the literal string "true"', () => {
+    expect(pixelWatermarkAllowed()).toBe(false);
+    process.env[PIXEL_WATERMARK_OVERRIDE_ENV] = '1';
+    expect(pixelWatermarkAllowed()).toBe(false);
+    process.env[PIXEL_WATERMARK_OVERRIDE_ENV] = 'true';
+    expect(pixelWatermarkAllowed()).toBe(true);
+    expect(parseChain('gemini-image-best,gpt-image-2')).toEqual(['gemini-image-best', 'gpt-image-2']);
+  });
+  test('the override alone restores the pre-09-24 fallback legs when no env chain is set (kill switch)', () => {
+    const { WATERMARK_ALLOWED_DEFAULT_CHAIN } = require('../services/content/image-generator')._internals;
+    process.env[PIXEL_WATERMARK_OVERRIDE_ENV] = 'true';
+    expect(parseChain(undefined)).toEqual(WATERMARK_ALLOWED_DEFAULT_CHAIN.split(','));
+    expect(parseChain(undefined)).toContain('gemini-image-pro');
+    expect(new ImageGenerator({ envChain: undefined, fetchFn: jest.fn() }).chain).toContain('gemini-image-pro');
+    delete process.env[PIXEL_WATERMARK_OVERRIDE_ENV];
+    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+  });
+  test('a Gemini-only env chain falls back to the OpenAI default instead of reaching Gemini', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.GEMINI_API_KEY = 'gem-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gemini-image-best,gemini', fetchFn: mockFetch });
+    expect(gen.chain).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    const r = await gen.generate({ title: 'Test' });
+    expect(r.model).toBe('gpt-image-2');
+    for (const call of mockFetch.mock.calls) expect(String(call[0])).not.toMatch(/generativelanguage|gemini/i);
+  });
+  test('an exhausted OpenAI ladder throws — it never falls through to a watermarking model', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.GEMINI_API_KEY = 'gem-test';
+    const mockFetch = jest.fn().mockReturnValue(err(500, 'down'));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini-image-pro,gpt-image-1', fetchFn: mockFetch });
+    await expect(gen.generate({ title: 'Test' })).rejects.toMatchObject({ attempts: [expect.objectContaining({ provider: 'gpt-image-2' }), expect.objectContaining({ provider: 'gpt-image-1' })] });
+    for (const call of mockFetch.mock.calls) expect(String(call[0])).not.toMatch(/generativelanguage|gemini/i);
   });
 });
 
@@ -186,7 +243,7 @@ describe('ImageGenerator: chain success on first provider', () => {
   test('gpt-image-2 succeeds → returns its dataUrl + model slug', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch, allowPixelWatermark: true });
     const r = await gen.generate({ title: 'Test', mode: 'blog-hero' });
     expect(r.model).toBe('gpt-image-2');
     expect(r.dataUrl).toMatch(/^data:image\/png;base64,AAAA$/);
@@ -202,7 +259,7 @@ describe('ImageGenerator: one deadline for the whole chain (Codex r5 P2 on #3964
     let clock = 1_000_000;
     // The first leg burns the whole budget (a hang that only the abort ends).
     const mockFetch = jest.fn().mockImplementation(() => { clock += 200_000; return Promise.resolve(err(500, 'upstream hang')); });
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini,gpt-image-1', fetchFn: mockFetch, chainBudgetMs: 200_000, now: () => clock });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini,gpt-image-1', fetchFn: mockFetch, chainBudgetMs: 200_000, now: () => clock, allowPixelWatermark: true });
     await expect(gen.generate({ title: 'Test' })).rejects.toMatchObject({
       attempts: [
         expect.objectContaining({ provider: 'gpt-image-2' }),
@@ -236,7 +293,7 @@ describe('ImageGenerator: chain fallback on fatal OpenAI error', () => {
     const mockFetch = jest.fn()
       .mockReturnValueOnce(err(400, 'invalid model'))
       .mockReturnValueOnce(ok(GEMINI_OK_BODY));
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch, allowPixelWatermark: true });
     const r = await gen.generate({ title: 'Test' });
     expect(r.model).toBe('gemini');
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -248,7 +305,7 @@ describe('ImageGenerator: skipped when key missing', () => {
     delete process.env.OPENAI_API_KEY;
     process.env.GEMINI_API_KEY = 'gem-test';
     const mockFetch = jest.fn().mockReturnValue(ok(GEMINI_OK_BODY));
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch, allowPixelWatermark: true });
     const r = await gen.generate({ title: 'Test' });
     expect(r.model).toBe('gemini');
     expect(mockFetch).toHaveBeenCalledTimes(1); // only gemini was called
@@ -257,7 +314,7 @@ describe('ImageGenerator: skipped when key missing', () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.GEMINI_API_KEY;
     const mockFetch = jest.fn();
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch, allowPixelWatermark: true });
     await expect(gen.generate({ title: 'Test' })).rejects.toThrow(/all providers failed/);
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -273,7 +330,7 @@ describe('ImageGenerator: retryable errors fall through to next provider', () =>
     const mockFetch = jest.fn()
       .mockReturnValueOnce(err(500, 'server error'))
       .mockReturnValueOnce(ok(GEMINI_OK_BODY));
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch, allowPixelWatermark: true });
     const r = await gen.generate({ title: 'Test' });
     expect(r.model).toBe('gemini');
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -284,7 +341,7 @@ describe('ImageGenerator: retryable errors fall through to next provider', () =>
     const mockFetch = jest.fn()
       .mockReturnValueOnce(err(429, 'rate limited'))
       .mockReturnValueOnce(err(503, 'unavailable'));
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch, allowPixelWatermark: true });
     await expect(gen.generate({ title: 'Test' })).rejects.toThrow(/all providers failed/);
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
@@ -298,7 +355,7 @@ describe('ImageGenerator: Gemini safety refusal', () => {
     const mockFetch = jest.fn()
       .mockReturnValueOnce(ok(safetyResponse))
       .mockReturnValueOnce(ok(OPENAI_OK_BODY));
-    const gen = new ImageGenerator({ envChain: 'gemini,gpt-image-2', fetchFn: mockFetch });
+    const gen = new ImageGenerator({ envChain: 'gemini,gpt-image-2', fetchFn: mockFetch, allowPixelWatermark: true });
     const r = await gen.generate({ title: 'Test' });
     expect(r.model).toBe('gpt-image-2');
   });
@@ -311,7 +368,7 @@ describe('ImageGenerator: capabilityCheck', () => {
     const mockFetch = jest.fn().mockReturnValue(ok({
       data: [{ id: 'gpt-image-1' }, { id: 'gpt-image-2' }],
     }));
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5,gemini', fetchFn: mockFetch });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5,gemini', fetchFn: mockFetch, allowPixelWatermark: true });
     const check = await gen.capabilityCheck();
     expect(check.providers['gpt-image-2']).toBe('available');
     expect(check.providers['gpt-image-1.5']).toBe('model_not_listed');
@@ -328,7 +385,7 @@ describe('ImageGenerator: capabilityCheck', () => {
   test('reports missing API key cleanly', async () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.GEMINI_API_KEY;
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: jest.fn() });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: jest.fn(), allowPixelWatermark: true });
     const check = await gen.capabilityCheck();
     expect(check.providers['gpt-image-2']).toBe('OPENAI_API_KEY_missing');
     expect(check.providers['gemini']).toBe('GEMINI_API_KEY_missing');
@@ -353,7 +410,7 @@ describe('ImageGenerator: attempts breadcrumb on failure', () => {
       .mockReturnValueOnce(err(404))
       .mockReturnValueOnce(err(400))
       .mockReturnValueOnce(err(400));
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1,gemini', fetchFn: mockFetch });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1,gemini', fetchFn: mockFetch, allowPixelWatermark: true });
     try {
       await gen.generate({ title: 'Test' });
       throw new Error('expected throw');
@@ -384,11 +441,11 @@ describe('gemini image-native models', () => {
       return ok(GEMINI_OK_BODY);
     });
 
-    const withAspect = new ImageGenerator({ envChain: 'gemini-image-best', fetchFn });
+    const withAspect = new ImageGenerator({ envChain: 'gemini-image-best', fetchFn, allowPixelWatermark: true });
     await withAspect.generate({ title: 't', mode: 'social-square' });
     expect(bodies[0].generationConfig.imageConfig).toEqual({ aspectRatio: '1:1' });
 
-    const legacy = new ImageGenerator({ envChain: 'gemini', fetchFn });
+    const legacy = new ImageGenerator({ envChain: 'gemini', fetchFn, allowPixelWatermark: true });
     await legacy.generate({ title: 't', mode: 'social-square' });
     expect(bodies[1].generationConfig.imageConfig).toBeUndefined();
   });
@@ -400,7 +457,7 @@ describe('gemini image-native models', () => {
       bodies.push(JSON.parse(opts.body));
       return ok(GEMINI_OK_BODY);
     });
-    const gen = new ImageGenerator({ envChain: 'gemini-image', fetchFn });
+    const gen = new ImageGenerator({ envChain: 'gemini-image', fetchFn, allowPixelWatermark: true });
     await gen.generate({ title: 't', mode: 'blog-hero' });
     expect(bodies[0].generationConfig.imageConfig).toEqual({ aspectRatio: '3:2' });
   });

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { hideRecruitingThreadsFromNonAdmin, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -299,8 +299,14 @@ router.get('/weather', async (req, res, next) => {
 // WEEKLY BI BRIEFING AGENT
 // =========================================================================
 
+// Admin-only (ADMIN-BUG-R42): company-wide revenue/MRR briefings and the
+// paid BI-agent trigger are owner-only everywhere else (admin-kpi-targets,
+// admin-dashboard), and the router-level requireTechOrAdmin above stays for
+// the genuinely technician-facing routes in this file (/inbox, /weather,
+// /recent-photos, /field-leads) — so these two are gated per-route rather
+// than at the router.
 // POST /api/admin/dashboard-ops/bi/run — trigger the Monday briefing manually
-router.post('/bi/run', async (req, res, next) => {
+router.post('/bi/run', requireAdmin, async (req, res, next) => {
   try {
     const BIAgent = require('../services/bi-agent');
     const { skipSMS } = req.body;
@@ -318,7 +324,7 @@ router.post('/bi/run', async (req, res, next) => {
 });
 
 // GET /api/admin/dashboard-ops/bi/reports — view weekly reports
-router.get('/bi/reports', async (req, res, next) => {
+router.get('/bi/reports', requireAdmin, async (req, res, next) => {
   try {
     const { limit = 10 } = req.query;
     const reports = await db('weekly_bi_reports')

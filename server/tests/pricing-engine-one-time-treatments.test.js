@@ -109,8 +109,12 @@ describe('pricing engine one-time treatment rules', () => {
     const p = property({ measuredTurfSf: 6000 });
     // Reference call mirrors priceOneTimeLawn's baseline derivation exactly:
     // raw market rate — no cost floor AND no recurring program minimum (the
-    // $45/mo floor is a plan floor and must not inflate one-time work).
-    const lawn = priceLawnCare(p, { track: 'st_augustine', tier: 'enhanced', lawnFreq: 6, useLawnCostFloor: false, applyProgramMinimum: false });
+    // $45/mo floor is a plan floor and must not inflate one-time work) —
+    // anchored on the 6x/standard cell, which is hidden for new sales (owner
+    // directive 2026-09-24) and so needs includeHiddenTiers, exactly as
+    // priceOneTimeLawn reads it.
+    const lawn = priceLawnCare(p, { track: 'st_augustine', tier: 'standard', lawnFreq: 6, includeHiddenTiers: true, useLawnCostFloor: false, applyProgramMinimum: false });
+    expect(lawn.tier).toBe('standard');
     const base = Math.max(115, Math.round(lawn.perApp * 1.50));
     const treated = Math.max(115, Math.round(base * 1.38));
     const expected = Math.max(115, Math.round(treated * 1.50 * 0.85));

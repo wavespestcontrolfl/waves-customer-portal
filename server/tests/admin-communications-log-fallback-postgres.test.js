@@ -95,7 +95,9 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
         message_type text, status text, metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
       CREATE TEMP TABLE messaging_audit_log (id bigserial PRIMARY KEY, provider_message_id text, channel text,
         metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
-      CREATE TEMP TABLE message_drafts (id uuid PRIMARY KEY, intent text);
+      CREATE TEMP TABLE message_drafts (id uuid PRIMARY KEY, intent text, sms_log_id uuid);
+      CREATE TEMP TABLE inbound_sms_optout_receipts (
+        message_sid text PRIMARY KEY, phone text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now());
     `);
   });
   afterAll(async () => {
@@ -103,7 +105,7 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     await mockPg?.rollback(); await database?.destroy();
   });
   beforeEach(async () => {
-    await mockPg.raw('TRUNCATE customers, conversations, messages, sms_log, messaging_audit_log, message_drafts');
+    await mockPg.raw('TRUNCATE customers, conversations, messages, sms_log, messaging_audit_log, message_drafts, inbound_sms_optout_receipts');
   });
 
   test('an unlinked +44 sender sharing a US customer\'s last 10 digits resolves to NO customer', async () => {
@@ -167,6 +169,88 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     expect(body.messages.find((message) => message.body === 'Malformed draft metadata')).toBeDefined();
   });
 
+  test('projects the exact canonical inbound anchor and provider handoff time for an approved draft', async () => {
+    const conversationId = randomUUID();
+    const inboundMessageId = randomUUID();
+    const inboundLogId = randomUUID();
+    const draftId = randomUUID();
+    const outboundMessageId = randomUUID();
+    await mockPg('conversations').insert({
+      id: conversationId, channel: 'sms', our_endpoint_id: '+19415550199',
+      unknown_contact: true, contact_phone: '+19415559878',
+    });
+    await mockPg('messages').insert([
+      {
+        id: inboundMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+        body: 'Can you check the gate?', author_type: 'customer', twilio_sid: 'SM-anchor-exact',
+        created_at: '2026-09-23T12:00:00Z',
+      },
+      {
+        id: outboundMessageId, conversation_id: conversationId, channel: 'sms', direction: 'outbound',
+        body: 'Yes, we can.', author_type: 'admin', twilio_sid: 'SM-reply-exact',
+        message_type: 'ai_approved', delivery_status: 'sent', created_at: '2026-09-23T12:00:10Z',
+      },
+    ]);
+    await mockPg('sms_log').insert([
+      {
+        id: inboundLogId, twilio_sid: 'SM-anchor-exact', direction: 'inbound',
+        message_type: 'inbound', status: 'received', created_at: '2026-09-23T12:00:00Z',
+      },
+      {
+        twilio_sid: 'SM-reply-exact', direction: 'outbound', message_type: 'ai_approved',
+        status: 'sent', metadata: { draft_id: draftId }, created_at: '2026-09-23T12:00:04Z',
+      },
+    ]);
+    await mockPg('message_drafts').insert({ id: draftId, intent: 'reply', sms_log_id: inboundLogId });
+
+    const { status, body } = await getLog();
+    expect(status).toBe(200);
+    const reply = body.messages.find((item) => item.id === outboundMessageId);
+    expect(reply).toMatchObject({
+      responseIsAnswer: true,
+      responseReplyToMessageId: inboundMessageId,
+      responseCreatedAt: '2026-09-23T12:00:04.000Z',
+      createdAt: '2026-09-23T12:00:10.000Z',
+    });
+  });
+
+  test('fails closed when a draft anchor has duplicate canonical inbound twins', async () => {
+    const conversationId = randomUUID();
+    const inboundLogId = randomUUID();
+    const draftId = randomUUID();
+    const outboundMessageId = randomUUID();
+    await mockPg('conversations').insert({
+      id: conversationId, channel: 'sms', our_endpoint_id: '+19415550199',
+      unknown_contact: true, contact_phone: '+19415559879',
+    });
+    await mockPg('messages').insert([
+      ...[randomUUID(), randomUUID()].map((id) => ({
+        id, conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+        body: 'Duplicate canonical twin', author_type: 'customer', twilio_sid: 'SM-anchor-duplicate',
+      })),
+      {
+        id: outboundMessageId, conversation_id: conversationId, channel: 'sms', direction: 'outbound',
+        body: 'Draft reply', author_type: 'admin', twilio_sid: 'SM-reply-duplicate',
+        message_type: 'ai_revised', delivery_status: 'sent',
+      },
+    ]);
+    await mockPg('sms_log').insert([
+      { id: inboundLogId, twilio_sid: 'SM-anchor-duplicate', direction: 'inbound', status: 'received' },
+      {
+        twilio_sid: 'SM-reply-duplicate', direction: 'outbound', message_type: 'ai_revised',
+        status: 'sent', metadata: { draft_id: draftId },
+      },
+    ]);
+    await mockPg('message_drafts').insert({ id: draftId, intent: 'reply', sms_log_id: inboundLogId });
+
+    const { status, body } = await getLog();
+    expect(status).toBe(200);
+    expect(body.messages.find((item) => item.id === outboundMessageId)).toMatchObject({
+      responseIsAnswer: false,
+      responseReplyToMessageId: null,
+    });
+  });
+
   test('loads prior outbound context set-wise for courtesy classification', async () => {
     const conversationId = randomUUID();
     await mockPg('conversations').insert({
@@ -189,4 +273,49 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     expect(body.messages.find((message) => message.body === 'Okay').courtesyOnly).toBe(false);
     expect(body.messages.find((message) => message.body === 'Thanks!').courtesyOnly).toBe(true);
   });
+
+  test.each([true, false])(
+    'projects a delayed receipt-backed STOP before a later question (legacy row: %s)',
+    async (withLegacyStop) => {
+      const conversationId = randomUUID();
+      const contactPhone = '+19415559880';
+      await mockPg('conversations').insert({
+        id: conversationId, channel: 'sms', our_endpoint_id: '+19415550199',
+        unknown_contact: true, contact_phone: contactPhone,
+      });
+      await mockPg('inbound_sms_optout_receipts').insert({
+        message_sid: 'SM-delayed-stop', phone: contactPhone, applied_at: '2026-09-23T12:01:00Z',
+      });
+      await mockPg('messages').insert([
+        {
+          id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+          body: 'Can you still come Friday?', author_type: 'customer', message_type: 'inbound',
+          twilio_sid: 'SM-real-question', created_at: '2026-09-23T12:02:00Z',
+        },
+        {
+          id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+          body: 'STOP', author_type: 'customer', message_type: 'inbound',
+          twilio_sid: 'SM-delayed-stop', created_at: '2026-09-23T12:03:00Z',
+        },
+      ]);
+      if (withLegacyStop) {
+        await mockPg('sms_log').insert({
+          twilio_sid: 'SM-delayed-stop', direction: 'inbound', message_type: 'opt_out',
+          status: 'received', created_at: '2026-09-23T12:03:00Z',
+        });
+      }
+
+      const { status, body } = await getLog();
+      expect(status).toBe(200);
+      expect(body.messages.find((message) => message.body === 'STOP')).toMatchObject({
+        messageType: 'inbound',
+        responseMessageType: 'opt_out',
+        createdAt: '2026-09-23T12:01:00.000Z',
+      });
+      expect(body.messages.find((message) => message.body === 'Can you still come Friday?')).toMatchObject({
+        responseMessageType: 'inbound',
+        createdAt: '2026-09-23T12:02:00.000Z',
+      });
+    },
+  );
 });

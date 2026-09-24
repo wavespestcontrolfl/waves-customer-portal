@@ -170,26 +170,35 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
   }
   if (serviceKey === 'lawn_care') {
     // 'basic' (lawnFreq 4) is RETIRED for new sales (owner directive
-    // 2026-07-09) — never offer or price it here. Standard stays first so
-    // the portal panel (which auto-selects options[0]) keeps defaulting to
-    // the 6-application plan.
+    // 2026-07-09) — never offer or price it here. 'standard' (lawnFreq 6,
+    // bi-monthly) is likewise retired for new sales (owner directive
+    // 2026-09-24: "I don't want to offer bi-monthly lawn care service
+    // anymore") — dropped from the offered ladder entirely, not just
+    // reordered, so it can never be options[0]. Enhanced stays first so the
+    // portal panel (which auto-selects options[0]) defaults to the
+    // 9-application plan.
+    // A DB re-enable (lawn_pricing_v2.tiers.standard.hidden=false) brings
+    // 6x back AFTER enhanced, so options[0] stays the 9x default.
+    const { LAWN_TIERS } = require('./pricing-engine/constants');
     const all = [
-      { id: 'lawn-standard', serviceKey, label: 'Lawn care — 6x applications/yr', tier: 'standard', lawnFreq: 6, cadence: '6 applications/yr' },
       { id: 'lawn-enhanced', serviceKey, label: 'Lawn care — 9x applications/yr', tier: 'enhanced', lawnFreq: 9, cadence: '9 applications/yr' },
+      ...(LAWN_TIERS.standard && !LAWN_TIERS.standard.hidden
+        ? [{ id: 'lawn-standard', serviceKey, label: 'Lawn care — 6x applications/yr', tier: 'standard', lawnFreq: 6, cadence: '6 applications/yr' }]
+        : []),
       { id: 'lawn-premium', serviceKey, label: 'Lawn care — 12x applications/yr', tier: 'premium', lawnFreq: 12, cadence: '12 applications/yr' },
     ];
     if (generic) return all.filter(o => o.id === 'lawn-enhanced');
     // Tier-intent narrowing uses the tier name or application-count wording only.
     // The count form accepts an optional "x" so the "Nx applications/yr" labels
     // a customer can copy from an option ("12x applications/yr", "9x") map
-    // to the right tier; a bare "Nx" token counts too. 6x is Standard, which is
-    // the default returned by the fallthrough below, so it needs no branch.
+    // to the right tier; a bare "Nx" token counts too.
     // Bare cadence words ("quarterly"/"monthly") are NOT matched: in a prompt
     // like "I have quarterly pest and want lawn care" the cadence refers to the
     // existing pest plan, so matching it would wrongly hide the other lawn tiers.
-    // "basic"/"4x" prompts intentionally fall through to the full sold ladder —
-    // the retired 4-application plan must neither be advertised nor silently
-    // priced as a different tier under its old label.
+    // "basic"/"4x" and "standard"/"6x"/"bimonthly" prompts intentionally fall
+    // through to the full (now enhanced/premium-only) sold ladder — neither
+    // retired plan is advertised or silently priced as a different tier under
+    // its old label.
     if (/\bpremium\b|\b12x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b12x\b/i.test(prompt)) {
       return all.filter(o => o.id === 'lawn-premium');
     }

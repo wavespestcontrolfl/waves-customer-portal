@@ -33,7 +33,12 @@ describe('lawn pricing golden master', () => {
   });
 
   it.each(cases.map((c) => [c.label, c]))('%s', (_label, c) => {
-    const r = priceLawnCare(c.in.property, c.in.options);
+    // includeHiddenTiers: the fixture pins the full price GRID, including the
+    // 6x/standard cells. Standard is hidden for new sales (owner directive
+    // 2026-09-24) but stays the internal bracket anchor — without the flag a
+    // standard request falls back to enhanced and the 6x cells would read 9x.
+    // The flag never changes an enhanced/premium result (only the tiers list).
+    const r = priceLawnCare(c.in.property, { ...c.in.options, includeHiddenTiers: true });
     const actual = {};
     for (const k of PINNED) actual[k] = r[k] === undefined ? r.frequency : r[k];
     // freq is exposed as `frequency` on the result root
@@ -41,6 +46,35 @@ describe('lawn pricing golden master', () => {
     for (const k of PINNED) {
       expect({ [k]: actual[k] }).toEqual({ [k]: c.out[k] });
     }
+  });
+
+  // standard/6x retired for new sales (owner directive 2026-09-24): hidden,
+  // not removed. Every pinned 6x cell must (a) be absent from the default
+  // customer-facing tiers, (b) price a default-path standard request exactly
+  // as the matching enhanced/9x case (the hidden-tier fallback), and (c)
+  // still price its own pinned 6x anchor under includeHiddenTiers (checked
+  // by the it.each above).
+  const standardCases = cases.filter((c) => c.in.options.tier === 'standard');
+  it('fixture still pins 6x anchor cells', () => {
+    expect(standardCases.length).toBeGreaterThanOrEqual(10);
+  });
+  it.each(standardCases.map((c) => [c.label, c]))('retired 6x: %s requested without includeHiddenTiers prices as enhanced/9x', (_label, c) => {
+    const r = priceLawnCare(c.in.property, c.in.options);
+    expect(r.tiers.map((t) => t.tier)).toEqual(['enhanced', 'premium']);
+    expect(r.tier).toBe('enhanced');
+    expect(r.frequency).toBe(9);
+    const enhanced = priceLawnCare(c.in.property, { ...c.in.options, tier: 'enhanced' });
+    expect({ perApp: r.perApp, annual: r.annual, monthly: r.monthly })
+      .toEqual({ perApp: enhanced.perApp, annual: enhanced.annual, monthly: enhanced.monthly });
+    // lawnFreq: 6 resolves the same way.
+    const byFreq = priceLawnCare(c.in.property, { track: c.in.options.track, lawnFreq: 6 });
+    expect(byFreq.tier).toBe('enhanced');
+    expect(byFreq.annual).toBe(enhanced.annual);
+    // The anchor cell itself is untouched and still reachable internally.
+    const anchor = priceLawnCare(c.in.property, { ...c.in.options, includeHiddenTiers: true });
+    expect(anchor.tier).toBe('standard');
+    expect(anchor.frequency).toBe(6);
+    expect(anchor.annual).toBe(c.out.annual);
   });
 
   it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $64 / $576 / $48 (market table; floors disarmed 2026-07-17)', () => {
@@ -77,7 +111,8 @@ describe('lawn pricing golden master', () => {
     }
     // The old worst case — small Bahia — collects its market-table price
     // ($34/mo); the owner raises anything that looks low in the estimator.
-    const r = priceLawnCare({ turfSf: 3000 }, { track: 'bahia', tier: 'standard' });
+    // 6x anchor cell read explicitly (standard is hidden for new sales 2026-09-24).
+    const r = priceLawnCare({ turfSf: 3000 }, { track: 'bahia', tier: 'standard', includeHiddenTiers: true });
     expect(r.monthly).toBe(34);
     expect(r.annual).toBe(408);
     expect(r.pricingSource).toBe('MARKET_TABLE');

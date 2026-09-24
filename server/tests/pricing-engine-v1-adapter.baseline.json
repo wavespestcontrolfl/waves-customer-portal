@@ -12,11 +12,6 @@
     "results": {
       "lawn": [
         {
-          "mo": 38,
-          "recommended": false,
-          "name": "6x applications/yr"
-        },
-        {
           "mo": 50,
           "recommended": true,
           "name": "9x applications/yr"
@@ -74,11 +69,6 @@
     },
     "results": {
       "lawn": [
-        {
-          "mo": 38,
-          "recommended": false,
-          "name": "6x applications/yr"
-        },
         {
           "mo": 50,
           "recommended": false,
@@ -498,11 +488,6 @@
     "results": {
       "lawn": [
         {
-          "mo": 42,
-          "recommended": false,
-          "name": "6x applications/yr"
-        },
-        {
           "mo": 52,
           "recommended": true,
           "name": "9x applications/yr"
@@ -576,11 +561,6 @@
     },
     "results": {
       "lawn": [
-        {
-          "mo": 34,
-          "recommended": false,
-          "name": "6x applications/yr"
-        },
         {
           "mo": 47,
           "recommended": true,

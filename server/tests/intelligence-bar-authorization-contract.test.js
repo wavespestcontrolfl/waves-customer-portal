@@ -291,6 +291,50 @@ test('customer updates disclose address ripples and stage lifecycle stamps; bulk
   expect(plain.effects.some((e) => /Address change|lifecycle fields/.test(e.label))).toBe(false);
 });
 
+test('a churn stage move discloses the billing disarm (GitHub Codex #4684 r4); other stages do not', () => {
+  const single = buildContract({ toolName: 'update_customer', params: { customer_id: 'c1', updates: { pipeline_stage: 'churned' } }, displayParams: { updates: { pipeline_stage: 'churned' } } });
+  const billingLine = single.effects.find((e) => e.kind === 'billing' && /Auto Pay/.test(e.label));
+  expect(billingLine).toBeDefined();
+  expect(billingLine.label).toBe('Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — REFUSED at commit if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file; an already-churned customer whose billing is already off is not re-checked — only saved-method Auto Pay and armed retries are repaired');
+  // The generic lifecycle-stamps line stays alongside the new billing line.
+  expect(single.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Stage → churned also stamps lifecycle fields/));
+
+  // A non-churned stage never gets the billing disarm disclosure.
+  const won = buildContract({ toolName: 'update_customer', params: { updates: { pipeline_stage: 'won' } }, displayParams: { updates: { pipeline_stage: 'won' } } });
+  expect(won.effects.some((e) => /Auto Pay/.test(e.label))).toBe(false);
+  const plain = buildContract({ toolName: 'update_customer', params: { updates: { city: 'Venice' } }, displayParams: { updates: { city: 'Venice' } } });
+  expect(plain.effects.some((e) => /Auto Pay/.test(e.label))).toBe(false);
+});
+
+test('bulk churn stage move discloses the per-customer billing disarm with the "For each of N" prefix, and reports blocks as skipped', () => {
+  const bulk = buildContract({
+    toolName: 'bulk_update_customers',
+    params: { customer_ids: ['a', 'b', 'c'], updates: { pipeline_stage: 'churned' } },
+    displayParams: { customer_ids: ['a', 'b', 'c'], updates: { pipeline_stage: 'churned' } },
+  });
+  const billingLine = bulk.effects.find((e) => e.kind === 'billing' && /Auto Pay/.test(e.label));
+  expect(billingLine).toBeDefined();
+  expect(billingLine.label).toBe('For each of 3 customers: Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — skipped at commit and reported back (not updated), never silently if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file; an already-churned customer whose billing is already off is not re-checked — only saved-method Auto Pay and armed retries are repaired');
+
+  // A single-id bulk call gets no "For each of N" prefix (n === 1).
+  const bulkOne = buildContract({
+    toolName: 'bulk_update_customers',
+    params: { customer_ids: ['a'], updates: { pipeline_stage: 'churned' } },
+    displayParams: { customer_ids: ['a'], updates: { pipeline_stage: 'churned' } },
+  });
+  const oneLine = bulkOne.effects.find((e) => e.kind === 'billing' && /Auto Pay/.test(e.label));
+  expect(oneLine.label.startsWith('For each of')).toBe(false);
+  expect(oneLine.label.startsWith('Turns off Auto Pay')).toBe(true);
+
+  // A non-churned bulk stage move never gets the billing disarm disclosure.
+  const bulkWon = buildContract({
+    toolName: 'bulk_update_customers',
+    params: { customer_ids: ['a', 'b'], updates: { pipeline_stage: 'won' } },
+    displayParams: { customer_ids: ['a', 'b'], updates: { pipeline_stage: 'won' } },
+  });
+  expect(bulkWon.effects.some((e) => /Auto Pay/.test(e.label))).toBe(false);
+});
+
 test('preview fingerprint hashes arrays as sets (SQL row order) but ordered plans still bind via position', () => {
   const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
   const a = previewFingerprint({ stops: [{ id: 's1', service: 'Pest' }, { id: 's2', service: 'Lawn' }] });
@@ -516,6 +560,55 @@ test('assign_technician: grouped stops disclose the visit-membership seam effect
   });
   expect(mk(true).effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/belong to grouped visits/));
   expect(mk(false).effects.some((e) => /grouped visit/.test(e.label))).toBe(false);
+});
+
+test('assign_technician: terminal exclusions are disclosed on the exact-effects card (Codex round 1 P1)', () => {
+  const withSkips = buildContract({
+    toolName: 'assign_technician',
+    params: { service_ids: ['s1', 's2'], technician_name: 'Luis' },
+    displayParams: { technician_name: 'Luis' },
+    preview: {
+      proposal: true,
+      stops: [{ id: 's1', customer: 'acct-7002', current_tech: 'Unassigned' }],
+      skipped_terminal: [{ id: 's2', status: 'completed', customer: 'acct-7003' }],
+    },
+  });
+  const withoutSkips = buildContract({
+    toolName: 'assign_technician',
+    params: { service_ids: ['s1'], technician_name: 'Luis' },
+    displayParams: { technician_name: 'Luis' },
+    preview: { proposal: true, stops: [{ id: 's1', customer: 'acct-7002', current_tech: 'Unassigned' }] },
+  });
+  const label = withSkips.effects.map((e) => e.label).find((l) => /will NOT be reassigned/.test(l));
+  expect(label).toMatch(/1 stop\(s\) are in a terminal status/);
+  // Codex round 3 P1: the card names WHICH stops stay behind (customer, id,
+  // status), never just how many.
+  expect(label).toMatch(/acct-7003 #s2 \(completed\)/);
+  expect(withoutSkips.effects.some((e) => /terminal status/.test(e.label))).toBe(false);
+});
+
+test('swap_tech_assignments: terminal exclusions are disclosed on the exact-effects card (Codex round 1 P1)', () => {
+  const withSkips = buildContract({
+    toolName: 'swap_tech_assignments',
+    params: { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis' },
+    displayParams: { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis' },
+    preview: {
+      proposal: true,
+      stops: { Adam: [], Luis: [{ id: 'b1', service_type: 'Lawn' }] },
+      skipped_terminal: [{ id: 'a1', status: 'no_show' }, { id: 'a2', status: 'skipped' }],
+    },
+  });
+  const withoutSkips = buildContract({
+    toolName: 'swap_tech_assignments',
+    params: { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis' },
+    displayParams: { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis' },
+    preview: { proposal: true, stops: { Adam: [{ id: 'a1', service_type: 'Lawn' }], Luis: [] } },
+  });
+  const label = withSkips.effects.map((e) => e.label).find((l) => /will NOT be swapped/.test(l));
+  expect(label).toMatch(/2 stop\(s\) are in a terminal status/);
+  // Codex round 3 P1: each excluded stop is listed by id and status.
+  expect(label).toMatch(/#a1 \(no_show\), #a2 \(skipped\)/);
+  expect(withoutSkips.effects.some((e) => /terminal status/.test(e.label))).toBe(false);
 });
 
 test('unit-only address edit (address_line2) carries the address fan-out disclosure (GH r14 P2)', () => {

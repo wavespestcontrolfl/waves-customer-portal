@@ -840,6 +840,35 @@ describe('rain-out service', () => {
       expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
     });
 
+    // codex-review P0 (PR #4673 round 3): the ROUTE's admin-only gate on
+    // scope='job' decides from ITS OWN pre-call read of the visit, which
+    // races this function's own re-read — a concurrent date change landing
+    // in between could leave the route believing no series-widening is
+    // possible while this function's fresh read disagrees, reaching the
+    // series branch with no ownership enforcement (requireAssignedTechnicianId
+    // only fenced the single-job fallback). requireAssignedTechnicianId now
+    // forces every OTHER wantsSeriesShift precondition to be irrelevant: a
+    // restricted (technician) caller NEVER takes the series branch, full
+    // stop, and always lands on the single-job path with its own CAS.
+    test('a technician-scoped call (requireAssignedTechnicianId set) never takes the series branch even though every other series-shift condition holds', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      SmartRebooker.reschedule.mockResolvedValueOnce({ id: 'svc-1', visitMove: null });
+
+      const result = await RainOut.commit({ ...DAY_MOVE_ARGS, requireAssignedTechnicianId: 'tech-1' });
+
+      expect(result.ok).toBe(true);
+      expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
+        expect.objectContaining({
+          seriesPolicy: 'single',
+          expect: { technician_id: 'tech-1' },
+        }),
+      );
+    });
+
     test('gate on: a REPLAYED series result runs the (idempotent) shared effects pass; Quick Move\'s own moved-SMS is CLAIMED on the row first — a winner that already concluded it means no second text', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       db.fn = { now: jest.fn(() => 'now()') };

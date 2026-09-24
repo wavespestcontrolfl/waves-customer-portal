@@ -1,6 +1,7 @@
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
 }));
 
 jest.mock('../models/db', () => {

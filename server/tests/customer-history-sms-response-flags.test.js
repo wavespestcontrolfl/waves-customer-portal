@@ -74,7 +74,41 @@ test('customer comms requires exact draft provenance before AI approval clears a
     created_at: new Date('2026-09-23T12:00:00Z'),
   };
   expect(mapCommsMessage(base, { phone: '+19415550100' }, null).responseIsAnswer).toBe(false);
-  expect(mapCommsMessage({
-    ...base, response_has_draft_provenance: true,
-  }, { phone: '+19415550100' }, null).responseIsAnswer).toBe(true);
+  const linked = mapCommsMessage({
+    ...base,
+    response_reply_to_message_id: '00000000-0000-4000-8000-000000000001',
+    response_created_at: new Date('2026-09-23T11:59:58Z'),
+  }, { phone: '+19415550100' }, null);
+  expect(linked).toMatchObject({
+    responseIsAnswer: true,
+    responseReplyToMessageId: '00000000-0000-4000-8000-000000000001',
+    responseCreatedAt: new Date('2026-09-23T11:59:58Z'),
+    createdAt: new Date('2026-09-23T12:00:00Z'),
+  });
+});
+
+test('customer comms does not classify a proactive follow-up as an answer', () => {
+  const mapped = mapCommsMessage({
+    id: 'message-follow-up', conversation_id: 'conversation-1', channel: 'sms', direction: 'outbound',
+    body: 'Checking in', media: [], message_type: 'follow_up', delivery_status: 'sent',
+    created_at: new Date('2026-09-23T12:00:00Z'),
+  }, { phone: '+19415550100' }, null);
+  expect(mapped.responseIsAnswer).toBe(false);
+  expect(mapped.responseReplyToMessageId).toBeNull();
+});
+
+test('customer comms uses durable STOP chronology while preserving the canonical privacy type', () => {
+  const canonicalAt = new Date('2026-09-23T12:03:00Z');
+  const receiptAt = new Date('2026-09-23T12:01:00Z');
+  const mapped = mapCommsMessage({
+    id: 'message-delayed-stop', conversation_id: 'conversation-1', channel: 'sms', direction: 'inbound',
+    body: 'STOP', media: [], message_type: 'job_applicant_reply', response_message_type: 'opt_out',
+    effective_created_at: receiptAt, created_at: canonicalAt,
+  }, { phone: '+19415550100' }, null);
+
+  expect(mapped).toMatchObject({
+    messageType: 'job_applicant_reply',
+    responseMessageType: 'opt_out',
+    createdAt: receiptAt,
+  });
 });

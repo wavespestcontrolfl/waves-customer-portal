@@ -85,14 +85,52 @@ Currently live:
   `property-lookup-v2.js`, `ai-chart-builder.js` image intent) plus the per-service-env lanes that default to the
   same registry selector (`GEMINI_TURF_OCR_MODEL`, `LAWN_VISION_MODEL`,
   `GEMINI_PROPERTY_MODEL`). Owner ruling 2026-09-06: one model for all of them.
+  Completion-photo captions also run on it (`TEXT_POLICIES.photoCaptions`,
+  `laneId: 'photo_scoring'` in `admin-dispatch.js`) — owner directive
+  2026-09-24, Claude Opus fallback only.
 
 **Every cross-provider call site keeps an automatic fallback to Claude** so
 a provider issue never causes a gap:
 - OpenAI features → Claude (the estimate assistant then falls to a
   deterministic template).
-- Gemini vision → retry `GEMINI_VISION_FALLBACK_MODEL` only when it names a
-  different model (the default equals BEST, so the retry rung is skipped), and
-  the parallel Claude-vision fan-out still runs.
+- Gemini vision ladders (lawn, pest, tree-shrub, treatment-zone, tech-caption
+  photo read) → retry `GEMINI_VISION_FALLBACK_MODEL` only when it names a
+  different model (the default equals BEST, so the retry rung is skipped),
+  THEN Claude VISION only if both Gemini rungs miss. Two exceptions make ONE
+  Gemini call with no retry: completion-photo captions
+  (`TEXT_POLICIES.photoCaptions`, Gemini → Claude through the dispatcher) and
+  `satellite-analyzer.js` (Gemini → Claude → OpenAI). **Owner ruling
+  2026-09-24: the four customer photo-scoring lanes below (lawn, pest,
+  tree-shrub, satellite) are Gemini-first ladders — no parallel fan-out or
+  averaging.** The ruling does NOT cover every vision lane: `property_trio`,
+  `property_v2_vision`, and `turf_ocr` remain intentional consensus fan-outs,
+  and `visionAnalysis` lanes (vision-delta, lawn quality gate, hero alt,
+  WDO brief) stay Anthropic-first — don't remove those without a new ruling.
+  `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day),
+  `pest-identification.js#analyzePhoto`/`identifyPest`, and
+  `tree-shrub-assessment.js#analyzePhoto` all call Gemini only; Claude runs
+  ONLY when Gemini returns nothing (HTTP/parse/empty/schema-invalid miss). A
+  single-model result still goes through each file's own single-model path
+  (pest-identification downgrades confidence a notch via `mergeModelResults`;
+  lawn/tree-shrub's `averageScores` passes the lone result through unchanged)
+  — a one-model read can never surface as the two-model "agreed" case.
+  `averageScores`/`mergeModelResults` still exist and still work with two
+  results handed to them directly (tests, or any future caller), but live
+  scoring never calls either with two live results anymore.
+  `satellite-analyzer.js` is the same idea with a third rung: Gemini (one
+  call — no `GEMINI_VISION_FALLBACK_MODEL` retry), then Claude (FLAGSHIP),
+  then OpenAI as the true last resort, stopping at the
+  first schema-valid result — no more three-way parallel fan-out with
+  agreement-based confidence. A single-source satellite result now always
+  reads `confidence: 'single_model'`, never `'high'` (which used to require
+  multi-provider agreement).
+  All four files validate a parsed response against its own JSON-contract
+  shape before accepting it — a syntactically valid but empty/malformed
+  response (e.g. `{}`, or a field out of range) is still a truthy object, so
+  without this check it would read as a real result, skip the fallback, and
+  let missing fields become false zero-score findings (the exact bug Codex
+  flagged P1 on lawn-assessment 2026-09-24 — see `isValidVisionScores` there
+  for the pattern each file's own validator mirrors).
 
 Gemini parsing trap (twin of the DEEP thinking-block rule): Gemini 3.x
 Flash is a thinking model — always JOIN ALL text parts of the response,
