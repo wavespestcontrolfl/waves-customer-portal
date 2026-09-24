@@ -10324,16 +10324,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               .where({ scheduled_service_id: req.params.id })
               .catch(() => [])
           : [];
-        // ADMIN-BUG-R01 (P0) fix: the posted `estimatedPrice` is the Edit
-        // modal's Price field, which for a no-add-on row is seeded via this
-        // SAME shared function against the DTO — i.e. it is the row's GROSS
-        // (`primaryLinePrice`), never the stored NET `estimated_price`,
-        // whenever add-ons are "known" (SchedulePage.jsx:1708-1719). Diffing
-        // that posted gross against the stored net treated every discounted,
-        // add-on-less save as a price change and silently stripped the
-        // discount. Re-derive the stored row's own gross the identical way
-        // and diff against THAT, so an echoed, untouched Price field is a
-        // true no-op.
+        // ADMIN-BUG-R01 (P0) fix: this branch is shared by TWO callers with
+        // DIFFERENT price-field conventions for the SAME `estimatedPrice`
+        // key. The desktop Edit-appointment modal (SchedulePage.jsx) seeds
+        // its Price field from the row's GROSS `primaryLinePrice` whenever
+        // add-ons are "known" (:1708-1719) — never the stored NET
+        // `estimated_price` — while MobileServiceEditModal seeds and posts
+        // the stored NET `estimatedPrice` verbatim. Diffing the posted value
+        // against only the net (the old behavior) treated every discounted,
+        // add-on-less DESKTOP save as a price change and silently stripped
+        // the discount; diffing against only a re-derived gross (an
+        // intermediate version of this fix) broke the equally real MOBILE
+        // no-op the same way in reverse. An echoed, untouched Price field
+        // must be a no-op under EITHER convention, so treat the price as
+        // unchanged when it matches the stored net OR the row's own
+        // (re-derived, same way the client derives it) gross.
+        const existingNetPrice = Number(existingPrice?.estimated_price);
         const existingGrossPrice = deriveLegacyPrimarySubmission({
           primaryLinePrice: existingPrice?.primary_line_price,
           estimatedPrice: existingPrice?.estimated_price,
@@ -10341,8 +10347,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             basePrice: addon.base_price != null ? addon.base_price : addon.estimated_price,
           })),
         });
-        const priceChanged = !Number.isFinite(existingGrossPrice)
-          || Math.abs(existingGrossPrice - basePrice) >= 0.005;
+        const matchesNet = Number.isFinite(existingNetPrice) && Math.abs(existingNetPrice - basePrice) < 0.005;
+        const matchesGross = Number.isFinite(existingGrossPrice) && Math.abs(existingGrossPrice - basePrice) < 0.005;
+        const priceChanged = !matchesNet && !matchesGross;
         const discountTypeChanged = discountType !== undefined
           && (discountType || null) !== (existingPrice?.discount_type || null);
         const nextDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;

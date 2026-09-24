@@ -160,3 +160,20 @@ test('an unrelated save echoing the gross primaryLinePrice as estimatedPrice mus
   expect(write.payload.discount_type).not.toBeNull();
   expect(write.payload.discount_amount).not.toBeNull();
 });
+
+test('an unrelated MobileServiceEditModal save echoing the stored NET as estimatedPrice must also NOT strip the discount', async () => {
+  // MobileServiceEditModal seeds its price state from the stored NET
+  // `estimatedPrice` (90) and posts it back verbatim — the opposite
+  // convention from the desktop modal's gross echo above. Both callers post
+  // the same `estimatedPrice` key to this same branch, so the no-op check
+  // must recognize BOTH as unchanged.
+  const { status, body } = await put({ estimatedPrice: 90, notes: 'gate code 1234' });
+  const write = captured.find((c) => c.table === 'scheduled_services');
+  console.log('status', status, JSON.stringify(body), 'captured scheduled_services update:', JSON.stringify(write?.payload));
+  expect(write).toBeDefined();
+  if (write.payload.estimated_price !== undefined) {
+    expect(Number(write.payload.estimated_price)).toBeCloseTo(90, 2);
+  }
+  expect(write.payload.discount_type).not.toBeNull();
+  expect(write.payload.discount_amount).not.toBeNull();
+});
