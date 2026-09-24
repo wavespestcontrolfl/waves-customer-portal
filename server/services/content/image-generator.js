@@ -209,11 +209,14 @@ const EQUIPMENT_SUBJECT = /\b(controller|timer|clock|irrigation|sprinkler|spread
 // #3964).
 const INDOOR_SUBJECT = /\b(kitchen|pantry|bathroom|bedroom|attic|closet|cabinets?|indoors?|inside|baseboards?|roach(es)?|cockroach(es)?|bed bugs?|silverfish|drain flies)\b/i;
 const OUTDOOR_SUBJECT = /\b(lawn|turf|grass|sod|yard|mounds?|garden|hedges?|shrubs?|trees?|palms?|mulch|patio|lanai|pool|driveway|exterior|outdoors?|outside|perimeter|foundation)\b/i;
-function settingsFor(subject) {
+function settingCategoryFor(subject) {
   const text = String(subject || '');
-  if (EQUIPMENT_SUBJECT.test(text)) return [...SETTINGS.equipment];
-  if (INDOOR_SUBJECT.test(text) && !OUTDOOR_SUBJECT.test(text)) return [...SETTINGS.indoor];
-  return [...SETTINGS.yard];
+  if (EQUIPMENT_SUBJECT.test(text)) return 'equipment';
+  if (INDOOR_SUBJECT.test(text) && !OUTDOOR_SUBJECT.test(text)) return 'indoor';
+  return 'yard';
+}
+function settingsFor(subject) {
+  return [...SETTINGS[settingCategoryFor(subject)]];
 }
 const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];
 const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking down', 'over the shoulder', 'straight-on, centered', 'three-quarter view'];
@@ -257,10 +260,10 @@ function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject =
   if (style === 'infographic') {
     return { style, setting: pick(INFOGRAPHIC_LAYOUTS, 1), timeOfDay: '', vantage: 'straight-on, centered' };
   }
-  const settings = settingsFor(subject);
+  const category = settingCategoryFor(subject);
   return {
     style,
-    setting: pick(settings, 1),
+    setting: pick(SETTINGS[category], 1),
     timeOfDay: pick(TIMES_OF_DAY, 2),
     vantage: pick(VANTAGES, 3),
     // Owner ask 2026-09-23: the Waves van in the background of SOME exterior
@@ -269,7 +272,7 @@ function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject =
     // The van is UNMARKED by design — the real wrap carries the retired name
     // and generators turn lettering into gibberish; the logo screen would
     // reject it. Revisit as a reference-image path after the re-wrap.
-    van: settings[0] === SETTINGS.yard[0] && (seed + 4 * 7919) % 3 === 0,
+    van: category === 'yard' && (seed + 4 * 7919) % 3 === 0,
   };
 }
 const VAN_LINE = 'In the background, a solid Waves-blue (#009CDE) Ford Transit work van parked at the curb or in the driveway — plain and unmarked, no lettering, no logo, not the focus of the shot.';
