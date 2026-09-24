@@ -9,20 +9,21 @@
  * re-derived from the new picture (hero-alt-vision) so the shipped alt never
  * describes the old blue shirt.
  *
- * DRY RUN by default — prints what would be generated and the cost. --live spends.
+ * DRY RUN by default — prints what would be generated and the cost. --execute spends.
  *
  *   cd ~/waves-customer-portal && railway run --service waves-customer-portal -- \
  *     node <portal wt>/ops/agents/uniform-image-regenerate.js \
- *       --report uniform-audit.json --astro ~/wt-astro-uniform [--only <file>] [--live]
+ *       --report uniform-audit.json --astro ~/wt-astro-uniform [--only <file>] [--execute]
  */
 const fs = require('fs');
 const path = require('path');
+const { etDateString } = require('../../server/utils/datetime-et');
 
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const REPORT = opt('--report'); const ASTRO = opt('--astro'); const ONLY = opt('--only', null);
-const LIVE = args.includes('--live');
-if (!REPORT || !ASTRO) { console.error('usage: --report <audit.json> --astro <astro worktree> [--only <file>] [--live]'); process.exit(1); }
+const LIVE = args.includes('--execute');
+if (!REPORT || !ASTRO) { console.error('usage: --report <audit.json> --astro <astro worktree> [--only <file>] [--execute]'); process.exit(1); }
 // A linked worktree's `.git` is a FILE (`gitdir: .../worktrees/<name>`); the main
 // checkout's is a directory. Refuse the main checkout — another session may have
 // it on its own branch with staged work, and a --live run would write into it.
@@ -57,7 +58,8 @@ function frontmatter(text) {
 }
 // Astro rule: bump the lastmod field on any content edit (sitemap lastmod).
 function bumpModified(text) {
-  const today = new Date().toISOString().slice(0, 10);
+  // Eastern calendar day, never UTC (an evening run must not stamp tomorrow).
+  const today = etDateString(new Date());
   if (/^updated:.*$/m.test(text)) return text.replace(/^updated:.*$/m, `updated: "${today}"`);
   if (/^modified:.*$/m.test(text)) return text.replace(/^modified:.*$/m, `modified: "${today}"`);
   return text;
