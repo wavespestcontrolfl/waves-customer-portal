@@ -12178,6 +12178,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (!['pending', 'confirmed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
             throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from an upcoming pending or confirmed visit.`);
           }
+          // Customer row lock BEFORE the series-advisory guard below (Codex
+          // #4716 r1 follow-up P1): this trx's only other 'customers' touch
+          // (the Bill-To FOR SHARE peek above) is conditional on
+          // payer_id/self_pay_override and does not run on a plain
+          // make-recurring save, so nothing else here establishes the
+          // customer -> series-advisory order admin-schedule.js's POST
+          // creator (~7186) and booking.js already use. executeMerge
+          // (customer-dedupe.js) holds this customer's row FOR UPDATE while
+          // waiting on the recurring-series-create advisory lock; the child
+          // inserts below take a key-share lock on this same customer row
+          // via their customer_id FK. Locking the row first here means
+          // whichever side gets there first runs to completion before the
+          // other can proceed, instead of each holding what the other waits
+          // on.
+          await trx('customers').where({ id: parent.customer_id }).forUpdate().first('id');
           // Race-safe duplicate-series backstop (P0), mirroring the POST
           // creator's in-trx guard: the child-date preload above only dedupes
           // rows already attached to THIS parent — it never sees a DIFFERENT

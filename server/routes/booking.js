@@ -4565,6 +4565,20 @@ async function createSelfBooking(payload = {}) {
           // order, or concurrent creation for the same customer/service
           // deadlocks (the in-seeder acquire is then reentrant).
           await lockCustomerComms(trx, custId);
+          // Customer row lock BEFORE the series-advisory lock (Codex #4716
+          // r1 P1) — the same customer → series-advisory order admin-
+          // schedule.js (~7186) and this file's own in-booking guard
+          // (~2933) already use. executeMerge (customer-dedupe.js) holds
+          // this customer's row FOR UPDATE while it waits on the
+          // recurring-series-create advisory lock; seedFollowUpsForParent
+          // below inserts child scheduled_services rows whose customer_id
+          // FK takes a key-share lock on this same customer row. Without
+          // this row lock taken FIRST, this transaction could hold the
+          // advisory lock (via checkActiveSeriesLocked below) while
+          // waiting on the customer row the merge already holds, and the
+          // merge waits on the advisory lock this transaction holds — a
+          // deadlock Postgres resolves by aborting one side.
+          await trx('customers').where({ id: custId }).forUpdate().first('id');
           // Composite parents (Pest + add-ons) guard and seed as the PEST
           // family: serviceKeyFor on the joined label would classify the
           // series as mosquito/lawn and (a) miss an existing pest series
