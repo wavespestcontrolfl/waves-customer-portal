@@ -998,6 +998,11 @@ describe('model vocabulary slips are normalized before schema validation (audit 
     expect(out3.items[0].evidence.map((e) => e.quote)).toEqual(['I will call you back tomorrow morning with the price']);
     const many = { commitments: Array.from({ length: 13 }, () => item()) };
     expect(normalizeModelOutput(many).commitments).toHaveLength(12);
+    // The commitment cap keeps grounded commitments ahead of ungrounded ones (r5 P2).
+    const ungrounded = Array.from({ length: 12 }, (_, i) => item({ description: `phantom ${i}`, evidence: [{ quote: `nothing like this was said ${i}`, speaker: 'agent' }] }));
+    const capped = normalizeModelOutput({ commitments: [...ungrounded, item()] }, transcript).commitments;
+    expect(capped).toHaveLength(12);
+    expect(capped[0].description).toBe('Call back with the price');
     expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most three quotes per commitment/);
     expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most twelve commitments/);
   });

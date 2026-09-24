@@ -148,7 +148,15 @@ function normalizeModelOutput(parsed, transcript = '') {
       item.evidence = preferred.concat(rest).slice(0, 3);
     }
   }
-  if (parsed.commitments.length > 12) parsed.commitments = parsed.commitments.slice(0, 12);
+  // Same rule for the twelve-commitment cap: commitments with at least one
+  // grounded quote come first, so the trim drops ungrounded ones (r5 P2).
+  if (parsed.commitments.length > 12) {
+    const hasGrounded = (item) => !!item && typeof item === 'object'
+      && Array.isArray(item.evidence) && item.evidence.some((e) => grounded(e, item));
+    const preferred = parsed.commitments.filter(hasGrounded);
+    const rest = parsed.commitments.filter((item) => !preferred.includes(item));
+    parsed.commitments = preferred.concat(rest).slice(0, 12);
+  }
   return parsed;
 }
 
