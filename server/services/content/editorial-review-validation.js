@@ -63,7 +63,7 @@ function validateClaimEvidence(claim, sources) {
   if (!kinds.includes(claim.claimKind)) return `claim_kind:${claim.claimId}`;
   if (!suitability.includes(claim.sourceSuitability)) return `claim_suitability:${claim.claimId}`;
   const deterministicKind = deterministicClaimKind(claim.passage);
-  if (deterministicKind && claim.claimKind !== deterministicKind) return `claim_kind_mismatch:${claim.claimId}`;
+  if (claim.verdict !== 'non_external' && deterministicKind && claim.claimKind !== deterministicKind) return `claim_kind_mismatch:${claim.claimId}`;
   if (claim.verdict === 'supported') {
     if (!validSourceReference(claim.sourceIndex, claim.sourceQuote, sources)) return `claim_quote:${claim.claimId}`;
     if (claim.sourceSuitability === 'unsuitable' || claim.sourceSuitability === 'not_applicable') return `claim_unsuitable:${claim.claimId}`;
