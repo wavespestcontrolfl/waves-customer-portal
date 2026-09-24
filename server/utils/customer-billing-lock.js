@@ -59,28 +59,45 @@
  * per-PI pg_advisory_xact_lock (services/stripe.js) collapses it to one
  * ledger row.
  *
- * A THIRD, rollout-compatibility check runs before either lock layer:
- * during a rolling deploy, an OLD pod's retry sweep or monthly cron
- * (code that predates this whole file) has no idea this per-customer lock
- * exists, so a NEW pod's charge-now taking `billing-customer:<id>` alone
- * would not see it. Both jobs, in every version of this code (the wrapping
- * in services/scheduler.js is untouched by this file), already run inside
- * a NAMED job-level advisory lock ('billing-monthly' / 'billing-retries',
- * utils/cron-lock.js's runExclusive) for their ENTIRE run — a signal
- * visible regardless of which pod's code is doing the checking. A plain
- * `pg_locks` read (lockHeldByAnySession — db.raw only, no connection
- * pinning) checks whether either job is running ANYWHERE before
- * proceeding. Callers that ARE themselves running inside one of those two
- * jobs pass `excludeJobLocks` naming their OWN job — checking it would
- * otherwise refuse every one of their own charges (the lock they hold IS
- * what's reported as "held").
+ * A THIRD, rollout-compatibility layer runs INSIDE the second: during a
+ * rolling deploy, an OLD pod's retry sweep or monthly cron (code that
+ * predates this whole file) has no idea this per-customer lock exists, so
+ * a NEW pod's charge-now taking `billing-customer:<id>` alone would not
+ * see it. Both jobs, in every version of this code (the wrapping in
+ * services/scheduler.js is untouched by this file), already run inside a
+ * NAMED job-level advisory lock ('billing-monthly' / 'billing-retries',
+ * utils/cron-lock.js's runExclusive, via its own UNMODIFIED
+ * pg_try_advisory_lock) for their ENTIRE run — a signal visible
+ * regardless of which pod's code is doing the checking.
+ *
+ * A one-time snapshot of "is that job running right now?" cannot close
+ * this: the old pod's job can start its OWN exclusive acquisition in the
+ * gap between the snapshot and the actual charge. Instead, for the WHOLE
+ * duration of the customer-scoped operation, this layer holds a
+ * pg_try_advisory_lock_SHARED on each non-excluded job's exact key — on
+ * the SAME connection already holding the `billing-customer:<id>`
+ * exclusive lock (utils/cron-lock.js's getHeldConnection(), set via
+ * runExclusive's AsyncLocalStorage context). Postgres advisory locks make
+ * shared and exclusive holders on the SAME key mutually exclusive, so:
+ *   - if a job is CURRENTLY running (holds its lock exclusively)
+ *     anywhere, the shared acquire fails immediately and this layer
+ *     refuses rather than let the charge proceed unfenced;
+ *   - once this layer holds the shared lock, an old pod's job cannot
+ *     START — its own unmodified pg_try_advisory_lock call fails and it
+ *     skips that tick, exactly like a same-version instance overlap
+ *     already does — until this operation releases it.
+ * No old-pod code needs to know this file exists; it only ever calls the
+ * pg_try_advisory_lock it already called before this PR. Callers that ARE
+ * themselves running inside one of those two jobs pass `excludeJobLocks`
+ * naming their OWN job — taking a lock this session already holds
+ * exclusively would deadlock against itself.
  *
  * Callers MUST hold this lock across BOTH the already-collected read and
  * the charge() call — locking only the write leaves the classic
  * check-then-act race open.
  */
 const db = require('../models/db');
-const { runExclusive, lockHeldByAnySession } = require('./cron-lock');
+const { runExclusive, getHeldConnection } = require('./cron-lock');
 
 const locks = new Map(); // customerId -> tail promise (never rejects)
 
@@ -107,36 +124,57 @@ function claimHeldElsewhereError(customerId, reason) {
   return err;
 }
 
-// Rollout-compatibility probe: is EITHER named cron job (other than the
-// caller's own, if it named one) currently running on ANY pod? A plain
-// pg_locks read — degrades to "not running" (false/null) on a DB hiccup or
-// a test double, since the per-customer layer below is the primary defense
-// and already fails closed on genuine ambiguity; this is a supplementary
-// net for the old/new-pod overlap the per-customer lock alone can't see.
-async function anyOtherJobRunning(excludeJobLocks) {
+// Rollout-compatibility layer — see the file header. Runs INSIDE the
+// customer's own exclusive lock (called as runExclusive's fn), so
+// getHeldConnection() returns the SAME session already holding it. Takes
+// a pg_try_advisory_lock_shared on each non-excluded job's EXACT key
+// (utils/cron-lock.js's own `cron:<jobName>` namespace) before letting the
+// real fn() run, and releases them (in reverse) once it settles.
+async function runUnderRolloutCompatJobLocks(customerId, fn, excludeJobLocks) {
   const exclude = new Set(excludeJobLocks || []);
-  for (const jobName of ROLLOUT_COMPAT_JOB_LOCKS) {
-    if (exclude.has(jobName)) continue;
-    const held = await lockHeldByAnySession(jobName).catch(() => null);
-    if (held === true) return jobName;
+  const conn = getHeldConnection();
+  const heldKeys = [];
+  try {
+    for (const jobName of ROLLOUT_COMPAT_JOB_LOCKS) {
+      if (exclude.has(jobName)) continue;
+      const lockKey = `cron:${jobName}`;
+      const res = await conn.query({
+        text: 'SELECT pg_try_advisory_lock_shared(hashtext($1)) AS locked',
+        values: [lockKey],
+      });
+      const locked = !!res?.rows?.[0]?.locked;
+      if (!locked) throw claimHeldElsewhereError(customerId, `job ${jobName} is running`);
+      heldKeys.push(lockKey);
+    }
+    return await fn();
+  } finally {
+    for (const lockKey of heldKeys.reverse()) {
+      try {
+        await conn.query({ text: 'SELECT pg_advisory_unlock_shared(hashtext($1))', values: [lockKey] });
+      } catch (err) {
+        // Session advisory locks survive pool release — if this connection
+        // went back into the pool still holding a shared lock, every
+        // future tick of that job would skip (lease_held) until the
+        // process died. Flag it for destruction (mirrors cron-lock.js's
+        // own unlock-failure handling) so the lock dies with the session.
+        conn.__knex__disposed = `customer-billing-lock rollout-compat unlock failed: ${err.message}`;
+      }
+    }
   }
-  return null;
 }
 
 async function runCrossProcessGuarded(customerId, fn, excludeJobLocks) {
-  const busyJob = await anyOtherJobRunning(excludeJobLocks);
-  if (busyJob) throw claimHeldElsewhereError(customerId, `job ${busyJob} is running`);
-
   if (!crossProcessLockCapable()) {
     // No pg connection-pinning API at all (a unit test's db double) — no
     // cross-process signal exists to trust either way. The in-process Map
     // still fences the case that matters most on this deployment shape.
     return fn();
   }
-  const result = await runExclusive(crossProcessLockName(customerId), fn, {
-    recordHealth: false,
-    waitForSlot: false,
-  });
+  const result = await runExclusive(
+    crossProcessLockName(customerId),
+    () => runUnderRolloutCompatJobLocks(customerId, fn, excludeJobLocks),
+    { recordHealth: false, waitForSlot: false },
+  );
   if (result && result.skipped === true) {
     // Capable of the technique but could not confirm exclusivity —
     // whether a confirmed other-process holder (lease_held) or an

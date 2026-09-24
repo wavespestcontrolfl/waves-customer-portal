@@ -146,6 +146,14 @@ describe.each(["legacy", "comfortable"])(
       // shown before/while the charge is in flight, not just on a receipt
       // after the fact.
       expect(document.body.textContent).toMatch(/\$100\.00.*\$3\.00.*\$103\.00/);
+      // Codex round-2 P2: the quote line used to be `truncate` in the
+      // legacy sheet, so on a narrow screen the TOTAL — the last part of
+      // the string — was the part that got ellipsized. A textContent
+      // check alone can't see that (jsdom doesn't apply CSS overflow), so
+      // assert the class directly: the element holding the total must not
+      // truncate.
+      const quoteEl = screen.getByText(/\$103\.00/);
+      expect(quoteEl.className).not.toMatch(/\btruncate\b/);
     });
 
     it("still charges successfully under React.StrictMode's dev double-invoked mount/cleanup", async () => {

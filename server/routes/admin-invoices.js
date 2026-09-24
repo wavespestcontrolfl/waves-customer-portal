@@ -2689,12 +2689,23 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // credit here without it would draw down the customer's credit while
         // that same card charge is still pending reconciliation (double
         // collection once the webhook lands and quarantines it as an orphan).
+        // Codex round-2 P2: assertNoInvoiceChargeReconciliationPending can
+        // itself WRITE on this same trx — promoting a stale 'claimed' row
+        // to 'ambiguous' once its active window has passed
+        // (promoteStaleSavedCardClaim, services/stripe.js). Re-throwing
+        // its mapped error here would roll back that promotion along with
+        // everything else in this transaction, so every LATER attempt
+        // re-reads the same stale, not-yet-promoted claim and keeps
+        // reporting "in progress" forever instead of "ambiguous,
+        // reconcile it". Return a refusal sentinel instead (mirrors
+        // recordManualPayment's chargeReconciliationPending) so the
+        // transaction COMMITS — the promotion sticks — and map it to 409
+        // outside, after commit.
         try {
           await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(id, trx);
         } catch (fenceErr) {
           if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
-            const err = new Error(`${fenceErr.message} — resolve it before applying credit`);
-            err.statusCode = 409; err.isOperational = true; throw err;
+            return { chargeReconciliationPending: `${fenceErr.message} — resolve it before applying credit` };
           }
           throw fenceErr;
         }
@@ -2769,6 +2780,10 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     } catch (err) {
       if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
       throw err;
+    }
+
+    if (outcome?.chargeReconciliationPending) {
+      return res.status(409).json({ error: outcome.chargeReconciliationPending });
     }
 
     const { invoice: covered, cover, balanceAfter } = outcome;

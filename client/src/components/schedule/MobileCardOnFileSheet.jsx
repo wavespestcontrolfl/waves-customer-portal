@@ -389,8 +389,14 @@ export default function MobileCardOnFileSheet({
                       {cardTitle(c)}
                     </span>
                     {quotes[c.id] && (
+                      // Codex round-2 P2: this used to `truncate` (single
+                      // line, ellipsized) — on a narrow screen the total at
+                      // the END of the string (base + fee = TOTAL) was the
+                      // part that got cut off, hiding the one number that
+                      // matters most. Let it wrap instead so the total is
+                      // always fully visible.
                       <span
-                        className="text-ink-secondary truncate block"
+                        className="text-ink-secondary block whitespace-normal break-words"
                         style={{ fontSize: 13 }}
                       >
                         {quoteAmountLabel(quotes[c.id])}
