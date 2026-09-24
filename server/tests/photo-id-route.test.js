@@ -486,8 +486,11 @@ describe('next_step branches', () => {
 
   test('lawn: explicit null scores are treated as missing, not a measured zero -> unclear', async () => {
     mockLawnAnalyzePhoto.mockResolvedValue({
+      // fungal_activity present (baseline 'none') so this composite carries
+      // SOME evidence (not a total-failure 503) while turf/weed/color stay
+      // genuinely absent — the case this test targets.
       composite: {
-        turf_density: null, weed_coverage: null, color_health: null, grass_type: null, observations: '',
+        turf_density: null, weed_coverage: null, color_health: null, grass_type: null, observations: '', fungal_activity: 'none',
       },
     });
     await withServer(async (base) => {
@@ -499,10 +502,11 @@ describe('next_step branches', () => {
   });
 
   test('lawn: no usable scores -> unclear, and the result is the neutral placeholder (codex GH r3 P1)', async () => {
-    // An empty composite is a SUCCESSFUL photo (partial stays false), so
-    // only noUsableScores catches this — the result must be suppressed the
+    // A composite carrying SOME evidence (fungal_activity present, not a
+    // total-failure 503) but no turf/weed/color scores at all — only
+    // noUsableScores catches this — the result must be suppressed the
     // same way a partial batch's is, not just the next_step.
-    mockLawnAnalyzePhoto.mockResolvedValue({ composite: {} });
+    mockLawnAnalyzePhoto.mockResolvedValue({ composite: { fungal_activity: 'none' } });
     mockReserviceAccess.mockResolvedValue({ token: 'tok-would-win', lanes: ['lawn'] });
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/lawn', photoBody());
@@ -515,13 +519,43 @@ describe('next_step branches', () => {
   });
 
   test('GET /:type/:id also suppresses a stored no-usable-scores lawn result', async () => {
-    mockLawnAnalyzePhoto.mockResolvedValue({ composite: {} });
+    mockLawnAnalyzePhoto.mockResolvedValue({ composite: { fungal_activity: 'none' } });
     await withServer(async (base) => {
       const created = await post(base, '/api/photo-id/lawn', photoBody()).then((r) => r.json());
       const res = await fetch(`${base}/api/photo-id/lawn/${created.id}`);
       const body = await res.json();
       expect(body.result.observations).not.toContain('No urgent lawn issues');
       expect(body.next_step.kind).toBe('unclear');
+    });
+  });
+
+  test('lawn: a completely EMPTY composite carries no evidence at all -> 503, not a confident/unclear 200 (codex GH r4 P1)', async () => {
+    mockLawnAnalyzePhoto.mockResolvedValue({ composite: {} });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody());
+      expect(res.status).toBe(503);
+      expect(TABLES.lawn_diagnostics).toHaveLength(0);
+    });
+  });
+
+  test('lawn: one healthy composite + one truly EMPTY composite is partial, never a confident single-photo read (codex GH r4 P1)', async () => {
+    // An empty {} composite is truthy — it must not silently count as a
+    // successful photo alongside a real one and let the real photo's scores
+    // stand in as if the whole batch succeeded.
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-would-win', lanes: ['lawn'] });
+    mockLawnAnalyzePhoto
+      .mockResolvedValueOnce({
+        composite: {
+          turf_density: 90, weed_coverage: 5, color_health: 9, fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Looks great.',
+        },
+      })
+      .mockResolvedValueOnce({ composite: {} }); // truthy, but carries nothing
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/lawn', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('unclear');
+      expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.result.observations).not.toContain('Looks great');
     });
   });
 
@@ -805,6 +839,21 @@ describe('property scope (GATE_APP_PROPERTY_SCOPE)', () => {
       const body = await res.json();
       expect(body.next_step.kind).toBe('reservice');
       expect(body.next_step.url).toBe('/reservice/tok-primary');
+    });
+  });
+
+  test('a CLOSED scope (every saved property retired) rejects the submission before spending a paid vision call (codex GH r4 P1)', async () => {
+    // applyPropertyPredicate's closed branch matches NOTHING for this
+    // customer — a row written here would be permanently invisible to both
+    // history reads, so this must reject before identifyPest ever runs.
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: false, scoped: true, closed: true, property: null,
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(409);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.pest_identifications).toHaveLength(0);
     });
   });
 });

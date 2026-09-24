@@ -386,6 +386,19 @@ function numericValues(list, key) {
   return list.map((c) => c[key]).filter((v) => v != null && v !== '').map(Number).filter(Number.isFinite);
 }
 
+// codex GH r4 P1: a composite object existing (analyzePhoto resolved
+// non-null) is not the same as it carrying any usable evidence — an empty
+// {} still passes a truthy check. Counts as evidence when at least one
+// score or signal field the merge actually reads is present.
+function lawnCompositeHasEvidence(composite) {
+  if (!composite) return false;
+  const fields = [
+    'turf_density', 'weed_coverage', 'color_health',
+    'fungal_activity', 'insect_damage', 'mechanical_damage', 'drought_stress', 'thatch_visibility',
+  ];
+  return fields.some((key) => composite[key] != null && composite[key] !== '');
+}
+
 function mergeLawnComposites(list) {
   const turf = numericValues(list, 'turf_density');
   const weed = numericValues(list, 'weed_coverage');
@@ -468,7 +481,13 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   const analyses = await Promise.all(photoInputs.map((photo) => lawnAssessment
     .analyzePhoto(photo.data, photo.mimeType, context)
     .catch((err) => { logger.warn(`[photo-id] lawn analyzePhoto failed: ${err.message}`); return null; })));
-  const composites = analyses.filter(Boolean).map((a) => a.composite).filter(Boolean);
+  // codex GH r4 P1: a composite object existing is not the same as it
+  // carrying any usable evidence — an EMPTY {} composite is truthy and was
+  // passing the old `.filter(Boolean)` check, so a mixed batch (one real
+  // photo + one that returned nothing) counted as fully successful and
+  // merged a confident result off the single working photo alone. Only a
+  // composite carrying at least one score/signal field counts now.
+  const composites = analyses.filter(Boolean).map((a) => a.composite).filter(lawnCompositeHasEvidence);
   if (!composites.length) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
   }
@@ -637,6 +656,16 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
     req._photoInputs = photoInputs;
 
     const scope = await resolvePropertyScope(req);
+    // codex GH r4 P1: a closed scope (every saved property retired) has no
+    // property to stamp — applyPropertyPredicate then matches NOTHING for
+    // this customer (its own "closed" branch is whereNull('id'), never
+    // true), so a row written here would be immediately, permanently
+    // invisible to both history reads. Reject before spending the paid
+    // vision call rather than silently burning it on a submission the
+    // customer could never see again.
+    if (scope.closed) {
+      return res.status(409).json({ error: `We couldn't find an active property on your account. Please call our office at ${OFFICE_PHONE} and we'll get that fixed.` });
+    }
     const propertyId = scope.scoped && scope.property ? scope.property.id : null;
 
     return await handler(req, res, {
