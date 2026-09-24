@@ -11473,6 +11473,10 @@ export function CompletionPanel({
   // Owner ruling 2026-09-24: on a customer's first visit on this service
   // line the picker starts at 5 and the tech lowers it if they saw less.
   const [clientPestRatingDefault, setClientPestRatingDefault] = useState(null);
+  // Set once the rating came from the tech (a tap) or a restored draft;
+  // the late first-visit prefill must never overwrite either. A dedicated
+  // ref — the draft snapshot ref is replaced on every autosave.
+  const clientPestRatingSetByTechRef = useRef(false);
   useEffect(() => {
     let cancelled = false;
     // Per-service `allowed` boolean from the server. The endpoint
@@ -11498,11 +11502,7 @@ export function CompletionPanel({
           setClientPestRatingDefault(5);
           // Never over a value the tech already tapped or a restored draft
           // (including a draft where the tech cleared the default).
-          setClientPestRating((current) => (
-            current == null && draftSnapshotRef.current?.restoredFromStorage !== true
-              ? 5
-              : current
-          ));
+          if (!clientPestRatingSetByTechRef.current) setClientPestRating(5);
         }
       })
       .catch(() => {
@@ -13382,6 +13382,7 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
+    clientPestRatingSetByTechRef.current = true;
     setClientPestRating(
       Number.isInteger(savedDraft.clientPestRating)
         ? savedDraft.clientPestRating
@@ -18427,9 +18428,10 @@ export function CompletionPanel({
                       <button
                         key={n}
                         type="button"
-                        onClick={() =>
-                          setClientPestRating(selected ? null : n)
-                        }
+                        onClick={() => {
+                          clientPestRatingSetByTechRef.current = true;
+                          setClientPestRating(selected ? null : n);
+                        }}
                         style={{
                           minWidth: 44,
                           height: 44,
@@ -20813,9 +20815,10 @@ export function CompletionPanel({
                     <button
                       key={n}
                       type="button"
-                      onClick={() =>
-                        setClientPestRating(selected ? null : n)
-                      }
+                      onClick={() => {
+                        clientPestRatingSetByTechRef.current = true;
+                        setClientPestRating(selected ? null : n);
+                      }}
                       style={{
                         minWidth: 44,
                         height: 40,
