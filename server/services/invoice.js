@@ -8616,16 +8616,26 @@ const InvoiceService = {
     const amount = Number.isFinite(claimAmount) && claimAmount > 0 ? claimAmount : lineAmount;
     if (!(amount > 0)) return null;
     if (!setupLine && !claimRecord) return null;
+    // Every TERM-BACKED prepay invoice restores through the annual-prepay
+    // pipeline (the claims-ledger sync, codex #3591 r48 P1, OR the
+    // switch-supersede marker re-mint, codex round-2) — checked
+    // UNCONDITIONALLY, not only when a claim happens to exist (codex
+    // round-2 P0 follow-up): an estimate-origin switch prepay deliberately
+    // has NO claim on its first cycle (the marker re-mint is the sole
+    // mechanism there), so a refund reaching this GENERIC reversal path
+    // (returnAppliedCreditOnRefund, the real Stripe/credit refund
+    // transition — not just the annual-prepay-renewals.js sync) would
+    // otherwise see no claim, see the invoice's own setup line, and stamp
+    // the setup a SECOND time on top of whatever the term-cancel sync
+    // already restores.
+    const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
+    if (termBacked) return null; // prepay lane — restored via the claims ledger / marker re-mint
     if (claimRecord) {
-      // Only TERM-BACKED prepay claims restore through the claims-ledger
-      // sync (codex #3591 r48 P1) — a COMPLETION invoice writes a claim
-      // record too (crash-resume evidence, admin-dispatch), and its
-      // reversal must put the stamp back HERE, consuming the record.
-      const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
-      if (termBacked) return null; // prepay lane — restored via the claims ledger
-      // Consumed only AFTER a successful re-stamp/re-bill (codex #3591 r53
-      // local P0): an ambiguous or failed restore keeps the durable
-      // evidence for retry / manual reconciliation.
+      // A COMPLETION invoice writes a claim record too (crash-resume
+      // evidence, admin-dispatch), consumed only AFTER a successful
+      // re-stamp/re-bill (codex #3591 r53 local P0): an ambiguous or
+      // failed restore keeps the durable evidence for retry / manual
+      // reconciliation.
       completionClaimToConsume = claimRecord.id;
     }
     const { authoritativeServiceKey } = require("./secure-appointment-plans");
@@ -8770,6 +8780,70 @@ const InvoiceService = {
       .where({ id: prepayInvoiceId })
       .first("id", "customer_id", "scheduled_service_id", "line_items");
     if (!invoiceRow) return null;
+    // ESTIMATE-origin on-site prepay switches deliberately never write a
+    // setup_fee_claims row for THIS prepay (admin-schedule.js prepay-switch,
+    // codex #3591 r38 P1): the switch's own setup line was carried off the
+    // superseded per-application accept invoice, and a later void/refund of
+    // this prepay re-mints that accept invoice — setup line included —
+    // through the prepay-switch-restore marker
+    // (restoreSwitchSupersededInvoicesForPrepay), independent of the claims
+    // ledger. This function runs on EVERY first payment, not only a
+    // dispute-revival, so without this guard it ledgers the claim the switch
+    // refused to write; the refund then restores the setup TWICE — once via
+    // the marker re-mint, once via the claims-restore stamp/re-bill. Detect
+    // the shape from the marker itself (the switch's own estimate flag isn't
+    // available here): a voided sibling invoice pointing at this prepay that
+    // still carries a setup-fee line. The switch can supersede MULTIPLE
+    // invoices at once (resolveSupersededInvoices matches on the visit set
+    // OR the whole estimate-scoped AR) — an unordered single-row read could
+    // pick an application-only sibling while ANOTHER sibling carries the
+    // setup, wrongly falling through to ledger a claim the marker restore
+    // will ALSO cover once it re-mints the setup-bearing sibling (codex P0).
+    // Read every sibling.
+    const supersededSiblings = await conn("invoices")
+      .where("notes", "like", `%${prepaySwitchSupersededByMarker(prepayInvoiceId)}%`)
+      .select("id", "line_items");
+    if (supersededSiblings.length > 0) {
+      const carriesSetup = (sib) => {
+        let siblingLines = sib.line_items;
+        if (typeof siblingLines === "string") { try { siblingLines = JSON.parse(siblingLines); } catch { siblingLines = []; } }
+        return (Array.isArray(siblingLines) ? siblingLines : [])
+          .some((li) => /setup fee/i.test(String(li?.description || "")));
+      };
+      const setupBearingSiblings = supersededSiblings.filter(carriesSetup);
+      // The marker re-mint is idempotent PER SUPERSEDED INVOICE
+      // (restoreSwitchSupersededInvoicesForPrepay's own `existing` guard):
+      // once a restore has been minted for a given superseded row, it will
+      // NEVER be minted again on any later refund, no matter what happens
+      // to that restore afterward. A REVIVAL (dispute won / re-payment)
+      // voids any currently-live restore right after this call
+      // (_retireSwitchRestoredInvoicesForRevivedPrepay, since the prepay's
+      // own coverage is live again) — so once a restore has ever existed for
+      // the setup-bearing sibling(s), the marker path is a spent, one-time
+      // mechanism and this ledger must take over from here, or a later
+      // dispute-lost -> dispute-won -> refund cycle drops the setup fee
+      // obligation forever (codex P1: the void replacement blocks a second
+      // re-mint AND no claim exists for the claims-restore path to find).
+      // Checked by EXISTENCE only (any status) — never by current liveness,
+      // which the imminent void in this same transaction would make racy.
+      let anySetupSiblingNeverRestored = false;
+      let anyRestoredOnce = false;
+      for (const sib of setupBearingSiblings) {
+         
+        const restored = await conn("invoices")
+          .where("notes", "like", `%${prepaySwitchRestoreMarker(sib.id)}%`)
+          .first("id");
+        if (restored) anyRestoredOnce = true;
+        else anySetupSiblingNeverRestored = true;
+      }
+      if (setupBearingSiblings.length > 0 && anySetupSiblingNeverRestored) {
+        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: estimate-origin switch — ${setupBearingSiblings.length} superseded invoice(s) carry the setup line and at least one has never been restored; no claim ledgered (its marker re-mint on refund is the sole restore path so far)`);
+        return null;
+      }
+      if (setupBearingSiblings.length > 0 && anyRestoredOnce) {
+        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: estimate-origin switch — every setup-bearing superseded invoice's marker re-mint already fired and cannot fire again; ledgering the claim so a future refund can restore the setup via the claims path instead`);
+      }
+    }
     let lines = invoiceRow.line_items;
     if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
