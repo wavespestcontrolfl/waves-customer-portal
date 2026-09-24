@@ -86,15 +86,19 @@ function splitTotalAcrossVisits(totalDollars, visitCount) {
   return slices;
 }
 
-// Rows (by scheduled_services.id) among `ids` that still carry an ACTIVE
-// prepaid_series.allocated audit row for this customer — i.e. their current
-// prepaid stamp was allocated by a PRIOR call to stampSeriesPrepaid and has
-// not since been retired. Shared by retireActiveAllocationAudits (which
-// retires the evidence) and a restamp's booster reconciliation (which also
-// needs to know WHICH excluded rows to clear, without touching a booster
-// that was stamped independently of any series-level fan-out).
-async function activeAllocationResourceIds(trx, { customerId, ids }) {
-  if (!ids.length) return [];
+// The most recent ACTIVE prepaid_series.allocated audit row for each of
+// `ids`, for this customer — i.e. an allocation event by a PRIOR call to
+// stampSeriesPrepaid that has not since been retired. Used by a restamp's
+// booster reconciliation to find which excluded rows to reconcile — but an
+// active audit row alone only proves the row was ONCE part of a series
+// allocation, not that its CURRENT stamp still IS that allocation: a
+// single-visit clear (or a fresh independent single-visit stamp written
+// over it) leaves this audit row active without retiring it. The caller
+// must additionally compare the row's current prepaid_amount/
+// prepaid_method/prepaid_at against the returned metadata before treating
+// the row as still holding that stale slice.
+async function mostRecentActiveAllocations(trx, { customerId, ids }) {
+  if (!ids.length) return new Map();
   const audits = await trx('audit_log as allocation')
     .where({
       'allocation.action': 'prepaid_series.allocated',
@@ -110,8 +114,17 @@ async function activeAllocationResourceIds(trx, { customerId, ids }) {
         })
         .whereRaw('cleared.resource_id = allocation.id');
     })
-    .select('allocation.resource_id');
-  return audits.map((row) => row.resource_id);
+    .orderBy('allocation.created_at', 'asc')
+    .select('allocation.resource_id', 'allocation.metadata');
+  const byResourceId = new Map();
+  // Last write wins if more than one active allocation somehow exists for
+  // the same row (shouldn't happen in normal operation, but the ordering
+  // keeps this deterministic rather than picking an arbitrary one).
+  for (const row of audits) {
+    const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    byResourceId.set(row.resource_id, metadata);
+  }
+  return byResourceId;
 }
 
 async function retireActiveAllocationAudits(trx, { customerId, parentId, ids }) {
@@ -278,10 +291,28 @@ async function stampSeriesPrepaid(db, {
     // unrelated to any series fan-out) is left alone.
     const excludedBoosterRows = eligible.filter((row) => boosterIds.has(row.id) && Number(row.prepaid_amount) > 0);
     if (excludedBoosterRows.length) {
-      const staleBoosterIds = await activeAllocationResourceIds(trx, {
+      const activeAllocations = await mostRecentActiveAllocations(trx, {
         customerId: anchor.customer_id,
         ids: excludedBoosterRows.map((row) => row.id),
       });
+      // An ACTIVE allocation audit row only proves this booster was ONCE
+      // part of a series allocation — a single-visit clear (or a fresh
+      // independent single-visit stamp written over it) leaves that audit
+      // row active without retiring it. Only treat the booster as still
+      // holding that stale slice when its CURRENT stamp exactly matches
+      // what the allocation recorded (amount, method, and the timestamp);
+      // anything else — cleared since, or overwritten by an independent
+      // payment — is left untouched rather than risk erasing real money.
+      const staleBoosterIds = excludedBoosterRows
+        .filter((row) => {
+          const metadata = activeAllocations.get(row.id);
+          if (!metadata) return false;
+          const rowPrepaidAt = row.prepaid_at instanceof Date ? row.prepaid_at.toISOString() : new Date(row.prepaid_at).toISOString();
+          return Number(metadata.prepaid_amount) === Number(row.prepaid_amount)
+            && (metadata.prepaid_method || null) === (row.prepaid_method || null)
+            && metadata.prepaid_at === rowPrepaidAt;
+        })
+        .map((row) => row.id);
       if (staleBoosterIds.length) {
         await trx('scheduled_services').whereIn('id', staleBoosterIds)
           .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null });

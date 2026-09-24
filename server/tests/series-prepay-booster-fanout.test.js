@@ -146,12 +146,13 @@ postgres('r1-sched-visits-1: in-person series prepay vs booster rows', () => {
     // this fix shipped) fanned $600 across all 6 rows ($100 each, including
     // the 2 boosters) and left the matching allocation-audit evidence —
     // exactly what the old, unfixed fan-out and its audit trail produced.
+    const priorPrepaidAt = new Date('2026-01-01T12:00:00.000Z');
     await trx('scheduled_services').whereIn('id', boosterIds)
-      .update({ prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: new Date() });
+      .update({ prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: priorPrepaidAt });
     for (const boosterId of boosterIds) {
       await trx('audit_log').insert({
         actor_type: 'system', action: 'prepaid_series.allocated', resource_type: 'scheduled_service',
-        resource_id: boosterId, metadata: { customer_id: customerId, series_parent_id: parentId, prepaid_amount: 100, prepaid_method: 'cash' },
+        resource_id: boosterId, metadata: { customer_id: customerId, series_parent_id: parentId, prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: priorPrepaidAt.toISOString() },
       });
     }
     // Now restamp the series at the CORRECT (fixed) $400 total for the 4
@@ -167,6 +168,38 @@ postgres('r1-sched-visits-1: in-person series prepay vs booster rows', () => {
     // allocation is cleared — not left stacked on top of the new $400,
     // which would otherwise show $600 of "covered" money for a $400 total.
     for (const r of boosters) expect(r.prepaid_amount).toBeNull();
+  });
+
+  test('restamp reconciliation does NOT erase a NEW independent payment recorded over a stale (never-retired) series allocation', async () => {
+    const { parentId } = await insertFamily({ boosterDates: ['2026-12-15', '2027-01-15'] });
+    const rows = await family(parentId);
+    const boosterId = rows.find((r) => r.is_recurring === false).id;
+    // Old series-level allocation (its audit row is never retired by a
+    // single-visit clear — same as production's DELETE /:id/prepaid).
+    const oldPrepaidAt = new Date('2026-01-01T12:00:00.000Z');
+    await trx('scheduled_services').where({ id: boosterId })
+      .update({ prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: oldPrepaidAt });
+    await trx('audit_log').insert({
+      actor_type: 'system', action: 'prepaid_series.allocated', resource_type: 'scheduled_service',
+      resource_id: boosterId, metadata: { customer_id: customerId, series_parent_id: parentId, prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: oldPrepaidAt.toISOString() },
+    });
+    // Staff clears that single visit (leaves the allocation audit row
+    // ACTIVE — a single-visit clear intentionally does not retire it),
+    // then records a genuinely NEW, independent payment on the same row.
+    const newPrepaidAt = new Date('2026-06-01T09:00:00.000Z');
+    await trx('scheduled_services').where({ id: boosterId })
+      .update({ prepaid_amount: 75, prepaid_method: 'zelle', prepaid_at: newPrepaidAt });
+    await stampSeriesPrepaid(trx, {
+      anchorServiceId: parentId, totalAmount: 400, method: 'cash', note: null, useExistingTransaction: true,
+    });
+    const after = await family(parentId);
+    const boosterAfter = after.find((r) => r.id === boosterId);
+    // EXPECTED: the CURRENT stamp no longer matches what the stale
+    // allocation recorded (different amount/method/timestamp), so it is
+    // left alone — an active allocation audit row proves the row was ONCE
+    // part of a series allocation, not that its current stamp still is.
+    expect(Number(boosterAfter.prepaid_amount)).toBe(75);
+    expect(boosterAfter.prepaid_method).toBe('zelle');
   });
 
   test('restamp reconciliation does NOT touch a booster paid independently of any series fan-out', async () => {
