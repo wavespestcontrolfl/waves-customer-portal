@@ -169,13 +169,13 @@ function outboundIsAnswer({
   messageType,
   status,
   isClickFollowup = false,
-  hasDraftProvenance = false,
+  hasInboundDraftAnchor = false,
 } = {}) {
   return direction === 'outbound'
     && HUMAN_REPLY_TYPES.includes(messageType)
     && ['queued', 'sent', 'delivered'].includes(status)
     && !isClickFollowup
-    && (!DRAFT_REPLY_TYPES.includes(messageType) || hasDraftProvenance);
+    && (!DRAFT_REPLY_TYPES.includes(messageType) || hasInboundDraftAnchor);
 }
 
 module.exports = {

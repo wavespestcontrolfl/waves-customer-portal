@@ -181,6 +181,7 @@ function makeQueryBuilder(rows = []) {
     orWhereNull: jest.fn(() => builder),
     orWhere: jest.fn(() => builder),
     orWhereRaw: jest.fn(() => builder),
+    orderByRaw: jest.fn(() => builder),
     limit: jest.fn((value) => {
       calls.limit.push(value);
       return builder;
@@ -1999,6 +2000,36 @@ describe('admin communications SMS route', () => {
       expect(body.limit).toBe(500);
       expect(builder.calls.limit).toEqual([501]);
       expect(builder.calls.offset).toEqual([0]);
+    });
+  });
+
+  test('filters the SMS log to exact pending candidate ids', async () => {
+    const builder = makeQueryBuilder([smsMessageRow({ id: 'pending-message' })]);
+    db.mockReturnValue(builder);
+    db.raw
+      .mockResolvedValueOnce({ rows: [{
+        id: 'pending-message', peer: '9415550100', endpoint: '9415550190',
+        message_body: 'Can you confirm the visit?', metadata: {}, media: [],
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?needsResponse=true`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('FROM messages pending_message'), [['pending-message']]);
+      expect(builder.orderByRaw).toHaveBeenCalledWith(expect.stringContaining('messages.id = ANY'), [['pending-message']]);
+      expect((await res.json()).messages.map((message) => message.id)).toEqual(['pending-message']);
+    });
+  });
+
+  test('rejects an invalid needs-response filter', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?needsResponse=yes`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(400);
     });
   });
 

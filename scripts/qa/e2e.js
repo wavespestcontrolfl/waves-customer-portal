@@ -175,15 +175,20 @@ async function main() {
       assert.equal((await db('sms_log').where({ id: legacy.id }).first()).status, 'delivered');
       assert.equal((await db('messages').where({ id: unified.id }).first()).delivery_status, 'delivered');
       assert.equal((await db('messages').where({ twilio_sid: legacy.twilio_sid })).length, 1);
-      const boundary = new Date(Date.now() - 1000);
+      // Keep the synthetic read-boundary messages after the accepted manual
+      // send above. Unread semantics did not care about this ordering, but a
+      // real human reply correctly resolves any earlier customer question.
+      const acceptedAt = Math.max(new Date(unified.created_at).getTime(), new Date(legacy.created_at).getTime());
+      const boundary = new Date(acceptedAt + 1000);
       const inbound = [crypto.randomUUID(), crypto.randomUUID()];
       const sids = inbound.map(id => `SM${id.replaceAll('-', '')}`);
+      const inboundBody = 'Can you confirm the QA visit time?';
       for (let index = 0; index < 2; index++) {
         const created = new Date(boundary.getTime() + (index ? 500 : -500));
         await db('messages').insert({ id: inbound[index], conversation_id: unified.conversation_id, channel: 'sms', direction: 'inbound', author_type: 'customer',
-          body: 'QA inbound boundary check', twilio_sid: sids[index], is_read: false, created_at: created });
+          body: inboundBody, twilio_sid: sids[index], is_read: false, created_at: created });
         await db('sms_log').insert({ customer_id: fixture.customerId, direction: 'inbound', from_phone: fixture.phone, to_phone: legacy.from_phone,
-          message_body: 'QA inbound boundary check', twilio_sid: sids[index], is_read: false, created_at: created });
+          message_body: inboundBody, twilio_sid: sids[index], is_read: false, created_at: created });
       }
       const read = await json(await page.request.post(`${baseUrl}/api/admin/communications/messages/read`, { headers,
         data: { conversationIds: [unified.conversation_id], readBefore: boundary.toISOString() } }));
@@ -195,9 +200,16 @@ async function main() {
       const count = await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers }));
       assert.deepEqual(count, { conversations: 1, messages: 1 });
       await json(await page.request.post(`${baseUrl}/api/admin/communications/messages/read`, { headers, data: { messageIds: [inbound[1]] } }));
+      assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 1, messages: 1 });
+      await db('messages').insert({ id: crypto.randomUUID(), conversation_id: unified.conversation_id, channel: 'sms', direction: 'outbound', author_type: 'admin',
+        body: 'Yes, the QA visit time is confirmed.', message_type: 'manual', delivery_status: 'delivered', created_at: new Date(boundary.getTime() + 1500) });
       assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 0, messages: 0 });
+      await db('messages').insert({ id: crypto.randomUUID(), conversation_id: unified.conversation_id, channel: 'sms', direction: 'inbound', author_type: 'customer',
+        body: 'Can you also confirm the QA arrival window?', is_read: true, created_at: new Date(boundary.getTime() + 2000) });
+      assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 1, messages: 1 });
       return { providerTransportSimulated: true, signedCallbackStatus: 200, unsignedCallbackStatus: 403,
-        legacyAndUnifiedDelivered: true, callbackRetryRows: 1, authorAttributed: true, readBoundaryPreserved: true, finalUnread: 0 };
+        legacyAndUnifiedDelivered: true, callbackRetryRows: 1, authorAttributed: true, readBoundaryPreserved: true,
+        readDoesNotClearNeedResponse: true, humanReplyClearsNeedResponse: true, laterQuestionRestoresNeedResponse: true };
     });
     await step('account-property-switch-and-record-isolation', async () => {
       let headers = { Authorization: `Bearer ${customerToken}` };

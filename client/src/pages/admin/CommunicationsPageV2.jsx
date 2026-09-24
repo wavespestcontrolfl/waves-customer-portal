@@ -917,6 +917,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
   // PR 4 — status filter chips, reply-from lock.
   const [statusFilter, setStatusFilter] = useState("all");
+  const statusFilterRef = useRef("all");
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
   const [smsHasMore, setSmsHasMore] = useState(false);
@@ -927,6 +928,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const approvalDraftRequestRef = useRef(0);
   const smsPageRef = useRef(1);
   const smsLoadedSearchRef = useRef(null);
+  const smsLoadedStatusFilterRef = useRef(null);
   const rewriteContextRef = useRef({
     toNumber: "",
     selectedCustomerId: null,
@@ -989,6 +991,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();
     const normalizedSearch = search.trim();
+    const requestedStatusFilter = options.statusFilter || statusFilterRef.current;
     const page = options.page || 1;
     const append = !!options.append;
     if (options.background && smsRequestRef.current) return Promise.resolve();
@@ -1002,6 +1005,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       page: String(page),
     });
     if (normalizedSearch) params.set("search", normalizedSearch);
+    if (requestedStatusFilter === "unanswered") params.set("needsResponse", "true");
     const logUrl = `/admin/communications/log?${params.toString()}`;
     return Promise.allSettled([
       adminFetch(logUrl, { signal: controller.signal }),
@@ -1011,18 +1015,23 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       if (
         controller.signal.aborted ||
         requestSeq !== smsLoadSeqRef.current ||
-        normalizedSearch !== smsSearchRef.current
+        normalizedSearch !== smsSearchRef.current ||
+        requestedStatusFilter !== statusFilterRef.current
       ) {
         return;
       }
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
-        const retainHistory = options.refresh && smsLoadedSearchRef.current === normalizedSearch;
+        const retainHistory = options.refresh
+          && requestedStatusFilter !== "unanswered"
+          && smsLoadedSearchRef.current === normalizedSearch
+          && smsLoadedStatusFilterRef.current === requestedStatusFilter;
         setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
         smsPageRef.current = logData.page || page;
         setSmsPage(smsPageRef.current);
         setSmsHasMore(!!logData.hasMore);
         smsLoadedSearchRef.current = normalizedSearch;
+        smsLoadedStatusFilterRef.current = requestedStatusFilter;
         setSmsLoadError("");
       } else {
         setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
@@ -2342,8 +2351,13 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     );
     if (nextThread && nextThread !== activeThread) {
       setActiveThread(nextThread);
+    } else if (!nextThread && statusFilter === "unanswered" && !smsHasMore) {
+      // A reply can remove the peer from the server-backed pending result.
+      // Do not leave the operator inside a stale unanswered conversation.
+      setActiveThread(null);
+      setSmsView("threads");
     }
-  }, [threads, activeThread?.contactPhone]);
+  }, [threads, activeThread?.contactPhone, statusFilter, smsHasMore]);
 
   // Deep-link from a notification: /admin/communications?thread=<customerId>
   // opens that customer's SMS conversation. The sms_reply notification carries
@@ -3174,6 +3188,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             onClick={() => {
               setSmsView("log");
               setActiveThread(null);
+              if (statusFilterRef.current === "unanswered") {
+                statusFilterRef.current = "all";
+                setStatusFilter("all");
+                void loadData(smsSearchRef.current, { statusFilter: "all" });
+              }
             }}
             className={cn(
               "px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors",
@@ -3238,7 +3257,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             <Select
               id="sms-thread-filter"
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => {
+                const nextFilter = e.target.value;
+                statusFilterRef.current = nextFilter;
+                setStatusFilter(nextFilter);
+                void loadData(smsSearchRef.current, { statusFilter: nextFilter });
+              }}
             >
               {[
                 { key: "all", label: "All", count: chipCounts.all },

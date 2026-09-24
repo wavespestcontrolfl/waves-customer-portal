@@ -178,6 +178,73 @@ it("keeps older history but restarts pagination so refreshed pages cannot be ski
   expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("page")).toBe("2");
 });
 
+it("loads and paginates the server needs-response filter, then restores the ordinary inbox", async () => {
+  let pendingAvailable = true;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    if (url.searchParams.get("needsResponse") === "true") {
+      return response({
+        messages: pendingAvailable ? [inbound(`pending-${page}`, `Pending question ${page}`, `+1941555010${page}`)] : [],
+        hasMore: pendingAvailable && page === 1,
+        page,
+      });
+    }
+    return response({ messages: [inbound("recent", "Recent ordinary message")], hasMore: false, page });
+  };
+  setup(); await tick();
+  const filter = screen.getByRole("combobox", { name: "Filter conversations" });
+  fireEvent.change(filter, { target: { value: "unanswered" } }); await tick();
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
+  expect(screen.getByText("Pending question 1")).toBeInTheDocument();
+  expect(screen.queryByText("Recent ordinary message")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
+  const paged = new URL(String(logRequests().at(-1)[0]), "http://localhost");
+  expect(paged.searchParams.get("needsResponse")).toBe("true");
+  expect(paged.searchParams.get("page")).toBe("2");
+  expect(screen.getByText("Pending question 2")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText("Pending question 1"));
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+  pendingAvailable = false;
+  await tick(30000);
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "all" } }); await tick();
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.has("needsResponse")).toBe(false);
+  expect(screen.getByText("Recent ordinary message")).toBeInTheDocument();
+});
+
+it("restores the ordinary dataset when Log View hides the unanswered selector", async () => {
+  loadLog = (url) => url.searchParams.get("needsResponse") === "true"
+    ? response({ messages: [inbound("pending", "Pending filtered question")], page: 1 })
+    : response({ messages: [inbound("ordinary", "Ordinary log message")], page: 1 });
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Log View" })); await tick();
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.has("needsResponse")).toBe(false);
+  expect(screen.getByText("Ordinary log message")).toBeInTheDocument();
+});
+
+it("keeps an open page-two pending thread when a truncated background refresh returns page one", async () => {
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    return response({
+      messages: [inbound(`pending-${page}`, `Pending page ${page}`, `+1941555010${page}`)],
+      hasMore: page === 1,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
+  fireEvent.click(screen.getByText("Pending page 2"));
+  await tick(30000);
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
+  expect(screen.getAllByText("Pending page 2").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+});
+
 it("restores each conversation's own text and attachments when switching customers", async () => {
   messages.push(inbound("b", "Please check the lawn", "+19415550101"));
   const { container } = setup(); await tick();

@@ -316,7 +316,7 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
 // newest actionable inbound in SQL, then use the shared JS courtesy classifier
 // for historical unstamped rows. No created_at horizon: an old unanswered
 // question remains.
-async function countUnreadInboundSms({ excludePhones = [], customerId = null } = {}) {
+async function countUnreadInboundSms({ excludePhones = [], customerId = null, includePending = false } = {}) {
   const {
     HUMAN_REPLY_TYPES,
     DRAFT_REPLY_TYPES,
@@ -331,36 +331,16 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
   const { rows = [] } = await db.raw(`
     WITH base_sms AS MATERIALIZED (
       SELECT m.id, m.direction, m.body AS message_body, m.created_at,
+             m.twilio_sid, m.message_type AS canonical_message_type,
+             m.delivery_status AS canonical_delivery_status,
+             m.metadata AS canonical_metadata,
+             COALESCE(m.media, '[]'::jsonb) AS media,
              c.customer_id,
              COALESCE(NULLIF(c.contact_phone, ''), cu.phone, '') AS contact_phone,
-             COALESCE(c.our_endpoint_id, '') AS our_endpoint_id,
-             COALESCE(legacy.message_type, m.message_type, '') AS message_type,
-             COALESCE(legacy.status, m.delivery_status, '') AS delivery_status,
-             COALESCE(m.metadata, '{}'::jsonb)
-               || COALESCE(legacy.metadata, '{}'::jsonb)
-               || COALESCE(audit.metadata, '{}'::jsonb) AS metadata,
-             COALESCE(m.media, '[]'::jsonb) AS media,
-             response_draft.id IS NOT NULL AS has_draft_provenance,
-             response_draft.intent AS draft_intent
+             COALESCE(c.our_endpoint_id, '') AS our_endpoint_id
       FROM messages m
       JOIN conversations c ON c.id = m.conversation_id
       LEFT JOIN customers cu ON cu.id = c.customer_id
-      LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status, sl.metadata
-        FROM sms_log sl
-        WHERE sl.twilio_sid = m.twilio_sid AND sl.direction = m.direction
-        ORDER BY sl.created_at DESC, sl.id DESC
-        LIMIT 1
-      ) legacy ON true
-      LEFT JOIN LATERAL (
-        SELECT mal.metadata
-        FROM messaging_audit_log mal
-        WHERE mal.provider_message_id = m.twilio_sid AND mal.channel = 'sms'
-        ORDER BY mal.created_at DESC, mal.id DESC
-        LIMIT 1
-      ) audit ON true
-      LEFT JOIN message_drafts response_draft
-        ON response_draft.id = ${draftIdSql("COALESCE(audit.metadata->>'draft_id', legacy.metadata->>'draft_id', m.metadata->>'draft_id')")}
       WHERE m.channel = 'sms'
         AND (CAST(:customerId AS uuid) IS NULL OR c.customer_id = CAST(:customerId AS uuid))
         AND NOT (COALESCE(c.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
@@ -369,56 +349,105 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
     ), sms_events AS MATERIALIZED (
       SELECT base.*, ${eventPeer} AS peer, ${eventEndpoint} AS endpoint
       FROM base_sms base
+    ), inbound_events AS MATERIALIZED (
+      SELECT s.*,
+             COALESCE(legacy.message_type, s.canonical_message_type, '') AS message_type,
+             COALESCE(s.canonical_metadata, '{}'::jsonb)
+               || COALESCE(legacy.metadata, '{}'::jsonb) AS metadata
+      FROM sms_events s
+      LEFT JOIN LATERAL (
+        SELECT sl.message_type, sl.status, sl.metadata
+        FROM sms_log sl
+        WHERE sl.twilio_sid = s.twilio_sid AND sl.direction = s.direction
+        ORDER BY sl.created_at DESC, sl.id DESC
+        LIMIT 1
+      ) legacy ON true
+      WHERE s.direction = 'inbound'
     ), latest_inbound AS (
       SELECT DISTINCT ON (s.peer, s.endpoint)
         s.id, s.peer, s.endpoint, s.customer_id, s.message_body,
-        s.message_type, s.metadata, s.media, s.created_at
-      FROM sms_events s
-      WHERE s.direction = 'inbound'
-        AND s.peer <> ''
+        s.message_type, s.metadata, s.media, s.created_at, s.twilio_sid
+      FROM inbound_events s
+      WHERE s.peer <> ''
         AND s.message_type <> ALL(CAST(:ignoredInboundTypes AS text[]))
         -- Recruiting replies have their own inbox and notification lifecycle.
         AND s.message_type NOT LIKE 'job\\_%'
         AND NOT EXISTS (
           SELECT 1 FROM blocked_numbers b WHERE ${blockedPeer} = s.peer
-        )
+      )
       ORDER BY s.peer, s.endpoint, s.created_at DESC, s.id DESC
-    ), prior_context AS MATERIALIZED (
-      SELECT DISTINCT ON (li.id) li.id, prev.message_body
+    ), enriched_inbound AS MATERIALIZED (
+      SELECT li.*,
+             li.metadata || COALESCE(audit.metadata, '{}'::jsonb) AS enriched_metadata
       FROM latest_inbound li
-      JOIN sms_events prev ON prev.peer = li.peer AND prev.endpoint = li.endpoint
-        AND prev.direction = 'outbound' AND li.endpoint <> ''
+      LEFT JOIN LATERAL (
+        SELECT mal.metadata
+        FROM messaging_audit_log mal
+        WHERE mal.provider_message_id = li.twilio_sid AND mal.channel = 'sms'
+        ORDER BY mal.created_at DESC, mal.id DESC
+        LIMIT 1
+      ) audit ON true
+    ), outbound_events AS MATERIALIZED (
+      SELECT s.*, li.id AS inbound_id, li.created_at AS inbound_created_at,
+             COALESCE(legacy.message_type, s.canonical_message_type, '') AS message_type,
+             COALESCE(legacy.status, s.canonical_delivery_status, '') AS delivery_status,
+             response_draft.sms_log_id IS NOT NULL AS has_inbound_draft_anchor,
+             response_draft.intent AS draft_intent
+      FROM enriched_inbound li
+      JOIN sms_events s ON s.peer = li.peer AND s.endpoint = li.endpoint
+        AND s.direction = 'outbound'
+        AND s.created_at > li.created_at - INTERVAL '24 hours'
+      LEFT JOIN LATERAL (
+        SELECT sl.message_type, sl.status, sl.metadata
+        FROM sms_log sl
+        WHERE sl.twilio_sid = s.twilio_sid AND sl.direction = s.direction
+        ORDER BY sl.created_at DESC, sl.id DESC
+        LIMIT 1
+      ) legacy ON true
+      LEFT JOIN LATERAL (
+        SELECT mal.metadata
+        FROM messaging_audit_log mal
+        WHERE mal.provider_message_id = s.twilio_sid AND mal.channel = 'sms'
+        ORDER BY mal.created_at DESC, mal.id DESC
+        LIMIT 1
+      ) audit ON true
+      LEFT JOIN message_drafts response_draft
+        ON response_draft.id = ${draftIdSql("COALESCE(audit.metadata->>'draft_id', legacy.metadata->>'draft_id', s.canonical_metadata->>'draft_id')")}
+    ), prior_context AS MATERIALIZED (
+      SELECT DISTINCT ON (prev.inbound_id) prev.inbound_id AS id, prev.message_body
+      FROM outbound_events prev
+      WHERE prev.endpoint <> ''
         AND prev.delivery_status IN ('queued', 'sent', 'delivered')
         AND prev.message_type <> 'internal_alert'
-        AND prev.created_at < li.created_at
-        AND prev.created_at > li.created_at - INTERVAL '24 hours'
-      ORDER BY li.id, prev.created_at DESC, prev.id DESC
+        AND prev.created_at < prev.inbound_created_at
+      ORDER BY prev.inbound_id, prev.created_at DESC, prev.id DESC
+    ), answered_inbound AS MATERIALIZED (
+      SELECT DISTINCT os.inbound_id
+      FROM outbound_events os
+      WHERE os.message_type = ANY(CAST(:humanReplyTypes AS text[]))
+        AND os.delivery_status IN ('queued', 'sent', 'delivered')
+        AND os.created_at > os.inbound_created_at
+        -- Approval sends can be proactive nudges. Require an exact draft
+        -- inbound anchor for ambiguous types; proactive drafts never clear an ask.
+        AND (os.message_type <> ALL(CAST(:draftReplyTypes AS text[])) OR os.has_inbound_draft_anchor)
+        AND os.draft_intent IS DISTINCT FROM 'click_followup'
+    ), latest_stop AS MATERIALIZED (
+      SELECT st.peer, MAX(st.created_at) AS stopped_at
+      FROM inbound_events st
+      WHERE st.message_type = 'opt_out'
+      GROUP BY st.peer
     )
     SELECT li.id, li.peer, li.endpoint, li.customer_id, li.message_body,
-           li.message_type, li.metadata, li.media, li.created_at,
+           li.message_type, li.enriched_metadata AS metadata, li.media, li.created_at,
            prior_context.message_body AS prior_outbound_body
-    FROM latest_inbound li
+    FROM enriched_inbound li
     LEFT JOIN prior_context ON prior_context.id = li.id
-    WHERE NOT EXISTS (
-      SELECT 1 FROM sms_events os
-      WHERE os.direction = 'outbound'
-        AND os.message_type = ANY(CAST(:humanReplyTypes AS text[]))
-        AND os.delivery_status IN ('queued', 'sent', 'delivered')
-        AND os.created_at > li.created_at
-        AND os.peer = li.peer
-        AND os.endpoint = li.endpoint
-        -- Approval sends can be proactive nudges. Require an exact draft
-        -- link for ambiguous types; absent provenance never clears an ask.
-        AND (os.message_type <> ALL(CAST(:draftReplyTypes AS text[])) OR os.has_draft_provenance)
-        AND os.draft_intent IS DISTINCT FROM 'click_followup'
-    )
+    LEFT JOIN answered_inbound answered ON answered.inbound_id = li.id
+    LEFT JOIN latest_stop stop ON stop.peer = li.peer
+    WHERE answered.inbound_id IS NULL
     -- STOP closes every business-number thread for the peer. A later genuine
     -- inbound candidate can reopen only if it arrived after that STOP.
-    AND NOT EXISTS (
-      SELECT 1 FROM sms_events st
-      WHERE st.direction = 'inbound' AND st.message_type = 'opt_out'
-        AND st.created_at > li.created_at AND st.peer = li.peer
-    )
+    AND (stop.stopped_at IS NULL OR stop.stopped_at <= li.created_at)
   `, {
     customerId: customerId || null,
     excludePhones,
@@ -433,12 +462,14 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
     media: row.media,
     metadata: row.metadata,
   }));
-  return {
+  const result = {
     conversations: new Set(actionable.map((row) => row.peer)).size,
     // Kept for response compatibility; this is now the number of endpoint
     // threads needing a reply, rather than the number of unread rows.
     messages: actionable.length,
   };
+  if (includePending) result.pendingMessageIds = actionable.map((row) => row.id);
+  return result;
 }
 
 async function customerIdsInScope(ids, convs) {

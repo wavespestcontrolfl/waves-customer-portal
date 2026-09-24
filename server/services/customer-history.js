@@ -364,7 +364,7 @@ function mapCommsMessage(message, customer, twilioNumbers) {
   const responseIsAnswer = require('./sms-response-policy').outboundIsAnswer({
     direction: message.direction, messageType: responseMessageType, status: responseStatus,
     isClickFollowup: message.response_is_click_followup === true,
-    hasDraftProvenance: message.response_has_draft_provenance === true,
+    hasInboundDraftAnchor: message.response_has_inbound_draft_anchor === true,
   });
   return {
     id: message.id, conversationId: message.conversation_id, channel: message.channel,
@@ -399,7 +399,7 @@ async function listCustomerComms(db, customer, query = {}) {
       ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
     ) sms_audit ON true`)
     .joinRaw(`LEFT JOIN LATERAL (
-      SELECT true AS has_draft_provenance,
+      SELECT mdx.sms_log_id IS NOT NULL AS has_inbound_draft_anchor,
              mdx.intent = 'click_followup' AS is_click_followup
       FROM message_drafts mdx
       WHERE mdx.id = ${responseDraftId}
@@ -417,7 +417,7 @@ async function listCustomerComms(db, customer, query = {}) {
       'sms_response.metadata as response_metadata',
       'sms_audit.metadata as response_audit_metadata',
       'sms_answer.is_click_followup as response_is_click_followup',
-      'sms_answer.has_draft_provenance as response_has_draft_provenance',
+      'sms_answer.has_inbound_draft_anchor as response_has_inbound_draft_anchor',
     );
   const rowsQuery = selectCommsColumns(db('messages as m')
     .leftJoin('conversations as c', 'm.conversation_id', 'c.id')

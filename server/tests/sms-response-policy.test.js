@@ -68,10 +68,10 @@ describe('SMS response policy', () => {
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'ai_approved', status: 'delivered', isClickFollowup: true })).toBe(false);
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'ai_approved', status: 'delivered' })).toBe(false);
     expect(outboundIsAnswer({
-      direction: 'outbound', messageType: 'ai_approved', status: 'delivered', hasDraftProvenance: true,
+      direction: 'outbound', messageType: 'ai_approved', status: 'delivered', hasInboundDraftAnchor: true,
     })).toBe(true);
     expect(outboundIsAnswer({
-      direction: 'outbound', messageType: 'ai_revised', status: 'sent', hasDraftProvenance: true,
+      direction: 'outbound', messageType: 'ai_revised', status: 'sent', hasInboundDraftAnchor: true,
     })).toBe(true);
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'reminder', status: 'sent' })).toBe(false);
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'manual', status: 'failed' })).toBe(false);

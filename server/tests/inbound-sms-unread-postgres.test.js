@@ -157,14 +157,18 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
   });
 
-  test('approval sends without exact provenance cannot clear an unanswered question', async () => {
+  test('approval sends require an exact inbound-anchored draft to clear an unanswered question', async () => {
     await seedEvent({ body: 'Please call me' });
     await seedEvent({ direction: 'outbound', messageType: 'ai_approved', body: 'Checking in' });
     await seedEvent({ direction: 'outbound', messageType: 'ai_revised', metadata: { draft_id: 'invalid' } });
     expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
-    const draftId = randomUUID();
-    await mockPg('message_drafts').insert({ id: draftId, intent: 'customer_issue_needs_review' });
-    await seedEvent({ direction: 'outbound', messageType: 'ai_approved', auditMetadata: { draft_id: draftId } });
+    const proactiveDraftId = randomUUID();
+    await mockPg('message_drafts').insert({ id: proactiveDraftId, intent: 'agent_ops_lead_followup' });
+    await seedEvent({ direction: 'outbound', messageType: 'ai_approved', auditMetadata: { draft_id: proactiveDraftId } });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+    const replyDraftId = randomUUID();
+    await mockPg('message_drafts').insert({ id: replyDraftId, sms_log_id: randomUUID(), intent: 'customer_issue_needs_review' });
+    await seedEvent({ direction: 'outbound', messageType: 'ai_approved', auditMetadata: { draft_id: replyDraftId } });
     expect(await countUnreadInboundSms()).toEqual({ conversations: 0, messages: 0 });
   });
 
@@ -289,7 +293,7 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     const nodes = [];
     const collect = node => { nodes.push(node); (node.Plans || []).forEach(collect); };
     collect(plan.Plan);
-    const contextScans = nodes.filter(node => node['CTE Name'] === 'sms_events' && node.Alias === 'prev');
+    const contextScans = nodes.filter(node => node['CTE Name'] === 'outbound_events' && node.Alias === 'prev');
     expect(contextScans).toHaveLength(1);
     expect(contextScans[0]['Actual Loops']).toBe(1);
   });

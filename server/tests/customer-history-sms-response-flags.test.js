@@ -66,7 +66,7 @@ test('customer comms maps an audit-linked click followup to a non-answer', () =>
   expect(mapped).not.toHaveProperty('responseAuditMetadata');
 });
 
-test('customer comms requires exact draft provenance before AI approval clears a thread', () => {
+test('customer comms requires an inbound-anchored draft before AI approval clears a thread', () => {
   const base = {
     id: 'message-ai-approved', conversation_id: 'conversation-1', channel: 'sms', direction: 'outbound',
     body: 'A human-approved reply', media: [], metadata: {}, message_type: 'ai_approved',
@@ -75,6 +75,6 @@ test('customer comms requires exact draft provenance before AI approval clears a
   };
   expect(mapCommsMessage(base, { phone: '+19415550100' }, null).responseIsAnswer).toBe(false);
   expect(mapCommsMessage({
-    ...base, response_has_draft_provenance: true,
+    ...base, response_has_inbound_draft_anchor: true,
   }, { phone: '+19415550100' }, null).responseIsAnswer).toBe(true);
 });
