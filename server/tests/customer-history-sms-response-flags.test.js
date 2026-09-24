@@ -35,6 +35,25 @@ test('customer comms leaves media-bearing courtesy captions actionable', () => {
   expect(mapped.courtesyOnly).toBe(false);
 });
 
+test('customer comms preserves an acknowledgment that answers the prior outbound question', () => {
+  const mapped = mapCommsMessage({
+    id: 'message-question-answer', conversation_id: 'conversation-1', channel: 'sms', direction: 'inbound',
+    body: 'Okay', media: [], metadata: {}, response_prior_outbound_body: 'Does 9am work?',
+    created_at: new Date('2026-09-23T12:00:00Z'),
+  }, { phone: '+19415550100' }, null);
+  expect(mapped.courtesyOnly).toBe(false);
+});
+
+test('customer comms retires an unstamped courtesy closer after a verified service update', () => {
+  const mapped = mapCommsMessage({
+    id: 'message-courtesy', conversation_id: 'conversation-1', channel: 'sms', direction: 'inbound',
+    body: 'Thanks!', media: [], metadata: {},
+    response_prior_outbound_body: 'Your service is complete. Reply STOP to opt out.',
+    created_at: new Date('2026-09-23T12:00:00Z'),
+  }, { phone: '+19415550100' }, null);
+  expect(mapped.courtesyOnly).toBe(true);
+});
+
 test('customer comms maps an audit-linked click followup to a non-answer', () => {
   const mapped = mapCommsMessage({
     id: 'message-3', conversation_id: 'conversation-1', channel: 'sms', direction: 'outbound',

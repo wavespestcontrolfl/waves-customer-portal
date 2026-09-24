@@ -17,21 +17,31 @@ describe('SMS response policy', () => {
   });
 
   test.each([
-    ['Thanks!', true],
-    ['Okay', true],
-    ['Thanks, but you missed the backyard', false],
-    ['Can you come tomorrow?', false],
-    ['Yes', false],
-  ])('classifies historical inbound %p with the shared courtesy grammar', (body, courtesyOnly) => {
-    expect(responseFlags({ direction: 'inbound', body })).toMatchObject({ courtesyOnly });
+    ['Thanks!', 'Your service is complete. Reply STOP to opt out.', true],
+    ['Okay', 'We are on the way. Reply STOP to opt out. Msg & data rates may apply.', true],
+    ['Thanks!', 'Does 9am work?', false],
+    ['Okay', 'Please confirm someone will be home.', false],
+    ['👍', null, false],
+    ['Thanks, but you missed the backyard', 'Your service is complete.', false],
+    ['Can you come tomorrow?', 'Your service is complete.', false],
+    ['Yes', 'Your service is complete.', false],
+  ])('classifies unstamped inbound %p from verified prior context', (body, priorOutboundBody, courtesyOnly) => {
+    expect(responseFlags({ direction: 'inbound', body, priorOutboundBody })).toMatchObject({ courtesyOnly });
   });
 
-  test('metadata stamps retire courtesy and enforced spam without exposing raw metadata', () => {
+  test('metadata stamps remain authoritative over inferred prior context', () => {
     expect(responseFlags({
       direction: 'inbound',
       body: 'legacy body',
       metadata: JSON.stringify({ courtesyOnly: true, spam_verdict: { enforced: true, score: 0.98 } }),
+      priorOutboundBody: 'Does 9am work?',
     })).toEqual({ courtesyOnly: true, spamEnforced: true, hasMedia: false });
+    expect(responseFlags({
+      direction: 'inbound',
+      body: 'Okay',
+      metadata: { courtesyOnly: false },
+      priorOutboundBody: 'Your service is complete.',
+    })).toEqual({ courtesyOnly: false, spamEnforced: false, hasMedia: false });
     expect(inboundNeedsResponse({
       direction: 'inbound', body: 'legacy body', metadata: { spam_verdict: { enforced: true } },
     })).toBe(false);

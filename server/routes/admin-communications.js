@@ -1686,6 +1686,19 @@ router.get('/log', async (req, res, next) => {
             AND mdx.intent = 'click_followup'
         ) AS is_click_followup
       ) sms_answer ON true`)
+      .joinRaw(`LEFT JOIN LATERAL (
+        SELECT prior.body
+        FROM messages prior
+        WHERE messages.direction = 'inbound'
+          AND prior.channel = 'sms'
+          AND prior.conversation_id = messages.conversation_id
+          AND prior.direction = 'outbound'
+          AND prior.delivery_status IN ('queued', 'sent', 'delivered')
+          AND COALESCE(prior.message_type, '') <> 'internal_alert'
+          AND prior.created_at < messages.created_at
+          AND prior.created_at > messages.created_at - interval '24 hours'
+        ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1
+      ) sms_prior_outbound ON true`)
       .where('messages.channel', 'sms')
       .select(
         'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
@@ -1701,6 +1714,7 @@ router.get('/log', async (req, res, next) => {
         'sms_response.metadata as response_metadata',
         'sms_audit.metadata as response_audit_metadata',
         'sms_answer.is_click_followup as response_is_click_followup',
+        'sms_prior_outbound.body as response_prior_outbound_body',
       )
       .orderBy('messages.created_at', 'desc');
 
@@ -1770,6 +1784,7 @@ router.get('/log', async (req, res, next) => {
         direction: m.direction, body: m.body, media: m.media,
         metadata: m.metadata, legacyMetadata: m.response_metadata,
         auditMetadata: m.response_audit_metadata,
+        priorOutboundBody: m.response_prior_outbound_body,
       });
       const responseMessageType = m.response_message_type || m.message_type;
       const responseStatus = m.response_status || m.status;

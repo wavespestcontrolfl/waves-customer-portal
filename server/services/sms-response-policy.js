@@ -1,4 +1,4 @@
-const { isCourtesyOnly } = require('./sms-intent');
+const { isCourtesyOnly, outboundAsksForReply } = require('./sms-intent');
 
 // Keep this list aligned with the unanswered-communications watcher. These
 // are the outbound SMS types that represent a real answer to the customer;
@@ -48,15 +48,26 @@ function mediaItems(value) {
 // rows predate the webhook's courtesyOnly stamp, so classify their body with
 // the same fail-safe detector. An attachment always keeps an inbound text
 // actionable even when its caption is a courtesy phrase.
-function responseFlags({ direction, body, media, metadata, legacyMetadata, auditMetadata } = {}) {
+function responseFlags({
+  direction,
+  body,
+  media,
+  metadata,
+  legacyMetadata,
+  auditMetadata,
+  priorOutboundBody,
+} = {}) {
   const meta = { ...jsonObject(metadata), ...jsonObject(legacyMetadata), ...jsonObject(auditMetadata) };
   const directMedia = mediaItems(media);
   const attachments = directMedia.length ? directMedia : mediaItems(meta.media);
   const inbound = direction === 'inbound';
   const hasMedia = inbound && attachments.length > 0;
+  const stampedCourtesy = typeof meta.courtesyOnly === 'boolean' ? meta.courtesyOnly : null;
   const courtesyOnly = inbound && !hasMedia && (
-    meta.courtesyOnly === true
-    || isCourtesyOnly(body, { awaitingAnswer: false })
+    stampedCourtesy === true
+    || (stampedCourtesy == null
+      && priorOutboundBody != null
+      && isCourtesyOnly(body, { awaitingAnswer: outboundAsksForReply(priorOutboundBody) }))
   );
   const spamEnforced = inbound && !hasMedia && meta.spam_verdict?.enforced === true;
   return { courtesyOnly, spamEnforced, hasMedia };

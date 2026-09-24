@@ -356,6 +356,7 @@ function mapCommsMessage(message, customer, twilioNumbers) {
     direction: message.direction, body: message.body, media,
     metadata: message.metadata, legacyMetadata: message.response_metadata,
     auditMetadata: message.response_audit_metadata,
+    priorOutboundBody: message.response_prior_outbound_body,
   });
   const responseMessageType = message.response_message_type || message.message_type;
   const responseStatus = message.response_status || message.delivery_status;
@@ -401,6 +402,19 @@ async function listCustomerComms(db, customer, query = {}) {
           AND mdx.intent = 'click_followup'
       ) AS is_click_followup
     ) sms_answer ON true`)
+    .joinRaw(`LEFT JOIN LATERAL (
+      SELECT prior.body
+      FROM messages prior
+      WHERE m.direction = 'inbound'
+        AND prior.channel = 'sms'
+        AND prior.conversation_id = m.conversation_id
+        AND prior.direction = 'outbound'
+        AND prior.delivery_status IN ('queued', 'sent', 'delivered')
+        AND COALESCE(prior.message_type, '') <> 'internal_alert'
+        AND prior.created_at < m.created_at
+        AND prior.created_at > m.created_at - interval '24 hours'
+      ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1
+    ) sms_prior_outbound ON true`)
     .select(
       'm.id', 'm.conversation_id', 'm.channel', 'm.direction', 'm.body',
       'm.ai_summary', 'm.message_type', 'm.duration_seconds', 'm.media', 'm.answered_by',
@@ -413,6 +427,7 @@ async function listCustomerComms(db, customer, query = {}) {
       'sms_response.metadata as response_metadata',
       'sms_audit.metadata as response_audit_metadata',
       'sms_answer.is_click_followup as response_is_click_followup',
+      'sms_prior_outbound.body as response_prior_outbound_body',
     );
   const rowsQuery = selectCommsColumns(db('messages as m')
     .leftJoin('conversations as c', 'm.conversation_id', 'c.id')
