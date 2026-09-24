@@ -2850,11 +2850,14 @@ async function createSelfBooking(payload = {}) {
             await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
           }
         }
-        // The customer row BEFORE any estimate row (codex r38 P2): the
-        // Customer 360 edit locks the customer first and then rewrites
-        // matching open estimates, so the reverse order here would deadlock
-        // a booking against a staff address edit. A re-lock later is a no-op.
-        if (custId && ((pricing_estimate_id && estimate_token) || (estimate?.id && estimate_share_token))) {
+        // The customer row BEFORE the DRAFT estimate row (codex r38 P2): the
+        // Customer 360 edit and the website publication lock the customer
+        // first and then the draft, so the reverse order here would
+        // deadlock a booking against them. Only the draft handoff — a
+        // PUBLISHED row (the share-token entry) is locked estimate-first by
+        // acceptance and the service-mix mutations, so that path keeps the
+        // estimate-first order (codex r39 P1). A re-lock later is a no-op.
+        if (custId && pricing_estimate_id && estimate_token) {
           await trx('customers').where({ id: custId }).forUpdate().first('id');
         }
         if (pricing_estimate_id && estimate_token) {
