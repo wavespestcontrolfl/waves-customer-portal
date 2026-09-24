@@ -494,15 +494,25 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         // link the text and email carry would render without that
         // property — the notification is withheld instead (the extension
         // itself stands; staff see the hold on the estimate).
+        // The visible sibling set is LOCKED (anchor first, then siblings in
+        // id order — the grouped send claims in the same order) before its
+        // verdicts are judged, so a withdrawal cannot flag a sibling between
+        // this check and the claim stamp below (pre-push audit P1 after
+        // r43): its per-row write waits on the lock and then meets the
+        // fresh claim.
+        let visibleSiblingIds = [];
         if (estimate.estimate_group_id) {
-          const blocked = await trx('estimates')
+          const siblings = await trx('estimates')
             .where({ estimate_group_id: estimate.estimate_group_id })
             .whereNot({ id: estimate.id })
             .whereNull('archived_at')
             .whereIn('status', ['sent', 'viewed', 'expired'])
-            .whereRaw(`NOT ${ADDRESS_UNVERIFIED_ABSENT_SQL}`)
-            .first('id');
-          if (blocked) return false;
+            .orderBy('id')
+            .forUpdate()
+            .select('id', 'estimate_data');
+          const { estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
+          if (siblings.some((sib) => estimateOffCustomerSurface({ estimate_data: sib.estimate_data }))) return false;
+          visibleSiblingIds = siblings.map((sib) => sib.id);
         }
         const claimedAt = new Date().toISOString();
         const CLAIM_STAMP_SQL = "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)";
@@ -516,12 +526,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         // make it vanish from the link the text and email carry. Same
         // token; released with the anchor. A sibling under another send's
         // fresh claim keeps that one.
-        if (estimate.estimate_group_id) {
+        if (visibleSiblingIds.length) {
           await trx('estimates')
-            .where({ estimate_group_id: estimate.estimate_group_id })
-            .whereNot({ id: estimate.id })
-            .whereNull('archived_at')
-            .whereIn('status', ['sent', 'viewed', 'expired'])
+            .whereIn('id', visibleSiblingIds)
             .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
             .update({
               estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, deliveryClaimToken]),

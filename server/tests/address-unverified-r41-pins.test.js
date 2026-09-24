@@ -121,8 +121,12 @@ describe('codex r43', () => {
   test('a grouped extension withholds its notification when any link-visible sibling is off-surface', () => {
     const ext = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
     const claim = ext.slice(ext.indexOf('const deliveryClaimToken = '), ext.indexOf('let smsResult = '));
-    expect(claim).toContain('.whereRaw(`NOT ${ADDRESS_UNVERIFIED_ABSENT_SQL}`)');
-    expect(claim.indexOf('if (blocked) return false;')).toBeLessThan(claim.indexOf('const claimedAt = '));
+    // Siblings are LOCKED (id order, after the anchor) before their verdicts
+    // are judged, and the claim stamps exactly that locked set.
+    expect(claim).toContain(".orderBy('id')\n            .forUpdate()\n            .select('id', 'estimate_data');");
+    expect(claim).toContain("if (siblings.some((sib) => estimateOffCustomerSurface({ estimate_data: sib.estimate_data }))) return false;");
+    expect(claim.indexOf('return false;')).toBeLessThan(claim.indexOf('const claimedAt = '));
+    expect(claim).toContain(".whereIn('id', visibleSiblingIds)");
   });
   test('the customer fan-out relaxes locality exactly as the lead does when the prior estimate had none', () => {
     const src = require('fs').readFileSync(require.resolve('../services/admin-estimate-persistence'), 'utf8');
