@@ -2204,3 +2204,127 @@ it('round 19 P2 (:3768): the same shape with NO stored discount still falls back
   expect(screen.getByText('Subtotal').nextElementSibling.textContent).toBe('$90.00');
   expect(screen.queryByText('Original price not recorded')).not.toBeInTheDocument();
 });
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 23 on #4657 — three client P2s.
+// ---------------------------------------------------------------------
+
+// P2 (:1685): a finite NEGATIVE price ("-1") passed parseFinitePrice, so a
+// discounted line was posted with basePrice -1 — the server's toMoney
+// nulls it, dropping the picked discount and persisting an unpriced line.
+it('round 23 (:1685): a negative typed price ("-1") on a discounted line blocks Save exactly like a blank price', async () => {
+  const fertLineFixture = {
+    ...baseService,
+    serviceAddons: [
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: fertLineFixture }));
+  render(<Harness service={fertLineFixture} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPriceInput = (await screen.findAllByPlaceholderText('0.00')).find((i) => Number(i.value) === 40);
+  fireEvent.change(fertPriceInput, { target: { value: '-1' } });
+  const fertPicker = screen.getByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  await waitFor(() => expect(screen.queryByText(/Confirming totals with the server/)).not.toBeInTheDocument());
+  expect(screen.getByText(/A line has a discount selected but no price/)).toBeInTheDocument();
+  const save = screen.getByRole('button', { name: 'Save', exact: true });
+  expect(save).toBeDisabled();
+  fireEvent.click(save);
+  // Blocked at the client — nothing with basePrice -1 ever reaches the wire.
+  expect(writes().filter(([url]) => url.includes('/update-details') && !url.includes('/preview'))).toHaveLength(0);
+});
+
+// P2 (:3517): after a VISIT_CHANGED_RETRY the old preview stayed "fresh",
+// so the next click resent the same stale expectedTotal and got the same
+// 409 forever unless the operator happened to edit a field.
+it('round 23 (:3517): a VISIT_CHANGED_RETRY invalidates the confirmed preview and re-runs it, so the next Save carries the server\'s CURRENT total, not the refused witness', async () => {
+  let refusals = 0;
+  let previewTotal = 195;
+  const previewCalls = () => fetch.mock.calls.filter(([url]) => url.includes('/update-details/preview')).length;
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      // The "server" reprices the visit between the first preview and
+      // the first save (a catalog change) — the same total-drift the
+      // route's PREVIEW_TOTAL_DRIFT reason refuses.
+      return { ok: true, json: async () => ({ ...computeMockPreview(JSON.parse(options.body), baseService, DISCOUNTS), total: previewTotal }) };
+    }
+    if (url.includes('/update-details')) {
+      const body = JSON.parse(options.body);
+      if (body.expectedTotal !== 200) {
+        refusals += 1;
+        previewTotal = 200;
+        return { ok: false, status: 409, json: async () => ({ code: 'VISIT_CHANGED_RETRY', reason: 'PREVIEW_TOTAL_DRIFT', error: 'The total changed since it was previewed — review the new total and save again.' }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  const onSaved = vi.fn();
+  render(<Harness onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  await waitFor(() => expect(totalText()).toBe('$195.00'));
+  const previewsBefore = previewCalls();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('review the new total and save again');
+  expect(refusals).toBe(1);
+  // Without the fix: no new preview request, the $195 figure stays
+  // "fresh", and the next click resends expectedTotal 195 → 409 again.
+  await waitFor(() => expect(previewCalls()).toBeGreaterThan(previewsBefore));
+  await waitFor(() => expect(totalText()).toBe('$200.00'));
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+  expect(refusals).toBe(1);
+  const saves = writes().filter(([url]) => url.includes('/update-details') && !url.includes('/preview'));
+  expect(saves).toHaveLength(2);
+  expect(JSON.parse(saves[0][1].body).expectedTotal).toBe(195);
+  expect(JSON.parse(saves[1][1].body).expectedTotal).toBe(200);
+});
+
+// P2 (:4994): under the round-13 visit lock the pickers were disabled but
+// each add-on's Remove button stayed active — removing a discounted row
+// requests canonical adoption, which the PUT deterministically refuses
+// with LEGACY_PRIMARY_GROSS_UNKNOWN.
+it('round 23 (:4994): gate ON, the legacy visit lock also disables Remove on an add-on that carries a stored discount', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: legacyAddonDiscountVisit }));
+  render(<Harness service={legacyAddonDiscountVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect()).toBeDisabled());
+  const remove = screen.getByRole('button', { name: 'Remove' });
+  expect(remove).toBeDisabled();
+  expect(remove).toHaveAttribute('title', expect.stringContaining('legacy discount'));
+  fireEvent.click(remove);
+  // The row is still there — nothing could queue a refused removal.
+  expect(screen.getByText(/Discount can't be changed on this legacy line/)).toBeInTheDocument();
+});
+
+it('round 23 (:4994): the same lock leaves Remove ENABLED on an add-on with no stored discount (deleting it is not a term change)', async () => {
+  const lockedWithPlainAddon = {
+    ...legacyAddonDiscountVisit,
+    serviceAddons: [
+      ...legacyAddonDiscountVisit.serviceAddons,
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: lockedWithPlainAddon }));
+  render(<Harness service={lockedWithPlainAddon} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect()).toBeDisabled());
+  const removes = screen.getAllByRole('button', { name: 'Remove' });
+  expect(removes).toHaveLength(2);
+  expect(removes[0]).toBeDisabled();
+  expect(removes[1]).toBeEnabled();
+});
+
+it('round 23 (:4994) gate-off parity: Remove stays enabled on the discounted legacy add-on', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: false, service: legacyAddonDiscountVisit }));
+  render(<Harness service={legacyAddonDiscountVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  expect(screen.getByRole('button', { name: 'Remove' })).toBeEnabled();
+});

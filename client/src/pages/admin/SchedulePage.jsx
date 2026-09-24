@@ -1679,10 +1679,16 @@ export function lineDiscountSaveBlocked({ known, appointmentDiscountSelected, li
 // still showed a discount. One helper: a finite number in, that number
 // back; blank, non-numeric, NaN or +/-Infinity input is null — the same
 // "no valid price" outcome every caller already treats a blank field as.
+// GitHub Codex round 23 P2 (#4657, :1685): a finite NEGATIVE value ("-1")
+// passed too — the price inputs' min={0} is native form validation that
+// these direct-handler buttons never trigger — so a discounted line was
+// posted with basePrice -1, the server's toMoney turned it into null, and
+// the save dropped the picked discount while persisting an unpriced line.
+// A price below zero is not a price: null, same as blank.
 function parseFinitePrice(value) {
   if (value === "" || value == null) return null;
   const n = parseFloat(value);
-  return Number.isFinite(n) ? n : null;
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 export function EditServiceModal({ service, technicians, onClose, onSaved, onMarkPrepaid }) {
@@ -3530,6 +3536,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // (adminFetch), so show the server's own message and fall back to
         // the stacked-discount copy only when it's empty.
         setSaveError(e.message || "This appointment's stacked discounts changed since it opened (likely another save). Close and reopen it to see the current numbers, then save again.");
+        // GitHub Codex round 23 P2 (#4657, :3517): the preview that
+        // produced the refused expectedTotal is stale by definition —
+        // without this, the same witness is resent on the next click and
+        // the operator gets the same 409 until they happen to edit a
+        // field. Invalidate it and re-run the dry-run now.
+        setPreviewNonce((n) => n + 1);
       } else {
         setSaveError("Save failed: " + e.message);
       }
@@ -3652,7 +3664,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const previewAbortRef = useRef(null);
   const [moneyPreview, setMoneyPreview] = useState(null);
   const [moneyPreviewLoading, setMoneyPreviewLoading] = useState(false);
+  // GitHub Codex round 23 P2 (#4657, :3517): a VISIT_CHANGED_RETRY (the
+  // server refused this save against what it would now persist — preview-
+  // total drift after a catalog price/eligibility change, or any other
+  // concurrent change) must invalidate the preview that produced the
+  // refused witness. Bumping this nonce changes the inputs key below, so
+  // the stale response reads as not-fresh on the very next render (Save
+  // disables, the stale expectedTotal can never be resent) and the effect
+  // re-runs the dry-run against the server's CURRENT figures.
+  const [previewNonce, setPreviewNonce] = useState(0);
   const moneyPreviewInputsKey = JSON.stringify({
+    previewNonce,
     form,
     isRecurring, recurringOngoing,
     discountType, discountAmount, discountPresetId, storedDiscountCleared,
@@ -4016,6 +4038,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // picker is replaced with a plain notice instead of rendering as if no
     // discount exists at all.
     lineDiscountLocked = false,
+    // GitHub Codex round 23 P2 (#4657, :4994): true when removing this
+    // line is itself a discount-term change the server would refuse
+    // (LEGACY_PRIMARY_GROSS_UNKNOWN) — the button stays visible but
+    // disabled, with the reason, instead of a confirmed-looking removal
+    // that only fails at the PUT.
+    removeLocked = false,
   }) => {
     const picking = pickerKey === pickerId;
     return (
@@ -4045,6 +4073,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <button
                 type="button"
                 onClick={onRemove}
+                disabled={removeLocked}
+                title={removeLocked
+                  ? "This line carries a legacy discount on a visit whose original price was never recorded. Set the primary service's price and save first, then remove it."
+                  : undefined}
                 className="font-medium"
                 style={{
                   padding: "4px 10px",
@@ -4053,7 +4085,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   color: "#B42318",
                   border: "1px solid #FCA5A5",
                   fontSize: 12,
-                  cursor: "pointer",
+                  cursor: removeLocked ? "not-allowed" : "pointer",
+                  opacity: removeLocked ? 0.5 : 1,
                 }}
               >
                 Remove
@@ -4992,6 +5025,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     lineDiscountOptions: lineDiscountOptionsFor(line),
                     lineDiscountDollars: lineDiscountDollarsAt(idx),
                     lineDiscountLocked: stackingEnabled && (lineGrossUnknownAt(idx) || visitDiscountsLocked),
+                    // GitHub Codex round 23 P2 (#4657, :4994): under the
+                    // visit lock, deleting a row that carries a stored
+                    // discount is a term change too (the server's
+                    // discountedAddonRowDeleted requests canonical
+                    // adoption, which LEGACY_PRIMARY_GROSS_UNKNOWN refuses)
+                    // — so Remove locks for exactly those rows, alongside
+                    // the pickers the same lock already disables.
+                    removeLocked: visitDiscountsLocked && !!line._origDiscountType,
                   })}
                 </div>,
               )}
