@@ -106,6 +106,7 @@ jest.mock('sharp', () => jest.fn(() => ({
 
 const express = require('express');
 const adminRouter = require('../routes/admin-photo-assessments');
+const assessmentCreate = require('../services/photo-assessment-create');
 
 const ROW_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const LEAD_ID = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
@@ -883,7 +884,7 @@ describe('POST /:type (admin create) — message_photos (inbound MMS)', () => {
 // through the HTTP layer — the describe block above already proves the
 // handler wires them together correctly end to end.
 describe('resolveRequestPhotos / resolveAssociations / lookupAssociation (unit)', () => {
-  const { resolveRequestPhotos, resolveAssociations, lookupAssociation } = adminRouter._test;
+  const { resolveRequestPhotos, resolveAssociations, lookupAssociation } = assessmentCreate._test;
   const MESSAGE_ID = 'dddddddd-eeee-4fff-8000-111111111111';
   const CONVERSATION_ID = 'eeeeeeee-ffff-4000-8111-222222222222';
   const CUSTOMER_ID = 'ffffffff-0000-4111-8222-333333333333';
@@ -962,7 +963,7 @@ describe('resolveRequestPhotos / resolveAssociations / lookupAssociation (unit)'
   });
 
   test('buildSnapshots: falls back to the linked customer contact when the body has none, explicit contact wins', () => {
-    const { buildSnapshots } = adminRouter._test;
+    const { buildSnapshots } = assessmentCreate._test;
     const customerContact = { first_name: 'Dana', last_name: 'Reed', email: 'dana@example.com', phone: '+12395550100' };
     expect(buildSnapshots({}, customerContact).contactSnapshot).toEqual(customerContact);
     expect(buildSnapshots({}, null).contactSnapshot).toBeNull();

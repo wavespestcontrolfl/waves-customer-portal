@@ -70,7 +70,7 @@ export function stageOf(row) {
   return { key: "teaser", label: "Teaser only" };
 }
 
-const SOURCE_LABELS = { public_funnel: "Public funnel", admin: "Admin", tech: "Tech" };
+const SOURCE_LABELS = { public_funnel: "Public funnel", admin: "Admin", tech: "Tech", auto_triage: "Photo triage" };
 
 // Downscale to ≤1600px JPEG before upload — same payload contract as the
 // public funnel client (keeps admin uploads under the server's size cap).

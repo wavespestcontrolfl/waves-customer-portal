@@ -135,6 +135,36 @@ describe("PendingDraftsTab", () => {
     await waitFor(() => expect(screen.getByText("No pending drafts", { exact: false })).toBeInTheDocument());
   });
 
+  it("a photo-triage draft shows its lane and a View assessment link to its assessment", async () => {
+    adminFetch.mockResolvedValue({
+      drafts: [
+        {
+          id: "d3",
+          customerName: "Lee Customer",
+          customerPhone: "+19415550102",
+          recipientPhone: "+19415550102",
+          inboundMessage: "what is this in my yard",
+          draftResponse: "Thanks for the photo, Lee.",
+          intent: "photo_triage",
+          campaignType: null,
+          contextSummary: null,
+          flags: { origin: "photo_triage", assessment_type: "lawn", assessment_id: "a-1" },
+          createdAt: new Date().toISOString(),
+        },
+        { ...DRAFTS.drafts[1], flags: { assessment_type: "lawn", assessment_id: "a-2" } },
+      ],
+      pendingCount: 2,
+    });
+    render(<PendingDraftsTab embedded />);
+    expect(await screen.findByText("Lee Customer")).toBeInTheDocument();
+    expect(screen.getByText("Photo triage")).toBeInTheDocument();
+    // Only the photo-triage card links out — a stray flag on another
+    // intent never renders a link.
+    const links = screen.getAllByText("View assessment");
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAttribute("href", "/admin/lawn-assessments?open=lawn%3Aa-1");
+  });
+
   it("empty queue renders the explainer", async () => {
     adminFetch.mockResolvedValue({ drafts: [], pendingCount: 0 });
     render(<PendingDraftsTab embedded />);

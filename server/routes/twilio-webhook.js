@@ -1565,6 +1565,17 @@ router.post('/sms', async (req, res) => {
       logger.info('[sms-intent] SMS reaction detected; skipping legacy AI draft');
     }
 
+    // PHOTO-TEXT AUTO-TRIAGE (GATE_PHOTO_TRIAGE, default OFF): a photo text
+    // that reads like a lawn/plant/pest "what is this" runs the admin photo
+    // assessment and parks ONE pending draft reply for owner approval —
+    // never a send. The service owns every guard (gate, image media, line
+    // type, internal sender, opt-out, pending draft, per-message claim,
+    // daily vision cap); detached so its vision call never holds this block.
+    void require('../services/photo-text-triage').triageInboundPhotoText({
+      inboundTouchpoint, smsLogEntry, body: Body, from: From,
+      numberType: numberConfig.type, isAiNumber, customer, media: inboundMedia,
+    }).catch((err) => logger.error(`[photo-triage] inbound triage failed: ${err.message}`));
+
     // SMS SHADOW DRAFTER (brand-voice loop, Phase B) — silently record what
     // the house-voice AI would have replied. status='shadow' rows never send
     // and never enter the approval queue; a later judge pass scores them

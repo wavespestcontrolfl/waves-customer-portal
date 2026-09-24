@@ -16,6 +16,19 @@
  * "I've got bugs in my yard"). Returns null interest when the classifier
  * can't confidently pick a branch — caller should fall through to the
  * human-draft path in that case.
+ *
+ * Sibling for inbound PHOTO texts (services/photo-text-triage.js):
+ *
+ *   classifyPhotoDiagnosisIntent(body) -> Promise<{
+ *     intent: 'photo_diagnosis' | null,
+ *     assessmentType: 'lawn' | 'pest' | null,
+ *     method: 'regex' | 'claude' | 'none',
+ *   }>
+ *
+ * Only meaningful for a message that already carries an image. Same shape
+ * of decision: regex fast path first (a subject word or a "what is this"
+ * question, or an EMPTY caption — a bare photo is a show-and-ask), Claude
+ * FAST only for a caption the regex can't place.
  */
 
 const logger = require('./logger');
@@ -132,4 +145,96 @@ async function classifyServiceIntent(body) {
   return claudeClassify(body);
 }
 
-module.exports = { classifyServiceIntent };
+// ── Photo-diagnosis intent (inbound MMS) ────────────────────────────────
+
+// Words that pick the LAWN assessment. Everything else that triggers
+// photo_diagnosis runs the pest identifier.
+const PHOTO_LAWN_WORDS = ['lawn', 'grass', 'yard', 'turf', 'weed', 'weeds'];
+const PHOTO_PEST_WORDS = [
+  'bug', 'bugs', 'insect', 'insects', 'pest', 'pests', 'ant', 'ants',
+  'termite', 'termites',
+];
+const PHOTO_TREE_SHRUB_WORDS = [
+  'tree', 'trees', 'shrub', 'shrubs', 'bush', 'bushes', 'plant', 'plants',
+  'palm', 'palms', 'leaf', 'leaves',
+];
+// Subject words that say "diagnose this" without leaning lawn or pest.
+const PHOTO_NEUTRAL_WORDS = ['fungus', 'fungi', 'mold', 'mushroom', 'mushrooms'];
+const PHOTO_QUESTION_RE = /\b(what(?:['’]?s| is| are)? (?:this|that|these|those|it)\b|what(?:['’]?s| is) wrong|what(?:['’]?s| is) going on|can you tell|could you tell|any idea|identify|what kind of|what type of)/i;
+
+// TODO(tree_shrub): tree/shrub photos run the pest identifier until the
+// tree_shrub assessment type lands in its own PR; flip this constant then.
+const TREE_SHRUB_TRIAGE_TYPE = 'pest';
+
+function countTokens(lower, tokens) {
+  return tokens.filter((t) => tokenMatches(lower, [t])).length;
+}
+
+// Lawn only when lawn words strictly outnumber the pest-side words (pest +
+// tree/shrub, which currently route to TREE_SHRUB_TRIAGE_TYPE); a tie or a
+// question with no subject word runs the pest identifier.
+function photoAssessmentType(lower) {
+  const scores = { lawn: 0, pest: 0 };
+  scores.lawn += countTokens(lower, PHOTO_LAWN_WORDS);
+  scores.pest += countTokens(lower, PHOTO_PEST_WORDS);
+  scores[TREE_SHRUB_TRIAGE_TYPE] += countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
+  return scores.lawn > scores.pest ? 'lawn' : 'pest';
+}
+
+function regexClassifyPhoto(body) {
+  const text = typeof body === 'string' ? body.trim() : '';
+  if (!text) return { intent: 'photo_diagnosis', assessmentType: 'pest', method: 'regex' };
+  const lower = text.toLowerCase();
+  const subject = tokenMatches(lower, [
+    ...PHOTO_LAWN_WORDS, ...PHOTO_PEST_WORDS, ...PHOTO_TREE_SHRUB_WORDS, ...PHOTO_NEUTRAL_WORDS,
+  ]);
+  if (!subject && !PHOTO_QUESTION_RE.test(text)) return null;
+  return { intent: 'photo_diagnosis', assessmentType: photoAssessmentType(lower), method: 'regex' };
+}
+
+const PHOTO_INTENT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['subject'],
+  properties: {
+    subject: { type: 'string', enum: ['lawn', 'pest', 'tree_shrub', 'none'] },
+  },
+};
+const PHOTO_SUBJECT_TYPES = { lawn: 'lawn', pest: 'pest', tree_shrub: TREE_SHRUB_TRIAGE_TYPE };
+
+async function claudeClassifyPhoto(body) {
+  const none = { intent: null, assessmentType: null, method: 'ai' };
+  try {
+    const prompt = `A customer texted Waves Pest Control a PHOTO with this caption: ${JSON.stringify(body)}
+
+Is the customer asking us to look at the photo and tell them what something is or what is wrong with it? Pick ONE subject:
+- "lawn" — their grass, turf, or yard (brown/dead patches, weeds, lawn disease)
+- "pest" — a bug, insect, spider, rodent, termite, or damage from one
+- "tree_shrub" — a tree, shrub, palm, or plant
+- "none" — anything else (a gate code, a receipt, a thank-you, a scheduling note, an address, a screenshot)
+
+Classify by what the customer is ASKING, not by which words appear.`;
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+      laneId: 'sms_intent',
+      text: prompt,
+      jsonMode: true,
+      jsonSchema: PHOTO_INTENT_SCHEMA,
+      maxTokens: 40,
+    });
+    const assessmentType = response.ok && response.json ? PHOTO_SUBJECT_TYPES[response.json.subject] : null;
+    return assessmentType ? { intent: 'photo_diagnosis', assessmentType, method: 'ai' } : none;
+  } catch (err) {
+    logger.error(`[sms-service-intent] AI photo classify failed: ${err.message}`);
+    return none;
+  }
+}
+
+async function classifyPhotoDiagnosisIntent(body) {
+  return regexClassifyPhoto(body) || claudeClassifyPhoto(body);
+}
+
+module.exports = {
+  classifyServiceIntent,
+  classifyPhotoDiagnosisIntent,
+  TREE_SHRUB_TRIAGE_TYPE,
+};

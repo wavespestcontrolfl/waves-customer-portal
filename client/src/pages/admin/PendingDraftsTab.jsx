@@ -3,7 +3,8 @@
  *
  * The owner-approval queue for message_drafts rows parked at
  * status='pending' (click follow-ups, campaign/upsell drafts, seasonal
- * reactivation, estimate clarify asks, legacy webhook drafts). The
+ * reactivation, estimate clarify asks, photo-text triage replies, legacy
+ * webhook drafts). The
  * approve/revise/reject API (/api/admin/drafts) has existed since the
  * lanes shipped — this is its first list surface; until now a pending
  * draft was reachable only through a ?draftId= deep link nothing
@@ -34,13 +35,15 @@ const D = {
 
 // Lane = which pipeline parked the draft. campaign_type is authoritative
 // when present (the campaign writers: 'reactivation' | 'upsell'); the
-// click-followup and estimate-clarify writers store NO campaign_type and
-// identify their rows by intent alone (click-followup.js,
-// estimate-clarify-asks.js), and the webhook/reply drafter rows carry only
-// a classifier intent — those fall through to the reply lane.
+// click-followup, estimate-clarify and photo-triage writers store NO
+// campaign_type and identify their rows by intent alone (click-followup.js,
+// estimate-clarify-asks.js, photo-text-triage.js), and the webhook/reply
+// drafter rows carry only a classifier intent — those fall through to the
+// reply lane.
 const INTENT_LANES = {
   click_followup: "click_followup",
   estimate_clarify: "estimate_clarify",
+  photo_triage: "photo_triage",
 };
 
 function laneOf(draft) {
@@ -53,6 +56,7 @@ const LANE_LABELS = {
   upsell: "Upsell",
   reactivation: "Seasonal",
   estimate_clarify: "Estimate clarify",
+  photo_triage: "Photo triage",
   reply_draft: "Reply draft",
 };
 
@@ -70,6 +74,24 @@ function communicationsHref(draft) {
   const to = draft.recipientPhone || draft.customerPhone;
   if (to) params.set("phone", to);
   return `/admin/communications?${params.toString()}`;
+}
+
+const ASSESSMENT_TYPES = new Set(["lawn", "pest"]);
+
+// Photo-triage drafts carry the assessment they were written from
+// (flags.assessment_type / assessment_id, stamped server-side by
+// photo-text-triage.js); the link opens its detail sheet on the
+// assessments page (?open=<type>:<id>). Every other draft renders nothing.
+function AssessmentLink({ draft }) {
+  const type = draft.flags?.assessment_type;
+  const id = draft.flags?.assessment_id;
+  if (draft.intent !== "photo_triage" || !ASSESSMENT_TYPES.has(type) || !id) return null;
+  const params = new URLSearchParams({ open: `${type}:${id}` });
+  return (
+    <a href={`/admin/lawn-assessments?${params.toString()}`} style={{ fontSize: 13, color: D.blue, textDecoration: "none" }}>
+      View assessment
+    </a>
+  );
 }
 
 function timeLabel(value) {
@@ -227,6 +249,7 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
           >
             Open in Communications
           </a>
+          <AssessmentLink draft={draft} />
         </div>
       )}
     </div>
@@ -407,7 +430,7 @@ export default function PendingDraftsTab({ embedded = false }) {
 
       {!loading && !error && visible.length === 0 && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 24, fontSize: 14, color: D.muted }}>
-          No pending drafts. Parked drafts from the click follow-up, campaign, seasonal, and estimate-clarify lanes land here for approval.
+          No pending drafts. Parked drafts from the click follow-up, campaign, seasonal, estimate-clarify, and photo-triage lanes land here for approval.
         </div>
       )}
 
