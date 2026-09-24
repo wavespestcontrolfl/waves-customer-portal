@@ -1391,6 +1391,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const effectiveCleanAt = Math.max(cleanAt, newestClean);
       if (!blocked && newestFlag && newestFlagAt > effectiveCleanAt) return { newerFlag: newestFlag };
       if (blocked && newestClean > newestFlagAt) return { newerClean: new Date(newestClean).toISOString() };
+      // An already-blocked run whose own / carried flag is OLDER than a
+      // flag another request committed reports that newer flag too, so the
+      // draft, lead and withdrawal writes carry the newest evidence and
+      // never overwrite a concurrently updated lead with the older one
+      // (codex r34 P1).
+      if (blocked && newestFlag && newestFlag !== blocked && newestFlagAt > (Date.parse(blocked.flagged_at || '') || 0)) return { newerFlag: newestFlag };
       return {};
     };
     if (addressUnverified) {
@@ -3350,6 +3356,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             logger.info('[public-quote] carried address flag not written — a clean verdict committed after it');
             return;
           }
+          // The newest winning flag lands, never an older carried one over
+          // a concurrently updated lead (codex r34 P1).
+          if (rec.newerFlag) carriedAddressFlag = rec.newerFlag;
           const verdict = { ...buildAddressVerdict({ flag: carriedAddressFlag, address: normalizedAddress }), at: carriedAddressFlag.flagged_at || new Date().toISOString() };
           await trx('leads').where({ id: lead.id }).update({
             extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: carriedAddressFlag, address_verdict: verdict })]),
