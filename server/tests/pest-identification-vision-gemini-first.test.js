@@ -129,6 +129,15 @@ describe('analyzePhoto — an incomplete Gemini answer is a miss', () => {
     expect(result.claude).toMatchObject({ best_match: 'fire ant' });
   });
 
+  it('a padded " true " not_a_pest is stored as a real boolean', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...GEMINI_ID, not_a_pest: ' True ' }));
+
+    const result = await analyzePhoto('base64photo', 'image/jpeg');
+
+    expect(result.gemini.not_a_pest).toBe(true);
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+
   it('a blurry-photo "unidentifiable" answer is valid, not a miss', async () => {
     global.fetch = jest.fn().mockResolvedValue(geminiResponse({
       ...GEMINI_ID, best_match: 'unidentifiable', category: 'other', confidence: 'low',

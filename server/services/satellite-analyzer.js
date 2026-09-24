@@ -13,7 +13,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { geminiText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -221,7 +221,9 @@ class SatelliteAnalyzer {
         }],
       });
 
-      const text = response.content[0].text;
+      // FLAGSHIP can lead with a thinking block; the shared extractor skips it.
+      const text = anthropicText(response);
+      if (!text) { logger.warn('Satellite Claude vision returned empty content'); return null; }
       const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
       normalizeSatelliteAnalysis(parsed);
       if (!isValidSatelliteAnalysis(parsed)) {

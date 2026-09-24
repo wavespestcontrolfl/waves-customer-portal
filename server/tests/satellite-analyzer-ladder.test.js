@@ -122,6 +122,19 @@ describe('analyze() — Gemini → Claude → OpenAI ladder, stopping at first v
     expect(result.confidence).toBe('single_model');
   });
 
+  it('a Claude reply that leads with a thinking block still counts (shared extractor)', async () => {
+    mockFetchRouting({ gemini: {} });
+    mockAnthropicCreate.mockResolvedValue({ content: [
+      { type: 'thinking', thinking: 'measuring the roof…' },
+      { type: 'text', text: JSON.stringify(CLAUDE_ANALYSIS) },
+    ] });
+
+    const result = await satelliteAnalyzer.analyze('123 Test St', 27.0, -82.5);
+
+    expect(result.source).toBe('claude');
+    expect(result.providerStatus.openai).toBeUndefined();
+  });
+
   it('Gemini and Claude both miss → OpenAI runs as the true last resort', async () => {
     mockFetchRouting({ openai: OPENAI_ANALYSIS });
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{}' }] });

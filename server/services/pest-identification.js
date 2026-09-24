@@ -386,9 +386,16 @@ function isValidPestIdentification(parsed) {
   return true;
 }
 
+// Store the accepted flag as a real boolean so mergeModelResults can't misread
+// a padded " true " as false (Codex r4).
+function normalizePestIdentification(parsed) {
+  if (typeof parsed.not_a_pest === 'string') parsed.not_a_pest = parsed.not_a_pest.trim().toLowerCase() === 'true';
+  return parsed;
+}
+
 function parseVisionJson(text, source) {
   const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-  if (isValidPestIdentification(parsed)) return parsed;
+  if (isValidPestIdentification(parsed)) return normalizePestIdentification(parsed);
   logger.warn(`[pest-identification] ${source} vision response failed schema validation`);
   return null;
 }
