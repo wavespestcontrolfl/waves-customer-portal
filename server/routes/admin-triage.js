@@ -641,8 +641,12 @@ function liveAddressIsReviewedPremise(payload, liveOnFile) {
   const liveUnit = unitOfPair(liveLine, liveOnFile?.address_line2);
   const samePremise = (line1, unit, city, zip) => sameHouseNumberStreet(liveLine, line1)
     && liveUnit === unitOfPair(line1, unit)
-    && (!zip5(zip) || !zip5(liveOnFile?.zip) || zip5(zip) === zip5(liveOnFile?.zip))
-    && (!cityKey(city) || !cityKey(liveOnFile?.city) || cityKey(city) === cityKey(liveOnFile?.city));
+    // Any locality the reviewed premise carries must be PRESENT and equal
+    // on the live row: a live line whose city or ZIP was cleared by an
+    // incomplete edit is not the reviewed premise, and adopting it would
+    // file the task without the known locality (codex r25 P2).
+    && (!zip5(zip) || zip5(zip) === zip5(liveOnFile?.zip))
+    && (!cityKey(city) || cityKey(city) === cityKey(liveOnFile?.city));
   if (!payload?.stated_street && !payload?.on_file_address?.address_line1) return true;
   return samePremise(payload?.stated_street, payload?.stated_unit, payload?.stated_city, payload?.stated_zip)
     || samePremise(payload?.on_file_address?.address_line1, payload?.on_file_address?.address_line2, payload?.on_file_address?.city, payload?.on_file_address?.zip);
@@ -653,11 +657,13 @@ function liveAddressIsReviewedPremise(payload, liveOnFile) {
 // auto_booking_skipped_after_approval task, judged at the approved on-file
 // address (live when it is a reviewed premise, else the card's snapshot).
 // A Deny that marks the scheduling OR the service wrong leaves no trustworthy
-// appointment to hand on (codex r9 P2).
+// appointment to hand on (codex r9 P2); so does a WHOLE-CALL deny — an
+// empty-field Deny or the card's Dismiss, which denyRejectsUnitEvidence
+// already reads as rejecting the whole call (codex r25 P1).
 function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false, liveOnFile = null } = {}) {
   const payload = heldConflictPayload && typeof heldConflictPayload === 'object' ? heldConflictPayload : null;
   const confirmed = !!payload && (payload.scheduling_window?.status === 'confirmed' || payload.scheduling_status === 'confirmed');
-  const scheduleDenied = verdict === 'deny' && (wrongFields.includes('scheduling') || wrongFields.includes('service'));
+  const scheduleDenied = verdict === 'deny' && (wrongFields.length === 0 || wrongFields.includes('scheduling') || wrongFields.includes('service'));
   const onFile = liveAddressIsReviewedPremise(payload, liveOnFile) ? liveOnFile : (payload?.on_file_address || null);
   const approvedAddress = onFile
     ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null }
@@ -709,9 +715,11 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   // a relink the recovery task would be joined under the new account with
   // the original account's approved window (codex r24 P1). A reprocess
   // refreshes the card for the new customer; until then the verdict is
-  // refused.
-  if (heldConflictPayload?.dispute_customer_id && callRowForAddress?.customer_id
-    && String(heldConflictPayload.dispute_customer_id) !== String(callRowForAddress.customer_id)) {
+  // refused. An UNLINKED call (customer_id set to null — a supported
+  // operator action in admin-call-recordings) is an identity change too:
+  // its recovery task would hang off no account (codex r25 P2).
+  if (heldConflictPayload?.dispute_customer_id
+    && String(heldConflictPayload.dispute_customer_id) !== String(callRowForAddress?.customer_id || '')) {
     throw Object.assign(new Error('This call was relinked to another customer since the card was filed — reprocess the call to refresh the card, then review it.'), { statusCode: 409, code: 'CONFLICT_CUSTOMER_RELINKED' });
   }
   const liveCustomer = callRowForAddress?.customer_id

@@ -133,15 +133,15 @@ async function main() {
       await page.getByRole('button', { name: 'Cancel', exact: true }).click();
       await page.getByText('Closed', { exact: true }).waitFor();
       await page.goto(`${server.baseUrl}/qa-schedule?tab=match`);
-      for (const label of ['Tech Match', 'CSR Booking', 'Job Scores', 'Insights']) {
+      for (const label of ['Matching', 'Booking', 'Scores', 'Insights']) {
         const tab = page.getByRole('button', { name: label, exact: true });
         await tab.click();
         assert.equal(await tab.getAttribute('aria-current'), 'page');
-        await page.getByText({ 'Tech Match': 'Required', 'CSR Booking': 'Recommended windows', 'Job Scores': 'Score formula', 'Insights': 'Period' }[label], { exact: true }).first().waitFor();
+        await page.getByText({ Matching: 'Required', Booking: 'Recommended windows', Scores: 'Score formula', Insights: 'Period' }[label], { exact: true }).first().waitFor();
         await capture(`schedule-${label.toLowerCase().replaceAll(' ', '-')}`);
       }
       await page.goto(`${server.baseUrl}/qa-services`);
-      if (width < 768) await page.getByRole('button', { name: /All Services/ }).click();
+      if (width < 768) await page.getByRole('button', { name: /Services/ }).click();
       await page.getByText('Fixture Pest Service', { exact: true }).first().click();
       const nameField = width < 768 ? page.getByLabel('Name', { exact: true }) : page.getByRole('textbox', { name: 'Name', exact: true });
       await nameField.fill('Fixture renamed service');

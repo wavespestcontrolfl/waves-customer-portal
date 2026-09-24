@@ -310,6 +310,13 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(otherUnit.approvedWindow.requested_address.street_line_2).toBeNull();
     const otherTown = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: 'Elsewhere', zip: '34220' } });
     expect(otherTown.approvedWindow.requested_address.city).toBe('Parrish');
+    // A live row whose locality was CLEARED is not the reviewed premise either:
+    // the task keeps the snapshot's known city and ZIP (codex r25 P2).
+    const noZip = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: 'Parrish', zip: null } });
+    expect(noZip.approvedWindow.requested_address).toEqual({ street_line_1: '1260 Example St', street_line_2: null, city: 'Parrish', postal_code: '34219', raw_text: null });
+    const noCity = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: '', zip: '34219' } });
+    expect(noCity.approvedWindow.requested_address.city).toBe('Parrish');
+    expect(noCity.approvedPayload.on_file_address).toEqual(held.on_file_address);
     const retyped = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: 'Parrish', zip: '34219' } });
     expect(retyped.approvedWindow.requested_address.street_line_1).toBe('1260 Example Street');
   });
@@ -333,13 +340,11 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held }).file).toBe(false);
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['service'], heldConflictPayload: held }).file).toBe(false);
   });
-});
 
-describe('disputeReuseDecision (reused AI booking under a dispute)', () => {
-  const { disputeReuseDecision } = require('../services/call-recording-processor');
-  test('a dispute holds NEW side effects and never pulls an existing assignment', () => {
-    expect(disputeReuseDecision({ disputed: false })).toEqual({ holdNewSideEffects: false });
-    expect(disputeReuseDecision({ disputed: true })).toEqual({ holdNewSideEffects: true });
-    expect(Object.keys(disputeReuseDecision({ disputed: true }))).toEqual(['holdNewSideEffects']);
+  test('a whole-call Deny (no field) or Dismiss rejects the appointment — no recovery task', () => {
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: [], heldConflictPayload: held }).file).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'deny', heldConflictPayload: held }).file).toBe(false);
+    // Accept is unaffected by an empty field list.
+    expect(heldConflictTaskDecision({ verdict: 'accept', wrongFields: [], heldConflictPayload: held }).file).toBe(true);
   });
 });

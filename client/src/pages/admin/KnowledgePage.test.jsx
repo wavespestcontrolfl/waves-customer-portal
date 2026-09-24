@@ -93,7 +93,7 @@ describe("KnowledgePage embedded navigation", () => {
 
     expect(screen.getByRole("button", { name: "Sources" }))
       .toHaveAttribute("aria-current", "page");
-    fireEvent.click(screen.getByRole("button", { name: "Recent queries" }));
+    fireEvent.click(screen.getByRole("button", { name: "Queries" }));
 
     expect(screen.getByTestId("location-search")).toHaveTextContent(
       "?source=bookmark&wikiTab=queries",
@@ -214,7 +214,7 @@ describe("KnowledgePage embedded navigation", () => {
     expect(queryReads).toBe(2);
 
     fireEvent.click(screen.getByRole("button", { name: "Articles" }));
-    fireEvent.click(screen.getByRole("button", { name: "Recent queries" }));
+    fireEvent.click(screen.getByRole("button", { name: "Queries" }));
     await waitFor(() => expect(queryReads).toBe(3));
     expect(await screen.findByText("Q: Fixture prior question")).toBeInTheDocument();
     expect(screen.getByTestId("location-search")).toHaveTextContent(
@@ -260,7 +260,7 @@ describe("KnowledgePage embedded navigation", () => {
     expect(await screen.findByText("Q: Fixture prior question")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Articles" }));
-    fireEvent.click(screen.getByRole("button", { name: "Recent queries" }));
+    fireEvent.click(screen.getByRole("button", { name: "Queries" }));
     expect(screen.getByText("Loading recent queries\u2026")).toBeInTheDocument();
     expect(screen.queryByText("Q: Fixture prior question")).not.toBeInTheDocument();
 

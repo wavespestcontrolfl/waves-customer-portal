@@ -13943,7 +13943,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
-      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', bell: true, metadata: { estimateId: estimate.id, customerId, invoiceId } });
+      // link carries ?estimateId= so the deep link lands on this estimate,
+      // the same shape estimate_hot_view already uses (estimate-hot-view-alert.js).
+      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: `/admin/estimates?estimateId=${estimate.id}`, bell: true, metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
         await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, {
           icon: '\u2705',

@@ -63,7 +63,7 @@ describe("Reviews workspace foundation", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
     expect(screen.getByText("Velocity workspace")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Review Outreach" })).toHaveClass(
+    expect(screen.getByRole("button", { name: "Requests" })).toHaveClass(
       "bg-zinc-900",
     );
 

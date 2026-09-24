@@ -1018,6 +1018,19 @@ describe('restoreRodentSetupObligationForReversedInvoice — a voided/refunded S
     const prepay = conn({ rootsForCoverage: [rodentRoot], claim: { id: 'claim-1' }, prepayTerm: { id: 'term-1' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(prepay, setupInvoice())).toBeNull();
     expect(prepay.writes).toEqual([]);
+    // codex round-2 P0 follow-up: a CLAIM-LESS term-backed prepay (the
+    // estimate-origin switch's own invoice, which deliberately carries no
+    // setup_fee_claims row) must ALSO defer to the prepay pipeline when this
+    // generic reversal runs — e.g. via returnAppliedCreditOnRefund, the real
+    // refund transition, not just the annual-prepay-renewals.js sync. The
+    // old code only checked term-backed status INSIDE the claim branch, so
+    // a claim-less prepay invoice with its own setup line fell through and
+    // stamped the root directly — a second, independent obligation on top
+    // of whatever the term-cancel sync's marker re-mint or claims restore
+    // already puts back.
+    const claimlessPrepay = conn({ rootsForCoverage: [rodentRoot], claim: null, prepayTerm: { id: 'term-2' }, scheduledService: { id: 'root-rb', status: 'confirmed' } });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(claimlessPrepay, setupInvoice())).toBeNull();
+    expect(claimlessPrepay.writes).toEqual([]);
     const occupied = conn({ rootsForCoverage: [rodentRoot], claim: null, updateResult: 0, scheduledService: { id: 'root-rb', status: 'confirmed' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(occupied, setupInvoice())).toBeNull();
     const noRoot = conn({ rootsForCoverage: [{ id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null }], claim: null });
@@ -1068,19 +1081,45 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     ],
   };
   const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
-  function revivalConn({ stamp = '99.00', invoiceRow = prepayInvoiceRow, rebills = [], markerRebill = null } = {}) {
+  function revivalConn({
+    stamp = '99.00', invoiceRow = prepayInvoiceRow, rebills = [], markerRebill = null,
+    // The estimate-origin switch guard's own 3-arg where('notes', 'like', …)
+    // probe for voided siblings carrying [prepay-switch-superseded-by:…]
+    // (codex P0 — a switch can supersede MULTIPLE invoices at once, so the
+    // source reads them all via .select(), never .first()): default []
+    // (no superseded siblings) so every pre-existing fixture in this
+    // describe block — none of which is a switch prepay — keeps hitting the
+    // normal ledger/stamp path unchanged. restoredMarkerIds: sibling ids
+    // whose OWN prepay-switch-restore marker probe should find a match
+    // (i.e. that sibling's marker re-mint has already fired once).
+    supersededSiblings = [],
+    restoredMarkerIds = [],
+  } = {}) {
     const c = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp } });
     const inner = c;
     const wrapped = (table) => {
       const q = inner(table);
       if (table === 'invoices') {
-        // The r75 marker probe is a 3-arg where('notes', 'like', …) —
-        // route it to the markerRebill fixture, everything else to the row.
-        let notesProbe = false;
+        // Every probe here is a 3-arg where('notes', 'like', <pattern>) —
+        // route each to its own fixture by the marker text in the pattern,
+        // everything else to the row.
+        let notesPattern = null;
         const origWhere = q.where;
-        q.where = (...args) => { if (args[0] === 'notes') { notesProbe = true; return q; } return origWhere(args[0]); };
-        q.first = async () => (notesProbe ? markerRebill : invoiceRow);
-        q.select = async () => rebills;
+        q.where = (...args) => { if (args[0] === 'notes') { notesPattern = String(args[2] || ''); return q; } return origWhere(args[0]); };
+        q.first = async () => {
+          if (notesPattern && notesPattern.includes('prepay-switch-superseded-by')) return supersededSiblings[0] || null;
+          if (notesPattern && notesPattern.includes('prepay-switch-restore:')) {
+            const m = /prepay-switch-restore:([^%\]]+)/.exec(notesPattern);
+            const siblingId = m && m[1];
+            return siblingId && restoredMarkerIds.includes(siblingId) ? { id: `restored-${siblingId}` } : null;
+          }
+          if (notesPattern) return markerRebill;
+          return invoiceRow;
+        };
+        q.select = async () => {
+          if (notesPattern && notesPattern.includes('prepay-switch-superseded-by')) return supersededSiblings;
+          return rebills;
+        };
       }
       return q;
     };
@@ -1169,6 +1208,33 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     expect(section).not.toMatch(/whereNotIn\("status", \["cancelled", "canceled", "rescheduled"\]\)/);
     // Both re-bill mints carry the machine marker the revival sweep voids by.
     expect((invoiceSrc.match(/rodentSetupRebillMarker\(/g) || []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('codex round-2 P0: a SECOND superseded invoice with no setup line must not hide the setup-bearing sibling', async () => {
+    // resolveSupersededInvoices can void MULTIPLE invoices for the same
+    // switch (matches on the visit set OR the whole estimate-scoped AR),
+    // every one stamped with the SAME [prepay-switch-superseded-by:P]
+    // marker. Deliberately lists the NON-setup sibling FIRST in the array —
+    // an unordered .first()/[0] read would pick it and never see the one
+    // that actually carries the $99, wrongly falling through to ledger a
+    // claim the marker restore will ALSO cover once it re-mints the
+    // setup-bearing sibling.
+    const applicationOnlySibling = { id: 'inv-superseded-apponly', line_items: [{ description: 'First service application', amount: 128 }] };
+    const setupBearingSibling = { id: 'inv-superseded-setup', line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 99 }] };
+    const c = revivalConn({ supersededSiblings: [applicationOnlySibling, setupBearingSibling] });
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(c, 'inv-prepay')).toBeNull();
+    expect(c.writes).toEqual([]);
+
+    // Once that setup-bearing sibling's OWN marker re-mint has fired once,
+    // the marker path is spent and the claim must ledger instead — proving
+    // the per-sibling restore check, not just per-sibling setup detection.
+    const restored = revivalConn({
+      supersededSiblings: [applicationOnlySibling, setupBearingSibling],
+      restoredMarkerIds: [setupBearingSibling.id],
+    });
+    const out = await InvoiceService.retireRodentSetupObligationForRevivedPrepay(restored, 'inv-prepay');
+    expect(out).not.toBeNull();
+    expect(restored.writes.some((w) => w.table === 'setup_fee_claims' && w.op === 'insert')).toBe(true);
   });
 
   test('wired into BOTH term revival transitions (source contract)', () => {
@@ -1322,7 +1388,13 @@ describe('r47 wiring — commercial bait, anchor-less revival sweep, unvoid reti
     const wrapped = (table) => {
       const q = inner(table);
       if (table === 'invoices') {
-        q.first = async () => prepayInvoiceRow;
+        // Not a switch-superseded prepay (source contract for this fixture)
+        // — the P0 switch-supersede probe (where('notes','like', a
+        // prepay-switch-superseded-by pattern)) must find no sibling here.
+        let notesPattern = null;
+        const origWhere = q.where;
+        q.where = (...args) => { if (args[0] === 'notes') { notesPattern = String(args[2] || ''); return q; } return origWhere(args[0]); };
+        q.first = async () => (notesPattern && notesPattern.includes('prepay-switch-superseded-by') ? null : prepayInvoiceRow);
         q.select = async () => [{ id: 'inv-rebill', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }];
       }
       return q;
@@ -1463,13 +1535,23 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     const prepayRow = { id: 'inv-prepay', customer_id: 'cust-1', scheduled_service_id: null, line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 99 }] };
     const writes = [];
     const trx = (table) => {
-      const q = { _where: null };
-      q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) }; return q; };
+      const q = { _where: null, _notesPattern: null };
+      q.where = (w, ...rest) => {
+        if (typeof w === 'function') { w.call(q); return q; }
+        if (w === 'notes') { q._notesPattern = String(rest[1] || ''); return q; }
+        q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) };
+        return q;
+      };
       q.whereNot = () => q; q.orWhere = () => q; q.whereNull = () => q; q.forUpdate = () => q; q.whereNotIn = () => q; q.whereIn = () => q; q.orderBy = () => q; q.orWhereNotNull = () => q;
       q.first = async () => {
-        if (table === 'invoices') return q._where && q._where.id === 'inv-comp-draft'
-          ? { id: 'inv-comp-draft', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }
-          : prepayRow;
+        if (table === 'invoices') {
+          // Not a switch-superseded prepay (source contract for this
+          // fixture) — the P0 switch-supersede probe must find no sibling.
+          if (q._notesPattern && q._notesPattern.includes('prepay-switch-superseded-by')) return null;
+          return q._where && q._where.id === 'inv-comp-draft'
+            ? { id: 'inv-comp-draft', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }
+            : prepayRow;
+        }
         if (table === 'scheduled_services') return { id: 'root-rb', pending_setup_fee: null };
         if (table === 'knex_migrations') return { migration_time: '2026-08-29T18:30:00.000Z' };
         return null;

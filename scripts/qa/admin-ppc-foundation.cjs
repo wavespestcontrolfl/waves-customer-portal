@@ -264,7 +264,7 @@ async function main() {
     assert.ok(report.geometry.filter((entry) => entry.name.startsWith('ppc-dashboard-')).every((entry) => entry.revenueMetrics.length > 0));
     assert.ok(report.geometry.find((entry) => entry.name === 'ppc-dashboard-overview-1440').revenueMetrics.every((entry) => entry.text !== '$0.00'));
     const nav = desktop.getByRole('navigation', { name: 'PPC section' });
-    for (const section of ['Overview', 'Call Bridge', 'Service Lines', 'AI Advisor', 'Capacity']) {
+    for (const section of ['Overview', 'Bridge', 'Services', 'Advisor', 'Capacity']) {
       console.log(`Checking workspace: ${section}`);
       const tab = nav.getByRole('button', { name: section, exact: true });
       await tab.evaluate((element) => element.click());
@@ -283,7 +283,7 @@ async function main() {
     await assertPlatformAttribution(mobile);
     await verify(mobile, 'ppc-dashboard-390');
     const mobileNav = mobile.getByRole('navigation', { name: 'PPC section' });
-    for (const section of ['Overview', 'Call Bridge', 'Service Lines', 'AI Advisor', 'Capacity']) {
+    for (const section of ['Overview', 'Bridge', 'Services', 'Advisor', 'Capacity']) {
       console.log(`Checking mobile workspace: ${section}`);
       await mobileNav.getByRole('button', { name: section, exact: true }).evaluate((element) => element.click());
       await mobile.waitForFunction((label) => {

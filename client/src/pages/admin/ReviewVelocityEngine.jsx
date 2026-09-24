@@ -872,7 +872,7 @@ export default function ReviewVelocityEngine() {
     },
     {
       key: "log",
-      label: "Activity Log",
+      label: "Activity",
     },
   ];
 

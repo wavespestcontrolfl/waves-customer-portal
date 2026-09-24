@@ -286,6 +286,7 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
         setSentNote("Provider accepted; delivery is not yet confirmed.");
       }
       writeDraft(forCustomerId, "");
+      notifyUnreadChanged();
       onSent?.();
       if (customerRef.current === forCustomerId) await load({ silent: true });
     } catch (err) {

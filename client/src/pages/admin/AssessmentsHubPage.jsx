@@ -27,8 +27,8 @@ const LawnAssessmentPanel = React.lazy(() => import("./LawnAssessmentPanel"));
 const TAB_KEY = "tab";
 const TABS = { FUNNEL: "funnel", FIELD: "field" };
 const TAB_LIST = [
-  { key: TABS.FUNNEL, label: "Lead Magnets", Icon: Camera },
-  { key: TABS.FIELD, label: "Field Assessment", Icon: Leaf },
+  { key: TABS.FUNNEL, label: "Leads", Icon: Camera },
+  { key: TABS.FIELD, label: "Field", Icon: Leaf },
 ];
 const VALID_TABS = TAB_LIST.map((t) => t.key);
 

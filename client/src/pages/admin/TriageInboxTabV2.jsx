@@ -18,7 +18,7 @@ import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 
 const STATUS_TABS = [
   { key: "open", label: "Open" },
-  { key: "in_progress", label: "In progress" },
+  { key: "in_progress", label: "Active" },
   { key: "resolved", label: "Resolved" },
   { key: "dismissed", label: "Dismissed" },
 ];

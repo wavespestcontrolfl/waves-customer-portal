@@ -73,10 +73,57 @@ function kindBelongsToParty(party, kind) {
   return false;
 }
 const CHANNELS = Object.freeze(['sms', 'email', 'call', 'in_person', 'unknown']);
+// Model output vocabulary is coerced BEFORE schema validation. The 2026-09-23
+// audit reproduced `channel: "phone"` on 27 of 62 calls in one week: the enum
+// rejected it, ajv failed the whole response, and every promise on the call
+// was discarded (the post-validation coercion never ran). A word outside the
+// vocabulary is a normalization problem, not a schema failure.
+const CHANNEL_ALIASES = Object.freeze({
+  phone: 'call', telephone: 'call', voice: 'call', phone_call: 'call', callback: 'call',
+  text: 'sms', texting: 'sms', text_message: 'sms', message: 'sms',
+  mail: 'email', e_mail: 'email',
+  in_person: 'in_person', inperson: 'in_person', on_site: 'in_person', onsite: 'in_person', visit: 'in_person',
+});
+// Only STRING values are vocabulary; a number, boolean, array or object is a
+// structural problem and is left for the validator to reject (codex #4681
+// r1 P2: stringifying `false` to 'unknown' would let malformed output through,
+// and 'unknown' is a sendable channel for send_reschedule_link).
+function normalizeChannel(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') return value;
+  const key = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!key) return null;
+  if (CHANNELS.includes(key)) return key;
+  return CHANNEL_ALIASES[key] || 'unknown';
+}
+// "call back" / "call-back" normalize to call_back, which is the CUSTOMER
+// kind; the Waves kind is spelled callback. Resolve the collision by party
+// so a Waves callback promise is not silently dropped later as a
+// party/kind mismatch (codex #4681 r1 P2).
+function normalizeKind(value, party = null) {
+  if (typeof value !== 'string') return value;
+  let key = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (key === 'call_back' && party === 'waves') key = 'callback';
+  if (key === 'callback' && party === 'customer') key = 'call_back';
+  return COMMITMENT_KINDS.includes(key) ? key : 'other';
+}
+// Coerce the enum-typed STRING fields of each model item in place so a
+// vocabulary slip fails soft (to 'unknown' / 'other') instead of failing the
+// response. Structural problems (missing evidence, wrong types) still reach
+// the schema.
+function normalizeModelOutput(parsed) {
+  if (!parsed || !Array.isArray(parsed.commitments)) return parsed;
+  for (const item of parsed.commitments) {
+    if (!item || typeof item !== 'object') continue;
+    if (typeof item.channel === 'string') item.channel = normalizeChannel(item.channel);
+    if (typeof item.kind === 'string') item.kind = normalizeKind(item.kind, item.party);
+  }
+  return parsed;
+}
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
-const EXTRACTOR_VERSION = 'commitments-v7';
+const EXTRACTOR_VERSION = 'commitments-v8';
 const IDENTITY_UNRESOLVED_INCOMPLETE = 'incomplete_extraction';
 const IDENTITY_UNRESOLVED_AMBIGUOUS = 'reconciliation_ambiguity';
 
@@ -452,6 +499,7 @@ Rules — these are strict:
 3. "due_text" is the timing of THIS promised action as spoken ("by tomorrow morning", "later today", "after the inspection") or null. "due_at" is an ISO 8601 timestamp with the -04:00/-05:00 Eastern offset ONLY when that timing names a specific day/time relative to the call date (${when} Eastern); otherwise null. Never use the existing or requested appointment date as the delivery time. "due_type" is "deadline" ONLY when the agent explicitly promises this action BY, BEFORE, or NO LATER THAN due_at; it is "floor" when the agent says to send it AT or AFTER due_at, and null when due_at is null or timing is unclear. A deadline on another action (such as a callback) does not make the link delivery a deadline.
 4. "confidence" is how sure you are that the quoted words constitute a real commitment (0 to 1).
 5. Use kind "other" only when none of the listed kinds fits.
+5b. "channel" is exactly one of "sms", "email", "call", "in_person", "unknown", or null. A phone call or callback is "call"; a text message is "sms".
    Use send_reschedule_link ONLY when the AGENT promises to send a link for changing an existing appointment. A caller asking for one, a generic website link, a booking link for new service, or a link already sent is not this promise. For EVERY such row supply a subject object with date_claims, even if it has no visit identity. subject.visit_date is ONLY the CURRENT appointment's date (YYYY-MM-DD), never the requested NEW date. Include service, street address, and a verbatim subject.quote only when actually discussed; omit unknown values and never guess the soonest visit.
    date_claims is a COMPLETE list of every spoken calendar claim relevant to this link and its appointment, including the agent's and caller's words. Use [] ONLY when no such calendar claim was spoken. For each claim copy a verbatim quote from the transcript and classify binding: "appointment" when the date names the EXISTING appointment, "requested" when it clearly names the desired NEW appointment date, "delivery" when it times sending the LINK, or "unresolved" when it could be current or new or its attachment is unclear. A sentence mentioning both dates needs two claims. Include ONLY calendar components the words establish: year (four digits), month (1-12), day (1-31), weekday (0=Sunday through 6=Saturday). Resolve an unambiguous relative date such as "tomorrow" using the call date; a bare weekday with no clear week gets weekday only. "September 20" gets month and day, not an invented year. A date for another action such as a callback is unresolved unless clearly irrelevant to this link. Never omit an ambiguous claim just because subject.visit_date is present.
 6. Output ONLY a JSON object, no prose:
@@ -628,8 +676,12 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   } catch (err) {
     return { items: [], skipped: 'parse_failed', error: err.message, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
+  normalizeModelOutput(parsed);
   const validate = getValidator();
   if (!validate(parsed)) {
+    // Paths and keywords only — never the model text (it quotes the caller).
+    const why = (validate.errors || []).slice(0, 3).map((e) => `${e.instancePath || '/'} ${e.message}`).join('; ');
+    logger.warn(`[call-commitments] model output failed schema (${(validate.errors || []).length} error(s)): ${why}`);
     return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
   const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
@@ -2486,6 +2538,9 @@ async function buildCallOutcomes(conn, call) {
 
 module.exports = {
   COMMITMENT_KINDS,
+  normalizeChannel,
+  normalizeKind,
+  normalizeModelOutput,
   REPEATABLE_KINDS,
   WAVES_KINDS,
   CUSTOMER_KINDS,
