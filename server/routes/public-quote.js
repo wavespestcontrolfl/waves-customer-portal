@@ -3211,7 +3211,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           let carried = carryDraftAddressBlock(lockedEst);
           let clearedUnderLock = false;
           {
-            const rec = await reconcileUnderLock(trx);
+            const rec = await reconcileUnderLock(trx, { carriedFlag: carried ? carriedAddressFlag : null });
             if (!carried && rec.newerFlag) { carried = true; carriedAddressFlag = rec.newerFlag; }
             if (rec.newerClean) { carried = false; clearedUnderLock = true; addressUnverified = null; cleanEvidenceAt = rec.newerClean; }
           }
@@ -3261,7 +3261,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 let carried = carryDraftAddressBlock(lockedDup);
                 let clearedUnderLock = false;
                 {
-                  const rec = await reconcileUnderLock(trx);
+                  const rec = await reconcileUnderLock(trx, { carriedFlag: carried ? carriedAddressFlag : null });
                   if (!carried && rec.newerFlag) { carried = true; carriedAddressFlag = rec.newerFlag; }
                   if (rec.newerClean) { carried = false; clearedUnderLock = true; addressUnverified = null; cleanEvidenceAt = rec.newerClean; }
                 }
