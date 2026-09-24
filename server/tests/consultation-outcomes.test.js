@@ -331,6 +331,15 @@ describe('isQualifyingSaleBooking — the ONE positive-allow-list predicate for 
       ...BASE, estimated_price: null,
     }, true],
     ['a real non-zero estimated_price still qualifies', { ...BASE, estimated_price: '149.00' }, true],
+    ['an existing member\'s covered recurring series (no price stamp, invoicing off — memberSeriesCovered) is not a new sale', {
+      ...BASE, is_recurring: true, estimated_price: null, create_invoice_on_complete: false,
+    }, false],
+    ['a covered member visit carrying a priced add-on still qualifies', {
+      ...BASE, is_recurring: true, estimated_price: '45.00', create_invoice_on_complete: false,
+    }, true],
+    ['a recurring booking that invoices on completion still qualifies', {
+      ...BASE, is_recurring: true, estimated_price: null, create_invoice_on_complete: true,
+    }, true],
 
     // round 11: annual-prepay-renewals.js's buildInsert — every visit it
     // seeds for a term (first-ever seed or a later renewal alike) stamps

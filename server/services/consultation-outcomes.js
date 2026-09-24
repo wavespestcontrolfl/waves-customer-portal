@@ -399,6 +399,13 @@ function isQualifyingSaleBooking(row) {
   if (row.followup_included) return false;
   if (row.estimated_price != null && Number(row.estimated_price) === 0) return false;
   if (row.annual_prepay_term_id) return false;
+  // Existing-membership coverage (local audit P1): admin-schedule books a
+  // monthly member's series with no base price stamp and invoicing off
+  // (memberSeriesCovered) — the dues are the sale, made earlier. A
+  // recurring row that bills nothing is that coverage, not a new sale; a
+  // priced add-on on a covered visit keeps its positive stamp and still
+  // counts.
+  if (row.is_recurring && !(Number(row.estimated_price) > 0) && row.create_invoice_on_complete === false) return false;
   if (isAlwaysFreeServiceType(row.service_type)) return false;
   return true;
 }
@@ -531,6 +538,7 @@ async function findSaleEvidenceForConsultation(database, {
       'status', 'source_action', 'customer_confirmed',
       'is_callback', 'recurring_parent_id', 'followup_included',
       'estimated_price', 'annual_prepay_term_id',
+      'is_recurring', 'create_invoice_on_complete',
     );
   let earliestBookingAt = null;
   for (const booking of bookings) {
