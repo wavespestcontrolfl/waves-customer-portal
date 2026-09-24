@@ -168,7 +168,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-9" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-8"}
+        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-8" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-7"}
         secondarySections={areaSections}
         secondaryActiveKey={activeArea}
         onSecondaryChange={(key) => setHubParams({ area: key === ALL_AREAS ? null : key })}

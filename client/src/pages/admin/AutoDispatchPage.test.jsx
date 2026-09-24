@@ -184,3 +184,18 @@ it("does not infer current operation from an old apply run when status cannot lo
   expect(await screen.findByText("Current operating status unavailable.")).toBeInTheDocument();
   expect(screen.getByText(/may use Google geocoding/)).toBeInTheDocument();
 });
+
+
+it("keeps the runs panel stable while a background refresh is pending", async () => {
+  mount();
+  await screen.findByText("Original decision");
+  const slow = deferred();
+  const get = adminFetch.getMockImplementation();
+  adminFetch.mockImplementation((path) => path.includes("runs?") ? slow.promise : get(path));
+  fireEvent(window, new Event("focus"));
+  expect(screen.queryByText("Loading runs…")).not.toBeInTheDocument();
+  expect(screen.getByText("Original decision")).toBeInTheDocument();
+  await act(async () => slow.resolve({ runs: [{ ...run, status: "completed" }], automation }));
+  expect(screen.queryByText("Loading runs…")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /completed.*Apply/ })).toBeInTheDocument();
+});

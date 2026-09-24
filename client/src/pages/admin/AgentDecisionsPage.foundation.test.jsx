@@ -1,13 +1,21 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import AgentDecisionsPage from './AgentDecisionsPage';
 import { adminFetch } from '../../utils/admin-fetch';
 
+const { refresh } = vi.hoisted(() => ({ refresh: { callback: null } }));
+
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
+vi.mock('../../hooks/useVisiblePageRefresh', () => ({
+  default: (callback) => {
+    refresh.callback = callback;
+  },
+}));
+beforeEach(() => { refresh.callback = null; });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.resetAllMocks(); });
 
 it('preserves the decision correction payload from the shared review fields', async () => {
@@ -48,7 +56,7 @@ it('keeps in-progress review text when a pending background read resolves', asyn
   });
   render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
   const reason = await screen.findByLabelText('Review reason');
-  fireEvent(window, new Event('focus'));
+  act(() => { void refresh.callback(); });
   await waitFor(() => expect(listReads).toBe(2));
   fireEvent.change(reason, { target: { value: 'Keep this correction' } });
   resolveBackground({ decisions: [{ id: 'replacement', status: 'pending', customerName: 'Replacement', recommendedActions: [] }] });
@@ -116,9 +124,37 @@ it('clears a decision refresh error after a successful automatic poll', async ()
   await screen.findByLabelText('Final / rewrite reply');
   await waitFor(() => expect(screen.getByLabelText('Final / rewrite reply')).toBeEnabled());
   adminFetch.mockRejectedValueOnce(new Error('Decision refresh failed'));
-  fireEvent(window, new Event('focus'));
+  await act(async () => refresh.callback());
   await screen.findByText('Decision refresh failed');
-  fireEvent(window, new Event('focus'));
+  await act(async () => refresh.callback());
   await waitFor(() => expect(screen.queryByText('Decision refresh failed')).not.toBeInTheDocument());
   expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+});
+
+it('clears foreground loading when a newer background poll wins', async () => {
+  let resolveRetry;
+  let listReads = 0;
+  adminFetch.mockImplementation((url) => {
+    if (url.endsWith('/context')) return Promise.resolve({ context: {} });
+    listReads += 1;
+    if (listReads === 1) return Promise.resolve({ decisions: [] });
+    if (listReads === 2) return Promise.reject(new Error('Decision refresh failed'));
+    if (listReads === 3) return new Promise((resolve) => { resolveRetry = resolve; });
+    return Promise.resolve({ decisions: [] });
+  });
+
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  await screen.findByText('No decisions found.');
+
+  await act(async () => refresh.callback());
+  fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+  await waitFor(() => expect(listReads).toBe(3));
+  expect(screen.getByText('Loading decisions...')).toBeInTheDocument();
+
+  await act(async () => refresh.callback());
+  expect(await screen.findByText('No decisions found.')).toBeInTheDocument();
+  expect(screen.queryByText('Loading decisions...')).not.toBeInTheDocument();
+
+  await act(async () => resolveRetry({ decisions: [{ id: 'stale' }] }));
+  expect(screen.queryByText('Unknown customer')).not.toBeInTheDocument();
 });

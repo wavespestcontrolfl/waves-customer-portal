@@ -160,9 +160,9 @@ export default function AutoDispatchPage({ embedded = false }) {
     return params;
   });
 
-  const loadRuns = useCallback(async () => {
+  const loadRuns = useCallback(async ({ background = false } = {}) => {
     const request = ++listRequest.current;
-    setList((previous) => ({ ...previous, loading: true, error: null }));
+    if (!background) setList((previous) => ({ ...previous, loading: true, error: null }));
     try {
       const data = await adminFetch("/admin/auto-dispatch/runs?limit=50");
       if (mounted.current && request === listRequest.current) {
@@ -195,10 +195,10 @@ export default function AutoDispatchPage({ embedded = false }) {
     }
   }, []);
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback(({ background = false } = {}) => {
     const runId = selectedRef.current;
     return Promise.all([
-      loadRuns(),
+      loadRuns({ background }),
       runId ? loadDetail(runId) : Promise.resolve(),
     ]);
   }, [loadDetail, loadRuns]);
@@ -219,7 +219,7 @@ export default function AutoDispatchPage({ embedded = false }) {
     loadDetail(selected, { clear: true });
   }, [loadDetail, selected]);
 
-  useVisiblePageRefresh(refresh, {
+  useVisiblePageRefresh(() => refresh({ background: true }), {
     intervalMs: detail.data?.run?.status === "running" ? 30_000 : 60_000,
     enabled: !list.loading && !detail.loading && !running && savingControls === 0,
   });

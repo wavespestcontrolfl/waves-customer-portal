@@ -136,7 +136,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     } catch (err) {
       if (request === requestRef.current && editEpoch === editEpochRef.current) setError(err.message);
     } finally {
-      if (!background && request === requestRef.current) setLoading(false);
+      if (request === requestRef.current) setLoading(false);
     }
   }, [status]);
 

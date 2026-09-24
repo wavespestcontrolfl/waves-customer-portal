@@ -316,7 +316,8 @@ function LeadConversionPanel({ details }) {
 export default function AgentOpsPage({ embedded = false } = {}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [notice, setNotice] = useState("");
   const [noticeAction, setNoticeAction] = useState(null);
   const [pendingAction, setPendingAction] = useState("");
@@ -327,18 +328,18 @@ export default function AgentOpsPage({ embedded = false } = {}) {
     const seq = (loadSeqRef.current += 1);
     if (!background) {
       setLoading(true);
-      setError("");
+      setReadError("");
     }
     try {
       const next = await adminFetch("/admin/agents/overview");
       if (seq !== loadSeqRef.current) return;
       setData(next);
-      setError("");
+      setReadError("");
     } catch (err) {
       if (seq !== loadSeqRef.current) return;
-      setError(err.message || "Failed to load agent ops.");
+      setReadError(err.message || "Failed to load agent ops.");
     } finally {
-      if (seq === loadSeqRef.current && !background) setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   }, []);
 
@@ -372,7 +373,8 @@ export default function AgentOpsPage({ embedded = false } = {}) {
     loadSeqRef.current += 1;
     setLoading(false);
     setPendingAction(key);
-    setError("");
+    setReadError("");
+    setActionError("");
     setNotice("");
     setNoticeAction(null);
     try {
@@ -384,11 +386,13 @@ export default function AgentOpsPage({ embedded = false } = {}) {
       setNoticeAction(result?.actionUrl ? { url: result.actionUrl, label: result.actionLabel || "Open" } : null);
       await load();
     } catch (err) {
-      setError(err.message || `${action.label} failed.`);
+      setActionError(err.message || `${action.label} failed.`);
     } finally {
       setPendingAction("");
     }
   }, [load]);
+
+  const error = actionError || readError;
 
   return (
     <div style={{ minHeight: "100%", background: D.bg, color: D.text }}>
@@ -420,9 +424,11 @@ export default function AgentOpsPage({ embedded = false } = {}) {
         {error && (
           <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }} role="alert">
             <span>{error}</span>
-            <button type="button" onClick={load} disabled={loading || !!pendingAction} style={{ border: `1px solid ${D.red}`, borderRadius: 6, background: D.card, color: D.red, padding: "6px 10px", font: "inherit", cursor: loading ? "default" : "pointer" }}>
-              {loading ? "Retrying…" : "Retry"}
-            </button>
+            {readError && !actionError && (
+              <button type="button" onClick={load} disabled={loading || !!pendingAction} style={{ border: `1px solid ${D.red}`, borderRadius: 6, background: D.card, color: D.red, padding: "6px 10px", font: "inherit", cursor: loading ? "default" : "pointer" }}>
+                {loading ? "Retrying…" : "Retry"}
+              </button>
+            )}
           </div>
         )}
         {notice && (

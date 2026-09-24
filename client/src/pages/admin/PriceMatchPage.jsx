@@ -81,9 +81,15 @@ export default function PriceMatchPage() {
   // Always-current selection, so an in-flight refresh can't clobber the pane after
   // the operator has moved on to a different draft.
   const selectedIdRef = useRef(null);
-  useEffect(() => {
-    selectedIdRef.current = selectedId;
-  }, [selectedId]);
+  const selectDraft = useCallback((id) => {
+    selectedIdRef.current = id;
+    setSelectedId(id);
+    if (!id) {
+      setDetail(null);
+      setDetailLoading(false);
+      setConfirmSend(false);
+    }
+  }, []);
 
   // Monotonic load id — a slow earlier request (e.g. operator switched tabs) must
   // not overwrite the list with the wrong filter's results when it lands last.
@@ -97,7 +103,15 @@ export default function PriceMatchPage() {
     try {
       const data = await adminFetch(`/admin/price-match/drafts?status=${filter}`);
       if (seq !== loadSeqRef.current) return; // superseded by a newer load
-      setDrafts((data && data.drafts) || []);
+      const nextDrafts = (data && data.drafts) || [];
+      const currentSelectedId = selectedIdRef.current;
+      if (
+        currentSelectedId &&
+        !nextDrafts.some((draft) => draft.id === currentSelectedId)
+      ) {
+        selectDraft(null);
+      }
+      setDrafts(nextDrafts);
       setRecipient((data && data.recipient) || null);
     } catch (err) {
       if (seq === loadSeqRef.current)
@@ -105,7 +119,7 @@ export default function PriceMatchPage() {
     } finally {
       if (!background && seq === foregroundRead.current) setLoading(false);
     }
-  }, [filter]);
+  }, [filter, selectDraft]);
 
   useEffect(() => {
     loadDrafts();
@@ -126,13 +140,15 @@ export default function PriceMatchPage() {
     setConfirmSend(false);
     adminFetch(`/admin/price-match/drafts/${selectedId}`)
       .then((d) => {
-        if (active) setDetail((d && d.draft) || null);
+        if (active && selectedIdRef.current === selectedId)
+          setDetail((d && d.draft) || null);
       })
       .catch(() => {
-        if (active) setDetail(null);
+        if (active && selectedIdRef.current === selectedId) setDetail(null);
       })
       .finally(() => {
-        if (active) setDetailLoading(false);
+        if (active && selectedIdRef.current === selectedId)
+          setDetailLoading(false);
       });
     return () => {
       active = false;
@@ -312,7 +328,7 @@ export default function PriceMatchPage() {
             aria-pressed={filter === f.key}
             onClick={() => {
               setFilter(f.key);
-              setSelectedId(null);
+              selectDraft(null);
             }}
           >
             {f.label}
@@ -359,7 +375,7 @@ export default function PriceMatchPage() {
                 key={d.id}
                 variant="ghost"
                 aria-pressed={selectedId === d.id}
-                onClick={() => setSelectedId(d.id)}
+                onClick={() => selectDraft(d.id)}
                 className={cn(
                   "h-auto w-full justify-start whitespace-normal rounded-none border-b border-l-2 border-hairline border-zinc-200 p-4 text-left",
                   selectedId === d.id
