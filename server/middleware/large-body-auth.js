@@ -12,8 +12,19 @@ const STAFF_LARGE_BODY_AUTH_MIN = 1 * 1024 * 1024;
 // bodiless request (no Content-Length and no Transfer-Encoding — e.g. a GET
 // OAuth callback) is small; a chunked/streamed body has unknown length and is
 // treated as large so it can't slip past a Content-Length-only check.
+//
+// Content-Encoding (codex GH r12 P1): every parser this guards mounts with
+// body-parser's default `inflate: true`, which decompresses gzip/deflate
+// bodies BEFORE the size limit is enforced against the DECOMPRESSED bytes.
+// Content-Length only ever reflects the wire (compressed) size, so a gzipped
+// body under 1 MB on the wire can inflate to the parser's full 30/50 MB limit
+// — an anonymous caller could force that decompression + parse work while
+// looking "proven small". Any non-identity Content-Encoding is therefore
+// never provably small, whatever Content-Length says.
 function bodyProvenSmall(req) {
   if (req.headers['transfer-encoding']) return false;
+  const encoding = req.headers['content-encoding'];
+  if (encoding && String(encoding).trim().toLowerCase() !== 'identity') return false;
   const raw = req.headers['content-length'];
   if (raw === undefined) return true;
   const len = Number(raw);

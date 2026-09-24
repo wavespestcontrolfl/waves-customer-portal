@@ -68,6 +68,26 @@ describe('requireStaffTokenForLargeBody', () => {
     expect(run({ 'transfer-encoding': 'chunked' }).status).toBe(401);
   });
 
+  // codex GH r12 P1: express.json mounts with body-parser's default
+  // `inflate: true` — Content-Length is the WIRE (compressed) size, so a
+  // gzip body under 1 MB on the wire can inflate to the full 50 MB parser
+  // limit. A small Content-Length alongside a non-identity Content-Encoding
+  // must never be treated as "proven small".
+  test('a small Content-Length with gzip Content-Encoding is not proven small (decompression bypass)', () => {
+    const r = run({ 'content-length': String(500 * 1024), 'content-encoding': 'gzip' });
+    expect(r.nexted).toBe(false);
+    expect(r.status).toBe(401);
+  });
+
+  test('an explicit identity Content-Encoding is unaffected — still proven small under the size check', () => {
+    expect(run({ 'content-length': String(500 * 1024), 'content-encoding': 'identity' }).nexted).toBe(true);
+  });
+
+  test('a gzip body still passes with a valid staff token (parser challenge, not an outright block)', () => {
+    const r = run({ 'content-length': String(500 * 1024), 'content-encoding': 'gzip', authorization: `Bearer ${staffToken()}` });
+    expect(r.nexted).toBe(true);
+  });
+
   test('large body with a valid staff token passes to the parser', () => {
     const r = run({ 'content-length': LARGE, authorization: `Bearer ${staffToken()}` });
     expect(r.nexted).toBe(true);
@@ -114,6 +134,17 @@ describe('requireCustomerTokenForLargeBody', () => {
     expect(r.nexted).toBe(false);
     expect(r.status).toBe(401);
     expect(r.body).toEqual({ error: 'Authentication required' });
+  });
+
+  test('a small Content-Length with gzip Content-Encoding is not proven small (decompression bypass, codex GH r12 P1)', () => {
+    const r = runCustomer({ 'content-length': String(500 * 1024), 'content-encoding': 'gzip' });
+    expect(r.nexted).toBe(false);
+    expect(r.status).toBe(401);
+  });
+
+  test('a gzip body still passes with a valid customer token (parser challenge, not an outright block)', () => {
+    const r = runCustomer({ 'content-length': String(500 * 1024), 'content-encoding': 'gzip', authorization: `Bearer ${customerToken()}` });
+    expect(r.nexted).toBe(true);
   });
 
   test('chunked/unknown-length body without a token is rejected (no Content-Length bypass)', () => {
