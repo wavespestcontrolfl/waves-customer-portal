@@ -161,10 +161,16 @@ export default function TechDrawer({ techId, onClose, onAbsenceChanged }) {
   // Re-running fetchTech(techId) rides the same seq-ref race guard as
   // every other fetch, so a stale response from a since-superseded
   // selection still can't clobber newer state.
-  const handleAbsenceChanged = useCallback(() => {
+  // The section reports which tech its mutation was for; a callback that
+  // arrives after the drawer moved to another tech (close, reopen on B while
+  // A's request was still in flight) must not refetch A over B's details.
+  const techIdRef = useRef(techId);
+  techIdRef.current = techId;
+  const handleAbsenceChanged = useCallback((changedTechId) => {
+    if (changedTechId && changedTechId !== techIdRef.current) return;
     onAbsenceChanged?.();
-    if (techId) fetchTech(techId);
-  }, [onAbsenceChanged, fetchTech, techId]);
+    if (techIdRef.current) fetchTech(techIdRef.current);
+  }, [onAbsenceChanged, fetchTech]);
 
   const open = !!techId;
 

@@ -73,6 +73,13 @@ export default function TechOutSection({ techId, techName, onChanged }) {
   // change itself.
   const techIdRef = useRef(techId);
   techIdRef.current = techId;
+  // Unmount invalidates every in-flight request (drawer closed mid-mutation,
+  // then reopened on another tech): a late response finds the seq advanced
+  // and no current tech, so it neither renders nor calls onChanged.
+  useEffect(() => () => {
+    fetchSeqRef.current += 1;
+    techIdRef.current = null;
+  }, []);
 
   const fetchStatus = useCallback(async (id) => {
     const seq = ++fetchSeqRef.current;
@@ -160,7 +167,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
       setAbsence({ ...data.absence, redistribution: data.absence?.redistribution || data.summary });
       setConfirming(false);
       setNote('');
-      onChanged?.();
+      onChanged?.(requestTechId);
     } catch (err) {
       if (fetchSeqRef.current !== seq || techIdRef.current !== requestTechId) {
         discarded = true;
@@ -198,7 +205,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       await fetchStatus(requestTechId);
-      onChanged?.();
+      onChanged?.(requestTechId);
     } catch (err) {
       if (discarded) return;
       setSubmitError(err.message || 'Failed to clear absence');

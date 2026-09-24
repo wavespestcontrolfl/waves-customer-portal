@@ -233,6 +233,15 @@ async function sweepAbsentTechDays({ now } = {}) {
       // own header comment) — an in-flight assignment on this tech-day
       // finishes before the sweep snapshots it.
       await lockTechDays(trx, [{ techId: technicianId, date }]);
+      // Re-read under the fence: "Tech is back" (clearTechOut) takes the same
+      // fence before clearing, so an absence cleared while this sweep was
+      // between its unlocked listing and this transaction is seen here and
+      // parks nothing — never recreating alerts for a tech who is back.
+      const stillOut = await trx('technician_absences')
+        .where({ id: absence.id })
+        .whereNull('cleared_at')
+        .first('id');
+      if (!stillOut) return { total: 0, units: 0, skipped: 'cleared' };
 
       const stops = await dayStopsQuery(trx, {
         dateStr: date,
@@ -328,6 +337,10 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
 /** Clear a technician's absence for a date and resolve its parked alerts, atomically. Moves nothing. */
 async function clearTechOut({ technicianId, date, actorId }) {
   return db.transaction(async (trx) => {
+    // Fence first (same order as markTechOut and the sweep): a sweep that
+    // holds this tech-day finishes before we clear, and a sweep that starts
+    // after us re-reads the row under the fence and sees cleared_at.
+    await lockTechDays(trx, [{ techId: technicianId, date }]);
     const absence = await trx('technician_absences')
       .where({ technician_id: technicianId, absence_date: date })
       .whereNull('cleared_at')

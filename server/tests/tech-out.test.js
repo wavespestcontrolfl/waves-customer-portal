@@ -355,6 +355,9 @@ describe('getTechOut / clearTechOut', () => {
     const trx = db.__lastTrx;
     const lockedRead = trx.__chains.find((x) => x.table === 'technician_absences').c;
     expect(lockedRead.forUpdate).toHaveBeenCalled();
+    // Fence before the row lock — the same order markTechOut and the sweep use.
+    expect(lockTechDays).toHaveBeenCalledWith(trx, [{ techId: TECH.id, date: DATE }]);
+    expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(lockedRead.forUpdate.mock.invocationCallOrder[0]);
     expect(absence).toMatchObject({ cleared_at: 'NOW()', cleared_by: ACTOR });
     expect(resolveAlert).toHaveBeenCalledTimes(2);
     expect(resolveAlert).toHaveBeenCalledWith({ id: 'alert-1', resolvedBy: ACTOR, trx, auto: true });
@@ -417,6 +420,22 @@ describe('sweepAbsentTechDays', () => {
     });
     expect(lockTechDays).toHaveBeenCalledWith(expect.anything(), [{ techId: TECH.id, date: DATE }]);
     expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(createAlert.mock.invocationCallOrder[0]);
+  });
+
+  test('an absence cleared while the sweep waited on the fence parks nothing (re-read under the fence)', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'would-park' })]));
+    // "Tech is back" commits while this sweep is blocked on the tech-day fence.
+    lockTechDays.mockImplementationOnce(async () => { db.__state.absences['absence-1'].cleared_at = 'NOW()'; return ['k']; });
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(dayStopsQuery).not.toHaveBeenCalled();
+    expect(createAlert).not.toHaveBeenCalled();
   });
 
   test('a stop already covered by an open alert on job_id is not re-parked', async () => {

@@ -146,6 +146,39 @@ describe('out today', () => {
 // a mark-out POST or a "Tech is back" DELETE for tech A that resolved
 // after the dispatcher had already selected tech B could still paint A's
 // redistribution result into B's drawer.
+describe('unmount mid-mutation (auditor P1)', () => {
+  it('a POST that resolves after the section unmounted never calls onChanged or renders', async () => {
+    const onChanged = vi.fn();
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+    const { unmount } = render(
+      <TechOutSection techId="tech-1" techName="Tech One" onChanged={onChanged} />
+    );
+    await screen.findByText('Availability');
+    fireEvent.click(screen.getByRole('button', { name: 'Mark out today' }));
+    await screen.findByRole('button', { name: 'Confirm' });
+
+    let releasePost;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { releasePost = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await screen.findByRole('button', { name: 'Redistributing…' });
+
+    // Drawer closed (section unmounted) before A's POST resolves.
+    unmount();
+    await act(async () => {
+      releasePost({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          absence: { id: 'abs-1', technician_id: 'tech-1', absence_date: '2026-09-23', reason: 'sick', note: null },
+          summary: { total: 1, moved: [], parked: [{ job_id: 'j1', alert_id: 'a1', bump_order: 1 }], failed: [] },
+        }),
+      });
+    });
+
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+});
+
 describe('cross-tech mutation race (Codex P1)', () => {
   it('discards a stale POST response after switching to a different tech before it resolves', async () => {
     const onChanged = vi.fn();
