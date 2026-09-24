@@ -2427,15 +2427,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // (codex r12 P1).
           if (!addressUnverified && rollAnsweredThisRun) {
             try {
+              // Judged on the CUSTOMER-FACING premise (a commercial
+              // proposal's editable propertyAddress over the immutable base
+              // column), as the withdrawal judges it: a clean verdict for A
+              // must not lift the hold on a proposal staff moved to B that a
+              // later lookup flagged (pre-push audit P1 after r46).
+              const { customerFacingPremise } = require('../services/website-quote-withdrawal');
               const stale = await trx('estimates')
                 .where({ source: 'quote_wizard' })
                 .whereNotNull('archived_at')
                 .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
                 .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
                 .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
-                .select('id', 'address');
+                .select('id', 'address', trx.raw("estimate_data->'proposal'->>'propertyAddress' as proposal_address"));
               const superseded = stale
-                .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }));
+                .filter((row) => samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true }));
               // Each write re-asserts the row's matched address AND this
               // contact pair (codex r39 P1): a customer edit that moved the
               // row to another pair and premise — and a lookup under that
@@ -2465,9 +2471,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
                 .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
                 .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
-                .select('id', 'address');
+                .select('id', 'address', trx.raw("estimate_data->'proposal'->>'propertyAddress' as proposal_address"));
               const unblocked = blocked
-                .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }));
+                .filter((row) => samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true }));
               for (const row of unblocked) {
                 await trx('estimates')
                   .where({ id: row.id, address: row.address })

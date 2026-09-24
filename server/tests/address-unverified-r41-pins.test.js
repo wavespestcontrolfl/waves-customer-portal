@@ -281,5 +281,8 @@ describe('codex r46: a corrected commercial proposal is judged on its customer-f
     expect(src.split("estimate_data->'proposal'->>'propertyAddress' as proposal_address").length - 1).toBe(2);
     expect(src).toContain('samePremiseDisplay(customerFacingPremise(row), fullAddress, { requireLocality: true })');
     expect(src).not.toContain('samePremiseDisplay(row.address, fullAddress');
+    // /calculate's own supersession + legacy lift use the same resolver.
+    const pq = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    expect(pq.split('samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true })').length - 1).toBe(2);
   });
 });

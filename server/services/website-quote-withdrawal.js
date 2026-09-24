@@ -192,3 +192,4 @@ async function liftLegacyBlocksForCleanVerdict(trx, { contactEmail, contactPhone
 
 module.exports = { withdrawFlaggedPublications, WITHDRAWABLE_PUBLICATION_STATES };
 module.exports.liftLegacyBlocksForCleanVerdict = liftLegacyBlocksForCleanVerdict;
+module.exports.customerFacingPremise = customerFacingPremise;
