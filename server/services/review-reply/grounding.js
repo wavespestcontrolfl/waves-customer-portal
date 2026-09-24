@@ -13,10 +13,11 @@
  *     version, reviewId,
  *     review:  { firstName, rating, text, hasText, wordCount,
  *                mentionedTechNames, topics }            // source: review
- *     account: null | { relationship, tenure, serviceCategories, city }
- *                                                        // source: account
+ *     account: null | { relationship, tenure, serviceCategories,
+ *                       servicesPerformed, city }         // source: account
  *     provenance: { <fact>: 'review' | 'account' }
- *     allow: { names: [...], cities: [...], digits: [...] }  // verifier allowlist
+ *     allow: { names: [...], cities: [...], digits: [...],
+ *              servicePhrases: [...] }                   // verifier allowlist
  *   }
  */
 
@@ -24,6 +25,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { etCalendarDayOf } = require('../../utils/datetime-et');
+const { mappedServiceLabel } = require('../../utils/service-normalizer');
 
 const GROUNDING_VERSION = 'grounding-v1';
 
@@ -139,6 +141,146 @@ function serviceCategoriesFrom(serviceTypes) {
   return [...labels];
 }
 
+// Public-safe named services actually performed, derived from completed
+// scheduled_services.service_type — never a product/brand name, a count, or
+// a date (those stay out of the pack entirely; see servicesPerformedFrom).
+// Product/brand words a service_type must never surface under (an internal
+// label like "Pre-Slab Termidor" names a product, not a public service).
+// 2026-09-25 P1 fix: the canonical normalizer's own SERVICE_TYPE_MAP
+// (server/utils/service-normalizer.js) emits brand names for some mapped
+// types too — "Bora-Care Wood Treatment Service", "Arborjet Treatment" —
+// so every product/brand token found there (and in the termite-bait family)
+// is covered here, not just the ones a raw label could carry unmapped.
+const SERVICE_PRODUCT_WORD_RE = /termidor|talstar|talak|taurus|bifen|fipronil|advion|alpine|demand|essentria|bora-?care|arborjet|sentricon|altriset|trelona|premise|waves assessment|appointment/i;
+
+// Shared word-normalization (mirrors drafter.js's normalizeWords — kept as a
+// small local copy rather than a cross-module import so grounding.js keeps
+// its own minimal surface).
+function normalizeWords(s) {
+  return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}'\s]/gu, ' ').split(/\s+/).filter(Boolean);
+}
+
+// First letter of each whitespace-delimited word capitalized, everything
+// else left exactly as given — a no-op for data that already arrives in
+// Title Case (the normal shape of service_type), but fixes a stray
+// all-lowercase entry without clobbering an embedded acronym (WDO).
+function titleCase(s) {
+  return s.split(' ').map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ');
+}
+
+const PUBLIC_FAMILY_BY_TYPE = Object.freeze({
+  'Quarterly Pest Control': 'Pest Control',
+  'General Pest Control': 'Pest Control',
+  'Pest Control Service': 'Pest Control',
+  'Pest Control': 'Pest Control',
+  'German Roach Treatment': 'Cockroach Treatment',
+  'Cockroach Treatment Service': 'Cockroach Treatment',
+  'Bed Bug Treatment Service': 'Bed Bug Treatment',
+  'Ant Treatment': 'Ant Treatment',
+  'Flea & Tick Treatment': 'Flea & Tick Treatment',
+  'Stinging Insect Removal': 'Stinging Insect Service',
+  'Tent Fumigation': 'Fumigation',
+  'Rodent Wire Mesh Exclusion Service': 'Rodent Control',
+  'Rodent Exclusion': 'Rodent Control',
+  'Rodent Control': 'Rodent Control',
+  'Mole Control': 'Mole Control',
+  'WDO Inspection': 'Inspection',
+  'Termite Inspection': 'Inspection',
+  Inspection: 'Inspection',
+  'Bora-Care Wood Treatment Service': 'Termite Control',
+  'Termite Treatment': 'Termite Control',
+  'Termite Bait Monitoring': 'Termite Control',
+  'Termite Service': 'Termite Control',
+  'Lawn Care Visit': 'Lawn Care',
+  'Lawn Care': 'Lawn Care',
+  'Lawn Fertilization': 'Lawn Care',
+  'Weed Control': 'Lawn Care',
+  'Lawn Dethatching Service': 'Lawn Care',
+  'Lawn Top Dressing Service': 'Lawn Care',
+  'Lawn Aeration': 'Lawn Care',
+  'Sod Installation': 'Lawn Care',
+  'Seasonal Mosquito Control Service': 'Mosquito Control',
+  'Monthly Mosquito Control Service': 'Mosquito Control',
+  'Mosquito Barrier Treatment': 'Mosquito Control',
+  'Tree & Shrub Care': 'Tree & Shrub Care',
+  'Palm Injection': 'Tree & Shrub Care',
+  'Arborjet Treatment': 'Tree & Shrub Care',
+});
+
+// One completed service_type → a public-safe display name, or null when it
+// carries no safe public name (too short, names a product/brand, or matches
+// no known service family).
+//
+// servicesPerformed is drawn ONLY from mappedServiceLabel's finite set of
+// FIXED public labels (server/utils/service-normalizer.js's SERVICE_TYPE_MAP
+// `type` strings) — never normalizeServiceType's catalog or foam branches
+// (2026-09-25 round-5 P1 fix). Both of those can return arbitrary text: the
+// catalog cache is populated from historical scheduled_services labels, so a
+// hand-edited free-text label ("Dog In Home Call Before Arrival") can enter
+// it and pass through verbatim, and the foam branch returns any larger
+// string merely CONTAINING a foam token ("Foam Drill Customer Complained
+// Reservice"). A fixed label the map itself wrote can never leak free text.
+function normalizeServiceName(serviceType) {
+  const raw = String(serviceType || '').trim();
+  if (!raw) return null;
+  // "Waves Pest Control Appointment (Service)" is the catalog's generic
+  // unknown-service placeholder; the map would collapse it to "Pest
+  // Control" before the label check below could see "appointment" (round-10
+  // P1). Only the placeholder word is checked on the raw label — brand names
+  // there still genericize through the map ("Pre-Slab Termidor").
+  if (/\bappointment\b/i.test(raw)) return null;
+  const mapped = mappedServiceLabel(raw);
+  // Public copy names only the service FAMILY, never the specific variant
+  // (Codex #4713 r6/r8/r11: lawn vs tree & shrub fertilization, inspection
+  // vs removal, bait installation vs monitoring — each a within-family
+  // mislabel the loose legacy map made). A family name is true for every
+  // label that maps into it; anything outside the table is dropped.
+  const label = mapped ? PUBLIC_FAMILY_BY_TYPE[mapped] : null;
+  if (!label) return null;
+  if (SERVICE_PRODUCT_WORD_RE.test(label)) return null;
+  // Strip a trailing generic suffix ("… Service", "… Visit", "… Appointment
+  // Service") before a trailing parenthesised qualifier ("(Quarterly)").
+  let s = label.replace(/\s+(?:Appointment\s+Service|Visit|Service)$/i, '').trim();
+  s = s.replace(/\s*\([^)]*\)\s*$/, '').trim();
+  s = s.replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  s = titleCase(s);
+  if (s.length < 4) return null;
+  // Belt-and-suspenders (2026-09-25 P1 fix): mappedServiceLabel only ever
+  // returns one of SERVICE_TYPE_MAP's own fixed `type` strings, none of
+  // which carry a digit, "$", a duration word, or a " - " / " – " separator
+  // today — but if a future map entry ever did, this still fails closed
+  // rather than surface it.
+  if (/\d|\$|\b(?:hours?|hrs?|mins?|minutes?|days?|weeks?)\b|\s[-–]\s/i.test(s)) return null;
+  return s;
+}
+
+// Most-recent-first, deduped case-insensitively, capped at 4 — a short,
+// public-safe list of WHAT we have done, never when or how many times. A
+// normalized-name tiebreak (localeCompare) after the date-desc key keeps the
+// cap-at-4 selection deterministic when two rows share a scheduled_date,
+// regardless of the order the DB happens to return them in.
+function servicesPerformedFrom(visits) {
+  const dateKey = (v) => String(v.scheduled_date == null ? '' : (v.scheduled_date instanceof Date ? v.scheduled_date.toISOString() : v.scheduled_date)).slice(0, 10);
+  const nameKey = (v) => normalizeServiceName(v.service_type) || '';
+  const sorted = [...visits].sort((a, b) => {
+    const byDate = dateKey(b).localeCompare(dateKey(a));
+    return byDate !== 0 ? byDate : nameKey(a).localeCompare(nameKey(b));
+  });
+  const seen = new Set();
+  const out = [];
+  for (const v of sorted) {
+    const name = normalizeServiceName(v.service_type);
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
 // Tenure in ET CALENDAR days: member_since is a Postgres DATE (never a UTC
 // instant) and created_at is an instant that must be read on the ET wall
 // clock — etCalendarDayOf handles both shapes.
@@ -211,6 +353,7 @@ async function loadAccountFacts(customerId, conn = db) {
     relationship,
     tenure: tenureBucket(tenureSince),
     serviceCategories: serviceCategoriesFrom(visits.map((v) => v.service_type)),
+    servicesPerformed: servicesPerformedFrom(visits),
     city: servedCity(customer.city),
   };
 }
@@ -220,7 +363,7 @@ async function loadAccountFacts(customerId, conn = db) {
 // was in flight (same customer_id) invalidates the draft.
 function accountFingerprint(account) {
   const a = account || null;
-  const key = a ? `${a.relationship || ''}|${a.tenure || ''}|${[...(a.serviceCategories || [])].sort().join(',')}|${a.city || ''}` : 'none';
+  const key = a ? `${a.relationship || ''}|${a.tenure || ''}|${[...(a.serviceCategories || [])].sort().join(',')}|${[...(a.servicesPerformed || [])].sort().join(',')}|${a.city || ''}` : 'none';
   return require('crypto').createHash('sha1').update(key).digest('hex');
 }
 
@@ -253,7 +396,7 @@ async function buildReplyGrounding(review, { conn = db, techFirstNames = null } 
     firstName: 'review', rating: 'review', text: 'review', mentionedTechNames: 'review', topics: 'review',
   };
   if (account) {
-    for (const k of ['relationship', 'tenure', 'serviceCategories', 'city']) provenance[k] = 'account';
+    for (const k of ['relationship', 'tenure', 'serviceCategories', 'servicesPerformed', 'city']) provenance[k] = 'account';
   }
 
   const locationWords = [loc.name, loc.area || '', 'Southwest Florida', 'Florida', 'SWFL']
@@ -288,6 +431,14 @@ async function buildReplyGrounding(review, { conn = db, techFirstNames = null } 
       cities: [...new Set([...locationWords, ...(account?.city ? [account.city] : [])])],
       // Digit strings the reply may contain: only what the reviewer typed.
       digits: (text.match(/\d+/g) || []),
+      // Lowercased, normalized WHOLE-PHRASE names of the account's
+      // servicesPerformed ("cockroach treatment", "quarterly pest control")
+      // — sourced vocabulary for the verifier's service/experience claim
+      // checks, but only as a complete phrase (2026-09-25 P1 fix): the
+      // account having "Cockroach Treatment" does not license composing
+      // "treatment" with an unrelated pest the reviewer named ("ant
+      // treatment" must still need its own provenance).
+      servicePhrases: [...new Set((account?.servicesPerformed || []).map((s) => normalizeWords(s).join(' ')).filter(Boolean))],
     },
   };
 }
@@ -306,6 +457,8 @@ module.exports = {
   detectTopics,
   mentionedTechNames,
   serviceCategoriesFrom,
+  servicesPerformedFrom,
+  normalizeServiceName,
   tenureBucket,
   servedCity,
 };

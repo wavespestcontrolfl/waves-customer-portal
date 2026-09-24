@@ -41,22 +41,23 @@ describe("applyServerLawnPricingConfig — live lawn program minimum in the fall
   it("defaults to DISARMED: small-lawn tiers price off the market table, no minimum", () => {
     const est = calculateEstimate(lawnInput());
     expect(est.error).toBeUndefined();
-    const sixApp = est.results.lawn.find((t) => t.v === 6);
-    expect(sixApp.programMinimumApplied).toBe(false);
-    expect(sixApp.mo).toBeLessThan(50);
+    // 9x (6x retired for new sales 2026-09-24): ~$44/mo market at 3,000 sf.
+    const nineApp = est.results.lawn.find((t) => t.v === 9);
+    expect(nineApp.programMinimumApplied).toBe(false);
+    expect(nineApp.mo).toBeLessThan(50);
   });
 
   it("honors a server-provided re-armed minimum (codex P1 #2827: live DB re-arm reaches fallback saves)", () => {
     expect(applyServerLawnPricingConfig({ programMinimumMonthly: 50 })).toBe(50);
     const est = calculateEstimate(lawnInput());
     expect(est.error).toBeUndefined();
-    const sixApp = est.results.lawn.find((t) => t.v === 6);
-    // Market ~$30/mo at 3,000 sf clamps up to the $50/mo program minimum —
+    const nineApp = est.results.lawn.find((t) => t.v === 9);
+    // 9x market ~$44/mo at 3,000 sf clamps up to the $50/mo program minimum —
     // the same clamp the server applies, so the public route will accept
     // the persisted rows instead of forcing a requote.
-    expect(sixApp.programMinimumApplied).toBe(true);
-    expect(sixApp.mo).toBeGreaterThanOrEqual(50);
-    expect(sixApp.pricingSource).toBe("PROGRAM_MINIMUM");
+    expect(nineApp.programMinimumApplied).toBe(true);
+    expect(nineApp.mo).toBeGreaterThanOrEqual(50);
+    expect(nineApp.pricingSource).toBe("PROGRAM_MINIMUM");
   });
 
   it("treats unset/invalid config as the disarmed default", () => {
@@ -65,8 +66,8 @@ describe("applyServerLawnPricingConfig — live lawn program minimum in the fall
     expect(applyServerLawnPricingConfig({ programMinimumMonthly: "not-a-number" })).toBe(0);
     expect(applyServerLawnPricingConfig({ programMinimumMonthly: -25 })).toBe(0);
     const est = calculateEstimate(lawnInput());
-    const sixApp = est.results.lawn.find((t) => t.v === 6);
-    expect(sixApp.programMinimumApplied).toBe(false);
+    const nineApp = est.results.lawn.find((t) => t.v === 9);
+    expect(nineApp.programMinimumApplied).toBe(false);
   });
 
   it("honors a server-provided cost-floor re-arm: floor SELECTION follows the live switch (codex P2 #2827 merge-main)", () => {
@@ -217,11 +218,11 @@ describe("applyServerPestPricingConfig — live pest floor re-arm in the fallbac
 
 describe("fallback lawn margin visibility — report-only WaveGuard breach warning", () => {
   it("surfaces the below-margin lawn warning on a discounted fallback bundle and renders a review note", () => {
-    // 12,000 sqft standard/6x St. Augustine is a thin-margin cell; the
+    // 12,000 sqft enhanced/9x St. Augustine is a thin-margin cell; the
     // Silver 10% (pest + lawn) drops collected margin under the 35% review
     // floor. Nothing is capped — the warning is the visibility the ruling
     // depends on (codex P2 round 8 #2827).
-    const est = calculateEstimate(lawnInput({ svcPest: true, measuredTurfSf: 12000, lawnFreq: "6" }));
+    const est = calculateEstimate(lawnInput({ svcPest: true, measuredTurfSf: 12000, lawnFreq: "9" }));
     expect(est.error).toBeUndefined();
     const warning = (est.recurring.marginWarnings || []).find(
       (w) => w.service === "lawn_care" && w.type === "waveguard_discount_below_margin_floor",
@@ -242,12 +243,12 @@ describe("fallback lawn margin visibility — report-only WaveGuard breach warni
 
   it("surfaces the manual-discount lawn warning on a lawn-only fallback quote (codex P2 round 9 #2827)", () => {
     // No WaveGuard (single service) — a 40% owner-entered manual discount
-    // on the thin 12,000 sqft standard cell drops collected margin far
+    // on the thin 12,000 sqft enhanced cell drops collected margin far
     // below 35%. Nothing caps it; the warn-only entry mirrors the server's
     // manual_discount_below_margin_floor and renders a review note.
     const est = calculateEstimate(lawnInput({
       measuredTurfSf: 12000,
-      lawnFreq: "6",
+      lawnFreq: "9",
       manualDiscount: { type: "PERCENT", value: 40 },
     }));
     expect(est.error).toBeUndefined();
@@ -300,11 +301,11 @@ describe("fallback lawn margin visibility — report-only WaveGuard breach warni
 
 describe("collectMarginReviewNotes — standing lawn margin (no discount) — codex P2 round 12 #2827", () => {
   it("surfaces a thin market-priced lawn line with no discounts at all", () => {
-    // 12,000 sqft standard/6x St. Augustine is a thin-margin cell at its
+    // 12,000 sqft enhanced/9x St. Augustine is a thin-margin cell at its
     // MARKET price — no WaveGuard (single service), no manual discount, so
     // the discount warnings stay silent, but the owner still needs the
     // report-only note before sending.
-    const est = calculateEstimate(lawnInput({ measuredTurfSf: 12000, lawnFreq: "6" }));
+    const est = calculateEstimate(lawnInput({ measuredTurfSf: 12000, lawnFreq: "9" }));
     expect(est.error).toBeUndefined();
     const notes = collectMarginReviewNotes(est);
     expect(notes.some((n) => n.startsWith("Lawn Care") && n.includes("35%"))).toBe(true);
@@ -313,7 +314,7 @@ describe("collectMarginReviewNotes — standing lawn margin (no discount) — co
   it("does not double-note lawn when a discount warning already covers it", () => {
     const est = calculateEstimate(lawnInput({
       measuredTurfSf: 12000,
-      lawnFreq: "6",
+      lawnFreq: "9",
       manualDiscount: { type: "PERCENT", value: 40 },
     }));
     const notes = collectMarginReviewNotes(est);

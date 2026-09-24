@@ -6,6 +6,7 @@
 const hide = require('../models/migrations/20260903000020_public_quote_menu_tier_c_hide');
 const selectable = require('../models/migrations/20260829000020_services_public_quote_selectable');
 const { FORMERLY_PUBLIC_KEYS } = require('../services/public-services-menu');
+const retire6x = require('../models/migrations/20260924000010_lawn_retire_bimonthly_6x');
 
 function fakeKnex(db) {
   const knex = (table) => {
@@ -56,7 +57,7 @@ describe('20260903000020 Tier C rows leave the public quote menu', () => {
   });
 
   test('CONTRACT: every hidden key stays accepted on /calculate as quote-on-request (cached pages, stale snapshot)', () => {
-    expect([...FORMERLY_PUBLIC_KEYS].sort()).toEqual([...hide.HIDE_KEYS].sort());
+    expect([...FORMERLY_PUBLIC_KEYS].sort()).toEqual([...hide.HIDE_KEYS, retire6x.SERVICE_KEY].sort());
   });
 
   test('flips exactly the ruled rows; every public product beside them stays selectable', async () => {

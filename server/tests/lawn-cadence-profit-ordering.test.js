@@ -59,7 +59,10 @@ function profitsAt(track, lawnSqFt) {
   // track rides the OPTIONS object — priceLawnCare ignores grassType on the
   // property (codex #3274 r2: passing it there measured the default
   // St. Augustine curve for every "track").
-  const result = priceLawnCare({ lawnSqFt }, { tier: 'standard', track });
+  // includeHiddenTiers: the envelope spans the full 6/9/12 ladder — the 6x
+  // leg is hidden for new sales (owner directive 2026-09-24) but remains the
+  // cadence-discount anchor this ordering is measured against.
+  const result = priceLawnCare({ lawnSqFt }, { tier: 'standard', track, includeHiddenTiers: true });
   const byVisits = {};
   for (const tier of result.tiers) {
     byVisits[tier.visits] = tier.annual - tier.costFloorDetails.annualCost;

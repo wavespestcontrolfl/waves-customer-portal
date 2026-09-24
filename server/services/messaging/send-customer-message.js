@@ -112,8 +112,8 @@ async function appointmentMoveHeld(input) {
 // further down, inside services/twilio.js's sendSMS — the true provider
 // boundary, run from INSIDE whatever locked withSmsHandoff a caller
 // supplies, immediately before messages.create(). This call stays only as
-// an early, cheap refusal: it runs before providerPreSendCheck's other
-// rechecks (suppression, consent, window) and before any lock is acquired,
+// an early, cheap refusal: it runs before the provider preparation hook's
+// other rechecks (suppression, consent, window) and before any lock is acquired,
 // so an already-withheld send fails fast without the cost of getting that
 // far — but it is NOT the last word; twilio.js re-derives and re-verdicts
 // fresh, after the lock, right before the SDK call, and that is the check
@@ -314,7 +314,15 @@ async function sendCustomerMessageCore(input) {
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
   //    form. Caller closures stay outside message state and audit payloads.
-  const { preDispatchCheck, preProviderCheck, preSendCheck, withSmsHandoff, withProviderHandoff, ...inputRest } = input;
+  const {
+    preDispatchCheck,
+    preProviderCheck,
+    preSendCheck,
+    providerPreSendCheck,
+    withSmsHandoff,
+    withProviderHandoff,
+    ...inputRest
+  } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
   // Request lifecycle email companions have no text leg. Keep their App
@@ -703,7 +711,7 @@ async function sendCustomerMessageCore(input) {
       };
     }
   };
-  const providerPreSendCheck = async () => {
+  const providerPreparationCheck = async () => {
     const windowVerdict = checkSendWindow(sendInput, policy, contactState);
     if (!windowVerdict || windowVerdict.ok !== true) {
       return rememberBoundaryBlock(windowVerdict, 'check_send_window_boundary');
@@ -733,7 +741,7 @@ async function sendCustomerMessageCore(input) {
   };
   // Push performs an ownership read after the awaited guard. It can then
   // re-check the window without another opaque caller await or a DB lock.
-  providerPreSendCheck.isStillValid = () => checkSendWindow(sendInput, policy, contactState)?.ok === true;
+  providerPreparationCheck.isStillValid = () => checkSendWindow(sendInput, policy, contactState)?.ok === true;
 
   providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
   const dispatchProvider = () => dispatchToProvider(sendInput, {
@@ -768,7 +776,12 @@ async function sendCustomerMessageCore(input) {
       await dispatch(trx);
       return { ok: true };
     })),
-    preSendCheck: providerPreSendCheck,
+    preSendCheck: providerPreparationCheck,
+    // A separate caller predicate runs inside Twilio's final dispatch,
+    // after its authoritative annual-offer guard. Keeping it distinct from
+    // preSendCheck avoids invoking existing opaque preparation callbacks a
+    // second time at the provider boundary.
+    providerPreSendCheck,
   });
   providerOutcome = withProviderHandoff
     ? await withProviderHandoff(dispatchProvider)

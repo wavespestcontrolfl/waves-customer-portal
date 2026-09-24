@@ -2,6 +2,7 @@ const {
   HUMAN_REPLY_TYPES,
   NON_ACTIONABLE_INBOUND_TYPES,
   draftReplyToMessageIdSql,
+  inboundSmsReceiptProjectionSql,
   responseFlags,
   inboundNeedsResponse,
   outboundIsAnswer,
@@ -24,6 +25,18 @@ describe('SMS response policy', () => {
     expect(sql).toContain("canonical_inbound.channel = 'sms'");
     expect(sql).toContain("canonical_inbound.direction = 'inbound'");
     expect(sql).toContain('COUNT(canonical_inbound.id) = 1');
+  });
+
+  test('projects a durable inbound STOP receipt without replacing canonical privacy types', () => {
+    const projection = inboundSmsReceiptProjectionSql({
+      messageAlias: 'm', legacyAlias: 'legacy', receiptAlias: 'receipt',
+    });
+    expect(projection.joinSql).toContain('receipt.message_sid = m.twilio_sid');
+    expect(projection.joinSql).toContain("m.channel = 'sms'");
+    expect(projection.joinSql).toContain("m.direction = 'inbound'");
+    expect(projection.responseMessageTypeSql).toContain("THEN 'opt_out'");
+    expect(projection.responseMessageTypeSql).toContain('COALESCE(legacy.message_type, m.message_type)');
+    expect(projection.effectiveCreatedAtSql).toContain('LEAST(m.created_at, receipt.applied_at)');
   });
 
   test.each([
