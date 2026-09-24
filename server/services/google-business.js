@@ -1894,8 +1894,9 @@ class GoogleBusinessService {
               link: '/admin/reviews',
               metadata: { observedAt },
               trx: savepoint,
+              // No rolling window (see promised-estimate-watcher): the clean
+              // run's retireIfClean drops the key, so a new episode rings.
               dedupeKey: 'ops-digest:gbp-sync-health',
-              dedupeWindowMs: 7 * 24 * 60 * 60 * 1000,
               refreshOnDedupe: true,
               sendEmail: async () => ({ ok: true }),
             });

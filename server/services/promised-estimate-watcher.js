@@ -302,8 +302,11 @@ async function runPromisedEstimateWatcher(opts = {}) {
       html: composed.html,
       text: composed.text,
       link: '/admin/pipeline',
+      // No rolling window: notifyAdmin's window is measured from created_at,
+      // which refreshOnDedupe never advances, so a gap standing longer than
+      // the window would mint a second row. retireIfClean drops the key on
+      // the clean run, so a new episode still rings (pre-push audit P1).
       dedupeKey: 'ops-digest:promised-estimate',
-      dedupeWindowMs: 7 * 24 * 60 * 60 * 1000,
       refreshOnDedupe: true,
       sendEmail: () => mailer.sendOne({
         to,
