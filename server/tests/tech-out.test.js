@@ -372,7 +372,7 @@ describe('uncommitted estimate holds are never parked (auditor P1)', () => {
       };
       dayStopsQuery.mockImplementation(() => fakeQuery([hold({ id: 'hold-late' })]));
       const result = await sweepAbsentTechDays();
-      expect(result).toEqual({ absences: 1, parked: 0 });
+      expect(result).toEqual({ absences: 1, parked: 0, failed: 0 });
       expect(createAlert).not.toHaveBeenCalled();
     } finally {
       delete process.env.GATE_TECH_OUT_REDISTRIBUTE;
@@ -511,6 +511,20 @@ describe('slot-offer cache + grouped ranking (Codex r6)', () => {
   });
 });
 
+describe('post-commit side effects never fail the mutation (pre-push auditor P1)', () => {
+  test('a throwing slot-cache invalidation or broadcast leaves markTechOut / clearTechOut resolved and logged', async () => {
+    invalidateAllEstimates.mockImplementationOnce(() => { throw new Error('cache boom'); });
+    const io = fakeIo();
+    io.to.mockImplementation(() => { throw new Error('socket boom'); });
+    getIo.mockReturnValue(io);
+    const { absence } = await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    expect(absence.id).toBeTruthy();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('cache boom'));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('socket boom'));
+    await expect(clearTechOut({ technicianId: TECH.id, date: DATE, actorId: ACTOR })).resolves.toBeTruthy();
+  });
+});
+
 describe('sweepAbsentTechDays', () => {
   const TECH2 = { id: '22222222-3333-4444-8888-999999999999', name: 'Sam' };
 
@@ -540,7 +554,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 1 });
+    expect(result).toEqual({ absences: 1, parked: 1, failed: 0 });
     expect(createAlert).toHaveBeenCalledTimes(1);
     expect(createAlert.mock.calls[0][0]).toMatchObject({
       type: ALERT_TYPE, severity: 'warn', techId: TECH.id, jobId: 'uncovered',
@@ -563,13 +577,30 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 1 });
+    expect(result).toEqual({ absences: 1, parked: 1, failed: 0 });
     const stored = db.__state.absences[absence.id].redistribution;
     expect(stored).toMatchObject({ total: 2, units: 2 });
     expect(stored.parked.map((p) => p.job_id)).toEqual(['orig', 'late-1']);
     // Written on the sweep's transaction, not a plain connection.
     const trx = db.__lastTrx;
     expect(trx.__chains.some((x) => x.table === 'technician_absences' && x.c.update.mock.calls.length > 0)).toBe(true);
+  });
+
+  test('one failing absence is logged and skipped; the others are still swept this tick (pre-push auditor P1)', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-bad'] = { id: 'absence-bad', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null };
+    db.__state.absences['absence-ok'] = { id: 'absence-ok', technician_id: TECH2.id, absence_date: DATE, reason: 'sick', cleared_at: null };
+    dayStopsQuery.mockImplementation((_trx, { technicianId }) => {
+      if (technicianId === TECH.id) throw new Error('stops boom');
+      return fakeQuery([stop({ id: 'ok-stop' })]);
+    });
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 2, parked: 1, failed: 1 });
+    expect(createAlert).toHaveBeenCalledTimes(1);
+    expect(createAlert.mock.calls[0][0]).toMatchObject({ techId: TECH2.id, jobId: 'ok-stop' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('absence-bad'));
   });
 
   test('an absence cleared while the sweep waited on the fence parks nothing (re-read under the fence)', async () => {
@@ -583,7 +614,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(result).toEqual({ absences: 1, parked: 0, failed: 0 });
     expect(dayStopsQuery).not.toHaveBeenCalled();
     expect(createAlert).not.toHaveBeenCalled();
   });
@@ -600,7 +631,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(result).toEqual({ absences: 1, parked: 0, failed: 0 });
     expect(createAlert).not.toHaveBeenCalled();
   });
 
@@ -618,7 +649,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(result).toEqual({ absences: 1, parked: 0, failed: 0 });
     expect(createAlert).not.toHaveBeenCalled();
   });
 
@@ -638,7 +669,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 2 });
+    expect(result).toEqual({ absences: 1, parked: 2, failed: 0 });
     expect(createAlert).toHaveBeenCalledTimes(1);
     expect(createAlert.mock.calls[0][0]).toMatchObject({ jobId: 'sib-1' });
     expect(createAlert.mock.calls[0][0].payload.visit_member_ids).toEqual(['sib-1', 'sib-2']);
@@ -657,7 +688,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 1 });
+    expect(result).toEqual({ absences: 1, parked: 1, failed: 0 });
     expect(createAlert).toHaveBeenCalledTimes(1);
     expect(createAlert.mock.calls[0][0].payload).toMatchObject({ absence_id: 'absence-1', late_arrival: true });
   });
@@ -675,7 +706,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 1 });
+    expect(result).toEqual({ absences: 1, parked: 1, failed: 0 });
     expect(createAlert.mock.calls[0][0].payload).toMatchObject({ absence_id: 'absence-2' });
   });
 
@@ -703,7 +734,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(result).toEqual({ absences: 1, parked: 0, failed: 0 });
     expect(createAlert).not.toHaveBeenCalled();
   });
 
@@ -724,7 +755,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 1 });
+    expect(result).toEqual({ absences: 1, parked: 1, failed: 0 });
     expect(createAlert).toHaveBeenCalledTimes(1);
   });
 
@@ -736,7 +767,7 @@ describe('sweepAbsentTechDays', () => {
     dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'x' })]));
 
     const first = await sweepAbsentTechDays();
-    expect(first).toEqual({ absences: 1, parked: 1 });
+    expect(first).toEqual({ absences: 1, parked: 1, failed: 0 });
 
     // createAlert is mocked and does not itself write into state.alerts —
     // simulate the committed row its real insert would have left behind.
@@ -747,7 +778,7 @@ describe('sweepAbsentTechDays', () => {
     createAlert.mockClear();
 
     const second = await sweepAbsentTechDays();
-    expect(second).toEqual({ absences: 1, parked: 0 });
+    expect(second).toEqual({ absences: 1, parked: 0, failed: 0 });
     expect(createAlert).not.toHaveBeenCalled();
   });
 
@@ -763,7 +794,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 0, parked: 0 });
+    expect(result).toEqual({ absences: 0, parked: 0, failed: 0 });
     expect(dayStopsQuery).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
   });
@@ -777,7 +808,7 @@ describe('sweepAbsentTechDays', () => {
 
     const result = await sweepAbsentTechDays();
 
-    expect(result).toEqual({ absences: 1, parked: 0 });
+    expect(result).toEqual({ absences: 1, parked: 0, failed: 0 });
     expect(createAlert).not.toHaveBeenCalled();
   });
 });

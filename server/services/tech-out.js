@@ -272,13 +272,35 @@ async function sweepAbsentTechDays({ now } = {}) {
     .select('id', 'technician_id', 'absence_date', 'reason', 'redistribution');
 
   let parked = 0;
+  let failed = 0;
   for (const absence of absences) {
     const technicianId = absence.technician_id;
     const date = dateOnlyString(absence.absence_date);
     // Serial on purpose — each absence gets its own transaction, and these
     // are independent tech-days on a 5-minute cadence; nothing gained by
     // parallelizing a handful of rows against Railway's shared Postgres.
-    const summary = await db.transaction(async (trx) => {
+    // Each is also isolated in failure: one tech-day that cannot be parked
+    // (bad row, transient DB error) is logged and skipped so every other
+    // absent tech-day is still swept this tick (pre-push auditor P1).
+    let summary;
+    try {
+      summary = await sweepOneAbsence({ absence, technicianId, date });
+    } catch (err) {
+      failed += 1;
+      logger.error(`[tech-out] sweep: absence ${absence.id} (tech ${technicianId}, ${date}) failed: ${err.message}`);
+      continue;
+    }
+
+    parked += summary.total;
+    logger.info(`[tech-out] sweep: absence ${absence.id} (tech ${technicianId}, ${date}) — ${summary.total} uncovered stop(s) parked`);
+  }
+
+  return { absences: absences.length, parked, failed };
+}
+
+/** One absence's sweep transaction — see sweepAbsentTechDays. */
+async function sweepOneAbsence({ absence, technicianId, date }) {
+  return db.transaction(async (trx) => {
       // Fence first, same order as every assignment writer (markTechOut's
       // own header comment) — an in-flight assignment on this tech-day
       // finishes before the sweep snapshots it.
@@ -348,13 +370,7 @@ async function sweepAbsentTechDays({ now } = {}) {
       };
       await trx('technician_absences').where({ id: absence.id }).update({ redistribution: JSON.stringify(merged) }).returning('id');
       return swept;
-    });
-
-    parked += summary.total;
-    logger.info(`[tech-out] sweep: absence ${absence.id} (tech ${technicianId}, ${date}) — ${summary.total} uncovered stop(s) parked`);
-  }
-
-  return { absences: absences.length, parked };
+  });
 }
 
 const ABSENCE_EVENT = 'dispatch:tech_absence';
@@ -371,19 +387,31 @@ const ADMIN_ROOM = 'dispatch:admins';
  * Fire-and-forget; io unset (unit tests, boot order) just logs.
  */
 function emitAbsenceChange({ technicianId, date, out, absenceId }) {
-  // Public estimate slot offers are memoized for up to five minutes
-  // (estimate-slot-availability wrapperCache); a cached list could keep
-  // offering — or keep hiding — this tech's day after the absence changed
-  // while reserveSlot already answers from the live table (Codex r6 P1).
-  // Same schedule-wide drop admin-schedule.js uses after an edit; lazy
-  // require because that module is far heavier than this one.
-  require('./estimate-slot-availability').invalidateAllEstimates();
-  const io = getIo();
-  if (!io) {
-    logger.warn('[tech-out] io not initialized; skipping absence broadcast');
-    return;
+  // Everything here runs AFTER the transaction committed and is best-effort:
+  // a failure must never turn a committed mark-out / clear into a 500 for
+  // the dispatcher (pre-push auditor P1 on #4678) — the row is the truth,
+  // the board's next refresh and the slot cache's own TTL catch up.
+  try {
+    // Public estimate slot offers are memoized for up to five minutes
+    // (estimate-slot-availability wrapperCache); a cached list could keep
+    // offering — or keep hiding — this tech's day after the absence changed
+    // while reserveSlot already answers from the live table (Codex r6 P1).
+    // Same schedule-wide drop admin-schedule.js uses after an edit; lazy
+    // require because that module is far heavier than this one.
+    require('./estimate-slot-availability').invalidateAllEstimates();
+  } catch (err) {
+    logger.warn(`[tech-out] slot cache invalidation failed after absence change: ${err.message}`);
   }
-  io.to(ADMIN_ROOM).emit(ABSENCE_EVENT, { tech_id: technicianId, date, out: !!out, absence_id: absenceId || null });
+  try {
+    const io = getIo();
+    if (!io) {
+      logger.warn('[tech-out] io not initialized; skipping absence broadcast');
+      return;
+    }
+    io.to(ADMIN_ROOM).emit(ABSENCE_EVENT, { tech_id: technicianId, date, out: !!out, absence_id: absenceId || null });
+  } catch (err) {
+    logger.warn(`[tech-out] absence broadcast failed: ${err.message}`);
+  }
 }
 
 /** Mark a technician out for a date and park their day, atomically. */
