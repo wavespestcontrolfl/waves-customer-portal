@@ -2,12 +2,15 @@ const {
   applyFixtureReplayOptions,
   buildMissingFixtureResults,
   buildReplayErrorResult,
+  compareFlatFields,
   etScheduleParts,
   evaluateFixtureExpectation,
+  FIELD_GROUPS,
   goldFieldValues,
   isValidGoldValue,
   GOLD_FIELDS,
   loadReplayFixture,
+  normalizeField,
   parseArgs,
   shouldFailRun,
   summarizeResults,
@@ -634,5 +637,87 @@ describe('call extraction replay variance reporting', () => {
       replayErrors: 1,
       fixtureExpectations: { failed: 0 },
     }, { fixturePath: null })).toBe(false);
+  });
+
+  // service_request.price (schema 1.12.0, codex #4707 P1): without these in
+  // FIELD_GROUPS, a v8 extractor that drops or changes an amount, unit,
+  // acceptance, tier, or prepay term relative to the stored extraction would
+  // go unnoticed by the weekly replay/model bake-off.
+  describe('service_request.price variance coverage', () => {
+    test('every normalized price field is registered in FIELD_GROUPS', () => {
+      const allFields = new Set(Object.values(FIELD_GROUPS).flat());
+      for (const field of [
+        'price_amount_usd',
+        'price_amount_max_usd',
+        'price_unit',
+        'price_accepted',
+        'price_prepay_term',
+        'price_tier_mentioned',
+      ]) {
+        expect(allFields.has(field)).toBe(true);
+      }
+    });
+
+    test('compareFlatFields reports a variance when the stored amount changes', () => {
+      const oldFlat = { price_amount_usd: 90, price_unit: 'per_quarter' };
+      const currentFlat = { price_amount_usd: 75, price_unit: 'per_quarter' };
+      const variances = compareFlatFields(oldFlat, currentFlat, true);
+      const amountVariance = variances.find((v) => v.field === 'price_amount_usd');
+      expect(amountVariance).toBeDefined();
+      expect(amountVariance.severity).toBe('medium');
+      expect(amountVariance.old).toBe(90);
+      expect(amountVariance.current).toBe(75);
+    });
+
+    test('compareFlatFields reports a variance when a range end, tier, or prepay term is dropped', () => {
+      const oldFlat = {
+        price_amount_usd: 90,
+        price_amount_max_usd: 100,
+        price_tier_mentioned: 'gold',
+        price_prepay_term: 'annual',
+      };
+      const currentFlat = {
+        price_amount_usd: 90,
+        price_amount_max_usd: null,
+        price_tier_mentioned: null,
+        price_prepay_term: null,
+      };
+      const variances = compareFlatFields(oldFlat, currentFlat, true).map((v) => v.field);
+      expect(variances).toEqual(expect.arrayContaining([
+        'price_amount_max_usd',
+        'price_tier_mentioned',
+        'price_prepay_term',
+      ]));
+    });
+
+    test('compareFlatFields reports a variance when acceptance flips', () => {
+      const variances = compareFlatFields(
+        { price_amount_usd: 65, price_accepted: true },
+        { price_amount_usd: 65, price_accepted: false },
+        true
+      );
+      expect(variances.find((v) => v.field === 'price_accepted')).toBeDefined();
+    });
+
+    test('compareFlatFields reports no variance when nothing changed', () => {
+      const flat = {
+        price_amount_usd: 65,
+        price_amount_max_usd: null,
+        price_unit: 'one_time',
+        price_accepted: true,
+        price_prepay_term: null,
+        price_tier_mentioned: null,
+      };
+      const variances = compareFlatFields(flat, { ...flat }, true)
+        .filter((v) => v.field.startsWith('price_'));
+      expect(variances).toEqual([]);
+    });
+
+    test('normalizeField keeps price_accepted a genuine tri-state (null distinct from false)', () => {
+      expect(normalizeField('price_accepted', null)).toBeNull();
+      expect(normalizeField('price_accepted', false)).toBe(false);
+      expect(normalizeField('price_accepted', true)).toBe(true);
+      expect(normalizeField('price_accepted', null)).not.toBe(normalizeField('price_accepted', false));
+    });
   });
 });

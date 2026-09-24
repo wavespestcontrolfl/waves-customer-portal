@@ -58,6 +58,17 @@ const FIELD_GROUPS = {
     // + is_primary_residence per entry) — the nested values flatView keeps
     // as an array, compared as one order-insensitive string (codex #3418 r3).
     'additional_property_roles',
+    // service_request.price (schema 1.12.0) — ANY price stated on the call,
+    // accepted or not, a range, unit, tier, or prepay term. Without these
+    // here, a v8 extractor that drops or changes an unaccepted/ranged/tiered
+    // price could regress the price-capture feature while the weekly
+    // replay/model bake-off stayed green (codex #4707 P1).
+    'price_amount_usd',
+    'price_amount_max_usd',
+    'price_unit',
+    'price_accepted',
+    'price_prepay_term',
+    'price_tier_mentioned',
   ],
   low: [
     'lead_quality',
@@ -379,6 +390,10 @@ function normalizeField(field, value) {
   if (field === 'phone') return normalizePhone(value);
   if (field === 'email') return normalizeString(value);
   if (field === 'appointment_confirmed' || field === 'is_spam' || field === 'is_voicemail') return normalizeBool(value);
+  // price_accepted is a tri-state (true/false/null): unlike
+  // agent_committed_booking, null is NOT collapsed into false — "acceptance
+  // never at issue" is a distinct state from "the caller declined".
+  if (field === 'price_accepted') return normalizeBool(value);
   // agent_committed_booking postdates every legacy extraction: absent/null
   // means "not committed", identical to false — collapse them so replays
   // don't report a spurious high-severity delta on every pre-1.8.0 row
@@ -1619,6 +1634,8 @@ if (require.main === module) {
 module.exports = {
   parseArgs,
   normalizeField,
+  compareFlatFields,
+  FIELD_GROUPS,
   summarizeResults,
   summarizeGoldAccuracy,
   evaluateFixtureExpectation,

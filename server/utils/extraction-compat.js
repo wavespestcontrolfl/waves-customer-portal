@@ -21,6 +21,7 @@ function flatView(extraction) {
   const property = extraction.property || {};
   const addr = property.service_address || {};
   const svc = extraction.service_request || {};
+  const price = svc.price || {};
   const sched = extraction.scheduling || {};
   const meta = extraction.meta || {};
   const sentiment = extraction.sentiment_and_lead || {};
@@ -44,6 +45,19 @@ function flatView(extraction) {
     quoted_price: typeof svc.quoted_price_usd === 'number' ? svc.quoted_price_usd : null,
     quote_requested: svc.quote_requested === true,
     quote_promised: svc.quote_promised === true,
+    // service_request.price (schema 1.12.0) — ANY price the agent/caller
+    // stated on the call, accepted or not; a range, unit, tier, or prepay
+    // term. Broader than quoted_price above, which stays accepted-total-only
+    // and is unaffected by this. Replay variance watches these (FIELD_GROUPS
+    // medium in replay-call-extraction-variance.js) so a v8 extractor that
+    // drops or changes an unaccepted/ranged/tiered price cannot go unnoticed
+    // by the weekly replay/bake-off (codex #4707 P1).
+    price_amount_usd: typeof price.amount_usd === 'number' ? price.amount_usd : null,
+    price_amount_max_usd: typeof price.amount_max_usd === 'number' ? price.amount_max_usd : null,
+    price_unit: price.unit || null,
+    price_accepted: typeof price.accepted === 'boolean' ? price.accepted : null,
+    price_prepay_term: price.prepay_term || null,
+    price_tier_mentioned: price.tier_mentioned || null,
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
     service_address_occupancy: property.service_address_occupancy || null,
     service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'

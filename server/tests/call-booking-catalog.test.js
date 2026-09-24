@@ -1149,6 +1149,60 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(flat.follow_up_date_time).toBeNull();
   });
 
+  // service_request.price (schema 1.12.0, codex #4707 P1): flatView must
+  // expose the normalized price fields so replay variance (FIELD_GROUPS in
+  // replay-call-extraction-variance.js) can actually watch them — otherwise
+  // a v8 extractor regression here goes unnoticed by the weekly bake-off.
+  test('flatView exposes service_request.price fields', () => {
+    const flat = flatView({
+      meta: { schema_version: '1.12.0' },
+      service_request: {
+        primary_service_category: 'mosquito',
+        price: {
+          amount_usd: 90,
+          amount_max_usd: 100,
+          unit: 'per_quarter',
+          accepted: false,
+          stated_by: 'agent',
+          prepay_term: 'annual',
+          tier_mentioned: 'gold',
+          evidence_quote: 'that runs ninety to a hundred a quarter',
+        },
+      },
+    });
+    expect(flat.price_amount_usd).toBe(90);
+    expect(flat.price_amount_max_usd).toBe(100);
+    expect(flat.price_unit).toBe('per_quarter');
+    expect(flat.price_accepted).toBe(false);
+    expect(flat.price_prepay_term).toBe('annual');
+    expect(flat.price_tier_mentioned).toBe('gold');
+  });
+
+  test('flatView defaults every price field to null when price is absent or empty', () => {
+    const absent = flatView({ meta: { schema_version: '1.12.0' }, service_request: {} });
+    expect(absent.price_amount_usd).toBeNull();
+    expect(absent.price_amount_max_usd).toBeNull();
+    expect(absent.price_unit).toBeNull();
+    expect(absent.price_accepted).toBeNull();
+    expect(absent.price_prepay_term).toBeNull();
+    expect(absent.price_tier_mentioned).toBeNull();
+
+    const empty = flatView({
+      meta: { schema_version: '1.12.0' },
+      service_request: { price: { amount_usd: null, amount_max_usd: null, unit: null, accepted: null, stated_by: null, prepay_term: null, tier_mentioned: null, evidence_quote: null } },
+    });
+    expect(empty.price_amount_usd).toBeNull();
+    expect(empty.price_accepted).toBeNull();
+  });
+
+  test('flatView keeps price_accepted a genuine tri-state (false survives, unlike a truthy-only flag)', () => {
+    const declined = flatView({
+      meta: { schema_version: '1.12.0' },
+      service_request: { price: { amount_usd: 65, accepted: false } },
+    });
+    expect(declined.price_accepted).toBe(false);
+  });
+
   test('normalizeCallExtraction sanitizes the new V1 fields', () => {
     const out = normalizeCallExtraction({
       quoted_price: '350',
