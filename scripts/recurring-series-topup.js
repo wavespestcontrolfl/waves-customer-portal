@@ -48,11 +48,18 @@ function argValue(flag) {
 const CUSTOMER_ID = argValue('--customer');
 const PARENT_ID = argValue('--parent');
 const HORIZON_DAYS_ARG = argValue('--horizon-days');
-const horizonOpt = {};
+// Default through the SAME env reader the nightly sweep uses
+// (RECURRING_TOPUP_HORIZON_DAYS, else 365) — without this, an operator who
+// has that env var set to override the default would silently get
+// topUpRecurringSeriesLocked's own 365-day fallback instead whenever
+// --horizon-days is omitted (Codex pre-push P1).
+const { horizonDaysFromEnv } = require('../server/services/recurring-series-topup');
+let horizonDays = horizonDaysFromEnv();
 if (HORIZON_DAYS_ARG) {
   const n = Number(HORIZON_DAYS_ARG);
-  if (Number.isFinite(n) && n > 0) horizonOpt.horizonDays = Math.floor(n);
+  if (Number.isFinite(n) && n > 0) horizonDays = Math.floor(n);
 }
+const horizonOpt = { horizonDays };
 
 async function resolveParentIds() {
   if (PARENT_ID) return [PARENT_ID];
@@ -74,7 +81,7 @@ async function main() {
     return;
   }
 
-  console.log(`${APPLY ? 'APPLYING' : 'DRY RUN'} — ${parentIds.length} candidate series, horizon ${horizonOpt.horizonDays || '(default)'} days\n`);
+  console.log(`${APPLY ? 'APPLYING' : 'DRY RUN'} — ${parentIds.length} candidate series, horizon ${horizonOpt.horizonDays} days\n`);
 
   const summary = { scanned: parentIds.length, toppedUp: 0, visitsInserted: 0, skipped: {}, errors: 0 };
 

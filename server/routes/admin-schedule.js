@@ -15045,9 +15045,32 @@ async function resolveTopUpTermCap(conn, parent, parentId, cols) {
     const allIds = [...new Set([...linkedIds, ...customerIds].map(String))];
     if (!allIds.length) return { cap: null, failed: false };
     const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
-    const rows = await coveredTermsAsOf(conn, null).whereIn('t.id', allIds).select('t.term_end');
+    const rows = await coveredTermsAsOf(conn, null).whereIn('t.id', allIds)
+      .select('t.term_end', 't.status', 't.renewal_decision');
     const todayStr = etDateString();
-    const ends = rows.map((r) => dateOnly(r.term_end)).filter((d) => d && d >= todayStr).sort();
+    // Only drop a term once it is BOTH decided AND its own window has
+    // closed. "Decided" = renewed (superseded by a new term, which — if it
+    // exists — is a separate row in this same set with its own later end)
+    // or switch_plan (the customer left annual prepay outright), or a
+    // declined-renewal lapse (cancelled + renewal_decision=cancel) whose
+    // paid remainder has fully run out. An undecided term (active,
+    // renewal_pending, payment_pending, or a lapse still riding out its
+    // window) keeps capping even past its own term_end — the outcome isn't
+    // settled yet, so booking speculatively past it is exactly the mistake
+    // this cap exists to prevent (Codex pre-push P1: an unconditional
+    // "drop every expired row" filter let an overdue-but-undecided renewal
+    // book a full uncapped horizon).
+    const DECIDED_CLOSED_STATUSES = new Set(['renewed', 'switch_plan']);
+    const ends = rows
+      .map((r) => ({ end: dateOnly(r.term_end), status: String(r.status || '').toLowerCase(), decision: String(r.renewal_decision || '').toLowerCase() }))
+      .filter((r) => {
+        if (!r.end) return false;
+        const decidedLapse = r.status === 'cancelled' && r.decision === 'cancel';
+        const decidedClosed = DECIDED_CLOSED_STATUSES.has(r.status) || decidedLapse;
+        return !decidedClosed || r.end >= todayStr;
+      })
+      .map((r) => r.end)
+      .sort();
     return { cap: ends.length ? ends[ends.length - 1] : null, failed: false };
   } catch (e) {
     logger.warn(`[recurring-topup] term cap lookup failed for parent=${parentId}: ${e.message}`);
