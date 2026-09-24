@@ -1,4 +1,4 @@
-const { isMistingSystemService } = require('../utils/mosquito-misting-system');
+const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = require('../utils/mosquito-misting-system');
 
 // A rule's `serviceKeys` are the catalog service keys it claims: a booking
 // that carries one (service_key_snapshot) resolves to that rule's visit
@@ -247,22 +247,25 @@ const MATCH_RULES = [
   },
 ];
 
-// The automatic mosquito misting SYSTEM (mosquito_misting_system: design
-// visit, install, monthly/quarterly maintenance — see
-// wiki/protocols/mosquito-misting-systems.md) is a consultation/equipment
-// service with no chemical application protocol of its own, but its name
-// and catalog category both share "mosquito"/"misting" with the barrier
-// PROGRAM's mosquito_barrier rule (visit 1, terms include 'misting' for the
-// barrier program's own "21-day misting" cycle-length copy) — left alone, a
-// scheduled misting-system visit would resolve the barrier program's
-// foliage/backpack spray steps. isMistingSystemService (server/utils) is the
-// shared predicate every caller of this identity check uses — bare "misting"
-// and the plain word "mosquito" keep routing to the barrier program exactly
-// as before.
-function isMistingSystemConsultation(serviceType, serviceKey) {
-  return isMistingSystemService({ serviceKey, name: serviceType });
-}
-
+// The automatic mosquito misting SYSTEM's DESIGN-VISIT identity
+// (mosquito_misting_system — see wiki/protocols/mosquito-misting-
+// systems.md) is a consultation/equipment service with no chemical
+// application protocol of its own, but its name and catalog category both
+// share "mosquito"/"misting" with the barrier PROGRAM's mosquito_barrier
+// rule (visit 1, terms include 'misting' for the barrier program's own
+// "21-day misting" cycle-length copy) — left alone, a scheduled
+// misting-system visit would resolve the barrier program's
+// foliage/backpack spray steps. isMistingDesignConsultation (server/utils)
+// is the shared, KEY-FIRST predicate every caller of this identity check
+// uses — bare "misting" and the plain word "mosquito" keep routing to the
+// barrier program exactly as before, and a future distinct catalog key
+// (install/maintenance) is never swept in by name matching.
+//
+// A KEYLESS row whose name reads as a different, not-yet-built phase of the
+// product (install/maintenance/refill — isMistingSystemServiceUnconfigured)
+// is neither this consultation nor a barrier match: there is no live
+// protocols.json program for it, so it gets its own explicit "no match"
+// reason below instead of falling through to the barrier program.
 function normalize(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
@@ -352,13 +355,27 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}
   // by design. Every caller already treats a null program as "no protocol"
   // (admin-protocols.js's /match and /completion-actions 404; job-card.js's
   // resolveProtocolLines only when it does not itself force a programKey).
-  if (isMistingSystemConsultation(serviceType, serviceKey)) {
+  if (isMistingDesignConsultation({ serviceKey, name: serviceType })) {
     return {
       programKey: null,
       program: null,
       matchedVisit: null,
       matched: false,
       reason: 'misting_system_consultation',
+    };
+  }
+  // A keyless row that names a different, not-yet-built phase of the
+  // product (install/maintenance/refill) — not this consultation, and not a
+  // barrier match either. No live program exists for it (pricing and the
+  // install product set are owner-pending), so it gets its own explicit
+  // "no match" reason instead of falling through to the barrier program.
+  if (isMistingSystemServiceUnconfigured({ serviceKey, name: serviceType })) {
+    return {
+      programKey: null,
+      program: null,
+      matchedVisit: null,
+      matched: false,
+      reason: 'misting_system_service_unconfigured',
     };
   }
   const normalized = normalize(serviceType);

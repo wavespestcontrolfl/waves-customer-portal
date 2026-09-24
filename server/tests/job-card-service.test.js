@@ -1823,6 +1823,38 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(barrier.visit).toMatchObject({ visit: 1, month: 'Any' });
   });
 
+  test('a keyless install/maintenance-named misting row gets the standard no-protocol note, never barrier steps; a DIFFERENT future key is not silently suppressed by the name (Codex round-3 P1)', async () => {
+    const protocols = {
+      mosquito: { visits: [{ visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal' }] },
+    };
+    const catalog = [{ id: 't', name: 'Talstar P' }];
+
+    // Keyless, name says "Install" — not the design consultation (no key to
+    // claim it), and there is no live install protocols.json program either
+    // — must land on the standard no-protocol note, not barrier steps.
+    const install = await jobCard.resolveVisitLines({
+      facts: { isLawn: false, serviceType: 'Mosquito Misting System Install', serviceCategory: 'mosquito', scheduledDate: '2026-09-04', addons: [] },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect([install.lines, install.note]).toEqual([[], 'No treatment protocol for this service (mosquito)']);
+
+    // A DIFFERENT, not-yet-built catalog key ('mosquito_misting_install') is
+    // NOT swept in by the name phrase — key-first means this predicate does
+    // not apply to it, so it falls through to the ordinary name-based
+    // resolution (today: the barrier program, since no dedicated
+    // install/maintenance program exists yet — a future PR would give this
+    // key its own protocols.json program instead).
+    const futureKeyed = await jobCard.resolveVisitLines({
+      facts: { isLawn: false, serviceType: 'Mosquito Misting System Install', serviceCategory: 'mosquito', serviceKey: 'mosquito_misting_install', scheduledDate: '2026-09-04', addons: [] },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect(futureKeyed.lines.map((l) => l.product.id)).toEqual(['t']);
+  });
+
   test('the tank search withholds every dose on a rodent sanitation appointment (r8 P1)', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };

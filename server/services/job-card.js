@@ -36,7 +36,7 @@ const contextAggregator = require('./context-aggregator');
 
 const { redactAccessCodes } = contextAggregator;
 const { matchServiceProtocol } = require('./protocol-matcher');
-const { isMistingSystemService } = require('../utils/mosquito-misting-system');
+const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = require('../utils/mosquito-misting-system');
 const {
   buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations,
   itemHasNitrogen, itemHasPhosphorus, parseProtocolLines,
@@ -336,9 +336,10 @@ async function loadAddons(dbh, serviceId) {
 const ADDON_PROGRAMS = Object.freeze({
   pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest' },
   lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
-  // mosquito_misting_system (the automatic misting SYSTEM) is suppressed by
-  // the shared isMistingSystemService predicate in addonProgramKey below —
-  // by key OR name, so it no longer needs its own nonChemical entry here.
+  // mosquito_misting_system (the misting SYSTEM's design-visit identity) is
+  // suppressed by the shared isMistingDesignConsultation predicate in
+  // addonProgramKey below — key-first, name only for a keyless row — so it
+  // no longer needs its own nonChemical entry here.
   mosquito: { any: ['mosquito'], fallback: 'mosquito' },
   termite: { any: ['termite'], fallback: 'termite' },
   rodent: {
@@ -359,14 +360,17 @@ const ADDON_PROGRAMS = Object.freeze({
 function addonProgramKey(category, name, protocols, serviceKey = null) {
   const rule = ADDON_PROGRAMS[category];
   if (!rule) return null;
-  // Consultation/equipment service, not a treatment — checked by catalog key
-  // OR name (the shared predicate) so a name-only appointment with no
-  // serviceKey attached is suppressed the same as a keyed one, instead of
-  // falling through to `rule.fallback` below (matchServiceProtocol already
-  // returns a null programKey for this identity, but `rule.any.includes(null)`
-  // is false, so the fallback would otherwise still hand it the category's
-  // chemical program).
-  if (isMistingSystemService({ serviceKey, name })) return null;
+  // The misting SYSTEM's design-visit identity is a consultation, not a
+  // treatment — checked key-first (the shared predicate), so a name-only
+  // appointment with no serviceKey attached is suppressed the same as a
+  // keyed one, instead of falling through to `rule.fallback` below
+  // (matchServiceProtocol already returns a null programKey for this
+  // identity, but `rule.any.includes(null)` is false, so the fallback would
+  // otherwise still hand it the category's chemical program). A keyless row
+  // naming a different, not-yet-built phase (install/maintenance/refill)
+  // also gets no protocol here — there is no live program for it either,
+  // and it must not fall through to the barrier program's `fallback`.
+  if (isMistingDesignConsultation({ serviceKey, name }) || isMistingSystemServiceUnconfigured({ serviceKey, name })) return null;
   if (serviceKey && rule.nonChemical?.includes(serviceKey)) return null;
   if (serviceKey && rule.keys?.[serviceKey]) return rule.keys[serviceKey];
   const picked = matchServiceProtocol(protocols, name, { serviceKey })?.programKey;
