@@ -43,6 +43,18 @@ jest.mock('../models/db', () => {
     return c;
   }
 
+  // Mirrors the production claim guard's SQL predicate (markTechOut finding
+  // 4) in plain JS, since this is an in-memory double, not a SQL engine.
+  function isClaimableRedistribution(redistribution) {
+    if (!redistribution) return true;
+    if (redistribution.status === 'partial') return true;
+    if (redistribution.status === 'running') {
+      const started = new Date(redistribution.started_at).getTime();
+      return Date.now() - started > 10 * 60 * 1000;
+    }
+    return false;
+  }
+
   function absencesChain() {
     const c = {};
     let cond = null;
@@ -50,6 +62,7 @@ jest.mock('../models/db', () => {
     let updatePatch = null;
     c.where = jest.fn((w) => { cond = { ...(cond || {}), ...w }; return c; });
     c.whereNull = jest.fn(() => { cond = { ...(cond || {}), __clearedNull: true }; return c; });
+    c.whereRaw = jest.fn(() => { cond = { ...(cond || {}), __claimGuard: true }; return c; });
     c.first = jest.fn(async () => Object.values(state.absences).find((r) => {
       if (cond?.technician_id && r.technician_id !== cond.technician_id) return false;
       if (cond?.absence_date && r.absence_date !== cond.absence_date) return false;
@@ -66,24 +79,33 @@ jest.mock('../models/db', () => {
         if (dup) throw Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
         const id = `absence-${Object.keys(state.absences).length + 1}`;
         const row = { id, cleared_at: null, cleared_by: null, redistribution: null, ...insertRow };
+        // Real Postgres auto-parses jsonb back to an object on ...returning('*').
+        if (typeof row.redistribution === 'string') {
+          try { row.redistribution = JSON.parse(row.redistribution); } catch { /* leave as-is */ }
+        }
         state.absences[id] = row;
         return [row];
       }
       if (updatePatch) {
         const row = Object.values(state.absences).find((r) => r.id === cond?.id);
-        if (row) {
-          // Real Postgres auto-parses a jsonb column back to an object on
-          // read; the production writer always JSON.stringifies before
-          // writing, so mirror that round-trip here instead of storing the
-          // raw string (a later read — e.g. the ALREADY_OUT resume check
-          // reading .redistribution.status — must see an object).
-          const patch = { ...updatePatch };
-          if (typeof patch.redistribution === 'string') {
-            try { patch.redistribution = JSON.parse(patch.redistribution); } catch { /* leave as-is */ }
-          }
-          Object.assign(row, patch);
+        if (!row) return [];
+        if (cond?.__clearedNull && row.cleared_at) return [];
+        // The atomic claim guard (finding 4): zero rows back when the
+        // current redistribution is neither null, partial, nor a stale
+        // 'running' lease — the caller then 409s ALREADY_OUT instead of
+        // racing a genuinely in-progress or already-complete run.
+        if (cond?.__claimGuard && !isClaimableRedistribution(row.redistribution)) return [];
+        // Real Postgres auto-parses a jsonb column back to an object on
+        // read; the production writer always JSON.stringifies before
+        // writing, so mirror that round-trip here instead of storing the
+        // raw string (a later read — e.g. the ALREADY_OUT resume check
+        // reading .redistribution.status — must see an object).
+        const patch = { ...updatePatch };
+        if (typeof patch.redistribution === 'string') {
+          try { patch.redistribution = JSON.parse(patch.redistribution); } catch { /* leave as-is */ }
         }
-        return row ? [row] : [];
+        Object.assign(row, patch);
+        return [row];
       }
       return [];
     });
@@ -143,6 +165,20 @@ jest.mock('../models/db', () => {
   });
   fn.fn = { now: jest.fn(() => 'NOW()') };
   fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  // A minimal transaction double (finding 5): runs `body` against the same
+  // table router (so trx('technician_absences') etc. behave identically to
+  // db(...)), and on a throw restores the pre-transaction state — enough to
+  // prove a resolveAlert rejection rolls the absence clear back too.
+  fn.transaction = jest.fn(async (body) => {
+    const snapshot = JSON.parse(JSON.stringify({ absences: state.absences, dispatchAlerts: state.dispatchAlerts }));
+    try {
+      return await body(fn);
+    } catch (err) {
+      state.absences = snapshot.absences;
+      state.dispatchAlerts = snapshot.dispatchAlerts;
+      throw err;
+    }
+  });
   fn.__state = state;
   fn.__reset = resetState;
   return fn;
@@ -197,6 +233,10 @@ jest.mock('../services/dispatch-alerts', () => ({
   resolveAlert: jest.fn(),
 }));
 
+jest.mock('../services/dispatch-assignment', () => ({
+  emitDispatchJobUpdate: jest.fn(),
+}));
+
 const db = require('../models/db');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const { applyAssignable } = require('../services/technician-eligibility');
@@ -204,7 +244,9 @@ const { inactiveCapabilitiesForServices } = require('../services/technician-capa
 const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('../services/scheduling/arrival-route');
 const SmartRebooker = require('../services/rebooker');
 const { createAlert, resolveAlert } = require('../services/dispatch-alerts');
+const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { addETDays, etDateString } = require('../utils/datetime-et');
+const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
 
 const {
   REASONS, techOutEnabled, markTechOut, clearTechOut, redistributeTechDay, rankBumpOrder,
@@ -268,8 +310,8 @@ describe('rankBumpOrder', () => {
   test('recurring-unconfirmed bumps first, one-time-confirmed bumps last', () => {
     const stops = [
       { id: 'a', status: 'confirmed', window_start: '09:00' }, // one-time, confirmed => 70
-      { id: 'b', recurring_parent_id: 'p1', status: 'pending', window_start: '10:00' }, // recurring, unconfirmed => 0
-      { id: 'c', recurring_parent_id: 'p2', status: 'confirmed', window_start: '11:00' }, // recurring, confirmed => 20
+      { id: 'b', is_recurring: true, status: 'pending', window_start: '10:00' }, // recurring, unconfirmed => 0
+      { id: 'c', is_recurring: true, status: 'confirmed', window_start: '11:00' }, // recurring, confirmed => 20
       { id: 'd', status: 'pending', window_start: '12:00' }, // one-time, unconfirmed => 50
     ];
     const ranked = rankBumpOrder(stops);
@@ -291,12 +333,28 @@ describe('rankBumpOrder', () => {
     rankBumpOrder([stop]);
     expect(stop.bump_reason).toBeUndefined();
   });
+
+  test('finding 6: a booster occurrence (recurring_parent_id set, is_recurring false) classifies as one-time, not recurring', () => {
+    const stops = [
+      // A genuine recurring child: is_recurring true (a booster is stored
+      // is_recurring=false precisely so cadence maintenance ignores it —
+      // recurring_parent_id alone must not drive this classification).
+      { id: 'child', is_recurring: true, recurring_parent_id: 'series-1', status: 'pending', window_start: '09:00' },
+      { id: 'booster', is_recurring: false, recurring_parent_id: 'series-1', status: 'pending', window_start: '10:00' },
+    ];
+    const ranked = rankBumpOrder(stops);
+    // The genuine recurring child bumps first (score 0); the booster scores
+    // like a one-time visit (score 50) despite carrying the same parent id.
+    expect(ranked.map((s) => s.id)).toEqual(['child', 'booster']);
+    expect(ranked[0].bump_reason).toMatch(/easiest to slide/);
+    expect(ranked[1].bump_reason).toMatch(/can still slide/);
+  });
 });
 
 const STOP = {
   id: 'stop-1', customer_id: 'cust-1', status: 'confirmed', service_type: 'general_pest',
   window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
-  recurring_parent_id: null, lat: null, lng: null, first_name: 'Sam', last_name: 'Jones',
+  recurring_parent_id: null, is_recurring: false, lat: null, lng: null, first_name: 'Sam', last_name: 'Jones',
 };
 
 describe('redistributeTechDay', () => {
@@ -316,6 +374,9 @@ describe('redistributeTechDay', () => {
         allowLive: true,
         expect: { technician_id: ABSENT_TECH },
         suppressTechNotice: false,
+        // finding 2: the rebooker re-checks capability on the move
+        // transaction itself through this caller-supplied guard.
+        moveGuard: expect.any(Function),
       },
     );
     expect(summary.moved).toEqual([{ job_id: STOP.id, to_technician_id: CANDIDATE.id, to_technician_name: CANDIDATE.name, detour_minutes: null }]);
@@ -323,6 +384,8 @@ describe('redistributeTechDay', () => {
     expect(summary.failed).toEqual([]);
     expect(summary.status).toBe('complete');
     expect(createAlert).not.toHaveBeenCalled();
+    // finding 8: every committed move gets a best-effort board broadcast.
+    expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: STOP.id, actorId: 'actor-1' });
   });
 
   test('no fitting tech parks the stop as a ranked tech_out_overflow alert', async () => {
@@ -478,8 +541,8 @@ describe('redistributeTechDay', () => {
     test('alerts are created in REVERSE bump order (highest bump_order first) so bump #1 lands newest on top', async () => {
       // Both stops park (empty crew short-circuits placeStop trivially).
       state.absentStops = [
-        { ...STOP, id: 'stop-recurring', recurring_parent_id: 'p1', status: 'pending', window_start: '09:00' }, // bump_score 0 -> bump_order 1
-        { ...STOP, id: 'stop-confirmed', recurring_parent_id: null, status: 'confirmed', window_start: '11:00' }, // bump_score 70 -> bump_order 2
+        { ...STOP, id: 'stop-recurring', is_recurring: true, status: 'pending', window_start: '09:00' }, // bump_score 0 -> bump_order 1
+        { ...STOP, id: 'stop-confirmed', is_recurring: false, status: 'confirmed', window_start: '11:00' }, // bump_score 70 -> bump_order 2
       ];
       state.crew = [];
 
@@ -495,6 +558,144 @@ describe('redistributeTechDay', () => {
       // The returned summary still lists parked stops in ascending bump order.
       expect(summary.parked.map((p) => p.bump_order)).toEqual([1, 2]);
       expect(summary.parked.map((p) => p.job_id)).toEqual(['stop-recurring', 'stop-confirmed']);
+    });
+  });
+
+  describe('grouped visit moves as a unit (finding 1)', () => {
+    test('processes ONE representative per visit, moving and broadcasting every member', async () => {
+      const MEMBER_A = {
+        ...STOP, id: 'member-a', visit_id: 'visit-1', service_type: 'general_pest', window_start: '09:00', window_end: '10:00',
+      };
+      const MEMBER_B = {
+        ...STOP, id: 'member-b', visit_id: 'visit-1', service_type: 'lawn_care', window_start: '09:00', window_end: '10:00',
+      };
+      state.absentStops = [MEMBER_A, MEMBER_B];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = [];
+      SmartRebooker.reschedule.mockResolvedValue({ success: true });
+
+      const summary = await redistributeTechDay({ technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1' });
+
+      // Only the representative (first in window order) is handed to the
+      // rebooker — moveVisitAsUnit moves the whole visit from there.
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(SmartRebooker.reschedule.mock.calls[0][0]).toBe(MEMBER_A.id);
+      // Every member gets its own moved entry and board broadcast.
+      expect(summary.moved).toEqual([
+        { job_id: MEMBER_A.id, to_technician_id: CANDIDATE.id, to_technician_name: CANDIDATE.name, detour_minutes: null },
+        { job_id: MEMBER_B.id, to_technician_id: CANDIDATE.id, to_technician_name: CANDIDATE.name, detour_minutes: null },
+      ]);
+      expect(summary.total).toBe(2); // total stays the stop count, not the unit count
+      expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: MEMBER_A.id, actorId: 'actor-1' });
+      expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: MEMBER_B.id, actorId: 'actor-1' });
+    });
+
+    test('a parked grouped visit creates ONE overflow alert shared by every member', async () => {
+      const MEMBER_A = { ...STOP, id: 'member-a', visit_id: 'visit-1', window_start: '09:00', window_end: '10:00' };
+      const MEMBER_B = { ...STOP, id: 'member-b', visit_id: 'visit-1', window_start: '09:00', window_end: '10:00' };
+      state.absentStops = [MEMBER_A, MEMBER_B];
+      state.crew = [CANDIDATE];
+      // Conflicts the shared window — nobody fits, so the unit parks.
+      state.overlapsByTech[CANDIDATE.id] = [{ window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }];
+
+      const summary = await redistributeTechDay({ technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1' });
+
+      expect(createAlert).toHaveBeenCalledTimes(1); // ONE alert for the whole unit
+      const call = createAlert.mock.calls[0][0];
+      expect(call.jobId).toBe(MEMBER_A.id); // the representative
+      expect(call.payload.visit_member_ids).toEqual([MEMBER_A.id, MEMBER_B.id]);
+      expect(summary.parked).toEqual([
+        { job_id: MEMBER_A.id, alert_id: `alert-${MEMBER_A.id}`, bump_order: 1 },
+        { job_id: MEMBER_B.id, alert_id: `alert-${MEMBER_A.id}`, bump_order: 1 },
+      ]);
+    });
+
+    test('a resume skips a whole visit when ANY member already carries an open overflow alert', async () => {
+      const MEMBER_A = { ...STOP, id: 'member-a', visit_id: 'visit-1' };
+      const MEMBER_B = { ...STOP, id: 'member-b', visit_id: 'visit-1' };
+      state.absentStops = [MEMBER_A, MEMBER_B];
+      state.crew = [];
+
+      // skipJobIds (as markTechOut's parkedJobIds would hand it, once
+      // widened to the union of job_id + payload.visit_member_ids) names
+      // only member-a — the whole visit must still be skipped.
+      const skipJobIds = new Set([MEMBER_A.id]);
+      const summary = await redistributeTechDay({
+        technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1', skipJobIds,
+      });
+
+      expect(createAlert).not.toHaveBeenCalled();
+      expect(summary.moved).toEqual([]);
+      expect(summary.parked).toEqual([]);
+      expect(summary.total).toBe(0);
+    });
+  });
+
+  describe('grouped visit capability check covers every member (finding 2)', () => {
+    test('a candidate inactive for ANY member\'s service_type is skipped for the whole unit', async () => {
+      const MEMBER_A = { ...STOP, id: 'member-a', visit_id: 'visit-1', service_type: 'general_pest' };
+      const MEMBER_B = { ...STOP, id: 'member-b', visit_id: 'visit-1', service_type: 'lawn_care' };
+      state.absentStops = [MEMBER_A, MEMBER_B];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = []; // would otherwise fit
+      // Inactive for lawn_care only — not general_pest.
+      inactiveCapabilitiesForServices.mockResolvedValue([{ technician_id: CANDIDATE.id, service_category: 'lawn', active: false }]);
+
+      const summary = await redistributeTechDay({ technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1' });
+
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(summary.parked).toHaveLength(2); // both members parked as one unit
+      const rows = inactiveCapabilitiesForServices.mock.calls[0][2];
+      expect(rows).toEqual(expect.arrayContaining([{ service_type: 'general_pest' }, { service_type: 'lawn_care' }]));
+    });
+
+    test('the moveGuard passed to the rebooker re-checks capability on the move transaction and throws CAPABILITY_INACTIVE', async () => {
+      state.absentStops = [{ ...STOP }];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = [];
+      SmartRebooker.reschedule.mockResolvedValue({ success: true });
+
+      await redistributeTechDay({ technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1' });
+
+      const { moveGuard } = SmartRebooker.reschedule.mock.calls[0][5];
+      inactiveCapabilitiesForServices.mockResolvedValueOnce([{ technician_id: CANDIDATE.id, active: false }]);
+      await expect(moveGuard({ trx: db, technicianId: CANDIDATE.id, service: { service_type: 'general_pest' } }))
+        .rejects.toMatchObject({ status: 409, code: 'CAPABILITY_INACTIVE' });
+    });
+  });
+
+  describe('office-review-pending bookings are never auto-moved (finding 3)', () => {
+    test('a pending, unconfirmed office-review booking is parked, never moved', async () => {
+      const PENDING_STOP = {
+        ...STOP, id: 'pending-stop', source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION, customer_confirmed: false,
+      };
+      state.absentStops = [PENDING_STOP];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = []; // would otherwise fit and move
+
+      const summary = await redistributeTechDay({ technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1' });
+
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(summary.moved).toEqual([]);
+      expect(summary.parked).toHaveLength(1);
+      const call = createAlert.mock.calls[0][0];
+      expect(call.payload.conflict_reason).toBe('office_review_pending');
+      expect(call.payload.bump_reason).toBe('Unreviewed office booking — review before moving');
+    });
+
+    test('a customer_confirmed office-review booking is eligible for auto-move (the office already reviewed it)', async () => {
+      const CONFIRMED_STOP = {
+        ...STOP, id: 'confirmed-stop', source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION, customer_confirmed: true,
+      };
+      state.absentStops = [CONFIRMED_STOP];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = [];
+      SmartRebooker.reschedule.mockResolvedValue({ success: true });
+
+      const summary = await redistributeTechDay({ technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1' });
+
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(summary.moved).toHaveLength(1);
     });
   });
 
@@ -668,6 +869,90 @@ describe('markTechOut', () => {
       expect(summary.parked[0].job_id).toBe(STOP_B.id);
     });
   });
+
+  describe('concurrent resume lease (finding 4)', () => {
+    test('a fresh (recent) running lease refuses a second resume — only one run at a time', async () => {
+      state.absences['absence-1'] = {
+        id: 'absence-1',
+        technician_id: ABSENT_TECH,
+        absence_date: DATE,
+        reason: 'sick',
+        cleared_at: null,
+        // Simulates: another request's markTechOut is genuinely in flight
+        // right now (claimed moments ago).
+        redistribution: { status: 'running', started_at: new Date().toISOString() },
+      };
+      state.crew = [CANDIDATE];
+
+      await expect(markTechOut({
+        technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-2',
+      })).rejects.toMatchObject({ status: 409, code: 'ALREADY_OUT' });
+
+      // Nothing ran — the lease it found was not claimable, so no
+      // redistribution pass and no lease overwrite.
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(state.absences['absence-1'].redistribution.status).toBe('running');
+    });
+
+    test('two POSTs racing the same fresh lease: only one resumes, the other 409s ALREADY_OUT', async () => {
+      // First POST creates the absence and starts (fresh, 'running' lease).
+      state.absentStops = [{ ...STOP }];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = [];
+      // The rebooker call never resolves within this test — the first
+      // request is still genuinely "in flight" when the second POST lands,
+      // exactly the race finding 4 closes.
+      let releaseFirst;
+      let notifyCalled;
+      const calledPromise = new Promise((resolve) => { notifyCalled = resolve; });
+      SmartRebooker.reschedule.mockImplementation(() => {
+        notifyCalled();
+        return new Promise((resolve) => { releaseFirst = resolve; });
+      });
+
+      const firstPromise = markTechOut({
+        technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-1',
+      });
+      // Let the first POST reach (and hang inside) SmartRebooker.reschedule
+      // — its 'running' lease is on the row well before this point — so the
+      // second POST below races a genuinely in-flight run.
+      await calledPromise;
+
+      await expect(markTechOut({
+        technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-2',
+      })).rejects.toMatchObject({ status: 409, code: 'ALREADY_OUT' });
+
+      releaseFirst({ success: true });
+      const { resumed } = await firstPromise;
+      expect(resumed).toBe(false); // the first POST was the original mark, not a resume
+    });
+
+    test('a stale (>10min) running lease MAY be resumed — the run that held it is presumed dead', async () => {
+      const STOP_B = { ...STOP, id: 'stop-b' };
+      state.absences['absence-1'] = {
+        id: 'absence-1',
+        technician_id: ABSENT_TECH,
+        absence_date: DATE,
+        reason: 'sick',
+        cleared_at: null,
+        redistribution: { status: 'running', started_at: new Date(Date.now() - 11 * 60 * 1000).toISOString() },
+      };
+      state.absentStops = [STOP_B];
+      state.crew = [CANDIDATE];
+      state.overlapsByTech[CANDIDATE.id] = [];
+      SmartRebooker.reschedule.mockResolvedValue({ success: true });
+
+      const { resumed, summary } = await markTechOut({
+        technicianId: ABSENT_TECH, date: DATE, reason: 'sick', actorId: 'actor-2',
+      });
+
+      expect(resumed).toBe(true);
+      expect(summary.status).toBe('complete');
+      expect(summary.moved).toEqual([
+        { job_id: STOP_B.id, to_technician_id: CANDIDATE.id, to_technician_name: CANDIDATE.name, detour_minutes: null },
+      ]);
+    });
+  });
 });
 
 describe('clearTechOut', () => {
@@ -682,7 +967,10 @@ describe('clearTechOut', () => {
     const result = await clearTechOut({ technicianId: ABSENT_TECH, date: DATE, actorId: 'actor-1' });
 
     expect(resolveAlert).toHaveBeenCalledTimes(1);
-    expect(resolveAlert).toHaveBeenCalledWith({ id: 'alert-1', resolvedBy: 'actor-1', auto: true });
+    // finding 5: the clear and every resolveAlert share ONE transaction.
+    expect(resolveAlert).toHaveBeenCalledWith({
+      id: 'alert-1', resolvedBy: 'actor-1', auto: true, trx: expect.anything(),
+    });
     expect(result.resolvedAlerts).toEqual([{ id: 'alert-1', resolved_at: 'NOW()' }]);
     expect(state.absences['abs-1'].cleared_at).toBe('NOW()');
     expect(state.absences['abs-1'].cleared_by).toBe('actor-1');
@@ -692,5 +980,22 @@ describe('clearTechOut', () => {
   test('clearing an absence that does not exist is NOT_OUT (404)', async () => {
     await expect(clearTechOut({ technicianId: ABSENT_TECH, date: DATE, actorId: 'actor-1' }))
       .rejects.toMatchObject({ status: 404, code: 'NOT_OUT' });
+  });
+
+  describe('atomic clear + resolve (finding 5)', () => {
+    test('a resolveAlert rejection rolls back the absence clear too — the row stays uncleared', async () => {
+      state.absences['abs-1'] = { id: 'abs-1', technician_id: ABSENT_TECH, absence_date: DATE, cleared_at: null };
+      state.dispatchAlerts = [
+        { id: 'alert-1', type: 'tech_out_overflow', tech_id: ABSENT_TECH, resolved_at: null },
+      ];
+      resolveAlert.mockRejectedValue(new Error('resolve boom'));
+
+      await expect(clearTechOut({ technicianId: ABSENT_TECH, date: DATE, actorId: 'actor-1' }))
+        .rejects.toThrow('resolve boom');
+
+      // The whole transaction rolled back — the absence is NOT cleared.
+      expect(state.absences['abs-1'].cleared_at).toBeNull();
+      expect(state.absences['abs-1'].cleared_by).toBeUndefined();
+    });
   });
 });

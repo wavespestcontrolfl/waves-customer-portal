@@ -7159,7 +7159,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE) —
       // covers a stale picker and the auto-assign path alike; recurring
       // children below inherit this row's tech, so one check fences both.
-      await assertAssignableTechnician(resolvedTechId, { conn: trx });
+      await assertAssignableTechnician(resolvedTechId, { conn: trx, date: String(scheduledDate).slice(0, 10) });
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,

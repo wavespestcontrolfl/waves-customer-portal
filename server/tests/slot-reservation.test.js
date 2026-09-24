@@ -405,6 +405,7 @@ describe('slot reservation helpers', () => {
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledBuilders.shift();
       if (table === 'technicians') return techBuilder;
+      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -447,6 +448,7 @@ describe('slot reservation helpers', () => {
       const trx = jest.fn((table) => {
         if (table === 'scheduled_services') return scheduledBuilders.shift();
         if (table === 'technicians') return techBuilder;
+        if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
         throw new Error(`unexpected table ${table}`);
       });
       trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -557,6 +559,7 @@ describe('slot reservation helpers', () => {
       const trx = jest.fn((table) => {
         if (table === 'scheduled_services') return scheduledBuilders.shift();
         if (table === 'technicians') return techBuilder;
+        if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
         throw new Error(`unexpected table ${table}`);
       });
       trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -668,6 +671,7 @@ describe('slot reservation helpers', () => {
       // Commit-time eligibility re-check (technician-eligibility.js): the held
       // tech is still assignable in these fixtures.
       if (table === 'technicians') return makeAssignableTechnicianBuilder();
+      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -1553,6 +1557,7 @@ describe('slot reservation helpers', () => {
       // Commit-time eligibility re-check (technician-eligibility.js): the held
       // tech is still assignable in these fixtures.
       if (table === 'technicians') return makeAssignableTechnicianBuilder();
+      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -1627,6 +1632,7 @@ describe('slot reservation helpers', () => {
       // Commit-time eligibility re-check (technician-eligibility.js): the held
       // tech is still assignable in these fixtures.
       if (table === 'technicians') return makeAssignableTechnicianBuilder();
+      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -1684,6 +1690,7 @@ describe('slot reservation helpers', () => {
       // Commit-time eligibility re-check (technician-eligibility.js): the held
       // tech is still assignable in these fixtures.
       if (table === 'technicians') return makeAssignableTechnicianBuilder();
+      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -2229,6 +2236,7 @@ describe('commitReservation enforces a configured close in capacity mode (Codex 
       if (table === 'scheduled_services') return scheduledBuilders.shift();
       if (table === 'technicians') return techBuilder;
       if (table === 'booking_config') return bookingConfigBuilder;
+      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));

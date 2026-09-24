@@ -35,6 +35,7 @@ function assignmentTrx() {
     const c = {};
     for (const m of ['where', 'whereNotIn', 'whereRaw', 'whereNull', 'modify', 'forShare']) c[m] = jest.fn(() => c);
     if (table === 'technicians') { c.first = jest.fn(async () => ASSIGNABLE); return c; }
+    if (table === 'technician_absences') { c.first = jest.fn(async () => null); return c; }
     if (table === 'scheduled_services') {
       // Bare first() is the pre-row read (caller-trx path); first(raw) is the day key.
       c.first = jest.fn(async (arg) => (arg === undefined ? JOB : { day: '2026-09-10' }));
@@ -57,7 +58,10 @@ describe('assignDispatchJob → tech notice', () => {
     jest.clearAllMocks();
     const jobChain = { where: jest.fn(() => jobChain), first: jest.fn(async () => JOB) };
     const techChain = { where: jest.fn(() => techChain), first: jest.fn(async () => ASSIGNABLE) };
-    db.mockImplementation((table) => (table === 'scheduled_services' ? jobChain : techChain));
+    // assertAssignableTechnician now also reads technician_absences for the
+    // job's date (GATE_TECH_OUT_REDISTRIBUTE) — no absence here.
+    const absenceChain = { where: jest.fn(() => absenceChain), whereNull: jest.fn(() => absenceChain), first: jest.fn(async () => null) };
+    db.mockImplementation((table) => (table === 'scheduled_services' ? jobChain : table === 'technician_absences' ? absenceChain : techChain));
     db.transaction = jest.fn(async (cb) => cb(assignmentTrx()));
     ({ assignDispatchJob } = require('../services/dispatch-assignment'));
   });
@@ -102,7 +106,10 @@ describe('assignDispatchJob → tech notice', () => {
   test('a no-op assignment (same tech) never notifies', async () => {
     const jobChain = { where: jest.fn(() => jobChain), first: jest.fn(async () => ({ ...JOB, technician_id: 't-new' })) };
     const techChain = { where: jest.fn(() => techChain), first: jest.fn(async () => ASSIGNABLE) };
-    db.mockImplementation((table) => (table === 'scheduled_services' ? jobChain : techChain));
+    // assertAssignableTechnician now also reads technician_absences for the
+    // job's date (GATE_TECH_OUT_REDISTRIBUTE) — no absence here.
+    const absenceChain = { where: jest.fn(() => absenceChain), whereNull: jest.fn(() => absenceChain), first: jest.fn(async () => null) };
+    db.mockImplementation((table) => (table === 'scheduled_services' ? jobChain : table === 'technician_absences' ? absenceChain : techChain));
     const out = await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: 'adam' });
     expect(out.changed).toBe(false);
     expect(mockNotifyAssignmentChange).not.toHaveBeenCalled();

@@ -3273,7 +3273,7 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
         // explicit override that is not assignable is a 422.
         if (insertData.technician_id) {
           try {
-            await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+            await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(date).slice(0, 10) });
           } catch (eligErr) {
             if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
             logger.warn(`[dispatch] follow-up inherits technician ${insertData.technician_id} who is not assignable; booking unassigned`);

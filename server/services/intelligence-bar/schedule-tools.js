@@ -1649,8 +1649,8 @@ async function swapTechAssignments(input, actionContext = {}) {
       // Only a tech RECEIVING stops must be assignable: swapping an offboarded
       // tech's remaining route onto an eligible one is exactly how their
       // retained future work gets reassigned.
-      if (bIds.length) await assertAssignableTechnician(techA.id, { conn: trx });
-      if (aIds.length) await assertAssignableTechnician(techB.id, { conn: trx });
+      if (bIds.length) await assertAssignableTechnician(techA.id, { conn: trx, date });
+      if (aIds.length) await assertAssignableTechnician(techB.id, { conn: trx, date });
       if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
       // The COMMITTED schedule of every swapped row rides back for the
       // notices (pre-push audit P1): a same-day window edit landing between

@@ -69,6 +69,11 @@ function mockTables() {
     if (table === 'booking_config') {
       return { first: jest.fn().mockResolvedValue({}) };
     }
+    if (table === 'technician_absences') {
+      // assertAssignableTechnician also reads the tech's absence for the
+      // booking date (GATE_TECH_OUT_REDISTRIBUTE) — none here.
+      return { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    }
     if (table === 'technicians') {
       return {
         where: jest.fn().mockReturnThis(),
@@ -365,6 +370,11 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       };
       return b;
     }
+    if (table === 'technician_absences') {
+      // assertAssignableTechnician also reads the tech's absence for the
+      // booking date (GATE_TECH_OUT_REDISTRIBUTE) — none here.
+      return { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    }
     if (table === 'technicians') {
       // In-transaction eligibility re-check (technician-eligibility.js).
       return {
@@ -395,6 +405,11 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       }
       if (table === 'booking_config') {
         return { first: jest.fn().mockResolvedValue({}) };
+      }
+      if (table === 'technician_absences') {
+        // assertAssignableTechnician also reads the tech's absence for the
+        // booking date (GATE_TECH_OUT_REDISTRIBUTE) — none here.
+        return { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
       }
       if (table === 'technicians') {
         return {

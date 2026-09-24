@@ -2598,7 +2598,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
         if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
         if (options.technicianId !== undefined) {
-          await assertAssignableTechnician(options.technicianId || null, { conn: t });
+          await assertAssignableTechnician(options.technicianId || null, { conn: t, date: newDateStr });
           patch.technician_id = options.technicianId || null;
         }
         // Mirror the normal retarget's lifecycle reset (codex r43): a
@@ -3193,7 +3193,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         patch.stop_seq = await nextStopSeq(t, newKey);
       }
       if (options.technicianId !== undefined) {
-        await assertAssignableTechnician(options.technicianId || null, { conn: t });
+        await assertAssignableTechnician(options.technicianId || null, { conn: t, date: newDateStr });
         patch.technician_id = options.technicianId || null;
       }
       if (plan.anyLive || newDateStr !== plan.oldDate) {

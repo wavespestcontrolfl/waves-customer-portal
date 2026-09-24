@@ -31,7 +31,7 @@ const initialBoard = {
 };
 
 describe('refreshTechs (Codex P2 on PR #4678)', () => {
-  it('re-fetches the board and merges fresh tech rows without touching jobs[]', async () => {
+  it('re-fetches the board, merges fresh tech rows, and replaces jobs[] from the same response', async () => {
     fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
     const { result } = renderHook(() => useDispatchBoard());
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -42,9 +42,8 @@ describe('refreshTechs (Codex P2 on PR #4678)', () => {
       ok: true,
       json: async () => ({
         techs: [{ id: 'tech-1', name: 'Tech One', status: 'idle', out_today: true, updated_at: 't1' }],
-        // A real board refresh answer would still carry jobs, but
         // refreshTechs must not apply them.
-        jobs: [{ id: 'job-1', technician_id: 'tech-2', status: 'confirmed', address: 'should not apply' }],
+        jobs: [{ id: 'job-1', technician_id: 'tech-2', status: 'confirmed', address: '456 Moved Ln' }],
       }),
     });
 
@@ -52,9 +51,10 @@ describe('refreshTechs (Codex P2 on PR #4678)', () => {
 
     expect(result.current.techs[0].out_today).toBe(true);
     expect(result.current.techs[0].updated_at).toBe('t1');
-    // jobs[] reference and content are untouched by refreshTechs.
-    expect(result.current.jobs).toBe(jobsBefore);
-    expect(result.current.jobs[0].technician_id).toBe('tech-1');
+    // jobs[] is replaced from the refresh response so redistributed stops
+    // show under their new technician without a socket round-trip.
+    expect(result.current.jobs).not.toBe(jobsBefore);
+    expect(result.current.jobs[0].technician_id).toBe('tech-2');
   });
 
   it('leaves the roster as-is and does not throw when the refresh fetch fails', async () => {

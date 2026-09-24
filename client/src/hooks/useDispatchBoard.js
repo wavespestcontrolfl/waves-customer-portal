@@ -43,10 +43,10 @@
  * GET /board and merges the fresh tech rows into techsMap by id — used
  * after a tech-out mark-out/clear mutation so out_today and the roster's
  * derived status reflect the server immediately, without waiting on a
- * broadcast. It deliberately leaves jobs[] untouched: the tech-out
- * redistribution reassigns stops through the same assignDispatchJob path
- * drag-to-reassign uses, which already emits dispatch:job_update per job
- * — refetching jobs here would just duplicate that broadcast.
+ * broadcast. It also replaces jobs[] from the same response (Codex r3 P1
+ * on #4678): the server broadcasts dispatch:job_update per moved stop, but
+ * this tab's own board must not depend on a socket round-trip to show the
+ * stops under their new technician.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
@@ -166,6 +166,7 @@ export function useDispatchBoard() {
         for (const t of data.techs || []) next.set(t.id, t);
         return next;
       });
+      setJobs(data.jobs || []);
     } catch {
       // Best-effort: this follows a mutation that already succeeded
       // (mark out / tech is back). `error` is reserved for the initial

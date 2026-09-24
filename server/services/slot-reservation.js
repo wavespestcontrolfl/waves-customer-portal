@@ -1710,7 +1710,7 @@ async function commitReservation({
     // accept flow already handles (customer re-picks a time).
     if (row.technician_id) {
       try {
-        await assertAssignableTechnician(row.technician_id, { conn: client });
+        await assertAssignableTechnician(row.technician_id, { conn: client, date: dateOnly(row.scheduled_date) });
       } catch (eligErr) {
         if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
         const err = new Error('slot technician is not available');
@@ -2440,7 +2440,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // Same error codes, so the route and client recovery are unchanged.
     if (row.technician_id) {
       try {
-        await assertAssignableTechnician(row.technician_id, { conn: trx });
+        await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate });
       } catch (eligErr) {
         if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
         const err = new Error('slot technician is not available');

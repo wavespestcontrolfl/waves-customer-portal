@@ -24,9 +24,17 @@ const { windowsOverlap, DEFAULT_EXCLUDE_STATUSES } = require('./scheduling/occup
 const { driveMin, resolveGeo, HQ } = require('./auto-dispatch/geo');
 const SmartRebooker = require('./rebooker');
 const { createAlert, resolveAlert } = require('./dispatch-alerts');
+const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+const { emitDispatchJobUpdate } = require('./dispatch-assignment');
 
 const REASONS = ['sick', 'emergency', 'no_show', 'other'];
 const MAX_NOTE_LENGTH = 300;
+// A resume's lease staleness window (finding 4): a 'running' redistribution
+// younger than this is presumed genuinely in-flight (another request, or
+// this one before it finished) and refuses a concurrent resume; older than
+// this, the run that held it is presumed dead (crash, deploy) and it may
+// be re-claimed.
+const RESUME_LEASE_STALE_MINUTES = 10;
 // The absent tech's own stops that redistribution considers moving. An
 // en_route stop stays IN — a tech pulled off the road mid-drive still
 // needs that stop covered by someone. on_site drops out: the tech is
@@ -73,14 +81,21 @@ async function getTechOut({ technicianId, date }) {
 
 /**
  * rankBumpOrder — pure. Sorts parked stops "bump first" ascending by score:
- *   recurring (recurring_parent_id set) +0, else +50
+ *   recurring (is_recurring === true) +0, else +50
  *   status 'confirmed' +20
  * Ties → later window_start sorts first (more room to still move that day).
  * Returns new objects (does not mutate input) with `bump_reason` attached.
+ *
+ * is_recurring alone classifies "recurring" (not recurring_parent_id): a
+ * series root carries is_recurring true with a null parent, while a
+ * booster occurrence carries a parent but is stored is_recurring=false
+ * precisely so cadence maintenance ignores it (see
+ * auto-dispatch/eligibility.js) — recurring_parent_id alone would
+ * misclassify a booster as the easiest-to-slide recurring visit.
  */
 function rankBumpOrder(stops) {
   const scored = (stops || []).map((stop) => {
-    const recurring = !!stop.recurring_parent_id;
+    const recurring = stop.is_recurring === true;
     const confirmed = stop.status === 'confirmed';
     const score = (recurring ? 0 : 50) + (confirmed ? 20 : 0);
     let bump_reason;
@@ -214,11 +229,18 @@ function compareDetour(a, b) {
  *   { placed: true, best: { id, name, detour_minutes } }
  * or
  *   { placed: false, near_misses: [{ technician_id, technician_name, conflict_reason, detour_minutes }] }
+ *
+ * `memberServiceTypes` (optional): for a grouped visit, the service_type of
+ * EVERY member — a candidate inactive for ANY one of them cannot take the
+ * unit, not just the representative's own service. Defaults to the
+ * representative's own service_type (an ungrouped stop is its own unit).
  */
-async function placeStop(stop, crew, date) {
+async function placeStop(stop, crew, date, memberServiceTypes) {
   if (!crew.length) return { placed: false, near_misses: [] };
 
-  const inactive = await inactiveCapabilitiesForServices(db, crew.map((c) => c.id), [{ service_type: stop.service_type }]);
+  const capabilityRows = (memberServiceTypes && memberServiceTypes.length ? memberServiceTypes : [stop.service_type])
+    .map((service_type) => ({ service_type }));
+  const inactive = await inactiveCapabilitiesForServices(db, crew.map((c) => c.id), capabilityRows);
   const inactiveIds = new Set(inactive.map((r) => r.technician_id));
 
   const evaluations = [];
@@ -267,14 +289,27 @@ async function placeStop(stop, crew, date) {
   };
 }
 
-/** The still-open tech_out_overflow alerts' job ids for a tech+date — a resume must not re-park them. */
+/**
+ * The still-open tech_out_overflow alerts' ids for a tech+date — a resume
+ * must not re-park them. Includes both the alert's own job_id (the
+ * representative for a grouped visit) and every id in
+ * payload.visit_member_ids (finding 1: a resume must skip a whole visit
+ * when ANY member already has an open overflow alert), so a caller that
+ * skips every id in this set naturally skips the whole visit.
+ */
 async function parkedJobIds({ technicianId, date }) {
   const rows = await db('dispatch_alerts')
     .where({ type: 'tech_out_overflow', tech_id: technicianId })
     .whereNull('resolved_at')
     .whereRaw("payload->>'date' = ?", [date])
-    .select('job_id');
-  return new Set(rows.map((r) => r.job_id));
+    .select('job_id', 'payload');
+  const ids = new Set();
+  for (const row of rows) {
+    if (row.job_id) ids.add(row.job_id);
+    const memberIds = row.payload && row.payload.visit_member_ids;
+    if (Array.isArray(memberIds)) for (const id of memberIds) ids.add(id);
+  }
+  return ids;
 }
 
 /**
@@ -304,14 +339,55 @@ async function redistributeTechDay({
       'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.status',
       'scheduled_services.service_type', 'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.estimated_duration_minutes', 'scheduled_services.recurring_parent_id',
-      'scheduled_services.visit_id',
+      'scheduled_services.is_recurring', 'scheduled_services.visit_id',
+      'scheduled_services.source_action', 'scheduled_services.customer_confirmed',
       ...guardedCoordSelects(db),
       'customers.first_name', 'customers.last_name',
     ],
   }).orderBy('scheduled_services.window_start', 'asc');
+
+  // A resume must skip a whole grouped visit when ANY of its members
+  // already carries an open overflow alert (finding 1) — parkedJobIds
+  // (markTechOut) already returns the union of every alert's job_id and
+  // payload.visit_member_ids, so widening the skip set to every member of
+  // a visit any of whose ids appears there covers it.
+  const skipVisitIds = new Set();
+  if (skipJobIds && skipJobIds.size) {
+    for (const s of allStops) {
+      if (s.visit_id && skipJobIds.has(s.id)) skipVisitIds.add(s.visit_id);
+    }
+  }
   const stops = skipJobIds && skipJobIds.size
-    ? allStops.filter((s) => !skipJobIds.has(s.id))
+    ? allStops.filter((s) => !skipJobIds.has(s.id) && !(s.visit_id && skipVisitIds.has(s.visit_id)))
     : allStops;
+
+  // allStops carries one row per visit member (finding 1): group them so
+  // every member id — and every member's service_type, for the capability
+  // check (finding 2) — is reachable from a visit's representative stop.
+  const membersByVisit = new Map();
+  for (const s of stops) {
+    if (!s.visit_id) continue;
+    if (!membersByVisit.has(s.visit_id)) membersByVisit.set(s.visit_id, []);
+    membersByVisit.get(s.visit_id).push(s);
+  }
+  const memberIdsFor = (stop) => (
+    stop.visit_id ? (membersByVisit.get(stop.visit_id) || [stop]).map((m) => m.id) : [stop.id]
+  );
+  const memberServiceTypesFor = (stop) => (
+    stop.visit_id ? (membersByVisit.get(stop.visit_id) || [stop]).map((m) => m.service_type) : [stop.service_type]
+  );
+  // Process ONE representative per visit — everything else (capability
+  // check, placement, the rebooker call) considers the whole visit through
+  // it, and every member gets its own moved/parked entry from the result.
+  const seenVisitIds = new Set();
+  const units = [];
+  for (const s of stops) {
+    if (s.visit_id) {
+      if (seenVisitIds.has(s.visit_id)) continue;
+      seenVisitIds.add(s.visit_id);
+    }
+    units.push(s);
+  }
 
   const crew = await applyAssignable(db('technicians'))
     .whereNot('technicians.id', technicianId)
@@ -330,11 +406,39 @@ async function redistributeTechDay({
   const failed = [];
   const toPark = [];
 
+  // Re-checked on the move transaction itself (finding 2): the capability
+  // pre-check above is a point-in-time read; a category flipped inactive
+  // between it and the write is caught here, before the first write, for
+  // BOTH the single-row path (keptTechId = the destination tech on a tech
+  // change) and every grouped member's own re-point (visit-groups.js's
+  // alignMember calls this at technicianId = the destination tech too).
+  async function capabilityMoveGuard({ trx, technicianId: destTechId, service }) {
+    if (!destTechId || !service || !service.service_type) return;
+    const inactive = await inactiveCapabilitiesForServices(trx, [destTechId], [{ service_type: service.service_type }]);
+    if (inactive.length) {
+      throw Object.assign(new Error(`Technician ${destTechId} is not capable of ${service.service_type}`), {
+        status: 409, statusCode: 409, code: 'CAPABILITY_INACTIVE',
+      });
+    }
+  }
+
   try {
-    for (const stop of stops) {
+    for (const stop of units) {
+      const memberIds = memberIdsFor(stop);
+      // Office-review-pending bookings (finding 3): the office has not yet
+      // confirmed this AI-created booking, so activateLegacyOutboundReviewRowIfNeeded
+      // (rebooker post-commit) would run on a move the office hasn't seen
+      // yet. Never moved — always parked for a human to review first.
+      const isOfficeReviewPending = OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(stop.source_action)
+        && !stop.customer_confirmed;
+      if (isOfficeReviewPending) {
+        toPark.push({ stop, near_misses: [], officeReviewPending: true, memberIds });
+        continue;
+      }
+
       // Sequential by design: a later stop's fit test (and the crew's
       // occupancy) must see this move.
-      const placement = await placeStop(stop, crew, date);
+      const placement = await placeStop(stop, crew, date, memberServiceTypesFor(stop));
       if (placement.placed) {
         try {
           // The canonical mover: a grouped stop (visit_id set) moves its
@@ -355,14 +459,25 @@ async function redistributeTechDay({
               allowLive: true,
               expect: { technician_id: technicianId },
               suppressTechNotice: false,
+              moveGuard: capabilityMoveGuard,
             },
           );
-          moved.push({
-            job_id: stop.id,
-            to_technician_id: placement.best.id,
-            to_technician_name: placement.best.name,
-            detour_minutes: placement.best.detour_minutes,
-          });
+          // moveVisitAsUnit moves every member of a grouped visit — one
+          // moved entry (and one best-effort board broadcast) per member,
+          // not just the representative (finding 1 + finding 8).
+          for (const memberId of memberIds) {
+            moved.push({
+              job_id: memberId,
+              to_technician_id: placement.best.id,
+              to_technician_name: placement.best.name,
+              detour_minutes: placement.best.detour_minutes,
+            });
+            try {
+              await emitDispatchJobUpdate({ jobId: memberId, actorId });
+            } catch (broadcastErr) {
+              logger.warn(`[tech-out] dispatch board broadcast failed for ${memberId}: ${broadcastErr.message}`);
+            }
+          }
         } catch (err) {
           // A failed move (CAS race, destination conflict, rebooker refusal)
           // must not strand the stop on the absent tech with no path
@@ -373,6 +488,7 @@ async function redistributeTechDay({
           toPark.push({
             stop,
             move_error: err.message,
+            memberIds,
             near_misses: [{
               technician_id: placement.best.id, technician_name: placement.best.name,
               conflict_reason: 'move_failed', detour_minutes: placement.best.detour_minutes,
@@ -380,14 +496,16 @@ async function redistributeTechDay({
           });
         }
       } else {
-        toPark.push({ stop, near_misses: placement.near_misses });
+        toPark.push({ stop, near_misses: placement.near_misses, memberIds });
       }
     }
 
     const ranked = rankBumpOrder(toPark.map((p) => p.stop));
     const nearMissById = new Map(toPark.map((p) => [p.stop.id, p.near_misses]));
     const moveErrorById = new Map(toPark.filter((p) => p.move_error).map((p) => [p.stop.id, p.move_error]));
-    const newlyParked = new Array(ranked.length);
+    const memberIdsById = new Map(toPark.map((p) => [p.stop.id, p.memberIds]));
+    const officeReviewIds = new Set(toPark.filter((p) => p.officeReviewPending).map((p) => p.stop.id));
+    const newlyParkedByUnit = new Array(ranked.length);
     // Insert alerts in REVERSE bump order (highest bump_order — "bump
     // last" — created FIRST, bump #1 — "bump first" — created LAST): the
     // Action Queue hydrates by created_at DESC and prepends socket events,
@@ -395,6 +513,7 @@ async function redistributeTechDay({
     // itself still numbers ascending from 1 in the payload either way.
     for (let i = ranked.length - 1; i >= 0; i -= 1) {
       const stop = ranked[i];
+      const memberIds = memberIdsById.get(stop.id) || [stop.id];
       const alert = await createAlert({
         type: 'tech_out_overflow',
         severity: 'warn',
@@ -410,14 +529,18 @@ async function redistributeTechDay({
           window_end: stop.window_end,
           bump_order: i + 1,
           bump_total: ranked.length,
-          bump_reason: stop.bump_reason,
+          bump_reason: officeReviewIds.has(stop.id) ? 'Unreviewed office booking — review before moving' : stop.bump_reason,
           near_misses: (nearMissById.get(stop.id) || []).slice(0, 3),
           ...(moveErrorById.has(stop.id) ? { move_error: moveErrorById.get(stop.id) } : {}),
+          ...(officeReviewIds.has(stop.id) ? { conflict_reason: 'office_review_pending' } : {}),
+          ...(memberIds.length > 1 ? { visit_member_ids: memberIds } : {}),
         },
       });
-      newlyParked[i] = { job_id: stop.id, alert_id: alert.id, bump_order: i + 1 };
+      // One alert per unit, shared across every member of a grouped visit
+      // (finding 1) — a single-stop unit gets its own one-entry array.
+      newlyParkedByUnit[i] = memberIds.map((jobId) => ({ job_id: jobId, alert_id: alert.id, bump_order: i + 1 }));
     }
-    const parked = [...priorParked, ...newlyParked];
+    const parked = [...priorParked, ...newlyParkedByUnit.flat()];
 
     logger.info(`[tech-out] redistributed ${date} for ${absentTech?.name || technicianId}: ${moved.length} moved, ${parked.length} parked, ${failed.length} failed (of ${priorTotal ?? stops.length})`);
 
@@ -471,23 +594,54 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
 
   let absence;
   let resumed = false;
+  // priorRedistribution: the summary a RESUMED run merges onto — captured
+  // BEFORE the claim below overwrites the row's redistribution with the
+  // fresh lease, so a resume never loses the earlier attempt's moved/
+  // parked/failed lists (finding 4).
+  let priorRedistribution = null;
   try {
     const rows = await db('technician_absences')
       .insert({
         technician_id: technicianId, absence_date: normalizedDate, reason, note: note || null, created_by: actorId || null,
+        // The lease (finding 4): a fresh mark starts 'running' immediately —
+        // the partial unique index (WHERE cleared_at IS NULL) already
+        // serializes concurrent inserts for the same tech+date, so no
+        // separate claim is needed here, only for a RESUME below.
+        redistribution: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }),
       })
       .returning('*');
     absence = rows[0];
   } catch (err) {
     if (err && err.code === '23505') {
       const existing = await getTechOut({ technicianId, date: normalizedDate });
-      const incomplete = existing && (!existing.redistribution || existing.redistribution.status !== 'complete');
-      if (incomplete) {
-        resumed = true;
-        absence = existing;
-      } else {
+      if (!existing) {
+        // The row that caused the unique-constraint miss is already gone
+        // (cleared between the failed insert and this read) — the safe
+        // read is "already out", not a silent fall-through.
         throw serviceError(409, 'ALREADY_OUT', `${tech.name} is already marked out for ${normalizedDate}`);
       }
+      priorRedistribution = existing.redistribution;
+      // Atomic claim (finding 4): only a row that is unstarted (null),
+      // partial (a prior run threw), or 'running' with a stale lease (the
+      // run that held it died without persisting partial/complete) may be
+      // resumed. Zero rows back ⇒ either truly complete, or another
+      // request is genuinely running this resume right now — either way
+      // this request 409s instead of racing it.
+      const claimed = await db('technician_absences')
+        .where({ id: existing.id })
+        .whereNull('cleared_at')
+        .whereRaw(`(
+          redistribution IS NULL
+          OR redistribution->>'status' = 'partial'
+          OR (redistribution->>'status' = 'running' AND (redistribution->>'started_at')::timestamptz < now() - interval '${RESUME_LEASE_STALE_MINUTES} minutes')
+        )`)
+        .update({ redistribution: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }) })
+        .returning('*');
+      if (!claimed.length) {
+        throw serviceError(409, 'ALREADY_OUT', `${tech.name} is already marked out for ${normalizedDate}`);
+      }
+      resumed = true;
+      [absence] = claimed;
     } else {
       throw err;
     }
@@ -504,7 +658,7 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
     actorId,
     absenceId: absence.id,
     skipJobIds,
-    priorSummary: resumed ? absence.redistribution : null,
+    priorSummary: resumed ? priorRedistribution : null,
   });
   const [updated] = await db('technician_absences')
     .where({ id: absence.id })
@@ -514,16 +668,18 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
   return { absence: updated || { ...absence, redistribution: summary }, summary, resumed };
 }
 
-/** Clear a technician's absence for a date; resolves parked overflow alerts, moves nothing back. */
+/**
+ * Clear a technician's absence for a date; resolves parked overflow alerts,
+ * moves nothing back.
+ *
+ * The absence UPDATE and every resolveAlert run inside ONE db.transaction
+ * (finding 5): a resolveAlert rejection rolls the clear back too, so the
+ * absence never ends up cleared with its overflow alerts left dangling
+ * open (or vice versa).
+ */
 async function clearTechOut({ technicianId, date, actorId }) {
   const absence = await getTechOut({ technicianId, date });
   if (!absence) throw serviceError(404, 'NOT_OUT', 'Technician is not marked out for this date');
-
-  const rows = await db('technician_absences')
-    .where({ id: absence.id })
-    .update({ cleared_at: db.fn.now(), cleared_by: actorId || null })
-    .returning('*');
-  const updated = rows[0];
 
   const openAlerts = await db('dispatch_alerts')
     .where({ type: 'tech_out_overflow', tech_id: technicianId })
@@ -532,11 +688,22 @@ async function clearTechOut({ technicianId, date, actorId }) {
     .select('id');
 
   const resolvedAlerts = [];
-  for (const { id } of openAlerts) {
-    // resolveAlert is the sole writer; small set, order doesn't matter.
-    const row = await resolveAlert({ id, resolvedBy: actorId, auto: true });
-    if (row) resolvedAlerts.push(row);
-  }
+  const updated = await db.transaction(async (trx) => {
+    const rows = await trx('technician_absences')
+      .where({ id: absence.id })
+      .update({ cleared_at: trx.fn.now(), cleared_by: actorId || null })
+      .returning('*');
+    for (const { id } of openAlerts) {
+      // resolveAlert is the sole writer; small set, order doesn't matter.
+      // A rejection here throws out of this callback and rolls the whole
+      // transaction back — the clear above included.
+      const row = await resolveAlert({
+        id, resolvedBy: actorId, auto: true, trx,
+      });
+      if (row) resolvedAlerts.push(row);
+    }
+    return rows[0];
+  });
 
   logger.info(`[tech-out] cleared absence ${absence.id} for ${technicianId} on ${date}; resolved ${resolvedAlerts.length} overflow alert(s)`);
 
