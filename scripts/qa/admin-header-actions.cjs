@@ -16,7 +16,7 @@ const {default:Header}=await import('/src/components/admin/AdminCommandHeader.js
 const {UiSurface}=await import('/src/components/ui/UiSurface.jsx');
 const {CalendarPlus,Plus,Users}=await import('/node_modules/.vite/deps/lucide-react.js');
 const rows=[
- ['Schedule','Add Appointment','legacy','framed','Auto-Dispatch'],
+ ['Schedule','Add Appointment','legacy','framed'],
  ['Customers','Add Customer','comfortable','workspace'],
  ['Pipeline','New lead','comfortable','workspace','Create estimate'],
  ['Contracts','New template','comfortable','workspace'],

@@ -3,7 +3,6 @@
  * Tabs rendered as one centered pill:
  *   - "Overview"           — AgentOpsPage (fleet health cards + task queue),
  *                            or the Control center once features.ledger is enabled
- *   - "Dispatch"           — Auto-Dispatch run history and visit decisions
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
  *   - "Pending Drafts"     — PendingDraftsTab (owner-approval queue for
  *                            parked message_drafts; approve/revise sends)
@@ -70,7 +69,6 @@ const TAB_LIST = [
   // working) — GATE_AGENT_ACTIVITY; the tab renders a "not enabled" note
   // while the gate is off (the endpoint answers { available: false }).
   { key: TABS.ACTIVITY, label: "Runs", Icon: Activity },
-  { key: TABS.DISPATCH, label: "Dispatch", Icon: Bot, adminOnly: true },
   { key: TABS.DECISIONS, label: "Decisions", Icon: ListChecks },
   { key: TABS.DRAFTS, label: "Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow", Icon: MessageSquareDashed },
@@ -126,13 +124,14 @@ export default function AgentsHubPage() {
     return () => { disposed = true; };
   }, []);
   const queueAvailable = hub.features.queue === true;
-  // Keep the gated Control center and admin-only Dispatch oversight together.
+  // Auto-Dispatch is autonomous. Its diagnostic deep links remain admin-only,
+  // but it is no longer a section in the everyday navigation.
   const controlCenter = hub.features.ledger === true;
-  const tabList = (queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST)
-    .filter(({ adminOnly }) => !adminOnly || getAdminUser()?.role === "admin");
+  const tabList = queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST;
   const validTabs = tabList.map((t) => t.key);
   const paramTab = searchParams.get(TAB_KEY);
-  const tab = validTabs.includes(paramTab) ? paramTab : TABS.OVERVIEW;
+  const diagnosticDispatch = paramTab === TABS.DISPATCH && getAdminUser()?.role === "admin";
+  const tab = diagnosticDispatch || validTabs.includes(paramTab) ? paramTab : TABS.OVERVIEW;
   const setTab = useCallback(
     (next) => {
       // Re-clicking the active section renders nothing new — skip the URL

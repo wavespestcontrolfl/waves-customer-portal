@@ -83,13 +83,10 @@ describe("AdminDispatchPage", () => {
     ));
   });
 
-  it("links to Agent Ops from Schedule without embedding a duplicate workspace", async () => {
+  it("keeps autonomous dispatch out of Schedule controls", () => {
     renderSchedule("/admin/dispatch?tab=board");
-    fireEvent.click(screen.getByRole("button", { name: "Auto-Dispatch" }));
-    await waitFor(() => expect(screen.getByTestId("location-search")).toHaveTextContent(
-      "/admin/agents?tab=dispatch",
-    ));
-    expect(screen.queryByText("Embedded automation workspace")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Auto-Dispatch" })).not.toBeInTheDocument();
+    expect(screen.getByText("Dispatch board workspace")).toBeInTheDocument();
   });
 
   it("hides the admin-only Automation tab from technician accounts", () => {
