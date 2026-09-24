@@ -144,6 +144,49 @@ function strictBool(v) {
   return v === true || String(v).trim().toLowerCase() === 'true';
 }
 
+const VISION_SEVERITY_VALUES = new Set(['none', 'minor', 'moderate', 'severe']);
+const VISION_THATCH_VALUES = new Set(['low', 'moderate', 'high']);
+const VISION_GRASS_TYPE_VALUES = new Set(['st_augustine', 'bermuda', 'zoysia', 'bahia', 'mixed']);
+
+// Codex P1 (2026-09-24): a syntactically valid response with a missing or
+// malformed schema (e.g. `{}`, or a turf_density outside 0-100) is still a
+// truthy object — without this check it reads as a real score set, skips the
+// Claude fallback, and lets mapToDisplayScores turn the missing fields into
+// false "zero density" stress findings. Validates the VISION_PROMPT contract
+// field-by-field; called AFTER strictBool/normalizeDetectedGrass have already
+// normalized overwatering_signal / grass_type on the parsed object.
+// Models sometimes quote numbers ("82") or capitalize enums ("None"). Coerce
+// those in place first so the validator rejects only genuinely missing or
+// out-of-range fields, not formatting noise.
+function normalizeVisionScores(parsed) {
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  for (const field of ['turf_density', 'weed_coverage', 'color_health']) {
+    const v = parsed[field];
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) parsed[field] = Number(v);
+  }
+  for (const field of ['fungal_activity', 'insect_damage', 'drought_stress', 'mechanical_damage', 'thatch_visibility']) {
+    if (typeof parsed[field] === 'string') parsed[field] = parsed[field].trim().toLowerCase();
+  }
+  return parsed;
+}
+
+function isValidVisionScores(parsed) {
+  if (!parsed || typeof parsed !== 'object') return false;
+  const numberInRange = (v, min, max) => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
+  if (!numberInRange(parsed.turf_density, 0, 100)) return false;
+  if (!numberInRange(parsed.weed_coverage, 0, 100)) return false;
+  if (!numberInRange(parsed.color_health, 1, 10)) return false;
+  for (const field of ['fungal_activity', 'insect_damage', 'drought_stress', 'mechanical_damage']) {
+    if (!VISION_SEVERITY_VALUES.has(parsed[field])) return false;
+  }
+  if (!VISION_THATCH_VALUES.has(parsed.thatch_visibility)) return false;
+  // normalizeDetectedGrass already collapses "unknown"/unrecognized to null.
+  if (parsed.grass_type !== null && !VISION_GRASS_TYPE_VALUES.has(parsed.grass_type)) return false;
+  if (typeof parsed.overwatering_signal !== 'boolean') return false;
+  if (typeof parsed.observations !== 'string') return false;
+  return true;
+}
+
 async function callClaudeVision(base64Image, mimeType, context = {}) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
 
@@ -166,6 +209,11 @@ async function callClaudeVision(base64Image, mimeType, context = {}) {
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
     parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
     parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
+    normalizeVisionScores(parsed);
+    if (!isValidVisionScores(parsed)) {
+      logger.warn('[lawn-assessment] Claude vision response failed schema validation');
+      return null;
+    }
     return parsed;
   } catch (err) {
     logger.error(`Lawn assessment Claude vision failed: ${err.message}`);
@@ -204,6 +252,11 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
   const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
   parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
   parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
+  normalizeVisionScores(parsed);
+  if (!isValidVisionScores(parsed)) {
+    logger.warn(`Lawn assessment Gemini vision response failed schema validation (${model})`);
+    return null;
+  }
   return parsed;
 }
 
@@ -651,6 +704,8 @@ module.exports = {
   FUNGUS_DISPLAY,
   THATCH_DISPLAY,
   buildVisionPrompt,
+  isValidVisionScores,
+  normalizeVisionScores,
   analyzePhoto,
   averageScores,
   mapToDisplayScores,

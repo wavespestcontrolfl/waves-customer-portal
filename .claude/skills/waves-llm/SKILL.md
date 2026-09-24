@@ -95,15 +95,33 @@ a provider issue never causes a gap:
   deterministic template).
 - Gemini vision → retry `GEMINI_VISION_FALLBACK_MODEL` only when it names a
   different model (the default equals BEST, so the retry rung is skipped),
-  THEN Claude VISION only if both Gemini rungs miss. Most photo lanes
-  (`pest-identification.js`, `tree-shrub-assessment.js`, `satellite-analyzer.js`)
-  still run Gemini and Claude in PARALLEL and merge the two — check the
-  lane before assuming Gemini-then-Claude is universal. **Lawn health
-  scoring is the one exception that changed 2026-09-24**: owner ruling —
-  no more Claude+Gemini averaging. `lawn-assessment.js#analyzePhoto` calls
-  Gemini only; Claude runs ONLY when Gemini returns nothing. `averageScores`
-  still exists (single-model passthrough, or true averaging when a caller
-  hands it two results directly) but live scoring never calls it with both.
+  THEN Claude VISION only if both Gemini rungs miss. **Owner ruling
+  2026-09-24: every photo-vision lane is now Gemini-first, Claude-fallback-
+  only — no more parallel fan-out + averaging/merging anywhere.**
+  `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day),
+  `pest-identification.js#analyzePhoto`/`identifyPest`, and
+  `tree-shrub-assessment.js#analyzePhoto` all call Gemini only; Claude runs
+  ONLY when Gemini returns nothing (HTTP/parse/empty/schema-invalid miss). A
+  single-model result still goes through each file's own single-model path
+  (pest-identification downgrades confidence a notch via `mergeModelResults`;
+  lawn/tree-shrub's `averageScores` passes the lone result through unchanged)
+  — a one-model read can never surface as the two-model "agreed" case.
+  `averageScores`/`mergeModelResults` still exist and still work with two
+  results handed to them directly (tests, or any future caller), but live
+  scoring never calls either with two live results anymore.
+  `satellite-analyzer.js` is the same idea with a third rung: Gemini, then
+  Claude (FLAGSHIP), then OpenAI as the true last resort, stopping at the
+  first schema-valid result — no more three-way parallel fan-out with
+  agreement-based confidence. A single-source satellite result now always
+  reads `confidence: 'single_model'`, never `'high'` (which used to require
+  multi-provider agreement).
+  All four files validate a parsed response against its own JSON-contract
+  shape before accepting it — a syntactically valid but empty/malformed
+  response (e.g. `{}`, or a field out of range) is still a truthy object, so
+  without this check it would read as a real result, skip the fallback, and
+  let missing fields become false zero-score findings (the exact bug Codex
+  flagged P1 on lawn-assessment 2026-09-24 — see `isValidVisionScores` there
+  for the pattern each file's own validator mirrors).
 
 Gemini parsing trap (twin of the DEEP thinking-block rule): Gemini 3.x
 Flash is a thinking model — always JOIN ALL text parts of the response,
