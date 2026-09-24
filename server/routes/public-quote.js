@@ -2457,11 +2457,20 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
                 .select('id', 'address');
               const superseded = stale
-                .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
-                .map((row) => row.id);
-              if (superseded.length) {
+                .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }));
+              // Each write re-asserts the row's matched address AND this
+              // contact pair (codex r39 P1): a customer edit that moved the
+              // row to another pair and premise — and a lookup under that
+              // pair that stamped a fresh rejection — must win, never be
+              // cleared by this pair's clean answer.
+              const contactPairPredicates = (q) => q
+                .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+                .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)]);
+              for (const row of superseded) {
                 await trx('estimates')
-                  .whereIn('id', superseded)
+                  .where({ id: row.id, address: row.address })
+                  .modify(contactPairPredicates)
+                  .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
                   .update({
                     estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
                     updated_at: new Date(),
@@ -2480,11 +2489,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
                 .select('id', 'address');
               const unblocked = blocked
-                .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
-                .map((row) => row.id);
-              if (unblocked.length) {
+                .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }));
+              for (const row of unblocked) {
                 await trx('estimates')
-                  .whereIn('id', unblocked)
+                  .where({ id: row.id, address: row.address })
+                  .modify(contactPairPredicates)
+                  .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
                   .update({
                     estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
                     updated_at: new Date(),

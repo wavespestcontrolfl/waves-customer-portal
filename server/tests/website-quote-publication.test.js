@@ -73,7 +73,10 @@ test('publishes the current verified quote once, freezing the canonical snapshot
   expect(rows.estimates[0]).toMatchObject({ status: 'sent', token: result.token });
   expect(JSON.parse(rows.estimates[0].estimate_data).sendSnapshot).toEqual(snapshot.sendSnapshot);
   expect(JSON.parse(rows.estimates[0].estimate_data).noEngagementAutomation).toBe(true);
-  expect(locks).toEqual(['estimates', 'customers']);
+  // Customer row first, then the estimate, then the customer eligibility
+  // re-lock (a no-op) — the one order booking and the Customer 360 edit
+  // share (codex #4667 r39 P1).
+  expect(locks).toEqual(['customers', 'estimates', 'customers']);
   expect(delivery._internals.assertEstimateSendable).toHaveBeenCalledTimes(1);
   expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'website_quote_published', critical: true, trx: query }));
   expect(await publishWebsiteQuote(args)).toBeNull();
