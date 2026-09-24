@@ -20,6 +20,7 @@ const {
   recordOutcome,
   markWonForCustomer,
   markNoShow,
+  consultationStats,
 } = require('../services/consultation-outcomes');
 
 // ---- tiny in-memory knex-shim -------------------------------------------
@@ -380,6 +381,46 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(saved.outcome).toBe('warm');
   });
 
+  test('P1-1: scheduled_date read back as a UTC-midnight Date object still bounds the window on the CORRECT calendar day', async () => {
+    // pg on Railway (TZ=UTC) hands scheduled_date '2026-09-10' back as a JS
+    // Date at UTC midnight, not a string. Running that Date through
+    // etDateString (the bug) reads it in ET and reports '2026-09-09' — a
+    // full calendar day early — which would let evidence from the day
+    // BEFORE the actual visit count as "on/after the visit". Seed the visit
+    // with scheduled_date as that exact Date object (all the other tests in
+    // this block use a plain string) and an estimate accepted the day
+    // before the visit: under the bug this estimate falls inside the
+    // (wrongly shifted-back) window and wins; fixed, it must be excluded
+    // and the outcome stays warm.
+    const fakeDb = makeFakeDb({
+      scheduled_services: [{
+        id: 'visit-1', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', service_id: null,
+        scheduled_date: new Date(`${SCHEDULED_DATE}T00:00:00.000Z`),
+        created_at: new Date(`${SCHEDULED_DATE}T09:00:00Z`),
+      }],
+      estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-09-09T15:00:00Z') }],
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('warm');
+  });
+
+  test('P1-2: an accepted estimate from BEFORE the visit does not hide a LATER qualifying acceptance', async () => {
+    // The pre-fix read ordered by accepted_at ASC and took .first() before
+    // ever checking the date range — so a customer's oldest-ever acceptance
+    // always won that .first() and (failing the in-range check) hid a real,
+    // later, in-window acceptance entirely.
+    const fakeDb = seededDb({
+      estimates: [
+        { id: 'est-old', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-08-01T00:00:00Z') }, // out of window — would win a naive ORDER BY ASC LIMIT 1
+        { id: 'est-new', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-09-15T00:00:00Z') }, // in window — the real sale
+      ],
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('estimate_accept');
+    expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-15T00:00:00Z').toISOString());
+  });
+
   test('P1-2: evidence dated in the FUTURE relative to `now` does not count', async () => {
     // Sanity companion to the markWonForCustomer future-consultation test
     // below — the upper bound applies to evidence dates here too.
@@ -593,5 +634,42 @@ describe('markNoShow', () => {
     // fallback is not a guard (the UPDATE's WHERE already decided nothing
     // should change) — it only supplies the return value.
     expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(2);
+  });
+});
+
+// ---- consultationStats — median_days_to_close --------------------------
+
+describe('consultationStats — P1-1 median_days_to_close preserves the scheduled_date DATE column\'s calendar day', () => {
+  // consultationStats' own db access is a leftJoin-then-where-then-select
+  // knex chain the store-based table() shim above doesn't model (no joins).
+  // Stub the chain to hand back a fixed `visits` row set, exactly as if the
+  // joins/where clauses had already produced it — the fix under test lives
+  // entirely in the per-row JS below the query, not in the SQL shape.
+  function statsDb(visits) {
+    const builder = { leftJoin: () => builder, where: () => builder, select: () => Promise.resolve(visits) };
+    return () => builder;
+  }
+
+  test('a scheduled_date read back as a UTC-midnight Date is not shifted a day by etDateString', async () => {
+    // pg on Railway (TZ=UTC) hands scheduled_date '2026-09-10' back as a JS
+    // Date at UTC midnight. Running it through etDateString (the bug) reads
+    // that instant in ET and reports '2026-09-09' — a day early — which
+    // used to send median_days_to_close negative/inflated whenever won_at
+    // landed on the visit's own calendar day.
+    const visits = [{
+      status: 'completed',
+      scheduled_date: new Date('2026-09-10T00:00:00.000Z'),
+      technician_id: 't1',
+      technician_name: 'Adam',
+      outcome: 'won',
+      won_via: 'closeout_booking',
+      won_at: new Date('2026-09-10T18:00:00.000Z'), // same ET calendar day, that evening
+      lead_source: 'referral',
+    }];
+    const stats = await consultationStats({ trx: statsDb(visits) });
+    // Correct: 0 days between the visit's scheduled_date and won_at (same ET
+    // calendar day). The pre-fix bug computes this as 1 (etDateString reads
+    // the UTC-midnight scheduled_date as the ET day before).
+    expect(stats.median_days_to_close).toBe(0);
   });
 });

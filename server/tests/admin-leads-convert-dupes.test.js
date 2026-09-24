@@ -30,6 +30,11 @@ jest.mock('../services/lead-estimate-link', () => ({
   markLeadContactedFromEvidence: jest.fn(async () => ({ contacted: true })),
 }));
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest.fn(async () => {}) }));
+// consultation-outcomes reconciliation (P1-3): a plain jest.fn stand-in —
+// the actual warm/cold→won flip is proved against a real store in
+// consultation-outcomes.test.js; this file only proves the ROUTE calls it
+// for every non-assessment booking (not just a first-time conversion).
+jest.mock('../services/consultation-outcomes', () => ({ markWonForCustomer: jest.fn(async () => 1) }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -703,6 +708,23 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     });
   });
 
+  it('P1-3: a real (non-assessment) rebook on an ALREADY-converted lead still reconciles consultation outcomes — the reconciliation is not gated on isConversion', async () => {
+    const { markWonForCustomer } = require('../services/consultation-outcomes');
+    markWonForCustomer.mockClear();
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true }); // default serviceType: 'Pest Control' — a real booking
+      expect(res.status).toBe(200);
+      // isConversion is false here (lockedLinked.converted_at is already
+      // set) — the pre-fix code only called markWonForCustomer under
+      // `if (isConversion)` and this rebook would never reconcile a
+      // consultation outcome recorded after the original conversion.
+      expect(markWonForCustomer).toHaveBeenCalledTimes(1);
+      expect(markWonForCustomer).toHaveBeenCalledWith('cust-linked', { via: 'office_booking', trx: expect.any(Function) });
+    });
+  });
+
   it('occupancy: date lock is the FIRST statement of the trx, before comms lock and lead FOR UPDATE', async () => {
     const calls = [];
     install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
@@ -1222,7 +1244,13 @@ describe('POST /admin/leads/:id/schedule-appointment — customer_id linked WITH
 describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does not convert', () => {
   const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
   const { markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
-  beforeEach(() => { db.mockReset(); bridgeLeadFunnelStage.mockClear(); markLeadContactedFromEvidence.mockClear(); });
+  const { markWonForCustomer } = require('../services/consultation-outcomes');
+  beforeEach(() => {
+    db.mockReset();
+    bridgeLeadFunnelStage.mockClear();
+    markLeadContactedFromEvidence.mockClear();
+    markWonForCustomer.mockClear();
+  });
 
   it('new lead: customer provisioned at new_lead, lead claimed and advanced through contacted evidence, never won', async () => {
     const calls = [];
@@ -1230,6 +1258,9 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { serviceType: 'Waves Assessment' });
       expect(res.status).toBe(200);
+      // An assessment booking is never itself a sale — the reconciliation
+      // call must stay scoped to real (non-assessment) bookings.
+      expect(markWonForCustomer).not.toHaveBeenCalled();
       const custInsert = calls.find((c) => c.table === 'customers' && c.op === 'insert');
       expect(custInsert.args[0].pipeline_stage).toBe('new_lead');
       // A prospect, not a customer: no became-a-customer date.

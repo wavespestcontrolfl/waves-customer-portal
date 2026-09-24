@@ -1779,10 +1779,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           performed_by: 'system',
           metadata: JSON.stringify({ customerId }),
         });
-        // Consultation-outcomes reconciliation: this is a real (non-assessment)
-        // booking closing for the customer — settle any open warm/cold
-        // consultation outcome within its 90-day window. Best-effort,
-        // savepoint-isolated inside markWonForCustomer (waves-db §5b).
+      }
+      // Consultation-outcomes reconciliation: this is a real (non-assessment)
+      // booking closing for the customer — settle any open warm/cold
+      // consultation outcome within its 90-day window. Runs for EVERY real
+      // booking, not just a first-time conversion (isConversion) — a lead
+      // that converted BEFORE a consultation outcome was recorded must still
+      // reconcile when it later books again. Best-effort, savepoint-isolated
+      // inside markWonForCustomer (waves-db §5b).
+      if (!assessmentVisit) {
         await require('../services/consultation-outcomes')
           .markWonForCustomer(customerId, { via: 'office_booking', trx });
       }

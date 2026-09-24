@@ -12,7 +12,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const {
   isAssessmentServiceRow,
   isAssessmentServiceType,
@@ -74,12 +74,27 @@ function defaultFollowUpAt(outcome, followUpAt) {
 }
 
 // The visit's scheduled_date as a plain 'YYYY-MM-DD' — pg hands a DATE
-// column back as either a Date (midnight UTC) or, over some drivers/mocks,
-// already a string; normalize once (mirrors consultationStats' own
-// scheduledDateStr derivation).
+// column back as either a Date (midnight UTC on Railway's TZ=UTC box) or,
+// over some drivers/mocks, already a string; normalize once (shared by
+// consultationStats' own scheduledDateStr derivation below).
+//
+// P1-1: a DATE column must NEVER be run through etDateString. That helper
+// treats its input as an absolute instant and converts it to ET — so pg's
+// UTC-midnight Date for '2026-09-10' reads as '2026-09-09' 20:00/19:00 ET
+// the day before, and etDateString hands back '2026-09-09'. Read a Date's
+// calendar fields with the UTC getters instead (mirrors the Date branch of
+// server/services/auto-dispatch/dates.js's toDateStr).
 function toDateOnlyString(value) {
+  if (value == null) return null;
   if (typeof value === 'string') return value.slice(0, 10);
-  return etDateString(value);
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    const y = value.getUTCFullYear();
+    const m = String(value.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(value.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return String(value).slice(0, 10);
 }
 
 /**
@@ -105,30 +120,49 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
   const windowEndStr = etDateString(windowEndDate);
   // Never later than `now` (P1-2), and never past the visit's own window.
   const upperBoundStr = nowDateStr < windowEndStr ? nowDateStr : windowEndStr;
-  const inRange = (dateStr) => dateStr >= scheduledDateStr && dateStr <= upperBoundStr;
 
-  const leadRows = await database('leads').where({ customer_id: customerId }).select('id', 'converted_at');
-  for (const lead of leadRows) {
-    if (!lead.converted_at) continue;
-    if (inRange(etDateString(new Date(lead.converted_at)))) {
-      return { won_via: 'office_booking', won_at: new Date(lead.converted_at) };
-    }
+  // P1-2: real Date bounds, applied IN each query, not a JS filter run
+  // AFTER an ORDER BY ... LIMIT 1 already picked a row. The old accepted-
+  // estimate read ordered by accepted_at ASC and took .first() before
+  // checking the range — so a customer's oldest-ever acceptance always won
+  // that .first() and could fail the in-range check even though a LATER
+  // acceptance qualified, hiding it entirely. Bounding the query itself (and
+  // ordering ASC so the earliest QUALIFYING row wins) applies to all three
+  // evidence reads. lowerBound is the visit's scheduled_date at ET midnight;
+  // upperBound is upperBoundStr's ET day, +999ms so the final sub-second of
+  // that day is inclusive (mirrors admin-leads.js's parseInclusiveEnd).
+  const lowerBound = parseETDateTime(`${scheduledDateStr}T00:00:00`);
+  const upperBound = new Date(parseETDateTime(`${upperBoundStr}T23:59:59`).getTime() + 999);
+
+  const convertedLead = await database('leads')
+    .where({ customer_id: customerId })
+    .whereNotNull('converted_at')
+    .where('converted_at', '>=', lowerBound)
+    .where('converted_at', '<=', upperBound)
+    .orderBy('converted_at', 'asc')
+    .first('converted_at');
+  if (convertedLead) {
+    return { won_via: 'office_booking', won_at: new Date(convertedLead.converted_at) };
   }
 
   const acceptedEstimate = await database('estimates')
     .where({ customer_id: customerId, status: 'accepted' })
     .whereNotNull('accepted_at')
+    .where('accepted_at', '>=', lowerBound)
+    .where('accepted_at', '<=', upperBound)
     .orderBy('accepted_at', 'asc')
     .first('accepted_at');
-  if (acceptedEstimate && inRange(etDateString(new Date(acceptedEstimate.accepted_at)))) {
+  if (acceptedEstimate) {
     return { won_via: 'estimate_accept', won_at: new Date(acceptedEstimate.accepted_at) };
   }
 
   const bookings = await database('scheduled_services')
     .where({ customer_id: customerId })
+    .where('created_at', '>=', lowerBound)
+    .where('created_at', '<=', upperBound)
+    .orderBy('created_at', 'asc')
     .select('id', 'service_type', 'service_id', 'created_at');
   for (const booking of bookings) {
-    if (!inRange(etDateString(new Date(booking.created_at)))) continue;
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale
     return { won_via: 'office_booking', won_at: new Date(booking.created_at) };
   }
@@ -462,10 +496,12 @@ async function consultationStats({ from, to, trx } = {}) {
       if (v.won_via === 'closeout_booking') stats.won_at_door += 1;
       else stats.won_after += 1;
       if (v.won_at) {
-        const scheduledDateStr = typeof v.scheduled_date === 'string'
-          ? v.scheduled_date.slice(0, 10)
-          : etDateString(v.scheduled_date);
-        closeDurations.push(etDaysBetween(new Date(v.won_at), scheduledDateStr));
+        // P1-1: v.scheduled_date is a DATE column — toDateOnlyString reads
+        // its calendar fields directly rather than routing it through
+        // etDateString (which would treat it as an instant and convert to
+        // ET, shifting a UTC-midnight date back a day under Railway's
+        // TZ=UTC).
+        closeDurations.push(etDaysBetween(new Date(v.won_at), toDateOnlyString(v.scheduled_date)));
       }
     }
 
