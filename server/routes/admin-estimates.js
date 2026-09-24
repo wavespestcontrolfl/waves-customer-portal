@@ -4959,22 +4959,30 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     const primarySvc = bookingServiceFor(oneTimeLabel);
 
     // Reservation collision guard. If the estimate is already linked to a
-    // confirmed scheduled service, this customer has already picked a
-    // slot — texting a fresh /book URL would invite a second appointment.
+    // live scheduled service, this customer has already picked a slot —
+    // texting a fresh /book URL would invite a second appointment. Every
+    // real booking path (operator "Schedule", the Create Appointment modal,
+    // and the customer's own /book) stamps scheduled_services.source_estimate_id
+    // — estimate_data.scheduled_service_id is written only by the call-agent
+    // assessment pre-draft, so keying the guard on that key alone left every
+    // normal booking unchecked. OR both keys and match any live (not
+    // cancelled/rescheduled/completed) status.
     try {
       const estData = typeof estimate.estimate_data === 'string'
         ? JSON.parse(estimate.estimate_data)
         : estimate.estimate_data;
       const linkedSvcId = estData?.scheduled_service_id || null;
-      if (linkedSvcId) {
-        const linked = await db('scheduled_services')
-          .where({ id: linkedSvcId, status: 'confirmed' })
-          .first();
-        if (linked) {
-          return res.status(409).json({
-            error: `Customer already has a confirmed appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
-          });
-        }
+      const linked = await db('scheduled_services')
+        .where((q) => {
+          q.where({ source_estimate_id: estimate.id });
+          if (linkedSvcId) q.orWhere({ id: linkedSvcId });
+        })
+        .whereNotIn('status', ['cancelled', 'rescheduled', 'completed'])
+        .first();
+      if (linked) {
+        return res.status(409).json({
+          error: `Customer already has an appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
+        });
       }
     } catch (_) { /* on parse failure fall through — no false positive */ }
 

@@ -228,6 +228,14 @@ function getReceiptEmailRecipients(customer, prefs = {}) {
 
 function getServiceReportEmailRecipients(customer, prefs = {}) {
   if (!customer) return [];
+  // The portal-wide "Email Messages" kill switch and the "Service Complete
+  // Report" toggle both apply here too, the way the grouped-visit twin
+  // (visit-completion-summary.js summaryEmailRecipients) and the SMS leg
+  // (messaging/policy.js purpose 'service_completion' -> prefsColumn
+  // 'service_completed') already enforce them. This resolver previously
+  // only consulted service_report_notify_primary/_billing, so an opted-out
+  // customer still got the report email + PDF after every completed visit.
+  if (prefs?.email_enabled === false || prefs?.service_completed === false) return [];
   const primary = getPrimaryContact(customer);
   const recipients = [];
 

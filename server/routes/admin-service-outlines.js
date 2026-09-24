@@ -3,6 +3,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
+const EmailTemplateLibrary = require('../services/email-template-library');
 const { wrapServiceEmail, ctaButton, colors } = require('../services/email-template');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -20,6 +21,17 @@ const {
 const router = express.Router();
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Mirror service-report/email-delivery.js's direct-sendOne fallback: a
+// synthetic template shape so activeSuppressionFor() can apply the same
+// email_suppressions semantics (global bounce/spam/do_not_email + the
+// service group) to a raw sendgrid.sendOne call that has no real template
+// row of its own.
+const LAWN_SERVICE_OUTLINE_GROUP_KEY = 'service_operational';
+const LAWN_SERVICE_OUTLINE_SUPPRESSION_TEMPLATE = {
+  send_stream: 'service_operational',
+  suppression_group_key: 'service_operational',
+};
 
 function publicUrlForToken(token) {
   return `${publicPortalUrl()}/service-outlines/${encodeURIComponent(token)}`;
@@ -525,10 +537,37 @@ router.post('/:id/send', async (req, res, next) => {
     }
 
     if (sendEmail) {
+      // Honor the same email_suppressions rows and portal opt-out every
+      // other customer email path does — this route previously called
+      // sendgrid.sendOne directly with neither check, so a do-not-email /
+      // unsubscribed / bounced address, or a customer who turned off
+      // "Email Messages" in the portal, still received the packet email
+      // (and the packet was stamped 'sent' regardless).
+      const emailSuppression = estimate.customer_email
+        ? await EmailTemplateLibrary.activeSuppressionFor(
+          LAWN_SERVICE_OUTLINE_SUPPRESSION_TEMPLATE,
+          estimate.customer_email,
+          LAWN_SERVICE_OUTLINE_GROUP_KEY,
+        )
+        : null;
+      const emailPrefs = !emailSuppression && estimate.customer_id
+        ? await db('notification_prefs').where({ customer_id: estimate.customer_id }).first()
+        : null;
+      const emailOptedOut = emailPrefs?.email_enabled === false;
+
       if (!estimate.customer_email) {
         outcomes.email = { ok: false, error: 'No email on estimate' };
       } else if (!sendgrid.isConfigured()) {
         outcomes.email = { ok: false, error: 'SendGrid is not configured' };
+      } else if (emailSuppression) {
+        outcomes.email = {
+          ok: false,
+          sent: false,
+          blocked: true,
+          reason: `Suppressed: ${emailSuppression.suppression_type}${emailSuppression.group_key ? ` (${emailSuppression.group_key})` : ''}`,
+        };
+      } else if (emailOptedOut) {
+        outcomes.email = { ok: false, sent: false, blocked: true, reason: 'email_opted_out' };
       } else {
         await persistGeneratedTokenBeforeDelivery();
         const title = packet.title || 'Your Waves Lawn Care Program Overview';

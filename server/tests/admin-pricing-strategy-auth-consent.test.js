@@ -99,8 +99,11 @@ describe('POST /trigger-upsell/:customerId', () => {
 
   test('consentBasis comes from stored customer marketing preferences', async () => {
     setupDb();
+    // A distinct customer id from the "body.message is ignored" test above —
+    // the route's resend-cooldown guard (audit r1-races-2) is keyed per
+    // customer id, so reusing 'c1' here would 409 on this test's send.
     await withServer(async (base) => {
-      expect((await post(base, '/trigger-upsell/c1')).status).toBe(200);
+      expect((await post(base, '/trigger-upsell/c2')).status).toBe(200);
     });
     const args = mockSend.mock.calls[0][0];
     expect(args.purpose).toBe('marketing');

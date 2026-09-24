@@ -171,6 +171,35 @@ async function sendTemplate({
     return { ok: false, skipped: true, reason: 'missing_email' };
   }
 
+  // Portal-wide "Email Messages" kill switch (notification_prefs.email_enabled
+  // = false) must fail-closed across the whole membership.*/account.* family,
+  // the way receipt-delivery-queue.js:262, estimate-deposits.js:386,
+  // cancellation-confirmations.js:185 and autopay-setup-link.js:272 already
+  // do — this sender previously never read notification_prefs at all, so an
+  // opted-out customer had no self-serve way to stop these emails (the
+  // suppressionGroupKey below is TRANSACTIONAL_GROUP, which bypasses
+  // SendGrid-side suppression groups by design). A lookup failure is treated
+  // the same as opted-out: it must not read as "no opt-out" on a DB blip.
+  let emailOptedOut = false;
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
+    emailOptedOut = prefs ? prefs.email_enabled === false : false;
+  } catch (err) {
+    logger.warn(`[account-membership-email] notification_prefs lookup failed for ${recipientCustomer.id}: ${err.message}`);
+    emailOptedOut = true;
+  }
+  if (emailOptedOut) {
+    await logLifecycleEmailAttempt({
+      customerId: recipientCustomer.id,
+      templateKey,
+      eventType,
+      status: 'skipped',
+      failureReason: 'email_opted_out',
+      metadata,
+    });
+    return { ok: false, skipped: true, reason: 'email_opted_out' };
+  }
+
   const targetCustomer = String(customerId || '') === String(recipientCustomer.id)
     ? recipientCustomer
     : await loadCustomer(customerId);
