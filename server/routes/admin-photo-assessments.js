@@ -23,11 +23,9 @@
 const express = require('express');
 const crypto = require('crypto');
 const sharp = require('sharp');
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const router = express.Router();
 
 const db = require('../models/db');
-const appConfig = require('../config');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { parseStoredMedia, isSignableStoredMediaKey } = require('../services/sms-media');
@@ -74,23 +72,6 @@ const MESSAGE_PHOTO_MAX_PX = 1600;
 const MESSAGE_PHOTO_JPEG_QUALITY = 82;
 const MESSAGE_PHOTO_ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
-const s3 = new S3Client({
-  region: appConfig.s3?.region,
-  credentials: appConfig.s3?.accessKeyId
-    ? { accessKeyId: appConfig.s3.accessKeyId, secretAccessKey: appConfig.s3.secretAccessKey }
-    : undefined,
-});
-
-async function streamToBuffer(stream) {
-  if (!stream) return Buffer.alloc(0);
-  if (typeof stream.transformToByteArray === 'function') {
-    return Buffer.from(await stream.transformToByteArray());
-  }
-  const chunks = [];
-  for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks);
-}
-
 // Resolves one { message_id, key } request-photo entry into a
 // normalizePhotos-shaped { data, mimeType } photo, or an { error, status }
 // describing why it was refused. The key must belong to THIS message's own
@@ -121,9 +102,13 @@ async function loadMessagePhoto(entry) {
     return { error: `Unsupported photo type on message ${messageId}`, status: 400 };
   }
 
-  let object;
+  if (!PhotoService) {
+    logger.error(`[admin-photo-assessments] photo storage service unavailable for ${key}`);
+    return { error: 'Could not fetch the photo from storage — try again in a moment.', status: 502 };
+  }
+  let raw;
   try {
-    object = await s3.send(new GetObjectCommand({ Bucket: appConfig.s3.bucket, Key: key }));
+    ({ buffer: raw } = await PhotoService.getPhotoBuffer(key));
   } catch (err) {
     logger.error(`[admin-photo-assessments] S3 fetch failed for ${key}: ${err.message}`);
     return { error: 'Could not fetch the photo from storage — try again in a moment.', status: 502 };
@@ -131,7 +116,6 @@ async function loadMessagePhoto(entry) {
 
   let jpegBuffer;
   try {
-    const raw = await streamToBuffer(object.Body);
     jpegBuffer = await sharp(raw)
       .rotate()
       .resize(MESSAGE_PHOTO_MAX_PX, MESSAGE_PHOTO_MAX_PX, { fit: 'inside', withoutEnlargement: true })
@@ -155,29 +139,33 @@ async function loadMessagePhoto(entry) {
 }
 
 // Resolves every message_photos entry in order, short-circuiting on the
-// first failure. Returns { photos, customerId } — customerId is the first
-// resolved entry's conversation customer, the same "first rung wins"
-// convention the rest of this file uses for defaulting.
+// first failure. Returns { photos, customerId } when every entry's own
+// conversation customer agrees (including all-null), or an
+// { error, status } when they don't.
 async function resolveMessagePhotos(entries) {
   const photos = [];
-  // Every distinct NON-NULL customer a selected message's conversation
-  // resolves to. A phone-keyed thread on the client can mix messages from
-  // more than one customer (a shared/reassigned number) — the client
-  // already refuses to submit a mixed selection, but this is the
-  // authoritative check: message_photos spanning more than one customer is
-  // refused outright rather than silently attributed to whichever entry
-  // happened to resolve first.
-  const customerIds = new Set();
+  // Every selected message's own conversation customer, INCLUDING null for
+  // an unlinked conversation — null is a distinct ownership state, not "no
+  // opinion". Collecting only truthy ids would let a selection mixing a
+  // customer-linked message with an unlinked one slip through as
+  // "one distinct customer" and silently attribute the unlinked sender's
+  // photo to that customer. A phone-keyed thread on the client can mix
+  // messages from more than one customer (a shared/reassigned number) —
+  // the client already refuses to submit a mixed selection, but this is
+  // the authoritative check: message_photos whose messages don't all agree
+  // (including agreeing on "none") is refused outright rather than
+  // silently attributed to whichever entry happened to resolve first.
+  const customerIds = [];
   for (const entry of entries) {
     const result = await loadMessagePhoto(entry);
     if (result.error) return { error: result.error, status: result.status };
     photos.push(result.photo);
-    if (result.customerId) customerIds.add(result.customerId);
+    customerIds.push(result.customerId || null);
   }
-  if (customerIds.size > 1) {
+  if (new Set(customerIds).size > 1) {
     return { error: 'Selected photos belong to different customers — pick photos from one customer.', status: 400 };
   }
-  return { photos, customerId: customerIds.size === 1 ? [...customerIds][0] : null };
+  return { photos, customerId: customerIds[0] || null };
 }
 
 const TYPES = {
@@ -768,6 +756,110 @@ async function runPestAnalysis(photos, prospectNote) {
   };
 }
 
+// Resolves the request's photo inputs (photos + message_photos) into the
+// normalizePhotos-shaped list the analysis ladder runs on, or an
+// { error, status }. Owns every count/size/shape check for BOTH sources so
+// the route handler makes exactly one decision (did this fail) instead of
+// re-checking the combined list at each stage.
+async function resolveRequestPhotos(body) {
+  const rawPhotos = Array.isArray(body.photos) ? body.photos.filter(Boolean) : [];
+  const messagePhotoRequests = Array.isArray(body.message_photos) ? body.message_photos.filter(Boolean) : [];
+  if (!rawPhotos.length && !messagePhotoRequests.length) {
+    return { error: 'At least one photo is required', status: 400 };
+  }
+  if (rawPhotos.length + messagePhotoRequests.length > MAX_PHOTOS) {
+    return { error: `At most ${MAX_PHOTOS} photos per assessment`, status: 400 };
+  }
+
+  // Pulled BEFORE the vision ladder runs — a bad key or an unreachable S3
+  // object fails the request outright rather than silently dropping a
+  // photo the operator explicitly selected.
+  const messagePhotos = await resolveMessagePhotos(messagePhotoRequests);
+  if (messagePhotos.error) return messagePhotos;
+
+  const photos = normalizePhotos([...rawPhotos, ...messagePhotos.photos]);
+  if (!photos.length || !photos.some((photo) => photo.data)) {
+    return { error: 'At least one photo is required', status: 400 };
+  }
+  if (photos.length > MAX_PHOTOS) {
+    return { error: `At most ${MAX_PHOTOS} photos per assessment`, status: 400 };
+  }
+  if (photos.some((photo) => photo.data && photo.data.length > MAX_PHOTO_CHARS)) {
+    return { error: 'One of the photos is too large — resize it and retry.', status: 413 };
+  }
+
+  return { photos, messageCustomerId: messagePhotos.customerId };
+}
+
+// One id → row lookup for both lead_id and customer_id, so the two
+// association fields share a single validated-UUID-then-exists shape
+// instead of two parallel hand-written blocks.
+const ASSOCIATION_LOOKUPS = {
+  lead_id: { table: 'leads', notFoundLabel: 'Lead' },
+  customer_id: { table: 'customers', notFoundLabel: 'Customer' },
+};
+async function lookupAssociation(field, id) {
+  const spec = ASSOCIATION_LOOKUPS[field];
+  if (!UUID_RE.test(String(id))) return { error: `invalid ${field}`, status: 400 };
+  const row = await db(spec.table).where({ id }).first();
+  if (!row) return { error: `${spec.notFoundLabel} not found`, status: 404 };
+  return { id: row.id };
+}
+
+// Resolves lead_id/customer_id into { leadId, customerId }, or an
+// { error, status }. customerId prefers an explicit body value, otherwise
+// defaults from the inbound message thread (messageCustomerId, from
+// resolveRequestPhotos) — same existence check either way, so a
+// stale/deleted id never links. An explicit customer_id that CONTRADICTS
+// the selected messages' own (non-null) customer is refused rather than
+// silently overriding it — the client only ever sends an explicit
+// customer_id from the Customer 360-embedded composer, where it should
+// always agree with the thread it pulled photos from.
+async function resolveAssociations(body, messageCustomerId) {
+  let leadId = null;
+  let customerId = null;
+
+  if (body.lead_id) {
+    const lead = await lookupAssociation('lead_id', body.lead_id);
+    if (lead.error) return lead;
+    leadId = lead.id;
+  }
+
+  if (body.customer_id && messageCustomerId && String(body.customer_id) !== String(messageCustomerId)) {
+    return { error: 'customer_id does not match the selected photos’ customer', status: 400 };
+  }
+  const requestedCustomerId = body.customer_id || messageCustomerId;
+  if (requestedCustomerId) {
+    const customer = await lookupAssociation('customer_id', requestedCustomerId);
+    if (customer.error) return customer;
+    customerId = customer.id;
+  }
+
+  return { leadId, customerId };
+}
+
+function buildSnapshots(body) {
+  const contact = body.contact && typeof body.contact === 'object' && !Array.isArray(body.contact) ? body.contact : {};
+  const contactSnapshot = {
+    first_name: cleanString(contact.first_name, 80),
+    last_name: cleanString(contact.last_name, 80),
+    email: cleanString(contact.email, 254),
+    phone: cleanString(contact.phone, 20),
+  };
+  const address = body.address && typeof body.address === 'object' && !Array.isArray(body.address) ? body.address : {};
+  const addressSnapshot = {
+    line1: cleanString(address.line1),
+    city: cleanString(address.city),
+    state: cleanString(address.state, 20),
+    zip: cleanString(address.zip, 12),
+  };
+  return {
+    contactSnapshot: Object.values(contactSnapshot).some(Boolean) ? contactSnapshot : null,
+    addressSnapshot: Object.values(addressSnapshot).some(Boolean) ? addressSnapshot : null,
+    prospectNote: cleanString(body.note, 500),
+  };
+}
+
 // POST /api/admin/photo-assessments/:type
 // Admin-created assessment (prospect on the phone, or an existing customer)
 // — no public funnel involved: no lead is created, no attribution row, no
@@ -778,78 +870,15 @@ router.post('/:type', async (req, res, next) => {
     if (!config) return undefined;
     const body = req.body || {};
 
-    const rawPhotos = Array.isArray(body.photos) ? body.photos.filter(Boolean) : [];
-    const messagePhotoRequests = Array.isArray(body.message_photos) ? body.message_photos.filter(Boolean) : [];
-    if (!rawPhotos.length && !messagePhotoRequests.length) {
-      return res.status(400).json({ error: 'At least one photo is required' });
-    }
-    if (rawPhotos.length + messagePhotoRequests.length > MAX_PHOTOS) {
-      return res.status(400).json({ error: `At most ${MAX_PHOTOS} photos per assessment` });
-    }
+    const requestPhotos = await resolveRequestPhotos(body);
+    if (requestPhotos.error) return res.status(requestPhotos.status || 400).json({ error: requestPhotos.error });
+    const { photos, messageCustomerId } = requestPhotos;
 
-    // Pulled BEFORE the vision ladder runs — a bad key or an unreachable S3
-    // object fails the request outright rather than silently dropping a
-    // photo the operator explicitly selected.
-    const messagePhotos = await resolveMessagePhotos(messagePhotoRequests);
-    if (messagePhotos.error) return res.status(messagePhotos.status || 400).json({ error: messagePhotos.error });
-    const messageCustomerId = messagePhotos.customerId;
+    const associations = await resolveAssociations(body, messageCustomerId);
+    if (associations.error) return res.status(associations.status || 400).json({ error: associations.error });
+    const { leadId, customerId } = associations;
 
-    const photos = normalizePhotos([...rawPhotos, ...messagePhotos.photos]);
-    if (!photos.length || !photos.some((photo) => photo.data)) {
-      return res.status(400).json({ error: 'At least one photo is required' });
-    }
-    if (photos.length > MAX_PHOTOS) {
-      return res.status(400).json({ error: `At most ${MAX_PHOTOS} photos per assessment` });
-    }
-    if (photos.some((photo) => photo.data && photo.data.length > MAX_PHOTO_CHARS)) {
-      return res.status(413).json({ error: 'One of the photos is too large — resize it and retry.' });
-    }
-
-    let leadId = null;
-    let customerId = null;
-    if (body.lead_id) {
-      if (!UUID_RE.test(String(body.lead_id))) return res.status(400).json({ error: 'invalid lead_id' });
-      const lead = await db('leads').where({ id: body.lead_id }).first();
-      if (!lead) return res.status(404).json({ error: 'Lead not found' });
-      leadId = lead.id;
-    }
-    // Explicit customer_id wins; otherwise default from the inbound
-    // message's thread. Same existence check either way, so a stale/deleted
-    // customer id never links. An explicit customer_id that CONTRADICTS the
-    // selected messages' own (non-null) customer is refused rather than
-    // silently overriding it — the client only ever sends an explicit
-    // customer_id from the Customer 360-embedded composer, where it should
-    // always agree with the thread it pulled photos from.
-    if (body.customer_id && messageCustomerId && String(body.customer_id) !== String(messageCustomerId)) {
-      return res.status(400).json({ error: 'customer_id does not match the selected photos’ customer' });
-    }
-    const requestedCustomerId = body.customer_id || messageCustomerId;
-    if (requestedCustomerId) {
-      if (body.customer_id && !UUID_RE.test(String(body.customer_id))) {
-        return res.status(400).json({ error: 'invalid customer_id' });
-      }
-      const customer = await db('customers').where({ id: requestedCustomerId }).first();
-      if (!customer) return res.status(404).json({ error: 'Customer not found' });
-      customerId = customer.id;
-    }
-
-    const contact = body.contact && typeof body.contact === 'object' && !Array.isArray(body.contact) ? body.contact : {};
-    const contactSnapshot = {
-      first_name: cleanString(contact.first_name, 80),
-      last_name: cleanString(contact.last_name, 80),
-      email: cleanString(contact.email, 254),
-      phone: cleanString(contact.phone, 20),
-    };
-    const hasContact = Object.values(contactSnapshot).some(Boolean);
-    const address = body.address && typeof body.address === 'object' && !Array.isArray(body.address) ? body.address : {};
-    const addressSnapshot = {
-      line1: cleanString(address.line1),
-      city: cleanString(address.city),
-      state: cleanString(address.state, 20),
-      zip: cleanString(address.zip, 12),
-    };
-    const hasAddress = Object.values(addressSnapshot).some(Boolean);
-    const prospectNote = cleanString(body.note, 500);
+    const { contactSnapshot, addressSnapshot, prospectNote } = buildSnapshots(body);
 
     const analysis = req.params.type === 'lawn'
       ? await runLawnAnalysis(photos, prospectNote)
@@ -862,8 +891,8 @@ router.post('/:type', async (req, res, next) => {
       source: 'admin',
       lead_id: leadId,
       customer_id: customerId,
-      contact_snapshot: hasContact ? JSON.stringify(contactSnapshot) : null,
-      address_snapshot: hasAddress ? JSON.stringify(addressSnapshot) : null,
+      contact_snapshot: contactSnapshot ? JSON.stringify(contactSnapshot) : null,
+      address_snapshot: addressSnapshot ? JSON.stringify(addressSnapshot) : null,
       ...analysis.insert,
     }).returning(['id']);
 
@@ -887,4 +916,7 @@ module.exports._test = {
   listRowShape,
   normalizePhotos,
   TYPES,
+  resolveRequestPhotos,
+  resolveAssociations,
+  lookupAssociation,
 };

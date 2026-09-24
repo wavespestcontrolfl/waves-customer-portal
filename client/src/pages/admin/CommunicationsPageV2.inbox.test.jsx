@@ -520,9 +520,26 @@ it.each([null, { id: "another-approval", draftResponse: "Earlier approval", reci
   expect(stored.replyContext.messageId).toBe("original-reply");
 });
 
-it("shows Analyze photos for an admin operator", async () => {
+it("shows Analyze photos for an admin operator with an inbound photo on the OPEN thread", async () => {
+  // canAnalyzePhotos gates the button's whole render on admin role AND at
+  // least one analyzable photo in the ACTIVE thread — analyzablePhotos is
+  // [] until a thread is opened (activeThread stays null on the threads
+  // list), so this needs both a fixture message with media AND opening it.
+  const photoPhone = "+19415550600";
+  messages = [{
+    id: "photo-admin-visible", from: photoPhone, to: line, direction: "inbound", body: "A photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-visible",
+    media: [{ key: "sms-media/inbound/visible", url: "https://signed.example/visible", contentType: "image/jpeg" }],
+  }];
   setupWithOwner("admin-analyze-photos"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
   expect(screen.getByRole("button", { name: "Analyze photos" })).toBeInTheDocument();
+});
+
+it("hides Analyze photos for an admin operator when the open thread has no inbound photos", async () => {
+  setupWithOwner("admin-analyze-photos-no-photos"); await tick();
+  fireEvent.click(screen.getByText("Please check the gate"));
+  expect(screen.queryByRole("button", { name: "Analyze photos" })).not.toBeInTheDocument();
 });
 
 it("hides Analyze photos for a technician — the endpoint is admin-only (403 otherwise)", async () => {
@@ -550,6 +567,33 @@ it("blocks submit when the selected photos belong to different customers", async
   fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
   // photo-b (newest) starts pre-checked; check photo-a too so the selection
   // spans both customer-aaa and customer-bbb.
+  const checkboxes = screen.getAllByRole("checkbox");
+  expect(checkboxes).toHaveLength(2);
+  fireEvent.click(checkboxes[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
+  expect(screen.getByText("Selected photos belong to different customers — pick photos from one customer.")).toBeInTheDocument();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("/photo-assessments/"))).toBe(false);
+});
+
+it("blocks submit when a linked photo is mixed with an UNLINKED one (null customerId) — null is a distinct owner, not \"no opinion\"", async () => {
+  const photoPhone = "+19415550700";
+  messages = [
+    {
+      id: "photo-linked", from: photoPhone, to: line, direction: "inbound", body: "Linked customer's photo",
+      isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-linked",
+      media: [{ key: "sms-media/inbound/linked", url: "https://signed.example/linked", contentType: "image/jpeg" }],
+    },
+    {
+      id: "photo-unlinked", from: photoPhone, to: line, direction: "inbound", body: "Unlinked sender's photo",
+      isRead: true, createdAt: "2024-07-01T12:05:00Z", // no customerId — unlinked conversation
+      media: [{ key: "sms-media/inbound/unlinked", url: "https://signed.example/unlinked", contentType: "image/jpeg" }],
+    },
+  ];
+  setupWithOwner("linked-unlinked-owner"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  // photo-unlinked (newest) starts pre-checked; check photo-linked too so
+  // the selection spans a linked customer AND an unlinked (null) one.
   const checkboxes = screen.getAllByRole("checkbox");
   expect(checkboxes).toHaveLength(2);
   fireEvent.click(checkboxes[1]);
