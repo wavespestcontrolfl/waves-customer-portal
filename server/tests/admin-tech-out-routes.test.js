@@ -16,8 +16,13 @@ jest.mock('../services/tech-out', () => ({
   markTechOut: jest.fn(),
   clearTechOut: jest.fn(),
 }));
+jest.mock('../services/tech-out-auto-move', () => ({
+  autoMoveEnabled: jest.fn(),
+  autoAssignTechDay: jest.fn(),
+}));
 
 const techOut = require('../services/tech-out');
+const techOutAutoMove = require('../services/tech-out-auto-move');
 const router = require('../routes/admin-tech-out');
 
 const TECH_ID = '11111111-2222-4333-8444-555555555555';
@@ -45,6 +50,7 @@ async function run(method, path, { params = {}, query = {}, body = {} } = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  techOutAutoMove.autoMoveEnabled.mockReturnValue(false);
 });
 
 describe('admin-tech-out routes', () => {
@@ -61,14 +67,24 @@ describe('admin-tech-out routes', () => {
     expect(techOut.clearTechOut).not.toHaveBeenCalled();
   });
 
-  test('GET returns the current absence, defaulting date to today ET', async () => {
+  test('GET returns the current absence, defaulting date to today ET, plus auto_move_enabled', async () => {
     techOut.techOutEnabled.mockReturnValue(true);
     techOut.getTechOut.mockResolvedValue({ id: 'abs-1' });
 
     const res = await run('get', '/:technicianId');
 
-    expect(res.body).toEqual({ enabled: true, absence: { id: 'abs-1' } });
+    expect(res.body).toEqual({ enabled: true, absence: { id: 'abs-1' }, auto_move_enabled: false });
     expect(techOut.getTechOut).toHaveBeenCalledWith(expect.objectContaining({ technicianId: TECH_ID, date: expect.any(String) }));
+  });
+
+  test('GET reports auto_move_enabled: true when the auto-move gate is on', async () => {
+    techOut.techOutEnabled.mockReturnValue(true);
+    techOut.getTechOut.mockResolvedValue(null);
+    techOutAutoMove.autoMoveEnabled.mockReturnValue(true);
+
+    const res = await run('get', '/:technicianId');
+
+    expect(res.body).toEqual({ enabled: true, absence: null, auto_move_enabled: true });
   });
 
   test('GET rejects an impossible calendar date with 400, no service call', async () => {
@@ -146,6 +162,74 @@ describe('admin-tech-out routes', () => {
     const notFound = await run('delete', '/:technicianId');
     expect(notFound.statusCode).toBe(404);
     expect(notFound.body).toEqual({ error: 'not_out' });
+  });
+
+  describe('POST /:technicianId/auto-assign', () => {
+    test('base gate off answers the same 404 { enabled: false } as every other handler', async () => {
+      techOut.techOutEnabled.mockReturnValue(false);
+      const res = await run('post', '/:technicianId/auto-assign', { body: { date: '2026-09-24' } });
+      expect(res.statusCode).toBe(404);
+      expect(res.body).toEqual({ enabled: false });
+      expect(techOutAutoMove.autoAssignTechDay).not.toHaveBeenCalled();
+    });
+
+    test('base gate on but auto-move gate off answers 404 with auto_move_enabled: false', async () => {
+      techOut.techOutEnabled.mockReturnValue(true);
+      techOutAutoMove.autoMoveEnabled.mockReturnValue(false);
+      const res = await run('post', '/:technicianId/auto-assign', { body: { date: '2026-09-24' } });
+      expect(res.statusCode).toBe(404);
+      expect(res.body).toEqual({ enabled: true, auto_move_enabled: false });
+      expect(techOutAutoMove.autoAssignTechDay).not.toHaveBeenCalled();
+    });
+
+    test('rejects an impossible calendar date with 400, no service call', async () => {
+      techOut.techOutEnabled.mockReturnValue(true);
+      techOutAutoMove.autoMoveEnabled.mockReturnValue(true);
+      const res = await run('post', '/:technicianId/auto-assign', { body: { date: '2027-02-31' } });
+      expect(res.statusCode).toBe(400);
+      expect(techOutAutoMove.autoAssignTechDay).not.toHaveBeenCalled();
+    });
+
+    test('runs the batch for the given date with the actor from req.technicianId, defaulting date to today ET', async () => {
+      techOut.techOutEnabled.mockReturnValue(true);
+      techOutAutoMove.autoMoveEnabled.mockReturnValue(true);
+      techOutAutoMove.autoAssignTechDay.mockResolvedValue({
+        moved: [{ alert_id: 'a1', job_id: 'j1', to_technician_id: 'tech-2' }],
+        left_parked: [{ alert_id: 'a2', reason: 'no_eligible_candidate' }],
+      });
+
+      const res = await run('post', '/:technicianId/auto-assign', {});
+
+      expect(res.body).toEqual({
+        enabled: true,
+        auto_move_enabled: true,
+        moved: [{ alert_id: 'a1', job_id: 'j1', to_technician_id: 'tech-2' }],
+        left_parked: [{ alert_id: 'a2', reason: 'no_eligible_candidate' }],
+      });
+      expect(techOutAutoMove.autoAssignTechDay).toHaveBeenCalledWith(expect.objectContaining({
+        technicianId: TECH_ID, date: expect.any(String), actorId: 'actor-1',
+      }));
+    });
+
+    test('runs for an explicit date', async () => {
+      techOut.techOutEnabled.mockReturnValue(true);
+      techOutAutoMove.autoMoveEnabled.mockReturnValue(true);
+      techOutAutoMove.autoAssignTechDay.mockResolvedValue({ moved: [], left_parked: [] });
+
+      await run('post', '/:technicianId/auto-assign', { body: { date: '2026-09-24' } });
+
+      expect(techOutAutoMove.autoAssignTechDay).toHaveBeenCalledWith(expect.objectContaining({
+        technicianId: TECH_ID, date: '2026-09-24', actorId: 'actor-1',
+      }));
+    });
+
+    test('forwards an unexpected error to next()', async () => {
+      techOut.techOutEnabled.mockReturnValue(true);
+      techOutAutoMove.autoMoveEnabled.mockReturnValue(true);
+      techOutAutoMove.autoAssignTechDay.mockRejectedValue(new Error('boom'));
+
+      await expect(run('post', '/:technicianId/auto-assign', { body: { date: '2026-09-24' } })).rejects.toThrow('boom');
+    });
   });
 
 });
