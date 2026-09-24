@@ -25,7 +25,10 @@ jest.mock('../services/inspection-credit', () => ({
   markBookingForInspectionCredit: jest.fn(async () => {}),
   redeemInspectionCreditForBooking: jest.fn(async () => {}),
 }));
-jest.mock('../services/lead-estimate-link', () => ({ linkLeadEstimatesToCustomer: jest.fn(async () => {}) }));
+jest.mock('../services/lead-estimate-link', () => ({
+  linkLeadEstimatesToCustomer: jest.fn(async () => {}),
+  markLeadContactedFromEvidence: jest.fn(async () => ({ contacted: true })),
+}));
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest.fn(async () => {}) }));
 
 const express = require('express');
@@ -1218,9 +1221,10 @@ describe('POST /admin/leads/:id/schedule-appointment — customer_id linked WITH
 // it OPEN, provisions the customer in a lead stage, and stamps no funnel win.
 describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does not convert', () => {
   const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
-  beforeEach(() => { db.mockReset(); bridgeLeadFunnelStage.mockClear(); });
+  const { markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
+  beforeEach(() => { db.mockReset(); bridgeLeadFunnelStage.mockClear(); markLeadContactedFromEvidence.mockClear(); });
 
-  it('new lead: customer provisioned at new_lead, lead claimed but not won, no funnel bridge', async () => {
+  it('new lead: customer provisioned at new_lead, lead claimed and advanced through contacted evidence, never won', async () => {
     const calls = [];
     install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null, status: 'new' } }), calls));
     await withServer(async (baseUrl) => {
@@ -1234,24 +1238,39 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
       expect(leadUpdate.args[0]).toMatchObject({ customer_id: 'cust-new', is_qualified: true });
       expect(leadUpdate.args[0]).not.toHaveProperty('status');
       expect(leadUpdate.args[0]).not.toHaveProperty('converted_at');
+      expect(markLeadContactedFromEvidence).toHaveBeenCalledWith(expect.objectContaining({
+        leadId: LEAD_ID,
+        customerId: 'cust-new',
+        evidenceType: 'assessment_booked',
+        evidenceId: 'appt-1',
+        performedBy: 'Ava Admin',
+      }));
       // Claim only — never gated on converted_at like a conversion is.
       expect(leadUpdate.ops.filter((o) => o.op === 'whereNull').map((o) => o.args[0])).toEqual(['deleted_at']);
       const activities = calls.filter((c) => c.table === 'lead_activities' && c.op === 'insert').map((c) => c.args[0]);
       expect(activities.map((a) => a.activity_type)).toEqual(['appointment_scheduled']);
-      expect(activities[0].description).toMatch(/kept OPEN/);
+      expect(activities[0].description).toMatch(/assessment is not a win/);
+      // The helper owns the contacted funnel bridge. This route never writes
+      // a booked/won stage directly.
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
     });
   });
 
-  it('a closed lead (unresponsive) reopens to new when the assessment is booked', async () => {
+  it('a closed lead (unresponsive) is claimed without reopening it', async () => {
     const calls = [];
     install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null, status: 'unresponsive' } }), calls));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { serviceType: 'Waves Assessment' });
       expect(res.status).toBe(200);
       const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
-      expect(leadUpdate.args[0]).toMatchObject({ status: 'new', customer_id: 'cust-new' });
+      expect(leadUpdate.args[0]).toMatchObject({ customer_id: 'cust-new' });
+      expect(leadUpdate.args[0]).not.toHaveProperty('status');
       expect(leadUpdate.args[0]).not.toHaveProperty('converted_at');
+      expect(markLeadContactedFromEvidence).toHaveBeenCalledWith(expect.objectContaining({
+        leadId: LEAD_ID,
+        customerId: 'cust-new',
+        evidenceType: 'assessment_booked',
+      }));
     });
   });
 
@@ -1283,7 +1302,8 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
       expect((await res.json()).customerId).toBe('cust-linked');
       expect(calls.filter((c) => c.table === 'customers' && (c.op === 'update' || c.op === 'insert'))).toHaveLength(0);
       const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
-      expect(leadUpdate.args[0]).toMatchObject({ status: 'new', customer_id: 'cust-linked' });
+      expect(leadUpdate.args[0]).toMatchObject({ customer_id: 'cust-linked' });
+      expect(leadUpdate.args[0]).not.toHaveProperty('status');
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
     });
   });

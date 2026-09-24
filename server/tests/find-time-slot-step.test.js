@@ -47,7 +47,7 @@ afterAll(() => {
 
 function chain(result) {
   const c = {};
-  ['whereNotNull', 'where', 'whereBetween', 'whereIn', 'whereNotIn', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
+  ['whereNotNull', 'whereNull', 'where', 'whereBetween', 'whereIn', 'whereNotIn', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
   c.select = async () => result;
   return c;
 }
@@ -233,4 +233,21 @@ test('every gap names its two legs and the anchor the van leaves from (picked-ho
   expect(second.drive_in_minutes).toBe(1);
   expect(second.insertion.after_name).toBe('Fixture Stop');
   expect(second.insertion.after_stop_id).toBe('s1');
+});
+
+// GATE_TECH_OUT_REDISTRIBUTE's slot-discovery counterpart (codex #4678
+// pre-push auditor P1): a tech marked out for a date must never be offered
+// a slot on that date — legacy (non-capacity) path.
+describe('absent tech-days (technician_absences, GATE_TECH_OUT_REDISTRIBUTE)', () => {
+  test('a tech absent on one date in a two-date window yields no slots for that tech that date, but still yields them the other date', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return chain([{ id: 't1', name: 'A' }, { id: 't2', name: 'B' }]);
+      if (table === 'technician_absences') return chain([{ technician_id: 't2', absence_date: FUTURE_DATE }]);
+      return chain([]); // scheduled_services etc. — no route stops either day.
+    });
+    const { slots } = await findAvailableSlots({ ...BASE, dateTo: NEXT_FUTURE_DATE, topN: 200 });
+    const techIdsByDate = (date) => new Set(slots.filter((s) => s.date === date).map((s) => s.technician.id));
+    expect(techIdsByDate(FUTURE_DATE)).toEqual(new Set(['t1']));
+    expect(techIdsByDate(NEXT_FUTURE_DATE)).toEqual(new Set(['t1', 't2']));
+  });
 });

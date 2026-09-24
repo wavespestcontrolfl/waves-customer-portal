@@ -27,6 +27,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Sheet, SheetHeader, SheetBody, Badge, Button, Card, cn } from '../ui';
+import TechOutSection from './TechOutSection';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -111,7 +112,7 @@ function RouteStop({ stop }) {
   );
 }
 
-export default function TechDrawer({ techId, onClose }) {
+export default function TechDrawer({ techId, onClose, onAbsenceChanged }) {
   const [tech, setTech] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -152,6 +153,27 @@ export default function TechDrawer({ techId, onClose }) {
     setError(null);
     if (techId) fetchTech(techId);
   }, [techId, fetchTech]);
+
+  // TechOutSection's onChanged fires after a mark-out/clear mutation.
+  // onAbsenceChanged (the parent's callback) only refreshes the board
+  // roster — this drawer's own `tech` state (today's counts, route,
+  // out_today badge) would otherwise stay stale until the next open.
+  // Re-running fetchTech(techId) rides the same seq-ref race guard as
+  // every other fetch, so a stale response from a since-superseded
+  // selection still can't clobber newer state.
+  // The section reports which tech its mutation was for; a callback that
+  // arrives after the drawer moved to another tech (close, reopen on B while
+  // A's request was still in flight) must not refetch A over B's details.
+  const techIdRef = useRef(techId);
+  techIdRef.current = techId;
+  const handleAbsenceChanged = useCallback((changedTechId) => {
+    // The board refresh is unconditional — the server committed the change.
+    onAbsenceChanged?.();
+    // The drawer's own details refetch only for the tech it still shows.
+    if (!changedTechId || changedTechId === techIdRef.current) {
+      if (techIdRef.current) fetchTech(techIdRef.current);
+    }
+  }, [onAbsenceChanged, fetchTech]);
 
   const open = !!techId;
 
@@ -235,6 +257,8 @@ export default function TechDrawer({ techId, onClose }) {
                 </div>
               </Card>
             </div>
+
+            <TechOutSection techId={techId} techName={tech.name} onChanged={handleAbsenceChanged} />
 
             <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary mb-2">
               Today's route

@@ -1584,15 +1584,38 @@ function recurringTemplateTechnicianId(parent) {
 // removed) the child is seeded unassigned so auto-dispatch places it — never
 // onto a tech who cannot take it. FOR SHARE conflicts with the Team tab's
 // FOR UPDATE, so the change cannot commit underneath the insert.
-async function assignableRecurringTemplateTechnicianId(conn, parent) {
+//
+// `date` (YYYY-MM-DD, optional): the CHILD's own occurrence date (never the
+// parent's anchor date). When given, a tech who otherwise passes the
+// assignability check is still seeded unassigned if they carry an uncleared
+// technician_absences row for that date (GATE_TECH_OUT_REDISTRIBUTE) — same
+// predicate as assertAssignableTechnician's date check in
+// technician-eligibility.js. This never throws (unlike that 422 path): a
+// series edit or auto-extend spawning several children must not fail the
+// whole call because ONE occurrence lands on a marked-out day — that child
+// is simply seeded unassigned, same as any other not-assignable case.
+// Omitting `date` keeps every caller byte-identical to before this check.
+async function assignableRecurringTemplateTechnicianId(conn, parent, date) {
   const techId = recurringTemplateTechnicianId(parent);
   if (!techId) return null;
   let q = conn('technicians').where({ id: techId });
   if (conn.isTransaction) q = q.forShare();
   const tech = await q.first('id', 'employment_status', 'field_dispatchable');
-  if (isAssignable(tech)) return techId;
-  logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
-  return null;
+  if (!isAssignable(tech)) {
+    logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
+    return null;
+  }
+  if (date) {
+    const absence = await conn('technician_absences')
+      .where({ technician_id: techId, absence_date: date })
+      .whereNull('cleared_at')
+      .first('id');
+    if (absence) {
+      logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is marked out on ${date}; seeding child unassigned`);
+      return null;
+    }
+  }
+  return techId;
 }
 
 // Statuses that mean a series visit is still ahead of us. Confirmed counts:
@@ -7219,7 +7242,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE) —
       // covers a stale picker and the auto-assign path alike; recurring
       // children below inherit this row's tech, so one check fences both.
-      await assertAssignableTechnician(resolvedTechId, { conn: trx });
+      await assertAssignableTechnician(resolvedTechId, { conn: trx, date: String(scheduledDate).slice(0, 10) });
+      // The recurring-child and booster loops below insert this SAME
+      // resolvedTechId on OTHER dates (tech-out P1) — the parent-date check
+      // above can't see a tech marked out on one of those occurrence dates.
+      // plannedChildDates/plannedBoosterDates are fully computed (and
+      // locked) above, so every distinct destination date is checked once,
+      // here, before either insert loop runs — an absence on any occurrence
+      // date refuses the whole create instead of partially inserting a series.
+      if (resolvedTechId) {
+        const childBoosterDates = new Set([...plannedChildDates, ...plannedBoosterDates].filter(Boolean));
+        for (const occDate of childBoosterDates) {
+          await assertAssignableTechnician(resolvedTechId, { conn: trx, date: occDate });
+        }
+      }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -10855,6 +10891,38 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           arrivalRouteFenceKeys = new Set(await lockTechDays(trx, preFence));
         }
       }
+      // Save-time eligibility for the FINAL technician on the FINAL date
+      // this save lands on (tech-out P1 pre-push audit): assignScheduleJobs
+      // below only runs when the technician itself is changing, so a
+      // date-only edit that keeps the current technician used to skip
+      // eligibility entirely — the receiving day was never checked against
+      // technician_absences. And when assignScheduleJobs DOES run, its
+      // write to updates.scheduled_date hasn't happened yet, so without this
+      // it would validate the row's OLD date instead of the date this same
+      // transaction is about to write (assignDispatchJob's noticeSnapshot
+      // override, threaded below, fixes that half; this check covers the
+      // other). One check, on the tech-day fence already taken above, before
+      // any write in this transaction — refuse before the first write, same
+      // as the create-appointment path.
+      if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
+        const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
+          .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+        const finalTechnicianId = hasTechnicianIdUpdate
+          ? requestedTechnicianId
+          : (eligibilityRow?.technician_id || null);
+        const finalTechChanging = hasTechnicianIdUpdate
+          && (eligibilityRow?.technician_id || null) !== finalTechnicianId;
+        // Only a date that actually CHANGES is a new day to validate: the
+        // edit modal resubmits scheduled_date unchanged on a window / notes
+        // edit, and a tech marked out today must still be able to have
+        // today's stop edited in place (pre-push auditor P1 on #4678).
+        const finalDateChanging = updates.scheduled_date !== undefined
+          && dateOnly(updates.scheduled_date) !== (eligibilityRow?.day || null);
+        if (finalTechnicianId && (finalDateChanging || finalTechChanging)) {
+          const finalDate = finalDateChanging ? dateOnly(updates.scheduled_date) : (eligibilityRow?.day || null);
+          await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
+        }
+      }
       // Match customer editors and grouping: maintenance/comms, customer row,
       // then stop locks. Tech-day fences remain ahead of all three.
       const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan
@@ -12383,7 +12451,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             const childIdentity = await resolveSeriesChildIdentity(trx, parent);
             const childData = {
               customer_id: parent.customer_id,
-              technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
+              technician_id: await assignableRecurringTemplateTechnicianId(trx, parent, nextDateStr),
               scheduled_date: nextDateStr,
               window_start: parent.window_start,
               window_end: parent.window_end,
@@ -14471,7 +14539,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
       customer_id: parent.customer_id,
-      technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
+      technician_id: await assignableRecurringTemplateTechnicianId(trx, parent, nd),
       scheduled_date: nd,
       window_start: parent.window_start,
       window_end: parent.window_end,
@@ -14767,7 +14835,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           const childIdentity = await resolveSeriesChildIdentity(conn, parent);
           const nextData = {
             customer_id: parent.customer_id,
-            technician_id: await assignableRecurringTemplateTechnicianId(conn, parent),
+            technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
             scheduled_date: nextStr,
             window_start: parent.window_start, window_end: parent.window_end,
             service_type: childIdentity.service_type, status: 'pending',
@@ -19944,7 +20012,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent, nd),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',
@@ -20043,7 +20111,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent, nd),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',

@@ -3,21 +3,30 @@
  * heroes + social squares.
  *
  * Provider chain via env BLOG_IMAGE_PROVIDER (default:
- * "gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1").
- * Each provider is tried in order; on 404 / model-not-found / 5xx we fall
- * through to the next. On the first 2xx with image bytes we return.
+ * "gpt-image-2,gpt-image-1.5,gpt-image-1"). Each provider is tried in
+ * order; on 404 / model-not-found / 5xx we fall through to the next. On the
+ * first 2xx with image bytes we return.
  *
- * Chain rationale (bake-off 2026-09-05): gpt-image-2 is the top-ranked
- * image model overall; Nano Banana Pro (gemini-3-pro-image, its OWN
- * selector MODEL_GEMINI_IMAGE_PRO) is a close second and cheaper; the
- * remaining Gemini legs are the flash Nano Banana line from
- * config/models.js (MODEL_GEMINI_IMAGE / MODEL_GEMINI_IMAGE_STABLE — do not
- * point those at the Pro model, that only duplicates the Pro leg).
- * gpt-image-1 stays as the LAST
- * OpenAI fallback — an account without the newer models and no
- * GEMINI_API_KEY must not lose its only working provider. The legacy
- * 'gemini' slug (gemini-2.5-flash text model with image modality) is out
- * of the default but stays in MODEL_MAP for env overrides.
+ * ⛔ NO PIXEL-WATERMARKED PROVIDERS (owner directive 2026-09-24): every
+ * Gemini image model (the Nano Banana line and the legacy text-model slug)
+ * embeds Google's SynthID watermark in the PIXELS. Unlike the C2PA manifest
+ * (metadata, stripped by the webp re-encode), SynthID survives re-encoding
+ * and is not removable — so those providers are never used, not even as a
+ * fallback. MODEL_MAP tags them `pixelWatermark`; parseChain drops them from
+ * ANY chain (default or env) unless ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true
+ * is set on purpose. OpenAI's gpt-image line attaches C2PA metadata only.
+ * When the OpenAI ladder is exhausted the call throws and the slot parks /
+ * retries — it never quietly falls through to a watermarking model. With the
+ * override set and no env chain, the pre-09-24 chain (Gemini legs interleaved)
+ * is the default again, so the kill switch alone restores the old fallbacks.
+ *
+ * Chain rationale: gpt-image-2 is the top-ranked image model overall
+ * (bake-off 2026-09-05); gpt-image-1.5 and gpt-image-1 are the OpenAI
+ * fallbacks — an account without the newer models must not lose its only
+ * working provider. The Gemini legs (Nano Banana Pro = MODEL_GEMINI_IMAGE_PRO,
+ * the flash line = MODEL_GEMINI_IMAGE / MODEL_GEMINI_IMAGE_STABLE, and the
+ * legacy 'gemini' text-model slug) stay in MODEL_MAP only for the explicit
+ * override above — they are SynthID-watermarked.
  * Google's Imagen line retired 2026-08-17 — never add imagen-* here.
  *
  * Output shape — `data:` URL — matches the legacy generateFeaturedImage
@@ -43,11 +52,15 @@ const { GEMINI_IMAGE_PRO, GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('..
 
 // Chain order (bake-off 2026-09-05, the same three prompts on every provider):
 // gpt-image-2 best on photo, cartoon and infographic (it honored an exact
-// caption list; ~75–90 s, ~$0.17); Nano Banana Pro (gemini-3-pro-image)
-// second — photo and cartoon close behind, ~16 s, ~$0.13, but it added
-// unrequested labels to the infographic; gpt-image-1.5 third (~35–40 s);
-// the flash Nano Banana fourth (~8 s, cheapest, weakest); gpt-image-1 last.
-const DEFAULT_CHAIN = 'gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
+// caption list; ~75–90 s, ~$0.17); gpt-image-1.5 next (~35–40 s); gpt-image-1
+// last. The Gemini legs that used to sit between them were removed 2026-09-24
+// (SynthID pixel watermark — see the header); OpenAI-only by design.
+const DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1';
+// The pre-2026-09-24 chain (bake-off order, Gemini legs interleaved). Used as
+// the default ONLY while ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true, so the
+// documented kill switch restores the old fallback legs during an OpenAI
+// outage without also requiring a BLOG_/SOCIAL_IMAGE_PROVIDER change.
+const WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
 
 const MODEL_MAP = {
   'gpt-image-2':   { api: 'openai', model: 'gpt-image-2',   quality: 'high' },
@@ -57,11 +70,19 @@ const MODEL_MAP = {
   // accept generationConfig.imageConfig.aspectRatio; the legacy 'gemini' slug
   // below is a text model with image modality and 400s on imageConfig, so
   // aspect stays prompt-only there (imageAspect flag gates the field).
-  'gemini-image-pro':  { api: 'gemini', model: GEMINI_IMAGE_PRO, imageAspect: true },
-  'gemini-image-best': { api: 'gemini', model: GEMINI_IMAGE_BEST, imageAspect: true },
-  'gemini-image':      { api: 'gemini', model: GEMINI_IMAGE_STABLE, imageAspect: true },
-  'gemini':        { api: 'gemini', model: 'gemini-2.5-flash' },
+  // ALL Gemini image output carries Google's SynthID pixel watermark —
+  // `pixelWatermark` keeps them out of every chain unless explicitly allowed.
+  'gemini-image-pro':  { api: 'gemini', model: GEMINI_IMAGE_PRO, imageAspect: true, pixelWatermark: 'synthid' },
+  'gemini-image-best': { api: 'gemini', model: GEMINI_IMAGE_BEST, imageAspect: true, pixelWatermark: 'synthid' },
+  'gemini-image':      { api: 'gemini', model: GEMINI_IMAGE_STABLE, imageAspect: true, pixelWatermark: 'synthid' },
+  'gemini':        { api: 'gemini', model: 'gemini-2.5-flash', pixelWatermark: 'synthid' },
 };
+
+// Owner directive 2026-09-24: no invisible watermarks on any published image.
+// The override exists only so a deliberate operator run (never prod defaults)
+// can reach a watermarking model; it must be the literal string 'true'.
+const PIXEL_WATERMARK_OVERRIDE_ENV = 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS';
+function pixelWatermarkAllowed() { return process.env[PIXEL_WATERMARK_OVERRIDE_ENV] === 'true'; }
 
 const MODE_SIZES = {
   'blog-hero':     { openai: '1536x1024', gemini: '1536x1024' },
@@ -83,12 +104,25 @@ const RETRYABLE_OPENAI_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
 // ── pure helpers (test-friendly) ─────────────────────────────────────
 
-function parseChain(envValue) {
-  const raw = String(envValue || DEFAULT_CHAIN);
-  return raw
+// { allowPixelWatermark } defaults to the env override; every chain — the
+// default AND an env/constructor override — is filtered, so a stale
+// BLOG_IMAGE_PROVIDER / SOCIAL_IMAGE_PROVIDER naming a Gemini slug cannot
+// reintroduce a watermarking provider. Dropped slugs are logged once per
+// distinct chain string so the operator sees why a leg vanished.
+const warnedChains = new Set();
+function parseChain(envValue, { allowPixelWatermark = pixelWatermarkAllowed() } = {}) {
+  const raw = String(envValue || (allowPixelWatermark ? WATERMARK_ALLOWED_DEFAULT_CHAIN : DEFAULT_CHAIN));
+  const known = raw
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter((s) => MODEL_MAP[s]);
+  if (allowPixelWatermark) return known;
+  const dropped = known.filter((s) => MODEL_MAP[s].pixelWatermark);
+  if (dropped.length && !warnedChains.has(raw)) {
+    warnedChains.add(raw);
+    logger.warn(`[image-generator] dropped pixel-watermarked provider(s) from the chain: ${dropped.join(', ')} (owner directive 2026-09-24 — set ${PIXEL_WATERMARK_OVERRIDE_ENV}=true only for a deliberate run)`);
+  }
+  return known.filter((s) => !MODEL_MAP[s].pixelWatermark);
 }
 
 function isFatalOpenAIError(status) {
@@ -209,11 +243,14 @@ const EQUIPMENT_SUBJECT = /\b(controller|timer|clock|irrigation|sprinkler|spread
 // #3964).
 const INDOOR_SUBJECT = /\b(kitchen|pantry|bathroom|bedroom|attic|closet|cabinets?|indoors?|inside|baseboards?|roach(es)?|cockroach(es)?|bed bugs?|silverfish|drain flies)\b/i;
 const OUTDOOR_SUBJECT = /\b(lawn|turf|grass|sod|yard|mounds?|garden|hedges?|shrubs?|trees?|palms?|mulch|patio|lanai|pool|driveway|exterior|outdoors?|outside|perimeter|foundation)\b/i;
-function settingsFor(subject) {
+function settingCategoryFor(subject) {
   const text = String(subject || '');
-  if (EQUIPMENT_SUBJECT.test(text)) return [...SETTINGS.equipment];
-  if (INDOOR_SUBJECT.test(text) && !OUTDOOR_SUBJECT.test(text)) return [...SETTINGS.indoor];
-  return [...SETTINGS.yard];
+  if (EQUIPMENT_SUBJECT.test(text)) return 'equipment';
+  if (INDOOR_SUBJECT.test(text) && !OUTDOOR_SUBJECT.test(text)) return 'indoor';
+  return 'yard';
+}
+function settingsFor(subject) {
+  return [...SETTINGS[settingCategoryFor(subject)]];
 }
 const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];
 const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking down', 'over the shoulder', 'straight-on, centered', 'three-quarter view'];
@@ -257,13 +294,22 @@ function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject =
   if (style === 'infographic') {
     return { style, setting: pick(INFOGRAPHIC_LAYOUTS, 1), timeOfDay: '', vantage: 'straight-on, centered' };
   }
+  const category = settingCategoryFor(subject);
   return {
     style,
-    setting: pick(settingsFor(subject), 1),
+    setting: pick(SETTINGS[category], 1),
     timeOfDay: pick(TIMES_OF_DAY, 2),
     vantage: pick(VANTAGES, 3),
+    // Owner ask 2026-09-23: the Waves van in the background of SOME exterior
+    // scenes. Yard settings only (a van in a kitchen is a contradiction), and
+    // about one in three so the variation directive (2026-09-05) still holds.
+    // The van is UNMARKED by design — the real wrap carries the retired name
+    // and generators turn lettering into gibberish; the logo screen would
+    // reject it. Revisit as a reference-image path after the re-wrap.
+    van: category === 'yard' && (seed + 4 * 7919) % 3 === 0,
   };
 }
+const VAN_LINE = 'In the background, a solid Waves-blue (#009CDE) Ford Transit work van parked at the curb or in the driveway — plain and unmarked, no lettering, no logo, not the focus of the shot.';
 // The style a slot regenerates in after a failed text/logo screen: one no
 // sibling slot of the post uses (the permutation's unused fourth style, when
 // the slot can carry it), else the slot's own style under a fresh seed — a
@@ -282,9 +328,19 @@ function retryStyleFor({ slug, mode = 'blog-hero', index = 0, captions = [] } = 
 // depict" lines (a brief's rules — e.g. no repair scenes on a post that says
 // Waves does not repair irrigation; no competitor vehicles on a comparison).
 const STANDARD_GUARDS = [
-  'no company logos, brand names, or brand marks of any kind — equipment, vehicles and uniforms are generic and unbranded',
+  'no company logos, brand names, or brand marks of any kind — equipment and vehicles are generic and unbranded, and uniforms carry no logo or lettering (only the uniform COLORS follow the Waves uniform line)',
   'no invented control-panel labels, dials with fake words, or gibberish lettering',
 ];
+// Owner directive 2026-09-23 (Adam, after the Bradenton WDO hero showed a tech in
+// a blue long-sleeve and khakis): any Waves technician in a generated image wears
+// the REAL uniform. Every scene mode carries the line — a hero, body slot or social
+// tile can all put a person in frame, and a captioned infographic about an
+// inspection or treatment can still draw a technician icon (Codex P2), so the
+// infographic carries it too. The logo itself stays OFF the shirt/cap:
+// generators render marks as gibberish and the post-generation text/logo
+// screen would reject the image.
+const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering.';
+
 function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [] }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
@@ -317,8 +373,10 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     : `Composition: landscape 3:2 aspect ratio, 1536x1024.`;
   // Brand palette is Waves Blue #009CDE + Gold #FFD700 (theme-brand.js); the
   // brand brief explicitly forbids teal, so steer the grade, don't paint it.
+  // The limited illustration palettes (blue / gold / neutrals) must not
+  // steer a technician's shirt back to blue: uniform red is always allowed.
   const styleLine = style
-    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast.`
+    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast; a technician's red shirt or red cap is part of the palette.`
     : `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast).`;
   const captionList = (style && style.allowsText ? captions : []).map((c) => String(c || '').trim()).filter(Boolean);
   const textRule = captionList.length
@@ -329,7 +387,12 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
     : '';
-  return [base, focus, local, framing, composition, styleLine, textRule, guards, distinct].filter(Boolean).join(' ');
+  const editorial = mode === 'blog-hero' || mode === 'blog-body'
+    ? 'Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.'
+    : '';
+  const uniform = WAVES_UNIFORM_LINE;
+  const van = plan && plan.van && !isInfographic ? VAN_LINE : '';
+  return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
@@ -470,13 +533,13 @@ async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch, tim
 // ── public API ───────────────────────────────────────────────────────
 
 class ImageGenerator {
-  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now } = {}) {
-    this.chain = parseChain(envChain);
+  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed() } = {}) {
+    this.chain = parseChain(envChain, { allowPixelWatermark });
     this._chainBudgetMs = chainBudgetMs;
     this._now = now;
     if (!this.chain.length) {
       logger.warn('[image-generator] no valid providers in BLOG_IMAGE_PROVIDER; falling back to defaults');
-      this.chain = parseChain(DEFAULT_CHAIN);
+      this.chain = parseChain(undefined, { allowPixelWatermark });
     }
     this._fetchFn = fetchFn;
     this._capabilityChecked = false;
@@ -607,6 +670,7 @@ module.exports.planFor = planFor;
 module.exports.retryStyleFor = retryStyleFor;
 module.exports.IMAGE_CHAIN_BUDGET_MS = IMAGE_CHAIN_BUDGET_MS;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
+module.exports.pixelWatermarkAllowed = pixelWatermarkAllowed;
 module.exports._internals = {
   stylePermutation,
   retryStyleFor,
@@ -626,6 +690,9 @@ module.exports._internals = {
   IMAGE_LEG_FLOOR_MS,
   legTimeoutMs,
   parseChain,
+  pixelWatermarkAllowed,
+  PIXEL_WATERMARK_OVERRIDE_ENV,
+  WATERMARK_ALLOWED_DEFAULT_CHAIN,
   isFatalOpenAIError,
   sizeFor,
   buildPrompt,

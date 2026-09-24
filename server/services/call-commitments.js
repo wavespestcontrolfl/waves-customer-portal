@@ -111,19 +111,57 @@ function normalizeKind(value, party = null) {
 // vocabulary slip fails soft (to 'unknown' / 'other') instead of failing the
 // response. Structural problems (missing evidence, wrong types) still reach
 // the schema.
-function normalizeModelOutput(parsed) {
+// The ONE definition of "this quote grounds this commitment": verbatim in
+// the transcript (in the committing party's own turns when the transcript
+// is speaker-labelled) AND action-bearing. Shared by the pre-schema
+// evidence cap and by groundModelCommitments so the two can never rank
+// or accept quotes differently (Codex #4704 r2/r3).
+function evidenceGrounder(transcript) {
+  const flat = normalizeForMatch(transcript);
+  const turns = speakerTurns(transcript);
+  return (e, item) => {
+    const q = normalizeForMatch(e?.quote);
+    if (q.length < 3) return false;
+    if (!quoteExpressesAction(q, item)) return false;
+    const speaker = PARTY_SPEAKER[item.party] || null;
+    if (!turns || !speaker) return flat.includes(q);
+    return turns[speaker].some((turn) => turn.includes(q));
+  };
+}
+
+function normalizeModelOutput(parsed, transcript = '') {
   if (!parsed || !Array.isArray(parsed.commitments)) return parsed;
+  const grounded = evidenceGrounder(transcript);
   for (const item of parsed.commitments) {
     if (!item || typeof item !== 'object') continue;
     if (typeof item.channel === 'string') item.channel = normalizeChannel(item.channel);
     if (typeof item.kind === 'string') item.kind = normalizeKind(item.kind, item.party);
+    // A fourth quote for the same promise is surplus evidence, not a bad
+    // promise: keep three (schema maxItems) rather than fail the whole
+    // response — the 2026-09-23 replay found one call lost this way. Keep
+    // the quotes groundModelCommitments will accept (verbatim in the
+    // transcript AND action-bearing) ahead of the rest, so a promise whose
+    // only usable quote came fourth is not lost to the trim (Codex r2 P2).
+    if (Array.isArray(item.evidence) && item.evidence.length > 3) {
+      const preferred = item.evidence.filter((e) => grounded(e, item));
+      const rest = item.evidence.filter((e) => !preferred.includes(e));
+      item.evidence = preferred.concat(rest).slice(0, 3);
+    }
   }
+  // Over-long lists are trimmed to the schema ceiling here only so the
+  // response validates; the twelve-commitment cap is applied to the
+  // accepted results in extractCommitmentsWithModel.
+  if (parsed.commitments.length > 40) parsed.commitments = parsed.commitments.slice(0, 40);
   return parsed;
 }
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
-const EXTRACTOR_VERSION = 'commitments-v8';
+const EXTRACTOR_VERSION = 'commitments-v9';
+// The prompt asks for at most twelve, most consequential first; the cap is
+// enforced on the grounded, confidence-filtered results so that ordering
+// is what decides which twelve survive.
+const MAX_COMMITMENTS = 12;
 const IDENTITY_UNRESOLVED_INCOMPLETE = 'incomplete_extraction';
 const IDENTITY_UNRESOLVED_AMBIGUOUS = 'reconciliation_ambiguity';
 
@@ -416,7 +454,11 @@ const MODEL_OUTPUT_SCHEMA = {
   properties: {
     commitments: {
       type: 'array',
-      maxItems: 12,
+      // Sanity ceiling only. The twelve-commitment cap (MAX_COMMITMENTS) is
+      // applied to the ACCEPTED results after grounding, so a long list
+      // never fails validation and no grounded promise is crowded out by
+      // items grounding would drop anyway (Codex #4704 r5/r6).
+      maxItems: 40,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -494,8 +536,8 @@ A commitment is something one party explicitly said they would do after the call
 - "customer": the caller agreed to do something (send photos, confirm a date, call back, provide information such as an address or gate code, make a payment).
 
 Rules — these are strict:
-1. Only list what was actually SAID. Do not infer a promise from context, tone, or what a good agent would normally do. If nobody committed to anything, return {"commitments": []}.
-2. Every commitment needs at least one VERBATIM quote copied exactly from the transcript (same words, same spelling), with the speaker who said it. Do not paraphrase the quote.
+1. Only list what was actually SAID. Do not infer a promise from context, tone, or what a good agent would normally do. If nobody committed to anything, return {"commitments": []}. List at most twelve commitments, the most consequential first.
+2. Every commitment needs at least one VERBATIM quote copied exactly from the transcript (same words, same spelling), with the speaker who said it — at most three quotes per commitment. Do not paraphrase the quote.
 3. "due_text" is the timing of THIS promised action as spoken ("by tomorrow morning", "later today", "after the inspection") or null. "due_at" is an ISO 8601 timestamp with the -04:00/-05:00 Eastern offset ONLY when that timing names a specific day/time relative to the call date (${when} Eastern); otherwise null. Never use the existing or requested appointment date as the delivery time. "due_type" is "deadline" ONLY when the agent explicitly promises this action BY, BEFORE, or NO LATER THAN due_at; it is "floor" when the agent says to send it AT or AFTER due_at, and null when due_at is null or timing is unclear. A deadline on another action (such as a callback) does not make the link delivery a deadline.
 4. "confidence" is how sure you are that the quoted words constitute a real commitment (0 to 1).
 5. Use kind "other" only when none of the listed kinds fits.
@@ -604,8 +646,8 @@ function normalizedRescheduleSubject(item, transcript, reference) {
 }
 
 function groundModelCommitments(items, transcript, reference = null) {
-  const flat = normalizeForMatch(transcript);
   const turns = speakerTurns(transcript);
+  const isGrounded = evidenceGrounder(transcript);
   const kept = [];
   let droppedUngrounded = 0;
   let droppedLowConfidence = 0;
@@ -616,13 +658,7 @@ function groundModelCommitments(items, transcript, reference = null) {
     // is a cross-field rule the schema cannot express.
     if (!kindBelongsToParty(item.party, item.kind)) { droppedMismatched += 1; continue; }
     const speaker = PARTY_SPEAKER[item.party] || null;
-    const grounded = (item.evidence || []).filter((e) => {
-      const q = normalizeForMatch(e?.quote);
-      if (q.length < 3) return false;
-      if (!quoteExpressesAction(q, item)) return false;
-      if (!turns || !speaker) return flat.includes(q);
-      return turns[speaker].some((turn) => turn.includes(q));
-    });
+    const grounded = (item.evidence || []).filter((e) => isGrounded(e, item));
     if (!grounded.length) { droppedUngrounded += 1; continue; }
     if (typeof item.confidence !== 'number' || item.confidence < MIN_MODEL_CONFIDENCE) { droppedLowConfidence += 1; continue; }
     const malformedDue = Number.isNaN(parseDueAt(item.due_at));
@@ -676,7 +712,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   } catch (err) {
     return { items: [], skipped: 'parse_failed', error: err.message, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
-  normalizeModelOutput(parsed);
+  normalizeModelOutput(parsed, transcript);
   const validate = getValidator();
   if (!validate(parsed)) {
     // Paths and keywords only — never the model text (it quotes the caller).
@@ -685,7 +721,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
     return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
   const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
-  return { items: grounded.kept, droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
+  return { items: grounded.kept.slice(0, MAX_COMMITMENTS), droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
 }
 
 // ── Persistence ────────────────────────────────────────────────────────────

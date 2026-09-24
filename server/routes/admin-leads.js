@@ -12,7 +12,7 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 const { assertAdminAppointmentWindow, slotOverlapWarning } = require('../services/scheduling/window-rules');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
-const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
+const { linkLeadEstimatesToCustomer, markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const logger = require('../services/logger');
 
@@ -1388,8 +1388,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // services/assessment-booking.js): the owner goes out to look and quote,
     // nothing has sold. The booking still claims the lead for the customer
     // (so it can't be reused elsewhere) and logs on its timeline, but the
-    // lead stays OPEN, the customer row keeps its lead stage, and no
-    // member_since / funnel 'won' is stamped — the deal converts when the
+    // lead never becomes won, the customer row keeps its lead stage, and no
+    // member_since / funnel 'won' is stamped. New advances to contacted;
+    // estimate and closed states are preserved. The deal converts when the
     // quote is accepted or a paid service books, like every other path.
     const { isAssessmentServiceType, isAssessmentServiceRow } = require('../services/assessment-booking');
     const assessmentVisit = isAssessmentServiceType(svcType) || isAssessmentServiceRow(catalogService);
@@ -1677,7 +1678,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
       // ---- end slot-overlap guard part 2
 
-      await assertAssignableTechnician(technicianId || null, { conn: trx });
+      await assertAssignableTechnician(technicianId || null, { conn: trx, date: String(date).slice(0, 10) });
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,
@@ -1733,17 +1734,13 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (isConversion) convertQuery = convertQuery.whereNull('converted_at');
       let leadUpdate;
       if (assessmentVisit) {
-        // Claim, keep visibly open: a closed status (lost / unresponsive /
-        // disqualified) reopens to 'new' so the promised quote can't hide in
-        // a lead the pipeline view never shows — mirrors the phone-booking
-        // quote-pending claim in call-recording-processor.js.
-        const OPEN_LEAD_STATUSES = new Set(['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'won']);
-        const currentStatus = String(lockedLead.status || '').toLowerCase();
+        // Claim the lead without rewriting its lifecycle here. The shared
+        // evidence helper below owns the one permitted advance (new ->
+        // contacted); estimate, won, and every closed state stay untouched.
         leadUpdate = {
           customer_id: customerId,
           is_qualified: true,
           updated_at: new Date(),
-          ...(OPEN_LEAD_STATUSES.has(currentStatus) ? {} : { status: 'new' }),
         };
       } else {
         leadUpdate = {
@@ -1756,6 +1753,16 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
       const converted = await convertQuery.update(leadUpdate);
       if (!converted) throw alreadyConverted('Lead was deleted or already converted while booking — appointment not created');
+      if (assessmentVisit) {
+        await markLeadContactedFromEvidence({
+          database: trx,
+          leadId: req.params.id,
+          customerId,
+          evidenceType: 'assessment_booked',
+          evidenceId: appt.id,
+          performedBy,
+        });
+      }
       // Attach the lead's quote to this customer (same txn) so it becomes a
       // customer estimate visible in the New Appointment "Estimate source".
       // Best-effort — a backfill miss must not fail the booking.
@@ -1777,7 +1784,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         lead_id: req.params.id,
         activity_type: 'appointment_scheduled',
         description: `Appointment scheduled: ${svcType} on ${date}${windowStart ? ` at ${time}` : ''}`
-          + (assessmentVisit ? ' — lead kept OPEN: an assessment is not a win' : ''),
+          + (assessmentVisit ? ' — an assessment is not a win' : ''),
         performed_by: performedBy,
         metadata: JSON.stringify({
           appointmentId: appt.id, customerId, date, time,

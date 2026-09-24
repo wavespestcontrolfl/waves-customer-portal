@@ -32,7 +32,9 @@ jest.mock('../utils/datetime-et', () => {
 const db = require('../models/db');
 const { clearTechCurrentJob } = require('../services/tech-status');
 const datetimeEt = require('../utils/datetime-et');
+const logger = require('../services/logger');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
+const { NOT_ASSIGNABLE } = require('../services/technician-eligibility');
 
 const actualElapsed = jest.requireActual('../utils/datetime-et').sameDayWindowElapsed;
 const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
@@ -470,4 +472,59 @@ test.each([null, '09:00:00'])('legacy batch move maintains the dispatch due mark
     if (priorGate === undefined) delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
     else process.env.GATE_ADMIN_COLLECTIVE_MOVE = priorGate;
   }
+});
+
+// assign_technician bulk assign — per-destination-date eligibility (Codex r4
+// P1): the tool used to assert eligibility ONCE with no date, so a tech
+// marked out on ONE of several selected stops' dates still absorbed every
+// stop. It must now check every distinct scheduled_date among the selected
+// services before the bulk update runs.
+test('assign_technician refuses the whole bulk assign when the tech is out on any selected date, before any update runs', async () => {
+  const techRow = { id: 'tech-1', name: 'Grace Hopper', employment_status: 'active', field_dispatchable: true, active: true };
+  const services = [
+    { id: 'svc-1', first_name: 'Ada', last_name: 'Lovelace', service_type: 'Pest Control', scheduled_date: '2026-05-20', window_start: '09:00:00', window_end: '10:00:00', current_tech_id: null, visit_id: null, scheduled_date_str: '2026-05-20', current_tech_name: null },
+    { id: 'svc-2', first_name: 'Bob', last_name: 'Noyce', service_type: 'Pest Control', scheduled_date: '2026-05-21', window_start: '09:00:00', window_end: '10:00:00', current_tech_id: null, visit_id: null, scheduled_date_str: '2026-05-21', current_tech_name: null },
+  ];
+  const OUT_DATE = '2026-05-21';
+
+  const techChain = chain({ whereILike: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(techRow) });
+  const servicesListChain = chain({ select: jest.fn().mockResolvedValue(services) });
+  const bulkUpdateChain = chain();
+  const absenceCalls = [];
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return techChain;
+    if (table === 'scheduled_services') {
+      if (servicesListChain.select.mock.calls.length === 0) return servicesListChain;
+      return bulkUpdateChain;
+    }
+    if (table === 'technician_absences') {
+      let capturedDate = null;
+      const builder = {
+        where: jest.fn((cond) => { capturedDate = cond && cond.absence_date; return builder; }),
+        whereNull: jest.fn().mockReturnThis(),
+        first: jest.fn(async () => {
+          absenceCalls.push(capturedDate);
+          return capturedDate === OUT_DATE ? { id: 'absence-1' } : null;
+        }),
+      };
+      return builder;
+    }
+    throw new Error(`Unexpected db('${table}') call`);
+  });
+
+  const result = await executeScheduleTool('assign_technician', {
+    service_ids: ['svc-1', 'svc-2'], technician_name: 'Grace', confirmed: true,
+  });
+
+  expect(result.error).toMatch(/is marked out on 2026-05-21/);
+  // Both distinct destination dates were checked (absence read is cheap on
+  // the clean date too) — never just the first.
+  expect(absenceCalls.sort()).toEqual(['2026-05-20', '2026-05-21']);
+  expect(logger.error).toHaveBeenCalledWith(
+    expect.any(String),
+    expect.objectContaining({ code: NOT_ASSIGNABLE }),
+  );
+  // The bulk update never ran — the refused stop must not leak a partial
+  // reassignment onto the tech's clean-date stop either.
+  expect(bulkUpdateChain.update).not.toHaveBeenCalled();
 });
