@@ -97,7 +97,10 @@ function makeEstimate() {
 // liveSeriesCustomerId, when set, makes the 'scheduled_services' live-plan
 // query (customerHasLiveRecurringPlan) find ONE live recurring row for that
 // customer id — any other customer id (or none) finds nothing.
-function makeDb(estimate, { customerRow = existingMember, liveSeriesCustomerId = null } = {}) {
+// liveSeriesRowId names the fixture row's own id — a caller's
+// excludeRowIds (bookedAppointmentIds) that includes it makes the query
+// correctly find nothing, exactly like a real whereNotIn('id', …) would.
+function makeDb(estimate, { customerRow = existingMember, liveSeriesCustomerId = null, liveSeriesRowId = 'series-root-live' } = {}) {
   const updates = [];
   const inserts = [];
   const database = jest.fn((table) => {
@@ -105,7 +108,7 @@ function makeDb(estimate, { customerRow = existingMember, liveSeriesCustomerId =
       clause: null,
       where(clause) { if (typeof clause !== 'function') this.clause = clause; return this; },
       whereIn() { return this; },
-      whereNotIn() { return this; },
+      whereNotIn(column, values) { this.notIn = { ...(this.notIn || {}), [column]: values }; return this; },
       whereNull(column) { this.nullColumns = [...(this.nullColumns || []), column]; return this; },
       whereNotNull() { return this; },
       whereRaw() { return this; },
@@ -115,8 +118,10 @@ function makeDb(estimate, { customerRow = existingMember, liveSeriesCustomerId =
         if (table === 'estimates') return estimate;
         if (table === 'customers') return customerRow;
         if (table === 'scheduled_services') {
-          return (liveSeriesCustomerId && this.clause && this.clause.customer_id === liveSeriesCustomerId)
-            ? { id: 'series-root-live' } : null;
+          if (!(liveSeriesCustomerId && this.clause && this.clause.customer_id === liveSeriesCustomerId)) return null;
+          const excludedIds = (this.notIn && this.notIn.id) || [];
+          if (excludedIds.includes(liveSeriesRowId)) return null;
+          return { id: liveSeriesRowId };
         }
         return null;
       },
@@ -392,5 +397,63 @@ describe('r2-estimate-conversion-money-1: annual prepay of an add-on for an exis
 
     const withProspectiveId = await prepayBookingEligibility(unownedEstimate, database, perApplicationCustomer.id);
     expect(withProspectiveId).toMatchObject({ eligible: false, reason: 'existing_customer' });
+  });
+
+  test('a brand-new customer’s own just-booked prepay-on-book appointment does not count against them (codex round-2 P1 follow-up)', async () => {
+    // admin-schedule.js's prepay-on-book flow books the appointment(s)
+    // BEFORE calling accept, with source_estimate_id left NULL (linked only
+    // after acceptance succeeds) — so the source_estimate_id-based exclusion
+    // in customerHasLiveRecurringPlan does not catch them, and a brand-new
+    // customer's own new booking read back as "an existing live plan",
+    // wrongly rejecting them and leaving the appointment booked-but-not-accepted.
+    const brandNewCustomer = {
+      id: 'customer-brand-new-onbook',
+      pipeline_stage: 'active_customer',
+      billing_mode: null,
+      monthly_rate: null,
+    };
+    const estimate = makeEstimate();
+    estimate.customer_id = brandNewCustomer.id;
+    delete estimate.estimate_data.membershipSnapshot;
+    const bookedRowId = 'newly-booked-row-1';
+    const { database } = makeDb(estimate, {
+      customerRow: brandNewCustomer,
+      liveSeriesCustomerId: brandNewCustomer.id,
+      liveSeriesRowId: bookedRowId,
+    });
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({
+        customerId: brandNewCustomer.id,
+        billingTerm: 'prepay_annual',
+        draftInvoiceId: 'invoice-new-customer-prepay',
+      }),
+    };
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+
+    // WITHOUT bookedAppointmentIds: the just-booked row is indistinguishable
+    // from a genuine other live plan — reproduces the P1 (wrongly rejected).
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      source: 'verbal_annual_prepay',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService,
+      estimateConverter,
+    })).rejects.toMatchObject({ statusCode: 400 });
+
+    // WITH bookedAppointmentIds naming that exact row: excluded correctly,
+    // acceptance proceeds.
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      source: 'verbal_annual_prepay',
+      billingTerm: 'prepay_annual',
+      bookedAppointmentIds: [bookedRowId],
+      database,
+      leadLinkService,
+      estimateConverter,
+    });
+    expect(estimateConverter.convertEstimate).toHaveBeenCalled();
   });
 });

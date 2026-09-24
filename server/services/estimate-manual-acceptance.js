@@ -74,20 +74,28 @@ function estimateDataMembershipSnapshotIsExistingCustomer(estimate = {}) {
 // WHOLE account to annual_prepay regardless of what lane it silently killed.
 // This checks the one thing that actually matters here — does the customer
 // have ANY live recurring plan row, in ANY billing lane — not billing_mode
-// classification. Excludes rows sourced from THIS estimate (prepay-on-book
-// creates the add-on's own scheduled_services row before calling accept), so
-// a customer with no other plan is never blocked by their own new booking.
-async function customerHasLiveRecurringPlan(database, customerId, excludeEstimateId = null) {
+// classification. Excludes rows sourced from THIS estimate (a normal accept
+// links source_estimate_id at booking) — BUT the prepay-on-book flow books
+// its own appointment(s) BEFORE calling accept with source_estimate_id left
+// NULL (admin-schedule.js only links them after acceptance succeeds), so
+// that exclusion alone does not catch them; a brand-new customer's own
+// just-booked appointment would otherwise read back as "an existing live
+// plan" (codex round-2 P1). excludeRowIds — the accept's own
+// bookedAppointmentIds — excludes those specific rows by id instead.
+async function customerHasLiveRecurringPlan(database, customerId, excludeEstimateId = null, excludeRowIds = []) {
   if (!customerId) return false;
   const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
-  const row = await database('scheduled_services')
+  let query = database('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
     .whereNotIn('status', TERMINAL_STATUSES)
     .where((builder) => {
       builder.whereNull('source_estimate_id');
       if (excludeEstimateId) builder.orWhereNot('source_estimate_id', excludeEstimateId);
-    })
-    .first('id');
+    });
+  if (Array.isArray(excludeRowIds) && excludeRowIds.length > 0) {
+    query = query.whereNotIn('id', excludeRowIds);
+  }
+  const row = await query.first('id');
   return !!row;
 }
 
@@ -667,7 +675,7 @@ async function markEstimateManuallyAccepted({
         );
         const linkedCustomer = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
         customerLivePreservesMembership = !!(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
-        customerHasLivePlan = await customerHasLiveRecurringPlan(trx, estimate.customer_id, estimate.id || null);
+        customerHasLivePlan = await customerHasLiveRecurringPlan(trx, estimate.customer_id, estimate.id || null, bookedAppointmentIds);
       }
       if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || customerLivePreservesMembership || customerHasLivePlan) {
         throw httpError('Annual prepay is not available for an existing customer’s add-on — accept it as pay-at-visit (or per-application) so the customer’s existing plan keeps billing.', 400);
