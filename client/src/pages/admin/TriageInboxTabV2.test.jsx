@@ -201,6 +201,14 @@ describe('ConfirmEvidence — dispute recovery task', () => {
   });
 });
 
+describe('ConfirmEvidence — retained visit', () => {
+  it('names the retained appointment as address-correction work, not a second booking', () => {
+    render(<ConfirmEvidence payload={{ flag: 'auto_booking_skipped_after_approval', retained_service_id: 'svc-9', retained_scheduled_date: '2026-10-02' }} />);
+    expect(screen.getByText('Retained visit:')).toBeInTheDocument();
+    expect(screen.getByText(/Visit svc-9 on 2026-10-02 was kept on the caller-stated number/)).toBeInTheDocument();
+  });
+});
+
 describe('ConfirmEvidence — house-number conflict', () => {
   it('shows both whole doors: the stated unit and the on-file unit', () => {
     render(<ConfirmEvidence payload={{

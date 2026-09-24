@@ -317,13 +317,16 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(guard).toContain("code: 'CONFLICT_CUSTOMER_RELINKED'");
     expect(guard).toContain('no recovery task filed');
     const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(processor).toContain("cleared_on_file_street: onFileAddress?.address_line1 || null, dispute_customer_id: customerId ? String(customerId) : null");
+    // A reprocess re-binds the identity only for a LINKED call; an unlink keeps the filing identity (codex r29 P2).
+    expect(processor).toContain("...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),");
   });
 
   test('a denial of the call\'s scheduling evidence is exposed so the promised follow-up files nothing either (pre-push audit P1 after r25)', () => {
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: [], heldConflictPayload: held }).scheduleDenied).toBe(true);
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held }).scheduleDenied).toBe(true);
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['service'], heldConflictPayload: held }).scheduleDenied).toBe(true);
+    // A spam / wrong-number denial files no booking task either (codex r29 P1).
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['spam_status'], heldConflictPayload: held }).file).toBe(false);
     // A denial naming only the address keeps the appointment evidence.
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['address'], heldConflictPayload: held }).scheduleDenied).toBe(false);
     expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held }).scheduleDenied).toBe(false);

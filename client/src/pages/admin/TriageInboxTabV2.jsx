@@ -212,6 +212,12 @@ export function ConfirmEvidence({ payload }) {
       label: "Promised follow-up",
       value: `Visit 2 was promised${p.follow_up_plan.scheduled_date ? ` for ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""} — book it with the primary appointment.`,
     },
+    // A same-call visit the dispute retained on the caller's number: the
+    // work is to correct THAT appointment's address, not to book another.
+    p.retained_service_id && {
+      label: "Retained visit",
+      value: `Visit ${p.retained_service_id}${p.retained_scheduled_date ? ` on ${String(p.retained_scheduled_date).slice(0, 10)}` : ""} was kept on the caller-stated number — correct its address; do not book a second appointment.`,
+    },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

@@ -10175,6 +10175,12 @@ const CallRecordingProcessor = {
             // disagreement on booking evidence alone (local audit P1).
             addressEvidence.address_dispute_cleared_at = null;
             addressEvidence.cleared_on_file_street = null;
+            // The conditional "Caller said" line is cleared too when this
+            // pass has none (an AV `corrected` result became a plain
+            // accept) — the additive merge would otherwise keep labelling
+            // the prior raw street beside the new validated one (codex r29
+            // P2).
+            if (addressEvidence.spoken_street === undefined) addressEvidence.spoken_street = null;
             const landed = await trx('triage_items')
               .insert(conflictCard)
               .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
@@ -10312,7 +10318,15 @@ const CallRecordingProcessor = {
                 // on_file_address would let an Accept file the old
                 // customer's appointment under the new account (codex r29
                 // P1).
-                payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_dispute_cleared_at: new Date().toISOString(), cleared_on_file_street: onFileAddress?.address_line1 || null, dispute_customer_id: customerId ? String(customerId) : null, on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) })]),
+                // An UNLINKED call (no customer) keeps the FILING identity:
+                // nulling it would let a later Accept bypass the relink guard
+                // (which only fires on a truthy stored id) and file a recovery
+                // task for a customerless call (codex r29 P2).
+                payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                  address_dispute_cleared_at: new Date().toISOString(),
+                  cleared_on_file_street: onFileAddress?.address_line1 || null,
+                  ...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),
+                })]),
                 updated_at: new Date(),
               });
           }
@@ -15209,6 +15223,21 @@ const CallRecordingProcessor = {
                 // office re-arms them from the card once the number is
                 // confirmed.
                 logger.warn(`[call-proc] replay repairs skipped for reused booking ${svc.id} (${maskSid(callSid)}): house number disputed`);
+                // The RETAINED visit's id rides on the open card: an Accept
+                // of the on-file number must direct staff to correct that
+                // live appointment's address, never to book a second one
+                // beside it (codex r29 P1). Under the triage-call lock, in
+                // its own transaction; best-effort.
+                await db.transaction(async (ttrx) => {
+                  await lockTriageCall(ttrx, call.id);
+                  await ttrx('triage_items')
+                    .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+                    .whereIn('status', ['open', 'in_progress'])
+                    .update({
+                      payload: ttrx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retained_service_id: svc.id })]),
+                      updated_at: new Date(),
+                    });
+                }).catch((noteErr) => logger.warn(`[call-proc] retained visit not noted on the conflict card for ${maskSid(callSid)}: ${noteErr.code || noteErr.name || 'db_error'}`));
               } else {
                 // Same-key REPLAY of this call's OWN still-live booking
                 // (idempotency conflict): the first attempt committed the

@@ -671,7 +671,10 @@ function liveAddressIsReviewedPremise(payload, liveOnFile) {
 function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false, liveOnFile = null } = {}) {
   const payload = heldConflictPayload && typeof heldConflictPayload === 'object' ? heldConflictPayload : null;
   const confirmed = !!payload && (payload.scheduling_window?.status === 'confirmed' || payload.scheduling_status === 'confirmed');
-  const scheduleDenied = verdict === 'deny' && (wrongFields.length === 0 || wrongFields.includes('scheduling') || wrongFields.includes('service'));
+  // A spam / wrong-number denial rejects the scheduling obligation like a
+  // whole-call denial — never a task to book a call just classified as
+  // spam (codex r29 P1).
+  const scheduleDenied = verdict === 'deny' && (wrongFields.length === 0 || wrongFields.includes('scheduling') || wrongFields.includes('service') || wrongFields.includes('spam_status'));
   const onFile = liveAddressIsReviewedPremise(payload, liveOnFile) ? liveOnFile : (payload?.on_file_address || null);
   const approvedAddress = onFile
     ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null }
@@ -786,13 +789,26 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   });
   if (decision.file) {
     const { buildTriageItem } = require('../services/call-routing-gates');
+    // A same-call booking the dispute RETAINED (stamped to the caller's
+    // number, kept unassigned) is still live: the task is address-
+    // correction work on that visit, never a second appointment beside
+    // it (codex r29 P1). Judged on the live row so a visit the office
+    // already cancelled or moved falls back to the booking task.
+    const retainedId = heldConflictPayload?.retained_service_id || null;
+    const retained = retainedId
+      ? await trx('scheduled_services').where({ id: retainedId, call_log_id: item.call_log_id }).whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show']).first('id', 'scheduled_date')
+      : null;
+    const taskSummary = retained
+      ? `Address confirmed on file after a house-number dispute — the retained appointment (visit ${retained.id}) still carries the disputed number; correct its address, do not book a second one`
+      : decision.summary;
     await trx('triage_items')
       .insert(buildTriageItem({
         callLogId: item.call_log_id,
         flag: 'auto_booking_skipped_after_approval',
-        extraction: { meta: { call_summary: decision.summary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
+        extraction: { meta: { call_summary: taskSummary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
         extraPayload: {
-          skipped_reason: decision.skippedReason,
+          skipped_reason: retained ? 'address_correction_needed_on_retained_visit' : decision.skippedReason,
+          ...(retained ? { retained_service_id: retained.id, retained_scheduled_date: retained.scheduled_date || null } : {}),
           // The promised follow-up (visit 2) the hold kept from being booked
           // rides on the task with the primary ask (codex r20 P1).
           ...(heldConflictPayload?.follow_up_plan ? { follow_up_plan: heldConflictPayload.follow_up_plan } : {}),
