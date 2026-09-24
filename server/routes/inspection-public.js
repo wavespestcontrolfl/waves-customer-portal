@@ -323,15 +323,34 @@ async function loadTrustedCustomer(dbConn, lead, token) {
   // retry would mint another prospect and slip the assessment dedupe. Only
   // this route writes this activity type, so it is server-owned provenance,
   // unlike leads.customer_id.
-  const meta = await latestProvenance(dbConn, lead.id);
-  if (meta?.customer_id) {
-    const prospect = await loadCustomer(dbConn, meta.customer_id);
-    // A property of an EXISTING account (requires_verification — Codex
-    // #4737 r7 pre-push P0) is trusted only under the same proof as any
-    // linked customer; only a flow-created prospect is trusted outright.
-    if (prospect && !meta.requires_verification) return prospect;
-    if (prospect) return (await verifiedForCustomer(lead, prospect, token, dbConn)) ? prospect : null;
+  const prospect = await provenanceCustomer(dbConn, lead, token);
+  const linked = await verifiedLinkedCustomer(dbConn, lead, token);
+  // A verified lead link wins over provenance naming ANOTHER account (Codex
+  // #4737 r7 P2 — staff relinked the lead); provenance naming the linked
+  // customer's own account (an additional property booked here) wins.
+  if (linked && prospect) {
+    const sameAccount = prospect.id === linked.id
+      || (Boolean(linked.account_id) && prospect.account_id === linked.account_id);
+    return sameAccount ? prospect : linked;
   }
+  return linked || prospect;
+}
+
+// The customer the lead's newest provenance names, when trusted: outright
+// for a flow-created prospect; under the verified-phone proof for an
+// existing account's property (requires_verification — Codex #4737 r7
+// pre-push P0).
+async function provenanceCustomer(dbConn, lead, token) {
+  const meta = await latestProvenance(dbConn, lead.id);
+  if (!meta?.customer_id) return null;
+  const prospect = await loadCustomer(dbConn, meta.customer_id);
+  if (!prospect) return null;
+  if (!meta.requires_verification) return prospect;
+  return (await verifiedForCustomer(lead, prospect, token, dbConn)) ? prospect : null;
+}
+
+// leads.customer_id, when the lead's contact is verified for it.
+async function verifiedLinkedCustomer(dbConn, lead, token) {
   if (!lead.customer_id) return null;
   const customer = await loadCustomer(dbConn, lead.customer_id);
   if (!customer) return null;
@@ -1102,6 +1121,11 @@ router.get('/:token', async (req, res, next) => {
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
     const catalog = await loadAssessmentCatalog();
+    // A disabled/archived assessment offers no times at all (Codex #4737 r7
+    // P2) — the commit would refuse them anyway.
+    if (!catalog.serviceId) {
+      return res.json({ state: 'ok', lead: leadPayload, availability: null, needs_address: false, selfServeNotice: true, booking_unavailable: true });
+    }
 
     let availability = null;
     if (resolved.location) {
@@ -1153,6 +1177,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
     const catalog = await loadAssessmentCatalog();
+    if (!catalog.serviceId) return res.status(503).json({ error: 'booking_unavailable' });
     let availability = null;
     try {
       const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes });
@@ -1200,6 +1225,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
     const catalog = await loadAssessmentCatalog();
+    if (!catalog.serviceId) return res.status(503).json({ error: 'booking_unavailable' });
 
     const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
     const when = await parseWhen(query, searchParseOpts(config));
@@ -1230,6 +1256,17 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   }
 });
 
+// Whether a linked profile may take a corrected address in place (see
+// provisionLinkedCustomer): no visit history, and either this flow's own
+// outright-trusted prospect or an address that never geocoded.
+async function correctableInPlace(trx, freshLead, profile) {
+  const history = await trx('scheduled_services').where({ customer_id: profile.id }).select('id').limit(1);
+  if (history.length > 0) return false;
+  if (profile.latitude == null || profile.longitude == null) return true;
+  const prior = await latestProvenance(trx, freshLead.id);
+  return prior?.customer_id === profile.id && !prior.requires_verification;
+}
+
 // The linked-customer half of phase 1 (split out of provisionCommitCustomer).
 // Runs under its locks; returns { custRow, location } or a terminal
 // { locationFailure } / { eligibility }.
@@ -1255,16 +1292,17 @@ async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, 
     return { locationFailure: 'address_unresolved' };
   }
   provisioned = freshCustRow;
-  // A supplied address that is NOT an established profile's own address
-  // is ANOTHER property of the account (Codex #4737 r6 P1) — it reuses
-  // that account's matching profile or becomes a new one; the linked
-  // profile is never overwritten (its visits would otherwise dispatch to
-  // the new address). A profile with no visits yet (this flow's own
-  // prospect, a lead's unvalidated address) is still corrected in place.
+  // A supplied address that is NOT the linked profile's own address is
+  // ANOTHER property of the account (Codex #4737 r6 P1) — it reuses that
+  // account's matching profile or becomes a new one; the linked profile is
+  // never overwritten. The only profile corrected in place is one with no
+  // visits yet that is either this flow's OWN outright-trusted prospect
+  // (server-owned provenance — Codex #4737 r7 P2) or holds an address that
+  // never geocoded (no coordinates: nothing validated to lose).
   const anotherProperty = resolved.source === 'supplied'
     && Boolean(freshCustRow.address_line1)
     && !profileMatchesAddress(freshCustRow, resolved.address, resolved.location)
-    && (await trx('scheduled_services').where({ customer_id: freshCustRow.id }).select('id').limit(1)).length > 0;
+    && !(await correctableInPlace(trx, freshLead, freshCustRow));
   if (anotherProperty) {
     const other = await resolveOtherAccountProperty(trx, freshLead, freshCustRow, resolved);
     if (other.eligibility) return { eligibility: other.eligibility };

@@ -200,6 +200,8 @@ async function callFindSlots(token, body = {}) {
 }
 
 beforeEach(() => {
+  // An active, bookable assessment catalog row unless a test says otherwise.
+  firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
   // The originating call for LINKED_LEAD (caller ID = LEAD_ROW.phone).
   firstResults.call_log = { from_phone: '+19415550101' };
 });
@@ -451,6 +453,21 @@ describe('Codex #4737 r5 P2: a retired assessment catalog row is not bookable', 
     const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
     expect(res.statusCode).toBe(503);
     expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+  });
+});
+
+describe('Codex #4737 r7 P2: a retired assessment offers no times', () => {
+  test('GET answers ok with no availability and booking_unavailable; availability/find-slots answer 503', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30, booking_enabled: false };
+    const getRes = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(getRes.body).toMatchObject({ state: 'ok', availability: null, booking_unavailable: true });
+    expect(mockBuildAvailability).not.toHaveBeenCalled();
+    const availRes = await callAvailability(mintLeadConsultationToken(LEAD_ID), { address: '123 Palm Ave, Bradenton, FL 34209' });
+    expect(availRes.statusCode).toBe(503);
+    expect(availRes.body).toEqual({ error: 'booking_unavailable' });
   });
 });
 
@@ -1179,6 +1196,9 @@ describe('POST /:token commit', () => {
     // though the failed first attempt already persisted its own address.
     test('an explicitly supplied address wins over stored coordinates (a corrected retry)', async () => {
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      // cust-1 is this flow's own prospect (Codex #4737 r7 P2: only that, or
+      // a never-geocoded address, is corrected in place).
+      firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-1' }) };
       firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '1 First Try Rd', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
       listResults.scheduled_services = [];
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -1191,6 +1211,23 @@ describe('POST /:token commit', () => {
       expect(res.statusCode).toBe(200);
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(CORRECTED.lat);
       expect(updateCalls.find((c) => c.table === 'customers').payload.address_line1).toBe('2 Corrected Ave');
+    });
+
+    // Codex #4737 r7 P2: a linked customer's validated property with no
+    // visits yet (not this flow's prospect) is still preserved.
+    test('a visitless linked property with validated coordinates is preserved — the new address is another profile', async () => {
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', account_id: 'acct-1', phone: '9415550101', address_line1: '1 Home St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+      listResults.scheduled_services = [];
+      listResults.customers = [firstResults.customers];
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.6, lng: -82.4 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '9 Rental Ln, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(200);
+      expect(updateCalls.some((c) => c.table === 'customers' && c.payload.address_line1)).toBe(false);
+      expect(insertCalls.find((c) => c.table === 'customers').payload).toMatchObject({ account_id: 'acct-1', address_line1: '9 Rental Ln' });
     });
 
     // Codex #4737 r6 P1: an ESTABLISHED linked profile (it has visits) is
@@ -1272,6 +1309,34 @@ describe('POST /:token commit', () => {
         first: async () => (table === 'lead_activities' ? null : secondary),
       });
       expect(await loadTrustedCustomer(strangerAccount, lead, smsToken)).toBeNull();
+    });
+
+    // Codex #4737 r7 P2: staff relinking the lead to another account wins
+    // over stale provenance; provenance inside the linked account still wins.
+    test('a verified lead link beats provenance naming another account, not one in its own account', async () => {
+      const { loadTrustedCustomer } = inspectionPublicRouter._test;
+      const lead = { id: LEAD_ID, phone: '9415550101', first_contact_channel: 'web', customer_id: 'cust-new' };
+      const rows = {
+        'cust-old': { id: 'cust-old', account_id: 'acct-old', phone: '9415550101' },
+        'cust-new': { id: 'cust-new', account_id: 'acct-new', phone: '9415550101' },
+        'cust-extra': { id: 'cust-extra', account_id: 'acct-new', phone: '9415550101' },
+      };
+      const makeConn = (provenanceId) => (table) => {
+        let id = null;
+        return {
+          where(cond) { if (cond?.id) id = cond.id; return this; },
+          whereNull() { return this; }, orderBy() { return this; },
+          select: async () => [],
+          first: async () => (table === 'lead_activities'
+            ? { metadata: JSON.stringify({ customer_id: provenanceId }) }
+            : rows[id] || null),
+        };
+      };
+      const smsToken = { channel: require('../utils/lead-consultation-token').smsChannelFor('9415550101') };
+      expect((await loadTrustedCustomer(makeConn('cust-old'), lead, smsToken)).id).toBe('cust-new');
+      expect((await loadTrustedCustomer(makeConn('cust-extra'), lead, smsToken)).id).toBe('cust-extra');
+      // Unverified: the link is not trusted, the flow's own prospect is.
+      expect((await loadTrustedCustomer(makeConn('cust-old'), lead, null)).id).toBe('cust-old');
     });
 
     test('provenance that requires verification is not trusted on an unverified token', async () => {

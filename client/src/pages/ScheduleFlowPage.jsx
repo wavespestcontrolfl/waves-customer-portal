@@ -1046,6 +1046,11 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
         setError("We couldn't confirm your service area just now. Please try again in a moment, or text or call us.");
         return;
       }
+      // Online consultation booking is switched off (Codex #4737 r7 P2).
+      if (res.status === 503 && body.error === 'booking_unavailable') {
+        setError("Online booking isn't available right now. Please text or call us and we'll get you scheduled.");
+        return;
+      }
       if (!res.ok) throw new Error(body.error || 'failed');
       onAddressResolved?.(value);
       // The hero shows the address being booked, not the stale one on file
