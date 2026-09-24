@@ -51,7 +51,7 @@ const {
 } = require('../services/tree-shrub-assessment');
 const { storeFunnelPhotos, storeTreeShrubCustomerPhotos } = require('../utils/funnel-photos');
 const { reserviceStreamlineAccess } = require('../services/reservice-link');
-const { resolveSessionScope, applyPropertyPredicate } = require('../services/account-properties');
+const { resolveSessionScope, applyPropertyPredicate, isSecondarySelection } = require('../services/account-properties');
 const { etDateString } = require('../utils/datetime-et');
 
 const OFFICE_PHONE = '(941) 297-5749';
@@ -173,7 +173,10 @@ function buildNextStep(kind, { url, prefill } = {}) {
 // the tree_shrub call sites below, codex r5 P1): reservice-scheduler.js's
 // only two lanes are 'pest' and 'lawn', so a null lane (mosquito, termite,
 // rodent, tree & shrub — anything else) can never resolve to 'reservice'.
-function laneOutcomeKind(lane, access) {
+// `isSecondary` (codex GH r2 P1) forces 'request' even for a covered lane —
+// see resolvePropertyScope's comment for why.
+function laneOutcomeKind(lane, access, isSecondary) {
+  if (isSecondary) return 'request';
   return (lane && access && Array.isArray(access.lanes) && access.lanes.includes(lane)) ? 'reservice' : 'request';
 }
 
@@ -189,13 +192,26 @@ function prefillFor(type, { location, note } = {}) {
 // default (today's customer-wide behavior), never a 500 or a wrong-property
 // leak — a lookup failure fails toward the SAME customer-wide reading
 // everyone already gets pre-scoping, not toward any other customer's data.
+// `isSecondary` (codex GH r2 P1): reserviceStreamlineAccess checks ACCOUNT-
+// WIDE coverage, not the selected property's — it has no property parameter
+// anywhere in the codebase today (same repo-wide gap as loadCustomerGrassContext,
+// out of this PR's blast radius to extend). A submission scoped to a
+// SECONDARY property must not still resolve to 'reservice': the token-only
+// link (`/reservice/:token`) always opens the account's on-file (primary)
+// address, so "Your plan covers this" pointing a secondary-property
+// customer at the wrong address is actively misleading. `isSecondarySelection`
+// (the same helper the self-serve re-service picker itself already guards
+// with) is the one existing signal that's safe to act on without extending
+// either shared service — it costs nothing extra since scope is already
+// resolved.
 async function resolvePropertyScope(req) {
   try {
-    return await resolveSessionScope(req);
+    const scope = await resolveSessionScope(req);
+    return { ...scope, isSecondary: isSecondarySelection(scope) };
   } catch (err) {
     logger.warn(`[photo-id] property scope resolution failed: ${err.message}`);
     return {
-      customerId: req.customerId, enabled: false, multi: false, scoped: false, closed: false, property: null,
+      customerId: req.customerId, enabled: false, multi: false, scoped: false, closed: false, property: null, isSecondary: false,
     };
   }
 }
@@ -261,7 +277,7 @@ function pestResultForResponse(pestResult, partial) {
 // findings resolve to a null lane and can never read as 'reservice' (codex
 // r5 P1: those families are never self-serve reservice-eligible, whatever
 // lanes the customer's OWN plan happens to cover).
-function pestNextStepKind(result, idLabel, lane, access, partial) {
+function pestNextStepKind(result, idLabel, lane, access, partial, isSecondary) {
   if (result.recommendation && result.recommendation.inspection_required) return 'inspection';
   if (partial) return 'unclear';
   if (idLabel.hedged && idLabel.specificity === 'generic') return 'unclear';
@@ -270,7 +286,7 @@ function pestNextStepKind(result, idLabel, lane, access, partial) {
   // guard above never catches it — only an unhedged, high-confidence call
   // may read as the reassuring 'none'.
   if (result.not_a_pest) return idLabel.hedged ? 'unclear' : 'none';
-  return laneOutcomeKind(lane, access);
+  return laneOutcomeKind(lane, access, isSecondary);
 }
 
 function pestReserviceLane(contract) {
@@ -278,7 +294,7 @@ function pestReserviceLane(contract) {
   return line === 'pest' || line === 'lawn' ? line : null;
 }
 
-async function handlePest(req, res, { note, location, propertyId }) {
+async function handlePest(req, res, { note, location, propertyId, isSecondary }) {
   const photoInputs = req._photoInputs;
   const result = await identifyPest(photoInputs);
   if (!result.ok) {
@@ -325,7 +341,7 @@ async function handlePest(req, res, { note, location, propertyId }) {
   const pestResult = pestPublicResult(contract);
   const idLabel = publicIdentificationLabel(contract);
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = pestNextStepKind(pestResult, idLabel, pestReserviceLane(contract), access, partial);
+  const kind = pestNextStepKind(pestResult, idLabel, pestReserviceLane(contract), access, partial, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('pest', { location, note }),
@@ -442,7 +458,7 @@ function lawnResultForResponse(lawnResult, partial) {
   return partial ? LAWN_PARTIAL_RESULT : lawnResult;
 }
 
-async function handleLawn(req, res, { note, location, propertyId }) {
+async function handleLawn(req, res, { note, location, propertyId, isSecondary }) {
   const photoInputs = req._photoInputs;
   const grassContext = await loadCustomerGrassContext(req.customer.id).catch(() => null);
   const context = grassContext
@@ -488,7 +504,7 @@ async function handleLawn(req, res, { note, location, propertyId }) {
 
   const noUsableScores = merged.turf_density == null && merged.weed_coverage == null && merged.color_health == null;
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = (noUsableScores || partial) ? 'unclear' : laneOutcomeKind('lawn', access);
+  const kind = (noUsableScores || partial) ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('lawn', { location, note }),
@@ -513,7 +529,7 @@ function treeResultForResponse(treeResult, unreliable) {
 
 // ── Tree & shrub ─────────────────────────────────────────────────────────
 
-async function handleTreeShrub(req, res, { note, location, propertyId }) {
+async function handleTreeShrub(req, res, { note, location, propertyId, isSecondary }) {
   const photoInputs = req._photoInputs;
   const preview = await previewTreeShrubAssessment({
     photos: photoInputs,
@@ -579,7 +595,7 @@ async function handleTreeShrub(req, res, { note, location, propertyId }) {
   // explicitly excludes it from both 'pest' and 'lawn' — codex r5 P1) — a
   // null lane always resolves to 'request', whatever the customer's plan
   // covers.
-  const kind = (noUsableScores || unreliable) ? 'unclear' : laneOutcomeKind(null, access);
+  const kind = (noUsableScores || unreliable) ? 'unclear' : laneOutcomeKind(null, access, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('tree_shrub', { location, note }),
@@ -623,7 +639,7 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
     const propertyId = scope.scoped && scope.property ? scope.property.id : null;
 
     return await handler(req, res, {
-      note, location, propertyId,
+      note, location, propertyId, isSecondary: scope.isSecondary,
     });
   } catch (err) {
     return next(err);
@@ -651,19 +667,19 @@ function lawnHeadline(row) {
   }
 }
 
-function pestNextStepKindFromRow(row, access) {
+function pestNextStepKindFromRow(row, access, isSecondary) {
   const contract = parseJsonSafe(row.report_contract);
   const publicReport = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
   const idLabel = publicIdentificationLabel(contract);
   const partial = !!parseJsonSafe(row.ai_analysis).partial;
-  return pestNextStepKind(publicReport, idLabel, pestReserviceLane(contract), access, partial);
+  return pestNextStepKind(publicReport, idLabel, pestReserviceLane(contract), access, partial, isSecondary);
 }
 
-function lawnNextStepKindFromRow(row, access) {
+function lawnNextStepKindFromRow(row, access, isSecondary) {
   const contract = parseJsonSafe(row.report_contract);
   const scores = contract?.result?.scores || {};
   const noScores = scores.turf_density == null && scores.weed_coverage == null && scores.color_health == null;
-  return (noScores || contract.partial) ? 'unclear' : laneOutcomeKind('lawn', access);
+  return (noScores || contract.partial) ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary);
 }
 
 // True for a partial photo batch OR a "synthesized" (little-to-no real
@@ -675,9 +691,9 @@ function treeShrubIsUnreliable(row) {
   return meta.scored_count != null && meta.photo_count != null && meta.scored_count < meta.photo_count;
 }
 
-function treeNextStepKindFromRow(row, access) {
+function treeNextStepKindFromRow(row, access, isSecondary) {
   if (row.overall_score == null || treeShrubIsUnreliable(row)) return 'unclear';
-  return laneOutcomeKind(null, access); // tree & shrub is never reservice-eligible — see handleTreeShrub
+  return laneOutcomeKind(null, access, isSecondary); // tree & shrub is never reservice-eligible — see handleTreeShrub
 }
 
 // GET /api/photo-id
@@ -701,15 +717,15 @@ router.get('/', async (req, res, next) => {
     const items = [
       ...pestRows.map((row) => ({
         id: row.id, type: 'pest', created_at: row.created_at, headline: pestHeadline(row),
-        next_step_kind: pestNextStepKindFromRow(row, access),
+        next_step_kind: pestNextStepKindFromRow(row, access, scope.isSecondary),
       })),
       ...lawnRows.map((row) => ({
         id: row.id, type: 'lawn', created_at: row.created_at, headline: lawnHeadline(row),
-        next_step_kind: lawnNextStepKindFromRow(row, access),
+        next_step_kind: lawnNextStepKindFromRow(row, access, scope.isSecondary),
       })),
       ...treeRows.map((row) => ({
         id: row.id, type: 'tree_shrub', created_at: row.created_at, headline: 'Tree & shrub check',
-        next_step_kind: treeNextStepKindFromRow(row, access),
+        next_step_kind: treeNextStepKindFromRow(row, access, scope.isSecondary),
       })),
     ];
     items.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -740,7 +756,7 @@ router.get('/:type/:id', async (req, res, next) => {
       const pestResult = pestPublicResult(contract);
       const idLabel = publicIdentificationLabel(contract);
       const partial = !!parseJsonSafe(row.ai_analysis).partial;
-      const kind = pestNextStepKind(pestResult, idLabel, pestReserviceLane(contract), access, partial);
+      const kind = pestNextStepKind(pestResult, idLabel, pestReserviceLane(contract), access, partial, scope.isSecondary);
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
         prefill: prefillFor('pest', { location: row.location, note: row.note }),
@@ -754,7 +770,7 @@ router.get('/:type/:id', async (req, res, next) => {
       const contract = parseJsonSafe(row.report_contract);
       const lawnResult = contract.result || lawnPublicResult({});
       const lawnPartial = !!contract.partial;
-      const kind = lawnNextStepKindFromRow(row, access);
+      const kind = lawnNextStepKindFromRow(row, access, scope.isSecondary);
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
         prefill: prefillFor('lawn', { location: row.location, note: row.note }),
@@ -771,7 +787,7 @@ router.get('/:type/:id', async (req, res, next) => {
       aiSummary: row.ai_summary,
       plantGroups: [],
     });
-    const kind = treeNextStepKindFromRow(row, access);
+    const kind = treeNextStepKindFromRow(row, access, scope.isSecondary);
     const nextStep = buildNextStep(kind, {
       url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
       prefill: prefillFor('tree_shrub', { location: row.location, note: row.note }),

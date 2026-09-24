@@ -137,6 +137,14 @@ jest.mock('../services/account-properties', () => ({
     if (scope && scope.enabled && scope.scoped && scope.property) qb.__propertyId = scope.property.id;
     return qb;
   },
+  // Real semantics (matches the actual account-properties.js implementation):
+  // true only when scoped to a property that is NOT the primary (or every
+  // property is retired/closed).
+  isSecondarySelection: (scope) => {
+    if (!scope || !scope.enabled || !scope.scoped) return false;
+    if (scope.closed || !scope.property) return true;
+    return scope.property.is_primary !== true;
+  },
 }));
 jest.mock('../utils/funnel-photos', () => ({
   storeFunnelPhotos: (...args) => mockStoreFunnelPhotos(...args),
@@ -749,6 +757,37 @@ describe('property scope (GATE_APP_PROPERTY_SCOPE)', () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/photo-id/pest/${created.id}`);
       expect(res.status).toBe(404);
+    });
+  });
+
+  test('a SECONDARY property never resolves to reservice, even with full coverage (codex GH r2 P1)', async () => {
+    // reserviceStreamlineAccess is account-wide, not property-scoped, and the
+    // token-only /reservice/:token link always opens the primary address —
+    // "Your plan covers this" pointing a secondary-property customer at the
+    // wrong address would be actively misleading.
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-2', is_primary: false },
+    });
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-primary', lanes: ['pest', 'lawn'] });
+    await withServer(async (base) => {
+      const pest = await post(base, '/api/photo-id/pest', photoBody()).then((r) => r.json());
+      expect(pest.next_step.kind).toBe('request');
+      expect(pest.next_step.url).toBeUndefined();
+      const lawn = await post(base, '/api/photo-id/lawn', photoBody()).then((r) => r.json());
+      expect(lawn.next_step.kind).toBe('request');
+    });
+  });
+
+  test('the PRIMARY property still resolves to reservice normally', async () => {
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-primary', is_primary: true },
+    });
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-primary', lanes: ['pest'] });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('reservice');
+      expect(body.next_step.url).toBe('/reservice/tok-primary');
     });
   });
 });
