@@ -58,7 +58,7 @@ function isRealCalendarDate(value) {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
-const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { startOfETMonth, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
 // A date-only end_date (e.g. "2026-06-30") parses as midnight UTC, so an
@@ -83,6 +83,26 @@ function parseInclusiveStart(startDate) {
   if (!startDate) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return parseETDateTime(`${startDate}T00:00:00`);
   return new Date(startDate);
+}
+
+// One predicate for both rows and totals: full names and formatted phones
+// must have the same membership before pagination.
+function applyLeadSearch(query, search) {
+  const term = String(search).trim().replace(/\s+/g, ' ');
+  const pattern = `%${term}%`;
+  const digits = term.replace(/\D/g, '');
+  query.where(function () {
+    this.whereILike('leads.first_name', pattern)
+      .orWhereILike('leads.last_name', pattern)
+      .orWhereRaw("CONCAT_WS(' ', NULLIF(TRIM(leads.first_name), ''), NULLIF(TRIM(leads.last_name), '')) ILIKE ?", [pattern])
+      .orWhereILike('leads.phone', pattern)
+      .orWhereILike('leads.email', pattern)
+      .orWhereILike('leads.address', pattern)
+      .orWhereILike('leads.service_interest', pattern);
+    if (digits && /^[+\d\s().-]+$/.test(term)) {
+      this.orWhereRaw("regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
+    }
+  });
 }
 
 // Speed-to-Lead fresh-start baseline — the live backlog gauge (Avg Speed to
@@ -217,7 +237,7 @@ router.use(async (req, res, next) => {
 router.get('/analytics/overview', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : startOfETMonth();
+    const start = start_date ? parseInclusiveStart(start_date) : startOfETMonth();
     // parseInclusiveEnd → end-of-ET-day, so a date-only end_date matches the
     // by-source / by-channel windows the ROI aggregation below reconciles with
     // (raw new Date('2026-06-30') is midnight UTC = June 29 ET, dropping a day).
@@ -340,7 +360,7 @@ router.get('/analytics/by-source', async (req, res, next) => {
     // The Sources table requests inactive sources too (include_inactive=1); the
     // Analytics-tab panels call without it and stay active-only.
     const results = await leadAttribution.calculateAllSourceROI(
-      start_date ? new Date(start_date) : undefined,
+      start_date ? parseInclusiveStart(start_date) : undefined,
       parseInclusiveEnd(end_date),
       { includeInactive: include_inactive === '1' || include_inactive === 'true' },
     );
@@ -353,7 +373,7 @@ router.get('/analytics/by-channel', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
     const allROI = await leadAttribution.calculateAllSourceROI(
-      start_date ? new Date(start_date) : undefined,
+      start_date ? parseInclusiveStart(start_date) : undefined,
       parseInclusiveEnd(end_date),
     );
 
@@ -386,8 +406,8 @@ router.get('/analytics/by-channel', async (req, res, next) => {
 router.get('/analytics/funnel', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : startOfETMonth();
-    const end = end_date ? new Date(end_date) : new Date();
+    const start = start_date ? parseInclusiveStart(start_date) : startOfETMonth();
+    const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
     // The same prospect population as the overview KPIs and the source
     // analytics (scopeToProspects): a suppressed rerun or a second win must
@@ -427,12 +447,13 @@ router.get('/analytics/funnel', async (req, res, next) => {
 router.get('/analytics/response', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : new Date(new Date().getFullYear(), 0, 1);
-    const end = end_date ? new Date(end_date) : new Date();
+    const start = start_date ? parseInclusiveStart(start_date) : parseETDateTime(`${etDateString().slice(0, 4)}-01-01T00:00:00`);
+    const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
     const leads = await db('leads')
       .whereNull('deleted_at')
       .whereNotNull('response_time_minutes')
+      .modify(scopeToProspects)
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end);
 
@@ -476,8 +497,8 @@ router.get('/analytics/response', async (req, res, next) => {
 router.get('/analytics/lost', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : new Date(new Date().getFullYear(), 0, 1);
-    const end = end_date ? new Date(end_date) : new Date();
+    const start = start_date ? parseInclusiveStart(start_date) : parseETDateTime(`${etDateString().slice(0, 4)}-01-01T00:00:00`);
+    const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
     const reasons = await db('leads')
       .select('lost_reason')
@@ -544,7 +565,7 @@ router.get('/sources/:id', async (req, res, next) => {
     const { start_date, end_date } = req.query;
     const roi = await leadAttribution.calculateSourceROI(
       req.params.id,
-      start_date ? new Date(start_date) : undefined,
+      start_date ? parseInclusiveStart(start_date) : undefined,
       parseInclusiveEnd(end_date),
     );
     if (!roi) return res.status(404).json({ error: 'Source not found' });
@@ -753,17 +774,7 @@ router.get('/', async (req, res, next) => {
     const endDt = parseInclusiveEnd(end_date);
     if (startDt && !isNaN(startDt)) query = query.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) query = query.where('leads.first_contact_at', '<=', endDt);
-    if (search) {
-      const s = `%${search}%`;
-      query = query.where(function () {
-        this.whereILike('leads.first_name', s)
-          .orWhereILike('leads.last_name', s)
-          .orWhereILike('leads.phone', s)
-          .orWhereILike('leads.email', s)
-          .orWhereILike('leads.address', s)
-          .orWhereILike('leads.service_interest', s);
-      });
-    }
+    if (search) query.modify(applyLeadSearch, search);
 
     const validSorts = {
       first_contact_at: 'leads.first_contact_at',
@@ -815,17 +826,7 @@ router.get('/', async (req, res, next) => {
       excludeInternal(query);
       excludeInternal(countQuery);
     }
-    if (search) {
-      const s = `%${search}%`;
-      countQuery.where(function () {
-        this.whereILike('leads.first_name', s)
-          .orWhereILike('leads.last_name', s)
-          .orWhereILike('leads.phone', s)
-          .orWhereILike('leads.email', s)
-          .orWhereILike('leads.address', s)
-          .orWhereILike('leads.service_interest', s);
-      });
-    }
+    if (search) countQuery.modify(applyLeadSearch, search);
     const { count } = await countQuery.count('* as count').first();
 
     const leads = await query
@@ -1082,38 +1083,41 @@ router.put('/:id', async (req, res, next) => {
     if (updates.phone) updates.phone = leadAttribution.normalizePhone(updates.phone);
     updates.updated_at = new Date();
 
-    const [lead] = await db('leads').where('id', req.params.id).update(updates).returning('*');
-    if (!lead) return res.status(404).json({ error: 'Lead not found' });
-    let responseLead = lead;
+    const performedBy = [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ');
+    let previousStatus;
+    const responseLead = await db.transaction(async (trx) => {
+      const current = await trx('leads').where('id', req.params.id).whereNull('deleted_at').forUpdate().first();
+      if (!current) return null;
+      previousStatus = current.status;
+      const statusChanged = updates.status && updates.status !== current.status;
+      // Match booking/conversion semantics: first win owns the timestamp.
+      // Reopening and retrying a manual win never re-dates earned revenue.
+      if (updates.status === 'won') {
+        updates.converted_at = current.converted_at || new Date();
+        updates.is_qualified = true;
+      }
+      const [lead] = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update(updates).returning('*');
+      if (statusChanged && FIRST_RESPONSE_STATUSES.has(updates.status)) {
+        await leadAttribution.logFirstResponse(req.params.id, { database: trx });
+      }
+      await trx('lead_activities').insert({
+        lead_id: req.params.id,
+        activity_type: statusChanged ? 'status_change' : 'updated',
+        description: statusChanged
+          ? `Status: ${current.status} → ${updates.status}`
+          : `Lead updated: ${Object.keys(updates).filter(k => k !== 'updated_at').join(', ')}`,
+        performed_by: performedBy,
+        metadata: JSON.stringify({ ...updates, ...(statusChanged ? { previous_status: current.status } : {}) }),
+      });
+      return statusChanged ? trx('leads').where('id', lead.id).first() : lead;
+    });
+    if (!responseLead) return res.status(404).json({ error: 'Lead not found' });
 
-    if (
-      updates.status
-      && updates.status !== existingLead.status
-      && existingLead.response_time_minutes == null
-      && FIRST_RESPONSE_STATUSES.has(updates.status)
-    ) {
-      await leadAttribution.logFirstResponse(req.params.id);
-      responseLead = await db('leads').where('id', req.params.id).first();
-    }
-
-    // Manual status edits (Kanban drags / detail-pane changes) mirror onto the
-    // lead's ad_service_attribution funnel row. Monotonic + best-effort; a
-    // status with no funnel meaning no-ops inside the bridge. A manual WON is
-    // a conversion: it runs the shared settlement (bridge + wizard-repeat
-    // settlement) like the book route, so a repeat's win lands on its root's
-    // row instead of on the row /calculate deleted (codex #3834 r34 P1).
-    if (updates.status && updates.status !== existingLead.status) {
-      if (updates.status === 'won') await leadAttribution.settleWonFunnelRow(req.params.id, lead.customer_id || null);
+    // Existing best-effort funnel settlement runs after the atomic lead/history write.
+    if (updates.status && updates.status !== previousStatus) {
+      if (updates.status === 'won') await leadAttribution.settleWonFunnelRow(req.params.id, responseLead.customer_id || null);
       else await bridgeLeadFunnelStage(req.params.id, updates.status);
     }
-
-    await db('lead_activities').insert({
-      lead_id: req.params.id,
-      activity_type: 'updated',
-      description: `Lead updated: ${Object.keys(updates).filter(k => k !== 'updated_at').join(', ')}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
-      metadata: JSON.stringify(updates),
-    });
 
     res.json({ lead: responseLead });
   } catch (err) { next(err); }
@@ -1309,20 +1313,31 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    const callbackAt = new Date(`${date}T${time}`);
-
-    await db('lead_activities').insert({
-      lead_id: req.params.id,
-      activity_type: 'callback_scheduled',
-      description: `Callback scheduled for ${callbackAt.toLocaleString('en-US', { timeZone: 'America/New_York' })}${notes ? ' — ' + notes : ''}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
-      metadata: JSON.stringify({ date, time, notes, callback_at: callbackAt.toISOString() }),
+    if (!isRealCalendarDate(date) || typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+      return res.status(400).json({ error: 'A valid date and time are required' });
+    }
+    const callbackAt = parseETDateTime(`${date}T${time}`);
+    const callbackParts = etParts(callbackAt);
+    const [hour, minute] = time.split(':').map(Number);
+    if (etDateString(callbackAt) !== date || callbackParts.hour !== hour || callbackParts.minute !== minute) {
+      return res.status(400).json({ error: 'The selected time does not exist in Eastern time' });
+    }
+    const saved = await db.transaction(async (trx) => {
+      const changed = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update({
+        next_follow_up_at: callbackAt,
+        updated_at: new Date(),
+      });
+      if (!changed) return false;
+      await trx('lead_activities').insert({
+        lead_id: req.params.id,
+        activity_type: 'callback_scheduled',
+        description: `Callback scheduled for ${callbackAt.toLocaleString('en-US', { timeZone: 'America/New_York' })}${notes ? ' — ' + notes : ''}`,
+        performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+        metadata: JSON.stringify({ date, time, notes, callback_at: callbackAt.toISOString() }),
+      });
+      return true;
     });
-
-    await db('leads').where('id', req.params.id).update({
-      next_follow_up_at: callbackAt,
-      updated_at: new Date(),
-    });
+    if (!saved) return res.status(404).json({ error: 'Lead not found' });
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated });
@@ -1678,7 +1693,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
       // ---- end slot-overlap guard part 2
 
-      await assertAssignableTechnician(technicianId || null, { conn: trx });
+      await assertAssignableTechnician(technicianId || null, { conn: trx, date: String(date).slice(0, 10) });
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,

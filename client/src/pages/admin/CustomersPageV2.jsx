@@ -236,7 +236,7 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
                   );
                   if (!r.ok) {
                     const err = await r.json().catch(() => ({}));
-                    throw new Error(err.error || `HTTP ${r.status}`);
+                    throw new Error(err.message || err.error || `HTTP ${r.status}`);
                   }
                   onDelete?.(customer.id);
                 } catch (e) {
@@ -1981,7 +1981,7 @@ export default function CustomersPageV2() {
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        throw new Error(err.error || `HTTP ${r.status}`);
+        throw new Error(err.message || err.error || `HTTP ${r.status}`);
       }
       loadCustomers();
     } catch (e) {

@@ -1,6 +1,7 @@
 const {
   HUMAN_REPLY_TYPES,
   NON_ACTIONABLE_INBOUND_TYPES,
+  draftReplyToMessageIdSql,
   responseFlags,
   inboundNeedsResponse,
   outboundIsAnswer,
@@ -9,11 +10,20 @@ const {
 describe('SMS response policy', () => {
   test('keeps the watcher human-reply and consumed-inbound classifications explicit', () => {
     expect(HUMAN_REPLY_TYPES).toEqual([
-      'manual', 'ai_approved', 'ai_revised', 'ai_assistant', 'ai_assistant_reply', 'follow_up',
+      'manual', 'ai_approved', 'ai_revised', 'ai_assistant', 'ai_assistant_reply',
     ]);
     expect(NON_ACTIONABLE_INBOUND_TYPES).toEqual([
       'opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply',
     ]);
+  });
+
+  test('canonicalizes a draft anchor only when it has one inbound SMS twin', () => {
+    const sql = draftReplyToMessageIdSql('response_draft.sms_log_id');
+    expect(sql).toContain('draft_inbound.id = (response_draft.sms_log_id)');
+    expect(sql).toContain("draft_inbound.direction = 'inbound'");
+    expect(sql).toContain("canonical_inbound.channel = 'sms'");
+    expect(sql).toContain("canonical_inbound.direction = 'inbound'");
+    expect(sql).toContain('COUNT(canonical_inbound.id) = 1');
   });
 
   test.each([
@@ -68,11 +78,12 @@ describe('SMS response policy', () => {
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'ai_approved', status: 'delivered', isClickFollowup: true })).toBe(false);
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'ai_approved', status: 'delivered' })).toBe(false);
     expect(outboundIsAnswer({
-      direction: 'outbound', messageType: 'ai_approved', status: 'delivered', hasDraftProvenance: true,
+      direction: 'outbound', messageType: 'ai_approved', status: 'delivered', replyToMessageId: 'inbound-1',
     })).toBe(true);
     expect(outboundIsAnswer({
-      direction: 'outbound', messageType: 'ai_revised', status: 'sent', hasDraftProvenance: true,
+      direction: 'outbound', messageType: 'ai_revised', status: 'sent', replyToMessageId: 'inbound-1',
     })).toBe(true);
+    expect(outboundIsAnswer({ direction: 'outbound', messageType: 'follow_up', status: 'sent' })).toBe(false);
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'reminder', status: 'sent' })).toBe(false);
     expect(outboundIsAnswer({ direction: 'outbound', messageType: 'manual', status: 'failed' })).toBe(false);
   });

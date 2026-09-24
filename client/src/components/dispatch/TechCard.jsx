@@ -11,7 +11,7 @@
  * No D palette. See AGENTS.md / CLAUDE.md for the V2 contract.
  */
 import React, { useEffect, useState } from 'react';
-import { Card, cn } from '../ui';
+import { Badge, Card, cn } from '../ui';
 
 // Status → color token mapping. Kept narrow: only the dot color
 // changes by status; surrounding text is always zinc. Avoids the
@@ -67,6 +67,27 @@ function gpsAgeTone(updatedAt, now) {
   return now - ms > 5 * 60 * 1000 ? 'text-alert-fg' : 'text-ink-tertiary';
 }
 
+// Pulled out of TechCardImpl to keep that function's cyclomatic
+// complexity under the lint ceiling. A tech marked out today shows
+// nothing job-related — they aren't actually working the board, so
+// their last reported status/address/ETA (which can be stale from
+// before they went out) would mislead a dispatcher at a glance: idle
+// dot + "Out" status text + "—" address, same idea as the existing
+// idle-dot rule for dotColor/statusTextColor. ETA is backend-computed
+// via haversine when status is en_route/driving + tech has a
+// current_job + both have lat/lng — null in every other case, and
+// never shown for an out tech even if a stale en_route/driving status
+// and eta_minutes are still sitting on the row.
+function deriveTechDisplay(tech, jobs) {
+  const currentJob = !tech.out_today && tech.current_job_id ? jobs.get(tech.current_job_id) : null;
+  const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
+  const dotColor = tech.out_today ? STATUS_DOT.idle : (STATUS_DOT[tech.status] || STATUS_DOT.idle);
+  const statusTextColor = tech.out_today ? STATUS_TEXT.idle : (STATUS_TEXT[tech.status] || STATUS_TEXT.idle);
+  const statusText = tech.out_today ? 'Out' : (tech.status || 'idle');
+  const showEta = !tech.out_today && tech.eta_minutes != null && (tech.status === 'en_route' || tech.status === 'driving');
+  return { currentJob, addressLine, dotColor, statusTextColor, statusText, showEta };
+}
+
 function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
   const [now, setNow] = useState(() => Date.now());
 
@@ -75,16 +96,9 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
     return () => window.clearInterval(id);
   }, []);
 
-  const currentJob = tech.current_job_id ? jobs.get(tech.current_job_id) : null;
-  const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
-  const dotColor = STATUS_DOT[tech.status] || STATUS_DOT.idle;
-  const statusTextColor = STATUS_TEXT[tech.status] || STATUS_TEXT.idle;
+  const { currentJob, addressLine, dotColor, statusTextColor, statusText, showEta } = deriveTechDisplay(tech, jobs);
   const gpsLabel = gpsAgeLabel(tech.location_updated_at, now);
   const gpsTone = gpsAgeTone(tech.location_updated_at, now);
-  // ETA: backend computes via haversine when status is en_route or
-  // driving + tech has a current_job + both have lat/lng. Null in
-  // every other case — render nothing rather than a fake number.
-  const showEta = tech.eta_minutes != null && (tech.status === 'en_route' || tech.status === 'driving');
 
   const initials = (tech.name || '?')
     .split(/\s+/)
@@ -101,7 +115,11 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
       // <DispatchMap>'s onJobDragEnd hit-tests document.elementFromPoint
       // and walks up to find an ancestor with this attribute. The id
       // value is the technicians.id passed to PUT /jobs/:id/assign.
-      data-tech-card-id={tech.id}
+      // Omitted entirely for an out tech — DispatchMap's hit-test only
+      // matches this attribute, so an out card is never a drop target
+      // (no ancestor to `.closest()` onto), while the card stays
+      // selectable via onClick above.
+      {...(tech.out_today ? {} : { 'data-tech-card-id': tech.id })}
       className={cn(
         'block w-full text-left mb-2 u-focus-ring rounded-md',
         'transition-shadow',
@@ -110,15 +128,16 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
         // CSS-only hover highlight via the parent's data attribute would
         // be cleaner, but a prop keeps the contract explicit + makes
         // the affordance testable. The dashed border signals "you can
-        // drop here" without competing with the selected ring.
-        isDropTarget && 'ring-2 ring-dashed ring-waves-blue ring-offset-1'
+        // drop here" without competing with the selected ring. Never
+        // shown for an out tech — it can't be a drop target (see above).
+        !tech.out_today && isDropTarget && 'ring-2 ring-dashed ring-waves-blue ring-offset-1'
       )}
     >
       <Card
         className={cn(
           'cursor-pointer hover:bg-zinc-50',
           selected && 'border-zinc-900',
-          isDropTarget && 'bg-zinc-50'
+          !tech.out_today && isDropTarget && 'bg-zinc-50'
         )}
       >
         <div className="flex items-center gap-3 px-3 pt-3">
@@ -137,8 +156,13 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
             </div>
           )}
           <div className="flex-1 min-w-0">
-            <div className="text-14 font-medium text-ink-primary truncate">
-              {tech.name}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <div className="text-14 font-medium text-ink-primary truncate">
+                {tech.name}
+              </div>
+              {tech.out_today && (
+                <Badge tone="neutral" className="flex-shrink-0">Out</Badge>
+              )}
             </div>
             <div className={cn('flex items-center gap-1.5 mt-0.5')}>
               <span className={cn('inline-block w-1.5 h-1.5 rounded-full', dotColor)} />
@@ -148,7 +172,7 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
                   statusTextColor
                 )}
               >
-                {tech.status || 'idle'}
+                {statusText}
               </span>
               {showEta ? (
                 <span className="text-11 uppercase tracking-label font-medium text-zinc-500">
@@ -177,14 +201,18 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
 }
 
 // React.memo with a custom equality fn. The triple [id, updated_at,
-// current_job_id] is the dirty key. If any external prop other than
-// `tech` changes (selected, jobs reference, onSelect, isDropTarget),
-// we re-render regardless via the secondary checks below.
+// current_job_id] is the dirty key, plus eta_minutes and out_today — both
+// can change without updated_at advancing (eta recomputes off a live GPS
+// tick; out_today flips via the tech-out endpoint, not a board broadcast).
+// If any external prop other than `tech` changes (selected, jobs
+// reference, onSelect, isDropTarget), we re-render regardless via the
+// secondary checks below.
 export default React.memo(TechCardImpl, (prev, next) => {
   if (prev.tech.id !== next.tech.id) return false;
   if (prev.tech.updated_at !== next.tech.updated_at) return false;
   if (prev.tech.current_job_id !== next.tech.current_job_id) return false;
   if (prev.tech.eta_minutes !== next.tech.eta_minutes) return false;
+  if (prev.tech.out_today !== next.tech.out_today) return false;
   if (prev.selected !== next.selected) return false;
   if (prev.jobs !== next.jobs) return false;
   if (prev.onSelect !== next.onSelect) return false;

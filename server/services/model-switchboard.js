@@ -72,7 +72,7 @@ const SELECTORS = [
   { key: 'GEMINI_VISION_FALLBACK', env: 'GEMINI_VISION_FALLBACK_MODEL', description: 'Gemini photo retry model', accepts: { providers: ['gemini'], cap: 'vision' } },
   { key: 'GEMINI_TEXT_BEST', env: 'MODEL_GEMINI_TEXT', description: 'Sealed-eval Gemini leg (measurement only)', accepts: { providers: ['gemini'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'OPENAI_EMBEDDING', env: 'MODEL_OPENAI_EMBEDDING', description: 'Knowledge embeddings (1536-dim)', accepts: { providers: ['openai'], cap: 'embedding' }, lock: { kind: 'migration', label: 'Requires re-embed', detail: 'changing it re-embeds the whole corpus' } },
-  { key: 'GEMINI_IMAGE_PRO', env: 'MODEL_GEMINI_IMAGE_PRO', description: 'Image generation — Nano Banana Pro leg (second in the default chain)', accepts: { providers: ['gemini'], cap: 'image' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'image chain, not a text model' } },
+  { key: 'GEMINI_IMAGE_PRO', env: 'MODEL_GEMINI_IMAGE_PRO', description: 'Image generation — Nano Banana Pro leg (SynthID-watermarked; unreachable unless ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true)', accepts: { providers: ['gemini'], cap: 'image' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'image chain, not a text model' } },
   { key: 'GEMINI_IMAGE_BEST', env: 'MODEL_GEMINI_IMAGE', description: 'Image generation', accepts: { providers: ['gemini'], cap: 'image' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'image chain, not a text model' } },
   { key: 'GEMINI_IMAGE_STABLE', env: 'MODEL_GEMINI_IMAGE_STABLE', description: 'Image generation fallback', accepts: { providers: ['gemini'], cap: 'image' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'image chain, not a text model' } },
   { key: 'GEMINI_VIDEO_FAST', env: 'MODEL_GEMINI_VIDEO', description: 'Reels video generation', accepts: { providers: ['gemini'], cap: 'video' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'video chain, not a text model' } },
@@ -175,11 +175,21 @@ const AGENT_LOCK = LOCK.registration('Anthropic Managed Agents · model set at r
 // the first VALID slug is what the generator tries first (an all-invalid
 // value falls back to its default chain, hence null → the literal). Lazy
 // require: image-generator pulls in fetch + logger at load.
-function firstImageChainModel(value) {
-  const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
-  const [first] = parseChain(value);
-  return first ? MODEL_MAP[first].model : null;
+// The Nth leg of the EFFECTIVE image chain — image-generator's own parser,
+// which drops SynthID-watermarked Gemini slugs unless
+// ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true (and, with the override on and
+// no env chain, restores the pre-2026-09-24 interleaved defaults). The lane's
+// primary AND fallback both read through it, so the Models page shows the
+// legs that will really run, override on or off.
+function nthImageChainModel(n) {
+  return (value) => {
+    const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
+    const slug = parseChain(value)[n];
+    return slug ? MODEL_MAP[slug].model : null;
+  };
 }
+const firstImageChainModel = nthImageChainModel(0);
+const secondImageChainModel = nthImageChainModel(1);
 
 // Lane extras: `retry` = the leg tried after the fallback leg (the fan-out
 // photo lanes re-run Gemini on GEMINI_VISION_FALLBACK; the sequential caption
@@ -340,6 +350,9 @@ const LANES = [
   L('sms_verifier', 'SMS draft fact-check verifier', 'sms-draft-verifier.js, sms-shadow-drafter.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('shadow_judge', 'SMS shadow judge', 'sms-shadow-judge.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('intent_composer', 'Estimator intent composer', 'estimator-engine/intent-composer.js', 'deep', E('ESTIMATOR_ENGINE_MODEL', T('DEEP'), { live: true }), P('deepAnalysis', 'fallback'), { inbound: true, note: 'prompt carries the call transcript, SMS thread and customer profile' }),
+  L('editorial_review', 'Editorial evidence review', 'content/editorial-review.js, llm/deep.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
+  L('editorial_repair', 'Editorial draft repair', 'content/editorial-review.js, llm/deep.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
+  L('editorial_plan_review', 'Editorial answer plan review', 'content/editorial-review.js, llm/deep.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
   L('fact_check_gate', 'Blog fact-check gate', 'content/fact-check-gate.js', 'deep', E('MODEL_FACTCHECK', P('deepAnalysis', 'primary')), P('deepAnalysis', 'fallback')),
   L('compliance_gate', 'Content compliance gate', 'content/compliance-gate.js', 'deep', E('MODEL_COMPLIANCE', P('deepAnalysis', 'primary')), P('deepAnalysis', 'fallback'), { note: 'GATE_COMPLIANCE ships dark' }),
   L('blog_optimize', 'Blog optimization pass', 'content/blog-writer.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
@@ -376,7 +389,7 @@ const LANES = [
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
-  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), T('GEMINI_IMAGE_PRO'), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'chain: gpt-image-2 → GEMINI_IMAGE_PRO → gpt-image-1.5 → GEMINI_IMAGE_BEST → GEMINI_IMAGE_STABLE → gpt-image-1' }),
+  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), D('BLOG_IMAGE_PROVIDER', secondImageChainModel(undefined) || 'gpt-image-1.5', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondImageChainModel }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'effective chain, OpenAI only by default: gpt-image-2 → gpt-image-1.5 → gpt-image-1 (owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain). ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs and this lane then reports that Gemini backup.' }),
   L('video_gen', 'Reels video generation', 'content/video-generator.js', 'locked', T('GEMINI_VIDEO_FAST'), T('GEMINI_VIDEO_QUALITY'), { lock: LOCK.provider('video chain') }),
   L('mentions_prober', 'LLM mentions prober (Claude, OpenAI, Gemini, Perplexity arms)', 'seo/llm-mention-prober.js', 'locked', E('MODEL_MENTIONS', T('WORKHORSE'), { live: true }), null, { lock: LOCK.measurement('each engine is probed directly; a fallback would falsify the measurement'), note: 'OPENAI_MENTIONS_MODEL gpt-4o-search-preview · GEMINI_MENTIONS_MODEL gemini-2.5-flash · PERPLEXITY_MENTIONS_MODEL sonar' }),
   L('sealed_eval', 'SMS sealed-eval exam legs', 'sms-sealed-eval.js', 'locked', T('SMS_SONNET'), T('OPENAI_REPORT_WRITER'), { lock: LOCK.measurement('frozen exam; Gemini / Luna / Opus / Fable measurement legs too') }),
@@ -488,6 +501,9 @@ const LANE_AREA = {
   review_reply: 'content',
   review_gate_text: 'content',
   hero_alt: 'content',
+  editorial_review: 'content',
+  editorial_repair: 'content',
+  editorial_plan_review: 'content',
   fact_check_gate: 'content',
   compliance_gate: 'content',
   codex_remediation: 'content',
@@ -620,6 +636,9 @@ const LANE_DESCRIBE = {
   review_reply: 'Replies to Google reviews',
   review_gate_text: 'Drafts the review text for a customer',
   hero_alt: 'Writes alt text for hero images',
+  editorial_review: 'Audits complete article evidence and editorial quality',
+  editorial_repair: 'Repairs editorial findings while preserving document structure',
+  editorial_plan_review: 'Checks answer-first section plans before drafting',
   fact_check_gate: 'Fact-checks a post before publish',
   compliance_gate: 'Checks a post for banned claims',
   codex_remediation: 'Fixes content findings automatically',

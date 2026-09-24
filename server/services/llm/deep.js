@@ -14,7 +14,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { callOpenAI } = require('./call');
+const { callOpenAI, dispatchWithFallback } = require('./call');
 const agentContext = require('../agent-control/context');
 const { ledgerCall } = require('../llm-dispatch-metrics');
 
@@ -42,7 +42,28 @@ function stripThinkingBlocks(response) {
 // records inside callOpenAI.
 // `laneId` labels the call-ledger rows of BOTH legs — the option
 // dispatchWithFallback's payload takes — and never reaches the wire.
-async function createDeepMessage(client, { laneId, ...params } = {}) {
+async function createDeepMessage(client, { laneId, ...params } = {}, options = {}) {
+  if (options.jsonSchema) {
+    const basePolicy = MODELS.TEXT_POLICIES.deepAnalysis;
+    const policy = params.model
+      ? { ...basePolicy, primary: { ...basePolicy.primary, model: params.model } }
+      : basePolicy;
+    const validate = typeof options.validate === 'function'
+      ? (result) => options.validate(result.json, result)
+      : undefined;
+    return dispatchWithFallback(policy, {
+      anthropicClient: client,
+      laneId,
+      system: systemText(params.system),
+      text: messageText(params.messages),
+      jsonMode: true,
+      jsonSchema: options.jsonSchema,
+      maxTokens: params.max_tokens,
+      timeoutMs: options.timeoutMs ?? client?.timeout,
+      promptVersion: options.promptVersion,
+      temperature: params.temperature,
+    }, { validate });
+  }
   const run = () => agentContext.withChain(() => createDeepMessageInChain(client, params));
   return laneId ? agentContext.runInLane(laneId, run) : run();
 }
