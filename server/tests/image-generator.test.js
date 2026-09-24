@@ -89,12 +89,21 @@ describe('buildAltText', () => {
 });
 
 describe('buildPrompt', () => {
-  test.each(['blog-hero', 'blog-body'])('keeps %s explanatory without fabricated evidence or source branding', (mode) => {
-    const prompt = buildPrompt({ title: 'Shrub assessment photos', topic: 'UF/IFAS photo guidance', mode });
-    expect(prompt).toContain('Editorial illustration only');
+  test.each([
+    ['blog-hero', 'photo'], ['blog-body', 'photo'], ['blog-body', 'infographic'],
+  ])('keeps %s %s explanatory without fabricated evidence or source branding', (mode, style) => {
+    const prompt = buildPrompt({
+      title: 'Shrub assessment photos', topic: 'UF/IFAS photo guidance', mode,
+      plan: { style, setting: 'plain background', timeOfDay: 'morning', vantage: 'close up' },
+      captions: style === 'infographic' ? ['Leaf', 'Stem'] : [],
+    });
+    expect(prompt).toContain('Editorial image content');
+    expect(prompt).not.toContain('Editorial illustration only');
     expect(prompt).toContain('Do not invent measured results');
     expect(prompt).toContain('Source organizations mentioned in the context are attribution, not image subjects');
     expect(prompt).toContain('Keep anatomy and relative scale plausible');
+    if (style === 'photo') expect(prompt).toContain('no illustration look');
+    else expect(prompt).toContain('The ONLY text in the image is exactly: "Leaf", "Stem"');
   });
 
 
