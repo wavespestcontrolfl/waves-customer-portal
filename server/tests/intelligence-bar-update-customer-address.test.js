@@ -191,6 +191,10 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
     expect(result.billing_wound_down_fields).toEqual(expect.arrayContaining([
       'active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at',
     ]));
+    // Codex #4715 r1 P2: the completed card only renders warning/error/message
+    // on an ordinary result — the structured fields above are invisible
+    // without this.
+    expect(result.message).toBe('Billing wound down: Auto Pay off (customer + saved methods), next charge date and armed retries cleared.');
   });
 
   test('update_customer stage->churned refuses (no billing_wound_down) when churnGuardForRow blocks on a live visit', async () => {
@@ -213,6 +217,7 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
     expect(result.error).toMatch(/^Cannot mark Churned:/);
     expect(result.preview_changed).toBe(true);
     expect(result.billing_wound_down).toBeUndefined();
+    expect(result.message).toBeUndefined();
   });
 
   test('bulk_update_customers (fast CASE path) reports billing_wound_down_count for non-blocked rows and skips the blocked one', async () => {
@@ -232,6 +237,7 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
     expect(result.skipped_customers).toEqual(expect.arrayContaining([
       expect.objectContaining({ customer_id: 'cust-b' }),
     ]));
+    expect(result.message).toBe('Billing wound down for 2 customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.');
   });
 
   test('bulk_update_customers (per-row path, churn + address combined) reports billing_wound_down_count only for the row that committed', async () => {
@@ -257,6 +263,7 @@ describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684
     expect(result.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ customer_id: 'cust-b' }),
     ]));
+    expect(result.message).toBe('Billing wound down for 1 customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.');
   });
 });
 

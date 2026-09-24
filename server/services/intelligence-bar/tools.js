@@ -1438,9 +1438,13 @@ async function updateCustomer(customerId, updates, expectedVersion) {
     // and returns an error above instead) — so the wind-down always ran.
     // Names what happened rather than leaving the confirm card's disclosure
     // as the only place the operator ever sees it.
+    // `message` is what the completed card actually renders (Codex #4715
+    // r1 P2 — PendingActionsCard reads warning/error/message on an ordinary
+    // result; the structured fields above are invisible without it).
     ...(clean.pipeline_stage === 'churned' ? {
       billing_wound_down: true,
       billing_wound_down_fields: ['active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at'],
+      message: 'Billing wound down: Auto Pay off (customer + saved methods), next charge date and armed retries cleared.',
     } : {}),
   };
 }
@@ -1638,7 +1642,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // Churn billing disarm disclosure (GitHub Codex #4684 r4) — how many
       // of the approved rows actually went through churnGuardForRow's
       // wind-down (a blocked row lands in skipped_customers instead).
-      ...(churnWoundDownCount ? { billing_wound_down_count: churnWoundDownCount } : {}),
+      // `message` is what the completed card renders (Codex #4715 r1 P2).
+      ...(churnWoundDownCount ? {
+        billing_wound_down_count: churnWoundDownCount,
+        message: `Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`,
+      } : {}),
     };
   }
 
@@ -1810,8 +1818,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
       warning: `${errors.length} of ${count + errors.length} customers were NOT updated (${errors.length === 1 ? 'it' : 'they'} no longer resolved at commit); ${count} updated.`,
     } : {}),
     // Churn billing disarm disclosure (GitHub Codex #4684 r4) — same
-    // contract as the fast CASE path above.
-    ...(churnWoundDownCount ? { billing_wound_down_count: churnWoundDownCount } : {}),
+    // contract as the fast CASE path above. `message` is what the completed
+    // card renders (Codex #4715 r1 P2).
+    ...(churnWoundDownCount ? {
+      billing_wound_down_count: churnWoundDownCount,
+      message: `Billing wound down for ${churnWoundDownCount} customer(s): Auto Pay off (customer + saved methods), next charge date and armed retries cleared.`,
+    } : {}),
   };
 }
 

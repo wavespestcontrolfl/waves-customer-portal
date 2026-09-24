@@ -628,21 +628,23 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (upd.pipeline_stage) {
       push('customer', `Stage → ${upd.pipeline_stage} also stamps lifecycle fields (active, member_since, churned_at/churn_reason, pipeline_stage_changed_at) derived from the customer's stage at commit`);
     }
-    // Churn billing disarm (GitHub Codex #4684 r4): a stage move to
-    // 'churned' runs churnGuardForRow (customer-lifecycle-guard.js) at
-    // commit — REFUSE (bulk: skip and report) when a future visit, an
-    // active prepay term, or an unpaid annual-prepay invoice is still on
-    // file, otherwise wind billing down through cancellation-processor.js's
-    // disarmCustomerBillingFields + disarmPaymentRails. The generic stage
-    // line above never named this — the operator was confirming a smaller
-    // action than the one committed.
+    // Churn billing disarm (GitHub Codex #4684 r4, widened Codex #4715 r1):
+    // a stage move to 'churned' runs churnGuardForRow
+    // (customer-lifecycle-guard.js) at commit — REFUSE (bulk: skip and
+    // report) when findLiveFutureVisit still finds a future OR in-progress
+    // (en_route/on_site) visit OR an ongoing recurring-plan anchor with no
+    // seeded next occurrence, an active prepay term, or an unpaid
+    // annual-prepay invoice is still on file; otherwise wind billing down
+    // through cancellation-processor.js's disarmCustomerBillingFields +
+    // disarmPaymentRails. The generic stage line above never named this —
+    // the operator was confirming a smaller action than the one committed.
     if (upd.pipeline_stage === 'churned') {
       const n = toolName === 'bulk_update_customers' ? (params?.customer_ids || []).length : 1;
       const prefix = n > 1 ? `For each of ${n} customers: ` : '';
       const refusalClause = toolName === 'bulk_update_customers'
         ? 'skipped at commit and reported back (not updated), never silently'
         : 'REFUSED at commit';
-      push('billing', `${prefix}Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — ${refusalClause} if a future scheduled visit, an active prepay term, or an unpaid annual-prepay invoice is still on file`);
+      push('billing', `${prefix}Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — ${refusalClause} if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file`);
     }
   }
   // Billing-lane stamp (#3140): the executors stamp billing_mode
