@@ -1,6 +1,6 @@
 /** Validate partial technician review intent and retain stable finding identities. */
 const { CONDITION_LABEL_VALUES } = require('./lawn-diagnostic-report');
-const { PHOTO_ZONES, normalizePhotoZone } = require('./lawn-visit-input');
+const { PHOTO_ZONES, normalizeDetailZone } = require('./lawn-visit-input');
 
 const REVIEW_FIELDS = ['reviewedFindings', 'addedDetails', 'appliedProducts'];
 const TECH_TEXT_MAX = 500;
@@ -55,8 +55,11 @@ function findingEdit(entry, path, known, seen, errors) {
 
 function addedDetail(entry, path, errors) {
   if (!isText(entry.text, TECH_TEXT_MAX)) { errors.push(`${path}.text is required (${TECH_TEXT_MAX} characters or fewer)`); return null; }
-  if (entry.zone != null && entry.zone !== '' && !normalizePhotoZone(entry.zone)) { errors.push(`${path}.zone must be one of: ${PHOTO_ZONES.join(', ')}`); return null; }
-  return { text: entry.text.trim(), zone: normalizePhotoZone(entry.zone) };
+  // A retired zone value (back/side) already on a stored detail is accepted
+  // here so re-submitting an unchanged review never 400s on it — the picker
+  // itself only offers the current PHOTO_ZONES.
+  if (entry.zone != null && entry.zone !== '' && !normalizeDetailZone(entry.zone)) { errors.push(`${path}.zone must be one of: ${PHOTO_ZONES.join(', ')}`); return null; }
+  return { text: entry.text.trim(), zone: normalizeDetailZone(entry.zone) };
 }
 
 function appliedProduct(entry, path, errors, issued) {

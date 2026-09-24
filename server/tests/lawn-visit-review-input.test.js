@@ -37,6 +37,14 @@ test('partial lists preserve prior decisions, details, products and genuine rena
   expect(review({ reviewedFindings: [] }).reviewedFindings[1].keep).toBe(false);
 });
 
+test('resubmitting a stored detail\'s retired zone (back/side) as new input round-trips instead of 400ing', () => {
+  // The client resends the full addedDetails array on every save (see
+  // mergedReviewInputs' "complete list when sent" contract) — including one
+  // recorded under a zone the 2026-09-24 rename retired from the picker.
+  const merged = review({ addedDetails: [{ finding_id: 'T1', text: 'Dog run', zone: 'back' }] });
+  expect(merged.addedDetails).toEqual([{ text: 'Dog run', zone: 'back' }]);
+});
+
 test('changing one field of a rejected/renamed finding preserves the other decisions; explicit clears work', () => {
   const noteOnly = review({ reviewedFindings: [{ finding_id: 'F2', tech_note: 'follow up next visit' }] });
   expect(noteOnly.reviewedFindings[1]).toEqual({ finding_id: 'F2', keep: false, name: 'weed pressure', tech_note: 'follow up next visit' });

@@ -8,7 +8,13 @@ const GATE = 'GATE_LAWN_VISIT_ASSESSMENT';
 const PROMPT_VERSION = 'lawn-visit-v1';
 const MAX_VISIT_PHOTOS = 6;
 const MAX_OUTPUT_TOKENS = 16384;
-const PHOTO_ZONES = ['front', 'back', 'side'];
+// Owner ruling 2026-09-24: three named slots, all optional (no photo-count
+// requirement). 'front' drives the before/after progress slider; 'close_up'
+// and 'trouble' are a different spot every visit and must never be paired
+// across visits (see report-data.js). Legacy 'back'/'side' values recorded
+// before this rename are no longer accepted as new input (no admin UI or
+// native app sends a photo zone today) but still render from history.
+const PHOTO_ZONES = ['front', 'close_up', 'trouble'];
 const PHOTO_QUALITY = ['adequate', 'limited', 'poor'];
 const CONFIDENCE = ['high', 'moderate', 'low', 'unknown'];
 const SEVERITY_LEVELS = ['none', 'minor', 'moderate', 'severe', 'unknown'];
@@ -87,8 +93,8 @@ The server derives customer labels and prose from the reviewed evidence.
 
 # THE PHOTOS
 Photos are numbered in the order given ("Photo 1", "Photo 2", …). A label after the
-number is the technician's zone (front / back / side) and is the ONLY source of a zone
-— never infer one from the image. Every finding cites the photo numbers it is visible
+number is the technician's zone (front / close_up / trouble) and is the ONLY source of
+a zone — never infer one from the image. Every finding cites the photo numbers it is visible
 in (photo_refs). Rate every photo's quality: adequate (clear, close enough, lawn fills
 the frame), limited (one angle, glare, distance, white-balance), poor (blurred, too far,
 not a lawn) — and name the issue. Keep every supporting photo reference when a
@@ -214,15 +220,66 @@ function normalizePhotoZone(zone) {
   return PHOTO_ZONES.includes(key) ? key : null;
 }
 
+// Retired zone values (pre 2026-09-24 rename). No longer accepted for a NEW
+// photo upload (validateVisitPhotos below — no live caller sends them), but
+// still accepted for a technician-added detail's zone (lawn-visit-review-input.js)
+// so a visit review that already carries one keeps round-tripping on its next
+// save instead of silently losing the zone tag.
+const LEGACY_PHOTO_ZONES = ['back', 'side'];
+function normalizeDetailZone(zone) {
+  const key = String(zone == null ? '' : zone).trim().toLowerCase();
+  return (PHOTO_ZONES.includes(key) || LEGACY_PHOTO_ZONES.includes(key)) ? key : null;
+}
+
 function photoLabel(index, zone) {
   return `Photo ${index + 1}${zone ? ` (${zone})` : ''}`;
 }
 
-// lawn_assessment_photos.photo_type vocabulary (front_yard / back_yard /
-// side_yard / general); the recorded `zone` is the location claim the report
-// pairs before/after photos on.
+// lawn_assessment_photos.photo_type vocabulary. 'front' keeps its legacy
+// 'front_yard' value so before/after history pairing (report-data.js) keeps
+// matching older rows; 'trouble' keeps the existing 'trouble_spot' value
+// already read by ReportViewPage's label map. The recorded `zone` column
+// (not photo_type) is the location claim the report pairs before/after
+// photos on.
+const PHOTO_TYPE_BY_ZONE = { front: 'front_yard', close_up: 'close_up', trouble: 'trouble_spot' };
 function photoTypeForZone(zone) {
-  return zone ? `${zone}_yard` : 'general';
+  return PHOTO_TYPE_BY_ZONE[zone] || 'general';
+}
+
+// Customer-facing label for a stored photo zone (current slots plus the
+// retired back/side values), matching the legacy report's wording.
+const PHOTO_ZONE_LABELS = Object.freeze({
+  front: 'Front yard', close_up: 'Close-up', trouble: 'Trouble spot', back: 'Back yard', side: 'Side yard',
+});
+function photoZoneLabel(zone) {
+  const key = String(zone || '').trim().toLowerCase();
+  return key ? (PHOTO_ZONE_LABELS[key] || null) : null;
+}
+
+// Before/after photo pair for the progress slider (report + customer portal).
+// Candidates arrive best-first. Only a same-spot zone pairs: 'front', plus
+// legacy 'back'/'side' rows from before the 2026-09-24 rename. 'close_up' and
+// 'trouble' are a different spot every visit, so they never pair and never
+// fill the best-vs-best fallback either. Zones recorded on both sides but
+// disjoint → no honest pair (after is null). photo_type is not a location
+// claim (the gate-off path synthesizes it from upload order), so only `zone`
+// counts.
+const PAIRABLE_ZONES = new Set(['front', 'back', 'side']);
+const NON_PAIRABLE_ZONES = new Set(['close_up', 'trouble']);
+function pairBeforeAfterPhotos(beforeCandidates = [], afterCandidates = []) {
+  const rawZone = (p) => String(p?.zone || '').trim().toLowerCase();
+  const zoneKey = (p) => (PAIRABLE_ZONES.has(rawZone(p)) ? rawZone(p) : '');
+  for (const candidate of beforeCandidates) {
+    const zone = zoneKey(candidate);
+    if (!zone) continue;
+    const match = afterCandidates.find((p) => zoneKey(p) === zone);
+    if (match) return { before: candidate, after: match };
+  }
+  const bothSidesZoned = beforeCandidates.some((p) => zoneKey(p)) && afterCandidates.some((p) => zoneKey(p));
+  const eligible = (p) => !NON_PAIRABLE_ZONES.has(rawZone(p));
+  const before = beforeCandidates.find(eligible) || null;
+  const after = !bothSidesZoned && before ? (afterCandidates.find(eligible) || null) : null;
+  return { before, after };
 }
 
 // The gate-on request contract for /assess photos: at most MAX_VISIT_PHOTOS,
@@ -243,6 +300,9 @@ function validateVisitPhotos(photos) {
     }
     zones.push(normalizePhotoZone(photo.zone));
   }
+  // The slider pairs against one Front photo, so the API enforces what the
+  // drawer's picker does.
+  if (zones.filter((zone) => zone === 'front').length > 1) return { error: 'Only one photo can be the Front photo', zones: [] };
   return { error: null, zones };
 }
 
@@ -278,5 +338,5 @@ function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) 
 }
 
 module.exports = {
-  GATE, PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, PROMPT_DIGEST, buildUserText, normalizePhotoZone, photoLabel, photoTypeForZone, validateVisitPhotos, contextHash
+  GATE, PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, PROMPT_DIGEST, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
 };
