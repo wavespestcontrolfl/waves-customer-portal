@@ -87,10 +87,19 @@ router.get('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin
     const { scheduledServiceId } = req.params;
     if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
 
-    const row = await db('consultation_outcomes')
-      .where({ scheduled_service_id: scheduledServiceId })
-      .first();
-    if (!row) return res.status(404).json({ error: 'No outcome recorded for that visit' });
+    // The read is coupled to the CURRENT assignment in one query (Codex
+    // #4710 r6 P2): a technician reassigned after the check above never
+    // receives the outcome (quote_notes are internal).
+    const q = db('consultation_outcomes as co')
+      .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
+      .where('co.scheduled_service_id', scheduledServiceId);
+    if (req.techRole !== 'admin') q.where('ss.technician_id', req.technicianId);
+    const row = await q.first('co.*');
+    if (!row) {
+      // Reassigned in between → the same 403 the check gives; else 404.
+      if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
+      return res.status(404).json({ error: 'No outcome recorded for that visit' });
+    }
     res.json({ outcome: row });
   } catch (err) {
     next(err);

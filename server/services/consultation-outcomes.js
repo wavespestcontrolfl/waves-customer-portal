@@ -51,7 +51,11 @@ const WON_WINDOW_DAYS = 90;
 // Consultation visits that never happened: a sale is never attributed to
 // one (local audit P1). One list shared by every win path — the evidence
 // win, markWonForCustomer and the sweep's selection — so they cannot drift.
-const DEAD_CONSULTATION_STATUSES = ['no_show', 'cancelled', 'skipped'];
+// `rescheduled` is a pending-rebook placeholder on the CONSULTATION side
+// (appointment-public.js reports it as pending_rebook — Codex #4710 r6 P2),
+// never a visit that happened; as a SALE booking it still qualifies
+// (QUALIFYING_BOOKING_STATUSES), which is a separate list.
+const DEAD_CONSULTATION_STATUSES = ['no_show', 'cancelled', 'skipped', 'rescheduled'];
 
 // Outcomes a later sale converts to won (Codex #4710 r4 P2): warm and cold,
 // and `lost` too — a customer who declined at the door and bought within
@@ -336,7 +340,19 @@ function isValidFollowUpAt(followUpAt) {
   // later) and a nonexistent DST wall time shifts an hour, so the ET
   // date/hour/minute the Date lands on must equal what was typed.
   const naive = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::\d{2})?$/.exec(String(followUpAt).trim());
-  if (!naive) return true;
+  if (!naive) {
+    // An explicit offset/Z value must round-trip too (Codex #4710 r6 P2):
+    // shift the instant by its own offset and compare the wall-clock parts
+    // that were typed. Non-ISO inputs (a Date, epoch ms) pass as before.
+    const withOffset = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/i
+      .exec(String(followUpAt).trim());
+    if (!withOffset) return true;
+    const tz = withOffset[4].toUpperCase();
+    const offsetMinutes = tz === 'Z' ? 0
+      : (tz[0] === '-' ? -1 : 1) * (Number(tz.slice(1, 3)) * 60 + Number(tz.slice(-2)));
+    const wall = new Date(parsed.getTime() + offsetMinutes * 60000).toISOString();
+    return wall.slice(0, 10) === withOffset[1] && wall.slice(11, 13) === withOffset[2] && wall.slice(14, 16) === withOffset[3];
+  }
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York', hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
   }).formatToParts(parsed).map((p) => [p.type, p.value]));
@@ -696,7 +712,16 @@ async function reconcileOneOpenOutcome(database, {
  * Never accepts outcome 'won' — that is stamped only by markWonForCustomer
  * when a real booking/accept closes.
  */
-async function recordOutcome(params = {}, { trx } = {}) {
+async function recordOutcome(params = {}, opts = {}) {
+  try {
+    return await recordOutcomeOnce(params, opts);
+  } catch (err) {
+    if (err?.code !== 'CUSTOMER_CHANGED') throw err;
+    return recordOutcomeOnce(params, opts);
+  }
+}
+
+async function recordOutcomeOnce(params = {}, { trx } = {}) {
   const database = trx || db;
   const {
     scheduledServiceId, outcome, lostReason = null, interests = [],
@@ -784,7 +809,13 @@ async function recordOutcome(params = {}, { trx } = {}) {
     const liveVisit = await locked('scheduled_services')
       .where({ id: scheduledServiceId })
       .forNoKeyUpdate()
-      .first('status', 'technician_id');
+      .first('status', 'technician_id', 'customer_id');
+    // A customer merge that repointed the visit between the first read and
+    // this lock would otherwise write the retired customer_id (Codex #4710
+    // r6 P2) — retried once from the top against the surviving customer.
+    if (liveVisit && String(liveVisit.customer_id || '') !== String(customerId || '')) {
+      throw makeError('The consultation customer changed — retry', 409, 'CUSTOMER_CHANGED');
+    }
     if (liveVisit && DEAD_CONSULTATION_STATUSES.includes(liveVisit.status)) {
       throw makeError('That consultation was marked no-show, cancelled or skipped — its outcome cannot be recorded', 409, 'CONSULTATION_NOT_HELD');
     }
@@ -1350,7 +1381,16 @@ async function consultationStats({ from, to, trx } = {}) {
     // nothing is recorded yet — combined per row below.
     .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
     .leftJoin('technicians as otech', 'co.technician_id', 'otech.id')
-    .leftJoin('leads as l', 'l.id', 'co.lead_id')
+    // The originating lead even before an outcome is recorded (Codex #4710
+    // r6 P2): the outcome's own lead, else the lead whose
+    // appointment_scheduled activity names this visit — so a completed
+    // visit is counted under its real source whether or not the tech has
+    // closed it out yet.
+    .leftJoin('leads as l', function originatingLead() {
+      this.on('l.id', '=', database.raw(
+        "COALESCE(co.lead_id, (SELECT la.lead_id FROM lead_activities la WHERE la.activity_type = 'appointment_scheduled' AND la.metadata->>'appointmentId' = ss.id::text ORDER BY la.created_at DESC LIMIT 1))",
+      ));
+    })
     // round 12 fix (codex P1 :1064): leads has no `lead_source` column —
     // the source is a FK, leads.lead_source_id -> lead_sources.id, with the
     // human-readable name on lead_sources.name. Selecting the bare

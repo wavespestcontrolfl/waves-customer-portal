@@ -45,16 +45,35 @@ jest.mock('../services/consultation-outcomes', () => ({
 // consultation_outcomes for GET.
 let mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: ACTING_TECHNICIAN_ID };
 let mockOutcomeRow = null;
+// Set to simulate a dispatch reassignment landing right after the route's
+// ownership check (the next scheduled_services read sees it).
+let mockVisitRowAfterFirstRead = null;
 jest.mock('../models/db', () => {
-  const fn = jest.fn((table) => ({
-    where: () => ({
+  const fn = jest.fn((table) => {
+    // The GET's coupled read joins the visit and may filter on its CURRENT
+    // technician (Codex #4710 r6 P2) — honoured here.
+    let techFilter;
+    const chain = {
+      join: () => chain,
+      where: (col, val) => {
+        if (col === 'ss.technician_id') techFilter = val;
+        return chain;
+      },
       first: () => {
-        if (table === 'scheduled_services') return Promise.resolve(mockVisitRow);
-        if (table === 'consultation_outcomes') return Promise.resolve(mockOutcomeRow);
+        if (table === 'scheduled_services') {
+          const row = mockVisitRow;
+          if (mockVisitRowAfterFirstRead) { mockVisitRow = mockVisitRowAfterFirstRead; mockVisitRowAfterFirstRead = null; }
+          return Promise.resolve(row);
+        }
+        if (table === 'consultation_outcomes' || table === 'consultation_outcomes as co') {
+          if (techFilter !== undefined && mockVisitRow?.technician_id !== techFilter) return Promise.resolve(null);
+          return Promise.resolve(mockOutcomeRow);
+        }
         return Promise.resolve(null);
       },
-    }),
-  }));
+    };
+    return chain;
+  });
   return fn;
 });
 
@@ -90,6 +109,7 @@ beforeEach(() => {
   mockCurrentRole = 'admin';
   mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: ACTING_TECHNICIAN_ID };
   mockOutcomeRow = null;
+  mockVisitRowAfterFirstRead = null;
   jest.clearAllMocks();
 });
 
@@ -155,6 +175,15 @@ describe('POST /:scheduledServiceId/outcome — a technician records their own c
 });
 
 describe('GET /:scheduledServiceId/outcome', () => {
+  test('Codex #4710 r6 P2: a technician reassigned right after the ownership check gets 403, never the outcome', async () => {
+    mockCurrentRole = 'technician';
+    mockOutcomeRow = { scheduled_service_id: '11111111-1111-4111-8111-111111111111', outcome: 'warm', quote_notes: 'internal' };
+    mockVisitRowAfterFirstRead = { id: '11111111-1111-4111-8111-111111111111', technician_id: 'someone-else' };
+    const res = await call('get', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome');
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).not.toMatch(/internal/);
+  });
+
   test('404s when no outcome is recorded for that visit', async () => {
     mockOutcomeRow = null;
     const res = await call('get', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome');

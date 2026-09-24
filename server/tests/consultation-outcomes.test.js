@@ -695,6 +695,45 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(saved.outcome).toBe('warm');
   });
 
+  test.each(['2026-02-31T09:00-05:00', '2026-09-25T25:00Z', '2026-04-31T10:00:00.000+00:00'])(
+    'Codex #4710 r6 P2: an impossible offset/Z timestamp (%s) is rejected too',
+    async (followUpAt) => {
+      const fakeDb = makeFakeDb({ scheduled_services: [], leads: [] });
+      await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt }, { trx: fakeDb }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+    },
+  );
+
+  test('Codex #4710 r6 P2: a rescheduled (pending-rebook) consultation cannot be closed out', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [{ id: 'visit-1', status: 'rescheduled', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: SCHEDULED_DATE }],
+      leads: [],
+    });
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_NOT_HELD' });
+  });
+
+  test('Codex #4710 r6 P2: a customer merge that repoints the visit mid-write is retried against the surviving customer', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [{ id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', customer_id: 'cust-old', technician_id: 'tech-1', scheduled_date: SCHEDULED_DATE }],
+      leads: [],
+    });
+    // The merge lands between the first read and the lock: flip customer_id
+    // on the first locked re-read only.
+    let flipped = false;
+    const spyDb = (name) => {
+      const q = fakeDb(name);
+      if (name === 'customers' && !flipped) {
+        flipped = true;
+        fakeDb.__store.scheduled_services[0].customer_id = 'cust-new';
+      }
+      return q;
+    };
+    spyDb.transaction = async (fn) => fn(spyDb);
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb });
+    expect(saved.customer_id).toBe('cust-new');
+  });
+
   test.each(['2026-02-31T09:00', '2026-09-25T99:99', '2026-03-08T02:30'])(
     'Codex #4710 P2: an impossible follow-up wall time (%s) is rejected, never normalized onto another day',
     async (followUpAt) => {
