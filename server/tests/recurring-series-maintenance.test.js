@@ -658,8 +658,17 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // check (the nightly top-up loop) — extendSeriesOnceLocked's internal
     // call (moved out of runRecurringSeriesMaintenanceLocked, net zero) is
     // the completion path's existing occurrence, not a new one.
+    // (Two short-lived extra consumers — isSupersededSeries' own
+    // winner-selection loop and resolveTopUpProbeCandidateDate's
+    // candidate-date search — were introduced and then deleted within the
+    // same PR (#4782): round 3's review replaced that hand-rolled
+    // ranking/billability-probe approach with a direct reuse of the
+    // canonical duplicate-series guard, findActiveRecurringSeries — see
+    // isDuplicateActiveSeries's own comment. Back to the 6 pre-existing
+    // consumers below.)
     expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(6);
-    // The occupied-dates preload is shared the same way (same 4th consumer).
+    // The occupied-dates preload is shared the same way — same 4th
+    // consumer.
     expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });
 

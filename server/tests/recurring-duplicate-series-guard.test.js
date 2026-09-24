@@ -115,6 +115,33 @@ describe('findActiveRecurringSeries — service-family matching', () => {
     expect(matches).toHaveLength(1);
   });
 
+  test('classifies a candidate by its CURRENT template when recurring_template_overrides reassigns its service (codex #4782 r8 P1)', async () => {
+    // Root A was reassigned Lawn -> Pest going forward. With the edit-scope
+    // gate on, a Pest target must see A as Pest (and a Lawn target must not),
+    // matching how the caller's own parent is overlaid.
+    const gates = require('../config/feature-gates').gates;
+    const original = gates.editApptPriceServiceScope;
+    gates.editApptPriceServiceScope = true;
+    try {
+      const parents = [{
+        id: 7, service_id: null, service_type: 'Monthly Lawn Care Service',
+        recurring_template_overrides: { service_type: 'Quarterly Pest Control' },
+        recurring_ongoing: true, scheduled_date: '2026-01-01', status: 'pending',
+      }];
+      const columns = { ...COLS, recurring_template_overrides: {} };
+      const pestMatches = await findActiveRecurringSeries(makeConn({ parents, columns }), {
+        customerId: 5, serviceType: 'Quarterly Pest Control',
+      });
+      expect(pestMatches.map((m) => m.id)).toEqual([7]);
+      const lawnMatches = await findActiveRecurringSeries(makeConn({ parents, columns }), {
+        customerId: 5, serviceType: 'Monthly Lawn Care Service',
+      });
+      expect(lawnMatches).toHaveLength(0);
+    } finally {
+      gates.editApptPriceServiceScope = original;
+    }
+  });
+
   test('a DIFFERENT service family never matches', async () => {
     const conn = makeConn({
       parents: [{ id: 3, service_id: null, service_type: 'Mosquito Control', recurring_ongoing: true, scheduled_date: '2026-01-01', status: 'pending' }],

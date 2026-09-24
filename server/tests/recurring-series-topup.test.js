@@ -58,6 +58,31 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   ...jest.requireActual('../services/annual-prepay-renewals'),
   coveredTermsAsOf: jest.fn(),
 }));
+// isDuplicateActiveSeries (Codex GitHub r3 — the four-P1 redesign) reuses
+// the canonical duplicate-series guard directly rather than a second
+// hand-rolled classifier. findActiveRecurringSeries is a full DB query
+// this suite's fake connection can't model (it queries scheduled_services
+// with its own joins/filters independent of makeConn's scripted handler),
+// so it's mocked — every OTHER export (duplicateGuardFamilyKey,
+// customerPrefersNoWeekends, etc.) stays real. Default (see beforeEach):
+// no active duplicate for anyone, so every OTHER describe block in this
+// suite is unaffected unless a test opts in.
+jest.mock('../services/recurring-appointment-seeder', () => ({
+  ...jest.requireActual('../services/recurring-appointment-seeder'),
+  findActiveRecurringSeries: jest.fn(),
+  sourceEstimateForScope: jest.fn(),
+}));
+// buildSeriesAddressScope (estimate-converter.js) resolves the canonical
+// serviceAddressScope shape the SAME way the booking/estimate callers do.
+// Mocked whole-module (never used elsewhere in the top-up code path — Codex
+// GitHub r3's own admin-schedule.js:642 is the only estimate-converter
+// require this suite's code path ever reaches) so a test can assert the
+// EXACT args isDuplicateActiveSeries builds from a series' resolved
+// address, including an override, without needing a real customer_properties
+// row or the converter's own address-key machinery.
+jest.mock('../services/estimate-converter', () => ({
+  buildSeriesAddressScope: jest.fn(),
+}));
 
 const adminScheduleRouter = require('../routes/admin-schedule');
 const {
@@ -69,6 +94,8 @@ const { familyOfServiceRow } = require('../services/cancellation-processor');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { PAYMENT_PENDING_STATUS } = AnnualPrepayRenewals;
 const { ANNUAL_PREPAY_METHOD } = require('../services/prepaid-series');
+const { findActiveRecurringSeries, sourceEstimateForScope } = require('../services/recurring-appointment-seeder');
+const { buildSeriesAddressScope } = require('../services/estimate-converter');
 
 // A minimal chainable stand-in for coveredTermsAsOf's real knex query
 // builder — isCustomerPrepayLive only ever calls .where(...) (twice, one a
@@ -88,6 +115,12 @@ beforeEach(() => {
   // Default: no covered term for anyone — every OTHER describe block's
   // fixtures are unaffected by the v1 scope cut unless they opt in.
   AnnualPrepayRenewals.coveredTermsAsOf.mockReset().mockReturnValue(chainableCoveredTermsAsOf(undefined));
+  // Default: no active duplicate series for anyone, and no address scope
+  // resolved — every OTHER describe block's fixtures are unaffected by the
+  // duplicate-series guard unless a test opts in.
+  findActiveRecurringSeries.mockReset().mockResolvedValue([]);
+  sourceEstimateForScope.mockReset().mockResolvedValue(null);
+  buildSeriesAddressScope.mockReset().mockResolvedValue(null);
 });
 const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
 const { etDateString } = require('../utils/datetime-et');
@@ -426,6 +459,19 @@ describe('topUpRecurringSeriesLocked — eligibility', () => {
     expect(result.skipped).toBe('not_found');
   });
 
+  test('reports no_live_visit for an ongoing root whose rows are all cancelled/rescheduled — never a bare null (Codex GitHub #4782 r2 P2)', async () => {
+    // latestLiveSeriesVisit finds nothing for this series at all — never
+    // reaches extendSeriesOnceLocked, so no warning is ever logged for
+    // this case. Before this reason existed, the ops script's own fallback
+    // text wrongly pointed operators at "see warning above" for a case
+    // where no warning was ever printed, and the summary table silently
+    // dropped the series instead of counting it.
+    const { conn, inserted } = topupScenario({ seriesDates: [] });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('no_live_visit');
+    expect(inserted).toHaveLength(0);
+  });
+
   test('reads the customer row FOR UPDATE — the same lock PUT /:id/stage takes (Codex GitHub r3 P1)', async () => {
     const customerCalls = [];
     const { conn } = topupScenario({ seriesDates: [daysOut(0)], captureCustomerCalls: customerCalls });
@@ -717,6 +763,147 @@ describe('topUpRecurringSeriesLocked — plan-hold exclusion (Codex GitHub r6 P1
   });
 });
 
+describe('topUpRecurringSeriesLocked — duplicate active series (Codex GitHub #4782 r3: canonical duplicate-series guard reuse)', () => {
+  // The FIRST version of this rule (isSupersededSeries, three prior rounds)
+  // hand-rolled its own family classifier, active-series predicate, and
+  // address key — every one of round 3's four P1s traced to a place where
+  // that hand-rolled logic diverged from the SAME canonical guard the three
+  // series CREATORS already use (findActiveRecurringSeries,
+  // recurring-appointment-seeder.js). This suite reuses that canonical
+  // function directly instead: findActiveRecurringSeries is mocked (a full
+  // DB query the fake connection can't model), and every test here is
+  // about what isDuplicateActiveSeries hands it and does with what it
+  // returns — never a second definition of what counts as "active" or
+  // "the same family/property."
+  test('an active duplicate elsewhere skips THIS series with duplicate_series, carrying the sibling id for the ops script\'s review list', async () => {
+    // Not ...Once: topUpRecurringSeriesLocked resolves the canonical guard
+    // TWICE on a hit — once for the eligibility check, once more (reporting
+    // only) to hand the ops script the actual sibling ids — and a real DB
+    // read would return the same live result both times.
+    findActiveRecurringSeries.mockResolvedValue([{ id: 'sibling-b' }]);
+    const { conn, inserted } = topupScenario();
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('duplicate_series');
+    expect(result.duplicateSeriesIds).toEqual(['sibling-b']);
+    // customerId/serviceType must be stamped on THIS early-return path too
+    // (local pre-push audit) — every other early skip reason never needs
+    // them (the script prints just `[skip: reason]`), but the review row
+    // this ONE reason feeds needs the real values, not the ops script's
+    // own "(unknown)"/"(no service type)" fallback text.
+    expect(result.customerId).toBe(5);
+    expect(result.serviceType).toBe('Weekly Pest Control');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('the guard skips BOTH sides, independently — neither "wins," matching what already happens today for these customers', async () => {
+    // Series A (id 10): an active sibling ('sibling-b') exists. Not
+    // ...Once: resolved twice on a hit (eligibility + reporting) — see the
+    // previous test's own comment.
+    findActiveRecurringSeries.mockResolvedValue([{ id: 'sibling-b' }]);
+    const seriesA = topupScenario();
+    const resultA = await topUpRecurringSeriesLocked(seriesA.conn, 10, { horizonDays: 30 });
+    expect(resultA.skipped).toBe('duplicate_series');
+    expect(seriesA.inserted).toHaveLength(0);
+
+    // Series B (id 99): called independently, with its OWN mocked match —
+    // the guard has no memory of A's own skip and no ranking step to
+    // decide a "winner"; it just re-asks the same canonical question from
+    // B's own perspective and gets an active sibling back too (in a real
+    // customer, A itself).
+    findActiveRecurringSeries.mockResolvedValue([{ id: 10 }]);
+    const seriesB = topupScenario({ parentOverrides: { id: 99 } });
+    const resultB = await topUpRecurringSeriesLocked(seriesB.conn, 99, { horizonDays: 30 });
+    expect(resultB.skipped).toBe('duplicate_series');
+    expect(resultB.duplicateSeriesIds).toEqual([10]);
+    expect(seriesB.inserted).toHaveLength(0);
+  });
+
+  test('no active match (a different property, in practice) never collides — tops up normally, and the canonical guard is called with the resolved OVERRIDE address, never the stale stamped one', async () => {
+    // The RAW stamped address this series was created with — must NOT be
+    // what gets scoped, since recurring_template_overrides.appointment_address
+    // below supersedes it (a moved series scopes on where it is NOW).
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        property_id: 'prop-stale', service_address_line1: '123 Stale St',
+        service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34205',
+        recurring_template_overrides: JSON.stringify({
+          appointment_address: {
+            property_id: 'prop-override', service_address_line1: '456 Override Ave',
+            service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34205',
+          },
+        }),
+      },
+      colsOverrides: { recurring_template_overrides: {} },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    // findActiveRecurringSeries defaults to [] (beforeEach) — no active
+    // duplicate anywhere, so this series tops up normally.
+    expect(result.skipped).not.toBe('duplicate_series');
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(buildSeriesAddressScope).toHaveBeenCalledWith(
+      expect.anything(),
+      { property_id: 'prop-override', address: '456 Override Ave, Bradenton, FL 34205' },
+      5,
+    );
+    expect(findActiveRecurringSeries).toHaveBeenCalledWith(expect.anything(), {
+      customerId: 5,
+      serviceId: null,
+      serviceType: 'Weekly Pest Control',
+      excludeParentId: 10,
+      // The default beforeEach mock for buildSeriesAddressScope — this
+      // test only pins the ADDRESS it was asked to scope with (above), not
+      // buildSeriesAddressScope's own internal resolution (that function
+      // has its own dedicated tests).
+      serviceAddressScope: null,
+    });
+  });
+
+  test('an unstamped series with a source estimate scopes on that estimate property before the primary-address fallback (Codex r7 P1)', async () => {
+    sourceEstimateForScope.mockResolvedValueOnce({ property_id: 'prop-secondary', address: '9 Lake Dr, Parrish, FL 34219' });
+    const { conn } = topupScenario({
+      parentOverrides: { service_address_line1: null, property_id: null, source_estimate_id: 'est-2' },
+      customerOverrides: { address_line1: '7 Home Rd', city: 'Parrish', state: 'FL', zip: '34219' },
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(sourceEstimateForScope).toHaveBeenCalledWith(expect.anything(), 'est-2');
+    const call = buildSeriesAddressScope.mock.calls[0];
+    expect(call[1]).toEqual({ property_id: 'prop-secondary', address: '9 Lake Dr, Parrish, FL 34219' });
+  });
+
+  test('an unstamped legacy series scopes on the customer primary address, never the property-blind guard (Codex pre-push P1)', async () => {
+    const { conn } = topupScenario({
+      parentOverrides: { service_address_line1: null, service_address_line2: null, property_id: null },
+      customerOverrides: { address_line1: '7 Home Rd', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    const call = buildSeriesAddressScope.mock.calls[0];
+    expect(call[1].address).toBe('7 Home Rd, Parrish, FL 34219');
+  });
+
+  test('keeps an explicit unit as its own comma-separated segment so the canonical parser stays unit-aware (Codex GitHub r6 P1)', async () => {
+    const { conn } = topupScenario({
+      parentOverrides: {
+        service_address_line1: '100 Main St', service_address_line2: 'Apt 5',
+        service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34205',
+      },
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    const call = buildSeriesAddressScope.mock.calls[0];
+    expect(call[1].address).toBe('100 Main St, Apt 5, Bradenton, FL 34205');
+  });
+
+  // Approved separate programs (duplicateSeriesOverride / allowDuplicateSeries,
+  // admin-schedule.js's own booking-creation routes): checked ONLY at
+  // booking time via separateProgramMatches, against the reviewedIds the
+  // SAME request carries — never written anywhere durable afterward (no
+  // column, no linking table; only a logger.warn line survives). With
+  // nothing queryable to distinguish an approved program from an
+  // accidental duplicate after the fact, there is no persisted-approval
+  // exemption to test here — every active match skips both sides,
+  // approved programs included (see isDuplicateActiveSeries's own
+  // comment, and the PR description).
+});
+
 describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
   // Same shared verdict every OFFICE series writer consults
   // (seriesExtensionUnbillable) — the completion-time single-visit
@@ -726,16 +913,19 @@ describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
   // recurring-count.test.js pins that classification on the source).
   // Checked per ACTUAL candidate date inside extendSeriesOnceLocked (price
   // varies by date), so an unbillable series silently inserts nothing and
-  // stops — `skipped` stays null, same as running out of horizon or hitting
-  // the insert cap; it isn't a distinct ineligibility reason like
-  // 'not_ongoing' because the series WAS otherwise eligible and simply
-  // couldn't produce a billable date.
+  // stops. `skipped: 'unbillable'` when the VERY FIRST attempt this run is
+  // the one refused (nothing else inserted first) — an honest reason
+  // rather than a generic "would add nothing" the ops script used to
+  // print for this exact case (mistakable for "already at horizon", which
+  // has nothing to do with pricing); it isn't a distinct ELIGIBILITY
+  // reason like 'not_ongoing' since the series WAS otherwise eligible and
+  // simply couldn't produce a billable date.
   test('an unpriced series with no create-invoice stamp and no membership/lane inserts nothing — never mints a stack of $0 visits', async () => {
     const { conn, inserted } = topupScenario({
       parentOverrides: { create_invoice_on_complete: false, estimated_price: null },
     });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    expect(result.skipped).toBeNull();
+    expect(result.skipped).toBe('unbillable');
     expect(inserted).toHaveLength(0);
     expect(result.spawnedVisits).toHaveLength(0);
   });
@@ -936,6 +1126,41 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
   });
 });
 
+describe('topUpRecurringSeriesLocked — occupancy clashes are advisory only in top-up mode (Codex GitHub guards follow-up P2)', () => {
+  // seriesCandidateDateClashes is tech-blind, so on a busy calendar a hard
+  // skip-to-next-cadence-step can drop whole months of candidates from an
+  // unattended run (a prod monthly-lawn dry run lost Nov/Dec/Feb/May/Aug/Sep
+  // to one recurring conflict). guardRecurrenceDestination's own ruling for
+  // every OTHER admin write path is that an overlap is advisory (owner
+  // ruling 2026-08-25) — top-up's insert loop now matches that instead of
+  // reinventing a stricter rule for itself. Completion mode is unaffected:
+  // recurring-series-maintenance.test.js's own 'P1: auto-extend skips a
+  // candidate day another visit already occupies' pins that a clash still
+  // advances to the next cadence step there, since opts.overlapAdvisoryOnly
+  // is never set on that path.
+  test('a clash on the very first candidate still inserts that date, never advancing to the next cadence step', async () => {
+    const fixtureArgs = {
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00',
+        estimated_duration_minutes: 60,
+      },
+    };
+    const baseline = topupScenario(fixtureArgs);
+    const baselineResult = await topUpRecurringSeriesLocked(baseline.conn, 10, { horizonDays: 14 });
+
+    findConflictingVisits.mockReset().mockResolvedValueOnce([{ id: 'occupied-1' }]).mockResolvedValue([]);
+    const clashing = topupScenario(fixtureArgs);
+    const clashingResult = await topUpRecurringSeriesLocked(clashing.conn, 10, { horizonDays: 14 });
+
+    expect(findConflictingVisits).toHaveBeenCalled();
+    // Identical inserted dates whether or not the FIRST candidate clashed —
+    // the clash never advanced the search to a later cadence step.
+    expect(clashing.inserted.map((r) => r.scheduled_date)).toEqual(baseline.inserted.map((r) => r.scheduled_date));
+    expect(clashingResult.spawnedVisits.length).toBe(baselineResult.spawnedVisits.length);
+    expect(clashingResult.skipped).toBeNull();
+  });
+});
+
 describe('topUpRecurringSeriesLocked — horizon fill', () => {
   test('fills a weekly series to the horizon and stops (no past-dated or duplicate inserts)', async () => {
     const { conn, inserted, seriesDates } = topupScenario({
@@ -976,15 +1201,36 @@ describe('topUpRecurringSeriesLocked — horizon fill', () => {
     expect(inserted).toHaveLength(TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN);
   });
 
-  test('a series already booked past the horizon inserts nothing', async () => {
+  test('a series already booked past the horizon inserts nothing — skipped: at_horizon (Codex GitHub guards follow-up P2)', async () => {
     const { conn, inserted } = topupScenario({
       parentOverrides: { recurring_pattern: 'weekly' },
       seriesDates: [daysOut(60)],
     });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    expect(result.skipped).toBeNull();
+    expect(result.skipped).toBe('at_horizon');
     expect(inserted).toHaveLength(0);
     expect(result.priorBookedThrough).toBe(daysOut(60));
+  });
+
+  test('the CURRENT booked-through date is still inside the horizon, but the next monthly occurrence falls past it — skipped: at_horizon, never the generic "already booked" warning (Codex GitHub r1 P2)', async () => {
+    // Distinct from the test above: there the series' latest visit is
+    // ALREADY past the horizon (the pre-loop latestStr >= effectiveHorizon
+    // check catches it before extendSeriesOnceLocked's candidate search
+    // ever runs). Here the latest visit is TODAY — comfortably inside a
+    // 5-day horizon — but a monthly cadence's next occurrence lands about
+    // a month out, past that horizon: extendSeriesOnceLocked's own search
+    // loop is what discovers this (every one of its 12 attempts hits the
+    // maxDate cap), and it must report the SAME honest at_horizon reason,
+    // not the generic "every candidate within 12 cadence steps already
+    // booked" warning that used to fire for this case.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'monthly' },
+      seriesDates: [daysOut(0)],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 5 });
+    expect(result.skipped).toBe('at_horizon');
+    expect(inserted).toHaveLength(0);
+    expect(result.priorBookedThrough).toBe(daysOut(0));
   });
 });
 
@@ -1087,5 +1333,32 @@ describe('topUpRecurringSeries — the writing wrapper', () => {
     expect(result.skipped).toBe('owner_changed_under_fence');
     expect(result.spawnedVisits).toEqual([]);
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+});
+
+describe('classifySeriesOutcome (scripts/recurring-series-topup.js) — the no_change bucket (Codex GitHub #4782 r3 P2)', () => {
+  // require.main guard on the script (module.exports added alongside it)
+  // lets this suite pull the pure classifier directly without running
+  // main() — which would otherwise hit a real database as a side effect
+  // of require().
+  const { classifySeriesOutcome } = require('../../scripts/recurring-series-topup');
+
+  test('an eligible series that inserted nothing without a skip reason classifies as no_change — not silently missing from the outcome table', () => {
+    expect(classifySeriesOutcome({ spawnedVisits: [], skipped: null })).toBe('no_change');
+    expect(classifySeriesOutcome(undefined)).toBe('no_change');
+  });
+
+  test('a series that actually inserted classifies as toppedUp', () => {
+    expect(classifySeriesOutcome({ spawnedVisits: [{ scheduledDate: '2026-10-01' }], skipped: null })).toBe('toppedUp');
+  });
+
+  test('any named skip reason classifies as skip:<reason>, never toppedUp or no_change, even alongside inserted visits', () => {
+    expect(classifySeriesOutcome({ spawnedVisits: [], skipped: 'duplicate_series' })).toBe('skip:duplicate_series');
+    expect(classifySeriesOutcome({ spawnedVisits: [], skipped: 'at_horizon' })).toBe('skip:at_horizon');
+    // skipped is checked first — topUpRecurringSeriesLocked never returns
+    // both a skip reason and spawned visits from the SAME run today, but
+    // the classifier's own precedence must not silently change if that
+    // ever became possible.
+    expect(classifySeriesOutcome({ spawnedVisits: [{ scheduledDate: '2026-10-01' }], skipped: 'unbillable' })).toBe('skip:unbillable');
   });
 });

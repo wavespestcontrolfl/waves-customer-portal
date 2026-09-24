@@ -17,8 +17,10 @@
  * communication either way.
  *
  * Each line prints the customer id (never a name — this codebase's logs,
- * including ops scripts, carry ids only), service type, pattern, the
- * current booked-through date, and the date(s) it added/would add.
+ * including ops scripts, carry ids only; AGENTS.md's PII-in-logs rule is
+ * unconditional, with no opt-in carve-out — resolve the name from the id
+ * in the admin UI), service type, pattern, the current booked-through
+ * date, and the date(s) it added/would add.
  *
  * Usage:
  *   node scripts/recurring-series-topup.js                     # dry run, every eligible ongoing series
@@ -85,6 +87,30 @@ if (HORIZON_DAYS_ARG != null) {
 }
 const horizonOpt = { horizonDays };
 
+// Classifies one series' topUpOneSeries() result into exactly one summary
+// bucket — 'toppedUp', 'no_change' (Codex GitHub r3 P2: an eligible series
+// that inserted nothing without any named skip reason was invisible in the
+// outcome table before this, so toppedUp + no_change + every skip reason +
+// errors did not sum to scanned), or `skip:<reason>`. Pulled out as its
+// own function so the no_change bucket has a direct unit test without
+// running the whole CLI against a real database.
+function classifySeriesOutcome(result) {
+  if (result?.skipped) return `skip:${result.skipped}`;
+  const inserted = (result?.spawnedVisits || []).length;
+  return inserted > 0 ? 'toppedUp' : 'no_change';
+}
+
+// One row for the owner's "Duplicate series for review" table — ids only,
+// per the PII rule (see main()'s own comment on this).
+function duplicateReviewRow(parentId, result) {
+  return {
+    parent_id: parentId,
+    customer_id: result.customerId || '(unknown)',
+    service_type: result.serviceType || '(no service type)',
+    sibling_parent_ids: (result.duplicateSeriesIds || []).join(', '),
+  };
+}
+
 async function resolveParentIds() {
   if (PARENT_ID) return [PARENT_ID];
   const cols = await db('scheduled_services').columnInfo();
@@ -107,28 +133,66 @@ async function main() {
 
   console.log(`${APPLY ? 'APPLYING' : 'DRY RUN'} — ${parentIds.length} candidate series, horizon ${horizonOpt.horizonDays} days\n`);
 
-  const summary = { scanned: parentIds.length, toppedUp: 0, visitsInserted: 0, skipped: {}, errors: 0 };
+  // noChange: an eligible series that inserted nothing without any of the
+  // named skip reasons — extendSeriesOnceLocked's own 12-cadence-step
+  // search came up empty for some reason other than the horizon (a busy
+  // calendar in non-advisory mode, a persistent blackout shift) and
+  // already logged its own warning above this line. Counted separately so
+  // toppedUp + noChange + every skip reason + errors always sums to
+  // scanned — without it this bucket was invisible in the outcome table
+  // and the totals silently didn't add up.
+  const summary = {
+    scanned: parentIds.length, toppedUp: 0, visitsInserted: 0, noChange: 0, skipped: {}, errors: 0,
+  };
+  // Duplicate-series hits for the owner's own review — parent id, customer
+  // id, service type, and the sibling parent ids duplicate_series matched
+  // against. The guard skips BOTH sides rather than guessing which one to
+  // keep (see isDuplicateActiveSeries's own comment), so this list is how
+  // the owner finds and clears the stale recurring_ongoing root by hand.
+  // Ids only, never a name — same PII rule as every other line here.
+  const duplicatesForReview = [];
 
   for (const parentId of parentIds) {
     try {
       const result = await topUpOneSeries(parentId, { ...horizonOpt, dryRun: !APPLY });
       const insertedDates = (result?.spawnedVisits || []).map((v) => v.scheduledDate);
-      if (result?.skipped) {
-        summary.skipped[result.skipped] = (summary.skipped[result.skipped] || 0) + 1;
-        console.log(`[skip: ${result.skipped}] parent=${parentId}`);
+      const outcome = classifySeriesOutcome(result);
+      if (outcome.startsWith('skip:')) {
+        const reason = outcome.slice('skip:'.length);
+        summary.skipped[reason] = (summary.skipped[reason] || 0) + 1;
+        console.log(`[skip: ${reason}] parent=${parentId}`);
+        if (reason === 'duplicate_series') {
+          duplicatesForReview.push(duplicateReviewRow(parentId, result));
+        }
         continue;
       }
-      if (insertedDates.length) {
+      if (outcome === 'toppedUp') {
         summary.toppedUp += 1;
         summary.visitsInserted += insertedDates.length;
+      } else {
+        summary.noChange += 1;
       }
       // Customer id, not name — this codebase's logs (incl. ops scripts;
-      // see ops/agents/README.md) never carry customer names/PII, only ids.
-      // Resolve the name from the id in the admin UI when acting on a line.
+      // see ops/agents/README.md) never carry customer names/PII, only
+      // ids, and AGENTS.md's rule here is unconditional (no opt-in
+      // carve-out — a prior version of this script tried a `--names` flag
+      // for the owner reviewing a preview directly, and Codex's local
+      // pre-push audit correctly caught that an opt-in doesn't create an
+      // exception the rule itself doesn't grant). Resolve the name from
+      // the id in the admin UI when acting on a line.
       console.log(
         `customer=${result.customerId || '(unknown)'} | ${result.serviceType || '(no service type)'} | ${result.recurringPattern || '(no pattern)'} `
         + `| booked through ${result.priorBookedThrough || '(no live visit)'} `
-        + `| ${APPLY ? 'added' : 'would add'} ${insertedDates.length ? insertedDates.join(', ') : '(nothing — already at horizon)'}`,
+        // A falsy `skipped` here (result?.skipped was already handled above,
+        // including the honest at_horizon / no_live_visit / unbillable /
+        // duplicate_series reasons — every empty-run case
+        // topUpRecurringSeriesLocked can actually name) with an empty
+        // insertedDates is the noChange bucket above: extendSeriesOnceLocked's
+        // own 12-cadence-step search came up empty for some OTHER reason
+        // and already logged its own "already booked" warning above this
+        // line — never re-claim a specific reason this branch doesn't
+        // actually know to be true.
+        + `| ${APPLY ? 'added' : 'would add'} ${insertedDates.length ? insertedDates.join(', ') : '(nothing inserted — see warning above)'}`,
       );
     } catch (e) {
       summary.errors += 1;
@@ -138,6 +202,22 @@ async function main() {
 
   console.log('\nSummary');
   console.log(JSON.stringify(summary, null, 2));
+  console.log('\nBy outcome');
+  console.table([
+    { outcome: 'toppedUp', count: summary.toppedUp },
+    { outcome: 'no_change', count: summary.noChange },
+    ...Object.entries(summary.skipped).map(([reason, count]) => ({ outcome: `skip: ${reason}`, count })),
+    { outcome: 'errors', count: summary.errors },
+  ]);
+  if (duplicatesForReview.length) {
+    // findActiveRecurringSeries treats a root as active when its ongoing flag
+    // is set OR any of its rows is live per whereVisitRowLive (pending,
+    // confirmed, rescheduled, en_route, on_site, or a tracker-live row, at
+    // any date), so clearing the flag alone leaves the pair blocked (Codex
+    // r4/r5 P2).
+    console.log('\nDuplicate series for review: for each STALE series, clear recurring_ongoing on its root AND close out every row the live-visit guard still counts (pending, confirmed, rescheduled, en_route, on_site, or tracker-live, at any date): complete or cancel each one. The series you keep then tops up on the next run:');
+    console.table(duplicatesForReview);
+  }
   if (!APPLY) {
     console.log('\nDry run only — nothing was written. Pass --apply to commit.');
   }
@@ -151,8 +231,17 @@ async function main() {
   if (summary.errors > 0) process.exitCode = 1;
 }
 
-main().catch(async (err) => {
-  console.error(err);
-  await db.destroy();
-  process.exit(1);
-});
+// require.main guard: lets recurring-series-topup.test.js require this
+// file to unit-test classifySeriesOutcome directly, without main() running
+// against a real database as a side effect of the require() — `node
+// scripts/recurring-series-topup.js` (require.main === module) is
+// completely unaffected.
+if (require.main === module) {
+  main().catch(async (err) => {
+    console.error(err);
+    await db.destroy();
+    process.exit(1);
+  });
+}
+
+module.exports = { classifySeriesOutcome };

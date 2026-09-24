@@ -134,6 +134,14 @@ describe('every consumer consults the preference LIVE (source pins)', () => {
     // alert action. The update-details write paths consume the per-edit
     // snapshot (editPrefNoWeekends) instead of resolving again — one
     // snapshot per edit keeps the plan and the writes on the same value.
+    // (A short-lived 9th — resolveTopUpProbeCandidateDate's own candidate-
+    // date search for isSupersededSeries' billability probe, Codex GitHub
+    // guards follow-up P1 round 3 — was introduced and then deleted within
+    // the same PR (#4782): round 3's review replaced that whole hand-rolled
+    // ranking/billability-probe approach with a direct reuse of the
+    // canonical duplicate-series guard, findActiveRecurringSeries, which
+    // has no weekend-preference concern of its own. Back to the 8
+    // pre-existing consult sites below.)
     expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
     expect(src).toContain('(input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))');
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');

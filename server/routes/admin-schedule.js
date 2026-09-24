@@ -1523,6 +1523,7 @@ const {
   copyAppointmentDiscountFields,
   copyBillToFields,
   copyStampedServiceAddressFields,
+  recurringServiceAddress,
   typedDiscountSlot,
   restackOccurrenceDiscounts,
   stampPricingRegimeMarker,
@@ -16735,12 +16736,25 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // rows from a legacy template (AGENTS.md: windows start on the hour); a
 // windowless template is untouched either way. Omitted (the completion
 // path), the window is copied verbatim, byte-identical to before this
-// extraction. Top-up v1 excludes every annual-prepay series outright
-// (topupSeriesSkipReason, below) rather than reproducing the coverage
-// authority's own term-selection logic a second time — the existing
-// activation-time seeder (ensureCoverageRowsForTerm) already keeps a
-// prepay customer's covered rows booked; see the module header for the
-// scope-cut rationale.
+// extraction. `opts.overlapAdvisoryOnly` (bool), when true, never lets a
+// seriesCandidateDateClashes hit skip a candidate to the next cadence
+// step — it inserts on the cadence date and logs the overlap instead,
+// matching guardRecurrenceDestination's own ruling that every other admin
+// write treats an overlap as advisory, never a hard block. Top-up only: a
+// tech-blind clash probe on a busy calendar can otherwise skip most of a
+// year's cadence slots for one recurring conflict. Omitted (the
+// completion path), a clash still advances to the next cadence step,
+// byte-identical to before this extraction. `opts.onSkip` (function),
+// called with a reason string ('unbillable' today) instead of silently
+// returning null when opts.checkUnbillable refuses the very first
+// candidate — lets topUpRecurringSeriesLocked report an honest skip
+// reason instead of a generic "would add nothing." Never passed by the
+// completion path or any other caller. Top-up v1 excludes every
+// annual-prepay series outright (topupSeriesSkipReason, below) rather
+// than reproducing the coverage authority's own term-selection logic a
+// second time here — the existing activation-time seeder
+// (ensureCoverageRowsForTerm) already keeps a prepay customer's covered
+// rows booked; see the module header for the scope-cut rationale.
 // Pure (no DB) off-hour window floor for the top-up path — shared by
 // topUpRecurringSeriesLocked's upfront per-series check and
 // extendSeriesOnceLocked's own per-insert normalization, so the exact same
@@ -16791,7 +16805,7 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
 async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opts = {}) {
-  const { maxDate = null } = opts;
+  const { maxDate = null, onSkip } = opts;
   let spawnedVisit = null;
   // Find the latest LIVE visit (pending/confirmed or completed) to
   // calculate the next date — shared anchor query (cancelled/rescheduled
@@ -16862,6 +16876,13 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // avoid runaway loops on degenerate patterns.
     let attempt = 1;
     let nextStr = null;
+    // Set whenever the maxDate cap (top-up's horizon — never set by the
+    // completion path) rejects a candidate. Dates only advance forward as
+    // `attempt` climbs, so once one candidate falls past maxDate every
+    // later attempt does too — this loop can only exit with `nextStr`
+    // still null AND hitMaxDate true because the horizon, not a busy
+    // calendar, is why nothing more got booked (Codex GitHub r1 P2).
+    let hitMaxDate = false;
     while (attempt <= 12) {
       const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
       const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
@@ -16882,6 +16903,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // insert (never a compensating delete after the fact): a candidate
       // past the cap is not "the next date", it's "stop for this series".
       if (maxDate && candidate > maxDate) {
+        hitMaxDate = true;
         attempt++;
         continue;
       }
@@ -16889,8 +16911,24 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // The blackout nudge can land a candidate on an adjacent day
       // another visit already occupies (the series dedupe above only
       // covers THIS series) — probe global occupancy before accepting,
-      // skipping clashing dates to the next cadence step.
-      if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) { attempt++; continue; }
+      // skipping clashing dates to the next cadence step. opts.overlapAdvisoryOnly
+      // (top-up only — never set by the completion path, so its own
+      // behavior is unchanged): seriesCandidateDateClashes is tech-blind
+      // (it has no idea which technician the office actually intends), and
+      // guardRecurrenceDestination's own ruling for every OTHER admin write
+      // path is that an overlap is advisory, never a hard block (staff-side
+      // saves never block on schedule conflicts, owner ruling 2026-08-25).
+      // Treating a clash as a hard skip here on an unattended nightly loop
+      // silently drops whole cadence slots on a busy calendar — a monthly
+      // series can lose most of a year's candidates to one recurring
+      // conflict. Insert on the cadence date and log the overlap instead.
+      if (opts.overlapAdvisoryOnly) {
+        if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+          logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
+        }
+      } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+        attempt++; continue;
+      }
       nextStr = candidate;
       break;
     }
@@ -16908,7 +16946,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
         .first('recurring_ongoing');
       stillOngoing = !!(freshParent && freshParent.recurring_ongoing);
     }
-    if (!nextStr) {
+    if (!nextStr && hitMaxDate) {
+      // top-up only (maxDate is only ever set by topUpRecurringSeriesLocked):
+      // this is a correct, unremarkable stop at the horizon, not a busy
+      // calendar — reported through the SAME onSkip plumbing 'unbillable'
+      // already uses, never the generic "already booked" warning below,
+      // which would misreport why nothing was inserted (Codex GitHub r1 P2).
+      if (onSkip) onSkip('at_horizon');
+    } else if (!nextStr) {
       logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — every candidate within 12 cadence steps already booked`);
     } else if (!stillOngoing) {
       logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
@@ -16993,6 +17038,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
         });
         if (unbillable) {
           logger.warn(`[recurring-topup] Auto-extend skipped for parent=${parentId} — ${nextStr} would be unbillable`);
+          // Lets topUpRecurringSeriesLocked report skipped: 'unbillable'
+          // instead of the false "already at horizon" the ops script used
+          // to print for a series whose horizon math was fine but whose
+          // FIRST candidate the billable gate refused. Never set by the
+          // completion path (no onSkip passed there) or by any other
+          // extendSeriesOnceLocked caller (reconcile, etc.) — this is
+          // top-up-only plumbing.
+          if (onSkip) onSkip('unbillable');
           return spawnedVisit;
         }
       }
@@ -17340,12 +17393,127 @@ async function isFamilyOnPlanHold(conn, parent, parentId) {
   return !!activeHold;
 }
 
+// A customer can carry 2+ ACTIVE recurring series in the same family at
+// the same property — a booking mistake the THREE creators (booking.js
+// self-book, estimate-converter auto-schedule, admin POST
+// /admin/schedule's create + update-details' make-recurring) already
+// guard against at creation time via findActiveRecurringSeries
+// (recurring-appointment-seeder.js). Top-up reuses that SAME canonical
+// guard rather than a second, hand-rolled family/address classifier
+// (Codex GitHub r3: four P1s, every one of them a divergence the first
+// version of this rule introduced — a different family key than
+// duplicateGuardFamilyKey, an "active" predicate that didn't distinguish
+// a fixed-count series with an upcoming visit from a stale
+// recurring_ongoing root with nothing left, a hand-rolled address key
+// instead of the canonical override-aware resolver, and no awareness of
+// the approved-separate-program escape hatch at all).
+//
+// Unlike the deleted "rank and crown a winner" approach, a hit here skips
+// BOTH sides: this run has no reliable way to tell an accidental duplicate
+// from a deliberately approved separate program (see below), so the
+// conservative call is to withhold NEW top-up inserts from either series
+// until the owner reviews and clears the stale one — never guess which
+// one "should" keep growing. This matches what already happens today for
+// these customers (both series already exist and neither's top-up ran
+// before this PR), so it changes nothing about what's currently on the
+// books; it only stops the SAME mistake from compounding on future runs.
+//
+// Approved separate programs (duplicateSeriesOverride / allowDuplicateSeries,
+// admin-schedule.js's own booking-creation routes): checked at BOOKING
+// TIME only — an admin reviews the exact existing-series id SET on that
+// one request (separateProgramMatches) and the resulting row is never
+// durably marked as part of an approved pair afterward. There is no
+// column, no linking table, no queryable record at all — the only trace
+// is a logger.warn line at creation. With nothing to query, this rule
+// cannot distinguish an approved program from an accidental duplicate
+// after the fact, so EVERY active match skips both sides, approved
+// programs included. This never stops an approved program from keeping
+// the visits it already has — it only withholds NEW top-up inserts on
+// both series until the owner clears the stale one (recurring_ongoing) or
+// a future change adds a durable, queryable marker for an approval.
+// The address this series occupies for duplicate scoping, resolved the same
+// way findActiveRecurringSeries reads its CANDIDATE parents:
+//   1. the override-aware recurringServiceAddress (a moved series scopes on
+//      its current address, via recurring_template_overrides);
+//   2. an unstamped root (no street, no property) with an immutable source
+//      estimate scopes on that estimate's property/address
+//      (sourceEstimateForScope) — a secondary-property series must not read
+//      as the primary address (Codex r7 P1);
+//   3. otherwise an unstamped root lives at the customer's primary address
+//      (customerPrimaryStreet), never the property-blind legacy guard
+//      (Codex pre-push P1).
+// Street and unit are comma-separated segments so the canonical parser stays
+// unit-aware (Codex r6 P1).
+async function topUpScopeInput(conn, parent) {
+  const { sourceEstimateForScope } = require('../services/recurring-appointment-seeder');
+  let addr = recurringServiceAddress(parent);
+  const unstamped = !String(addr.service_address_line1 || '').trim() && !addr.property_id;
+  if (unstamped && parent.source_estimate_id) {
+    const src = await sourceEstimateForScope(conn, parent.source_estimate_id).catch(() => null);
+    if (src && (src.property_id || String(src.address || '').trim())) {
+      return { property_id: src.property_id || null, address: src.address || null };
+    }
+  }
+  if (unstamped) {
+    const cust = await conn('customers').where({ id: parent.customer_id })
+      .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+    if (cust && String(cust.address_line1 || '').trim()) {
+      addr = {
+        ...addr,
+        service_address_line1: cust.address_line1,
+        service_address_line2: cust.address_line2,
+        service_address_city: cust.city,
+        service_address_state: cust.state,
+        service_address_zip: cust.zip,
+      };
+    }
+  }
+  const address = [
+    addr.service_address_line1,
+    addr.service_address_line2,
+    addr.service_address_city,
+    `${addr.service_address_state || ''} ${addr.service_address_zip || ''}`.trim(),
+  ].filter(Boolean).join(', ');
+  return { property_id: addr.property_id || null, address };
+}
+
+// Shared by the eligibility rule below (isDuplicateActiveSeries, which
+// only needs the boolean) and topUpRecurringSeriesLocked's own reporting
+// path (which needs the actual sibling ids for the ops script's "Duplicate
+// series for review" list) — one resolver, never two definitions of "what
+// counts as an active duplicate" that could disagree.
+async function resolveDuplicateActiveSeries(conn, parent, parentId) {
+  const { findActiveRecurringSeries } = require('../services/recurring-appointment-seeder');
+  const { buildSeriesAddressScope } = require('../services/estimate-converter');
+  // Fail OPEN on the scope only, never on the guard itself — the canonical
+  // function's own documented fallback (serviceAddressScope: null) is exact
+  // legacy customer+family behavior: still a correct, just property-blind,
+  // duplicate check for this one series this run.
+  const serviceAddressScope = await buildSeriesAddressScope(
+    conn,
+    await topUpScopeInput(conn, parent),
+    parent.customer_id,
+  ).catch(() => null);
+  return findActiveRecurringSeries(conn, {
+    customerId: parent.customer_id,
+    serviceId: parent.service_id || null,
+    serviceType: parent.service_type,
+    excludeParentId: parentId,
+    serviceAddressScope,
+  });
+}
+async function isDuplicateActiveSeries(conn, parent, parentId) {
+  const matches = await resolveDuplicateActiveSeries(conn, parent, parentId);
+  return matches.length > 0;
+}
+
 // Table-driven (async — needs a DB read, unlike the synchronous customer
 // rules above) so a future prepay-aware top-up is one more row, not a
 // rewritten function.
 const TOPUP_SERIES_INELIGIBILITY_RULES = [
   ['annual_prepay_series', isAnnualPrepaySeries],
   ['plan_hold', isFamilyOnPlanHold],
+  ['duplicate_series', isDuplicateActiveSeries],
 ];
 async function topupSeriesSkipReason(conn, parent, parentId, cols) {
   for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
@@ -17447,7 +17615,27 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   if (!advisoryTryLockAcquired(prepayLockResult)) return { spawnedVisits: [], skipped: 'annual_prepay_busy' };
 
   const seriesSkip = await topupSeriesSkipReason(conn, parent, parentId, cols);
-  if (seriesSkip) return { spawnedVisits: [], skipped: seriesSkip };
+  if (seriesSkip) {
+    // duplicate_series: a second, reporting-only resolve of the SAME
+    // canonical guard (resolveDuplicateActiveSeries — no second
+    // definition) so the ops script can print the actual sibling ids for
+    // the owner's review list. Only runs on the rare hit, never on every
+    // series this loop scans. customerId/serviceType are stamped here too
+    // (unlike every other early-skip reason, which the script prints as a
+    // bare `[skip: reason]` line needing neither) — without them, the
+    // review row's own customer_id/service_type columns always read
+    // "(unknown)"/"(no service type)" since this is an early return, never
+    // reaching the reporting-fields section at the bottom of this
+    // function (local pre-push audit).
+    if (seriesSkip === 'duplicate_series') {
+      const duplicates = await resolveDuplicateActiveSeries(conn, parent, parentId);
+      return {
+        spawnedVisits: [], skipped: seriesSkip, duplicateSeriesIds: duplicates.map((m) => m.id),
+        customerId: parent.customer_id, serviceType: parent.service_type,
+      };
+    }
+    return { spawnedVisits: [], skipped: seriesSkip };
+  }
 
   // Pure/no-DB — depends only on parent.window_start/window_end/duration,
   // so it's the SAME verdict extendSeriesOnceLocked's own per-insert
@@ -17468,6 +17656,16 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   // series already past the horizon (spawnedVisits stays empty) still
   // reports what it currently has on the books.
   let priorBookedThrough = null;
+  // Honest skip reason for a run that inserts nothing: only ever set while
+  // spawnedVisits is still empty (a run that added even one visit before
+  // hitting the horizon or an unbillable date later is a partial SUCCESS,
+  // not a skip — the script/sweep must still count what it did insert).
+  // Replaces the ops script's old "would add (nothing — already at
+  // horizon)" line, which was printed for EVERY empty run regardless of
+  // why — including a series the billable gate refused on its very first
+  // candidate, which had nothing to do with the horizon at all.
+  let noInsertReason = null;
+  const onSkip = (reason) => { if (spawnedVisits.length === 0) noInsertReason = reason; };
   while (spawnedVisits.length < TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN) {
     // Re-check ongoing every iteration — a churn/cancel landing mid-loop
     // (same rationale as extendSeriesOnceLocked's own pre-insert re-check)
@@ -17477,7 +17675,17 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
       if (!freshOngoing || !freshOngoing.recurring_ongoing) break;
     }
     const latest = await latestLiveSeriesVisit(conn, parentId);
-    if (!latest) break;
+    if (!latest) {
+      // An ongoing root with no live visit at all (every row cancelled or
+      // rescheduled) has nothing to anchor an extension from — genuinely
+      // different from every other empty-run reason above, and previously
+      // reported as a bare `skipped: null` the ops script's own fallback
+      // text wrongly attributed to a warning that was never logged for
+      // this path (extendSeriesOnceLocked is never even reached here —
+      // Codex GitHub r2 P2).
+      if (spawnedVisits.length === 0) noInsertReason = 'no_live_visit';
+      break;
+    }
     if (priorBookedThrough === null) priorBookedThrough = dateOnly(latest.scheduled_date) || null;
     const rOpts = {
       ...recurrenceOrdinalOptions(parent.scheduled_date, {
@@ -17490,7 +17698,10 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // returns the raw date unchanged when it's today-or-future) — exactly
     // "the last booked date" this horizon check needs, with no extra query.
     const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
-    if (latestStr >= effectiveHorizon) break;
+    if (latestStr >= effectiveHorizon) {
+      if (spawnedVisits.length === 0) noInsertReason = 'at_horizon';
+      break;
+    }
     // checkUnbillable: the SAME shared verdict every OFFICE series writer
     // consults (seriesExtensionUnbillable) before adding a visit — the
     // completion-time single-visit auto-extend deliberately skips it
@@ -17504,8 +17715,13 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // extendSeriesOnceLocked (price varies by date), not a coarse upfront
     // guess — a series can fill partway then stop exactly where billability
     // breaks down, same as running out of horizon or hitting the cap.
+    // overlapAdvisoryOnly: a tech-blind occupancy clash on a busy calendar
+    // must never silently drop a whole cadence slot — insert on the
+    // cadence date and log it, matching every other admin write's own
+    // advisory-only posture (guardRecurrenceDestination).
     const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, {
       maxDate: effectiveHorizon, checkUnbillable: true, normalizeOffHourStart: true,
+      overlapAdvisoryOnly: true, onSkip,
     });
     if (!spawned) break;
     spawnedVisits.push(spawned);
@@ -17517,7 +17733,7 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   const reportedServiceType = parent.service_type;
   const reportedPattern = parent.recurring_pattern;
   return {
-    spawnedVisits, skipped: null, effectiveHorizon,
+    spawnedVisits, skipped: spawnedVisits.length === 0 ? noInsertReason : null, effectiveHorizon,
     priorBookedThrough, customerId: parent.customer_id,
     serviceType: reportedServiceType, recurringPattern: reportedPattern,
   };
@@ -23342,6 +23558,8 @@ router._test = {
   isAnnualPrepaySeries,
   isCustomerPrepayLive,
   isFamilyOnPlanHold,
+  isDuplicateActiveSeries,
+  resolveDuplicateActiveSeries,
   normalizeTopUpWindow,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
   latestLiveSeriesVisit,
