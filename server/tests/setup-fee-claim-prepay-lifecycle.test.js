@@ -1018,6 +1018,19 @@ describe('restoreRodentSetupObligationForReversedInvoice — a voided/refunded S
     const prepay = conn({ rootsForCoverage: [rodentRoot], claim: { id: 'claim-1' }, prepayTerm: { id: 'term-1' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(prepay, setupInvoice())).toBeNull();
     expect(prepay.writes).toEqual([]);
+    // codex round-2 P0 follow-up: a CLAIM-LESS term-backed prepay (the
+    // estimate-origin switch's own invoice, which deliberately carries no
+    // setup_fee_claims row) must ALSO defer to the prepay pipeline when this
+    // generic reversal runs — e.g. via returnAppliedCreditOnRefund, the real
+    // refund transition, not just the annual-prepay-renewals.js sync. The
+    // old code only checked term-backed status INSIDE the claim branch, so
+    // a claim-less prepay invoice with its own setup line fell through and
+    // stamped the root directly — a second, independent obligation on top
+    // of whatever the term-cancel sync's marker re-mint or claims restore
+    // already puts back.
+    const claimlessPrepay = conn({ rootsForCoverage: [rodentRoot], claim: null, prepayTerm: { id: 'term-2' }, scheduledService: { id: 'root-rb', status: 'confirmed' } });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(claimlessPrepay, setupInvoice())).toBeNull();
+    expect(claimlessPrepay.writes).toEqual([]);
     const occupied = conn({ rootsForCoverage: [rodentRoot], claim: null, updateResult: 0, scheduledService: { id: 'root-rb', status: 'confirmed' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(occupied, setupInvoice())).toBeNull();
     const noRoot = conn({ rootsForCoverage: [{ id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null }], claim: null });

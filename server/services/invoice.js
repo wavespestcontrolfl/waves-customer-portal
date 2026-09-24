@@ -8616,16 +8616,26 @@ const InvoiceService = {
     const amount = Number.isFinite(claimAmount) && claimAmount > 0 ? claimAmount : lineAmount;
     if (!(amount > 0)) return null;
     if (!setupLine && !claimRecord) return null;
+    // Every TERM-BACKED prepay invoice restores through the annual-prepay
+    // pipeline (the claims-ledger sync, codex #3591 r48 P1, OR the
+    // switch-supersede marker re-mint, codex round-2) — checked
+    // UNCONDITIONALLY, not only when a claim happens to exist (codex
+    // round-2 P0 follow-up): an estimate-origin switch prepay deliberately
+    // has NO claim on its first cycle (the marker re-mint is the sole
+    // mechanism there), so a refund reaching this GENERIC reversal path
+    // (returnAppliedCreditOnRefund, the real Stripe/credit refund
+    // transition — not just the annual-prepay-renewals.js sync) would
+    // otherwise see no claim, see the invoice's own setup line, and stamp
+    // the setup a SECOND time on top of whatever the term-cancel sync
+    // already restores.
+    const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
+    if (termBacked) return null; // prepay lane — restored via the claims ledger / marker re-mint
     if (claimRecord) {
-      // Only TERM-BACKED prepay claims restore through the claims-ledger
-      // sync (codex #3591 r48 P1) — a COMPLETION invoice writes a claim
-      // record too (crash-resume evidence, admin-dispatch), and its
-      // reversal must put the stamp back HERE, consuming the record.
-      const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
-      if (termBacked) return null; // prepay lane — restored via the claims ledger
-      // Consumed only AFTER a successful re-stamp/re-bill (codex #3591 r53
-      // local P0): an ambiguous or failed restore keeps the durable
-      // evidence for retry / manual reconciliation.
+      // A COMPLETION invoice writes a claim record too (crash-resume
+      // evidence, admin-dispatch), consumed only AFTER a successful
+      // re-stamp/re-bill (codex #3591 r53 local P0): an ambiguous or
+      // failed restore keeps the durable evidence for retry / manual
+      // reconciliation.
       completionClaimToConsume = claimRecord.id;
     }
     const { authoritativeServiceKey } = require("./secure-appointment-plans");
