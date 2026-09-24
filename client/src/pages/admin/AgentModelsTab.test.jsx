@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeData } from "./agents/modelDraft.fixture";
@@ -59,6 +59,29 @@ describe("AgentModelsTab", () => {
     await screen.findByText(/lanes move after restart/);
     fireEvent(window, new Event("focus"));
     expect(modelReads()).toBe(1);
+  });
+
+  it.each(["picker", "migration"])("resumes refresh after %s supersedes a foreground retry", async (dialogType) => {
+    renderTab();
+    const card = (await screen.findByText("SMS intent")).closest(".p-4");
+    adminFetch.mockRejectedValueOnce(new Error("registry unavailable"));
+    fireEvent(window, new Event("focus"));
+    await screen.findByRole("alert");
+    let resolveRetry;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { resolveRetry = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(resolveRetry).toBeTypeOf("function"));
+    if (dialogType === "picker") {
+      fireEvent.click(within(card).getByRole("button", { name: /Change/ }));
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: /Move a model/ }));
+    }
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: dialogType === "picker" ? "Cancel" : "Close" }));
+    await act(async () => { resolveRetry(makeData()); });
+    const readsBefore = adminFetch.mock.calls.filter(([path]) => path === "/admin/agents/models").length;
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([path]) => path === "/admin/agents/models")).toHaveLength(readsBefore + 1));
   });
 
   it("?area= narrows to that area and the No backup chip filters", async () => {

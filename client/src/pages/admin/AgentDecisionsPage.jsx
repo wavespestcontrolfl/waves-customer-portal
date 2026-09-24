@@ -129,6 +129,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       const next = await adminFetch(`/admin/agent-decisions?status=${encodeURIComponent(status)}&limit=100`);
       if (request !== requestRef.current || editEpoch !== editEpochRef.current) return;
       setData(next);
+      setError("");
       setSelectedId((current) => (
         next.decisions?.some((d) => d.id === current) ? current : next.decisions?.[0]?.id || null
       ));

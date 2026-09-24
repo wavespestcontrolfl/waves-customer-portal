@@ -61,3 +61,27 @@ it('clears stale summary badges when an automatic summary refresh fails',async()
  expect(screen.queryByRole('button',{name:'Audience (3)'})).not.toBeInTheDocument();
  expect(screen.queryByRole('button',{name:'Schedule (0)'})).not.toBeInTheDocument();
 });
+it('drops vanished inbox selections while keeping visible rows selected for bulk actions',async()=>{
+ let events=[
+  {id:'event-a',title:'Vanished event',adminStatus:'pending'},
+  {id:'event-b',title:'Visible event',adminStatus:'pending'},
+ ];
+ const original=fetch.getMockImplementation();
+ fetch.mockImplementation(async(url,options)=>String(url).includes('/events/inbox')
+  ? response({events,counts:{pending:events.length}})
+  : original(url,options));
+ render(<MemoryRouter initialEntries={['/admin/newsletter?tab=events']}><NewsletterPage/></MemoryRouter>);
+ const first=await screen.findByText('Vanished event');
+ fireEvent.click(within(first.closest('tr')).getByRole('checkbox'));
+ fireEvent.click(within(screen.getByText('Visible event').closest('tr')).getByRole('checkbox'));
+ expect(screen.getByText('2 selected')).toBeInTheDocument();
+ events=[events[1]];
+ fireEvent(window,new Event('online'));
+ await waitFor(()=>expect(screen.queryByText('Vanished event')).not.toBeInTheDocument());
+ expect(screen.getByText('1 selected')).toBeInTheDocument();
+ expect(within(screen.getByText('Visible event').closest('tr')).getByRole('checkbox')).toBeChecked();
+ fireEvent.click(screen.getAllByRole('button',{name:'Approve',exact:true})[0]);
+ await waitFor(()=>expect(fetch).toHaveBeenCalledWith('/api/admin/newsletter/events/bulk-action',expect.objectContaining({
+  method:'POST',body:JSON.stringify({action:'approve',ids:['event-b']})
+ })));
+});

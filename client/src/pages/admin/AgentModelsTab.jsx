@@ -118,8 +118,13 @@ export default function AgentModelsTab() {
       .map((l) => l.name);
   }, [data, laneChanged, effectiveLeg, catalog]);
 
-  const setDraftValue = (env, value, unverifiedLabel = null) => {
+  const invalidateRead = () => {
     loadSeq.current += 1;
+    setLoading(false);
+  };
+
+  const setDraftValue = (env, value, unverifiedLabel = null) => {
+    invalidateRead();
     setDraft((prev) => {
       const next = { ...prev };
       if (value) next[env] = value;
@@ -154,7 +159,7 @@ export default function AgentModelsTab() {
   const openPicker = (lane, leg, which) => {
     const env = envForLeg(leg);
     if (!env) return;
-    loadSeq.current += 1;
+    invalidateRead();
     const siblings = siblingsOf(lane, leg);
     // Unpin = delete the env var. For a lane pin that returns the leg to its
     // selector / code default; for a leg on an OVERRIDDEN selector it returns
@@ -250,7 +255,7 @@ export default function AgentModelsTab() {
           <span className="u-nums">{unchecked}</span> unchecked after a switch. Changes apply after Railway restarts; nothing here
           sends anything to a customer.
         </p>
-        <Button size="sm" variant="secondary" onClick={() => { loadSeq.current += 1; setMigrating(true); }} className="gap-2">
+        <Button size="sm" variant="secondary" onClick={() => { invalidateRead(); setMigrating(true); }} className="gap-2">
           <ArrowRightLeft size={13} strokeWidth={2} aria-hidden />
           Move a model…
         </Button>

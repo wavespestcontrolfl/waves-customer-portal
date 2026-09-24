@@ -770,7 +770,10 @@ function EventInboxView({ onDraftFromEvent }) {
         if (controller.signal.aborted || request !== eventsRequestRef.current) return;
         setEvents(d.events || []);
         setCounts(d.counts || {});
-        if (!background) setSelected(new Set());
+        const visibleIds = new Set((d.events || []).map((event) => event.id));
+        setSelected((current) => background
+          ? new Set([...current].filter((id) => visibleIds.has(id)))
+          : new Set());
       })
       .catch((e) => {
         if (request !== eventsRequestRef.current) return;

@@ -107,3 +107,18 @@ it('clears and disables reply training when the next decision context fails', as
   }
   expect(adminFetch.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(0);
 });
+
+it('clears a decision refresh error after a successful automatic poll', async () => {
+  adminFetch.mockImplementation(async (url) => url.endsWith('/context')
+    ? { context: {} }
+    : { decisions: [{ id: 'decision-a', customerName: 'Customer A', recommendedActions: [] }] });
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  await screen.findByLabelText('Final / rewrite reply');
+  await waitFor(() => expect(screen.getByLabelText('Final / rewrite reply')).toBeEnabled());
+  adminFetch.mockRejectedValueOnce(new Error('Decision refresh failed'));
+  fireEvent(window, new Event('focus'));
+  await screen.findByText('Decision refresh failed');
+  fireEvent(window, new Event('focus'));
+  await waitFor(() => expect(screen.queryByText('Decision refresh failed')).not.toBeInTheDocument());
+  expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+});
