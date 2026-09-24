@@ -16262,6 +16262,24 @@ export default function PortalPage() {
   const [showPhotoId, setShowPhotoId] = useState(false);
   const [reportIssuePrefill, setReportIssuePrefill] = useState(null);
   const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount;
+  // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a
+  // property/account switch (sessionEpoch — another tab, or this one) does
+  // NOT clear it on its own. Left alone, a still-open Photo ID handoff would
+  // survive the switch and could submit the OLD property's note/photos
+  // against the NEWLY selected one once ReportIssueOverlay's own scope-echo
+  // check clears (Codex r6 P1). Only a session actually seeded by a handoff
+  // is affected — an ordinary manually-opened request keeps relying on that
+  // existing scope-echo/staleness handling untouched.
+  const lastPhotoIdSessionEpochRef = useRef(sessionEpoch);
+  useEffect(() => {
+    if (lastPhotoIdSessionEpochRef.current !== sessionEpoch) {
+      lastPhotoIdSessionEpochRef.current = sessionEpoch;
+      if (reportIssuePrefill) {
+        setReportIssuePrefill(null);
+        setShowReportIssue(false);
+      }
+    }
+  }, [sessionEpoch, reportIssuePrefill]);
   // Desktop section nav floats (owner 2026-07-22): it sticks just below the
   // sticky header while the customer scrolls. The header's height varies
   // (safe-area inset, wrapping), so measure it instead of hardcoding.
