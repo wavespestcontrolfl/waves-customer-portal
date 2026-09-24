@@ -437,17 +437,16 @@ function effectiveBookingTimestamp(booking) {
  * warm/cold row recorded afterward would otherwise sit open forever.
  *
  * Round 12, P2 consultation-outcomes.js:520 (codex, post-push): collects the
- * EARLIEST qualifying candidate from EACH of the three sources below (not
- * "the first source with any match" — a converted lead dated well after an
- * earlier accepted estimate used to win outright just for being checked
- * first) and returns the overall-earliest one, deriving won_via from
- * whichever source it came from. Every candidate is still bounded to
- * [visit's scheduled_date (ET), min(now, scheduled_date + 90 days)] (P1-2 —
- * never a future date, never past the visit's own window):
- *   (a) leads.converted_at for any lead on this customer,
- *   (b) an accepted estimate for this customer (estimates.status='accepted',
+ * EARLIEST qualifying candidate from EACH of the two sources below (not
+ * "the first source with any match") and returns the overall-earliest one,
+ * deriving won_via from whichever source it came from. leads.converted_at is
+ * deliberately not a source — it is stamped for free bookings too. Every
+ * candidate is still bounded to [visit's scheduled_date (ET), min(now,
+ * scheduled_date + 90 days)] (P1-2 — never a future date, never past the
+ * visit's own window):
+ *   (a) an accepted estimate for this customer (estimates.status='accepted',
  *       accepted_at),
- *   (c) a non-assessment scheduled_services row for this customer that is a
+ *   (b) a non-assessment scheduled_services row for this customer that is a
  *       genuine NEW booking — another consultation, a free callback
  *       (is_callback), a recurring-series child spawned onto an EXISTING
  *       plan (recurring_parent_id), an included $0 follow-up minted from a
@@ -456,8 +455,8 @@ function effectiveBookingTimestamp(booking) {
  *       follow-up/re-visit by name) is never itself a sale. Dated at
  *       effectiveBookingTimestamp(booking) — confirmed_at for an
  *       office-review booking, created_at otherwise (P2 :537 above).
- * Returns { won_via, won_at } for the earliest match across all three
- * sources, or null.
+ * Returns { won_via, won_at } for the earliest match across both sources,
+ * or null.
  */
 async function findSaleEvidenceForConsultation(database, {
   customerId, scheduledDateStr, now = new Date(),
@@ -487,16 +486,10 @@ async function findSaleEvidenceForConsultation(database, {
   // the first match) and pick the overall-earliest at the end.
   const candidates = [];
 
-  const convertedLead = await database('leads')
-    .where({ customer_id: customerId })
-    .whereNotNull('converted_at')
-    .where('converted_at', '>=', lowerBound)
-    .where('converted_at', '<=', upperBound)
-    .orderBy('converted_at', 'asc')
-    .first('converted_at');
-  if (convertedLead) {
-    candidates.push({ won_via: 'office_booking', won_at: new Date(convertedLead.converted_at) });
-  }
+  // leads.converted_at is NOT evidence (local audit P1): admin-leads.js
+  // stamps it for any non-assessment booking, including an always-free
+  // Estimate Visit. A real conversion always leaves a qualifying booking or
+  // an accepted estimate, which the two sources below read directly.
 
   const acceptedEstimate = await database('estimates')
     .where({ customer_id: customerId, status: 'accepted' })

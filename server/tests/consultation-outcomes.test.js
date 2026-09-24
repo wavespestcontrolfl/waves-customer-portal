@@ -637,13 +637,16 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(saved.outcome).toBe('warm');
   });
 
-  test('a converted lead dated after the visit flips a freshly-recorded warm to won (won_via office_booking)', async () => {
+  test('local audit P1: a converted lead whose only booking is a free Estimate Visit is NOT a win — converted_at alone is never evidence', async () => {
     const fakeDb = seededDb({
       leads: [{ id: 'lead-1', customer_id: 'cust-1', converted_at: new Date('2026-09-16T00:00:00Z'), deleted_at: null, created_at: SCHEDULED_DATE }],
+      extraTables: {},
+    });
+    fakeDb.__store.scheduled_services.push({
+      id: 'est-visit', service_type: 'Estimate Visit', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-09-18', created_at: new Date('2026-09-16T00:00:00Z'),
     });
     const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
-    expect(saved.outcome).toBe('won');
-    expect(saved.won_via).toBe('office_booking');
+    expect(saved.outcome).toBe('warm');
   });
 
   test('a non-assessment booking created after the visit flips a freshly-recorded warm to won (won_via office_booking); another assessment does not', async () => {
