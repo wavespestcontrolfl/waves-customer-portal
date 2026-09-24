@@ -6,12 +6,12 @@ import {
   Link2,
   Mail,
   MessageSquare,
+  RefreshCw,
   RotateCcw,
   XCircle,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Table, TBody, TD, TH, THead, TR, UiSurface } from "../../components/ui";
-import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { adminFetch as rawAdminFetch } from "../../lib/adminFetch";
 
 const STATUS_TABS = [
@@ -63,8 +63,8 @@ function canAct(request) {
 }
 
 // `embedded` (under ContractsPage): the hub owns the header card, so this
-// page hands its status tabs up via `onSecondaryNav` instead of rendering its
-// own header. Standalone rendering is unchanged.
+// page hands its status tabs + Refresh up via `onSecondaryNav` instead of
+// rendering its own header. Standalone rendering is unchanged.
 export default function DocumentRequestsPage({ embedded = false, onSecondaryNav } = {}) {
   const [cancelTarget, setCancelTarget] = useState(null);
   const [status, setStatus] = useState("open");
@@ -72,12 +72,10 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   const [requests, setRequests] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [actionKey, setActionKey] = useState("");
   const [latestLink, setLatestLink] = useState("");
-  const listRequestRef = useRef(0);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ status, limit: "100" });
@@ -85,38 +83,26 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
     return params.toString();
   }, [status, search]);
 
-  const loadRequests = useCallback(async ({ background = false } = {}) => {
-    const request = ++listRequestRef.current;
-    if (!background) {
-      setLoading(true);
-      setLoadError("");
-    }
+  const loadRequests = useCallback(async () => {
+    setLoading(true);
+    setError("");
     try {
       const [data, statsData] = await Promise.all([
         api(`/admin/contracts/requests?${query}`),
         api("/admin/contracts/requests/stats").catch(() => ({ stats: null })),
       ]);
-      if (request !== listRequestRef.current) return;
       setRequests(data.requests || []);
-      if (statsData.stats) setStats(statsData.stats);
-      setLoadError("");
+      setStats(statsData.stats || null);
     } catch (err) {
-      if (request === listRequestRef.current) {
-        setLoadError(err.message || "Could not load document requests");
-      }
+      setError(err.message || "Could not load document requests");
     } finally {
-      if (request === listRequestRef.current) setLoading(false);
+      setLoading(false);
     }
   }, [query]);
 
   useEffect(() => {
     loadRequests();
-    return () => {
-      listRequestRef.current += 1;
-    };
   }, [loadRequests]);
-
-  useVisiblePageRefresh(() => loadRequests({ background: true }));
 
   const runDeliveryAction = async (request, channel, action = "send") => {
     if (!request?.id) return;
@@ -188,7 +174,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   };
 
   const hubNavRef = useRef({});
-  hubNavRef.current = { setStatus };
+  hubNavRef.current = { setStatus, loadRequests };
   useEffect(() => {
     if (!embedded || !onSecondaryNav) return undefined;
     onSecondaryNav({
@@ -197,10 +183,12 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
       onChange: (key) => hubNavRef.current.setStatus(key),
       ariaLabel: "Request status",
       navGridClassName: "grid-cols-2 md:grid-cols-6",
-      actions: [],
+      actions: [
+        { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: () => hubNavRef.current.loadRequests(), disabled: loading },
+      ],
     });
     return () => onSecondaryNav(null);
-  }, [embedded, onSecondaryNav, status]);
+  }, [embedded, onSecondaryNav, status, loading]);
 
   return (
     <UiSurface density="comfortable" className="mx-auto min-w-0 max-w-[1500px] text-ui-body">
@@ -213,6 +201,9 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
         activeKey={status}
         onSectionChange={setStatus}
         navGridClassName="grid-cols-2 md:grid-cols-6"
+        actions={[
+          { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: loadRequests, disabled: loading },
+        ]}
       />
       )}
 
@@ -240,9 +231,6 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
         ))}
       </div>
 
-      {loadError && (
-        <ActionFeedback error onRetry={() => loadRequests()} className="mb-3">{loadError}</ActionFeedback>
-      )}
       {error && (
         <ActionFeedback error className="mb-3">{error}</ActionFeedback>
       )}
@@ -357,7 +345,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
               </TBody>
             </Table>
           </div>
-          {!loading && !loadError && !error && requests.length === 0 && (
+          {!loading && !error && requests.length === 0 && (
             <div className="px-4 py-10 text-center text-ui-body text-ink-secondary">
               No document requests match this view.
             </div>

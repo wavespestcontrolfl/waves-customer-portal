@@ -55,7 +55,7 @@ async function main() {
         else { report.unmatched.push(key); body = { error: 'Unmatched synthetic fixture' }; status = 404; }
         await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
       });
-      await page.goto(`${server.baseUrl}/admin/contracts?source=qa`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.goto(`${server.baseUrl}/admin/contracts?source=qa`);
       await page.getByLabel('Name', { exact: true }).waitFor();
       await page.waitForFunction(() => [...document.querySelectorAll('input')].some(input => input.value === 'Example agreement'));
       await page.getByLabel('Name', { exact: true }).fill('Revised example agreement');
@@ -74,12 +74,7 @@ async function main() {
         });
       }
       await waitForFonts(page);
-      await page.evaluate(() => {
-        document.activeElement?.blur();
-        document.querySelector('main')?.scrollTo({ top: 0, behavior: 'instant' });
-        window.scrollTo(0, 0);
-      });
-      await page.getByRole('heading', { name: 'Contracts', exact: true }).scrollIntoViewIfNeeded();
+      await page.evaluate(() => window.scrollTo(0, 0));
       const templatesShot = path.join(output, `templates-${width}.png`);
       await page.screenshot({ path: templatesShot, fullPage: true }); report.screenshots.push(templatesShot);
       const form = await page.getByLabel('Name', { exact: true }).evaluate(el => ({ height: el.getBoundingClientRect().height, font: parseFloat(getComputedStyle(el).fontSize) }));
@@ -117,7 +112,7 @@ async function main() {
       const cancellation = report.requests.filter(r => r.key === 'POST /api/admin/contracts/qa-request/cancel').at(-1);
       assert.deepEqual(cancellation.body, { reason: 'Cancelled from document requests queue' });
       empty = true;
-      await page.evaluate(() => window.dispatchEvent(new Event('online')));
+      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await page.getByText('No document requests match this view.').waitFor();
       await page.reload();
       await page.getByLabel('Search requests').waitFor();
