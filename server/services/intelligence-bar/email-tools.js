@@ -467,8 +467,12 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
     }
 
     const gmailClient = require('../../services/email/gmail-client');
+    // ADMIN-BUG-R22 (same class): relayed mail (contact forms, lead
+    // marketplaces, ticketing) has a no-reply From with the real recipient
+    // in Reply-To — mirrors the rule the draft path above and the admin
+    // Email tab's manual reply already apply.
     const result = await gmailClient.sendMessage(
-      email.from_address,
+      email.reply_to || email.from_address,
       email.subject?.startsWith('Re:') ? email.subject : `Re: ${email.subject || '(no subject)'}`,
       body.replace(/\n/g, '<br>'),
       email.gmail_thread_id

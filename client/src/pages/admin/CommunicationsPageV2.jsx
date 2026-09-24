@@ -1284,9 +1284,20 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         method: "POST",
         body: JSON.stringify({ enabled: !aiAutoReply }),
       });
-      setAiAutoReply(r.enabled);
-    } catch {
-      /* ignore */
+      // A body carrying `error` (the server's own failure shape, kept here
+      // defensively even though the route now answers non-2xx on failure)
+      // never gets adopted as the confirmed state — the switch must not
+      // silently flip to a value that was never written.
+      if (r?.error) {
+        setSendResult({ ok: false, text: r.error || "AI Auto-Reply could not be changed. It is still set the way it was." });
+      } else {
+        setAiAutoReply(r.enabled);
+      }
+    } catch (err) {
+      // The failed toggle must be visible: the switch stays at its last
+      // confirmed position, and the operator is told the change did not
+      // take, instead of the empty catch that used to leave both silent.
+      setSendResult({ ok: false, text: err?.message || "AI Auto-Reply could not be changed. It is still set the way it was." });
     }
     setTogglingAi(false);
   };

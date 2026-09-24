@@ -920,9 +920,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
-  const serviceDate = row.service_date
-    ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
-    : '';
+  // ADMIN-BUG-R23: service_date is a DATE column, not an instant — formatting
+  // it through an America/New_York instant formatter shifts a UTC-midnight
+  // pg Date (TZ=UTC in production) to the PREVIOUS Eastern day. formatDateOnly
+  // normalises to noon UTC first, matching the correct email-leg call one
+  // line below at :196.
+  const serviceDate = formatDateOnly(row.service_date, { fallback: '' });
 
   const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${row.token}`, {
     kind: 'invoice', entityType: 'invoices', entityId: row.invoice_id, customerId: customer.id,

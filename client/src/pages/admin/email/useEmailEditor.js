@@ -140,7 +140,11 @@ export default function useEmailEditor(userId) {
     await sendEmail(
       "reply",
       {
-        to: email.from_address,
+        // ADMIN-BUG-R22: relayed mail (contact forms, lead marketplaces,
+        // ticketing) has a no-reply From with the real recipient in
+        // Reply-To. Same rule the server's AI-draft path already applies
+        // (email-actions.js: reply_to || from_address).
+        to: email.reply_to || email.from_address,
         subject: `Re: ${email.subject || ""}`,
         body: text,
         threadId: email.gmail_thread_id,
