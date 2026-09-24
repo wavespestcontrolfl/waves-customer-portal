@@ -1,0 +1,196 @@
+const {
+  answerEstimateQuestionFallback,
+  buildEstimateAssistantContext,
+} = require('../services/estimate-assistant');
+
+// Codex round-2 P1: mosquito_misting_system is lead-only and quote-required
+// by design (no engine pricer) — the deterministic quote-required fallback
+// (answerEstimateQuestion returns it before any model call) must never send
+// the misting-system customer to "pick a time to book online" (it is NOT
+// self-bookable — wiki/services/service-dispatch-rules.md) or state a price
+// (pricing is owner-pending).
+describe('Ask Waves fallback — mosquito misting SYSTEM quote-required questions', () => {
+  const mistingContext = {
+    billing: { quoteRequired: true, amountText: null },
+    services: [{
+      service: 'mosquito_misting_system',
+      label: 'Mosquito Misting System Service',
+      detail: 'Automatic mosquito misting system — install and monthly service plan.',
+    }],
+  };
+
+  test('"What happens at the design visit?" gets the design-visit answer, never the booking-window reply', () => {
+    const answer = answerEstimateQuestionFallback('What happens at the design visit?', mistingContext);
+    expect(answer.toLowerCase()).toContain('design visit');
+    expect(answer).not.toContain('Pick one of the available times');
+    expect(answer).not.toMatch(/\$\d/);
+  });
+
+  test('a scheduling-phrased question ("when can someone come out?") also gets the design-visit answer, not online booking', () => {
+    const answer = answerEstimateQuestionFallback('When can someone come out to look at my yard?', mistingContext);
+    expect(answer.toLowerCase()).toContain('design visit');
+    expect(answer).not.toContain('Pick one of the available times');
+    expect(answer).not.toContain('book online');
+  });
+
+  test('a price question on the misting estimate states no price', () => {
+    const answer = answerEstimateQuestionFallback('How much does this cost?', mistingContext);
+    expect(answer).not.toMatch(/\$\d/);
+  });
+
+  test('the misting-system identity is recognized by catalog key alone, even with a generic label', () => {
+    const context = {
+      billing: { quoteRequired: true },
+      services: [{ service: 'mosquito_misting_system', label: 'Mosquito Control' }],
+    };
+    const answer = answerEstimateQuestionFallback('What happens at the design visit?', context);
+    expect(answer.toLowerCase()).toContain('design visit');
+  });
+
+  test('end to end through buildEstimateAssistantContext: a real one-time quote-required misting item reaches the design-visit answer', () => {
+    const context = buildEstimateAssistantContext({
+      pricingBundle: {
+        oneTimeBreakdown: {
+          items: [{
+            service: 'mosquito_misting_system',
+            label: 'Mosquito Misting System Service',
+            quoteRequired: true,
+            detail: 'Automatic mosquito misting system.',
+          }],
+        },
+      },
+      serviceMode: 'one_time',
+    });
+    expect(context.billing.quoteRequired).toBe(true);
+    const answer = answerEstimateQuestionFallback('What happens at the design visit?', context);
+    expect(answer.toLowerCase()).toContain('design visit');
+    expect(answer).not.toContain('Pick one of the available times');
+    expect(answer).not.toMatch(/\$\d/);
+  });
+
+  test('a non-misting quote-required estimate is unchanged: still gets the booking-window reply for a scheduling question', () => {
+    const wdoContext = {
+      billing: { quoteRequired: true, amountText: null },
+      services: [{ service: 'wdo_inspection', label: 'WDO Inspection (Real Estate)', detail: 'Standalone inspection' }],
+    };
+    const answer = answerEstimateQuestionFallback('When can you come out?', wdoContext);
+    expect(answer).toContain('Pick one of the available times');
+  });
+
+  test('a non-misting quote-required estimate keeps its existing price-question copy', () => {
+    const wdoContext = {
+      billing: { quoteRequired: true, amountText: null },
+      services: [{ service: 'wdo_inspection', label: 'WDO Inspection (Real Estate)', detail: 'Standalone inspection' }],
+    };
+    const answer = answerEstimateQuestionFallback('How much does this cost?', wdoContext);
+    expect(answer).toContain('needs an inspection before final pricing');
+  });
+
+  test('bare "mosquito" on a barrier (non-misting) quote-required estimate is unchanged', () => {
+    const barrierContext = {
+      billing: { quoteRequired: true, amountText: null },
+      services: [{ service: 'mosquito_one_time', label: 'Mosquito Control', detail: 'One-time barrier spray' }],
+    };
+    const answer = answerEstimateQuestionFallback('When will the technician be out?', barrierContext);
+    expect(answer).toContain('Pick one of the available times');
+  });
+
+
+  describe('Codex #4779 r8: cabinet is not a misting signal; one_time mode keeps recurring rows', () => {
+    test('mixed misting + pest: "kitchen cabinet" pest question is not intercepted', () => {
+      const mixed = { billing: { quoteRequired: true, amountText: null }, services: [
+        { service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' },
+        { service: 'pest_general_quarterly', label: 'Quarterly Pest Control Service' },
+      ] };
+      const answer = answerEstimateQuestionFallback('Do you spray inside the kitchen cabinet?', mixed);
+      expect(answer.toLowerCase()).not.toContain('design visit');
+    });
+    test('one_time view of a recurring + misting estimate is not misting-only', () => {
+      const ctx = {
+        billing: { quoteRequired: true, amountText: null },
+        services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' }],
+        recurringServices: [{ service: 'pest_general_quarterly', label: 'Quarterly Pest Control Service' }],
+      };
+      const answer = answerEstimateQuestionFallback('What does the quarterly pest plan include?', ctx);
+      expect(answer.toLowerCase()).not.toContain('design visit');
+    });
+  });
+
+  describe('one fixed protocol answer for every misting question (Codex r7: no keyword intent routing)', () => {
+    const KEY_FACTS = [
+      'free on-site design visit',
+      'not booked online',
+      'under 10 ft',
+      'until the mist has settled and treated surfaces are dry',
+      'should be paused for rain',
+      'optional weather sensor',
+      'named storm',
+      'quarterly nozzle cleaning',
+      'only waves-licensed techs refill',
+      'specific product label decides',
+      'call the office right away',
+      'does not prevent disease',
+    ];
+    const QUESTIONS = [
+      'What happens at the design visit?',
+      'How much wind can the system handle?',
+      'How much solution do you refill?',
+      'Will a technician inspect the system after a hurricane?',
+      'Can I change the cycle schedule in the app?',
+      'Can I schedule a service appointment?',
+      'Will it come on if it rains?',
+      'Will your tech still come if it rains?',
+      'Can we go outside after it sprays?',
+      'What if my dog gets misted?',
+      'Is it bad for my bees and koi?',
+      'How often are the nozzles cleaned?',
+      'Anything else I should know?',
+    ];
+    test.each(QUESTIONS)('%s', (question) => {
+      const answer = answerEstimateQuestionFallback(question, mistingContext);
+      const lower = answer.toLowerCase();
+      for (const fact of KEY_FACTS) expect(lower).toContain(fact);
+      expect(answer).not.toContain('Pick one of the available times');
+      expect(answer).not.toMatch(/\$\d/);
+      expect(answer).not.toMatch(/\b\w+-safe\b/i);
+    });
+
+    const mixedPest = {
+      billing: { quoteRequired: true, amountText: null },
+      services: [
+        { service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' },
+        { service: 'pest_general_quarterly', label: 'Quarterly Pest Control Service' },
+      ],
+    };
+    test('mixed estimate: a question about the other service is not answered with misting copy', () => {
+      const answer = answerEstimateQuestionFallback('What does the pest control plan include?', mixedPest);
+      expect(answer.toLowerCase()).not.toContain('design visit');
+    });
+    test('mixed estimate: a misting-system question still gets the misting answer', () => {
+      const answer = answerEstimateQuestionFallback('How often do you clean the misting nozzles?', mixedPest);
+      expect(answer.toLowerCase()).toContain('quarterly nozzle cleaning');
+    });
+    test('mixed misting + barrier estimate: bare "misting" (barrier wording) stays off the system copy', () => {
+      const mixed = { billing: { quoteRequired: true, amountText: null }, services: [
+        { service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' },
+        { service: 'mosquito_monthly', label: 'Monthly Mosquito Control Service' },
+      ] };
+      const answer = answerEstimateQuestionFallback('How does the 21-day misting cycle work?', mixed);
+      expect(answer.toLowerCase()).not.toContain('design visit');
+    });
+    test('recurring serviceMode + quote-required misting one-time: builder keeps an identity-only row and misting questions still route', () => {
+      const context = buildEstimateAssistantContext({
+        pricingBundle: {
+          quoteRequired: true,
+          oneTimeBreakdown: { items: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', quoteRequired: true, amount: 4000 }] },
+        },
+        serviceMode: 'recurring',
+      });
+      expect(context.oneTime).toBeNull();
+      expect(context.quoteOnlyItems).toEqual([{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' }]);
+      expect(JSON.stringify(context.quoteOnlyItems)).not.toMatch(/4000|\$/);
+      const answer = answerEstimateQuestionFallback('How often do you clean the misting system nozzles?', context);
+      expect(answer.toLowerCase()).toContain('quarterly nozzle cleaning');
+    });
+  });
+});
