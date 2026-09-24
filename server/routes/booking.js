@@ -2814,6 +2814,66 @@ async function createSelfBooking(payload = {}) {
       // of the self-serve notice window — unset (default) skips the lock
       // AND the re-check below; the primitives themselves are unchanged.
       if (selfBookDayCapEnabled()) await acquireSelfBookingDayCapLock(trx, slotDateStr);
+      // The county-roll ADDRESS-VERDICT contact-pair locks, BEFORE the
+      // customer-comms fence (pre-push audit P1 after r41): the staff
+      // revision of a flagged draft and the website publication both take
+      // address-verdict first and customer-comms after, so this booking's
+      // former comms → address-verdict order could deadlock against them.
+      // Pair identities are read here (reads, not evidence); the verdict
+      // itself is still judged after the comms fence, before any row is
+      // written.
+      let contactEmail = null;
+      let namedPairEmail = null;
+      let namedPairPhone = null;
+      let customerPairEmail = null;
+      let customerPairPhone = null;
+      const reconcilePairs = [];
+      {
+      // The contact pair's email: the form's, else the email of the lead
+      // the link NAMES — a bare /book?lead=<id> link with the optional
+      // email cleared must still be judged against the newer flagged
+      // lead a repeat lookup minted for the same phone and premise
+      // (codex r28 P1). The named lead's email is an identity, not
+      // evidence, so it is read before the lock.
+      contactEmail = String(new_customer?.email || '').trim() || null;
+      // …and the named lead's STORED pair, always (codex r37 P1): the form
+      // lets the visitor edit both fields, so a newer flagged lead under
+      // the original pair must still be judged — this pair is negative-
+      // only evidence (it can refuse, never clear).
+      if (LEAD_ID_RE.test(String(lead_id || ''))) {
+        const namedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('email', 'phone');
+        namedPairEmail = String(namedLead?.email || '').trim() || null;
+        namedPairPhone = String(namedLead?.phone || '').replace(/\D/g, '') || null;
+        if (!contactEmail) contactEmail = namedPairEmail;
+      }
+      // …and the RESOLVED customer's stored pair when the form supplied no
+      // contact (an authenticated or reservice booking carries the account,
+      // not new_customer): the stored premise it books can still carry a
+      // matching flagged lead (codex r37 P1).
+      // …ALWAYS, not only when the form omitted a field: a confirm that
+      // changes either contact value would otherwise skip the stored pair
+      // and a flagged lead under it (codex r39 P1).
+      if (custId) {
+        const storedCustomer = await trx('customers').where({ id: custId }).whereNull('deleted_at').first('email', 'phone');
+        customerPairEmail = String(storedCustomer?.email || '').trim() || null;
+        customerPairPhone = String(storedCustomer?.phone || '').replace(/\D/g, '') || null;
+      }
+      if (contactEmail && phoneDigits) reconcilePairs.push([contactEmail, phoneDigits]);
+      if (customerPairEmail && customerPairPhone && !reconcilePairs.some(([e, p]) => e.toLowerCase() === customerPairEmail.toLowerCase() && p.slice(-10) === customerPairPhone.slice(-10))) {
+        reconcilePairs.push([customerPairEmail, customerPairPhone]);
+      }
+      if (namedPairEmail && namedPairPhone && !reconcilePairs.some(([e, p]) => e.toLowerCase() === namedPairEmail.toLowerCase() && p.slice(-10) === namedPairPhone.slice(-10))) {
+        reconcilePairs.push([namedPairEmail, namedPairPhone]);
+      }
+      {
+        const { contactPairLockKey } = require('../services/lead-address-unverified');
+        // Both pairs' locks, in deterministic key order.
+        const keys = [...new Set(reconcilePairs.map(([e, p]) => contactPairLockKey(e, p)))].sort();
+        for (const key of keys) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
+        }
+      }
+      }
       // Rung 6 (occupancy.js ORDERING CONTRACT): the appointment insert
       // below resolves its comms recipients LIVE from the customer row, so
       // it must serialize against a concurrent customer-merge undo's
@@ -2855,8 +2915,8 @@ async function createSelfBooking(payload = {}) {
       // through this transaction — the unlocked reads above can observe a
       // clean draft / lead while a concurrent /calculate commits the flag
       // before the appointment rows below are inserted (pre-push audit
-      // P1 on #4667). Taken AFTER every scheduling rung and the
-      // customer-comms lock (the ordering contract in
+      // P1 on #4667). The ROW locks below are taken AFTER every scheduling
+      // rung and the customer-comms lock (the ordering contract in
       // scheduling/occupancy.js: a merge-undo holds comms before it locks
       // journaled estimates — locking the estimate first would deadlock
       // against it), and BEFORE either booking row is written; the route
@@ -2874,55 +2934,8 @@ async function createSelfBooking(payload = {}) {
         // (advisory lock, then estimate rows), so a flagged lookup
         // withdrawing this draft and this confirm cannot deadlock (codex
         // r19 P2).
-        // The contact pair's email: the form's, else the email of the lead
-        // the link NAMES — a bare /book?lead=<id> link with the optional
-        // email cleared must still be judged against the newer flagged
-        // lead a repeat lookup minted for the same phone and premise
-        // (codex r28 P1). The named lead's email is an identity, not
-        // evidence, so it is read before the lock.
-        let contactEmail = String(new_customer?.email || '').trim() || null;
-        // …and the named lead's STORED pair, always (codex r37 P1): the form
-        // lets the visitor edit both fields, so a newer flagged lead under
-        // the original pair must still be judged — this pair is negative-
-        // only evidence (it can refuse, never clear).
-        let namedPairEmail = null;
-        let namedPairPhone = null;
-        if (LEAD_ID_RE.test(String(lead_id || ''))) {
-          const namedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('email', 'phone');
-          namedPairEmail = String(namedLead?.email || '').trim() || null;
-          namedPairPhone = String(namedLead?.phone || '').replace(/\D/g, '') || null;
-          if (!contactEmail) contactEmail = namedPairEmail;
-        }
-        // …and the RESOLVED customer's stored pair when the form supplied no
-        // contact (an authenticated or reservice booking carries the account,
-        // not new_customer): the stored premise it books can still carry a
-        // matching flagged lead (codex r37 P1).
-        let customerPairEmail = null;
-        let customerPairPhone = null;
-        // …ALWAYS, not only when the form omitted a field: a confirm that
-        // changes either contact value would otherwise skip the stored pair
-        // and a flagged lead under it (codex r39 P1).
-        if (custId) {
-          const storedCustomer = await trx('customers').where({ id: custId }).whereNull('deleted_at').first('email', 'phone');
-          customerPairEmail = String(storedCustomer?.email || '').trim() || null;
-          customerPairPhone = String(storedCustomer?.phone || '').replace(/\D/g, '') || null;
-        }
-        const reconcilePairs = [];
-        if (contactEmail && phoneDigits) reconcilePairs.push([contactEmail, phoneDigits]);
-        if (customerPairEmail && customerPairPhone && !reconcilePairs.some(([e, p]) => e.toLowerCase() === customerPairEmail.toLowerCase() && p.slice(-10) === customerPairPhone.slice(-10))) {
-          reconcilePairs.push([customerPairEmail, customerPairPhone]);
-        }
-        if (namedPairEmail && namedPairPhone && !reconcilePairs.some(([e, p]) => e.toLowerCase() === namedPairEmail.toLowerCase() && p.slice(-10) === namedPairPhone.slice(-10))) {
-          reconcilePairs.push([namedPairEmail, namedPairPhone]);
-        }
-        {
-          const { contactPairLockKey } = require('../services/lead-address-unverified');
-          // Both pairs' locks, in deterministic key order.
-          const keys = [...new Set(reconcilePairs.map(([e, p]) => contactPairLockKey(e, p)))].sort();
-          for (const key of keys) {
-            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
-          }
-        }
+        // The contact pairs and their advisory locks were taken ABOVE, before
+        // the customer-comms fence (pre-push audit P1 after r41).
         // The customer row BEFORE the DRAFT estimate row (codex r38 P2): the
         // Customer 360 edit and the website publication lock the customer
         // first and then the draft, so the reverse order here would

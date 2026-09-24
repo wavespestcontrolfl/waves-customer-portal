@@ -46,3 +46,15 @@ describe('staff revision of a flagged draft: customer-comms fence before the row
     expect(block.indexOf('.lockCustomerComms(')).toBeLessThan(block.indexOf(".forUpdate().first('id')"));
   });
 });
+
+describe('booking: address-verdict pair locks before the customer-comms fence (pre-push audit P1 after r41)', () => {
+  test('the advisory pair locks are acquired ahead of lockCustomerComms in the self-booking transaction', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/booking'), 'utf8');
+    const pairLock = src.indexOf("['address-verdict', key]");
+    const comms = src.indexOf('await lockCustomerComms(trx, custId);');
+    expect(pairLock).toBeGreaterThan(0);
+    expect(pairLock).toBeLessThan(comms);
+    // …and the verdict's row locks still follow the fence.
+    expect(src.indexOf("const lockedDraft = await trx('estimates')")).toBeGreaterThan(comms);
+  });
+});
