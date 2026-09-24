@@ -1324,6 +1324,7 @@ async function publishAstro(postId) {
     assertValidBlogFrontmatter(data);
     const prepared = await editorialEvidence.prepareDraft({ frontmatter: data, body: post.content || '' }, { page_type: 'supporting-blog' });
     const body = String(prepared.body || '').trim();
+    if (!post.reading_time_min) data.reading_time_min = estimateReadingTime(body);
     post.content = body;
 
     // 2b. Content-policy guardrails (hardcoded price, brand-token leak on
