@@ -9,8 +9,10 @@ const { LIMITS } = require('./editorial-review-contracts');
 function htmlText(html) {
   const withoutNoise = String(html || '')
     .replace(/<!--[^]*?-->/g, ' ')
+    .replace(/<(?:script|style|noscript|svg)\b[^>]*\/\s*>/gi, ' ')
     .replace(/<(script|style|noscript|svg)\b[^>]*>[^]*?<\/\1>/gi, ' ')
     .replace(/<(script|style|noscript|svg)\b[^>]*>[^]*$/gi, ' ')
+    .replace(/\s+/g, ' ')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p\s*>|<\/li\s*>|<\/h[1-6]\s*>/gi, '\n')
     .replace(/<[^>]+>/g, ' ');

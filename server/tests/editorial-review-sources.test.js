@@ -23,6 +23,14 @@ test('strips unterminated noise blocks through the end of truncated HTML', () =>
   expect(htmlText('<p>Useful evidence.</p><script>window.__DATA__ = "noise";')).toBe('Useful evidence.');
 });
 
+test('preserves evidence after self-closing noise tags', () => {
+  expect(htmlText('<svg aria-hidden="true" /><p>Later evidence.</p>')).toBe('Later evidence.');
+});
+
+test('collapses source-formatting whitespace within rendered HTML text', () => {
+  expect(htmlText('<p>Chinch bugs\n  feed on grass.</p>')).toBe('Chinch bugs feed on grass.');
+});
+
 test('falls back to the hostname when publisher metadata cleans to empty', () => {
   expect(publisherOf('<meta property="og:site_name" content="&nbsp;">', 'https://www.example.gov/article')).toBe('example.gov');
 });
