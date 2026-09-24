@@ -47,8 +47,35 @@
  * pings /v1/models at startup and logs which providers are reachable.
  */
 
+const fs = require('fs');
+const path = require('path');
 const logger = require('../logger');
 const { GEMINI_IMAGE_PRO, GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('../../config/models');
+
+// ── Waves uniform logo reference ─────────────────────────────────────
+// Owner directive 2026-09-24 (Adam): the Waves logo ON the technician's cap
+// and right chest. A prompt-only logo came back as gibberish lettering (the
+// 09-23 trade-off), so the real mark rides along as a REFERENCE IMAGE on the
+// OpenAI legs (/v1/images/edits — gpt-image reproduces an attached mark
+// faithfully). Gemini legs take no reference and keep the logo-free line.
+// If every leg fails WITH the reference, the chain runs once more without it
+// inside the same deadline — a rejected reference must not cost the image.
+// Kill switch: BLOG_IMAGE_UNIFORM_LOGO=false (prompt falls back to logo-free).
+const UNIFORM_LOGO_ENV = 'BLOG_IMAGE_UNIFORM_LOGO';
+const UNIFORM_LOGO_PATH = path.join(__dirname, '..', '..', 'assets', 'brand', 'waves-logo.png');
+function uniformLogoEnabled() { return !/^(false|0|off|no)$/i.test(String(process.env[UNIFORM_LOGO_ENV] || '').trim()); }
+let uniformLogoCache;
+function loadUniformLogo() {
+  if (!uniformLogoEnabled()) return null;
+  if (uniformLogoCache !== undefined) return uniformLogoCache;
+  try {
+    uniformLogoCache = fs.readFileSync(UNIFORM_LOGO_PATH);
+  } catch (err) {
+    logger.warn(`[image-generator] uniform logo reference unavailable (${err.message}) — generating without the logo`);
+    uniformLogoCache = null;
+  }
+  return uniformLogoCache;
+}
 
 // Chain order (bake-off 2026-09-05, the same three prompts on every provider):
 // gpt-image-2 best on photo, cartoon and infographic (it honored an exact
@@ -331,17 +358,28 @@ const STANDARD_GUARDS = [
   'no company logos, brand names, or brand marks of any kind — equipment and vehicles are generic and unbranded, and uniforms carry no logo or lettering (only the uniform COLORS follow the Waves uniform line)',
   'no invented control-panel labels, dials with fake words, or gibberish lettering',
 ];
+// With the logo reference attached, the ONLY mark allowed is the Waves logo
+// on the technician's cap and chest; everything else stays unbranded.
+const STANDARD_GUARDS_WITH_LOGO = [
+  'no company logos, brand names, or brand marks other than the Waves logo on the technician\'s cap and chest — equipment and vehicles are generic and unbranded',
+  STANDARD_GUARDS[1],
+];
 // Owner directive 2026-09-23 (Adam, after the Bradenton WDO hero showed a tech in
 // a blue long-sleeve and khakis): any Waves technician in a generated image wears
 // the REAL uniform. Every scene mode carries the line — a hero, body slot or social
 // tile can all put a person in frame, and a captioned infographic about an
 // inspection or treatment can still draw a technician icon (Codex P2), so the
-// infographic carries it too. The logo itself stays OFF the shirt/cap:
-// generators render marks as gibberish and the post-generation text/logo
-// screen would reject the image.
+// infographic carries it too. Without a reference image (Gemini legs, kill
+// switch, missing asset) the logo stays OFF the shirt/cap: generators render
+// a prompt-only mark as gibberish and the text/logo screen would reject it.
 const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering.';
 
-function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [] }) {
+// Owner directive 2026-09-24 (Adam): with the real logo attached as the
+// reference image, the technician carries it on the cap and the RIGHT chest —
+// and nowhere else in the picture.
+const WAVES_UNIFORM_LOGO_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo with the Waves logo — reproduced faithfully from the attached reference image — as a small badge on the wearer\'s RIGHT chest (the side of the wearer\'s right arm, not the left), a baseball cap that is either light blue or red with that same Waves logo centered on the front of the cap, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants. The reference logo appears ONLY on the technician\'s cap and right chest, at badge scale; never anywhere else in the picture and never as a standalone graphic. If no technician appears, do not use the reference image at all.';
+
+function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [], uniformLogo = false }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
   const base = style
@@ -358,6 +396,9 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   // An infographic's plan is a layout on a plain background — no scene, time
   // of day, or camera framing, which would contradict the style line.
   const isInfographic = Boolean(plan) && plan.style === 'infographic';
+  // An infographic never carries the reference (no scene, and its text rule
+  // is caption-only).
+  const withLogo = Boolean(uniformLogo) && !isInfographic;
   const local = isInfographic
     ? `Layout: ${plan.setting}, ${plan.vantage}, on a plain light background — no photographic scene, no time of day; at most one small Southwest Florida cue (a palm or wave icon).`
     : plan
@@ -381,8 +422,10 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const captionList = (style && style.allowsText ? captions : []).map((c) => String(c || '').trim()).filter(Boolean);
   const textRule = captionList.length
     ? `The ONLY text in the image is exactly: ${captionList.map((c) => `"${c}"`).join(', ')} — spelled exactly, nothing else written anywhere.`
-    : 'No text, words, letters, numbers, watermarks, or logos anywhere in the image.';
-  const guards = `Must not depict: ${[...STANDARD_GUARDS, ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
+    : (withLogo
+      ? 'No text, words, letters, numbers, watermarks, or logos anywhere in the image, other than the Waves logo on the technician\'s cap and right chest.'
+      : 'No text, words, letters, numbers, watermarks, or logos anywhere in the image.');
+  const guards = `Must not depict: ${[...(withLogo ? STANDARD_GUARDS_WITH_LOGO : STANDARD_GUARDS), ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
   const framing = mode === 'blog-body' && !isInfographic ? (BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up']) : '';
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
@@ -390,7 +433,7 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const editorial = mode === 'blog-hero' || mode === 'blog-body'
     ? 'Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.'
     : '';
-  const uniform = WAVES_UNIFORM_LINE;
+  const uniform = withLogo ? WAVES_UNIFORM_LOGO_LINE : WAVES_UNIFORM_LINE;
   const van = plan && plan.van && !isInfographic ? VAN_LINE : '';
   return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
@@ -456,18 +499,36 @@ const imageRequestSignal = (timeoutMs = IMAGE_REQUEST_TIMEOUT_MS) => (
     : undefined
 );
 
-async function callOpenAI({ model, quality, prompt, size }, { fetchFn = fetch, timeoutMs } = {}) {
+// referenceImages: [{ buffer, mimeType, filename }] — with any, the call goes
+// to /v1/images/edits as multipart (image[] + prompt), which is how gpt-image
+// takes a mark to reproduce; without, the plain JSON generations call.
+async function callOpenAI({ model, quality, prompt, size, referenceImages = [] }, { fetchFn = fetch, timeoutMs } = {}) {
   if (!process.env.OPENAI_API_KEY) {
     return { skipped: true, reason: 'OPENAI_API_KEY not set' };
   }
+  const refs = (Array.isArray(referenceImages) ? referenceImages : []).filter((r) => r && Buffer.isBuffer(r.buffer) && r.buffer.length);
   try {
-    const res = await fetchFn('https://api.openai.com/v1/images/generations', {
+    let url = 'https://api.openai.com/v1/images/generations';
+    const headers = { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` };
+    let body;
+    if (refs.length) {
+      url = 'https://api.openai.com/v1/images/edits';
+      const form = new FormData();
+      form.append('model', model);
+      form.append('prompt', prompt);
+      form.append('size', size);
+      form.append('quality', quality);
+      form.append('n', '1');
+      for (const r of refs) form.append('image[]', new Blob([r.buffer], { type: r.mimeType || 'image/png' }), r.filename || 'reference.png');
+      body = form; // fetch sets the multipart boundary header itself
+    } else {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify({ model, prompt, size, quality, n: 1 });
+    }
+    const res = await fetchFn(url, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ model, prompt, size, quality, n: 1 }),
+      headers,
+      body,
       signal: imageRequestSignal(timeoutMs),
     });
     if (!res.ok) {
@@ -533,8 +594,11 @@ async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch, tim
 // ── public API ───────────────────────────────────────────────────────
 
 class ImageGenerator {
-  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed() } = {}) {
+  // uniformLogo: Buffer (the reference) | null (never attach) | undefined
+  // (load the bundled asset lazily, honoring BLOG_IMAGE_UNIFORM_LOGO).
+  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed(), uniformLogo } = {}) {
     this.chain = parseChain(envChain, { allowPixelWatermark });
+    this._uniformLogo = uniformLogo;
     this._chainBudgetMs = chainBudgetMs;
     this._now = now;
     if (!this.chain.length) {
@@ -550,8 +614,10 @@ class ImageGenerator {
    * generate({ title, topic, keyword, city, mode })
    *
    * mode: 'blog-hero' (default) or 'social-square'.
-   * Returns: { dataUrl, mimeType, model, attempts: [...], prompt, alt }
+   * Returns: { dataUrl, mimeType, model, attempts: [...], prompt, alt, logoReference }
    *   prompt — the exact generation prompt used;
+   *   logoReference — true when the winning leg carried the Waves logo
+   *   reference image (the publisher's screen allows the uniform logo then);
    *   alt — accessibility text derived from the same subject/setting inputs
    *   as the prompt, so callers can stamp an alt that describes the ACTUAL
    *   generated image (null when a customPrompt made the fields unreliable).
@@ -565,42 +631,57 @@ class ImageGenerator {
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode, plan });
     const attempts = [];
     const deadline = Number.isFinite(deadlineAt) ? deadlineAt : this._now() + this._chainBudgetMs;
+    // The logo reference rides only on a prompt this module built (a caller's
+    // custom prompt says nothing about a reference) and never on an infographic.
+    const logo = this._uniformLogo === undefined ? loadUniformLogo() : this._uniformLogo;
+    const logoBuffer = !customPrompt && Buffer.isBuffer(logo) && logo.length && !(plan && plan.style === 'infographic') ? logo : null;
+    const logoPrompt = logoBuffer ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: true }) : null;
 
-    for (const slug of this.chain) {
-      const cfg = MODEL_MAP[slug];
-      const size = sizeFor(mode, cfg.api);
-      const timeoutMs = legTimeoutMs(deadline, this._now());
-      let result;
-      if (timeoutMs === null) {
-        // A spent budget is a timing condition, not a verdict on the provider:
-        // retryable so the runner retries the post instead of parking it
-        // (Codex r10 P2 on #3964).
-        result = { skipped: true, retryable: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` };
-      } else if (cfg.api === 'openai') {
-        result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn, timeoutMs });
-      } else if (cfg.api === 'gemini') {
-        const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
-        result = await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs });
-      } else {
-        result = { fatal: true, status: 'unknown_api' };
-      }
-      attempts.push({ provider: slug, result });
+    // Pass 1 carries the reference on the OpenAI legs; pass 2 (only if pass 1
+    // produced nothing) reruns the chain logo-free under the same deadline.
+    for (const withLogo of (logoPrompt ? [true, false] : [false])) {
+      if (withLogo === false && logoPrompt) logger.warn('[image-generator] every leg failed with the logo reference — retrying the chain without it');
+      for (const slug of this.chain) {
+        const cfg = MODEL_MAP[slug];
+        const size = sizeFor(mode, cfg.api);
+        const timeoutMs = legTimeoutMs(deadline, this._now());
+        // Gemini takes no reference: its prompt is the logo-free one.
+        const legLogo = withLogo && cfg.api === 'openai';
+        const legPrompt = legLogo ? logoPrompt : prompt;
+        let result;
+        if (timeoutMs === null) {
+          // A spent budget is a timing condition, not a verdict on the provider:
+          // retryable so the runner retries the post instead of parking it
+          // (Codex r10 P2 on #3964).
+          result = { skipped: true, retryable: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` };
+        } else if (cfg.api === 'openai') {
+          const referenceImages = legLogo ? [{ buffer: logoBuffer, mimeType: 'image/png', filename: 'waves-logo.png' }] : [];
+          result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: legPrompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
+        } else if (cfg.api === 'gemini') {
+          if (withLogo) continue; // a Gemini leg runs once, on the logo-free pass
+          const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
+          result = await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs });
+        } else {
+          result = { fatal: true, status: 'unknown_api' };
+        }
+        attempts.push({ provider: slug, logoReference: legLogo, result });
 
-      if (result.dataUrl) {
-        logger.info(`[image-generator] generated via ${slug} (${result.mimeType}, ${result.dataUrl.length} chars)`);
-        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt, alt, plan: plan || null };
-      }
-      // Skipped / fatal / retryable → next provider. The whole point
-      // of the chain is resilience: a 408/429/5xx on OpenAI should fall
-      // through to Gemini, not abort the chain. Admin and social
-      // callers do not retry, so bailing here used to defeat the
-      // fallback entirely.
-      if (result.skipped) {
-        logger.info(`[image-generator] ${slug} skipped: ${result.reason}`);
-      } else if (result.fatal) {
-        logger.warn(`[image-generator] ${slug} fatal: ${result.status} ${result.body || ''}`);
-      } else if (result.retryable) {
-        logger.warn(`[image-generator] ${slug} retryable: ${result.status || result.error} — trying next provider`);
+        if (result.dataUrl) {
+          logger.info(`[image-generator] generated via ${slug}${legLogo ? ' with the uniform logo reference' : ''} (${result.mimeType}, ${result.dataUrl.length} chars)`);
+          return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt: legPrompt, alt, plan: plan || null, logoReference: legLogo };
+        }
+        // Skipped / fatal / retryable → next provider. The whole point
+        // of the chain is resilience: a 408/429/5xx on OpenAI should fall
+        // through to Gemini, not abort the chain. Admin and social
+        // callers do not retry, so bailing here used to defeat the
+        // fallback entirely.
+        if (result.skipped) {
+          logger.info(`[image-generator] ${slug} skipped: ${result.reason}`);
+        } else if (result.fatal) {
+          logger.warn(`[image-generator] ${slug} fatal: ${result.status} ${result.body || ''}`);
+        } else if (result.retryable) {
+          logger.warn(`[image-generator] ${slug} retryable: ${result.status || result.error} — trying next provider`);
+        }
       }
     }
 
@@ -671,7 +752,16 @@ module.exports.retryStyleFor = retryStyleFor;
 module.exports.IMAGE_CHAIN_BUDGET_MS = IMAGE_CHAIN_BUDGET_MS;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
 module.exports.pixelWatermarkAllowed = pixelWatermarkAllowed;
+module.exports.uniformLogoEnabled = uniformLogoEnabled;
 module.exports._internals = {
+  UNIFORM_LOGO_ENV,
+  UNIFORM_LOGO_PATH,
+  uniformLogoEnabled,
+  loadUniformLogo,
+  WAVES_UNIFORM_LINE,
+  WAVES_UNIFORM_LOGO_LINE,
+  STANDARD_GUARDS,
+  STANDARD_GUARDS_WITH_LOGO,
   stylePermutation,
   retryStyleFor,
   settingsFor,

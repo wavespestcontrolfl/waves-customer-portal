@@ -872,10 +872,14 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     }
     const allowedText = plan.style === 'infographic' ? captions : [];
     // The screen runs inside the same slot deadline as the generation.
-    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, timeoutMs: deadlineAt - Date.now() });
+    // The uniform logo is allowed on the cap/chest only when the generator
+    // actually attached the reference (owner directive 2026-09-24); a
+    // logo-free generation is screened as before.
+    const allowUniformLogo = gen.logoReference === true;
+    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, allowUniformLogo, timeoutMs: deadlineAt - Date.now() });
     // deadlineAt rides along so the caller's alt-text vision pass runs
     // inside the same slot budget (Codex r9 P2).
-    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, deadlineAt };
+    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, logoReference: allowUniformLogo, deadlineAt };
     if (screen.ok) return candidate;
     candidates.push(candidate);
     if (attempt === 0) {
@@ -1293,7 +1297,7 @@ async function publishAstro(postId) {
     // source extension.
     if (heroImage?.buffer) {
       // Preserve alt across the recompress — only the generated path sets it.
-      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp', alt: heroImage.alt || null, model: heroImage.model || null, plan: heroImage.plan || null, screen: heroImage.screen || null };
+      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp', alt: heroImage.alt || null, model: heroImage.model || null, plan: heroImage.plan || null, screen: heroImage.screen || null, logoReference: heroImage.logoReference === true };
     }
     const heroImageExt = heroImage?.buffer ? 'webp' : imageExtFromSource(post.featured_image_url);
 
@@ -3018,7 +3022,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     const alt = vetGeneratedAlt(described, gen.alt || `Illustration for ${slot.heading}`, Array.isArray(frontmatter.domains) ? frontmatter.domains : null);
     logger.info(`[astro-publisher] generated body image ${n} for ${slug} via ${gen.model} (${gen.plan?.style || 'unplanned'}, "${slot.heading}")`);
     files.push({ path: repoPath, buffer });
-    images.push({ src, alt, reused: false, model: gen.model || null, plan: gen.plan || null, screen: gen.screen || null });
+    images.push({ src, alt, reused: false, model: gen.model || null, plan: gen.plan || null, screen: gen.screen || null, logoReference: gen.logoReference === true });
     newAlts.push(alt);
     placements.push({ insertAt: slot.insertAt, src, alt });
   }
@@ -4436,7 +4440,7 @@ function describeImageProvenance(label, img) {
   const screen = img.screen
     ? (img.screen.checked ? (img.screen.ok ? 'screen clean' : `**screen flagged after retry: ${img.screen.reasons.join('; ')}**`) : 'screen unavailable (fail-open)')
     : 'not screened';
-  return `- ${label}: ${img.model || 'unknown model'} (${plan}) — ${screen}`;
+  return `- ${label}: ${img.model || 'unknown model'}${img.logoReference ? ' + uniform logo reference' : ''} (${plan}) — ${screen}`;
 }
 
 function buildDraftPrBody({ frontmatter, slug, branch, content, brief, images = null }) {

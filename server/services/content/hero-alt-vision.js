@@ -106,12 +106,19 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 // let the caller regenerate once. Fail-open by contract, like the alt pass:
 // a vision miss returns { ok: true, checked: false } — a screen must never
 // park a publish on its own outage.
-function buildScreenPrompt({ allowedText = [], avoidDepicting = [] } = {}) {
+// allowUniformLogo: the image was generated WITH the Waves logo reference
+// (owner directive 2026-09-24) — the mark on the technician's cap and chest
+// is the point, not a violation; the same mark anywhere else still is.
+const UNIFORM_LOGO_DESCRIPTION = 'the Waves company logo (a smiling blue wave mascot in a red-and-blue shield, lettered "WAVES" and "LAWN & PEST")';
+function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniformLogo = false } = {}) {
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
   const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
+  const uniformLogoRule = allowUniformLogo
+    ? ` EXCEPTION: ${UNIFORM_LOGO_DESCRIPTION} is ALLOWED on a technician's cap or shirt chest — do not list it there, and do not list its own lettering under readable_text. List it under logos_or_brand_marks ONLY if it appears anywhere else (a vehicle, wall, sign, equipment, packaging, or floating on its own), naming where.`
+    : '';
   return `Inspect this generated blog image and answer as strict JSON only, shape {"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": number[], "notes": string}.
 - readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.
-- logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.
+- logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.${uniformLogoRule}
 - forbidden_scenes: the NUMBERS of the FORBIDDEN items below the image clearly depicts (e.g. [1]). Empty array if none${forbidden.length ? '' : ' (there are none to check)'}.
 - notes: one short sentence.
 ${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}
@@ -164,7 +171,18 @@ function matchExclusion(detection, exclusions) {
  *   ok=false when the image carries a logo / brand mark, or readable text
  *   beyond the captions the caller allowed (an infographic's own labels).
  */
-async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], avoidDepicting = [], timeoutMs = null } = {}) {
+// Belt to the prompt's braces: a model that lists the uniform logo anyway.
+// Dropped only when the detection names Waves AND a uniform location AND no
+// other surface — "Waves logo on the van door" stays a violation.
+const UNIFORM_LOGO_WORDS = /\bwaves?\b/i;
+const UNIFORM_LOCATION = /\b(cap|hat|shirt|chest|polo|uniform|technician|badge)\b/i;
+const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|sprayer|tank|packaging|bottle|box|background|floating|standalone|sky|ground)\b/i;
+const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t);
+// The logo's own lettering ("WAVES", "LAWN & PEST") read back as text.
+const LOGO_LETTERING = new Set(['waves', 'lawn', 'pest', 'lawn pest', 'waves lawn pest', 'waves lawn and pest', 'lawn and pest']);
+const isLogoLettering = (t) => LOGO_LETTERING.has(normalizeText(t));
+
+async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], avoidDepicting = [], allowUniformLogo = false, timeoutMs = null } = {}) {
   const open = { ok: true, checked: false, readableText: [], logos: [], forbidden: [], reasons: [], violations: 0 };
   if (!Buffer.isBuffer(buffer) || !buffer.length) return open;
   // timeoutMs bounds the whole vision chain (both legs) — the caller passes
@@ -176,7 +194,7 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
   }
   try {
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
-      text: buildScreenPrompt({ allowedText, avoidDepicting }),
+      text: buildScreenPrompt({ allowedText, avoidDepicting, allowUniformLogo }),
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: true,
       maxTokens: 400,
@@ -190,6 +208,10 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     if (!parsed) {
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
       return open;
+    }
+    if (allowUniformLogo) {
+      parsed.logos = parsed.logos.filter((t) => !isAllowedUniformLogo(t));
+      parsed.readableText = parsed.readableText.filter((t) => !isLogoLettering(t));
     }
     // An allowed caption may come back split ("1", "OFF") or joined. A
     // detected string is the caption's only when it is a contiguous, in-order
@@ -251,3 +273,4 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
 }
 
 module.exports = { describeHeroForAlt, sanitizeAlt, buildAltPrompt, screenGeneratedImage, buildScreenPrompt, parseScreen };
+module.exports._internals = { isAllowedUniformLogo, isLogoLettering, UNIFORM_LOGO_DESCRIPTION };

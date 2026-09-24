@@ -22,9 +22,11 @@ const ORIGINAL_ENV = { ...process.env };
 // Every assertion is about the DEFAULT watermark policy or an explicit toggle:
 // never inherit an operator's ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS from
 // the environment, and hand it back afterwards.
-beforeEach(() => { jest.clearAllMocks(); delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; });
+// The legacy chain assertions count fetch calls per leg: run them logo-free
+// (the uniform-logo describe block opts back in explicitly).
+beforeEach(() => { jest.clearAllMocks(); delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; process.env.BLOG_IMAGE_UNIFORM_LOGO = 'false'; });
 afterEach(() => {
-  for (const k of ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'BLOG_IMAGE_PROVIDER', 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS']) {
+  for (const k of ['OPENAI_API_KEY', 'GEMINI_API_KEY', 'BLOG_IMAGE_PROVIDER', 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS', 'BLOG_IMAGE_UNIFORM_LOGO']) {
     if (ORIGINAL_ENV[k] === undefined) delete process.env[k];
     else process.env[k] = ORIGINAL_ENV[k];
   }
@@ -468,5 +470,121 @@ describe('gemini image-native models', () => {
     expect(prompt).toContain('#FFD700');
     expect(prompt).toContain('no teal');
     expect(prompt).not.toContain('#0ea5e9');
+  });
+});
+
+// ── Waves uniform logo reference (owner directive 2026-09-24) ─────────
+
+describe('uniform logo reference (owner directive 2026-09-24: logo on cap + right chest)', () => {
+  const LOGO = Buffer.from('89504e470d0a1a0a', 'hex');
+  test('the bundled asset exists and the kill switch reads only an explicit false', () => {
+    expect(require('fs').existsSync(_internals.UNIFORM_LOGO_PATH)).toBe(true);
+    delete process.env.BLOG_IMAGE_UNIFORM_LOGO;
+    expect(_internals.uniformLogoEnabled()).toBe(true);
+    process.env.BLOG_IMAGE_UNIFORM_LOGO = 'false';
+    expect(_internals.uniformLogoEnabled()).toBe(false);
+    expect(_internals.loadUniformLogo()).toBeNull();
+  });
+
+  test('buildPrompt with the reference puts the logo on the cap and RIGHT chest, nowhere else; without it the logo stays off', () => {
+    const withLogo = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }), uniformLogo: true });
+    expect(withLogo).toMatch(/Waves logo — reproduced faithfully from the attached reference image — as a small badge on the wearer's RIGHT chest/);
+    expect(withLogo).toMatch(/cap that is either light blue or red with that same Waves logo centered on the front/);
+    expect(withLogo).toMatch(/ONLY on the technician's cap and right chest/);
+    expect(withLogo).toMatch(/other than the Waves logo on the technician's cap and right chest\./);
+    expect(withLogo).toMatch(/brand marks other than the Waves logo on the technician's cap and chest — equipment and vehicles are generic and unbranded/);
+    expect(withLogo).not.toMatch(/carry no readable logo/);
+    const without = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }) });
+    expect(without).toMatch(/shirt and cap carry no readable logo or lettering/);
+    expect(without).toMatch(/No text, words, letters, numbers, watermarks, or logos anywhere in the image\./);
+    expect(without).not.toMatch(/reference image/);
+  });
+
+  test('an infographic never carries the reference line even when asked', () => {
+    const info = buildPrompt({ title: 'X', mode: 'blog-body', plan: { style: 'infographic', setting: 'three-step row', vantage: 'straight-on' }, captions: ['One'], uniformLogo: true });
+    expect(info).not.toMatch(/reference image/);
+    expect(info).toMatch(/carry no readable logo or lettering/);
+  });
+
+  test('OpenAI legs post the reference to /v1/images/edits as multipart; the result says logoReference', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }) });
+    expect(r.logoReference).toBe(true);
+    expect(r.prompt).toMatch(/attached reference image/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://api.openai.com/v1/images/edits');
+    expect(opts.body).toBeInstanceOf(FormData);
+    expect(opts.headers['Content-Type']).toBeUndefined();
+    expect(opts.body.get('model')).toBe('gpt-image-2');
+    expect(opts.body.get('size')).toBe('1536x1024');
+    expect(opts.body.get('quality')).toBe('high');
+    const file = opts.body.get('image[]');
+    expect(file).toBeInstanceOf(Blob);
+    expect(file.type).toBe('image/png');
+    expect(file.size).toBe(LOGO.length);
+    expect(r.attempts[0]).toMatchObject({ provider: 'gpt-image-2', logoReference: true });
+  });
+
+  test('uniformLogo: null (or the kill switch) keeps the plain generations call and no logo line', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: null });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero' });
+    expect(r.logoReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+    expect(r.prompt).not.toMatch(/reference image/);
+  });
+
+  test('a caller-supplied custom prompt never gets the reference attached', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ prompt: 'custom', mode: 'blog-hero' });
+    expect(r.logoReference).toBe(false);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+  });
+
+  test('every leg failing WITH the reference reruns the chain logo-free (the reference must not cost the image)', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn()
+      .mockReturnValueOnce(err(400, 'unsupported reference'))
+      .mockReturnValueOnce(err(400, 'unsupported reference'))
+      .mockReturnValueOnce(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero' });
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/edits');
+    expect(mockFetch.mock.calls[1][0]).toBe('https://api.openai.com/v1/images/edits');
+    expect(mockFetch.mock.calls[2][0]).toBe('https://api.openai.com/v1/images/generations');
+    expect(r.model).toBe('gpt-image-2');
+    expect(r.logoReference).toBe(false);
+    expect(r.prompt).not.toMatch(/reference image/);
+    expect(r.attempts.map((a) => a.logoReference)).toEqual([true, true, false]);
+  });
+
+  test('a Gemini leg runs once, logo-free, on the second pass only', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.GEMINI_API_KEY = 'g-test';
+    const mockFetch = jest.fn((url) => (url.includes('openai') ? err(500) : ok(GEMINI_OK_BODY)));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini-image', fetchFn: mockFetch, allowPixelWatermark: true, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero' });
+    expect(r.model).toBe('gemini-image');
+    expect(r.logoReference).toBe(false);
+    const urls = mockFetch.mock.calls.map((c) => c[0]);
+    expect(urls.filter((u) => u.includes('generativelanguage'))).toHaveLength(1);
+    expect(r.attempts.map((a) => `${a.provider}:${a.logoReference}`)).toEqual(['gpt-image-2:true', 'gpt-image-2:false', 'gemini-image:false']);
+  });
+
+  test('a spent budget on the logo pass does not restart the clock for the logo-free pass', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    let t = 0;
+    const now = () => t;
+    const mockFetch = jest.fn(() => { t += 10_000_000; return err(500); });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, now, chainBudgetMs: 400_000, uniformLogo: LOGO });
+    await expect(gen.generate({ title: 'Test', mode: 'blog-hero' })).rejects.toThrow(/all providers failed/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });

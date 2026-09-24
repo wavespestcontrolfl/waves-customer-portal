@@ -91,3 +91,50 @@ describe('sanitizeAlt', () => {
     expect(sanitizeAlt(undefined)).toBeNull();
   });
 });
+
+describe('screenGeneratedImage: uniform logo allowance (owner directive 2026-09-24)', () => {
+  const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
+  const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
+  beforeEach(() => mockDispatch.mockReset());
+
+  test('the screen prompt names the exception only when the caller allows it', () => {
+    expect(buildScreenPrompt({})).not.toMatch(/EXCEPTION/);
+    const p = buildScreenPrompt({ allowUniformLogo: true });
+    expect(p).toMatch(/EXCEPTION: the Waves company logo .* is ALLOWED on a technician's cap or shirt chest/);
+    expect(p).toMatch(/ONLY if it appears anywhere else/);
+  });
+
+  test('the Waves logo on the cap/chest and its lettering pass; the same logo on the van still fails', async () => {
+    mockDispatch.mockResolvedValue(answer({ readable_text: ['WAVES', 'LAWN & PEST'], logos_or_brand_marks: ['Waves logo on the technician\'s cap', 'Waves logo on shirt chest'], forbidden_scenes: [], notes: '' }));
+    const ok = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(ok.ok).toBe(true);
+    expect(ok.logos).toEqual([]);
+    expect(ok.readableText).toEqual([]);
+    expect(mockDispatch.mock.calls[0][1].text).toMatch(/EXCEPTION/);
+
+    mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: ['Waves logo on the van door'], forbidden_scenes: [], notes: '' }));
+    const bad = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(bad.ok).toBe(false);
+    expect(bad.reasons[0]).toMatch(/logo or brand mark: Waves logo on the van door/);
+  });
+
+  test('without the allowance the uniform logo is still a violation (a logo-free generation must not carry one)', async () => {
+    mockDispatch.mockResolvedValue(answer({ readable_text: ['WAVES'], logos_or_brand_marks: ['Waves logo on cap'], forbidden_scenes: [], notes: '' }));
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER });
+    expect(r.ok).toBe(false);
+    expect(r.violations).toBe(2);
+    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/EXCEPTION/);
+  });
+
+  test('helpers: only a Waves mark on a uniform surface with no other surface named is allowed', () => {
+    const { isAllowedUniformLogo, isLogoLettering } = _internals;
+    expect(isAllowedUniformLogo('Waves logo on the cap')).toBe(true);
+    expect(isAllowedUniformLogo('Waves badge on the polo chest')).toBe(true);
+    expect(isAllowedUniformLogo('Waves logo on the cap and on the van')).toBe(false);
+    expect(isAllowedUniformLogo('Orkin logo on shirt')).toBe(false);
+    expect(isAllowedUniformLogo('Waves logo')).toBe(false);
+    expect(isLogoLettering('WAVES')).toBe(true);
+    expect(isLogoLettering('Lawn & Pest')).toBe(true);
+    expect(isLogoLettering('Waves Pest Control')).toBe(false);
+  });
+});

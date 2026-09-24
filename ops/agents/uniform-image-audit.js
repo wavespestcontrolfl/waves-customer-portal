@@ -5,6 +5,8 @@
  * Owner directive 2026-09-23: Waves techs wear a red long-sleeve polo, a light-blue
  * or red cap, and black/dark-navy pants. This script flags every live image that
  * shows a person dressed otherwise, so ONLY those get regenerated (not all 112).
+ * 2026-09-24: the cap front and the right chest carry the Waves logo — a visible
+ * cap/chest with no logo is out of uniform too.
  *
  * Usage (needs the portal env for the vision keys):
  *   cd ~/waves-customer-portal && railway run --service waves-customer-portal -- \
@@ -26,8 +28,8 @@ const MODELS = require('../../server/config/models');
 const { dispatchWithFallback } = require('../../server/services/llm/call');
 
 const PROMPT = `You are auditing a company blog image. Answer ONLY with JSON:
-{"person": true|false, "role": "technician"|"homeowner"|"other"|"none", "shirt": "<color and sleeve length or none>", "shirt_type": "polo"|"other"|"hidden", "cap": "<color or none>", "cap_type": "baseball"|"other"|"none"|"hidden", "head": "capped"|"bare"|"hidden", "pants": "<color or none>", "uniform_ok": true|false, "note": "<one short line>"}
-Rules: "person" is true only if a human figure (even partial: hands, torso) is visible. A technician is anyone doing pest-control or lawn-care work or wearing work clothes/gloves. "head" is "capped" when the technician wears any cap or hat, "bare" when their head is clearly in frame with no cap or hat, and "hidden" when the head is out of frame, cut off, or hidden. uniform_ok is FALSE when a technician's garment is actually visible AND wrong: a shirt that is not red, a red shirt whose sleeves are visibly SHORT (the uniform is a red LONG-SLEEVE polo; sleeves hidden or out of frame are not judged), a shirt that is visibly not a collared polo (a sweatshirt, t-shirt, hoodie, jacket or coverall — shirt_type "other"), a cap that is not light blue or red, headwear that is visibly not a baseball cap (a bucket hat, hard hat, beanie or visor — cap_type "other"), pants that are not black/dark navy — or when head is "bare" (a Waves technician always wears a baseball cap). shirt_type/cap_type are "hidden" only when that garment cannot be judged. If only hands, gloves or tools are visible (no shirt/cap/pants/head to judge), uniform_ok=true. A homeowner or an image with no person also gets uniform_ok=true (nothing to fix).`;
+{"person": true|false, "role": "technician"|"homeowner"|"other"|"none", "shirt": "<color and sleeve length or none>", "shirt_type": "polo"|"other"|"hidden", "cap": "<color or none>", "cap_type": "baseball"|"other"|"none"|"hidden", "head": "capped"|"bare"|"hidden", "pants": "<color or none>", "logo": "cap+chest"|"cap"|"chest"|"none"|"hidden", "uniform_ok": true|false, "note": "<one short line>"}
+Rules: "person" is true only if a human figure (even partial: hands, torso) is visible. A technician is anyone doing pest-control or lawn-care work or wearing work clothes/gloves. "head" is "capped" when the technician wears any cap or hat, "bare" when their head is clearly in frame with no cap or hat, and "hidden" when the head is out of frame, cut off, or hidden. uniform_ok is FALSE when a technician's garment is actually visible AND wrong: a shirt that is not red, a red shirt whose sleeves are visibly SHORT (the uniform is a red LONG-SLEEVE polo; sleeves hidden or out of frame are not judged), a shirt that is visibly not a collared polo (a sweatshirt, t-shirt, hoodie, jacket or coverall — shirt_type "other"), a cap that is not light blue or red, headwear that is visibly not a baseball cap (a bucket hat, hard hat, beanie or visor — cap_type "other"), pants that are not black/dark navy — or when head is "bare" (a Waves technician always wears a baseball cap). shirt_type/cap_type are "hidden" only when that garment cannot be judged. "logo" reports where the Waves company logo (a smiling blue wave mascot in a red-and-blue shield, lettered WAVES / LAWN & PEST) is visible on the technician: "cap+chest", "cap", "chest", "none" when the cap front or the shirt chest is clearly in frame and carries no such logo (a blank badge, a plain cap, or gibberish lettering all count as "none"), or "hidden" when neither the cap front nor the shirt chest can be judged. uniform_ok is ALSO FALSE when logo is "none" (since 2026-09-24 the uniform carries the Waves logo on the cap and the right chest). If only hands, gloves or tools are visible (no shirt/cap/pants/head to judge), uniform_ok=true. A homeowner or an image with no person also gets uniform_ok=true (nothing to fix).`;
 
 const MIME = { '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };
 
@@ -69,7 +71,7 @@ function outOfUniform(parsed) {
   // Server-side too, so a model that leaves uniform_ok true on a sweatshirt or
   // bucket hat still lands in toFix: the uniform is a long-sleeve POLO and a
   // BASEBALL cap, not just those colors.
-  return parsed.uniform_ok === false || lc(parsed.head) === 'bare' || lc(parsed.shirt_type) === 'other' || lc(parsed.cap_type) === 'other';
+  return parsed.uniform_ok === false || lc(parsed.head) === 'bare' || lc(parsed.shirt_type) === 'other' || lc(parsed.cap_type) === 'other' || lc(parsed.logo) === 'none';
 }
 function walk(d) {
   return fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
@@ -96,7 +98,7 @@ async function main() {
       const parsed = res.parsed;
       rows.push({ file: key, path: rel, sha256, ...parsed });
       const flag = outOfUniform(parsed);
-      process.stdout.write(`${flag ? 'FIX' : ' ok'} ${key}${parsed.person ? ` — ${parsed.role}: ${parsed.shirt}; cap ${parsed.cap} (${parsed.head || '?'}); pants ${parsed.pants}` : ' — no person'}\n`);
+      process.stdout.write(`${flag ? 'FIX' : ' ok'} ${key}${parsed.person ? ` — ${parsed.role}: ${parsed.shirt}; cap ${parsed.cap} (${parsed.head || '?'}); pants ${parsed.pants}; logo ${parsed.logo || '?'}` : ' — no person'}\n`);
     } finally {
       writeReport(); // incremental, on error rows too: a crash mid-sweep never loses the paid calls so far
     }
