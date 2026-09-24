@@ -575,6 +575,12 @@ async function attemptEvidenceBasedWin(database, {
     const [wonRow] = await sp('consultation_outcomes')
       .where({ id: outcomeRowId })
       .whereIn('outcome', ['warm', 'cold'])
+      // A no-showed consultation is never won, even when re-recorded
+      // warm/cold after the no-show (local audit P1) — same exclusion as
+      // markWonForCustomer and the sweep.
+      .whereIn('scheduled_service_id', function notNoShow() {
+        this.select('id').from('scheduled_services').whereNot('status', 'no_show');
+      })
       .update({ outcome: 'won', won_at: evidence.won_at, won_via: evidence.won_via, updated_at: new Date() })
       .returning('*');
     won = wonRow || null;
