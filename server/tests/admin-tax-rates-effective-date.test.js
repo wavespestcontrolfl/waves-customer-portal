@@ -503,6 +503,41 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   });
 });
 
+(process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('an immediate post truncates an active predecessor that already carries a later expiry (fallback-auditor P1 on 3cfda7b5b3)', () => {
+  const county = 'Manatee';
+  const predecessorEffective = etDateString(addETDays(new Date(), -100));
+  const predecessorExpiry = etDateString(addETDays(new Date(), 30));
+  const newEffective = etDateString(addETDays(new Date(), -20));
+  let restoreCounty;
+
+  beforeAll(async () => {
+    restoreCounty = await snapshotCounty(county);
+    // An active predecessor whose window already has an end (the shape a
+    // corrected historical row takes when it inherits its successor
+    // boundary), with the new rate landing INSIDE that window.
+    await db('tax_rates').insert({
+      county, state: 'FL', state_rate: 0.06, county_surtax: 0.015, combined_rate: 0.075,
+      effective_date: predecessorEffective, expiry_date: predecessorExpiry, active: true, notes: 'bounded predecessor',
+    });
+  });
+
+  afterAll(async () => { await restoreCounty(); });
+
+  test('the bounded predecessor is retired at the new effective date, not left running to its old expiry', async () => {
+    const res = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ county, stateRate: 0.06, countySurtax: 0.02, effectiveDate: newEffective, notes: 'inside the window' }),
+    }).then((r) => r.json()));
+    expect(res.success).toBe(true);
+
+    const predecessor = await db('tax_rates').where({ county, effective_date: predecessorEffective }).first();
+    // Pre-fix: a JS Date compared to a date string is always false, so the
+    // predecessor kept active:true and its +30d expiry.
+    expect(predecessor.active).toBe(false);
+    expect(dateOnlyStamp(predecessor.expiry_date)).toBe(newEffective);
+  });
+});
+
 // No database needed: validation runs (and rejects) before the route ever
 // touches tax_rates, so this runs unconditionally.
 describe('POST /admin/tax/rates rejects malformed rate strings before retiring anything (codex round-1 P1)', () => {

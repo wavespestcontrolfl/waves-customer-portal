@@ -290,7 +290,12 @@ router.post('/rates', async (req, res, next) => {
           .andWhere('effective_date', '<', effectiveDate)
           .orderBy('effective_date', 'desc')
           .first();
-        if (predecessor && (predecessor.expiry_date == null || predecessor.expiry_date > effectiveDate)) {
+        // dateOnlyStamp: pg hydrates the DATE column as a JS Date, and a
+        // Date compared to a 'YYYY-MM-DD' string is always false — an
+        // active predecessor that already carried an expiry (a corrected
+        // row that inherited its successor boundary) was never truncated
+        // to the new effective date (fallback-auditor P1 on 3cfda7b5b3).
+        if (predecessor && (predecessor.expiry_date == null || dateOnlyStamp(predecessor.expiry_date) > effectiveDate)) {
           await trx('tax_rates').where({ id: predecessor.id }).update({ active: false, expiry_date: effectiveDate });
         }
       }
