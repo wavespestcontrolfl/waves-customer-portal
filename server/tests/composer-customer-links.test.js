@@ -2741,6 +2741,18 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(refusal.error).toMatch(/US number/);
   });
 
+  // Codex #4709 r7 P2: an explicit http:// consultation link (short or long)
+  // would expose the bearer before any HTTPS redirect — refused.
+  test('an explicit http:// consultation link is refused, short or long form', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    wireConsultation();
+    const shortRefusal = await checkConsultationLinkSend('Pick a time: http://wavespest.co/l/cons1 Reply STOP to opt out.', '9415550100');
+    expect(shortRefusal.error).toMatch(/must use https/);
+    wireConsultation({ codeRows: [] });
+    const longRefusal = await checkConsultationLinkSend(`Pick a time: http://wavespest.co/inspection/${mintLeadConsultationToken('lead-1')} Reply STOP to opt out.`, '9415550100');
+    expect(longRefusal.error).toMatch(/must use https/);
+  });
+
   // Codex #4709 r5 P1: a pasted long /inspection/<token> URL is checked too.
   test('a long-form /inspection/<token> link is verified like its short wrapper', async () => {
     const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');

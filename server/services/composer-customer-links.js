@@ -1398,29 +1398,44 @@ async function checkContractLinks(ctx, contracts) {
 async function consultationLinkRows(body) {
   const runs = decodedRuns(body);
   const hosts = ownedPortalHosts();
+  // An explicit http:// link is remembered as plaintext (Codex #4709 r7
+  // P2): the 14-day bearer would ride the first unencrypted request before
+  // any HTTPS redirect, so the send check refuses it.
+  const isPlaintext = (run) => /^http:\/\//i.test(run);
+  const shortRuns = linkRuns(runs, /\/l\//i);
   const codes = [...new Set(
-    linkRuns(runs, /\/l\//i)
+    shortRuns
       .map((run) => canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, ANY_SCHEME))
       .filter(Boolean)
       .map((code) => code.toLowerCase())
   )];
+  const plaintextCodes = new Set(shortRuns.filter(isPlaintext)
+    .map((run) => canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, ANY_SCHEME))
+    .filter(Boolean)
+    .map((code) => code.toLowerCase()));
   const rows = [];
   if (codes.length) {
     const shortRows = await db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id');
-    for (const row of shortRows) rows.push({ lead_id: row.lead_id, expired: expiredShortRow(row), invalid: false });
+    for (const row of shortRows) {
+      rows.push({
+        lead_id: row.lead_id,
+        expired: expiredShortRow(row),
+        invalid: false,
+        plaintext: plaintextCodes.has(String(row.code).toLowerCase()),
+      });
+    }
   }
-  const tokens = [...new Set(
-    linkRuns(runs, /\/inspection\//i)
-      .map((run) => canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME))
-      .filter(Boolean)
-  )];
-  if (tokens.length) {
+  const longRuns = linkRuns(runs, /\/inspection\//i);
+  const tokenRuns = longRuns
+    .map((run) => ({ run, token: canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME) }))
+    .filter((t) => t.token);
+  if (tokenRuns.length) {
     const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
-    for (const token of tokens) {
+    for (const { run, token } of tokenRuns) {
       const signed = verifyLeadConsultationToken(token, 0); // signature only, expiry ignored
       rows.push(signed
-        ? { lead_id: signed.leadId, expired: !verifyLeadConsultationToken(token), invalid: false }
-        : { lead_id: null, expired: false, invalid: true });
+        ? { lead_id: signed.leadId, expired: !verifyLeadConsultationToken(token), invalid: false, plaintext: isPlaintext(run) }
+        : { lead_id: null, expired: false, invalid: true, plaintext: isPlaintext(run) });
     }
   }
   return rows;
@@ -1470,6 +1485,9 @@ async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLea
   }
   const { isOpenLeadRow } = require('./lead-statuses');
   for (const row of rows) {
+    if (row.plaintext) {
+      return refuseSend('Consultation links must use https — remove the http:// link and insert a fresh one.');
+    }
     if (row.invalid) {
       return refuseSend('This consultation link is not valid — remove it and insert a fresh one.');
     }

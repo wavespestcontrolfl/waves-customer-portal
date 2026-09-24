@@ -1000,6 +1000,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         setLeads(data.leads || []);
         setLeadsTotal(data.total || 0);
         setConsultationGate(data.consultationLinksEnabled === true);
+        // A list reload follows every lead edit on this page — drop cached
+        // availability so the expanded row re-probes against the edited lead
+        // (Codex #4709 r7 P2). An in-flight mint keeps its entry.
+        setConsultationLinks((m) => Object.fromEntries(Object.entries(m).filter(([, v]) => v?.minting)));
         hasLoadedLeadsRef.current = true;
         setPipelineLoadState("success");
       } catch (e) {
