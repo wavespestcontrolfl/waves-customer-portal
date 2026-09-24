@@ -878,7 +878,7 @@ async function settleHumanReply({ phoneLast10 = null, startedAt = null, parkedDe
   // Promote the reservation to accepted evidence before later bookkeeping.
   // If the normal provider row or the ignore update failed, recovery can use
   // this linked row instead of reopening cards on an answered thread.
-  await settleReplyHoldingReservation({ reservationId, acceptedResult: {} });
+  if (!await settleReplyHoldingReservation({ reservationId, acceptedResult: {} })) return;
   const ignored = parkedDecisionIds.length
     ? await ignoreParkedSuggestions({ decisionIds: parkedDecisionIds, reviewedBy })
     : 0;

@@ -150,9 +150,17 @@ test('existing reserve callers do not check or block on a manual reservation wit
   expect(inserted).toEqual([]);
 });
 
-function settleDb({ stale = [] } = {}) {
+function settleDb({ stale = [], acceptedUpdate = 1 } = {}) {
   const del = jest.fn(async () => 1);
-  const update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'd1', entity_id: 'draft-1' }]) }));
+  const updateResult = {
+    returning: jest.fn(async () => [{ id: 'd1', entity_id: 'draft-1' }]),
+    valueOf: () => 1,
+  };
+  const update = jest.fn((values) => (
+    values.status === 'sent' && Object.hasOwn(values, 'twilio_sid')
+      ? Promise.resolve(acceptedUpdate)
+      : updateResult
+  ));
   const chain = { del, update };
   for (const m of ['where', 'whereIn', 'whereNot', 'whereRaw', 'leftJoin']) chain[m] = jest.fn(() => chain);
   chain.select = jest.fn(async () => stale);
@@ -183,6 +191,19 @@ test('settle: provider uncertainty retains the linked marker and leaves decision
   });
   expect(del).not.toHaveBeenCalled();
   expect(update).toHaveBeenCalledWith(expect.objectContaining({ updated_at: expect.any(Date) }));
+});
+
+test('settle: failed accepted promotion leaves decisions held and skips cleanup', async () => {
+  const { del, update, chain } = settleDb({ acceptedUpdate: 0 });
+  await suggest.settleHumanReply({
+    phoneLast10: '9415550100', startedAt: new Date(),
+    parkedDecisionIds: ['d1'], reservationId: 'resv-1', sent: true, reviewedBy: 'tech-1',
+  });
+
+  expect(update).toHaveBeenCalledTimes(1);
+  expect(update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'ignored' }));
+  expect(chain.select).not.toHaveBeenCalled();
+  expect(del).not.toHaveBeenCalled();
 });
 
 // codex #4338 P1: a reservation created solely to fence an in-flight

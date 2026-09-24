@@ -187,7 +187,7 @@ function preserveSoleAcceptedReplyReceipts(query) {
       WHERE receipt.id <> sms_log.id
         AND receipt.direction = 'outbound'
         AND receipt.status IN ('queued', 'sent', 'delivered')
-        AND receipt.twilio_sid ~ '^SM[0-9A-Fa-f]{32}$'
+        AND receipt.twilio_sid ~* '^(SM|MM)[a-f0-9]{32}$'
         AND ${nonReservation}
         AND (
           (sms_log.twilio_sid IS NOT NULL AND receipt.twilio_sid = sms_log.twilio_sid)

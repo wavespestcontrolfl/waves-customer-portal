@@ -597,6 +597,24 @@ export class ApiClient {
     return this.request(requestId ? `/requests?requestId=${encodeURIComponent(requestId)}` : '/requests');
   }
 
+  // ---- Photo ID (GATE_CUSTOMER_PHOTO_ID) ----
+  // 404 means the feature is dark for this account — callers hide the entry
+  // points entirely rather than showing an error (see PhotoId.jsx).
+  getPhotoIds() {
+    return this.request('/photo-id');
+  }
+
+  createPhotoId(type, data) {
+    return this.request(`/photo-id/${encodeURIComponent(type)}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  getPhotoId(type, id) {
+    return this.request(`/photo-id/${encodeURIComponent(type)}/${encodeURIComponent(id)}`);
+  }
+
   // Cancel-flow v2 (GATE_CANCEL_FLOW_V2). Preview is read-only despite the
   // verb; 404 = gate off, the caller falls back to the single-step form.
   cancelResolutionPreview(body = {}) {
