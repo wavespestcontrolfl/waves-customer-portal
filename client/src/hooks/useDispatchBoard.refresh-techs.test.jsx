@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useDispatchBoard, TECH_ABSENCE_EVENT } from './useDispatchBoard';
+import { useDispatchBoard, TECH_ABSENCE_EVENT, UNKNOWN_TECH_REFETCH_MS } from './useDispatchBoard';
 
 // Handlers the hook registers, by event name, so a test can fire a
 // broadcast at the hook exactly as socket.io would.
@@ -471,5 +471,35 @@ describe('absence broadcast relay (Codex r8 P2 on PR #4678)', () => {
     });
     window.removeEventListener(TECH_ABSENCE_EVENT, listener);
     expect(seen).toEqual([{ tech_id: 'tech-1', date: '2026-09-30', out: true, absence_id: 'a-1' }]);
+  });
+});
+
+describe('unknown-tech refetch is throttled per tech (pre-push auditor P1 on PR #4678)', () => {
+  it('a tech the roster keeps excluding triggers one re-read per window, not one per ping', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
+      const { result } = renderHook(() => useDispatchBoard());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      const ping = () => socketHandlers['dispatch:tech_status']({
+        tech_id: 'office-9', status: 'idle', lat: 27.3, lng: -82.5,
+        updated_at: new Date().toISOString(), location_updated_at: new Date().toISOString(),
+      });
+      // Roster still omits office-9 (office-only).
+      fetch.mockResolvedValue({ ok: true, json: async () => initialBoard });
+      await act(async () => { ping(); });
+      await act(async () => { ping(); ping(); });
+      expect(fetch).toHaveBeenCalledTimes(2); // hydration + ONE re-read
+      vi.advanceTimersByTime(UNKNOWN_TECH_REFETCH_MS + 1);
+      await act(async () => { ping(); });
+      expect(fetch).toHaveBeenCalledTimes(3); // window elapsed → one more
+      // A different unknown tech has their own window.
+      await act(async () => {
+        socketHandlers['dispatch:tech_status']({ tech_id: 'other-7', status: 'idle', lat: 27.3, lng: -82.5, updated_at: new Date().toISOString(), location_updated_at: new Date().toISOString() });
+      });
+      expect(fetch).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

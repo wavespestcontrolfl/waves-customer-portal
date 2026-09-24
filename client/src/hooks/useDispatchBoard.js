@@ -118,6 +118,9 @@ function boardJobFromPayload(payload) {
 // TechDrawer's TechOutSection) can refetch without prop threading. detail =
 // the broadcast payload ({ tech_id, date, out, absence_id }).
 export const TECH_ABSENCE_EVENT = 'waves:tech-absence-changed';
+// Minimum gap between roster re-reads triggered by pings from a tech the
+// roster does not carry (see handleTechStatus).
+export const UNKNOWN_TECH_REFETCH_MS = 60_000;
 
 export function useDispatchBoard() {
   const [techsMap, setTechsMap] = useState(() => new Map());
@@ -249,6 +252,7 @@ export function useDispatchBoard() {
   // pending hydration and then fails must settle loading/error itself, or
   // the board stays "loading" forever (auditor P1, round 5).
   const hydratedRef = useRef(false);
+  const unknownTechRefetchAtRef = useRef(new Map());
 
   const loadBoard = useCallback(async () => {
     const seq = ++refreshSeqRef.current;
@@ -334,7 +338,17 @@ export function useDispatchBoard() {
       // refuse. Only a fresh location warrants it — a stale ping for an
       // unknown tech is ignored exactly as before.
       if (!techsMapRef.current.has(payload.tech_id)) {
-        if (hasFreshDispatchLocation(payload)) refreshTechs();
+        // Once per tech per UNKNOWN_TECH_REFETCH_MS: a tech the endpoint
+        // deliberately excludes (office-only, inactive) keeps pinging with a
+        // fresh location and would otherwise refetch /board on every ping
+        // (pre-push auditor P1 on #4678). Their first ping re-reads; if the
+        // roster still omits them, later pings wait out the window.
+        if (!hasFreshDispatchLocation(payload)) return;
+        const now = Date.now();
+        const last = unknownTechRefetchAtRef.current.get(payload.tech_id) || 0;
+        if (now - last < UNKNOWN_TECH_REFETCH_MS) return;
+        unknownTechRefetchAtRef.current.set(payload.tech_id, now);
+        refreshTechs();
         return;
       }
       if (latestRefreshPendingRef.current) pendingSocketRef.current.push({ type: 'tech_status', payload });
