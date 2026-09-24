@@ -839,8 +839,9 @@ async function reserveHumanReply({
     }
     const parkedDecisionIds = await parkThreadSuggestions({ phoneLast10: threadLast10 }, trx);
     // The gate controls only the autonomous-send interlock. A manual reply
-    // that actually parks decisions always needs durable recovery linkage.
-    const reservationId = autoSendEnabled || parkedDecisionIds.length
+    // that parks decisions or opts into wrapper retry blocking always needs
+    // durable recovery linkage, even with both autonomous gates off.
+    const reservationId = autoSendEnabled || parkedDecisionIds.length || blockOnActiveManualReservation
       ? await createReplyHoldingReservation(trx, {
         to, customerId, fromNumber, body, adminUserId, parkedDecisionIds,
         // reserveHumanReply returns directly to the tech-line provider call;
