@@ -10,7 +10,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SmsTab } from "./CommunicationsPageV2";
 
@@ -37,12 +37,25 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+// The switch is owner-only (ADMIN-BUG-R38): SmsTab reads the role off the
+// admin layout's outlet context, so render it the way the layout does.
+const renderAs = (role) => render(
+  <MemoryRouter>
+    <Routes>
+      <Route element={<Outlet context={{ user: { id: `${role}-1`, role } }} />}>
+        <Route path="*" element={<SmsTab active />} />
+      </Route>
+    </Routes>
+  </MemoryRouter>,
+);
+const renderAsOwner = () => renderAs("admin");
+
 const toggleButton = () => screen.getByRole("button", { name: /AI Auto-Reply/ });
 const togglePosts = () => fetch.mock.calls.filter(([u, o]) => String(u).endsWith("/ai-auto-reply") && o?.method === "POST");
 
 it("HTTP 500 on the toggle POST: switch stays ON and the failure is surfaced", async () => {
   toggleResponse = () => response({ error: "boom" }, 500);
-  render(<SmsTab active />, { wrapper: MemoryRouter }); await tick();
+  renderAsOwner(); await tick();
   expect(toggleButton()).toHaveAttribute("aria-pressed", "true");
   fireEvent.click(toggleButton()); await tick();
   expect(togglePosts()).toHaveLength(1);
@@ -53,7 +66,7 @@ it("HTTP 500 on the toggle POST: switch stays ON and the failure is surfaced", a
 
 it("HTTP 429 (no retry in this page's local adminFetch): failure is surfaced, no silent retry", async () => {
   toggleResponse = () => response({ error: "Too many requests, please try again later." }, 429);
-  render(<SmsTab active />, { wrapper: MemoryRouter }); await tick();
+  renderAsOwner(); await tick();
   fireEvent.click(toggleButton()); await tick(5000);
   expect(togglePosts()).toHaveLength(1); // no auto-retry
   expect(toggleButton()).toHaveAttribute("aria-pressed", "true");
@@ -62,7 +75,7 @@ it("HTTP 429 (no retry in this page's local adminFetch): failure is surfaced, no
 
 it("server DB failure returns 200 {enabled:false,error}: switch is NOT adopted from the error body", async () => {
   toggleResponse = () => response({ enabled: false, error: "connection refused" }, 200);
-  render(<SmsTab active />, { wrapper: MemoryRouter }); await tick();
+  renderAsOwner(); await tick();
   fireEvent.click(toggleButton()); await tick();
   // The 200 body carries an error, so the client must not adopt enabled:false —
   // the switch keeps showing the last CONFIRMED state (still on).
@@ -72,8 +85,15 @@ it("server DB failure returns 200 {enabled:false,error}: switch is NOT adopted f
 
 it("a successful toggle still flips the switch with no error text", async () => {
   toggleResponse = () => response({ enabled: false }, 200);
-  render(<SmsTab active />, { wrapper: MemoryRouter }); await tick();
+  renderAsOwner(); await tick();
   fireEvent.click(toggleButton()); await tick();
   expect(toggleButton()).toHaveAttribute("aria-pressed", "false");
   expect(screen.queryByText(/could not be changed|connection refused|boom/i)).not.toBeInTheDocument();
+});
+
+it("a technician never sees the company-wide switch and its status is not even fetched (ADMIN-BUG-R38)", async () => {
+  toggleResponse = () => response({ enabled: false }, 200);
+  renderAs("technician"); await tick();
+  expect(screen.queryByRole("button", { name: /AI Auto-Reply/ })).not.toBeInTheDocument();
+  expect(fetch.mock.calls.some(([u]) => String(u).endsWith("/ai-auto-reply-status"))).toBe(false);
 });

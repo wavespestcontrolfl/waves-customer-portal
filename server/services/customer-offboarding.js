@@ -586,14 +586,19 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   }
 
   // 5. Combined cancellation + refund email — only once money actually
-  // moved. Re-runs retry a failed send for money refunded on a PRIOR run
-  // (the idempotency key dedupes an already-delivered one); refundedTotal
-  // re-reads the ledger so the email states what Stripe actually returned.
+  // moved. refundedTotal is THIS RUN's delta (result.refunded, the sum of
+  // what refundUnconsumedDeposits actually moved via Stripe just above) —
+  // NOT the ledger's cumulative refunded_amount, which also carries any
+  // earlier partial refund (e.g. a dashboard refund taken weeks ago,
+  // estimate-deposits.js's "cumulative across partial refunds" stamp).
+  // Reporting the cumulative figure as "refunded today" overstates the
+  // customer email/admin bell by whatever was already refunded before this
+  // run, and — for a multi-deposit account where one deposit had a prior
+  // partial refund and the OTHER deposit's Stripe refund fails THIS run —
+  // the cumulative sum can equal preview.refundTotal even though this run
+  // actually moved less, masking a failed refund as complete.
   const depositIds = preview.deposits.map((d) => d.id).sort();
-  const ledgerRows = await db('estimate_deposits')
-    .whereIn('id', depositIds)
-    .select('refunded_amount');
-  const refundedTotal = ledgerRows.reduce((sum, r) => sum + Number(r.refunded_amount || 0), 0);
+  const refundedTotal = result.refunded;
   // Multi-deposit accounts: one Stripe failure lowers the sweep's total
   // WITHOUT throwing. The email promises ONE complete confirmation, so a
   // partial refund reports loudly and holds the email — the re-run that
@@ -605,9 +610,10 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     result.email = { ok: false, skipped: true, reason: 'partial_refund' };
   } else if (refundedTotal > 0) {
     const PaymentLifecycleEmail = require('./payment-lifecycle-email');
-    // The key carries the CUMULATIVE refunded cents: a retry that refunds a
+    // The key carries THIS RUN's refunded cents: a retry that refunds a
     // deposit the first run couldn't must send a corrected email with the
-    // new total, while an identical re-run still dedupes.
+    // new total, while an identical re-run (nothing left to refund, same
+    // delta) still dedupes.
     const refundedCents = Math.round(refundedTotal * 100);
     result.email = await PaymentLifecycleEmail.sendCancellationRefundIssued({
       customerId,

@@ -35,6 +35,8 @@ describe.each(["legacy", "comfortable"])(
       vi.unstubAllGlobals();
     });
 
+    const QUOTE = { base: 100, surcharge: 3, total: 103 };
+
     async function renderLoaded() {
       fetch.mockReturnValueOnce(jsonResponse({ cards }));
       render(
@@ -49,6 +51,15 @@ describe.each(["legacy", "comfortable"])(
         </UiSurface>,
       );
       await screen.findByText("Visa 1111");
+    }
+
+    // ADMIN-BUG-R47 fix: every charge tap now quotes first
+    // (/charge-card-quote) before posting /charge-card, so each scenario
+    // below queues a quote response ahead of the charge response it's
+    // actually testing.
+    function queueQuoteThenCharge(chargeBody, chargeOpts) {
+      fetch.mockReturnValueOnce(jsonResponse({ quote: QUOTE }));
+      fetch.mockReturnValueOnce(jsonResponse(chargeBody, chargeOpts));
     }
 
     it.each([
@@ -69,9 +80,7 @@ describe.each(["legacy", "comfortable"])(
       "locks every charge action after a terminal charge response",
       async (body) => {
         await renderLoaded();
-        fetch.mockReturnValueOnce(
-          jsonResponse(body, { ok: false, status: 409 }),
-        );
+        queueQuoteThenCharge(body, { ok: false, status: 409 });
 
         fireEvent.click(
           screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
@@ -85,14 +94,23 @@ describe.each(["legacy", "comfortable"])(
           expect(blocked).toHaveLength(2);
           blocked.forEach((button) => expect(button).toBeDisabled());
         });
-        expect(fetch).toHaveBeenCalledTimes(2);
+        // cards load + quote + charge
+        expect(fetch).toHaveBeenCalledTimes(3);
+        const chargeCall = fetch.mock.calls.find(([url]) =>
+          String(url).endsWith("/charge-card"),
+        );
+        expect(JSON.parse(chargeCall[1].body)).toEqual({
+          paymentMethodId: "pm-1",
+          expectedTotal: QUOTE.total,
+        });
       },
     );
 
     it("re-enables charge after a deterministic decline", async () => {
       await renderLoaded();
-      fetch.mockReturnValueOnce(
-        jsonResponse({ error: "Card declined" }, { ok: false, status: 400 }),
+      queueQuoteThenCharge(
+        { error: "Card declined" },
+        { ok: false, status: 400 },
       );
 
       fireEvent.click(
@@ -107,6 +125,196 @@ describe.each(["legacy", "comfortable"])(
           .getAllByRole("button", { name: /^Charge(?: |$)/ })
           .forEach((button) => expect(button).toBeEnabled());
       });
+    });
+
+    it("shows the quoted card-fee total and binds it as expectedTotal on a successful charge", async () => {
+      await renderLoaded();
+      queueQuoteThenCharge({ success: true, status: "paid" }, {});
+
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+
+      await waitFor(() => {
+        expect(
+          fetch.mock.calls.some(([url]) =>
+            String(url).includes("/charge-card-quote"),
+          ),
+        ).toBe(true);
+      });
+      // The exact amount that will move — base + card fee = total — is
+      // shown before/while the charge is in flight, not just on a receipt
+      // after the fact.
+      expect(document.body.textContent).toMatch(/\$100\.00.*\$3\.00.*\$103\.00/);
+      // Codex round-2 P2: the quote line used to be `truncate` in the
+      // legacy sheet, so on a narrow screen the TOTAL — the last part of
+      // the string — was the part that got ellipsized. A textContent
+      // check alone can't see that (jsdom doesn't apply CSS overflow), so
+      // assert the class directly: the element holding the total must not
+      // truncate.
+      const quoteEl = screen.getByText(/\$103\.00/);
+      expect(quoteEl.className).not.toMatch(/\btruncate\b/);
+    });
+
+    it.each([
+      ["no quote at all", {}],
+      ["total: null", { quote: { base: 100, surcharge: 3, total: null } }],
+      ["total: empty string", { quote: { base: 100, surcharge: 3, total: "" } }],
+      ["total: numeric string", { quote: { base: 100, surcharge: 3, total: "103" } }],
+    ])("refuses to charge when the quote comes back without a numeric total (%s) — nothing is posted to /charge-card", async (_label, quoteBody) => {
+      await renderLoaded();
+      // A 200 quote with no usable total. Only ONE response is queued: if
+      // the sheet wrongly proceeded, the charge fetch would get undefined
+      // and the assertion on fetch calls below catches it. null / "" are
+      // the Number()-coercion hole (Number(null) === 0) the strict typeof
+      // check closes; the server skips its changed-amount guard on a null
+      // expectedTotal.
+      fetch.mockReturnValueOnce(jsonResponse(quoteBody));
+
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+
+      await screen.findByText(/Could not price this charge/);
+      expect(
+        fetch.mock.calls.some(([url]) => String(url).includes("/charge-card") && !String(url).includes("/charge-card-quote")),
+      ).toBe(false);
+      // Not a terminal failure — the operator can retry once pricing works.
+      await waitFor(() => {
+        screen
+          .getAllByRole("button", { name: /^Charge(?: |$)/ })
+          .forEach((button) => expect(button).toBeEnabled());
+      });
+    });
+
+    it("still charges successfully under React.StrictMode's dev double-invoked mount/cleanup", async () => {
+      // StrictMode mounts, cleans up (setting abortedRef true via the
+      // effect's cleanup), then mounts again for the SAME instance — the
+      // effect's setup must reset the ref, or every charge on this
+      // genuinely-live second mount silently aborts right after quoting.
+      // The card-load effect itself runs twice under StrictMode too, so
+      // the cards response must be reusable, not a one-shot mock.
+      fetch.mockImplementation((url) =>
+        String(url).includes("/cards") ? jsonResponse({ cards }) : jsonResponse({}),
+      );
+      render(
+        <React.StrictMode>
+          <UiSurface density={density}>
+            <MobileCardOnFileSheet
+              presentation={density === "comfortable" ? "admin" : "legacy"}
+              desktopVisible
+              invoiceId="inv-1"
+              customerId="cust-1"
+              customerName="Test Customer"
+            />
+          </UiSurface>
+        </React.StrictMode>,
+      );
+      await screen.findByText("Visa 1111");
+      queueQuoteThenCharge({ success: true, status: "paid" }, {});
+
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+
+      await waitFor(() => {
+        expect(
+          fetch.mock.calls.some(([u]) => String(u).endsWith("/charge-card")),
+        ).toBe(true);
+      });
+    });
+
+    it("still notifies the parent when the sheet unmounts while the charge POST is in flight (money moved)", async () => {
+      let resolveCharge;
+      const chargePromise = new Promise((resolve) => {
+        resolveCharge = resolve;
+      });
+      const onChargeSuccess = vi.fn();
+      fetch.mockImplementation((url) => {
+        const u = String(url);
+        if (u.includes("/cards")) return jsonResponse({ cards });
+        if (u.includes("/charge-card-quote")) return jsonResponse({ quote: QUOTE });
+        return chargePromise;
+      });
+      const { unmount } = render(
+        <UiSurface density={density}>
+          <MobileCardOnFileSheet
+            presentation={density === "comfortable" ? "admin" : "legacy"}
+            desktopVisible
+            invoiceId="inv-1"
+            customerId="cust-1"
+            customerName="Test Customer"
+            onChargeSuccess={onChargeSuccess}
+          />
+        </UiSurface>,
+      );
+      await screen.findByText("Visa 1111");
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+      await waitFor(() => {
+        expect(
+          fetch.mock.calls.some(([u]) => String(u).endsWith("/charge-card")),
+        ).toBe(true);
+      });
+
+      // Sheet removed while /charge-card is in flight — the charge still
+      // completes upstream, so the parent must still be told.
+      unmount();
+      resolveCharge(jsonResponse({ success: true, status: "paid", payment: { id: "pay-1" } }));
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(onChargeSuccess).toHaveBeenCalledTimes(1);
+      expect(onChargeSuccess).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, status: "paid" }),
+      );
+    });
+
+    it("never posts /charge-card if the sheet unmounts while the quote is still in flight", async () => {
+      let resolveQuote;
+      const quotePromise = new Promise((resolve) => {
+        resolveQuote = resolve;
+      });
+      fetch.mockReturnValueOnce(jsonResponse({ cards }));
+      fetch.mockImplementation((url) => {
+        const u = String(url);
+        if (u.includes("/cards")) return jsonResponse({ cards });
+        if (u.includes("/charge-card-quote")) return quotePromise;
+        return jsonResponse({ success: true, status: "paid" });
+      });
+      const { unmount } = render(
+        <UiSurface density={density}>
+          <MobileCardOnFileSheet
+            presentation={density === "comfortable" ? "admin" : "legacy"}
+            desktopVisible
+            invoiceId="inv-1"
+            customerId="cust-1"
+            customerName="Test Customer"
+          />
+        </UiSurface>,
+      );
+      await screen.findByText("Visa 1111");
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+      await waitFor(() => {
+        expect(
+          fetch.mock.calls.some(([u]) =>
+            String(u).includes("/charge-card-quote"),
+          ),
+        ).toBe(true);
+      });
+
+      // Sheet is removed (Back, or any other unmount) BEFORE the quote
+      // resolves — the pending fetch resolves only afterward.
+      unmount();
+      resolveQuote(jsonResponse({ quote: QUOTE }));
+      // Let the already-in-flight promise chain settle.
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(
+        fetch.mock.calls.some(([u]) => String(u).endsWith("/charge-card")),
+      ).toBe(false);
     });
   },
 );

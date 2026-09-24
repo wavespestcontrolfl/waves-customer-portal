@@ -1251,19 +1251,35 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(generateEstimate).not.toHaveBeenCalled();
   });
 
-  // ⭐ THE RETIRED 'basic' TIER IS NEITHER ADVERTISED NOR FORWARDED. The 4x
-  // lawn tier is fully retired (owner 2026-08-04); the engine silently
-  // resolves it to enhanced, so offering it in the schema quoted a program
-  // Waves does not sell under a name the caller chose.
-  test("the retired 'basic' lawn tier is absent from the schema and falls to standard in the engine input", async () => {
+  // ⭐ THE RETIRED 'basic' AND 'standard' TIERS ARE NEITHER ADVERTISED NOR
+  // FORWARDED. The 4x lawn tier is fully retired (owner 2026-08-04) and the
+  // 6x/bi-monthly 'standard' tier is retired for new sales (owner
+  // 2026-09-24); the engine silently resolves either to enhanced, so offering
+  // them in the schema quoted a program Waves does not sell under a name the
+  // caller chose.
+  test("the retired 'basic' and 'standard' lawn tiers are absent from the schema and fall to enhanced in the engine input", async () => {
     const pricing = CONTEXT_TOOLS.find((t) => t.name === 'get_pricing');
-    expect(pricing.input_schema.properties.lawn_tier.enum).toEqual(['standard', 'enhanced', 'premium']);
+    expect(pricing.input_schema.properties.lawn_tier.enum).toEqual(['enhanced', 'premium']);
+    generateEstimate.mockReturnValue({ lineItems: [], summary: {} });
+    for (const lawnTier of ['basic', 'standard', undefined]) {
+      generateEstimate.mockClear();
+      await executeTool('get_pricing', {
+        service: 'lawn_care', home_sqft: 2000, lot_sqft: 8000,
+        ...(lawnTier ? { lawn_tier: lawnTier } : {}),
+      }, { customerId: null });
+      expect(generateEstimate).toHaveBeenCalledWith(expect.objectContaining({
+        services: expect.objectContaining({ lawn: expect.objectContaining({ tier: 'enhanced' }) }),
+      }));
+    }
+  });
+
+  test('a sold lawn tier (premium) is forwarded as requested', async () => {
     generateEstimate.mockReturnValue({ lineItems: [], summary: {} });
     await executeTool('get_pricing', {
-      service: 'lawn_care', home_sqft: 2000, lot_sqft: 8000, lawn_tier: 'basic',
+      service: 'lawn_care', home_sqft: 2000, lot_sqft: 8000, lawn_tier: 'premium',
     }, { customerId: null });
     expect(generateEstimate).toHaveBeenCalledWith(expect.objectContaining({
-      services: expect.objectContaining({ lawn: expect.objectContaining({ tier: 'standard' }) }),
+      services: expect.objectContaining({ lawn: expect.objectContaining({ tier: 'premium' }) }),
     }));
   });
 

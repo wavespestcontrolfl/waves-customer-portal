@@ -40,6 +40,11 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (req, res, next) => (
     ['admin', 'technician'].includes(req.techRole) ? next() : res.status(403).json({ error: 'Staff access required' })
   ),
+  // tech-track transitively loads admin-sms-templates, whose write routes
+  // are requireAdmin — the mock must export it or the router fails to mount.
+  requireAdmin: (req, res, next) => (
+    req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })
+  ),
 }));
 
 const express = require('express');

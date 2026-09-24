@@ -65,6 +65,9 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (throwOn && String(table).startsWith(throwOn)) throw new Error(`${table} down`);
     if (String(table).startsWith('annual_prepay_terms')) return chain(termsRows, calls.terms);
     if (table === 'payments') return chain(payments, calls.payments);
+    // The sibling-unresolved-outcome check (retry-collectibility.js) reads
+    // this table too — no fixtures here, so it always clears.
+    if (table === 'stripe_orphan_charges') return chain([], []);
     if (String(table).startsWith('scheduled_services')) return chain(visits, calls.visits);
     if (table === 'customers') return chain(customers, calls.customers);
     if (table === 'payment_methods') return chain(paymentMethods, []);
