@@ -230,9 +230,16 @@ router.post('/rates', async (req, res, next) => {
       // Correcting an already-posted/staged rate for the SAME effective
       // date must replace it, not sit beside it as a duplicate for that
       // date (codex P0, round 2) — applies regardless of past/present/future.
+      // expiry_date is set to TODAY (not effectiveDate): the readers no
+      // longer gate eligibility on `active` at all (codex round-5 P0), so
+      // an identical effective_date with expiry_date still null would tie
+      // the discarded row against its replacement with no reliable
+      // ordering — dating its expiry to the moment of replacement excludes
+      // it immediately regardless of whether effectiveDate is past or
+      // still staged (codex round-6 P0).
       await trx('tax_rates')
         .where({ county: countyKey, active: true, effective_date: effectiveDate })
-        .update({ active: false });
+        .update({ active: false, expiry_date: nowET });
 
       if (isImmediate) {
         // Retire ONLY the rate that was actually in force AT THE SUBMITTED

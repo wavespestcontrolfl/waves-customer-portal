@@ -306,6 +306,42 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
     expect(supersededDraft).toBeDefined();
     expect(parseFloat(supersededDraft.combinedRate)).toBeCloseTo(0.07, 6);
   });
+
+  test('correcting TODAY\'S rate for the same effective date actually changes what invoices are taxed (codex round-6 P0)', async () => {
+    // Distinct from the UI-label case above: this asserts the CALCULATED
+    // rate, not just how GET /rates displays it. Readers no longer gate
+    // eligibility on `active` at all (round-5 P0 fix), so a same-date
+    // replace that only flipped `active` — without also expiring the
+    // discarded row — tied it against its replacement with an identical
+    // effective_date and no reliable ordering; calculateTax could still
+    // return the discarded 7% instead of the corrected 8%.
+    const customerId = randomUUID();
+    const today = etDateString();
+    await db('customers').insert({
+      id: customerId, first_name: 'TaxSameDateCorrection', last_name: 'Commercial', phone: '9415550194',
+      email: `tax-samedate-${customerId}@example.com`, zip: '33901', property_type: 'commercial',
+    });
+    try {
+      const first = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ county, stateRate: 0.06, countySurtax: 0.01, effectiveDate: today, notes: 'first post' }),
+      }).then((r) => r.json()));
+      expect(first.success).toBe(true);
+
+      const second = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ county, stateRate: 0.06, countySurtax: 0.02, effectiveDate: today, notes: 'same-date correction' }),
+      }).then((r) => r.json()));
+      expect(second.success).toBe(true);
+
+      const r = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 100);
+      expect(r.rate).toBeCloseTo(0.08, 6);
+      expect(r.amount).toBe(8);
+    } finally {
+      await db('customers').where({ id: customerId }).del();
+      await db('tax_rates').where({ county, effective_date: today }).del();
+    }
+  });
 });
 
 // No database needed: validation runs (and rejects) before the route ever
