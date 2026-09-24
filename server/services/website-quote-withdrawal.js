@@ -94,6 +94,10 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
         .orWhere((own) => own
           .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
           .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])))
+      // …and the CUSTOMER-FACING premise the candidate read matched: a
+      // proposal editor (under another pair's lock) that moved
+      // proposal.propertyAddress since must win (codex r49 P1).
+      .whereRaw("estimate_data->'proposal'->>'propertyAddress' IS NOT DISTINCT FROM ?", [row.proposal_address || null])
       // The candidate query's live statuses re-asserted on the write: a
       // decline (or any terminal transition) that commits between the
       // SELECT and this row lock wins, so a successful decline token is
@@ -129,6 +133,10 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
         .orWhere((own) => own
           .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
           .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])))
+      // …and the CUSTOMER-FACING premise the candidate read matched: a
+      // proposal editor (under another pair's lock) that moved
+      // proposal.propertyAddress since must win (codex r49 P1).
+      .whereRaw("estimate_data->'proposal'->>'propertyAddress' IS NOT DISTINCT FROM ?", [row.proposal_address || null])
       .whereIn('status', WITHDRAWABLE_PUBLICATION_STATES)
       .whereNull('archived_at')
       .whereNull('price_locked_at')

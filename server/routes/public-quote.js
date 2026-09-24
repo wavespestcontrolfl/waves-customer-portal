@@ -3920,19 +3920,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         }
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
     }
-    // Both provider legs are behind us: release this run's delivery claim
-    // (token-fenced; the shared release also completes a deferred
-    // invalidation). Non-fatal — an uncleared claim ages out by TTL.
-    if (quoteDeliveryClaimToken) {
-      try {
-        const adminEstimates = require('./admin-estimates');
-        await adminEstimates.clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken);
-        const groupRow = await db('estimates').where({ id: draftEstimateId }).first('id', 'estimate_group_id');
-        if (groupRow?.estimate_group_id) await adminEstimates.clearGroupSiblingDeliveryClaims(groupRow, quoteDeliveryClaimToken);
-      } catch (releaseErr) {
-        logger.warn(`[public-quote] quote delivery claim release failed (ages out by TTL): ${releaseErr.code || releaseErr.name || 'db_error'}`);
-      }
-    }
+    // The delivery claim is HELD through the HTTP handoff too — the JSON
+    // response carries the same link and handoff token — and released
+    // right before res.json (codex r49 P1); see the release below.
 
     // Newsletter enrollment — gated on explicit opt-in from a public quote
     // client. Public quote emails are user-provided and
@@ -4131,6 +4121,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // never a book link (same rule as nextStepSummary).
     if (bookingUrl) response.booking_url = bookingUrl;
     if (websiteEstimateUrl) response.website_estimate_url = websiteEstimateUrl;
+    // Every handoff — both provider legs AND this JSON link — is behind us:
+    // release this run's delivery claim (token-fenced; the shared release
+    // also completes a deferred invalidation). Non-fatal — an uncleared
+    // claim ages out by TTL. A quarantine that lands after this point meets
+    // /booking/confirm's own locked recheck.
+    if (quoteDeliveryClaimToken) {
+      try {
+        const adminEstimates = require('./admin-estimates');
+        await adminEstimates.clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken);
+        const groupRow = await db('estimates').where({ id: draftEstimateId }).first('id', 'estimate_group_id');
+        if (groupRow?.estimate_group_id) await adminEstimates.clearGroupSiblingDeliveryClaims(groupRow, quoteDeliveryClaimToken);
+      } catch (releaseErr) {
+        logger.warn(`[public-quote] quote delivery claim release failed (ages out by TTL): ${releaseErr.code || releaseErr.name || 'db_error'}`);
+      }
+    }
     res.json(response);
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });

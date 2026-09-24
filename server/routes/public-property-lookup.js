@@ -633,10 +633,27 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       // pipeline row with no callback warning and no send guards. Fail
       // CLOSED: mark the derived flag on the lead outside the rolled-back
       // transaction, best-effort (codex r37 P1).
+      // …in its OWN transaction under the same contact-pair lock, with
+      // precedence rechecked (codex r49 P1): a booking confirmation holding
+      // that lock reads the lead's verdict and inserts its appointment as
+      // one unit, so the fallback lands before or after it, never between;
+      // and a clean verdict newer than this flag (a staff confirmation) is
+      // not overwritten.
       if (addressUnverified && lead?.id) {
-        await db('leads').where({ id: lead.id }).update({
-          extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: addressUnverified })]),
-          updated_at: new Date(),
+        await db.transaction(async (ftrx) => {
+          await ftrx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(email, normPhone)]);
+          const { loadContactVerdicts } = require('../services/lead-address-unverified');
+          const verdicts = (email && normPhone)
+            ? await loadContactVerdicts(ftrx, { email, phone: normPhone, premise: normalizedAddress, ownLeadId: lead.id })
+            : { newestCleanAt: 0 };
+          if (verdicts.newestCleanAt > (Date.parse(addressUnverified.flagged_at || '') || 0)) return;
+          await ftrx('leads').where({ id: lead.id }).update({
+            extracted_data: ftrx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+              address_unverified: addressUnverified,
+              address_verdict: buildAddressVerdict({ flag: addressUnverified, enriched: result?.enriched, profileFound: !!result?.enriched, address: normalizedAddress }),
+            })]),
+            updated_at: new Date(),
+          });
         }).catch((markErr) => logger.error(`[public-property-lookup] fail-closed lead mark failed: ${markErr.code || markErr.name || 'error'}`));
       }
       return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });

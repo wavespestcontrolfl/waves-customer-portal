@@ -199,6 +199,9 @@ describe('codex r45', () => {
     expect(block).toContain("jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text)");
     const release = src.indexOf('adminEstimates.clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken)');
     expect(release).toBeGreaterThan(src.indexOf('Customer SMS failed'));
+    // …held through the HTTP handoff: released right before the JSON send (codex r49 P1).
+    expect(release).toBeGreaterThan(src.lastIndexOf('    const response = {'));
+    expect(release).toBeLessThan(src.lastIndexOf('    res.json(response);'));
   });
   test('the lookup lifts legacy blocks through the withdrawal service', () => {
     const w = require('../services/website-quote-withdrawal');
@@ -331,5 +334,20 @@ describe('pre-push audit after r48', () => {
     const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
     expect(ppl).toContain("if (verdict.status === 'clean' && newestCleanAt) verdict.at = newestCleanAt;");
     expect(ppl).toContain('const newestCleanAt = [evidenceAt, reconciledCleanAt].filter(Boolean)');
+  });
+});
+
+describe('codex r49', () => {
+  test('withdrawal per-row writes re-assert the customer-facing premise', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/website-quote-withdrawal'), 'utf8');
+    expect(src.split("estimate_data->'proposal'->>'propertyAddress' IS NOT DISTINCT FROM ?").length - 1).toBe(2);
+  });
+  test('the lookup\'s fail-closed fallback republishes under the contact-pair lock with precedence', () => {
+    const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
+    const start = ppl.indexOf('} catch (verdictErr) {');
+    const block = ppl.slice(start, ppl.indexOf("return res.status(503).json({ error: 'We could not finish checking this address.", start));
+    expect(block).toContain("['address-verdict', contactPairLockKey(email, normPhone)]");
+    expect(block).toContain("if (verdicts.newestCleanAt > (Date.parse(addressUnverified.flagged_at || '') || 0)) return;");
+    expect(block).toContain('address_verdict: buildAddressVerdict({ flag: addressUnverified');
   });
 });
