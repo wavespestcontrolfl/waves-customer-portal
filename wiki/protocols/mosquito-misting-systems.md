@@ -11,7 +11,7 @@
 - **Label is the law.** Only products whose label allows automatic misting-system use, at label rates. Minimum-risk (25(b)) botanicals are exempt from EPA registration but still follow their label and state rules. Log product, EPA reg # (or "25(b)"), amount, and date on every refill.
 - **Locked reservoir.** Cabinet locked at all times. Company policy: only Waves licensed techs handle or refill solution. EPA guidance is to secure the reservoir and use state-licensed installers/technicians.
 - **Placement (EPA guidance):** nozzles under 10 ft, aimed at resting sites and AWAY from pools, ponds, canals, other water, grills and dining areas, and AC or air intakes. Also keep them off siding, painted or metal surfaces, and vehicles (staining).
-- **Timing:** cycles at dawn and dusk, 30–60 s, when people and pets are not outside. Pause for rain, fog, wind over 10 mph, or temperatures below 50°F, by a weather sensor where installed or from the app.
+- **Timing:** cycles at dawn and dusk, when people and pets are not outside. Cycle length comes from the install calibration (label + system output), not a fixed number of seconds. Pause for rain, fog, wind over 10 mph, or temperatures below 50°F, by a weather sensor where installed or from the app.
 - **Pollinators and water:** keep nozzles off flowering plants. Pyrethrins and permethrin kill bees; permethrin is very highly toxic to fish. "Botanical" is not automatically bee- or fish-safe, so review each product's label precautions with the customer. Waterfront lots get a wider buffer at the water.
 - **Never claim disease prevention.** The system reduces adult mosquitoes in the treated zone. It does nothing to larvae; pair it with source reduction and larvicide.
 
@@ -31,7 +31,7 @@
 4. Run tubing: eaves and fences first, then landscape risers; bury or clip runs out of mower and edger paths.
 5. Set nozzles per the placement rules above; photograph each nozzle.
 6. Pressure and leak test; walk every nozzle for its spray pattern.
-7. Program the schedule (dawn and dusk, 30–45 s to start); connect the app and any weather sensor.
+7. Calibrate before enabling the schedule. From the product label and this system's measured output (dilution, nozzle count, nozzle flow), work out the cycle length and cycles per day that stay within the label's use directions and any per-application or per-day limits. Record the calculation on the install record. Only then program the schedule (dawn and dusk cycles within that calibrated limit); connect the app and any weather sensor. Re-calibrate whenever the product, dilution, or nozzle count changes.
 8. Post the product label and dilution statement at the unit; lock the cabinet.
 9. Customer walkthrough: app and remote, pausing before going outside, what normal looks like, who to call.
 10. Hand over the disclosure sheet (product, pause instructions, pollinator and pet guidance, good-neighbor note, no self-refill, and that it is a comfort system, not disease prevention).
