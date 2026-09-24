@@ -198,6 +198,18 @@ describe('confirm scores are read-only from the AI; a blank AI read is the one f
       expect(fourth.finalScores.stress_damage).toBe(65);
     });
 
+    test('a cleared legacy Stress override stays cleared on the next save', () => {
+      const options = { scoreValue, calculateOverallScore: () => 77 };
+      const blank = { turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null };
+      const run = { status: 'complete', scores_adjusted: JSON.stringify(blank), reconciliation: JSON.stringify({ stress_damage_override: 55 }) };
+      let assessment = { ...blank, fungus_control: 80, thatch_level: 90, stress_damage: 55, adjusted_scores: null };
+      const clearing = visit.confirmScores(assessment, run, { stress_damage: null }, options);
+      expect(clearing.finalScores.stress_damage).toBe(80);
+      assessment = { ...assessment, ...clearing.finalScores, adjusted_scores: JSON.stringify({ ...clearing.finalScores, stress_damage_explicit: clearing.stressExplicit }) };
+      const next = visit.confirmScores(assessment, run, {}, options);
+      expect(next.finalScores.stress_damage).toBe(80);
+    });
+
     test('posting a fill as null clears it; omitting it keeps it', () => {
       const options = { scoreValue, calculateOverallScore: () => 77 };
       const blank = { turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null };

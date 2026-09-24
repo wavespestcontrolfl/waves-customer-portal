@@ -218,9 +218,11 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
   // reconciliation.stress_damage_override instead; read it as a fallback so
   // an in-flight technician entry survives the deploy. Inert once Stress is
   // AI-known (resolveConfirmScores checks that first).
-  const markerExplicit = parseJsonObject(assessment?.adjusted_scores)?.stress_damage_explicit;
-  const previousExplicit = known(markerExplicit)
-    ? markerExplicit
+  // Only an ABSENT marker falls back to the old field; a marker written as
+  // null is an explicit clear and must not resurrect the old entry.
+  const snapshot = parseJsonObject(assessment?.adjusted_scores) || {};
+  const previousExplicit = Object.prototype.hasOwnProperty.call(snapshot, 'stress_damage_explicit')
+    ? snapshot.stress_damage_explicit
     : parseJsonObject(run?.reconciliation)?.stress_damage_override;
   // Posting stress_damage as null/blank clears an earlier explicit entry.
   const stressCleared = Object.prototype.hasOwnProperty.call(adjusted, 'stress_damage') && !numericOverride(adjusted.stress_damage);
