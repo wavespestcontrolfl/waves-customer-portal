@@ -578,6 +578,14 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             addressUnverified = newerFlag;
             staffCleanAt = null;
             cachedAuditStale = false;
+          } else if (addressUnverified && newerFlag && newerFlag !== addressUnverified
+            && newerFlagAt > (Date.parse(addressUnverified.flagged_at || '') || 0)) {
+            // An already-flagged lookup carrying an OLDER cached flag adopts
+            // the newer flag another request stored, so the lead and the
+            // quarantine carry the newest negative evidence — never an older
+            // timestamp a clean verdict in between could out-date (codex r34
+            // P1).
+            addressUnverified = newerFlag;
           }
         }
         // A FLAGGED verdict quarantines the visitor's earlier publications
