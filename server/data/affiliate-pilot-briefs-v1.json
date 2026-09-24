@@ -2,10 +2,10 @@
   "version": 1,
   "set": "affiliate-pilot-v1",
   "owner": "adam",
-  "notes": "Affiliate pilot \u2014 six hub-only informational posts (owner monetization pilot 2026-08-31; playbook docs/affiliate-links-pilot.md): 2 nonchemical prevention, 2 lawn/irrigation measurement, 2 field-tool/equipment. GLOBAL RULES, all briefs: (1) informational lane only \u2014 no near-me or transactional phrasing anywhere; (2) every pest/agronomic claim must be verified against the cited UF/IFAS or manufacturer source at draft time \u2014 if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts, for Waves services OR for products \u2014 say 'view current price' near a product link; (4) never describe any pesticide or product as 'safe' \u2014 this set recommends NO pesticides at all (tools, gauges, exclusion materials only); (5) the ONLY way to link a product is the <AffiliateLink> component with the exact ids in affiliate_products \u2014 never a retailer URL; (6) frontmatter disclosure.type must be 'affiliate'; (7) the Waves service CTA comes before the first product link and every post keeps Waves service as the primary answer \u2014 the product is the homeowner's measuring/prevention step, not a substitute for treatment. Revised 2026-09-24: removed unsupported prevalence, speed and product-performance promises. No approved product IDs, placements, disclosures or owner-review requirements changed. Re-seeding is a separate operator action; edits here do not update queued payloads.",
+  "notes": "Affiliate pilot — six hub-only informational posts (owner monetization pilot 2026-08-31; playbook docs/affiliate-links-pilot.md): 2 nonchemical prevention, 2 lawn/irrigation measurement, 2 field-tool/equipment. GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every pest/agronomic claim must be verified against the cited UF/IFAS or manufacturer source at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts, for Waves services OR for products — say 'view current price' near a product link; (4) never describe any pesticide or product as 'safe' — this set recommends NO pesticides at all (tools, gauges, exclusion materials only); (5) the ONLY way to link a product is the <AffiliateLink> component with the exact ids in affiliate_products — never a retailer URL; (6) frontmatter disclosure.type must be 'affiliate'; (7) the Waves service CTA comes before the first product link and every post keeps Waves service as the primary answer — the product is the homeowner's measuring/prevention step, not a substitute for treatment. Revised 2026-09-24: removed unsupported prevalence, speed and product-performance promises. No approved product IDs, placements, disclosures or owner-review requirements changed. Re-seeding is a separate operator action; edits here do not update queued payloads.",
   "cta_codes": {
     "QUOTE": "quote form /pest-control-quote/ (relative on-site link)",
-    "CONTACT": "contact page /contact/ (relative on-site link) \u2014 lawn and tree-shrub have no calculator flow"
+    "CONTACT": "contact page /contact/ (relative on-site link) — lawn and tree-shrub have no calculator flow"
   },
   "briefs": [
     {
@@ -45,12 +45,12 @@
         }
       ],
       "sources": [
-        "https://edis.ifas.ufl.edu/",
-        "UF/IFAS EDIS for the exclusion and household-pest entry claims (search 'exclusion' and the specific pest); cite the publication you actually used."
+        "https://edis.ifas.ufl.edu/in1269",
+        "UF/IFAS supports observing daylight gaps as an exclusion concern; verify the approved sweep manufacturer instructions for fit, installation, and drainage. Do not infer product performance from extension guidance."
       ],
       "verify_notes": [
         "Verify every pest-behavior claim (which pests enter under doors, why) against a UF/IFAS EDIS publication; omit any claim you cannot source.",
-        "Do not claim the sweep 'keeps pests out' \u2014 it reduces one entry point; say so plainly.",
+        "Do not claim the sweep 'keeps pests out' — it reduces one entry point; say so plainly.",
         "No pesticide is recommended in this post; do not add one.",
         "Do not invent Waves inspection findings, local prevalence, product testing, task durations, or diagnostic certainty. Verify product suitability against current manufacturer documentation before drafting.",
         "Visual plan: one context image plus two distinct instructional views when accurate assets are available, and an article-specific ComparisonTable or PestEvidenceGrid with explicit supported props. No generic pest seasonality graphic, fabricated readings, source logos, or generated images presented as field evidence."
@@ -95,8 +95,8 @@
         }
       ],
       "sources": [
-        "https://edis.ifas.ufl.edu/",
-        "UF/IFAS EDIS for rodent/roach exclusion guidance and the weep-hole drainage function; cite the publication you actually used."
+        "https://edis.ifas.ufl.edu/in1269",
+        "Use UF/IFAS for general exclusion context only. Verify the specific building opening and approved mesh manufacturer instructions; this source does not establish mesh suitability for a weep hole or vent. Park an unsupported product use."
       ],
       "verify_notes": [
         "Verify the weep-hole drainage claim and the exclusion-material comparison against UF/IFAS before writing; omit anything unsourced.",
@@ -145,12 +145,12 @@
         }
       ],
       "sources": [
-        "https://edis.ifas.ufl.edu/",
-        "UF/IFAS EDIS for turf irrigation frequency/volume and wet-season disease claims; the Sarasota County utilities watering-restriction page for the current watering-day rules (verify and cite the live page)."
+        "https://gardeningsolutions.ifas.ufl.edu/care/irrigation/rain-sensors-and-gauges/",
+        "Use UF/IFAS for gauge placement and rainfall observation. Verify current Sarasota County watering restrictions on the exact county page before citing any schedule; avoid a universal weekly watering quota."
       ],
       "verify_notes": [
         "Verify the weekly-water figure and the disease claims against UF/IFAS; verify watering-day rules against the county's live page and date them; omit anything unsourced.",
-        "Never state a price for the gauge or for Waves service; lawn has no calculator flow \u2014 direct cost questions to /contact/.",
+        "Never state a price for the gauge or for Waves service; lawn has no calculator flow — direct cost questions to /contact/.",
         "Do not invent Waves inspection findings, local prevalence, product testing, task durations, or diagnostic certainty. Verify product suitability against current manufacturer documentation before drafting.",
         "Visual plan: one context image plus two distinct instructional views when accurate assets are available, and an article-specific ComparisonTable or PestEvidenceGrid with explicit supported props. No generic pest seasonality graphic, fabricated readings, source logos, or generated images presented as field evidence."
       ],
@@ -194,12 +194,12 @@
         }
       ],
       "sources": [
-        "https://edis.ifas.ufl.edu/",
-        "UF/IFAS EDIS for turf watering depth/frequency, overwatering symptoms, and the disease/pest claims; cite the publication you actually used."
+        "https://gardeningsolutions.ifas.ufl.edu/care/irrigation/better-lawn-on-less-water/",
+        "Use UF/IFAS for general turf watering context only. Verify the approved consumer meter manufacturer instructions and limitations; do not treat research on automated soil-moisture controllers as validation of a consumer probe or diagnose disease from a reading."
       ],
       "verify_notes": [
         "Verify every disease, pest, and soil claim against UF/IFAS; omit anything unsourced.",
-        "Do not attribute a specific moisture-scale number to 'correct' \u2014 describe the reading relative to the meter's own scale and root depth.",
+        "Do not attribute a specific moisture-scale number to 'correct' — describe the reading relative to the meter's own scale and root depth.",
         "No fungicide or pesticide is recommended in this post.",
         "Do not invent Waves inspection findings, local prevalence, product testing, task durations, or diagnostic certainty. Verify product suitability against current manufacturer documentation before drafting.",
         "Visual plan: one context image plus two distinct instructional views when accurate assets are available, and an article-specific ComparisonTable or PestEvidenceGrid with explicit supported props. No generic pest seasonality graphic, fabricated readings, source logos, or generated images presented as field evidence."
@@ -244,12 +244,12 @@
         }
       ],
       "sources": [
-        "https://edis.ifas.ufl.edu/",
-        "UF/IFAS EDIS for the catch-can / distribution-uniformity method and turf irrigation rates; the Manatee County watering-restriction page for current rules (verify and cite the live page)."
+        "https://gardeningsolutions.ifas.ufl.edu/care/tools-and-equipment/irrigation-system-maintenance/",
+        "Use UF/IFAS for the catch-container calibration method. Verify current Manatee County watering restrictions on the exact county page before citing any schedule; label worked measurements illustrative."
       ],
       "verify_notes": [
         "Verify the audit method and any uniformity figure against UF/IFAS; verify watering rules against the county's live page and date them; omit anything unsourced.",
-        "Never state prices; lawn has no calculator flow \u2014 direct cost questions to /contact/.",
+        "Never state prices; lawn has no calculator flow — direct cost questions to /contact/.",
         "Do not invent Waves inspection findings, local prevalence, product testing, task durations, or diagnostic certainty. Verify product suitability against current manufacturer documentation before drafting.",
         "Visual plan: one context image plus two distinct instructional views when accurate assets are available, and an article-specific ComparisonTable or PestEvidenceGrid with explicit supported props. No generic pest seasonality graphic, fabricated readings, source logos, or generated images presented as field evidence."
       ],
@@ -300,8 +300,8 @@
         }
       ],
       "sources": [
-        "https://edis.ifas.ufl.edu/",
-        "UF/IFAS EDIS for pest-sign identification (termite tubes, cockroach signs, rodent evidence) and inspection guidance; cite the publication you actually used."
+        "https://edis.ifas.ufl.edu/in1269",
+        "Use UF/IFAS for inspection and exclusion context. Retrieve exact primary identification guidance for each pest sign actually discussed; observation alone is not confirmation of a species or active infestation. Verify manufacturer instructions for the approved products."
       ],
       "verify_notes": [
         "Verify each pest-sign description against UF/IFAS; omit anything unsourced.",
