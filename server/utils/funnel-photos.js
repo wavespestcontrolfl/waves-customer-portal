@@ -25,10 +25,10 @@ const EXT_BY_MIME = {
  * funnel's photo table.
  *
  * @param {object} opts
- * @param {string} opts.table       photo table ('lawn_diagnostic_photos' | 'pest_identification_photos' | 'tree_shrub_identification_photos')
+ * @param {string} opts.table       photo table ('lawn_diagnostic_photos' | 'pest_identification_photos')
  * @param {string} opts.fkColumn    FK column pointing at the parent row
  * @param {string} opts.rowId       parent row id
- * @param {string} opts.keyPrefix   S3 photoType prefix (e.g. 'lawnfunnel' | 'pestid' | 'treeshrub')
+ * @param {string} opts.keyPrefix   S3 photoType prefix (e.g. 'lawnfunnel' | 'pestid')
  * @param {Array}  opts.photos      [{ data (base64), mimeType }]
  */
 async function storeFunnelPhotos({ table, fkColumn, rowId, keyPrefix, photos = [] }) {
@@ -43,7 +43,7 @@ async function storeFunnelPhotos({ table, fkColumn, rowId, keyPrefix, photos = [
       try {
         const uploadResult = await PhotoService.getUploadUrl(rowId, `${keyPrefix}_${i}`, ext);
         s3Key = uploadResult.key;
-         
+        // eslint-disable-next-line global-require
         const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
         const s3 = new S3Client({
           region: config.s3.region,
