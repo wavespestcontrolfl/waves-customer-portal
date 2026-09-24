@@ -18,8 +18,26 @@ exports.up = async function up(knex) {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.uuid('scheduled_service_id').notNullable().unique()
       .references('id').inTable('scheduled_services').onDelete('CASCADE');
-    t.uuid('lead_id')
-      .references('id').inTable('leads').onDelete('SET NULL');
+    // No FK to leads (round 6, unmerged migration — safe to rewrite in
+    // place; the CI database is rebuilt from scratch so nothing has this
+    // applied elsewhere). server/services/consultation-outcomes.js's
+    // recordOutcome locks `customers` FOR NO KEY UPDATE before its insert;
+    // that insert's own implicit FK KEY SHARE lock on a REFERENCED lead
+    // row would order after customers, and estimate-manual-acceptance.js's
+    // call-linkage-correction guard already locks `leads` FOR UPDATE
+    // BEFORE `customers` in that same transaction — FOR UPDATE conflicts
+    // with KEY SHARE, so the two orders form a real ABBA deadlock (caught
+    // by the pre-push auditor twice: once via the round-4 advisory lock,
+    // again via this FK once the row lock replaced it). No explicit lock
+    // order inside recordOutcome can satisfy both admin-leads.js's
+    // customers-before-leads order AND estimate-manual-acceptance.js's
+    // leads-before-customers order at once, so the FK — the chokepoint
+    // that forces the implicit lock — is removed instead. leads.id is
+    // never hard-deleted (soft-delete only, `deleted_at`), so there is no
+    // cascade behavior to lose; the column and its index stay, and the
+    // application still resolves/validates the link in JS
+    // (deriveLinkage/findSaleEvidenceForConsultation).
+    t.uuid('lead_id');
     t.uuid('customer_id')
       .references('id').inTable('customers').onDelete('SET NULL');
     t.uuid('technician_id')

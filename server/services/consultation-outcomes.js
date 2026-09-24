@@ -83,32 +83,67 @@ function makeError(message, statusCode, code) {
 // only `customers` FOR UPDATE (no leads). Locking `customers` FIRST, as
 // recordOutcome's only explicit row lock, matches every caller's order.
 //
-// WHY CUSTOMERS ONLY, NOT LEADS: recordOutcome's insert also references
-// lead_id (nullable FK), so its own INSERT still takes an implicit KEY
-// SHARE lock on that lead row — never a second EXPLICIT pre-lock. Three
-// reasons this is both sufficient and the safer choice:
-//   1. Every markWonForCustomer caller that could race an EXISTING
-//      customer's consultation always locks `customers` in its "both
-//      exist" path — admin-leads.js's FIRST-conversion branch (no
-//      customerId yet) only locks `leads`, but a not-yet-created customer
-//      cannot already have a consultation_outcomes row to race against, so
-//      there is nothing for recordOutcome to contend with there.
-//      Serializing on `customers` alone is provably sufficient — locking
-//      `leads` too adds no additional protection any real caller needs.
-//   2. estimate-manual-acceptance.js has its OWN, narrower `leads` FOR
-//      UPDATE (a call-linkage-correction guard, gated on
-//      `eng?.callLogId` + a specific lead_linkage marker) taken BEFORE its
-//      `customers` lock — the OPPOSITE relative order from admin-leads.js.
-//      That pre-existing cross-file inconsistency is unrelated to this
-//      lane and out of scope to resolve here; NOT locking `leads` from
-//      consultation-outcomes.js side-steps it entirely rather than
-//      guessing which of two contradictory orders to match.
-//   3. Because `customers` is the ONLY resource recordOutcome and
-//      markWonForCustomer's lock ever contend on (no advisory keys, no
-//      `leads`, no other table), a cycle needs two transactions to touch
-//      two SHARED resources in reversed order — with exactly one shared
-//      resource, taken as each side's very first touch of it, no cycle is
-//      possible.
+// ROUND 6 — WIDENED THE CHOKEPOINT, DID NOT JUST REORDER: round 5's own
+// "customers only, never an explicit leads pre-lock" reasoning (removed
+// here) was insufficient — it only considered an EXPLICIT lock statement,
+// not the INSERT's own UNAVOIDABLE implicit FK KEY SHARE lock on whatever
+// `lead_id` references. estimate-manual-acceptance.js's call-linkage-
+// correction guard (line ~579) locks `leads` FOR UPDATE BEFORE its
+// `customers` lock — the OPPOSITE order from admin-leads.js, a real,
+// pre-existing cross-file inconsistency this lane cannot resolve (touching
+// either of those files is out of scope). Because recordOutcome's INSERT
+// references `lead_id` at all, it is FORCED to take an implicit KEY SHARE
+// on that row no matter what recordOutcome itself explicitly pre-locks —
+// so no in-code lock ORDER inside consultation-outcomes.js can satisfy
+// both callers' orders simultaneously. The fix widens the chokepoint
+// instead: the migration (server/models/migrations/
+// 20260923000010_consultation_outcomes.js, this PR's own, unmerged — safe
+// to rewrite in place) DROPS the foreign key on `lead_id` (keeps the
+// column and its index; leads are soft-deleted only, so there was no
+// cascade behavior riding on the FK). With no FK, the INSERT takes NO lock
+// of any kind on the referenced lead row — recordOutcome's transaction
+// now holds `customers` FOR NO KEY UPDATE and, by construction, NO OTHER
+// ROW LOCK. `customers` is the only resource recordOutcome and
+// markWonForCustomer's lock ever contend on, so a cycle needs two
+// transactions to touch two SHARED resources in reversed order — with
+// exactly one shared resource, taken as each side's very first touch of
+// it, no cycle is possible.
+//
+// EVERY OTHER FK ON consultation_outcomes, checked the same way (does any
+// closeout/completion or estimate-accept transaction hold THAT referenced
+// row FOR UPDATE/UPDATE and then lock `customers`?):
+//   - customer_id → customers: safe BY CONSTRUCTION — recordOutcome holds
+//     this exact row itself, first; the INSERT's KEY SHARE on it is a
+//     no-op re-acquisition.
+//   - scheduled_service_id → scheduled_services: safe. The completion/
+//     closeout transaction (complete-scheduled-service.js
+//     completeScheduledService, persistRecord) explicitly documents and
+//     locks `customers FOR SHARE` BEFORE `scheduled_services FOR UPDATE`
+//     ("Customer FOR SHARE is taken BEFORE the visit lock — the same
+//     customer → visit order customer-dedupe's executeMerge uses"). An
+//     EARLIER `scheduled_services FOR UPDATE` in the same function
+//     (visitRecheck, the visit-group re-check) runs in its OWN separate
+//     `db.transaction(visitRecheck)` that commits and releases before
+//     persistRecord's transaction opens — never held concurrently with
+//     the later customers lock. estimate-converter.js's
+//     acquireConverterInvoiceDepositLocks (the estimate-accept deposit
+//     lock helper) takes `customers FOR KEY SHARE` THEN
+//     `scheduled_services FOR UPDATE`, and is only ever called (from
+//     convertEstimate) after that flow's own earlier `customers FOR
+//     UPDATE` (a stronger, already-held lock) — same order throughout.
+//   - technician_id → technicians: safe. `technicians FOR UPDATE` is
+//     taken in exactly one place repo-wide (admin-timetracking.js's PUT
+//     .../capabilities), a technician-record edit that never touches
+//     `customers` in the same transaction — no shared resource, so no
+//     cycle is possible regardless of order. The only other
+//     `technicians` lock reads (complete-scheduled-service.js,
+//     estimate-converter.js) are FOR SHARE, which doesn't conflict with
+//     KEY SHARE at all (Postgres row-lock matrix: FOR SHARE and FOR KEY
+//     SHARE never conflict with each other), so even a concurrent one is
+//     never a wait point.
+//   - There is no won_booking_id / won_estimate_id or other attribution
+//     FK on this table — won_at/won_via are plain timestamp/string
+//     columns, not foreign keys.
 async function lockCustomerRow(database, customerId) {
   if (!customerId) return;
   await database('customers').where({ id: customerId }).forNoKeyUpdate().first('id');
