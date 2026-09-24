@@ -884,7 +884,9 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
           // handled; an explicit null otherwise, so the merge onto a
           // standing task cannot keep stale booking instructions (codex
           // r33 P1).
-          follow_up_plan: (heldConflictPayload?.follow_up_plan && !(await followUpAlreadyOwnedOrHandled(trx, item.call_log_id)))
+          // …and never after a verdict that REJECTED the scheduling evidence
+          // (the retained-visit cleanup task also lands here) — codex r36 P1.
+          follow_up_plan: (heldConflictPayload?.follow_up_plan && !decision.scheduleDenied && !(await followUpAlreadyOwnedOrHandled(trx, item.call_log_id)))
             ? heldConflictPayload.follow_up_plan : null,
           scheduling_window: decision.approvedWindow,
           // The same live-else-snapshot choice the decision made (a
