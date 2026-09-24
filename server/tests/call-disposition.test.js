@@ -136,7 +136,7 @@ describe('v2-vs-v1 precedence (2026-09-24 call-agent audit)', () => {
       },
       outcome: { customerId: 'c-2' },
     });
-    expect(disposition).not.toBe('cancellation_processed');
+    expect(disposition).toBe('existing_customer_routed');
   });
 
   test('a reschedule request is never written as cancellation_processed — via the deterministic triage_flags path', () => {
@@ -147,7 +147,9 @@ describe('v2-vs-v1 precedence (2026-09-24 call-agent audit)', () => {
       },
       outcome: { isKnownCustomer: true },
     });
-    expect(disposition).not.toBe('cancellation_processed');
+    // Not a callback obligation either: the unworked-comms watcher pages
+    // every callback_task_created row, and an applied move never revises it.
+    expect(disposition).toBe('existing_customer_routed');
   });
 
   test('a genuine cancellation (not a reschedule) still processes as a cancellation', () => {
@@ -159,6 +161,19 @@ describe('v2-vs-v1 precedence (2026-09-24 call-agent audit)', () => {
       outcome: { isKnownCustomer: true },
     });
     expect(disposition).toBe('cancellation_processed');
+  });
+
+  test('a known customer\'s complaint escalates even when v2 recommends a generic disposition', () => {
+    const { disposition, reason } = decideDisposition({
+      extraction: {
+        call_nature: 'existing_customer_service',
+        customer_history: { prior_complaint_mentioned: true },
+        recommended_disposition: 'existing_customer_routed',
+      },
+      outcome: { isKnownCustomer: true },
+    });
+    expect(disposition).toBe('complaint_escalated');
+    expect(reason).toBe('complaint_from_known_customer');
   });
 
   test('a call that actually produced a booking is always booked, even when v2 recommends something else', () => {

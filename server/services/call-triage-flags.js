@@ -1120,28 +1120,6 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   for (const f of unknownFlags) {
     if (!failedOpenFlags.includes(f)) failedOpenFlags.push(f);
   }
-
-  // Commercial-quote authorization (2026-09-24, call-agent audit): a
-  // commercial/HOA-common-area caller who AGREED to a quoted price on THIS
-  // call has already cleared the reason commercial_requires_quote exists —
-  // the office doesn't need to go back and quote a price the caller already
-  // accepted. A live miss (2026-09-23 audit): a confirmed $100 commercial
-  // booking was recorded as lead_response_flow_triggered because this flag
-  // still blocked the appointment after the price was agreed. Demote to
-  // advisory (failedOpenFlags) exactly like the other recoverable flags — a
-  // commercial/HOA call that never reached an agreed price still blocks.
-  // Independent of opts.failOpen: an agreed price is direct evidence on
-  // THIS call, not a recovered contact-info field, so it applies to every
-  // call, not only the fail-open (known-customer) population.
-  const commercialPriceAgreed = extraction.service_request?.quoted_price_usd != null
-    && extraction.scheduling?.status === 'confirmed';
-  if (commercialPriceAgreed) {
-    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
-      if (f === 'commercial_requires_quote') { failedOpenFlags.push(f); return false; }
-      return true;
-    });
-  }
-
   const confirmedWithStart = extraction.scheduling?.status === 'confirmed'
     && !!extraction.scheduling?.confirmed_start_at;
   // Hoisted: the auto-route exit below also needs to know whether this booking
