@@ -246,6 +246,16 @@ async function promoteLinkedCustomerForProposalWin({ trx, customerId, today = et
     await trx('customers').where({ id: customerId }).update(stamps);
     logger.info(`[proposal-win] promoted linked customer ${customerId} on proposal win`);
   }
+  // Consultation-outcomes reconciliation: this proposal win is a real close
+  // for the customer — settle any open warm/cold consultation outcome
+  // within its 90-day window. Best-effort, savepoint-isolated inside
+  // markWonForCustomer (waves-db §5b); never blocks the win.
+  // `estimate_accept` is accurate: a proposal win runs through
+  // estimate-manual-acceptance.js, which marks the estimate row
+  // status='accepted' — the same evidence findSaleEvidenceForConsultation's
+  // sweep re-reads, so this win is sweep-covered like any accepted estimate.
+  await require('./consultation-outcomes')
+    .markWonForCustomer(customerId, { via: 'estimate_accept', trx });
 }
 
 // Create a NEW commercial customer for a no-customer proposal win.

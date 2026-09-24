@@ -695,6 +695,58 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // HOURLY :27 — Consultation-outcome reconciliation sweep. THE COMPLETENESS
+  // GUARANTEE behind the direct hooks at admin-leads.js/admin-schedule.js
+  // (see the RECONCILIATION MODEL note atop consultation-outcomes.js): those
+  // two hooks are the fast path at the two main manual-booking routes, but
+  // wiring markWonForCustomer into every scheduled_services insert site
+  // one-by-one does not converge (estimate-accept, proposal-win, the
+  // funnel, voice-relay confirm, re-service, and whatever ships next all
+  // create real bookings too). This sweep scans every open (warm/cold)
+  // consultation outcome within its 90-day attribution window and re-runs
+  // the SAME evidence check (findSaleEvidenceForConsultation) the hooks
+  // use, so any OTHER insert path is reconciled within the hour regardless.
+  // Idempotent (the guarded UPDATE only ever touches a still-open row) and
+  // best-effort per row (one row's failure is logged and skipped, never
+  // aborts the rest of the sweep). Ungated — ordinarily-dark by construction
+  // rather than behind a GATE_*: a no-op beyond a handful of row-lock
+  // queries whenever there are no open outcomes to reconcile. See
+  // server/services/consultation-outcomes.js.
+  //
+  // Round 12 fix (codex P1 scheduler.js:6918, post-push): this registration
+  // MUST sit above the GATE_CRON_JOBS early return below — the comment
+  // above already said "ungated," but the registration itself was placed
+  // BELOW that return, so with cron jobs off (GATE_CRON_JOBS=false) this
+  // cron.schedule call was never reached at all: nothing reconciled
+  // bookings from any no-hook path (e.g. booking.js's public booking flow)
+  // while crons were off. Registered here, alongside settleDeadRunning and
+  // the cancel-notice boundary maintenance above — the established pattern
+  // in this function for "runs regardless of GATE_CRON_JOBS."
+  // =========================================================================
+  cron.schedule('27 * * * *', async () => {
+    try {
+      await runExclusive('consultation-outcome-reconcile', async () => {
+        const { reconcileOpenConsultationOutcomes } = require('./consultation-outcomes');
+        const result = await reconcileOpenConsultationOutcomes();
+        if (result.won > 0 || result.no_show_repaired > 0 || result.reopened > 0 || result.errors > 0) {
+          logger.info(`[consultation-outcome-reconcile] scanned=${result.scanned} won=${result.won} no_show_repaired=${result.no_show_repaired || 0} reopened=${result.reopened || 0} errors=${result.errors}`);
+        }
+        // Codex #4710 r15 P2 :733: errors > 0 must FAIL job health, same
+        // guard the auto-dispatch cron above uses — reconcileOpenConsultationOutcomes
+        // is best-effort per row (one row's failure never aborts the sweep),
+        // but a sweep that logged errors and still resolved read as a green
+        // consultation-outcome-reconcile in job_health, hiding a degraded
+        // pass (e.g. a systemic evidence-lookup failure) behind a "success".
+        if (result.errors > 0) {
+          throw new Error(`consultation-outcome reconcile sweep unhealthy: errors=${result.errors} scanned=${result.scanned}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Consultation-outcome reconcile tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.
   if (!isEnabled('cronJobs')) {
