@@ -234,13 +234,6 @@ const CUSTOMER_UPDATE_TOOL_NAMES = new Set(['update_customer', 'bulk_update_cust
 // it carries the same derived-effect disclosure.
 const ADDRESS_UPDATE_KEYS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 
-// Derived writes the lead-status executors perform BESIDE the status column
-// (GH r10 P2): the transition mirrors onto the lead's ad_service_attribution
-// funnel row via the monotonic bridge (attribution reporting moves), and a
-// lead_activities status-change row is appended (audit history) — both in the
-// single (leads-tools updateLeadStatus) and bulk paths. The exact-effects
-// contract must disclose them, keyed off the SAME status→stage mapping the
-// bridge consumes so the disclosure fires exactly when the funnel write does.
 // One entry per excluded terminal stop, as assign_technician /
 // swap_tech_assignments report them (`{ id, status, customer? }`): the card
 // names WHICH stops stay behind, never just how many (Codex round 3 P1).
@@ -250,6 +243,13 @@ function describeSkippedTerminal(skipped) {
     .join(', ');
 }
 
+// Derived writes the lead-status executors perform BESIDE the status column
+// (GH r10 P2): the transition mirrors onto the lead's ad_service_attribution
+// funnel row via the monotonic bridge (attribution reporting moves), and a
+// lead_activities status-change row is appended (audit history) — both in the
+// single (leads-tools updateLeadStatus) and bulk paths. The exact-effects
+// contract must disclose them, keyed off the SAME status→stage mapping the
+// bridge consumes so the disclosure fires exactly when the funnel write does.
 function pushLeadStatusDerivedEffects(push, newStatus, { bulk = false } = {}) {
   const { LEAD_STATUS_TO_FUNNEL_STAGE } = require('../lead-funnel-bridge');
   const stage = LEAD_STATUS_TO_FUNNEL_STAGE[newStatus];
