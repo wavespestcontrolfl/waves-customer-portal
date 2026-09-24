@@ -46,7 +46,8 @@ const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = 
 const { detectServiceLine, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
-const { applyCustomerVisibleServiceRecordFilter } = require('../services/pest-pressure/history-filter');
+const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
+const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
 const { tipsForVisit } = require('../services/service-report/tip-library');
 
@@ -230,22 +231,6 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 //
 // 404 on unknown service; admin-dispatch's existing requireTechOrAdmin
 // gate covers auth.
-async function customerHasPriorVisitOnLine(knex, { customerId, serviceLine }) {
-  if (!customerId) return true;
-  const query = knex('service_records')
-    .where('customer_id', customerId)
-    .where('status', 'completed');
-  applyCustomerVisibleServiceRecordFilter(query);
-  // Legacy rows with no service_line count as prior visits — the same
-  // fallback Pest Pressure's own history lookup uses (orchestrate.js).
-  if (serviceLine) {
-    query.where(function priorServiceLine() {
-      this.where('service_line', serviceLine).orWhereNull('service_line');
-    });
-  }
-  return Boolean(await query.first('id'));
-}
-
 router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
@@ -272,7 +257,12 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
     const firstVisit = allowed && mayReadHistory
       ? !(await customerHasPriorVisitOnLine(db, { customerId: svc.customer_id, serviceLine }))
       : false;
-    res.json({ allowed, firstVisit });
+    // The picker caption names what each tap means using the ACTIVE labels,
+    // so a label set edited in Settings never contradicts the report.
+    const scaleLabels = allowed
+      ? [0, 1, 2, 3, 4, 5].map((n) => resolvePestPressureLabel(n, config?.labels)?.name || null)
+      : null;
+    res.json({ allowed, firstVisit, scaleLabels });
   } catch (err) { next(err); }
 });
 

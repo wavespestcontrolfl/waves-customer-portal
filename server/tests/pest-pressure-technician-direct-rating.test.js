@@ -109,6 +109,8 @@ describe('calculatePestPressureScore — technician direct rating override', () 
     expect(result.componentScores).toEqual({ technicianActivityRating: { value: n, weight: 100, present: true } });
     expect(result.componentWeights).toEqual({ technicianActivityRating: 100 });
     expect(result.missingComponents).toEqual([]);
+    // Different algorithm, different version (codex r4 P2).
+    expect(result.calculationVersion).toBe('direct-1.0');
     expect(scoreSourceFromComponents(result.componentScores)).toBe('technician_rating');
     expect(scoreSourceFromComponents(JSON.stringify(result.componentScores))).toBe('technician_rating');
   });
@@ -146,6 +148,7 @@ describe('calculatePestPressureScore — technician direct rating override', () 
     expect(result.score).toBe(1.0);
     expect(result.scoreSource).toBe('blended');
     expect(scoreSourceFromComponents(result.componentScores)).toBe('blended');
+    expect(result.calculationVersion).toBe(DEFAULT_CONFIG.calculationVersion);
   });
 
   test('rejects a non-integer technicianDirectRating', () => {

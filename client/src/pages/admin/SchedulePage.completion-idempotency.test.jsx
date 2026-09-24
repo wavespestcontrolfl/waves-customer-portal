@@ -7,6 +7,7 @@ import {
   SIDE_EFFECTS_GIVE_UP_MESSAGE,
   completionCrossKeyCompleted,
   completionPreferencesNeedDraft,
+  pestRatingScaleCaptionText,
   completionResumeOwedError,
   completionReconcilePrompt,
   completionReviewSuppressionReason,
@@ -444,5 +445,15 @@ describe("completionResumeOwedError", () => {
     expect(completionResumeOwedError({ status: 409, code: "completion_resume_payload_mismatch" })).toBe(false);
     expect(completionResumeOwedError({ status: 500, message: "boom" })).toBe(false);
     expect(completionResumeOwedError(null)).toBe(false);
+  });
+});
+
+describe("pestRatingScaleCaptionText (codex r4 P2)", () => {
+  it("names the default six-band scale without active labels", () => {
+    expect(pestRatingScaleCaptionText(null)).toBe("0 = none · 1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = high.");
+  });
+  it("uses the active labels the gate resolved", () => {
+    expect(pestRatingScaleCaptionText(["Very Low", "Very Low", "Low", "Moderate", "Elevated", "Severe"]))
+      .toBe("0 = very low · 1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = severe.");
   });
 });

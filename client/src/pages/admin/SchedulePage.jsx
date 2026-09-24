@@ -958,6 +958,20 @@ export function formatReentryStepperMinutes(min) {
   return rem ? `${hr} hr ${rem} min` : `${hr} hr`;
 }
 
+const DEFAULT_PEST_RATING_SCALE = ["none", "very low", "low", "moderate", "elevated", "high"];
+
+// "0 = none · 1 = very low · … · 5 = high" from the active labels (the
+// tech-rating-allowed gate resolves each integer against them).
+export function pestRatingScaleCaptionText(labels) {
+  const names = [0, 1, 2, 3, 4, 5].map((n) => {
+    const name = Array.isArray(labels) && typeof labels[n] === "string" && labels[n].trim()
+      ? labels[n].trim().toLowerCase()
+      : DEFAULT_PEST_RATING_SCALE[n];
+    return `${n} = ${name}`;
+  });
+  return `${names.join(" · ")}.`;
+}
+
 export function completionPreferencesNeedDraft({
   sendSms = true,
   includePayLink = true,
@@ -11477,6 +11491,10 @@ export function CompletionPanel({
   // the late first-visit prefill must never overwrite either. A dedicated
   // ref — the draft snapshot ref is replaced on every autosave.
   const clientPestRatingSetByTechRef = useRef(false);
+  // Active label names for 0..5 from the gate, so the caption never
+  // contradicts labels edited in Settings; falls back to the default scale.
+  const [pestRatingScaleLabels, setPestRatingScaleLabels] = useState(null);
+  const pestRatingScaleCaption = pestRatingScaleCaptionText(pestRatingScaleLabels);
   useEffect(() => {
     let cancelled = false;
     // Per-service `allowed` boolean from the server. The endpoint
@@ -11498,6 +11516,7 @@ export function CompletionPanel({
         if (cancelled) return;
         const allowed = !!(body && body.allowed === true);
         setTechRatingAllowed(allowed);
+        if (allowed && Array.isArray(body.scaleLabels)) setPestRatingScaleLabels(body.scaleLabels);
         if (allowed && body.firstVisit === true) {
           setClientPestRatingDefault(5);
           // Never over a value the tech already tapped or a restored draft
@@ -15847,6 +15866,11 @@ export function CompletionPanel({
       // strict validation passes.
       if (clientPestRating != null && Number.isInteger(clientPestRating)) {
         body.clientPestRating = clientPestRating;
+      } else if (clientPestRatingSetByTechRef.current) {
+        // A deliberate clear. Without this the server applies the
+        // first-visit 5 (owner ruling 2026-09-24) — which it also does when
+        // the picker's gate hadn't answered before submit.
+        body.clientPestRatingCleared = true;
       }
       // Typed specialty findings payload. Skipped on incomplete visits —
       // the server ignores typed findings for them anyway.
@@ -18471,7 +18495,7 @@ export function CompletionPanel({
                     textAlign: "center",
                   }}
                 >
-                  0 = none · 1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = high. Tap a number again to clear.
+                  {pestRatingScaleCaption} Tap a number again to clear.
                   {clientPestRatingDefault === 5 && (
                     <div style={{ marginTop: 4 }}>
                       First visit — starts at 5. Lower it if you saw less.
@@ -20854,7 +20878,7 @@ export function CompletionPanel({
                   color: D.muted,
                 }}
               >
-                0 = none · 1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = high. Tap a number again to clear.
+                {pestRatingScaleCaption} Tap a number again to clear.
                 {clientPestRatingDefault === 5 && (
                   <div style={{ marginTop: 4 }}>
                     First visit — starts at 5. Lower it if you saw less.

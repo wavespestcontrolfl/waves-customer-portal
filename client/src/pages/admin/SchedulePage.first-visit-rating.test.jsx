@@ -30,11 +30,12 @@ function stubFetch() {
   }));
 }
 
-async function mount() {
+async function mount(onSubmit = vi.fn().mockResolvedValue({})) {
   await act(async () => {
     render(<StrictMode><CompletionPanel service={service} products={[]}
-      onClose={vi.fn()} onSubmit={vi.fn().mockResolvedValue({})} /></StrictMode>);
+      onClose={vi.fn()} onSubmit={onSubmit} /></StrictMode>);
   });
+  return onSubmit;
 }
 
 async function answer(body) {
@@ -114,5 +115,36 @@ describe('first-visit pest activity rating', () => {
     await answer({ allowed: true, firstVisit: false });
     fireEvent.click(screen.getAllByRole('button', { name: 'Rate pest activity 2 out of 5' })[0]);
     expect(new Set(pressed())).toEqual(new Set(['Rate pest activity 2 out of 5']));
+  });
+
+  it('sends an explicit clear so the server does not apply the first-visit 5', async () => {
+    const onSubmit = await mount();
+    await answer({ allowed: true, firstVisit: true });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Rate pest activity 5 out of 5' })[0]);
+    expect(pressed()).toEqual([]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
+    });
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.clientPestRatingCleared).toBe(true);
+    expect(body).not.toHaveProperty('clientPestRating');
+  });
+
+  it('sends the prefilled 5 with no clear flag', async () => {
+    const onSubmit = await mount();
+    await answer({ allowed: true, firstVisit: true });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
+    });
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.clientPestRating).toBe(5);
+    expect(body).not.toHaveProperty('clientPestRatingCleared');
+  });
+
+  it('captions the scale with the active labels from the gate', async () => {
+    await mount();
+    await answer({ allowed: true, firstVisit: false, scaleLabels: ['Very Low', 'Very Low', 'Low', 'Moderate', 'Elevated', 'Severe'] });
+    expect(screen.getAllByText(/0 = very low · 1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = severe\./).length).toBeGreaterThan(0);
   });
 });

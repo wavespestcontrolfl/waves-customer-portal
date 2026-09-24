@@ -62,6 +62,7 @@ const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionCharge
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
+const { firstVisitDefaultRating } = require('../services/pest-pressure/first-visit');
 const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
@@ -2423,6 +2424,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       manualHeightIn = null,        // turf height-of-cut gauge reading (lawn) — OPTIONAL
       gaugePhoto = null,            // on-site lawn-length photo (data URL) — OPTIONAL
       clientPestRating = null,
+      // true when the tech deliberately cleared the picker — only then may
+      // a first visit complete without the default 5.
+      clientPestRatingCleared = false,
       structuredFindings = null,
       companionFindings = null,
       activityScore = null,
@@ -3387,6 +3391,30 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
+
+    // Owner ruling 2026-09-24: a customer's first visit on this line starts
+    // the technician rating at 5. The picker prefills it, but a submit that
+    // beats the picker's gate (or a failed gate fetch) sends no rating — so
+    // the server applies the same default unless the tech explicitly
+    // cleared it. Same gates as the rating write below.
+    let effectiveClientPestRating = clientPestRating;
+    try {
+      effectiveClientPestRating = await firstVisitDefaultRating({
+        knex: db,
+        clientPestRating,
+        clientPestRatingCleared,
+        visitOutcome,
+        completionAllowsRating: completionAllowsTechnicianPestRating({ typedFindingsType, isInternalOnlyCompletion }),
+        configAllowsRating: async () => pestPressureConfigAllowsTechnicianRating({
+          pestPressureConfig: await loadPestPressureConfig(db),
+          serviceLine: reportServiceLine,
+        }),
+        customerId: svc.customer_id,
+        serviceLine: reportServiceLine,
+      });
+    } catch (err) {
+      logger.warn(`[completion] first-visit rating default skipped: ${err?.message || err}`);
+    }
 
     // Gauge-reading capture (flag-gated; UAT → rollout). On a LAWN visit the tech
     // may log an OPTIONAL maintained-height reading and/or an OPTIONAL on-site
@@ -4912,7 +4940,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // 2026-07-30).
             observations: reportObservations,
             recommendations: reportRecommendations,
-            pestActivityRating: Number.isInteger(clientPestRating) ? clientPestRating : null,
+            pestActivityRating: Number.isInteger(effectiveClientPestRating) ? effectiveClientPestRating : null,
             visitContext: completionVisitContext,
           };
           const deterministicFallback = () => {
@@ -6342,7 +6370,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // data (column gets set but never read). Inline-load the
           // config inside the txn so we read a consistent snapshot with
           // the score calc that runs a few lines below.
-          if (clientPestRating != null
+          if (effectiveClientPestRating != null
             && completionAllowsTechnicianPestRating({ typedFindingsType, isInternalOnlyCompletion })
             && serviceRecordCols.client_pest_rating
             && serviceRecordCols.client_pest_rating_source) {
@@ -6351,7 +6379,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               pestPressureConfig,
               serviceLine: reportServiceLine,
             })) {
-              recordInsert.client_pest_rating = clientPestRating;
+              recordInsert.client_pest_rating = effectiveClientPestRating;
               recordInsert.client_pest_rating_source = 'technician';
               if (serviceRecordCols.client_pest_rating_at) {
                 recordInsert.client_pest_rating_at = trx.fn.now();
@@ -6545,7 +6573,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // found, and a contradictory zero would print on the customer
           // report. Only an explicit 0 rating states it (codex P2 r1).
           && !(completionProfile?.followupPolicy === 'alert'
-            && (activityScore ?? clientPestRating) == null)
+            && (activityScore ?? effectiveClientPestRating) == null)
           && shouldInsertNoActivityFinding({
             visitOutcome,
             observations: reportObservations,
@@ -6555,7 +6583,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // activityScore only arrives on typed completions (which are
             // already excluded above) — without the client rating the guard
             // never fired on ordinary visits (codex P1 #3043).
-            activityScore: activityScore ?? clientPestRating,
+            activityScore: activityScore ?? effectiveClientPestRating,
           })
         ) {
           await trx('service_findings').insert({

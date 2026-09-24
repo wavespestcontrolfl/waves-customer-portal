@@ -34,6 +34,8 @@ const INPUT_KEYS = Object.freeze(Object.keys(INPUT_KEY_TO_WEIGHT_KEY));
 
 // Component key recorded when a technician's direct rating is the score.
 const DIRECT_COMPONENT_KEY = 'technicianActivityRating';
+// calculation_version stamped on direct-score rows (column is varchar(20)).
+const DIRECT_CALCULATION_VERSION = 'direct-1.0';
 
 function scoreSourceFromComponents(componentScores) {
   let parsed = componentScores;
@@ -268,7 +270,10 @@ function calculatePestPressureScore(input, config) {
       componentScores: { [DIRECT_COMPONENT_KEY]: { value: score, weight: 100, present: true } },
       componentWeights: { [DIRECT_COMPONENT_KEY]: 100 },
       missingComponents: [],
-      calculationVersion: config.calculationVersion,
+      // A different algorithm from the weighted blend, so a different
+      // version: blended rows keep the config's version (that formula is
+      // unchanged); direct rows are reconstructable from this alone.
+      calculationVersion: DIRECT_CALCULATION_VERSION,
       configSnapshot: baseSnapshot,
     }
     : buildSharedAudit(scoringComponents, weightDenominator);
@@ -289,6 +294,7 @@ function calculatePestPressureScore(input, config) {
 module.exports = {
   INPUT_KEYS,
   DIRECT_COMPONENT_KEY,
+  DIRECT_CALCULATION_VERSION,
   scoreSourceFromComponents,
   INPUT_KEY_TO_WEIGHT_KEY,
   calculatePestPressureScore,
