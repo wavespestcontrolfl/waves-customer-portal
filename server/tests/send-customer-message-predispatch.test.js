@@ -173,6 +173,7 @@ test('a final provider predicate is forwarded without early invocation or serial
 
 test('canonical delivery borrows only a branded caller reservation and returns its actual provider context privately', async () => {
   const coordination = require('../services/messaging/provider-handoff-reservation');
+  const TwilioService = require('../services/twilio');
   const providerAcceptedAt = new Date('2026-09-24T20:00:00.000Z');
   const handle = coordination.borrowProviderHandoffReservation({
     reservationId: '11111111-1111-4111-8111-111111111111',
@@ -183,6 +184,7 @@ test('canonical delivery borrows only a branded caller reservation and returns i
     adminUserId: '22222222-2222-4222-8222-222222222222',
   });
   const prepare = jest.spyOn(coordination, 'prepareProviderHandoffReservation');
+  const derive = jest.spyOn(TwilioService, 'deriveOutboundNumber');
   isEnabled.mockImplementation((gate) => gate === 'smsGratitudeReplies');
   sendViaTwilio.mockImplementationOnce(async (providerInput, hooks) => {
     expect(providerInput).not.toHaveProperty('providerHandoffReservation');
@@ -212,6 +214,7 @@ test('canonical delivery borrows only a branded caller reservation and returns i
   });
 
   expect(prepare).not.toHaveBeenCalled();
+  expect(derive).not.toHaveBeenCalled();
   expect(result.reservationContext).toMatchObject({
     body: 'Final normalized body',
     fromNumber: '+19413529161',
@@ -222,6 +225,54 @@ test('canonical delivery borrows only a branded caller reservation and returns i
   expect(JSON.stringify(result)).not.toContain('reservationContext');
   expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('providerHandoffReservation');
   prepare.mockRestore();
+  derive.mockRestore();
+});
+
+test('canonical provider sender derivation failure is a retryable definite non-send', async () => {
+  const TwilioService = require('../services/twilio');
+  const derive = jest.spyOn(TwilioService, 'deriveOutboundNumber')
+    .mockRejectedValueOnce(new Error('location lookup unavailable'));
+  isEnabled.mockImplementation((gate) => gate === 'smsGratitudeReplies');
+  try {
+    const result = await sendCustomerMessage({
+      ...BASE_INPUT,
+      audience: 'customer',
+      customerId: 'customer-1',
+      identityTrustLevel: 'phone_matches_customer',
+    });
+
+    expect(result).toMatchObject({
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      retryable: true,
+      code: 'PROVIDER_HANDOFF_PREPARATION_FAILED',
+    });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  } finally {
+    derive.mockRestore();
+  }
+});
+
+test('canonical coordination does not derive or prepare while its gate is off', async () => {
+  const coordination = require('../services/messaging/provider-handoff-reservation');
+  const TwilioService = require('../services/twilio');
+  const derive = jest.spyOn(TwilioService, 'deriveOutboundNumber');
+  const prepare = jest.spyOn(coordination, 'prepareProviderHandoffReservation');
+  isEnabled.mockReturnValue(false);
+  try {
+    await expect(sendCustomerMessage({
+      ...BASE_INPUT,
+      audience: 'customer',
+      customerId: 'customer-1',
+      identityTrustLevel: 'phone_matches_customer',
+    })).resolves.toMatchObject({ sent: true });
+    expect(derive).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+  } finally {
+    derive.mockRestore();
+    prepare.mockRestore();
+  }
 });
 
 test('a successful caller boundary preserves its finite copy deadline', async () => {

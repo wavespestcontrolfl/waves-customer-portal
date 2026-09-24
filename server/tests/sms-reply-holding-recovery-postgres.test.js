@@ -271,16 +271,17 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeUndefined();
   });
 
-  test.each([false, true])('accepted push coordination with ordinary proof row %s preserves exactly one receipt', async (hasProof) => {
+  test.each(['none', 'ordinary', 'scheduled', 'unmarked phone'])('accepted push coordination with %s proof preserves exactly one valid receipt', async (proofKind) => {
     const prepared = await providerCoordination.prepareProviderHandoffReservation({
       to: '+12025550101', fromNumber: '+19413529161', body: 'Push body', messageType: 'receipt',
     });
     const providerAcceptedAt = new Date();
-    if (hasProof) {
+    if (proofKind !== 'none') {
       await trx('sms_log').insert({
-        id: randomUUID(), direction: 'outbound', from_phone: 'push', to_phone: '+12025550101',
+        id: randomUUID(), direction: 'outbound', from_phone: proofKind === 'ordinary' ? 'push' : '+19413180000', to_phone: '+12025550101',
         message_body: 'Push body', message_type: 'receipt', status: 'sent', twilio_sid: null, created_at: providerAcceptedAt,
-        metadata: { channel: 'push', providerAccepted: true },
+        metadata: { channel: 'push', providerAccepted: true,
+          ...(proofKind === 'scheduled' ? { push_settled_without_proof: true } : {}) },
       });
     }
     providerCoordination.captureProviderContext(prepared.handle, {
@@ -292,7 +293,7 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     });
     expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
     const reservation = await trx('sms_log').where({ id: prepared.handle.reservationId }).first();
-    if (hasProof) expect(reservation).toBeUndefined();
+    if (['ordinary', 'scheduled'].includes(proofKind)) expect(reservation).toBeUndefined();
     else expect(reservation).toMatchObject({ from_phone: 'push', status: 'sent', twilio_sid: null });
   });
 
@@ -352,11 +353,11 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     })).resolves.toBe(advanced);
   });
 
-  test.each([
+  test.each(['ordinary', 'scheduled'].flatMap(kind => [
     ['an older matching', 'notification-1', -60 * 60 * 1000, true],
     ['an older different', 'notification-2', -60 * 60 * 1000, false],
     ['a same-window different', 'notification-2', 0, false],
-  ])('a push proof with %s notification identity removes only a true dedup reservation', async (_label, proofNotificationId, proofOffsetMs, removed) => {
+  ].map(values => [kind, ...values])))('a %s push proof with %s notification identity removes only a true dedup reservation', async (kind, _label, proofNotificationId, proofOffsetMs, removed) => {
     const prepared = await providerCoordination.prepareProviderHandoffReservation({
       to: '+12025550101', fromNumber: '+19413529161', body: 'Deduped push body', messageType: 'receipt',
     });
@@ -366,10 +367,11 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
       updated_at: reservationCreatedAt,
     });
     await trx('sms_log').insert({
-      id: randomUUID(), direction: 'outbound', from_phone: 'push', to_phone: '+12025550101',
+      id: randomUUID(), direction: 'outbound', from_phone: kind === 'ordinary' ? 'push' : '+19413180000', to_phone: '+12025550101',
       message_body: 'Deduped push body', message_type: 'receipt', status: 'sent', twilio_sid: null,
       created_at: new Date(reservationCreatedAt.getTime() + proofOffsetMs),
-      metadata: { channel: 'push', providerAccepted: true, push_notification_id: proofNotificationId },
+      metadata: { channel: 'push', providerAccepted: true, push_notification_id: proofNotificationId,
+        ...(kind === 'scheduled' ? { push_settled_without_proof: true } : {}) },
     });
     providerCoordination.captureProviderContext(prepared.handle, {
       to: '+12025550101', fromNumber: 'push', body: 'Deduped push body', messageType: 'receipt',

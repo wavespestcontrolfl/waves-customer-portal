@@ -197,7 +197,8 @@ function preserveSoleAcceptedReplyReceipts(query) {
         AND receipt.status IN ('queued', 'sent', 'delivered', 'failed', 'undelivered', 'canceled')
         AND (
           receipt.twilio_sid ~* '^(SM|MM)[a-f0-9]{32}$'
-          OR (receipt.from_phone = 'push'
+          OR ((receipt.from_phone = 'push'
+              OR receipt.metadata->>'push_settled_without_proof' = 'true')
             AND receipt.metadata->>'channel' = 'push'
             AND receipt.metadata->>'providerAccepted' = 'true')
         )
@@ -207,7 +208,8 @@ function preserveSoleAcceptedReplyReceipts(query) {
           OR (
             sms_log.twilio_sid IS NULL
             AND sms_log.metadata->>'provider_channel' = 'push'
-            AND receipt.from_phone = 'push'
+            AND (receipt.from_phone = 'push'
+              OR receipt.metadata->>'push_settled_without_proof' = 'true')
             AND receipt.to_phone = sms_log.to_phone
             AND receipt.message_body IS NOT DISTINCT FROM sms_log.message_body
             AND receipt.message_type IS NOT DISTINCT FROM sms_log.message_type

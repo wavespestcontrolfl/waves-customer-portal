@@ -98,6 +98,56 @@ async function prepareProviderHandoffReservation({
   return { handle };
 }
 
+function preparationBlock(code = 'PROVIDER_HANDOFF_PREPARATION_FAILED', reason = 'Provider coordination could not be established') {
+  return {
+    deliveryOutcome: 'not_sent',
+    retryable: true,
+    code,
+    reason,
+    validator: 'provider_handoff_reservation',
+  };
+}
+
+// One acquisition contract for both the canonical router and direct Twilio
+// callers. Existing branded handles are borrowed without sender derivation or
+// reservation preparation, so their owner remains responsible for settlement.
+// Sender derivation is deliberately lazy and runs only for a new reservation
+// after the caller's feature/apply decision passes.
+async function acquireProviderHandoffReservation({
+  existingHandle = null,
+  applies = false,
+  reservation = {},
+  resolveFromNumber = null,
+} = {}) {
+  if (module.exports.isProviderHandoffHandle(existingHandle)) {
+    return { handle: existingHandle, owns: false, block: null };
+  }
+
+  try {
+    if (!applies) return { handle: null, owns: false, block: null };
+
+    const fromNumber = reservation.fromNumber
+      || (typeof resolveFromNumber === 'function' ? await resolveFromNumber() : null);
+    const prepared = await module.exports.prepareProviderHandoffReservation({
+      ...reservation,
+      fromNumber,
+    });
+    if (prepared?.blocked) {
+      return {
+        handle: null,
+        owns: false,
+        block: preparationBlock(prepared.code, prepared.reason),
+      };
+    }
+    if (!prepared?.handle) {
+      return { handle: null, owns: false, block: preparationBlock() };
+    }
+    return { handle: prepared.handle, owns: true, block: null };
+  } catch {
+    return { handle: null, owns: false, block: preparationBlock() };
+  }
+}
+
 function borrowProviderHandoffReservation({
   reservationId, to, fromNumber, body, messageType, adminUserId = null,
 } = {}) {
@@ -197,11 +247,23 @@ function settleProviderHandoffReservation(handle) {
   return pending;
 }
 
+async function finalizeProviderHandoffReservation({ handle, outcome = {}, settle = false } = {}) {
+  if (!handle) return true;
+  // Recording always precedes settlement so the reservation owner sees the
+  // final accepted/not-sent/uncertain result. Direct borrowed handles pass
+  // settle=false, and settleProviderHandoffReservation also leaves every
+  // caller-owned handle for its owner.
+  module.exports.recordProviderOutcome(handle, outcome);
+  if (!settle) return true;
+  return module.exports.settleProviderHandoffReservation(handle);
+}
+
 module.exports = {
   canonicalCoordinationApplies,
   directCoordinationApplies,
   trustedGratitudeOwnsReservation,
   gratitudeReservationOwner,
+  acquireProviderHandoffReservation,
   prepareProviderHandoffReservation,
   borrowProviderHandoffReservation,
   isProviderHandoffHandle,
@@ -209,5 +271,6 @@ module.exports = {
   recordProviderOutcome,
   attachReservationContext,
   settleProviderHandoffReservation,
+  finalizeProviderHandoffReservation,
   normalizeRecipient,
 };

@@ -758,48 +758,38 @@ async function sendCustomerMessageCore(input) {
   // re-check the window without another opaque caller await or a DB lock.
   providerPreparationCheck.isStillValid = () => checkSendWindow(sendInput, policy, contactState)?.ok === true;
 
-  let providerCoordinationBlock = null;
-  if (!providerHandoffReservation
-    && providerCoordination.canonicalCoordinationApplies(input, { providerPreSendCheck, withSmsHandoff })) {
-    try {
+  const acquiredProviderHandoff = await providerCoordination.acquireProviderHandoffReservation({
+    existingHandle: providerHandoffReservation,
+    applies: providerCoordination.canonicalCoordinationApplies(
+      input,
+      { providerPreSendCheck, withSmsHandoff },
+    ),
+    reservation: {
+      to: sendInput.to,
+      customerId: sendInput.customerId,
+      fromNumber: sendInput.metadata?.fromNumber,
+      body: sendInput.body,
+      messageType: sendInput.metadata?.original_message_type || mapPurposeToMessageType(sendInput.purpose),
+      adminUserId: sendInput.metadata?.adminUserId,
+    },
+    resolveFromNumber: async () => {
       const TwilioService = require('../twilio');
-      const frozenFromNumber = sendInput.metadata?.fromNumber || await TwilioService.deriveOutboundNumber({
+      return TwilioService.deriveOutboundNumber({
         customerLocationId: sendInput.metadata?.customerLocationId,
         customerId: sendInput.customerId,
       });
-      const prepared = await providerCoordination.prepareProviderHandoffReservation({
-        to: sendInput.to,
-        customerId: sendInput.customerId,
-        fromNumber: frozenFromNumber,
-        body: sendInput.body,
-        messageType: sendInput.metadata?.original_message_type || mapPurposeToMessageType(sendInput.purpose),
-        adminUserId: sendInput.metadata?.adminUserId,
-      });
-      if (prepared.blocked) {
-        providerCoordinationBlock = {
-          sent: false,
-          blocked: true,
-          deliveryOutcome: 'not_sent',
-          retryable: true,
-          code: prepared.code,
-          error: prepared.reason,
-          validator: 'provider_handoff_reservation',
-        };
-      } else {
-        providerHandoffReservation = prepared.handle;
-      }
-    } catch {
-      providerCoordinationBlock = {
-        sent: false,
-        blocked: true,
-        deliveryOutcome: 'not_sent',
-        retryable: true,
-        code: 'PROVIDER_HANDOFF_PREPARATION_FAILED',
-        error: 'Provider coordination could not be established',
-        validator: 'provider_handoff_reservation',
-      };
-    }
-  }
+    },
+  });
+  providerHandoffReservation = acquiredProviderHandoff.handle;
+  const providerCoordinationBlock = acquiredProviderHandoff.block && {
+    sent: false,
+    blocked: true,
+    deliveryOutcome: acquiredProviderHandoff.block.deliveryOutcome,
+    retryable: acquiredProviderHandoff.block.retryable,
+    code: acquiredProviderHandoff.block.code,
+    error: acquiredProviderHandoff.block.reason,
+    validator: acquiredProviderHandoff.block.validator,
+  };
   const dispatchProvider = () => {
     providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
     return dispatchToProvider(sendInput, {
@@ -846,14 +836,15 @@ async function sendCustomerMessageCore(input) {
   providerOutcome = providerCoordinationBlock || (withProviderHandoff
     ? await withProviderHandoff(dispatchProvider)
     : await dispatchProvider());
-  if (providerHandoffReservation) {
-    providerCoordination.recordProviderOutcome(providerHandoffReservation, {
+  await providerCoordination.finalizeProviderHandoffReservation({
+    handle: providerHandoffReservation,
+    outcome: {
       deliveryOutcome: providerOutcome.deliveryOutcome,
       providerMessageId: providerOutcome.providerMessageId,
       channel: providerOutcome.provider === 'push' ? 'push' : 'sms',
-    });
-    await providerCoordination.settleProviderHandoffReservation(providerHandoffReservation);
-  }
+    },
+    settle: true,
+  });
 
   // Push fan-out normalizes a provider-hook refusal to false and therefore
   // loses its code. Restore that boundary refusal only when the provider
@@ -992,11 +983,12 @@ async function sendCustomerMessageCore(input) {
       : {}),
   });
   } catch (err) {
-    if (providerHandoffReservation) {
-      const providerCoordination = require('./provider-handoff-reservation');
-      providerCoordination.recordProviderOutcome(providerHandoffReservation, err?.providerOutcome || providerOutcome);
-      await providerCoordination.settleProviderHandoffReservation(providerHandoffReservation);
-    }
+    const providerCoordination = require('./provider-handoff-reservation');
+    await providerCoordination.finalizeProviderHandoffReservation({
+      handle: providerHandoffReservation,
+      outcome: err?.providerOutcome || providerOutcome,
+      settle: true,
+    });
     // A recursive fallback may already carry its more specific outcome.
     if (!err.providerOutcome) err.providerOutcome = providerOutcome;
     if (providerHandoffReservation) {

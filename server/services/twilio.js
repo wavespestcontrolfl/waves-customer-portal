@@ -578,8 +578,9 @@ const TwilioService = {
     let acceptedMessage = null;
     let handoffAt = null;
     const providerCoordination = require('./messaging/provider-handoff-reservation');
-    let providerHandoffReservation = providerCoordination.isProviderHandoffHandle(options.providerHandoffReservation)
-      ? options.providerHandoffReservation
+    const suppliedProviderHandoffReservation = options.providerHandoffReservation;
+    let providerHandoffReservation = providerCoordination.isProviderHandoffHandle(suppliedProviderHandoffReservation)
+      ? suppliedProviderHandoffReservation
       : null;
     let ownsProviderHandoffReservation = false;
     try {
@@ -775,48 +776,36 @@ const TwilioService = {
         return { success: false, sid: null, deliveryOutcome: "not_sent", error: "Twilio not configured" };
       }
 
-      if (!providerHandoffReservation && providerCoordination.directCoordinationApplies({
-        messageType: options.messageType,
-        reservationOwner: options.providerReservationOwner,
-      })) {
-        to = providerCoordination.normalizeRecipient(to);
-        let prepared;
-        try {
-          prepared = await providerCoordination.prepareProviderHandoffReservation({
-            to,
-            customerId: options.customerId,
-            fromNumber,
-            body,
-            messageType: options.messageType || 'manual',
-            adminUserId: options.adminUserId,
-          });
-        } catch {
-          return {
-            success: false,
-            sid: null,
-            preSendBlocked: true,
-            deliveryOutcome: 'not_sent',
-            retryable: true,
-            code: 'PROVIDER_HANDOFF_PREPARATION_FAILED',
-            error: 'Provider coordination could not be established',
-            validator: 'provider_handoff_reservation',
-          };
-        }
-        if (prepared.blocked) {
-          return {
-            success: false,
-            sid: null,
-            preSendBlocked: true,
-            deliveryOutcome: 'not_sent',
-            retryable: true,
-            code: prepared.code,
-            error: prepared.reason,
-            validator: 'provider_handoff_reservation',
-          };
-        }
-        providerHandoffReservation = prepared.handle;
-        ownsProviderHandoffReservation = true;
+      const acquiredProviderHandoff = await providerCoordination.acquireProviderHandoffReservation({
+        existingHandle: providerHandoffReservation,
+        applies: providerCoordination.directCoordinationApplies({
+          messageType: options.messageType,
+          reservationOwner: options.providerReservationOwner,
+        }),
+        reservation: {
+          to: providerCoordination.normalizeRecipient(to),
+          customerId: options.customerId,
+          fromNumber,
+          body,
+          messageType: options.messageType || 'manual',
+          adminUserId: options.adminUserId,
+        },
+      });
+      providerHandoffReservation = acquiredProviderHandoff.handle;
+      ownsProviderHandoffReservation = acquiredProviderHandoff.owns;
+      if (acquiredProviderHandoff.block) {
+        return {
+          success: false,
+          sid: null,
+          preSendBlocked: true,
+          deliveryOutcome: acquiredProviderHandoff.block.deliveryOutcome,
+          retryable: acquiredProviderHandoff.block.retryable,
+          code: acquiredProviderHandoff.block.code,
+          error: acquiredProviderHandoff.block.reason,
+          validator: acquiredProviderHandoff.block.validator,
+        };
       }
+      if (ownsProviderHandoffReservation) to = providerCoordination.normalizeRecipient(to);
 
       const providerSmsMetadata = () => ({
         pre_handoff_stamp: true,
@@ -1411,15 +1400,14 @@ const TwilioService = {
       };
       throw wrapped;
     } finally {
-      if (providerHandoffReservation) {
-        providerCoordination.recordProviderOutcome(providerHandoffReservation, {
+      await providerCoordination.finalizeProviderHandoffReservation({
+        handle: providerHandoffReservation,
+        outcome: {
           deliveryOutcome,
           ...(acceptedMessage?.sid ? { providerMessageId: acceptedMessage.sid, channel: 'sms' } : {}),
-        });
-      }
-      if (ownsProviderHandoffReservation) {
-        await providerCoordination.settleProviderHandoffReservation(providerHandoffReservation);
-      }
+        },
+        settle: ownsProviderHandoffReservation,
+      });
     }
   },
 

@@ -530,8 +530,10 @@ router.post('/sms', async (req, res, next) => {
     // Provider coordination must publish the same From endpoint the SDK will
     // use. Resolve it before any thread-lock transaction, then freeze it into
     // both an existing caller-owned reservation and canonical delivery.
+    const providerCoordinationEnabled = isEnabled('smsGratitudeReplies');
     let providerCoordinationFromNumber = null;
-    if (isEnabled('smsGratitudeReplies')) {
+    let providerCoordinationCustomerId = trustedCustomerId || null;
+    if (providerCoordinationEnabled) {
       try {
         providerCoordinationFromNumber = fromNumber || await TwilioService.deriveOutboundNumber({
           customerId: trustedCustomerId || null,
@@ -545,9 +547,33 @@ router.post('/sms', async (req, res, next) => {
         });
       }
     }
-    const reservationFromNumber = providerCoordinationFromNumber
+    let reservationFromNumber = providerCoordinationFromNumber
       || fromNumber
       || TWILIO_NUMBERS.getOutboundNumber();
+    // Some bearer/review seams establish customer ownership only after the
+    // initial phone-scoped reservation. Re-resolve the location sender after
+    // that trusted adoption, outside any transaction, then correct the held
+    // row under the same thread lock before provider entry.
+    const refreshProviderCoordinationOwner = async () => {
+      if (!providerCoordinationEnabled || !trustedCustomerId
+        || providerCoordinationCustomerId === trustedCustomerId) return;
+      const resolvedFromNumber = fromNumber || await TwilioService.deriveOutboundNumber({
+        customerId: trustedCustomerId,
+      });
+      if (manualReservationId) {
+        const threadLast10 = normalizePhoneLast10(to);
+        await db.transaction(async (trx) => {
+          if (threadLast10) await lockSuggestThread(trx, threadLast10);
+          const updated = await trx('sms_log')
+            .where({ id: manualReservationId, direction: 'outbound', status: 'sending' })
+            .update({ from_phone: resolvedFromNumber, customer_id: trustedCustomerId, updated_at: new Date() });
+          if (updated === 0) throw new Error('Provider reservation was lost during customer adoption');
+        });
+      }
+      providerCoordinationFromNumber = resolvedFromNumber;
+      reservationFromNumber = resolvedFromNumber;
+      providerCoordinationCustomerId = trustedCustomerId;
+    };
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
@@ -776,7 +802,10 @@ router.post('/sms', async (req, res, next) => {
       // its owner): trust the row the seam verified so the recipient's own
       // consent policy applies, never the unverified-lead one (GH Codex
       // #3844 r9 P1). The seam already refused an ambiguous number.
-      if (!trustedCustomerId && bearerCheck.customerId) trustedCustomerId = bearerCheck.customerId;
+      if (!trustedCustomerId && bearerCheck.customerId) {
+        trustedCustomerId = bearerCheck.customerId;
+        await refreshProviderCoordinationOwner();
+      }
       if (bearerCheck.contracts) {
         const activation = await require('./admin-contracts').activatePreparedShareLinks(bearerCheck.contracts, req);
         if (!activation.ok) return abortUnsent(409, activation.error);
@@ -846,7 +875,10 @@ router.post('/sms', async (req, res, next) => {
         if (!owner || !ownerPhone || ownerPhone !== normalizePhone(to)) {
           return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
         }
-        trustedCustomerId = rr.customer_id;
+        if (!trustedCustomerId) {
+          trustedCustomerId = rr.customer_id;
+          await refreshProviderCoordinationOwner();
+        }
         // Live consent + the ask gates + the claim, serialized under the same
         // per-customer review lock the mint runs under: a draft can sit open
         // for hours, so the MINT-time gate is stale — a cadence or one-off

@@ -146,9 +146,13 @@ jest.mock('../services/short-url', () => ({
 // Controllable gates: the auto-send interlock (claim check + reservation row)
 // is gated on smsAutoSend, OFF by default so the manual send path is unchanged
 // for the existing tests. One test flips it on via mockGates.smsAutoSend.
-const mockGates = { smsAutoSend: false };
+const mockGates = { smsAutoSend: false, smsGratitudeReplies: true };
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: (gate) => (gate === 'smsAutoSend' ? mockGates.smsAutoSend : true),
+  isEnabled: (gate) => {
+    if (gate === 'smsAutoSend') return mockGates.smsAutoSend;
+    if (gate === 'smsGratitudeReplies') return mockGates.smsGratitudeReplies;
+    return true;
+  },
   gates: {},
   logGateStatus: jest.fn(),
 }));
@@ -277,6 +281,7 @@ describe('admin communications SMS route', () => {
     jest.clearAllMocks();
     db.mockReset();
     mockGates.smsAutoSend = false;
+    mockGates.smsGratitudeReplies = true;
   });
 
   test('cleans rewrite model labels and quotes before returning SMS copy', () => {
@@ -1866,6 +1871,126 @@ describe('admin communications SMS route', () => {
       });
       expect(sentInput.metadata.fromNumber).toBe('+19413529161');
     });
+  });
+
+  test('bearer customer adoption re-derives and corrects the reserved and canonical sender', async () => {
+    mockGates.smsAutoSend = true;
+    const reservationUpdates = [];
+    db.mockImplementation((table) => {
+      const builder = makeUniversalBuilder();
+      builder.update.mockImplementation((values) => {
+        if (table === 'sms_log') reservationUpdates.push(values);
+        return builder;
+      });
+      return builder;
+    });
+    const bearer = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, customerId: 'cust-A' });
+    const derive = require('../services/twilio').deriveOutboundNumber;
+    derive.mockResolvedValueOnce('+19413529161').mockResolvedValueOnce('+19413529999');
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: `SM${'9'.repeat(32)}`,
+    });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Validated bearer send', messageType: 'manual' }),
+        });
+        expect(response.status).toBe(200);
+      });
+    } finally {
+      bearer.mockRestore();
+    }
+
+    expect(derive).toHaveBeenNthCalledWith(1, { customerId: null });
+    expect(derive).toHaveBeenNthCalledWith(2, { customerId: 'cust-A' });
+    expect(reservationUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from_phone: '+19413529999', customer_id: 'cust-A' }),
+    ]));
+    const sentInput = sendCustomerMessage.mock.calls[0][0];
+    expect(sentInput).toMatchObject({
+      customerId: 'cust-A',
+      metadata: expect.objectContaining({ fromNumber: '+19413529999' }),
+      providerHandoffReservation: expect.objectContaining({
+        context: expect.objectContaining({ fromNumber: '+19413529999' }),
+      }),
+    });
+  });
+
+  test('review-request customer adoption re-derives before its reservation and canonical handoff', async () => {
+    mockGates.smsAutoSend = true;
+    const reservationUpdates = [];
+    db.mockImplementation((table) => {
+      const builder = makeUniversalBuilder();
+      if (table === 'review_requests') builder.first.mockResolvedValue({
+        id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null,
+        triggered_by: 'auto_inline', token: 'tok-abc123',
+      });
+      if (table === 'customers') builder.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      builder.update.mockImplementation((values) => {
+        if (table === 'sms_log') reservationUpdates.push(values);
+        return builder;
+      });
+      return builder;
+    });
+    const derive = require('../services/twilio').deriveOutboundNumber;
+    derive.mockResolvedValueOnce('+19413529161').mockResolvedValueOnce('+19413529998');
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: `SM${'8'.repeat(32)}`,
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567', body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual', reviewRequestId: 'rr-1',
+        }),
+      });
+      expect(response.status).toBe(200);
+    });
+
+    expect(derive).toHaveBeenNthCalledWith(1, { customerId: null });
+    expect(derive).toHaveBeenNthCalledWith(2, { customerId: 'cust-A' });
+    expect(reservationUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from_phone: '+19413529998', customer_id: 'cust-A' }),
+    ]));
+    const sentInput = sendCustomerMessage.mock.calls[0][0];
+    expect(sentInput).toMatchObject({
+      customerId: 'cust-A',
+      metadata: expect.objectContaining({ fromNumber: '+19413529998' }),
+      providerHandoffReservation: expect.objectContaining({
+        context: expect.objectContaining({ fromNumber: '+19413529998' }),
+      }),
+    });
+  });
+
+  test('gate-off bearer adoption preserves the legacy sender path', async () => {
+    mockGates.smsGratitudeReplies = false;
+    db.mockImplementation(() => makeUniversalBuilder());
+    const bearer = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, customerId: 'cust-A' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-legacy' });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Legacy bearer send', messageType: 'manual' }),
+        });
+        expect(response.status).toBe(200);
+      });
+    } finally {
+      bearer.mockRestore();
+    }
+    expect(require('../services/twilio').deriveOutboundNumber).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-A', providerHandoffReservation: null,
+      metadata: expect.objectContaining({ fromNumber: undefined }),
+    }));
   });
 
   test('rejects an MMS whose media exceeds Twilio\'s 5MB total per-message cap', async () => {
