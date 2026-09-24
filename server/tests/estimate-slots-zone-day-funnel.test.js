@@ -113,6 +113,16 @@ function mockDb({ scheduledRows = [], estimateRow = ESTIMATE_ROW, failFirstSched
     if (table === 'scheduled_services') {
       return scheduledServicesChain(scheduledRows);
     }
+    if (table === 'technician_absences') {
+      // buildAsapCapacitySlots' absentTechDays read (technician-eligibility.js)
+      // — no tech is marked out in this suite.
+      return {
+        whereBetween: jest.fn().mockReturnThis(),
+        whereNull: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        select: jest.fn().mockResolvedValue([]),
+      };
+    }
     throw new Error(`unexpected table ${table}`);
   });
 }

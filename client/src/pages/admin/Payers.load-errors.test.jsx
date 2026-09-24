@@ -58,7 +58,7 @@ describe('payer surfaces on a failed load', () => {
     // Statements tab shows its rows, not an error and not the empty copy.
     expect(screen.queryByText(/No statements yet/)).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: /balance|ar/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /aging/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
     expect(screen.queryByText(/No outstanding balance/)).not.toBeInTheDocument();
   });

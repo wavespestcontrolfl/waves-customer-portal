@@ -172,7 +172,7 @@ function BridgeList({ title, items }) {
 }
 
 const PROTOCOL_SECTIONS = [
-  { key: "mixing", label: "Mixing & labels", Icon: Beaker },
+  { key: "mixing", label: "Mixing", Icon: Beaker },
   { key: "overview", label: "Overview", Icon: Sprout },
   { key: "products", label: "Products", Icon: Package },
   { key: "bridges", label: "Instructions", Icon: BookOpen },

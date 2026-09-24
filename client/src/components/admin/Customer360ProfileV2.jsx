@@ -146,6 +146,7 @@ import {
   CONSENT_TEXT,
   CONSENT_VERSION,
 } from "../../lib/paymentMethodConsentText";
+import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
@@ -185,6 +186,17 @@ function adminFetch(path, options = {}) {
     if (r.status === 204) return null;
     return r.json();
   });
+}
+
+// A structured refusal's human `message` (e.g. {error: 'customer_still_
+// billing_or_scheduled', message: 'This customer still has a scheduled
+// visit...'}) rides on err.body, the full parsed clone above — prefer it
+// over err.message, which adminFetch derives from body.error/body.reason/
+// body.message/body.code IN THAT ORDER, so a refusal carrying both an error
+// CODE and a human message would otherwise surface the opaque code to the
+// operator instead of the sentence that actually explains it.
+export function apiErrorMessage(err, fallback) {
+  return err?.body?.message || err?.message || fallback;
 }
 
 function timeAgo(dateStr) {
@@ -7419,9 +7431,7 @@ function CustomerProfileEditor({
                     .filter(Boolean)
                     .join(" ")
                     .trim() || "this customer";
-                const ok = window.confirm(
-                  `Delete ${name}?\n\nThis removes them from the active customer list. Their history (services, invoices, payments) is preserved and can be restored.`,
-                );
+                const ok = window.confirm(archiveConfirmMessage(name));
                 if (!ok) return;
                 setDeletingCustomer(true);
                 setEditErr("");
@@ -7432,7 +7442,7 @@ function CustomerProfileEditor({
                   setEditOpen(false);
                   onClose?.();
                 } catch (e) {
-                  setEditErr(e.message || "Delete failed");
+                  setEditErr(apiErrorMessage(e, "Delete failed"));
                 }
                 setDeletingCustomer(false);
               }}
@@ -7490,7 +7500,7 @@ function CustomerProfileEditor({
                     await reloadCustomer();
                     setEditOpen(false);
                   } catch (e) {
-                    setEditErr(e.body?.message || e.message || "Save failed");
+                    setEditErr(apiErrorMessage(e, "Save failed"));
                   }
                   setSavingEdit(false);
                 }}

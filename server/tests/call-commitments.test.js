@@ -912,6 +912,115 @@ describe('the model pass sends no sampling controls (current models reject them)
   });
 });
 
+describe('model vocabulary slips are normalized before schema validation (audit 2026-09-23)', () => {
+  const { extractCommitmentsWithModel, normalizeChannel, normalizeKind, normalizeModelOutput, buildCommitmentsPrompt } = require('../services/call-commitments');
+  const transcript = 'Agent: I will call you back tomorrow morning with the price, thank you for calling Waves today.';
+  const reply = (commitments) => ({ content: [{ type: 'text', text: JSON.stringify({ commitments }) }] });
+  const item = (extra) => ({ party: 'waves', kind: 'callback', description: 'Call back with the price', channel: 'call', due_text: 'tomorrow morning', due_at: null, confidence: 0.9, evidence: [{ quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }], ...extra });
+
+  test('channel "phone" (the production failure) is coerced to "call" and the promise survives', async () => {
+    const create = jest.fn(async () => reply([item({ channel: 'phone' })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.items.map((i) => [i.kind, i.channel])).toEqual([['callback', 'call']]);
+  });
+  test('an unlisted channel word fails soft to "unknown"; an unlisted kind fails soft to "other"', async () => {
+    const create = jest.fn(async () => reply([item({ channel: 'carrier pigeon', kind: 'ring_back' })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.items.map((i) => [i.kind, i.channel])).toEqual([['other', 'unknown']]);
+  });
+  test('a structural problem (no evidence) is still a schema failure, reported with the offending path', async () => {
+    const create = jest.fn(async () => reply([item({ evidence: [] })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBe('schema_failed');
+    expect(out.items).toEqual([]);
+    expect(out.errors.some((e) => e.instancePath === '/commitments/0/evidence')).toBe(true);
+  });
+  test('normalizers: case, spacing and aliases; null stays null', () => {
+    expect(normalizeChannel('Phone')).toBe('call');
+    expect(normalizeChannel('text message')).toBe('sms');
+    expect(normalizeChannel('In-Person')).toBe('in_person');
+    expect(normalizeChannel('EMAIL')).toBe('email');
+    expect(normalizeChannel(null)).toBeNull();
+    expect(normalizeChannel('')).toBeNull();
+    expect(normalizeChannel('fax')).toBe('unknown');
+    expect(normalizeKind('Send Estimate')).toBe('send_estimate');
+    expect(normalizeKind('nope')).toBe('other');
+    expect(normalizeModelOutput({ commitments: 'not-an-array' })).toEqual({ commitments: 'not-an-array' });
+    expect(normalizeModelOutput(null)).toBeNull();
+  });
+  test('non-string channel or kind is left for the validator (codex r1 P2): the item still fails the schema', async () => {
+    expect(normalizeChannel(false)).toBe(false);
+    expect(normalizeChannel(1)).toBe(1);
+    expect(normalizeKind({ a: 1 })).toEqual({ a: 1 });
+    const create = jest.fn(async () => reply([item({ channel: false })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBe('schema_failed');
+    expect(out.errors.some((e) => e.instancePath === '/commitments/0/channel')).toBe(true);
+  });
+  test('"call back" resolves by party (codex r1 P2): waves -> callback, customer -> call_back', async () => {
+    expect(normalizeKind('call back', 'waves')).toBe('callback');
+    expect(normalizeKind('Call-Back', 'customer')).toBe('call_back');
+    expect(normalizeKind('callback', 'customer')).toBe('call_back');
+    expect(normalizeKind('call_back', null)).toBe('call_back');
+    const create = jest.fn(async () => reply([item({ kind: 'call back' })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.droppedMismatched).toBe(0);
+    expect(out.items.map((i) => i.kind)).toEqual(['callback']);
+  });
+  test('surplus evidence is trimmed to the schema cap instead of failing the response; more than 12 commitments are capped too', async () => {
+    const four = Array.from({ length: 4 }, () => ({ quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }));
+    const create = jest.fn(async () => reply([item({ evidence: four })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0].evidence.length).toBeLessThanOrEqual(3);
+    // Grounded quotes survive the trim even when they come last (Codex r2 P2).
+    const bogus = (n) => ({ quote: `not in the transcript number ${n}`, speaker: 'agent' });
+    const mixed = [bogus(1), bogus(2), bogus(3), { quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }];
+    const create2 = jest.fn(async () => reply([item({ evidence: mixed })]));
+    const out2 = await extractCommitmentsWithModel(transcript, { client: { messages: { create: create2 } } });
+    expect(out2.skipped).toBeUndefined();
+    expect(out2.droppedUngrounded).toBe(0);
+    expect(out2.items).toHaveLength(1);
+    expect(out2.items[0].evidence.map((e) => e.quote)).toEqual(['I will call you back tomorrow morning with the price']);
+    // Opposite-speaker quotes rank like ungrounded ones: a Waves promise
+    // needs an agent turn, so three caller lines ahead of the one agent
+    // line must not consume the cap (Codex r3 P2).
+    const twoParty = 'Caller: I will send you the photos tonight and I will pay the deposit tomorrow and I will text you the gate code.\nAgent: I will call you back tomorrow morning with the price.';
+    const callerLines = ['I will send you the photos tonight', 'I will pay the deposit tomorrow', 'I will text you the gate code'].map((quote) => ({ quote, speaker: 'agent' }));
+    const create3 = jest.fn(async () => reply([item({ evidence: [...callerLines, { quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }] })]));
+    const out3 = await extractCommitmentsWithModel(twoParty, { client: { messages: { create: create3 } } });
+    expect(out3.droppedUngrounded).toBe(0);
+    expect(out3.items).toHaveLength(1);
+    expect(out3.items[0].evidence.map((e) => e.quote)).toEqual(['I will call you back tomorrow morning with the price']);
+    // The twelve-commitment cap applies to ACCEPTED results: thirteen
+    // grounded commitments keep twelve, and twelve items grounding would
+    // drop anyway (ungrounded, low-confidence, party/kind mismatch) never
+    // crowd out the one real promise listed after them (r5/r6 P2).
+    const thirteen = Array.from({ length: 13 }, (_, i) => item({ description: `Call back with the price ${i}` }));
+    const create13 = jest.fn(async () => reply(thirteen));
+    expect((await extractCommitmentsWithModel(transcript, { client: { messages: { create: create13 } } })).items).toHaveLength(12);
+    const junk = [
+      ...Array.from({ length: 5 }, (_, i) => item({ description: `phantom ${i}`, evidence: [{ quote: `nothing like this was said ${i}`, speaker: 'agent' }] })),
+      ...Array.from({ length: 4 }, (_, i) => item({ description: `hedged ${i}`, confidence: 0.2 })),
+      ...Array.from({ length: 3 }, (_, i) => item({ description: `mismatch ${i}`, party: 'customer', kind: 'send_estimate' })),
+    ];
+    const createJunk = jest.fn(async () => reply([...junk, item()]));
+    const outJunk = await extractCommitmentsWithModel(transcript, { client: { messages: { create: createJunk } } });
+    expect(outJunk.skipped).toBeUndefined();
+    expect(outJunk.items.map((i) => i.description)).toEqual(['Call back with the price']);
+    expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most three quotes per commitment/);
+    expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most twelve commitments/);
+  });
+  test('the prompt names the channel vocabulary', () => {
+    const prompt = buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' });
+    expect(prompt).toMatch(/"channel" is exactly one of "sms", "email", "call", "in_person", "unknown"/);
+  });
+});
+
 describe('lead lookups on a call with no lead key', () => {
   const { buildCallOutcomes } = require('../services/call-commitments');
   test('buildCallOutcomes queries nothing for an imported call (no lead_id, no SID, no customer)', async () => {

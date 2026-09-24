@@ -17,11 +17,17 @@ function resolveLabel(score, labels) {
       return { key: row.key, name: row.name, description: row.description };
     }
   }
-  if (score < sorted[0].min) {
-    const row = sorted[0];
-    return { key: row.key, name: row.name, description: row.description };
+  // Nearest band — a score in the sliver between two bands (e.g. 0.45
+  // between 0.4 and 0.5) lands next to its neighbours, never at the top.
+  let row = sorted[0];
+  let best = Infinity;
+  for (const candidate of sorted) {
+    const distance = score < candidate.min ? candidate.min - score : score - candidate.max;
+    if (distance < best) {
+      best = distance;
+      row = candidate;
+    }
   }
-  const row = sorted[sorted.length - 1];
   return { key: row.key, name: row.name, description: row.description };
 }
 

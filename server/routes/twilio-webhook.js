@@ -10,7 +10,14 @@ const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/m
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
-const { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
+const {
+  hasSchedulingIntent,
+  isSmsReaction,
+  isQuietSmsReaction,
+  isCourtesyOnly,
+  hasRescheduleOrAwayIntent,
+  outboundAsksForReply,
+} = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { phoneMatchDigits } = require('../utils/phone');
 
@@ -377,12 +384,12 @@ router.post('/sms', async (req, res) => {
     // suppression write (Codex r10 P1). It is still classified best-effort
     // (Codex r22 P2) so the persisted row carries the recruiting type and
     // stays out of technician-visible readers — a lookup failure simply
-    // leaves it untyped and the compliance action proceeds.
+    // leaves it without the recruiting type; the command branch types it.
     const complianceCommand = Boolean(detectSmsOptCommand(Body || '').action);
     let recruitingReply = null;
     if (complianceCommand) {
       recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To).catch((e) => {
-        logger.warn(`[recruiting-inbound] match failed on a compliance command (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — proceeding untyped`);
+        logger.warn(`[recruiting-inbound] match failed on a compliance command (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — proceeding without recruiting type`);
         return null;
       });
     }
@@ -433,6 +440,24 @@ router.post('/sms', async (req, res) => {
     sourcePersistenceFailed = !inboundTouchpoint?.message?.id;
     const requireInboxMessage = () => {
       if (sourcePersistenceFailed) throw new Error('Inbound SMS inbox persistence failed');
+    };
+    const requireInboxMessageType = async (messageType, sourceCreatedAt = null) => {
+      requireInboxMessage();
+      const recruitingType = String(inboundTouchpoint.message.message_type || '').startsWith('job_');
+      // Recruiting commands stay admin-only; command readers already exclude job_*.
+      if (recruitingType && !sourceCreatedAt) return;
+      const patch = { updated_at: new Date() };
+      if (!recruitingType) patch.message_type = messageType;
+      // A delayed STOP retry must keep the original receipt chronology, while
+      // an on-time canonical write retains its earlier source timestamp.
+      if (sourceCreatedAt) {
+        patch.created_at = db.raw('LEAST(created_at, ?::timestamptz)', [sourceCreatedAt]);
+      }
+      const typed = await updateByTwilioSid(MessageSid, patch).catch(() => null);
+      if (!typed?.id) {
+        sourcePersistenceFailed = true;
+        throw new Error('Inbound SMS inbox command persistence failed');
+      }
     };
 
     // ── Resolve the sender relationship FIRST, before any screening or
@@ -561,13 +586,14 @@ router.post('/sms', async (req, res) => {
       // Receipt + suppression + recipient decline + prefs commit atomically.
       // A replay after START must not apply those consent effects again.
       // Stop before logs, alerts, corrections, or a successful TwiML response.
-      requireInboxMessage();
+      await requireInboxMessageType('opt_out', optOut.appliedAt);
 
       let optOutSmsLogId = null;
       try {
         const inserted = await db('sms_log').insert({
           customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
           message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
+          created_at: optOut.appliedAt,
           metadata: JSON.stringify({
             ...solicitationMeta,
             opt_out_reason: optCommand.reason,
@@ -666,6 +692,7 @@ router.post('/sms', async (req, res) => {
     // (carrier compliance) instead of letting it fall into normal routing.
     const { detectHelp, HELP_RESPONSE_TEMPLATE } = require('../services/messaging/opt-out-detector');
     if (complianceEligible && detectHelp(Body).help) {
+      await requireInboxMessageType('help_request');
       await db('sms_log').insert({
         customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'help_request',
@@ -678,6 +705,7 @@ router.post('/sms', async (req, res) => {
     }
 
     if (optCommand.action === 'opt_in') {
+      await requireInboxMessageType('opt_in');
       const normalizedFrom = normalizeE164(From);
       // The inbound log lands BEFORE the clear (codex #3495 P1): a late
       // 21610 callback's post-write recheck discovers a concurrent START by
@@ -1561,6 +1589,8 @@ router.post('/sms', async (req, res) => {
           smsLogId: smsLogEntry?.id || null,
           intent: triage,
           schedulingIntent,
+          source: 'live_webhook',
+          hasMedia: inboundMedia.length > 0,
         }).catch((err) => logger.warn(`[sms-shadow] async draft failed: ${err.message}`));
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
@@ -2075,7 +2105,7 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
     if (!last) return true;
     // A question mark OR an explicit reply directive ("Reply YES to confirm",
     // "let us know", "text back") — templates ask without "?" (hook P1).
-    return /\?|\breply\b|\brespond\b|\btext\s+(?:us\s+)?back\b|\blet\s+(?:us|me)\s+know\b|\bconfirm\b/i.test(String(last.message_body || ''));
+    return outboundAsksForReply(last.message_body);
   } catch (e) {
     logger.warn(`[twilio-webhook] awaiting-answer lookup failed: ${e.message}; treating as awaiting`);
     return true;

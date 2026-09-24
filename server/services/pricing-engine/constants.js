@@ -233,15 +233,34 @@ const PEST = {
 // ============================================================
 // LAWN CARE — 4 Tracks (St. Augustine merged, Bermuda, Zoysia, Bahia)
 // ============================================================
-// Tiers: standard(6x), enhanced(9x), premium(12x). basic(4x) is FULLY
-// RETIRED (owner directive 2026-08-04, extending the 2026-07-09
-// no-quarterly-plans ruling): the tier, its bracket column, and its
-// lawn_pricing_brackets rows are gone — a half-removed hidden column would
-// make the db-bridge seed $0 basic cells for any bracket row without one.
-// Legacy lawnFreq=4 inputs normalize to the enhanced default (see
-// resolveLawnTier), matching the client mirror's resolveLawnFreq.
+// Tiers: standard(6x), enhanced(9x, default), premium(12x) — enhanced and
+// premium are sold. basic(4x) is FULLY RETIRED (owner directive 2026-08-04,
+// extending the 2026-07-09 no-quarterly-plans ruling): the tier, its bracket
+// column, and its lawn_pricing_brackets rows are gone — a half-removed
+// hidden column would make the db-bridge seed $0 basic cells for any
+// bracket row without one. Legacy lawnFreq=4 inputs normalize to the
+// enhanced default (see resolveLawnTier), matching the client mirror's
+// resolveLawnFreq.
+//
+// standard(6x) is hidden:true (owner directive 2026-09-24: "I don't want to
+// offer bi-monthly lawn care service anymore") — mirrors EXACTLY how
+// basic(4x) was retired 2026-07-09 through 2026-08-04, one step short of
+// full removal: standard stays IN LAWN_TIERS and LAWN_SOLD_TIERS (never
+// removed) because, unlike basic, it is a live INTERNAL PRICE ANCHOR —
+// lookupLawnBracket's -4%/9x / -8%/12x discount caps read
+// LAWN_TIERS.standard.freq/.index directly (bypassing TIER_LIST/hidden
+// entirely), and priceOneTimeLawn anchors one-time lawn treatments on the
+// undiscounted 6x per-app rate via an explicit includeHiddenTiers:true call
+// so the hidden-tier customer-facing fallback below never substitutes
+// enhanced's discounted rate into that anchor. hidden:true only drops
+// standard from priceLawnCare's default (non-includeHiddenTiers) `tiers`
+// array — new quotes requesting it fall back to enhanced (the existing
+// hidden-tier mechanism, unchanged since the basic retirement) and
+// estimate-public.js's retired-cadence gate 409s an existing accept that
+// still carries a stored 6x/bimonthly row. DB-tunable without a deploy via
+// pricing_config lawn_pricing_v2.tiers.standard.hidden (db-bridge).
 const LAWN_TIERS = {
-  standard: { freq: 6,  index: 0, label: '6x applications/yr' },
+  standard: { freq: 6,  index: 0, label: '6x applications/yr', hidden: true },
   enhanced: { freq: 9,  index: 1, label: '9x applications/yr' },
   premium:  { freq: 12, index: 2, label: '12x applications/yr' },
 };

@@ -132,6 +132,10 @@ function scenario({
   // default for the older scenarios) models an unreadable customer, which
   // skips the gate exactly as the make-recurring spawn does.
   customer = null,
+  // GATE_TECH_OUT_REDISTRIBUTE (#4678 slice A): dates the template tech
+  // ('tech-1') carries an uncleared technician_absences row for. A child
+  // spawned on one of these dates is seeded unassigned.
+  techAbsenceDates = [],
 }) {
   const parent = {
     id: 10,
@@ -211,6 +215,16 @@ function scenario({
     if (table === 'schedule_blackout_dates') return [];
     // assignableRecurringTemplateTechnicianId fences the template tech on the trx.
     if (table === 'technicians') return op === 'first' ? { id: 'tech-1', employment_status: 'active', field_dispatchable: true } : [];
+    // Same table/predicate assignableRecurringTemplateTechnicianId's date
+    // check reads: technician_absences filtered to the queried date.
+    if (table === 'technician_absences') {
+      if (op === 'first') {
+        const whereCall = calls.find((c) => c[0] === 'where');
+        const queriedDate = whereCall?.[1]?.absence_date;
+        return techAbsenceDates.includes(queriedDate) ? { id: 'absence-1' } : null;
+      }
+      return [];
+    }
     return null;
   };
   return { conn: makeConn(handler, { hasCardHoldTable }), inserted, parent, live };
@@ -528,6 +542,26 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
     const r2 = await reconcile(over.conn, over.parent, 3, { ongoingSeries: true });
     expect(r2.cancelledIds).toHaveLength(0);
     expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('a child spawned on a date the template tech is marked out for is seeded unassigned; a sibling on another date keeps the tech (#4678 slice A)', async () => {
+    // Learn the two top-up dates this cadence actually lands on first — no
+    // assumption baked in about the walk's exact math.
+    const baseline = scenario({ upcoming: 2 });
+    await reconcile(baseline.conn, baseline.parent, 4);
+    const [dateA, dateB] = baseline.inserted.map((r) => r.scheduled_date).sort();
+    expect(dateA).toBeTruthy();
+    expect(dateB).toBeTruthy();
+    expect(dateA).not.toBe(dateB);
+
+    const { conn, parent, inserted } = scenario({ upcoming: 2, techAbsenceDates: [dateA] });
+    await reconcile(conn, parent, 4);
+
+    expect(inserted).toHaveLength(2);
+    const absentRow = inserted.find((r) => r.scheduled_date === dateA);
+    const keptRow = inserted.find((r) => r.scheduled_date === dateB);
+    expect(absentRow.technician_id).toBeNull();
+    expect(keptRow.technician_id).toBe('tech-1');
   });
 });
 

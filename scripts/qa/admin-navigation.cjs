@@ -94,13 +94,13 @@ async function main() {
     const assistantRequests = () => report.requests.filter(({ path: api }) => api.startsWith('/admin/intelligence-bar/')).length;
     const requestsBeforeSearch = assistantRequests();
     await search.fill('Recovery');
-    check('Old page names retain their canonical routes', await finder.getByRole('link', { name: /Needs attention/ }).getAttribute('href') === '/admin/billing-recovery');
+    check('Old page names retain their canonical routes', await finder.getByRole('link', { name: /Recovery/ }).getAttribute('href') === '/admin/billing-recovery');
     await search.fill('Accounting');
     await search.press('ArrowDown');
     check('Down selects the first result', await finder.getByRole('link', { name: /Banking/ }).evaluate((el) => el === document.activeElement));
     await desktop.keyboard.press('End');
-    check('End selects the last result', await finder.getByRole('link', { name: /Books & taxes/ }).evaluate((el) => el === document.activeElement));
-    for (const name of ['Invoices', 'Pipeline', 'Books & taxes']) {
+    check('End selects the last result', await finder.getByRole('link', { name: /Taxes/ }).evaluate((el) => el === document.activeElement));
+    for (const name of ['Invoices', 'Pipeline', 'Taxes']) {
       await search.fill(name);
       await finder.getByRole('button', { name: `Pin ${name}`, exact: true }).click();
     }
@@ -156,7 +156,7 @@ async function main() {
     const mobile = await openPage({ width: 390, hasTouch: true });
     await mobile.goto(`${server.baseUrl}/admin/more`);
     await mobile.getByRole('heading', { name: 'Workspaces', exact: true }).waitFor();
-    check('Mobile keeps all settings leaves', await mobile.getByRole('link', { name: 'Early feature access' }).count() === 1 && await mobile.getByRole('link', { name: 'Portal Usage' }).count() === 1);
+    check('Mobile keeps all settings leaves', await mobile.getByRole('link', { name: 'Features' }).count() === 1 && await mobile.getByRole('link', { name: 'Usage' }).count() === 1);
     await shot(mobile, 'mobile-directory-390');
     await mobile.getByRole('button', { name: 'Open menu' }).click();
     const drawer = mobile.getByRole('dialog', { name: 'Admin menu' });
@@ -196,7 +196,7 @@ async function main() {
     await mobile.keyboard.press('Escape');
     check('Closing Ask Waves from page search returns focus to the menu trigger', await mobile.getByRole('button', { name: 'Open menu' }).evaluate((el) => el === document.activeElement));
     await mobile.getByRole('button', { name: 'Open menu' }).click();
-    await drawer.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    await drawer.getByRole('button', { name: 'Ask', exact: true }).click();
     await mobile.getByPlaceholder(/Ask anything/).waitFor();
     check('Opening Ask Waves directly dismisses the mobile drawer', await drawer.count() === 0);
     await mobile.keyboard.press('Escape');
@@ -224,10 +224,10 @@ async function main() {
     const tech = await openPage({ width: 390, role: 'technician', hasTouch: true });
     await tech.goto(`${server.baseUrl}/admin/more`);
     await tech.getByRole('heading', { name: 'Workspaces', exact: true }).waitFor();
-    check('Technician directory excludes owner-only destinations', await tech.getByRole('button', { name: 'Sales', exact: true }).count() === 0 && await tech.getByRole('link', { name: 'Early feature access' }).count() === 0);
+    check('Technician directory excludes owner-only destinations', await tech.getByRole('button', { name: 'Sales', exact: true }).count() === 0 && await tech.getByRole('link', { name: 'Features' }).count() === 0);
     await tech.getByRole('button', { name: 'Search pages', exact: true }).first().click();
     const techFinder = tech.getByRole('dialog', { name: 'Go to a page' });
-    check('Technician page search excludes restricted destinations', await techFinder.getByRole('link', { name: /Contracts|System health|Estimates|Invoices/ }).count() === 0);
+    check('Technician page search excludes restricted destinations', await techFinder.getByRole('link', { name: /Contracts|Health|Estimates|Invoices/ }).count() === 0);
     const legacy = await openPage({ enabled: false });
     await legacy.goto(`${server.baseUrl}/admin/customers`);
     await legacy.getByRole('navigation', { name: 'Admin sections' }).waitFor();

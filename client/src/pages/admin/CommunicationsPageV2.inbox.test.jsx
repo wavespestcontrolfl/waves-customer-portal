@@ -8,6 +8,11 @@ import { SmsTab } from "./CommunicationsPageV2";
 import { SMS_DRAFT_STORAGE_KEY } from "../../hooks/useSmsDraft";
 
 vi.mock("../../utils/imageCompression", async (original) => ({ ...await original(), fitImagesToBudget: async (files) => ({ ok: true, files }) }));
+const mockNavigate = vi.fn();
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, useNavigate: () => mockNavigate };
+});
 
 const line = "+19413187612";
 const inbound = (id, body, phone = "+19415550100") => ({
@@ -30,6 +35,7 @@ const saveDraft = (owner, draft) => sessionStorage.setItem(SMS_DRAFT_STORAGE_KEY
 
 beforeEach(() => {
   vi.useFakeTimers();
+  mockNavigate.mockReset();
   Element.prototype.scrollIntoView = vi.fn();
   localStorage.setItem("waves_admin_token", "synthetic-token");
   sessionStorage.clear();
@@ -121,7 +127,6 @@ it("requires a recipient before composing text, media, or a scheduled send", asy
   const { container } = setup(); await tick();
   expect(screen.getByRole("textbox", { name: "Text message" })).toBeDisabled();
   expect(container.querySelector('input[type="file"]')).toBeDisabled();
-  expect(screen.getByText("Choose a recipient to start a message.")).toBeInTheDocument();
   fireEvent.change(screen.getByPlaceholderText("Search by name or enter phone number…"), { target: { value: "+19415550100" } });
   expect(screen.getByRole("textbox", { name: "Text message" })).toBeEnabled();
   expect(container.querySelector('input[type="file"]')).toBeEnabled();
@@ -444,12 +449,31 @@ it("drops an unverifiable recovered agent selection while retaining the editable
 });
 
 
-it("discards a recovered approval and its metadata before composing a fresh message", async () => {
+it("discards an Agent Review selection before sending a fresh message", async () => {
+  const owner = "discard-agent-draft-owner";
+  const selectedAgentDraft = { decisionId: "decision-a", suggestedMessage: "Agent suggestion" };
+  saveDraft(owner, { msgBody: selectedAgentDraft.suggestedMessage, fromNumber: line, selectedAgentDraft });
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: selectedAgentDraft }) : originalFetch(url, options));
+  setupWithOwner(owner); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Discard agent draft" }));
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("");
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Fresh reply" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: "Fresh reply" });
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("agentDecisionId");
+});
+
+
+it("leaves a recovered approval and clears its metadata before composing a fresh message", async () => {
   const owner = "discard-approval-owner";
   saveDraft(owner, { ...savedApproval, attachments: [attachment], replyContext: { messageId: "old-reply", phone: "9415550100", customerId: "customer-a" }, sendTiming: "tomorrow", insertedCustomerLinks: { contract: { url: "https://example.invalid/contract", contractId: "old-contract" } } });
   window.history.replaceState({}, "", "/?phone=9415550100&draftId=approval-a");
   const view = setupWithOwner(owner); await tick();
-  fireEvent.click(screen.getByRole("button", { name: "Clear draft" })); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Leave approval draft" })); await tick();
   expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("");
   expect(screen.queryByRole("button", { name: "Remove gate.png" })).not.toBeInTheDocument();
   expect(window.location.search).not.toContain("draftId");
@@ -467,7 +491,7 @@ it("discards a recovered approval and its metadata before composing a fresh mess
 });
 
 
-it("does not restore a discarded approval when its pending lookup finishes", async () => {
+it("does not restore a left approval when its pending lookup finishes", async () => {
   const owner = "discard-pending-approval-owner";
   saveDraft(owner, savedApproval);
   window.history.replaceState({}, "", "/?phone=9415550100&draftId=approval-a");
@@ -476,7 +500,7 @@ it("does not restore a discarded approval when its pending lookup finishes", asy
   fetch.mockImplementation(async (url, options) => String(url).endsWith("/drafts/approval-a")
     ? new Promise((resolve) => { resolveDraft = resolve; }) : originalFetch(url, options));
   setupWithOwner(owner); await tick();
-  fireEvent.click(screen.getByRole("button", { name: "Clear draft" }));
+  fireEvent.click(screen.getByRole("button", { name: "Leave approval draft" }));
   await act(async () => resolveDraft(response({ id: "approval-a", draftResponse: "Late approval", recipientPhone: "+19415550100", resolvedFromNumber: "+19415550199" })));
   expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("");
 });
@@ -494,4 +518,125 @@ it.each([null, { id: "another-approval", draftResponse: "Earlier approval", reci
   const stored = JSON.parse(sessionStorage.getItem(SMS_DRAFT_STORAGE_KEY)).owners[owner]["9415550100"];
   expect(stored.loadedMessageDraft).toEqual(loadedMessageDraft);
   expect(stored.replyContext.messageId).toBe("original-reply");
+});
+
+it("shows Analyze photos for an admin operator with an inbound photo on the OPEN thread", async () => {
+  // canAnalyzePhotos gates the button's whole render on admin role AND at
+  // least one analyzable photo in the ACTIVE thread — analyzablePhotos is
+  // [] until a thread is opened (activeThread stays null on the threads
+  // list), so this needs both a fixture message with media AND opening it.
+  const photoPhone = "+19415550600";
+  messages = [{
+    id: "photo-admin-visible", from: photoPhone, to: line, direction: "inbound", body: "A photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-visible",
+    media: [{ key: "sms-media/inbound/visible", url: "https://signed.example/visible", contentType: "image/jpeg" }],
+  }];
+  setupWithOwner("admin-analyze-photos"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  expect(screen.getByRole("button", { name: "Analyze photos" })).toBeInTheDocument();
+});
+
+it("hides Analyze photos for an admin operator when the open thread has no inbound photos", async () => {
+  setupWithOwner("admin-analyze-photos-no-photos"); await tick();
+  fireEvent.click(screen.getByText("Please check the gate"));
+  expect(screen.queryByRole("button", { name: "Analyze photos" })).not.toBeInTheDocument();
+});
+
+it("hides Analyze photos for a technician — the endpoint is admin-only (403 otherwise)", async () => {
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  expect(screen.queryByRole("button", { name: "Analyze photos" })).not.toBeInTheDocument();
+});
+
+it("blocks submit when the selected photos belong to different customers", async () => {
+  const photoPhone = "+19415550300";
+  messages = [
+    {
+      id: "photo-a", from: photoPhone, to: line, direction: "inbound", body: "First customer's photo",
+      isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-aaa",
+      media: [{ key: "sms-media/inbound/aaa", url: "https://signed.example/aaa", contentType: "image/jpeg" }],
+    },
+    {
+      id: "photo-b", from: photoPhone, to: line, direction: "inbound", body: "Second customer's photo",
+      isRead: true, createdAt: "2024-07-01T12:05:00Z", customerId: "customer-bbb",
+      media: [{ key: "sms-media/inbound/bbb", url: "https://signed.example/bbb", contentType: "image/jpeg" }],
+    },
+  ];
+  setupWithOwner("mixed-customer-owner"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  // photo-b (newest) starts pre-checked; check photo-a too so the selection
+  // spans both customer-aaa and customer-bbb.
+  const checkboxes = screen.getAllByRole("checkbox");
+  expect(checkboxes).toHaveLength(2);
+  fireEvent.click(checkboxes[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
+  expect(screen.getByText("Selected photos belong to different customers — pick photos from one customer.")).toBeInTheDocument();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("/photo-assessments/"))).toBe(false);
+});
+
+it("blocks submit when a linked photo is mixed with an UNLINKED one (null customerId) — null is a distinct owner, not \"no opinion\"", async () => {
+  const photoPhone = "+19415550700";
+  messages = [
+    {
+      id: "photo-linked", from: photoPhone, to: line, direction: "inbound", body: "Linked customer's photo",
+      isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-linked",
+      media: [{ key: "sms-media/inbound/linked", url: "https://signed.example/linked", contentType: "image/jpeg" }],
+    },
+    {
+      id: "photo-unlinked", from: photoPhone, to: line, direction: "inbound", body: "Unlinked sender's photo",
+      isRead: true, createdAt: "2024-07-01T12:05:00Z", // no customerId — unlinked conversation
+      media: [{ key: "sms-media/inbound/unlinked", url: "https://signed.example/unlinked", contentType: "image/jpeg" }],
+    },
+  ];
+  setupWithOwner("linked-unlinked-owner"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  // photo-unlinked (newest) starts pre-checked; check photo-linked too so
+  // the selection spans a linked customer AND an unlinked (null) one.
+  const checkboxes = screen.getAllByRole("checkbox");
+  expect(checkboxes).toHaveLength(2);
+  fireEvent.click(checkboxes[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
+  expect(screen.getByText("Selected photos belong to different customers — pick photos from one customer.")).toBeInTheDocument();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("/photo-assessments/"))).toBe(false);
+});
+
+it("a successful Analyze photos submit navigates to the new assessment and closes the dialog", async () => {
+  const photoPhone = "+19415550400";
+  messages = [{
+    id: "photo-solo", from: photoPhone, to: line, direction: "inbound", body: "A single photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-solo",
+    media: [{ key: "sms-media/inbound/solo", url: "https://signed.example/solo", contentType: "image/jpeg" }],
+  }];
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/photo-assessments/")
+    ? response({ success: true, id: "assessment-789", type: "lawn" }, 201)
+    : originalFetch(url, options));
+  setupWithOwner("analyze-photos-success"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" })); await tick();
+  expect(mockNavigate).toHaveBeenCalledWith("/admin/lawn-assessments?open=lawn:assessment-789");
+  expect(screen.queryByText("Analyze photos from this thread")).not.toBeInTheDocument();
+});
+
+it("a failed Analyze photos submit keeps the dialog open with the server's error and never navigates", async () => {
+  const photoPhone = "+19415550500";
+  messages = [{
+    id: "photo-solo-2", from: photoPhone, to: line, direction: "inbound", body: "A single photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-solo-2",
+    media: [{ key: "sms-media/inbound/solo2", url: "https://signed.example/solo2", contentType: "image/jpeg" }],
+  }];
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/photo-assessments/")
+    ? response({ error: "At least one photo is required" }, 400)
+    : originalFetch(url, options));
+  setupWithOwner("analyze-photos-failure"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" })); await tick();
+  expect(screen.getByText("At least one photo is required")).toBeInTheDocument();
+  expect(screen.getByText("Analyze photos from this thread")).toBeInTheDocument();
+  expect(mockNavigate).not.toHaveBeenCalled();
 });

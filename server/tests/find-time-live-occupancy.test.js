@@ -15,6 +15,15 @@ function serviceQuery(input) {
   const column = key => key.split('.').pop();
   const q = {
     whereBetween: () => q,
+    // absentTechDays (technician-eligibility.js) calls a top-level
+    // .whereNull('cleared_at') directly on the query (never inside the
+    // grouped `where(fn)` callback below) — every table this file's `wire`
+    // routes through serviceQuery (everything but 'technicians', now
+    // including 'technician_absences') must answer it. The rows here are
+    // scheduled_services fixtures, never real absence rows, so this always
+    // resolves to an inert "no tech marked out" read.
+    whereNull: () => q,
+    whereIn: () => q,
     whereNotIn(key, values) { rows = rows.filter(row => !values.includes(row[column(key)])); return q; },
     whereNotNull(key) { rows = rows.filter(row => row[column(key)] != null); return q; },
     where(fn) {

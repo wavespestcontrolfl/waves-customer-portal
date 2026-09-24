@@ -83,6 +83,13 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.transaction.mockImplementation(async (cb) => cb(db));
   db.__qb.update.mockResolvedValue(1);
+  // Standing default: the real dbLevelMergeConflict now also queries
+  // scheduled_services for a same-family recurring-series conflict
+  // (ADMIN-BUG-R15) on every call, beyond the one customer-rows `.select()`
+  // most tests below queue with `mockResolvedValueOnce`. An empty array is
+  // the correct "nothing found" default for those extra calls; individual
+  // `mockResolvedValueOnce` queues still take priority over this fallback.
+  db.__qb.select.mockResolvedValue([]);
   mockDuplicatePairEligibility.mockResolvedValue(ELIGIBLE);
   mockDescribeMergeEffects.mockResolvedValue(EFFECTS);
   // Default-off capability gate (Codex r14 P1): on for every test below

@@ -481,3 +481,47 @@ describe('property-history identity at the final send fence', () => {
     }
   });
 });
+
+// Codex round-3 P2 (audit r2-completion-live-money-tail-1 follow-up):
+// sendServiceReportV1Email reports a transient notification_prefs lookup
+// failure as {ok:false, transient:true, reason:'prefs_unavailable'} rather
+// than {skipped:true} — markDeliverySkipped treats every skip as TERMINAL
+// (never retried), so a DB blip reported that way would strand the report
+// forever even after the DB recovers. This confirms the queue actually
+// re-queues (not skips) that shape.
+describe('transient prefs-lookup failure re-queues instead of terminally skipping', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    KnowledgeBridge.sealRecommendationsForSend.mockResolvedValue(true);
+    loadLinkedLawnAssessment.mockResolvedValue(null); // non-lawn delivery
+  });
+
+  test('a transient prefs_unavailable result re-queues the delivery for retry, not skipped', async () => {
+    sendServiceReportV1Email.mockResolvedValueOnce({
+      ok: false, transient: true, reason: 'prefs_unavailable', error: 'Service report recipient preferences unavailable',
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' }, attempts: 0, max_attempts: 5 };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+
+    // NOT 'skipped' (terminal) — routes through markDeliveryFailed, which
+    // re-queues (status 'queued', a next_attempt_at) while attempts remain.
+    expect(out.status).toBe('queued');
+    expect(out.status).not.toBe('skipped');
+  });
+
+  // Contrast: a genuine opt-out (skipped:true) IS terminal by design — this
+  // is the existing, correct behavior the transient case must not disturb.
+  test('a genuine opt-out (skipped:true) stays terminally skipped', async () => {
+    sendServiceReportV1Email.mockResolvedValueOnce({
+      ok: false, skipped: true, error: 'Suppressed: customer opted out of service report email',
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' }, attempts: 0, max_attempts: 5 };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+
+    expect(out.status).toBe('skipped');
+  });
+});

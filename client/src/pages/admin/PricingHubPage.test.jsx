@@ -74,7 +74,7 @@ describe("PricingHubPage", () => {
     renderHub();
 
     expect(screen.getByText("Logic workspace")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Logic & Margins" }))
+    expect(screen.getByRole("button", { name: "Logic" }))
       .toHaveAttribute("aria-current", "page");
   });
 
@@ -82,7 +82,7 @@ describe("PricingHubPage", () => {
     renderHub("/admin/pricing-logic?source=bookmark&area=strategy");
 
     expect(screen.getByText("Strategy workspace")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Strategy & Offers" }))
+    expect(screen.getByRole("button", { name: "Strategy" }))
       .toHaveAttribute("aria-current", "page");
   });
 
@@ -90,18 +90,18 @@ describe("PricingHubPage", () => {
     mockGetAdminUser.mockReturnValue({ role: "tech" });
     renderHub("/admin/pricing-logic?area=strategy");
 
-    expect(screen.queryByRole("button", { name: "Strategy & Offers" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Strategy" })).not.toBeInTheDocument();
     expect(screen.queryByText("Strategy workspace")).not.toBeInTheDocument();
     // A deep link to the hidden area falls back to Logic & Margins.
     expect(screen.getByText("Logic workspace")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Logic & Margins" }))
+    expect(screen.getByRole("button", { name: "Logic" }))
       .toHaveAttribute("aria-current", "page");
   });
 
   it("switches areas without dropping existing query context", () => {
     renderHub("/admin/pricing-logic?source=alert&section=reality");
 
-    fireEvent.click(screen.getByRole("button", { name: "Price Notices" }));
+    fireEvent.click(screen.getByRole("button", { name: "Notices" }));
 
     expect(screen.getByText("Price notices workspace")).toBeInTheDocument();
     expect(screen.getByTestId("location-search")).toHaveTextContent(
@@ -121,7 +121,7 @@ describe("PricingHubPage", () => {
     expect(mockLogicSectionChange).toHaveBeenCalledWith("brackets");
 
     // Strategy has no sub-tabs — the second row must unmount with Logic.
-    fireEvent.click(screen.getByRole("button", { name: "Strategy & Offers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Strategy" }));
     expect(screen.getByText("Strategy workspace")).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Pricing section" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Pricing" })).toBeInTheDocument();

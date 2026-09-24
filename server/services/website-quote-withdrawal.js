@@ -10,6 +10,7 @@
 // caller's transaction, which also holds the contact-pair advisory lock;
 // the critical audit row commits with the archival.
 const { samePremiseDisplay } = require('./lead-address-unverified');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 
 // …and 'expired': a previously published quote that expired before the
 // flagged lookup is still revivable through the public seven-day extension
@@ -35,7 +36,7 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
       .orWhere((own) => own
         .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
         .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])))
-    .select('id', 'address', trx.raw("estimate_data->>'lead_id' as lead_id"), trx.raw("(estimate_data->'websiteSelfService' IS NOT NULL) as website"));
+    .select('id', 'address', 'status', trx.raw("estimate_data->>'lead_id' as lead_id"), trx.raw("(estimate_data->'websiteSelfService' IS NOT NULL) as website"), trx.raw(`(${DELIVERY_CLAIM_NOT_LIVE_SQL}) as claim_not_live`));
   // Premise-matched in BOTH arms: this lead's own rows match on
   // identity plus the (loose) premise — a lead's publication for a
   // different property must not be archived by a flag on this one;
@@ -43,8 +44,23 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
   const matched = candidates
     .filter((row) => (String(row.lead_id || '') === String(leadId) && samePremiseDisplay(row.address, fullAddress))
       || samePremiseDisplay(row.address, fullAddress, { requireLocality: true }));
+  // A LIVE delivery claim on any matched row (the sender is between its
+  // last-instant recheck and the provider call): quarantining now would
+  // commit the marker under a link the provider still receives. Refuse the
+  // whole withdrawal — the caller's transaction rolls back and answers a
+  // retryable 503; the claim lapses within its TTL (codex #4667 r39 P1).
+  const claimed = matched.find((row) => row.claim_not_live === false);
+  if (claimed) {
+    throw Object.assign(new Error('A quote is mid-delivery — retry in a moment.'), { code: 'DELIVERY_CLAIM_LIVE', statusCode: 503 });
+  }
   const toWithdraw = matched.filter((row) => row.website === true);
-  const toBlock = matched.filter((row) => row.website !== true);
+  // A legacy (non-website) row that already EXPIRED is not blocked: it has
+  // no revival path (the extension refuses off-surface rows, the revise
+  // block refuses expired SERVER rows) so a block would be permanent; it
+  // cannot be viewed or accepted anyway. Expired WEBSITE publications stay
+  // in the withdrawal set — the public extension could revive them (codex
+  // #4667 r39 P0).
+  const toBlock = matched.filter((row) => row.website !== true && row.status !== 'expired');
   // Every write re-asserts the EXACT address the row was matched on (codex
   // r33 P1): a Customer 360 correction fanning a new premise onto the row
   // between the SELECT and this row lock must win, or the block would be

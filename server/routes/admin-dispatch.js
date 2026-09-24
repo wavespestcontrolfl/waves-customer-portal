@@ -20,7 +20,7 @@ const db = require('../models/db');
 const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
@@ -46,6 +46,8 @@ const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = 
 const { detectServiceLine, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
+const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
+const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
 const { tipsForVisit } = require('../services/service-report/tip-library');
 
@@ -220,13 +222,20 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // dropped on completion. Computing the result per-service on the server
 // keeps the UI and the write path in agreement.
 //
+// `firstVisit` (owner ruling 2026-09-24): true when the customer has no
+// completed, customer-visible service record on this service line yet —
+// the picker then starts at 5 and the tech lowers it if they saw less.
+// Only computed when the picker is allowed, and only for the assigned
+// tech or an admin (it reads the customer's visit history) — anyone else
+// gets `false` and an empty picker, same as before this ruling.
+//
 // 404 on unknown service; admin-dispatch's existing requireTechOrAdmin
 // gate covers auth.
 router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'service_id', 'service_type');
+      .first('id', 'service_id', 'service_type', 'customer_id', 'technician_id');
     if (!svc) {
       return res.status(404).json({ error: 'Service not found' });
     }
@@ -235,13 +244,25 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
       resolveCompletionProfileForScheduledService(svc),
     ]);
     const serviceLine = detectServiceLine(svc.service_type);
-    res.json({
-      allowed: technicianPestRatingAllowedForService({
-        completionProfile,
-        pestPressureConfig: config,
-        serviceLine,
-      }),
+    const allowed = technicianPestRatingAllowedForService({
+      completionProfile,
+      pestPressureConfig: config,
+      serviceLine,
     });
+    const mayReadHistory = !completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    const firstVisit = allowed && mayReadHistory
+      ? !(await customerHasPriorVisitOnLine(db, { customerId: svc.customer_id, serviceLine }))
+      : false;
+    // The picker caption names what each tap means using the ACTIVE labels,
+    // so a label set edited in Settings never contradicts the report.
+    const scaleLabels = allowed
+      ? [0, 1, 2, 3, 4, 5].map((n) => resolvePestPressureLabel(n, config?.labels)?.name || null)
+      : null;
+    res.json({ allowed, firstVisit, scaleLabels });
   } catch (err) { next(err); }
 });
 
@@ -494,6 +515,24 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
       )
       .first();
     if (!svc || !svc.customer_id) return res.status(404).json({ error: 'Service not found' });
+    // Ownership: a technician token must not read the precise coordinates,
+    // treatment-zone layout and termite/rodent station map of a customer the
+    // technician is not currently serving (ADMIN-BUG-R35; the customer-scoped
+    // sibling below is already requireAdmin). A bare technician_id compare
+    // (completionOwnershipError) would keep authorizing a visit long after
+    // it went dead or aged out — the CANONICAL current-assignment predicate
+    // (technicianCurrentVisitFilter: dead statuses excluded, 7-day access
+    // window) is the one every other per-visit tech read in this file is
+    // supposed to use (codex round-1 P1). Re-queried against the unaliased
+    // table because the predicate's columns are table-qualified to
+    // `scheduled_services.*`, not this route's `ss` alias.
+    if (isTechnicianRequest(req)) {
+      const current = await db('scheduled_services')
+        .where('scheduled_services.id', req.params.serviceId)
+        .modify((q) => technicianCurrentVisitFilter(req, q))
+        .first('id');
+      if (!current) return res.status(404).json({ error: 'Service not found' });
+    }
     // Number(null) is 0 — a finite value that would sail past the payload's
     // missing_coordinates check and center the map at 0,0 (codex round-9 P2).
     return res.json(await buildPropertyMapPayload(svc.customer_id, coordOrNaN(svc.latitude), coordOrNaN(svc.longitude)));
@@ -992,13 +1031,33 @@ router.patch('/:serviceId/note', async (req, res, next) => {
   try {
     const { notes } = req.body;
     const text = (notes == null ? '' : String(notes)).slice(0, 2000);
-    const updated = await db('scheduled_services')
-      .where({ id: req.params.serviceId })
-      .update({ notes: text, updated_at: new Date() })
-      .returning(['id', 'notes']);
-    if (!updated.length) return res.status(404).json({ error: 'Service not found' });
-    res.json({ success: true, notes: updated[0].notes });
-  } catch (err) { next(err); }
+    let updatedNotes = null;
+    // codex-review (PR #4673): the row is now locked FOR UPDATE and
+    // re-verified through the canonical technician ownership predicate
+    // (ADMIN-BUG-R35 fixed the bare technician_id compare; this closes the
+    // remaining reassignment race — a mismatch lands INSIDE the same lock
+    // this update runs under, not a second unlocked SELECT that only
+    // narrows the window). codex round 4 P2: the note is a non-lifecycle
+    // edit the feed keeps open on a recently COMPLETED visit (7-day
+    // window, MobileAppointmentDetailSheet / ScheduleCustomerSidebar), so
+    // it uses the read-window predicate (allowCompleted →
+    // technicianCurrentVisitFilter) rather than the live one — still
+    // fenced to the technician's own, non-dead, in-window rows.
+    await db.transaction(async (trx) => {
+      await lockOwnedLiveVisit(trx, req, req.params.serviceId, ['id'], { allowCompleted: true });
+      const updated = await trx('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .update({ notes: text, updated_at: new Date() })
+        .returning(['id', 'notes']);
+      updatedNotes = updated[0]?.notes ?? text;
+    });
+    res.json({ success: true, notes: updatedNotes });
+  } catch (err) {
+    if (err && err.status && err.code) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
+    }
+    next(err);
+  }
 });
 
 // PATCH /api/admin/dispatch/:serviceId/time-on-site — after-the-fact
@@ -1770,6 +1829,17 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
+    // Same closed target allow-list as admin-schedule's PUT /:id/status
+    // (r1-sched-routes-2): this route handed 'pending' / 'rescheduled' / any
+    // string straight to transitionJobStatus too, so a technician could
+    // un-confirm or hand-stamp a reschedule on their own visit here after
+    // the schedule route refused it (pre-push fallback audit, PR #4673).
+    // Refused for every caller, before the row lookup; 'completed' still
+    // reaches its own USE_COMPLETION_FLOW refusal below.
+    const { STATUS_ROUTE_ALLOWED_TARGETS } = require('../services/job-status');
+    if (!STATUS_ROUTE_ALLOWED_TARGETS.has(toStatus)) {
+      return res.status(400).json({ error: `Invalid status '${toStatus}'`, code: 'invalid_status' });
+    }
     // Populated by the single-cancel branch when a cancellation text was
     // requested — surfaces send failures in the response.
     let cancelNoticeOutcome = null;
@@ -1780,6 +1850,28 @@ router.put('/:serviceId/status', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // A technician token is scoped to visits currently assigned to it — this
+    // route found the row by bare id with no ownership predicate, so a tech-1
+    // token could stamp/cancel/no-show tech-2's visit (ADMIN-BUG-R35). Admin
+    // requests stay unscoped.
+    {
+      const ownershipError = completionOwnershipError({
+        role: req.techRole,
+        actorTechnicianId: req.technicianId,
+        assignedTechnicianId: svc.technician_id,
+      });
+      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+    // Blast-radius actions that carry money or customer comms — a whole-
+    // series/following cancel (every future sibling, recurring plan stopped)
+    // and no_show (invoice void + card-on-file fee charge) — stay admin-only
+    // even on the tech's own visit; the mobile UI never renders a manual
+    // no-show button (removed 2026-07-31) and reaches series/following cancel
+    // only from the office-facing schedule surfaces.
+    if (req.techRole !== 'admin' && (toStatus === 'no_show' || (toStatus === 'cancelled' && ['following', 'series'].includes(scope)))) {
+      return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+    }
 
     // ⛔ 'completed' is NOT a bare status here. Only POST /:serviceId/complete
     // mints the service_records row + invoice; flipping the row to completed
@@ -2189,9 +2281,36 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // takeover); an unverified explicit confirm still commits, just as an
         // OFFICE confirm — the card funnel runs, which is the fail-closed
         // direction.
+        // codex-review (PR #4673): ownership was decided from the
+        // pre-transaction `svc` snapshot — assignDispatchJob (or any other
+        // reassignment) landing between that read and this transaction
+        // leaves the status CAS itself untouched (it keys on fromStatus,
+        // not technician_id), so the FORMER technician's transition still
+        // committed against the newly-reassigned visit. The shared
+        // lockOwnedLiveVisit helper re-verifies the row under a FOR UPDATE
+        // lock through the canonical technicianLiveVisitFilter predicate
+        // (dead statuses, completed rows, and the 7-day access window all
+        // fail it too, not just a technician_id compare) before
+        // transitionJobStatus ever runs — the SAME check the field-confirm
+        // path below reuses instead of re-verifying itself.
+        const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status'], {
+          // A same-status resend of an already-TERMINAL row (cancelled/
+          // skipped — job-status.js's own ONE_WAY_FROM_STATUSES; 'completed'
+          // can't reach here, it's refused earlier as USE_COMPLETION_FLOW,
+          // and 'no_show' has its own dedicated idempotent-retry branch that
+          // returns before this transaction) is the one case the terminal-
+          // transition check above explicitly lets through — it must not be
+          // re-rejected here for being terminal. Scoped to fromStatus
+          // itself being terminal (codex-review P1): a same-status resend
+          // of an ordinary LIVE status (e.g. re-confirming an already-
+          // confirmed visit) is NOT this case and must stay subject to the
+          // full technicianLiveVisitFilter (staleness included) — the
+          // earlier, broader `toStatus === fromStatus` check let a stale
+          // live-status resend bypass the 7-day window too.
+          allowTerminal: toStatus === fromStatus && ['cancelled', 'skipped'].includes(fromStatus),
+        });
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
-          const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
-            .first('technician_id', 'customer_confirmed', 'status');
+          const locked = lockedRow;
           fieldConfirmVerified = !!locked
             && String(locked.technician_id || '') === String(req.technicianId)
             && locked.customer_confirmed !== true
@@ -2265,6 +2384,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
         });
       });
     } catch (err) {
+      if (err && err.status && err.code) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
       // transitionJobStatus throws when fromStatus mismatch — surface
       // as 409 so the client can refetch and retry. Other errors
       // bubble to the outer next(err).
@@ -2793,13 +2915,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 router.put('/:serviceId/reorder', async (req, res, next) => {
   try {
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-    let found = true;
     let reorderedDay = null;
     await db.transaction(async (trx) => {
+      // codex-review (PR #4673 round 3): lockOwnedLiveVisit's FOR UPDATE
+      // taken BEFORE lockTechDays inverted the lock order
+      // dispatch-assignment.js:204 uses (advisory tech-day lock first, THEN
+      // row lock/update) — two concurrent transactions taking the two locks
+      // in opposite orders can deadlock. Read the provisional row UNLOCKED
+      // (same as dispatch-assignment.js's own `dayRow` read), THEN take the
+      // advisory lock, THEN validate ownership through the canonical
+      // technicianVisitRowInScope predicate (dead statuses, staleness — not
+      // just a technician_id compare) before the write. A row that changed
+      // between the provisional read and the lock is caught by the same
+      // "0 rows updated = stale, 409" CAS the update already relied on.
       const prov = await trx('scheduled_services')
         .where({ id: req.params.serviceId })
-        .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-      if (!prov) { found = false; return; } // pre-fence behavior: unknown id was a silent no-op
+        .first('technician_id', 'status', 'scheduled_date', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+      if (!prov) throw Object.assign(new Error('Service not found'), { status: 404, code: 'not_found' });
+      if (!technicianVisitRowInScope(req, prov)) {
+        throw Object.assign(new Error('Not assigned to this service'), { status: 403, code: 'service_not_assigned' });
+      }
       await lockTechDays(trx, [{ techId: prov.technician_id, date: prov.day }]);
       const updated = await trx('scheduled_services')
         .where({ id: req.params.serviceId })
@@ -2819,8 +2954,9 @@ router.put('/:serviceId/reorder', async (req, res, next) => {
         logger.error(`[dispatch] reorder route quality refresh failed: ${e.message}`);
       }
     }
-    res.json({ success: true, ...(found ? {} : { updated: 0 }) });
+    res.json({ success: true });
   } catch (err) {
+    if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
     if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
     next(err);
   }
@@ -2838,14 +2974,27 @@ router.put('/reorder/bulk', async (req, res, next) => {
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
     const reorderedDays = new Set();
     await db.transaction(async (trx) => {
+      // codex-review (PR #4673 round 3): a FOR UPDATE here, before
+      // lockTechDays, would invert the lock order dispatch-assignment.js:204
+      // uses (advisory tech-day lock first, then row lock/update) and could
+      // deadlock a concurrent reassignment. Read UNLOCKED — the tech-day
+      // advisory lock below already fences the concurrent-write case this
+      // batch cares about, and the per-item "0 rows updated = stale" CAS
+      // below catches anything that changed between this read and the lock.
       const rows = await trx('scheduled_services')
         .whereIn('id', (order || []).map((i) => i.serviceId))
-        .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+        .select('id', 'technician_id', 'status', 'scheduled_date', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
       const byId = new Map(rows.map((r) => [String(r.id), r]));
       await lockTechDays(trx, rows.map((r) => ({ techId: r.technician_id, date: r.day })));
       for (const item of order || []) {
         const prov = byId.get(String(item.serviceId));
         if (!prov) continue; // pre-fence behavior: unknown id was a silent no-op
+        // Ownership: a technician token may only reorder its OWN CURRENT
+        // visits — a row belonging to another tech, a dead-status row, or
+        // one outside the 7-day access window is skipped, same as an
+        // unknown id (ADMIN-BUG-R35 / codex-review: not just a bare
+        // technician_id compare).
+        if (!technicianVisitRowInScope(req, prov)) continue;
         const updated = await trx('scheduled_services')
           .where({ id: item.serviceId })
           .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [prov.day])
@@ -2872,11 +3021,31 @@ router.put('/reorder/bulk', async (req, res, next) => {
   }
 });
 
+// Owner-only vendor/COGS columns on products_catalog (same rule as
+// admin-inventory's OWNER_ONLY_PRODUCT_FIELDS / stripOwnerPricing, the
+// 2026-08-25 role lockdown — "per-product cost/COGS fields — owner-only").
+// This route selected the raw row with none of that projection
+// (ADMIN-BUG-R43); pest-recap.js's own read of this same table already
+// avoids the trap with an explicit agronomic select list.
+const CATALOG_OWNER_ONLY_FIELDS = [
+  'best_price', 'best_vendor', 'best_vendor_pricing_id',
+  'best_price_amount_cached', 'best_price_vendor_id_cached',
+  'best_price_updated_at', 'best_price_status',
+  'cost_per_unit', 'cost_unit', 'monthly_cost_estimate',
+  'needs_pricing', 'siteone_sku', 'auto_reorder_vendor_id', 'reorder_quantity',
+];
+function stripCatalogOwnerPricing(row) {
+  const out = { ...row };
+  for (const key of CATALOG_OWNER_ONLY_FIELDS) delete out[key];
+  return out;
+}
+
 // GET /api/admin/dispatch/products/catalog
 router.get('/products/catalog', async (req, res, next) => {
   try {
     const products = await db('products_catalog').where({ active: true }).orderBy('category').orderBy('name');
-    res.json({ products });
+    const isAdminRequest = req.techRole === 'admin';
+    res.json({ products: isAdminRequest ? products : products.map(stripCatalogOwnerPricing) });
   } catch (err) { next(err); }
 });
 
@@ -3273,7 +3442,7 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
         // explicit override that is not assignable is a 422.
         if (insertData.technician_id) {
           try {
-            await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+            await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(date).slice(0, 10) });
           } catch (eligErr) {
             if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
             logger.warn(`[dispatch] follow-up inherits technician ${insertData.technician_id} who is not assignable; booking unassigned`);
@@ -3436,8 +3605,8 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
       contextLines,
     });
     const generated = await dispatchWithFallback(
-      MODELS.TEXT_POLICIES.visionAnalysis,
-      { laneId: 'photo_scoring', text: basePrompt, images, jsonMode: false, maxTokens: 700, temperature: 0.2 },
+      MODELS.TEXT_POLICIES.photoCaptions,
+      { laneId: 'photo_scoring', text: basePrompt, images, jsonMode: false, maxTokens: 2048, temperature: 0.2 },
       {
         validate: (candidate) => {
           const parsed = PhotoAnalysis.parsePhotoAnalysisResponse(candidate.text, { photoCount: photos.length });
@@ -3640,7 +3809,16 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // A partial/unverifiable unit move deliberately retains the cohort
       // hold — this unconditional post-move sync must not release it
       // (codex #3609 r37).
-      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
+      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify,
+      // willNotify=false means this move sends no replacement notice of its
+      // own (Day-grid resize/bulk move always set notifyCustomer:false; a
+      // rain-out whose moved-SMS didn't send lands here too) — a still-
+      // pending creation confirmation must stay pending so the deferred
+      // sendConfirmation / stranded sweep still delivers it with the new
+      // time, exactly like the sibling re-arms in admin-schedule.js's bulk
+      // reschedule and auto-dispatch/apply.js (ADMIN-BUG-R24).
+      ...(willNotify ? {} : { keepPendingConfirmation: true }),
+      ...(expectSchedule ? { expectSchedule } : {}) },
     );
     if (synced && synced.skippedStale === true) return 'stale';
     if (synced !== null) return true;
@@ -4033,8 +4211,21 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'technician_id', 'scheduled_date');
+      .first('id', 'technician_id', 'scheduled_date', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Ownership: this route ran WITHOUT the tech-assignment check the
+    // tech-track twin (tech-track.js) already enforces — a technician token
+    // could rain-out (and, at scope='route', move every remaining stop on)
+    // another technician's day (ADMIN-BUG-R35).
+    {
+      const ownershipError = completionOwnershipError({
+        role: req.techRole,
+        actorTechnicianId: req.technicianId,
+        assignedTechnicianId: svc.technician_id,
+      });
+      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
 
     if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
       return res.status(409).json({
@@ -4044,8 +4235,48 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
     }
 
     const { reasonCode, scope, target, notifyCustomer, customerNote } = req.body || {};
+    // Blast-radius: scope='route' moves every remaining stop on the tech's
+    // day and texts each of those customers — admin-only even on the tech's
+    // own visit (same rationale as series/following cancel above).
+    if (req.techRole !== 'admin' && scope === 'route') {
+      return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+    }
     if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
       return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+    // codex-review P0: RainOut.commit's own collective-anchoring rule
+    // (rain-out.js, GATE_COLLECTIVE_SERIES_ANCHOR) shifts the visit's WHOLE
+    // FUTURE SERIES whenever a recurring job's date actually changes —
+    // independent of scope, so a plain scope='job' rain-out on the
+    // technician's own recurring visit reaches the same series-wide blast
+    // radius scope='route' is already admin-gated for. Refuse it here
+    // before RainOut.commit ever runs the implicit expansion.
+    if (
+      req.techRole !== 'admin'
+      && process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
+      && svc.is_recurring
+      && target?.date
+      && String(target.date) !== serviceDateOnly(svc.scheduled_date)
+    ) {
+      return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+    }
+
+    // codex-review (PR #4673): re-verify assignment as late as possible,
+    // immediately before handing off, through the canonical
+    // technicianLiveVisitFilter predicate (FOR UPDATE lock, released as
+    // soon as this pre-check transaction commits) — this narrows the
+    // window but RainOut.commit still does its own unlocked re-read with
+    // no caller-supplied CAS on the visit itself, so the REAL fence is
+    // requireAssignedTechnicianId below, which threads technician_id into
+    // the rebooker's own atomic write predicate (options.expect) the same
+    // way rescheduleOptions.expect does for POST /:id/reschedule.
+    if (req.techRole !== 'admin') {
+      try {
+        await db.transaction((trx) => lockOwnedLiveVisit(trx, req, req.params.serviceId, ['id']));
+      } catch (err) {
+        if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+        throw err;
+      }
     }
 
     const RainOut = require('../services/rain-out');
@@ -4067,6 +4298,11 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       // Authenticated dispatch-board click — the moved SMS is exempt from
       // the 8AM-8PM send window (operator-initiated, not machine-initiated).
       operatorInitiated: true,
+      // Fences the SINGLE-JOB write itself (rain-out.js merges this into
+      // the rebooker's options.expect CAS) — a reassignment landing after
+      // the lock above releases still makes the write miss and 409, instead
+      // of silently letting the former technician's move commit.
+      requireAssignedTechnicianId: req.techRole !== 'admin' ? req.technicianId : null,
     });
 
     if (!result.ok) {
@@ -4776,6 +5012,33 @@ function pastRescheduleDateError(newDate) {
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+    // Ownership: this route found the anchor visit by bare id with no
+    // ownership predicate — a technician token could move any customer's
+    // (or a whole recurring plan's) visit (ADMIN-BUG-R35). Admin requests
+    // stay unscoped and skip this extra lookup entirely — several existing
+    // admin-path tests exercise pure window-format validation before
+    // anything selects this row. lockOwnedLiveVisit's FOR UPDATE lock is
+    // released as soon as this pre-check transaction commits (the atomic
+    // write itself happens later, inside the rebooker's own transaction) —
+    // it exists to apply the canonical technicianLiveVisitFilter predicate
+    // (dead statuses, completed rows, the 7-day window) up front, same as
+    // every other technician-reachable per-visit write in this file. The
+    // ACTUAL race fence for the write is rescheduleOptions.expect below,
+    // which pins technician_id into the rebooker's own atomic CAS.
+    if (req.techRole !== 'admin') {
+      try {
+        await db.transaction((trx) => lockOwnedLiveVisit(trx, req, req.params.serviceId, ['id']));
+      } catch (err) {
+        if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+        throw err;
+      }
+    }
+    // Blast-radius: scope='series' moves every future occurrence of the
+    // plan — admin-only even on the tech's own visit (same rationale as
+    // series/following cancel).
+    if (req.techRole !== 'admin' && scope === 'series') {
+      return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+    }
     // Client-minted idempotency key for the series operation (see
     // rebooker.rescheduleSeries operationKey) — optional, string only.
     const operationKey = typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120
@@ -4900,6 +5163,19 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // Pin the fields that resolution derived from into the rebooker's CAS.
     const movePin = rescheduleExpectPredicate(observedForMove);
     if (movePin) rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), ...movePin };
+    // codex-review P1: the ownership check above reads a snapshot; without
+    // pinning it, a reassignment landing between that read and this write
+    // has no effect on the write itself, so the FORMER technician's move
+    // still commits (and still notifies the customer). Extend the rebooker's
+    // OWN atomic write predicate (options.expect merges straight into the
+    // UPDATE's WHERE) with the authenticated technician id — a concurrent
+    // reassignment then makes the write miss and surfaces the existing
+    // concurrent-change 409, the same fence every other CAS field here gets.
+    // Admin requests stay unscoped (an admin's own /reschedule with
+    // technicianId reassigns the row on purpose).
+    if (req.techRole !== 'admin') {
+      rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), technician_id: req.technicianId };
+    }
     // Staff surface: occupancy clashes commit with a warning instead of
     // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
     rescheduleOptions.overlapAdvisory = true;
@@ -4955,6 +5231,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         // (409, re-submit) instead.
         rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), visit_id: job.visit_id };
       } else if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
+        // Blast-radius: under this gate, a date-changing move on an
+        // ungrouped recurring anchor widens to every future occurrence
+        // exactly like an explicit scope='series' request — a technician
+        // sending scope='this_only' must not reach that widening by
+        // acknowledging the preview (codex-review P0: seriesAck/seriesAckIds
+        // was the one path this route's admin-only series check missed).
+        if (req.techRole !== 'admin') {
+          return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
+        }
         let preview = null;
         try {
           preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
@@ -5192,7 +5477,11 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         ts.updated_at,
         ts.location_updated_at,
         COALESCE(today_agg.total, 0)     AS today_total,
-        COALESCE(today_agg.completed, 0) AS today_completed
+        COALESCE(today_agg.completed, 0) AS today_completed,
+        EXISTS (
+          SELECT 1 FROM technician_absences a
+          WHERE a.technician_id = t.id AND a.absence_date = ? AND a.cleared_at IS NULL
+        ) AS out_today
       FROM technicians t
       INNER JOIN tech_status ts ON ts.tech_id = t.id
       LEFT JOIN (
@@ -5215,7 +5504,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         AND ts.location_updated_at >= NOW() - INTERVAL '24 hours'
       ORDER BY t.name
       `,
-      [today]
+      [today, today]
     );
 
     const jobRows = await db.raw(
@@ -5280,6 +5569,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       location_updated_at: r.location_updated_at,
       today_total: parseInt(r.today_total, 10) || 0,
       today_completed: parseInt(r.today_completed, 10) || 0,
+      out_today: !!r.out_today,
     })));
 
     const jobs = (jobRows.rows || []).map((r) => {
@@ -5590,7 +5880,10 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
         's.window_start',
         's.window_end'
       )
-      .orderBy('a.created_at', 'desc')
+      // Newest first; alerts written in one transaction share created_at
+      // (now() is per-transaction), so a tech-out batch orders by its own
+      // bump_order (#1 first). Rows without one keep pure recency.
+      .orderByRaw("a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST")
       .limit(limit);
 
     if (unresolved) q.whereNull('a.resolved_at');
@@ -5916,6 +6209,7 @@ module.exports.rescheduleReminderTime = rescheduleReminderTime;
 module.exports._test = {
   pastRescheduleDateError,
   technicianPestRatingAllowedForService,
+  customerHasPriorVisitOnLine,
   timeOnSiteEditPlan,
   reentryEditPlan,
   rearmRescheduleReminderWindows,

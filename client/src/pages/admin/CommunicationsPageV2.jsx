@@ -70,12 +70,14 @@ import {
   Headphones,
   Inbox,
   Loader2,
+  Link2,
   Mail,
   MessageSquare,
   Ban,
   Mic,
   MicOff,
   PhoneCall,
+  ScanSearch,
   Sparkles,
   Zap,
   ClipboardList,
@@ -99,6 +101,12 @@ import {
   Badge,
   Button,
   Card,
+  Checkbox,
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  DialogBody,
+  DialogFooter,
   Field,
   Input,
   Textarea,
@@ -225,7 +233,7 @@ function findKnownWavesNumber(value) {
 const TABS = [
   {
     key: "events",
-    label: "Message Automations",
+    label: "Automations",
     Icon: Zap,
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
@@ -239,19 +247,19 @@ const TABS = [
   // not day-to-day comms work. Events/SMS/Calls/Triage stay staff-wide.
   {
     key: "templates",
-    label: "Message Templates",
+    label: "Templates",
     Icon: FileText,
     adminOnly: true,
   },
   {
     key: "csr",
-    label: "CSR Coach",
+    label: "Coach",
     Icon: Headphones,
     adminOnly: true,
   },
   {
     key: "call_routing",
-    label: "Call Routing",
+    label: "Routing",
     Icon: Bot,
     adminOnly: true,
   },
@@ -800,6 +808,247 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   return `Hi ${first}, it's Waves Pest Control. ${line}`;
 }
 
+const ANALYZE_PHOTOS_MAX = 5;
+// Mirrors MESSAGE_PHOTO_ALLOWED_MIME in server/routes/admin-photo-assessments.js
+// — only these get resized+analyzed server-side; a non-image MMS (video,
+// audio, vcard) must never appear in the picker or count toward "has photos".
+const ANALYZE_PHOTOS_ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+
+// Pure: flat, newest-first list of every inbound photo in `messages`,
+// filtered to `allowedMime` — one entry per media item, not per message,
+// since one MMS can carry several photos. Module-level (not a SmsTab
+// closure) so it is unit-testable on its own and SmsTab's own body gains
+// only the one useMemo call site below, not this function's branching.
+// Shared by the general inbox (activeThread.messages) and the Customer
+// 360-embedded composer (customerMessages) — see AnalyzePhotosAction below.
+export function collectAnalyzablePhotos(messages, allowedMime) {
+  if (!Array.isArray(messages)) return [];
+  const items = [];
+  for (const m of messages) {
+    if (m.direction !== "inbound" || !Array.isArray(m.media)) continue;
+    for (const media of m.media) {
+      if (!media?.url || !media?.key) continue;
+      const mime = String(media.contentType || media.mimeType || "").toLowerCase();
+      if (!allowedMime.has(mime)) continue;
+      items.push({ messageId: m.id, key: media.key, url: media.url, createdAt: m.createdAt, customerId: m.customerId || null });
+    }
+  }
+  items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return items;
+}
+
+// "Analyze photos" — pulls inbound MMS photos from the open thread straight
+// into the photo-assessment pipeline (POST /admin/photo-assessments/:type
+// with message_photos, same server-side analysis lawn/pest funnel rows use).
+// `photos` is a flat, newest-first list of { messageId, key, url, customerId }
+// built from the active thread's inbound messages — one entry per media
+// item, not per message, since one MMS can carry several photos.
+// `fixedCustomerId`/`fixedCustomerName` are set ONLY for the Customer 360-
+// embedded composer, where the customer is the mount's own prop, not a
+// thread-derived guess — see the general-inbox note on AnalyzePhotosAction.
+function AnalyzePhotosDialog({ open, onClose, photos, fixedCustomerId, fixedCustomerName, onCreated, layer }) {
+  const [type, setType] = useState("lawn");
+  // Selections are keyed by the photo's own S3 key (globally unique), NOT
+  // array index — the inbox polls every ~30s and can replace `photos` with a
+  // new array (a fresh inbound MMS shifts everything newest-first) while
+  // this dialog sits open. Index-based selection would then silently submit
+  // whatever photo happened to land on the same position instead of what the
+  // operator actually checked.
+  const [selectedKeys, setSelectedKeys] = useState(() => new Set());
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    setType("lawn");
+    // Most recent photo (index 0 — the list is already newest-first) starts checked.
+    setSelectedKeys(new Set(photos.length ? [photos[0].key] : []));
+    setNote("");
+    setError("");
+    setBusy(false);
+    // Only reset when the dialog opens — re-running on every `photos`
+    // recompute would clobber the operator's picks mid-edit. `photos` is
+    // deliberately left out of the deps for that reason.
+  }, [open]);
+
+  const toggle = (key) => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else if (next.size < ANALYZE_PHOTOS_MAX) {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    const selected = photos.filter((p) => selectedKeys.has(p.key));
+    if (!selected.length) {
+      setError("Select at least one photo.");
+      return;
+    }
+    // General inbox: thread membership is keyed by phone, and a shared or
+    // reassigned number can hold messages from more than one customer — the
+    // open thread's own customerId is not trustworthy enough to attribute a
+    // submission. Derive it from the SELECTED photos' own messages instead,
+    // and refuse to guess when they disagree. Mirrors the server's
+    // resolveMessagePhotos: null (an unlinked message) is a DISTINCT
+    // ownership state, not "no opinion" — filtering it out first would let
+    // a customer-linked photo mixed with an unlinked one silently pass as
+    // "one distinct customer". The Customer 360-embedded composer is
+    // exempt: fixedCustomerId there is the mount's own prop, not a thread
+    // guess.
+    if (!fixedCustomerId) {
+      const distinctCustomerIds = new Set(selected.map((p) => p.customerId || null));
+      if (distinctCustomerIds.size > 1) {
+        setError("Selected photos belong to different customers — pick photos from one customer.");
+        return;
+      }
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const data = await adminFetch(`/admin/photo-assessments/${type}`, {
+        method: "POST",
+        body: JSON.stringify({
+          message_photos: selected.map((p) => ({ message_id: p.messageId, key: p.key })),
+          // Only the Customer 360-embedded mode passes customer_id — general
+          // inbox submissions let the server default it from the selected
+          // messages' own conversation (same "first rung wins" rule the
+          // admin-created path already uses), never a thread-level guess.
+          customer_id: fixedCustomerId || undefined,
+          note: note.trim() || undefined,
+        }),
+      });
+      onClose();
+      onCreated(type, data.id);
+    } catch (err) {
+      setError(err.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={busy ? undefined : onClose} aria-label="Analyze photos from this thread" layer={layer}>
+      <DialogHeader>
+        <DialogTitle>Analyze photos from this thread</DialogTitle>
+      </DialogHeader>
+      <DialogBody className="space-y-3">
+        <div>
+          <label className="block text-14 text-zinc-500 mb-1">Type</label>
+          <Select value={type} onChange={(e) => setType(e.target.value)} disabled={busy}>
+            <option value="lawn">Lawn assessment</option>
+            <option value="pest">Pest identification</option>
+          </Select>
+        </div>
+        {fixedCustomerId ? (
+          <div>
+            <label className="block text-14 text-zinc-500 mb-1">Customer</label>
+            <div className="text-14 text-zinc-900">{fixedCustomerName || "Linked customer"}</div>
+          </div>
+        ) : null}
+        <div>
+          <label className="block text-14 text-zinc-500 mb-1">
+            Photos ({selectedKeys.size}/{ANALYZE_PHOTOS_MAX} selected)
+          </label>
+          {photos.length === 0 ? (
+            <div className="text-14 text-zinc-500">No inbound photos in this thread.</div>
+          ) : (
+            <div className="grid grid-cols-3 gap-2">
+              {photos.map((p) => {
+                const checked = selectedKeys.has(p.key);
+                const capped = !checked && selectedKeys.size >= ANALYZE_PHOTOS_MAX;
+                return (
+                  <label
+                    key={p.key}
+                    className={cn(
+                      "relative block rounded-sm border-hairline overflow-hidden cursor-pointer",
+                      checked ? "border-zinc-900" : "border-zinc-300",
+                      capped && "opacity-40 cursor-not-allowed",
+                    )}
+                    style={{ aspectRatio: "1 / 1" }}
+                  >
+                    <img
+                      src={p.url}
+                      alt="Inbound MMS attachment"
+                      className="absolute inset-0 w-full h-full object-cover"
+                    />
+                    <div className="absolute top-1 left-1">
+                      <Checkbox
+                        checked={checked}
+                        disabled={capped || busy}
+                        onChange={() => toggle(p.key)}
+                      />
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div>
+          <label className="block text-14 text-zinc-500 mb-1">Note (optional)</label>
+          <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} disabled={busy} />
+        </div>
+        {error ? <div className="text-14 text-alert-fg">{error}</div> : null}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+        <Button onClick={submit} disabled={busy || !selectedKeys.size}>{busy ? "Analyzing…" : "Run analysis"}</Button>
+      </DialogFooter>
+    </Dialog>
+  );
+}
+
+// Analyze photos — the toolbar affordance + its dialog, owned together so
+// SmsTab carries none of the feature's decisions: this component derives the
+// open thread's inbound MMS photos (general inbox → activeThread.messages;
+// Customer 360-embedded composer → customerMessages), renders nothing for a
+// technician (the endpoint is requireAdmin — a tech would get a 403) or a
+// photo-less thread, and otherwise renders the button and the (portaled)
+// dialog. Only the Customer 360 mount has a trustworthy fixed customer (its
+// own prop) — the general inbox's activeThread is keyed by phone, which a
+// shared/reassigned number can hold messages from more than one customer
+// under, so the dialog derives the customer per-selection there instead.
+// Customer 360's overlay is z-[1000] (CustomerOverlayPresentation), so the
+// dialog is raised to 1120 there, same as CancelPlanDialog and its siblings.
+function AnalyzePhotosAction({ active, isAdmin, activeThread, customerMessages, customer, onCreated }) {
+  const [open, setOpen] = useState(false);
+  const photos = useMemo(
+    () => collectAnalyzablePhotos(customer ? customerMessages : activeThread?.messages, ANALYZE_PHOTOS_ALLOWED_MIME),
+    [customer, customerMessages, activeThread],
+  );
+  if (!isAdmin || photos.length === 0) return null;
+  return (
+    <>
+      <Button
+        variant="secondary"
+        onClick={() => setOpen(true)}
+        title="Run a lawn or pest assessment on photos from this thread"
+        aria-label="Analyze photos"
+        className="sms-writing-tool ui-icon-action"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+      >
+        <ScanSearch size={16} strokeWidth={2.2} aria-hidden />
+      </Button>
+      <AnalyzePhotosDialog
+        open={active && open}
+        onClose={() => setOpen(false)}
+        photos={photos}
+        fixedCustomerId={customer?.id || null}
+        fixedCustomerName={customer ? getCustomerOptionName(customer) : null}
+        layer={customer ? 1120 : undefined}
+        onCreated={onCreated}
+      />
+    </>
+  );
+}
+
 // With a customer, render the same composer used by Messages, locked to that
 // profile. The caller keys it by customer id/phone to discard another person's
 // draft, attachments, and minted links when the selected record changes.
@@ -810,6 +1059,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // SMS — the AI draft stays pending for the owner (codex P2).
   const smsOutletContext = useOutletContext();
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
+  const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(!customer);
@@ -944,7 +1194,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     const selectedDraft = setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
       const hasDraft = draft.msgBody.trim() || draft.attachments.length || draft.loadedMessageDraft;
       if (hasDraft && (draft.selectedCustomerId || null) !== (customerId || null)) {
-        setSendResult({ ok: false, text: "Saved draft kept with its original customer. Clear the draft before choosing another customer on this phone number." });
+        setSendResult({ ok: false, text: "Saved draft kept with its original customer. This phone number is shared with another customer." });
         return {};
       }
       if (hasDraft && draft.fromNumber && ourNumber
@@ -1138,11 +1388,14 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   }, [active, customer?.id, customerMessages, customerReadScope, markMessagesRead]);
 
   useEffect(() => {
-    if (customer) return;
+    // Server-enforced too (ADMIN-BUG-R38): the route is requireAdmin, so a
+    // technician's fetch would just 403 — skip it so the tab doesn't render
+    // a control it can never use.
+    if (customer || !smsIsAdminRole) return;
     adminFetch("/admin/communications/ai-auto-reply-status")
       .then((d) => setAiAutoReply(d.enabled))
       .catch(() => {});
-  }, []);
+  }, [smsIsAdminRole]);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -1284,9 +1537,20 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         method: "POST",
         body: JSON.stringify({ enabled: !aiAutoReply }),
       });
-      setAiAutoReply(r.enabled);
-    } catch {
-      /* ignore */
+      // A body carrying `error` (the server's own failure shape, kept here
+      // defensively even though the route now answers non-2xx on failure)
+      // never gets adopted as the confirmed state — the switch must not
+      // silently flip to a value that was never written.
+      if (r?.error) {
+        setSendResult({ ok: false, text: r.error || "AI Auto-Reply could not be changed. It is still set the way it was." });
+      } else {
+        setAiAutoReply(r.enabled);
+      }
+    } catch (err) {
+      // The failed toggle must be visible: the switch stays at its last
+      // confirmed position, and the operator is told the change did not
+      // take, instead of the empty catch that used to leave both silent.
+      setSendResult({ ok: false, text: err?.message || "AI Auto-Reply could not be changed. It is still set the way it was." });
     }
     setTogglingAi(false);
   };
@@ -1371,7 +1635,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       return;
     }
     if (loadedMessageDraft?.id && scheduledFor) {
-      setSendResult({ ok: false, text: "Send draft SMS now, or clear the draft before scheduling." });
+      setSendResult({ ok: false, text: "Approval drafts must be sent immediately and cannot be scheduled." });
       return;
     }
     if (loadedMessageDraft?.id && attachments.length > 0) {
@@ -1523,6 +1787,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         }
         setSendResult({ ok: true, text: `Provider accepted; delivery is not yet confirmed.${reviewEmailNote(sent?.reviewEmail)}` });
       }
+      notifyUnreadChanged();
       const { cleared, persisted } = clearDraft(draftRevision);
       if (cleared && persisted) {
         setToNumber(customer?.phone || "");
@@ -1545,6 +1810,31 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       sendInFlightRef.current = false;
       setSending(false);
     }
+  };
+
+  const leaveApprovalDraft = () => {
+    approvalDraftRequestRef.current += 1;
+    const { cleared, persisted } = clearDraft(draftRevision);
+    if (!cleared) return;
+    for (const attachment of attachments) {
+      if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete("draftId");
+    url.searchParams.delete("draft");
+    window.history.replaceState(window.history.state, "", url);
+    setSendResult({
+      ok: persisted,
+      text: persisted
+        ? "Approval draft closed."
+        : "Approval draft closed here, but recovery storage could not be updated. It may return after a reload.",
+    });
+  };
+
+  const discardAgentDraft = () => {
+    setMsgBody("");
+    setSelectedAgentDraft(null);
+    setSendResult({ ok: true, text: "Agent draft discarded." });
   };
 
   // Upload one-or-more image files → S3 → mediaUrls. Called from the hidden
@@ -2552,7 +2842,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         {recoveryWarning && <ActionFeedback error>{recoveryWarning}</ActionFeedback>}
         <fieldset disabled={sending} className="m-0 min-w-0 border-0 p-0">
         {" "}
-        {!customer && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
+        {/* Owner-only (ADMIN-BUG-R38): company-wide AI auto-reply switch. */}
+        {!customer && smsIsAdminRole && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
           <button
             type="button"
             onClick={toggleAiAutoReply}
@@ -2726,7 +3017,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             );
           })()}
         </>}
-        {!toNumber.trim() && <p className="mb-3 text-14 text-ink-secondary">Choose a recipient to start a message.</p>}
         <fieldset disabled={!toNumber.trim()} className="m-0 min-w-0 border-0 p-0">
         {(agentDraft || agentDraftLoading) && (
           <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm">
@@ -2839,6 +3129,98 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 )}
               </Button>
             )}
+            {/* Insert Link — opens the searchable link library sheet: the
+                per-customer minted links, per-office review links, the whole
+                website, app stores, and socials. */}
+            <Button
+              variant="secondary"
+              onClick={(event) => {
+                event.currentTarget.focus({ preventScroll: true });
+                openLinkSheet();
+              }}
+              disabled={
+                insertingResched ||
+                insertingReservice ||
+                !!insertingCustomerLink || sending
+              }
+              title="Quick Links — insert a link or send a prep guide"
+              aria-label="Quick Links"
+              className="sms-writing-tool ui-icon-action"
+              aria-haspopup="dialog"
+              aria-expanded={showLinkSheet}
+            >
+              {insertingResched || insertingReservice || insertingCustomerLink ? (
+                <Loader2 size={16} strokeWidth={2.2} className="animate-spin" aria-hidden />
+              ) : (
+                <Link2 size={16} strokeWidth={2.2} aria-hidden />
+              )}
+            </Button>{" "}
+            {/* Analyze photos — button + dialog live in AnalyzePhotosAction,
+                which renders nothing for a technician or a photo-less thread. */}
+            <AnalyzePhotosAction
+              active={active}
+              isAdmin={smsIsAdminRole}
+              activeThread={activeThread}
+              customerMessages={customerMessages}
+              customer={customer}
+              onCreated={(type, id) => navigate(`/admin/lawn-assessments?open=${type}:${id}`)}
+            />{" "}
+            {/* Plus — attachment menu */}
+            <div className="relative">
+              {" "}
+              <Button
+                variant="secondary"
+                onClick={() => setShowAttachSheet((v) => !v)}
+                disabled={uploading}
+                aria-label="Add attachment"
+                title="Add image"
+                className="sms-writing-tool ui-icon-action"
+              >
+                {" "}
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.25"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  {" "}
+                  <line x1="12" y1="5" x2="12" y2="19" />{" "}
+                  <line x1="5" y1="12" x2="19" y2="12" />{" "}
+                </svg>{" "}
+              </Button>
+              {showAttachSheet && (
+                <div
+                  className="absolute bottom-full right-0 mb-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden"
+                  style={{ width: 180 }}
+                >
+                  {" "}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachSheet(false);
+                      cameraInputRef.current?.click();
+                    }}
+                    className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+                  >
+                    Take photo
+                  </button>{" "}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachSheet(false);
+                      fileInputRef.current?.click();
+                    }}
+                    className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
+                  >
+                    Photo library
+                  </button>{" "}
+                </div>
+              )}
+            </div>{" "}
           </div>
         </div>
         {/* Attachment tray */}
@@ -2933,62 +3315,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           />
         )}
         <div className="flex flex-wrap gap-2 items-center">
-          {/* Plus — attachment menu */}
-          <div className="relative">
-            {" "}
-            <Button
-              variant="secondary"
-              onClick={() => setShowAttachSheet((v) => !v)}
-              disabled={uploading}
-              aria-label="Add attachment"
-              title="Add image"
-              className="sms-writing-tool ui-icon-action"
-            >
-              {" "}
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.25"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                {" "}
-                <line x1="12" y1="5" x2="12" y2="19" />{" "}
-                <line x1="5" y1="12" x2="19" y2="12" />{" "}
-              </svg>{" "}
-            </Button>
-            {showAttachSheet && (
-              <div
-                className="absolute bottom-full left-0 mb-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden"
-                style={{ width: 180 }}
-              >
-                {" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAttachSheet(false);
-                    cameraInputRef.current?.click();
-                  }}
-                  className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 u-focus-ring"
-                >
-                  Take photo
-                </button>{" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAttachSheet(false);
-                    fileInputRef.current?.click();
-                  }}
-                  className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
-                >
-                  Photo library
-                </button>{" "}
-              </div>
-            )}
-          </div>{" "}
           <Button
             variant="primary"
             className="flex-1"
@@ -3030,49 +3356,27 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           >
             {aiDrafting ? "Drafting…" : "AI Draft"}
           </Button>{" "}
-          {/* Insert Link — opens the searchable link library sheet: the
-              per-customer minted links, per-office review links, the whole
-              website, app stores, and socials. */}
+        </div>
+        {loadedMessageDraft?.id && (
           <Button
             variant="secondary"
-            onClick={(event) => {
-              event.currentTarget.focus({ preventScroll: true });
-              openLinkSheet();
-            }}
-            disabled={
-              insertingResched ||
-              insertingReservice ||
-              !!insertingCustomerLink || sending
-            }
-            title="Quick Links — insert a link or send a prep guide"
-            aria-haspopup="dialog"
-            aria-expanded={showLinkSheet}
+            className="mt-3"
+            disabled={sending || uploading || listening || rewritingSms || aiDrafting || insertingResched || insertingReservice || !!insertingCustomerLink}
+            onClick={leaveApprovalDraft}
           >
-            {insertingResched || insertingReservice || insertingCustomerLink
-              ? "Adding…"
-              : "Quick Links"}
-          </Button>{" "}
-        </div>
-        <Button
-          variant="secondary"
-          className="mt-3"
-          disabled={sending || uploading || listening || rewritingSms || aiDrafting || insertingResched || insertingReservice || !!insertingCustomerLink}
-          onClick={() => {
-            approvalDraftRequestRef.current += 1;
-            const { cleared, persisted } = clearDraft(draftRevision);
-            if (!cleared) return;
-            for (const attachment of attachments) {
-              if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-            }
-            const url = new URL(window.location.href);
-            url.searchParams.delete("draftId");
-            url.searchParams.delete("draft");
-            window.history.replaceState(window.history.state, "", url);
-            setSendResult({ ok: persisted, text: persisted ? "Draft cleared." : "Draft cleared here, but recovery storage could not be updated. It may return after a reload." });
-          }}
-        >
-          Clear draft
-        </Button>
+            Leave approval draft
+          </Button>
+        )}
+        {!loadedMessageDraft?.id && selectedAgentDraft?.decisionId && (
+          <Button
+            variant="secondary"
+            className="mt-3"
+            disabled={sending}
+            onClick={discardAgentDraft}
+          >
+            Discard agent draft
+          </Button>
+        )}
         <InsertLinkSheet
           open={active && showLinkSheet}
           onClose={() => setShowLinkSheet(false)}
@@ -3403,8 +3707,8 @@ export function usageLeafFor(tab, templateKind) {
 }
 
 const TEMPLATE_KINDS = [
-  { key: "sms", label: "SMS Templates" },
-  { key: "email", label: "Email Templates" },
+  { key: "sms", label: "Text" },
+  { key: "email", label: "Mail" },
 ];
 
 export default function CommunicationsPageV2() {
@@ -3499,7 +3803,7 @@ export default function CommunicationsPageV2() {
         secondaryAriaLabel="Template kind"
         secondaryNavGridClassName="grid-cols-2"
       />}
-      {activeTab === "events" && <NotificationEventsTabV2 />}
+      {activeTab === "events" && <NotificationEventsTabV2 isAdminRole={isAdminRole} />}
       {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 />}

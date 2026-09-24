@@ -4,7 +4,7 @@ import { Button, cn, useUiDensity } from "../ui";
 const PRESENTATIONS = {
   framed: {
     frame: "overflow-hidden rounded-md border-hairline border-zinc-200 bg-white",
-    heading: "flex flex-wrap items-center justify-between gap-2 px-3 py-2 md:gap-3 md:px-4 md:py-3",
+    heading: "gap-2 px-3 py-2 md:gap-3 md:px-4 md:py-3",
     titleSize: "text-18 md:text-22",
     divider: "border-b border-hairline border-zinc-200",
     nav: "u-scroll-strip flex p-1 md:grid md:gap-1 md:overflow-visible md:p-2",
@@ -47,6 +47,12 @@ export default function AdminCommandHeader({
   const density = useUiDensity();
   const presentation = PRESENTATIONS[variant];
   const resolvedActions = actions?.length ? actions : [action].filter(Boolean);
+  // Primary first in reading/focus order and on mobile; the desktop row
+  // places it at the far right, with supporting actions beside it.
+  const orderedActions = [
+    ...resolvedActions.filter((item) => !item.variant || item.variant === "primary"),
+    ...resolvedActions.filter((item) => item.variant && item.variant !== "primary"),
+  ];
   const Heading = headingLevel === 2 ? "h2" : "h1";
   const hasSections = sections.length > 0;
   const hasSecondary = secondarySections.length > 0;
@@ -112,10 +118,11 @@ export default function AdminCommandHeader({
         <div
           className={cn(
             presentation.heading,
+            "ui-command-heading",
             hasSections && presentation.divider,
           )}
         >
-          <div className="flex min-w-0 items-center gap-2 md:gap-3">
+          <div className="ui-command-title flex min-w-0 items-center gap-2 md:gap-3">
             <div className="h-8 w-8 md:h-9 md:w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
               {Icon && <Icon size={17} strokeWidth={1.9} aria-hidden />}
             </div>
@@ -133,16 +140,16 @@ export default function AdminCommandHeader({
             </Heading>
           </div>
           {resolvedActions.length > 0 && (
-            <div className="ui-record-actions justify-end">
-              {resolvedActions.map((item) => {
+            <div className="ui-command-actions">
+              {orderedActions.map((item) => {
                 const ActionIcon = item.icon;
                 return (
                   <Button
                     key={item.key || item.label}
-                    size={item.size || "md"}
+                    density="comfortable"
                     variant={item.variant || "primary"}
                     className={cn(
-                      density === "legacy" && "gap-2 px-3 text-12 font-medium uppercase tracking-label md:px-4",
+                      "ui-command-action",
                       item.className,
                     )}
                     onClick={item.onClick}

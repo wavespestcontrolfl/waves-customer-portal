@@ -174,6 +174,7 @@ function SmsCard({
   onDraft,
   onSave,
   onDelete,
+  readOnly,
 }) {
   return (
     <Card id={`sms-template-${template.template_key}`}>
@@ -191,7 +192,7 @@ function SmsCard({
           </div>
           <Switch
             checked={draft.is_active}
-            disabled={pending}
+            disabled={pending || readOnly}
             aria-label={`${draft.is_active ? "Disable" : "Enable"} ${template.name}`}
             onChange={(next) => onDraft({ ...draft, is_active: next })}
           />
@@ -200,15 +201,21 @@ function SmsCard({
         <Textarea
           rows={5}
           value={draft.body}
-          disabled={pending}
+          disabled={pending || readOnly}
           onChange={(e) => onDraft({ ...draft, body: e.target.value })}
         />
         <Variables variables={template.variables} />
 
+        {/* Owner-only (ADMIN-BUG-R39): the server's write routes are
+            requireAdmin, so Save/Delete would just 403 for a technician —
+            match the staff-wide tab's email half, which already hides its
+            template-management controls from non-admin. */}
         <div className="flex gap-2 flex-wrap">
-          <Button variant="primary" size="sm" className="gap-2" disabled={pending} onClick={onSave}>
-            <Save size={14} /> Save
-          </Button>
+          {!readOnly ? (
+            <Button variant="primary" size="sm" className="gap-2" disabled={pending} onClick={onSave}>
+              <Save size={14} /> Save
+            </Button>
+          ) : null}
           <Button
             variant="secondary"
             size="sm"
@@ -217,7 +224,7 @@ function SmsCard({
           >
             <ExternalLink size={14} /> Open in SMS Templates
           </Button>
-          {showDelete ? (
+          {showDelete && !readOnly ? (
             <Button variant="ghost" size="sm" className="gap-2" disabled={pending} onClick={onDelete}>
               <Trash2 size={14} /> Delete
             </Button>
@@ -228,8 +235,14 @@ function SmsCard({
   );
 }
 
-function EmailCard({ automation, draft, pending, onDraft, onSave }) {
+function EmailCard({ automation, draft, pending, onDraft, onSave, readOnly }) {
   const canEditVersion = automation.active_version_id && automation.version_status === "draft";
+  // Owner-only (codex round-4 P2, PR #4673): the admin-email-templates
+  // router is requireAdmin end to end (status toggle, draft save, and the
+  // Email Templates tab those links open), so a technician gets a
+  // read-only card — no enabled switch, editable fields, Save, or links
+  // that could only 403. Same rule SmsCard applies via readOnly.
+  const canEdit = !readOnly && canEditVersion;
   return (
     <Card id={`email-template-${automation.template_key}`}>
       <CardBody className="space-y-3">
@@ -257,7 +270,7 @@ function EmailCard({ automation, draft, pending, onDraft, onSave }) {
           </div>
           <Switch
             checked={draft.status === "active"}
-            disabled={pending}
+            disabled={pending || readOnly}
             aria-label={`${draft.status === "active" ? "Pause" : "Activate"} ${automation.automation_key}`}
             onChange={(next) => onDraft({ ...draft, status: next ? "active" : "paused" })}
           />
@@ -275,7 +288,7 @@ function EmailCard({ automation, draft, pending, onDraft, onSave }) {
             <Input
               className="mt-1"
               value={draft.subject}
-              disabled={pending || !canEditVersion}
+              disabled={pending || !canEdit}
               onChange={(e) => onDraft({ ...draft, subject: e.target.value })}
             />
           </div>
@@ -284,38 +297,40 @@ function EmailCard({ automation, draft, pending, onDraft, onSave }) {
             <Input
               className="mt-1"
               value={draft.previewText}
-              disabled={pending || !canEditVersion}
+              disabled={pending || !canEdit}
               onChange={(e) => onDraft({ ...draft, previewText: e.target.value })}
             />
           </div>
-          {!canEditVersion ? (
+          {!canEditVersion && !readOnly ? (
             <div className="text-11 text-ink-tertiary">
               Create a draft in Email Templates to edit subject and preview text.
             </div>
           ) : null}
         </div>
 
-        <div className="flex gap-2 flex-wrap">
-          <Button variant="primary" size="sm" className="gap-2" disabled={pending} onClick={onSave}>
-            <Save size={14} /> Save
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="gap-2"
-            onClick={() => hashTo({ tab: "email_templates", key: automation.template_key })}
-          >
-            <ExternalLink size={14} /> Open in Email Templates
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="gap-2"
-            onClick={() => hashTo({ tab: "email_templates", key: automation.template_key })}
-          >
-            <ExternalLink size={14} /> Edit blocks / versions
-          </Button>
-        </div>
+        {!readOnly ? (
+          <div className="flex gap-2 flex-wrap">
+            <Button variant="primary" size="sm" className="gap-2" disabled={pending} onClick={onSave}>
+              <Save size={14} /> Save
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="gap-2"
+              onClick={() => hashTo({ tab: "email_templates", key: automation.template_key })}
+            >
+              <ExternalLink size={14} /> Open in Email Templates
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-2"
+              onClick={() => hashTo({ tab: "email_templates", key: automation.template_key })}
+            >
+              <ExternalLink size={14} /> Edit blocks / versions
+            </Button>
+          </div>
+        ) : null}
       </CardBody>
     </Card>
   );
@@ -330,6 +345,7 @@ function EventSection({
   onEmailDraft,
   onSmsSave,
   onEmailSave,
+  isAdminRole,
 }) {
   const expectedSms = event.channels_expected?.includes("sms");
   const expectedEmail = event.channels_expected?.includes("email");
@@ -366,6 +382,7 @@ function EventSection({
               pending={!!pending[`sms:${template.id}`]}
               onDraft={(next) => onSmsDraft(template.id, next)}
               onSave={() => onSmsSave(template)}
+              readOnly={!isAdminRole}
             />
           ))}
           {!smsTemplates.length && expectedSms ? (
@@ -382,9 +399,10 @@ function EventSection({
               pending={!!pending[`email:${automation.automation_key}`]}
               onDraft={(next) => onEmailDraft(automation.automation_key, next)}
               onSave={() => onEmailSave(automation)}
+              readOnly={!isAdminRole}
             />
           ))}
-          {!emailAutomations.length && expectedEmail ? (
+          {!emailAutomations.length && expectedEmail && isAdminRole ? (
             <MissingChannel channel="email" onClick={() => hashTo({ tab: "email_templates", view: "automations" })} />
           ) : null}
         </div>
@@ -393,7 +411,7 @@ function EventSection({
   );
 }
 
-function SmsOnlyBucket({ event, smsDrafts, pending, onSmsDraft, onSmsSave, onSmsDelete }) {
+function SmsOnlyBucket({ event, smsDrafts, pending, onSmsDraft, onSmsSave, onSmsDelete, isAdminRole }) {
   const rows = event.sms_templates || [];
   return (
     <details className="rounded-md border-hairline border-zinc-200 bg-white">
@@ -413,6 +431,7 @@ function SmsOnlyBucket({ event, smsDrafts, pending, onSmsDraft, onSmsSave, onSms
                 onDraft={(next) => onSmsDraft(template.id, next)}
                 onSave={() => onSmsSave(template)}
                 onDelete={() => onSmsDelete(template)}
+                readOnly={!isAdminRole}
               />
             ))}
           </div>
@@ -437,7 +456,7 @@ function EmailOnlyBucket({ event }) {
   );
 }
 
-export default function NotificationEventsTabV2() {
+export default function NotificationEventsTabV2({ isAdminRole }) {
   const [events, setEvents] = useState([]);
   const [catalog, setCatalog] = useState([]);
   const [smsDrafts, setSmsDrafts] = useState({});
@@ -622,6 +641,7 @@ export default function NotificationEventsTabV2() {
             }
             onSmsSave={saveSms}
             onEmailSave={saveEmail}
+            isAdminRole={isAdminRole}
           />
         ))}
       </div>
@@ -635,6 +655,7 @@ export default function NotificationEventsTabV2() {
             onSmsDraft={(id, next) => setSmsDrafts((prev) => ({ ...prev, [id]: next }))}
             onSmsSave={saveSms}
             onSmsDelete={deleteSms}
+            isAdminRole={isAdminRole}
           />
         ) : null}
         {emailOnlyEvent ? <EmailOnlyBucket event={emailOnlyEvent} /> : null}

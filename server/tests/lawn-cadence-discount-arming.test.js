@@ -24,6 +24,11 @@ afterEach(() => {
   LAWN_PRICING_V2.edgeParityFloorArmed = true;
 });
 
+// Every priceLawnCare call below passes includeHiddenTiers: true — these
+// suites pin the cadence MATH, whose -4%/-8% caps and ladder lift are
+// defined against the 6x/standard anchor. Standard is hidden for new sales
+// (owner directive 2026-09-24) but still priced internally; the default
+// (customer-facing) tiers array omits it.
 function tiersByVisits(result) {
   const by = {};
   for (const t of result.tiers) by[t.visits] = t;
@@ -38,9 +43,9 @@ describe('cadence discount arm switch (rollback semantics)', () => {
     // the same class of lookup the caps would wrongly re-clamp after a
     // migrate:down restored the pre-discount cells. Disarming must release
     // both legs and never move the 6x anchor.
-    const armed = tiersByVisits(priceLawnCare({ lawnSqFt: 8125 }, { tier: 'standard' }));
+    const armed = tiersByVisits(priceLawnCare({ lawnSqFt: 8125 }, { tier: 'standard', includeHiddenTiers: true }));
     LAWN_PRICING_V2.cadenceFreqDiscountArmed = false;
-    const disarmed = tiersByVisits(priceLawnCare({ lawnSqFt: 8125 }, { tier: 'standard' }));
+    const disarmed = tiersByVisits(priceLawnCare({ lawnSqFt: 8125 }, { tier: 'standard', includeHiddenTiers: true }));
 
     expect(disarmed[6].perApp).toBe(armed[6].perApp);
     expect(disarmed[9].perApp).toBeGreaterThan(armed[9].perApp);
@@ -50,7 +55,7 @@ describe('cadence discount arm switch (rollback semantics)', () => {
   it('disarmed keeps the pre-discount 12x-never-above-9x bound', () => {
     LAWN_PRICING_V2.cadenceFreqDiscountArmed = false;
     for (const sqft of [800, 3000, 5500, 8000, 12500, 20000]) {
-      const by = tiersByVisits(priceLawnCare({ lawnSqFt: sqft }, { tier: 'standard' }));
+      const by = tiersByVisits(priceLawnCare({ lawnSqFt: sqft }, { tier: 'standard', includeHiddenTiers: true }));
       expect(by[12].perApp).toBeLessThanOrEqual(by[9].perApp + 0.01);
     }
   });
@@ -62,13 +67,13 @@ describe('cadence discount arm switch (rollback semantics)', () => {
     // is FLOORED at the extrapolated 6x anchor per-app — literally "no
     // frequency discount" — while the 2026-07-29 12x≤9x bound still holds.
     for (const sqft of [20001, 25000, 30000]) {
-      const by = tiersByVisits(priceLawnCare({ lawnSqFt: sqft }, { tier: 'standard' }));
+      const by = tiersByVisits(priceLawnCare({ lawnSqFt: sqft }, { tier: 'standard', includeHiddenTiers: true }));
       expect(by[9].perApp).toBeGreaterThanOrEqual(by[6].perApp - 0.01);
       expect(by[12].perApp).toBeGreaterThanOrEqual(by[6].perApp - 0.01);
       expect(by[12].perApp).toBeLessThanOrEqual(by[9].perApp + 0.01);
     }
     // The cap still binds AT the table edge itself.
-    const atEdge = tiersByVisits(priceLawnCare({ lawnSqFt: 20000 }, { tier: 'standard' }));
+    const atEdge = tiersByVisits(priceLawnCare({ lawnSqFt: 20000 }, { tier: 'standard', includeHiddenTiers: true }));
     expect(atEdge[9].perApp).toBeLessThanOrEqual(atEdge[6].perApp * 0.96 + 0.01);
     // A rolled-back discount removes the parity floor too: disarmed >20k
     // keeps the raw extrapolation of whatever grid is live (in a real
@@ -76,9 +81,9 @@ describe('cadence discount arm switch (rollback semantics)', () => {
     // db-bridge e2e verification on #3274), with only the 12x≤9x bound.
     // Grid-independent invariants: the 6x anchor never moves, and the
     // premium bound survives.
-    const armed25k = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard' }));
+    const armed25k = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard', includeHiddenTiers: true }));
     LAWN_PRICING_V2.cadenceFreqDiscountArmed = false;
-    const disarmed25k = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard' }));
+    const disarmed25k = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard', includeHiddenTiers: true }));
     expect(disarmed25k[6].perApp).toBe(armed25k[6].perApp);
     expect(disarmed25k[12].perApp).toBeLessThanOrEqual(disarmed25k[9].perApp + 0.01);
   });
@@ -89,9 +94,9 @@ describe('cadence discount arm switch (rollback semantics)', () => {
     // then price exactly as the _FREQ_DISCOUNT schedule did (caps applied
     // above the table, no parity floor), so label and behavior revert
     // together.
-    const parity = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard' }));
+    const parity = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard', includeHiddenTiers: true }));
     LAWN_PRICING_V2.edgeParityFloorArmed = false;
-    const rolledBack = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard' }));
+    const rolledBack = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard', includeHiddenTiers: true }));
 
     // Caps clamp again: 9x/12x fall back BELOW the parity-floored values...
     expect(rolledBack[9].perApp).toBeLessThan(parity[9].perApp);
@@ -104,7 +109,7 @@ describe('cadence discount arm switch (rollback semantics)', () => {
   });
 
   it('an explicit true (or absent key) keeps the caps armed', () => {
-    const armed = tiersByVisits(priceLawnCare({ lawnSqFt: 12500 }, { tier: 'standard' }));
+    const armed = tiersByVisits(priceLawnCare({ lawnSqFt: 12500 }, { tier: 'standard', includeHiddenTiers: true }));
     // matches the migration-applied grid: -4%/-8% off the 6x anchor
     expect(armed[9].perApp).toBeLessThanOrEqual(armed[6].perApp * 0.96 + 0.01);
     expect(armed[12].perApp).toBeLessThanOrEqual(armed[6].perApp * 0.92 + 0.01);
@@ -116,7 +121,7 @@ describe('cadence ladder under ARMED cost floors (lift resolution)', () => {
   // useLawnCostFloor re-arm floors 9x to $137/app above 6x's floored
   // $129/app. The engine must resolve the three cadences together.
   it('floored cadences keep the promised per-application ladder', () => {
-    const by = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true }));
+    const by = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true, includeHiddenTiers: true }));
     expect(by[9].costFloorApplied).toBe(true);
     expect(by[9].perApp).toBeLessThanOrEqual(by[6].perApp * 0.96 + 0.02);
     expect(by[12].perApp).toBeLessThanOrEqual(by[6].perApp * 0.92 + 0.02);
@@ -125,7 +130,7 @@ describe('cadence ladder under ARMED cost floors (lift resolution)', () => {
 
   it('the lift only ever RAISES legs — no cadence lands below its own floor', () => {
     for (const sqft of [8000, 12000, 15000, 20000]) {
-      const by = tiersByVisits(priceLawnCare({ lawnSqFt: sqft }, { tier: 'standard', useLawnCostFloor: true }));
+      const by = tiersByVisits(priceLawnCare({ lawnSqFt: sqft }, { tier: 'standard', useLawnCostFloor: true, includeHiddenTiers: true }));
       for (const v of [6, 9, 12]) {
         expect(by[v].annual).toBeGreaterThanOrEqual(Math.floor(by[v].costFloorAnnual));
         expect(by[v].annual).toBeGreaterThanOrEqual(by[v].marketAnnual);
@@ -134,7 +139,7 @@ describe('cadence ladder under ARMED cost floors (lift resolution)', () => {
   });
 
   it('lifted legs are flagged and carry lift provenance, not a market label (codex r4 P2)', () => {
-    const by = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true }));
+    const by = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true, includeHiddenTiers: true }));
     expect(by[6].cadenceLadderLiftApplied).toBe(true);
     // The lifted 6x annual exceeds its market annual, so labeling it
     // MARKET_TABLE would store a non-market price as market-derived.
@@ -144,7 +149,7 @@ describe('cadence ladder under ARMED cost floors (lift resolution)', () => {
   });
 
   it('the legacy mapper carries the lift marker through to R.lawn (codex r4 P2)', () => {
-    const result = priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true, includeHiddenTiers: false });
+    const result = priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true, includeHiddenTiers: true });
     const legacy = mapV1ToLegacyShape({
       lineItems: [result],
       totals: {},
@@ -157,7 +162,7 @@ describe('cadence ladder under ARMED cost floors (lift resolution)', () => {
   });
 
   it('disarmed floors change nothing (prod default path stays bit-identical)', () => {
-    const by = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard' }));
+    const by = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', includeHiddenTiers: true }));
     for (const v of [6, 9, 12]) {
       expect(by[v].cadenceLadderLiftApplied).toBeUndefined();
       expect(by[v].annual).toBe(by[v].marketAnnual);
@@ -166,7 +171,7 @@ describe('cadence ladder under ARMED cost floors (lift resolution)', () => {
 
   it('a rolled-back discount skips the lift (pre-discount floor behavior)', () => {
     LAWN_PRICING_V2.cadenceFreqDiscountArmed = false;
-    const by = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true }));
+    const by = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true, includeHiddenTiers: true }));
     for (const v of [6, 9, 12]) {
       expect(by[v].cadenceLadderLiftApplied).toBeUndefined();
     }
@@ -192,8 +197,8 @@ describe('cadence discount × bermuda suppression adder (codex r4 — deliberate
   });
 
   it('adder is identical per application on every cadence and the ladder stays strictly ordered', () => {
-    const plain = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard' }));
-    const withAdder = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', bermudaSuppression: true }));
+    const plain = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', includeHiddenTiers: true }));
+    const withAdder = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', bermudaSuppression: true, includeHiddenTiers: true }));
     const adders = [6, 9, 12].map((v) => Math.round((withAdder[v].perApp - plain[v].perApp) * 100) / 100);
     // Flat: same per-app adder on every cadence (owner ruling), never scaled
     // by the cadence discount.
@@ -215,7 +220,7 @@ describe('one-time lawn anchors on the undiscounted 6x column (codex r4 P1)', ()
     // discount; the 6x anchor per-app (182) never moved. A standalone
     // treatment makes no frequency commitment and must not inherit the
     // recurring discount.
-    const standardPerApp = tiersByVisits(priceLawnCare({ lawnSqFt: 20000 }, { tier: 'standard' }))[6].perApp;
+    const standardPerApp = tiersByVisits(priceLawnCare({ lawnSqFt: 20000 }, { tier: 'standard', includeHiddenTiers: true }))[6].perApp;
     const ot = priceOneTimeLawn({ lawnSqFt: 20000 }, { treatmentType: 'weed' });
     expect(ot.baselinePerApp).toBe(standardPerApp);
   });

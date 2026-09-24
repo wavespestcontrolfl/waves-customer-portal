@@ -335,8 +335,8 @@ function LicensesTab({ token }) {
 
 const COMPLIANCE_TABS = [
   { key: "dashboard", label: "Dashboard", Icon: Gauge },
-  { key: "log", label: "Application Log", Icon: ClipboardList },
-  { key: "limits", label: "Product Limits", Icon: ShieldCheck },
+  { key: "log", label: "Applications", Icon: ClipboardList },
+  { key: "limits", label: "Limits", Icon: ShieldCheck },
   { key: "licenses", label: "Licenses", Icon: FileText },
   { key: "credentials", label: "Credentials", Icon: BadgeCheck, adminOnly: true },
 ];

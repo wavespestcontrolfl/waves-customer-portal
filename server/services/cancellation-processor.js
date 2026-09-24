@@ -633,6 +633,47 @@ async function applyScopedWindDown(customerId, entryPlan, {
   return { plan };
 }
 
+// The customer-level leg of the churn billing wind-down: the monthly charge
+// loop skips active=false/autopay_enabled=false, but the failed-payment
+// retry ladder only skips soft-deleted customers — so autopay and the next
+// charge date are cleared here too. Exported and reused verbatim by
+// customer-lifecycle-guard.js (ADMIN-BUG-R10/R14): a stage-dropdown churn or
+// an archive click winds billing down through this SAME write, not a
+// parallel hand-rolled subset. Unconditional and idempotent — no
+// wasChurnedStage/prior-state gate — which is exactly what lets a re-save of
+// an already-churned residue row (money-leak class the 2026-08-30 audit
+// found) self-heal on the next call, whether that call is this processor's
+// own churn or an admin lifecycle writer's.
+// `preserveActive` (archive/restore only): a soft-deleted row is already
+// outside every dues/retry candidate set via deleted_at, so archiving must
+// not rewrite `active` — that flag is the customer's OWN state (a deliberate
+// deactivation, or the processor's churn stamp) and restore has nothing to
+// infer it back from (GitHub Codex #4684 r6 P1).
+async function disarmCustomerBillingFields(dbh, customerId, { preserveActive = false } = {}) {
+  await dbh('customers').where({ id: customerId }).update({
+    ...(preserveActive ? {} : { active: false }),
+    autopay_enabled: false,
+    next_charge_date: null,
+    updated_at: new Date(),
+  });
+}
+
+// Both saved payment METHODS (StripeService.charge() picks the default by
+// payment_methods.autopay_enabled alone) and any armed failed-payment retry
+// (the ladder does not check active/churn) are independent charge rails and
+// belong to the same wind-down as disarmCustomerBillingFields above.
+// Exported and reused the same way.
+async function disarmPaymentRails(dbh, customerId) {
+  await dbh('payment_methods')
+    .where({ customer_id: customerId })
+    .update({ autopay_enabled: false });
+  await dbh('payments')
+    .where({ customer_id: customerId, status: 'failed' })
+    .whereNull('superseded_by_payment_id')
+    .whereNotNull('next_retry_at')
+    .update({ next_retry_at: null });
+}
+
 /**
  * Whole-account (default) or FAMILY-SCOPED (`families` non-empty) cancel.
  *
@@ -839,14 +880,7 @@ async function processCancellationRequest({
       churnEpisodeId = reuseEpisode ? customer.churn_episode_id : randomUUID();
       const now = new Date();
       const update = {
-        active: false,
         pipeline_stage: 'churned',
-        // Wind down billing: the monthly charge loop skips active=false /
-        // autopay_enabled=false, but the failed-payment retry ladder only skips
-        // soft-deleted customers — so also disable autopay + clear the next
-        // charge, and disarm any armed retry below.
-        autopay_enabled: false,
-        next_charge_date: null,
         updated_at: now,
         ...(reuseEpisode ? {} : { churn_episode_id: churnEpisodeId }),
       };
@@ -898,22 +932,18 @@ async function processCancellationRequest({
           update.churn_mrr = Number(customer.monthly_rate);
         }
       }
+      // Wind down billing: the monthly charge loop skips active=false /
+      // autopay_enabled=false, but the failed-payment retry ladder only skips
+      // soft-deleted customers — so also disable autopay + clear the next
+      // charge (disarmCustomerBillingFields, exported below), and disarm any
+      // armed retry (disarmPaymentRails, also exported) after this commits.
+      // Both are called through the SAME exported functions the admin
+      // lifecycle writers (customer-lifecycle-guard.js — ADMIN-BUG-R10/R14)
+      // reuse, so a stage-dropdown churn/archive winds billing down through
+      // the identical write this processor's own churn always has.
       await trx('customers').where({ id: customerId }).update(update);
+      await disarmCustomerBillingFields(trx, customerId);
       return true;
-    };
-    // Both saved payment METHODS (StripeService.charge() picks the default
-    // by payment_methods.autopay_enabled alone) and any armed
-    // failed-payment retry (the ladder does not check active/churn) are
-    // independent charge rails and belong to the same wind-down.
-    const disarmPaymentRails = async (dbh) => {
-      await dbh('payment_methods')
-        .where({ customer_id: customerId })
-        .update({ autopay_enabled: false });
-      await dbh('payments')
-        .where({ customer_id: customerId, status: 'failed' })
-        .whereNull('superseded_by_payment_id')
-        .whereNotNull('next_retry_at')
-        .update({ next_retry_at: null });
     };
 
     if (gated) {
@@ -944,7 +974,7 @@ async function processCancellationRequest({
         // whole wind-down back and the gated abort below stops the run
         // BEFORE any service is swept — nothing is left half-done.
         await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
-        await disarmPaymentRails(trx);
+        await disarmPaymentRails(trx, customerId);
         churned = true;
       });
     } else {
@@ -954,7 +984,7 @@ async function processCancellationRequest({
       // (no rung 6: this transaction takes no other lock, so it cannot sit
       // in a cycle with the writers that do).
       if (await db.transaction(churnWrite)) {
-        await disarmPaymentRails(db);
+        await disarmPaymentRails(db, customerId);
         churned = true;
       }
     }
@@ -1633,5 +1663,6 @@ async function processCancellationRequest({
 module.exports = {
   processCancellationRequest, raiseTermiteRetrievalTask, rentedTermiteStationState, scopedPricingFingerprint,
   planScopedWindDown, applyScopedWindDown, familyOfServiceRow, priorCancelledVisits,
+  disarmCustomerBillingFields, disarmPaymentRails,
   CHURN_REASON, PORTAL_CANCEL_REASON_PREFIX, CANCELLABLE_STATUSES,
 };

@@ -54,7 +54,7 @@ function EquipmentCategoryIcon({
 }
 const FLEET_SECTIONS = [{
   key: "fleet",
-  label: "Fleet Overview",
+  label: "Fleet",
   Icon: Truck
 }, {
   key: "analytics",

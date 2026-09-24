@@ -119,6 +119,9 @@ describe('POST /customers/:id/charge-now fails closed off the monthly lane', () 
     db.mockImplementation((table) => {
       if (table === 'customers') return makeRecorder({ first: customer });
       if (table === 'payments') return makeRecorder({ first: null });
+      // The sibling-unresolved-outcome check (retry-collectibility.js)
+      // reads this table too — no fixtures here, so it always clears.
+      if (table === 'stripe_orphan_charges') return makeRecorder({ first: null });
       throw new Error(`unexpected table ${table}`);
     });
   });
@@ -164,10 +167,15 @@ describe('POST /customers/:id/charge-now fails closed off the monthly lane', () 
     await withServer(async (baseUrl) => {
       const res = await postChargeNow(baseUrl, customer.id, {});
       expect(res.status).toBe(200);
+      // 5th arg: the SAME autopay_monthly_<cid>_<ET date> idempotency key
+      // chargeMonthly() defaults to (ADMIN-BUG-R11 fix) — a duplicate that
+      // slips past the in-process charge-now lock (a genuine second Railway
+      // instance) still replays the SAME PaymentIntent as that day's cron
+      // run instead of minting a new one.
       expect(chargeMock).toHaveBeenCalledWith(customer.id, 89, expect.any(String), expect.objectContaining({
         type: 'manual_charge',
         billed_month: expect.stringMatching(/^\d{4}-\d{2}$/),
-      }));
+      }), expect.stringMatching(new RegExp(`^autopay_monthly_${customer.id}_\\d{4}-\\d{2}-\\d{2}$`)));
       expect(chargeOneTimeMock).not.toHaveBeenCalled();
     });
   });

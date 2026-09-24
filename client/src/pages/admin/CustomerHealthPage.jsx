@@ -1726,7 +1726,7 @@ export default function CustomerHealthPage() {
 
   const tabs = [
     { key: "dashboard", label: "Dashboard" },
-    { key: "scores", label: "Health Scores" },
+    { key: "scores", label: "Scores" },
     { key: "alerts", label: "Alerts" },
   ];
 

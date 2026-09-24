@@ -5054,22 +5054,52 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     const primarySvc = bookingServiceFor(oneTimeLabel);
 
     // Reservation collision guard. If the estimate is already linked to a
-    // confirmed scheduled service, this customer has already picked a
-    // slot — texting a fresh /book URL would invite a second appointment.
+    // live scheduled service, this customer has already picked a slot —
+    // texting a fresh /book URL would invite a second appointment. Every
+    // real booking path (operator "Schedule", the Create Appointment modal,
+    // and the customer's own /book) stamps scheduled_services.source_estimate_id
+    // — estimate_data.scheduled_service_id is written only by the call-agent
+    // assessment pre-draft, so keying the guard on that key alone left every
+    // normal booking unchecked. OR both keys and match any live status —
+    // TERMINAL_STATUSES (cancelled/completed/no_show/skipped/rescheduled),
+    // the same terminal set waveguard-existing-services.js uses, so a
+    // skipped or no-show visit doesn't block a legitimate replacement
+    // booking link. An UNCLAIMED hold (customer_id NULL) is only truly
+    // "booked" once reservation_expires_at is cleared or still in the
+    // future — because a customer who abandoned a self-booking hold stays a
+    // pending, customer-less row with this source_estimate_id link until
+    // the 15-minute sweep reclaims it, and without this an abandoned hold
+    // would block the very replacement link staff are trying to send. A
+    // COMMITTED row (customer_id set) counts regardless of its
+    // reservation_expires_at: estimate-public.js's public-contract comment
+    // and slot-reservation.js's own rescue sweep (which selects
+    // `reservation_expires_at < now AND customer_id IS NOT NULL` as
+    // "expiredCommitted") both document that a real, booked appointment can
+    // carry a stray expired timestamp the rescue hasn't cleared yet — the
+    // expiry test must never apply to it, or a live appointment reads as
+    // gone and a duplicate link goes out.
     try {
       const estData = typeof estimate.estimate_data === 'string'
         ? JSON.parse(estimate.estimate_data)
         : estimate.estimate_data;
       const linkedSvcId = estData?.scheduled_service_id || null;
-      if (linkedSvcId) {
-        const linked = await db('scheduled_services')
-          .where({ id: linkedSvcId, status: 'confirmed' })
-          .first();
-        if (linked) {
-          return res.status(409).json({
-            error: `Customer already has a confirmed appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
-          });
-        }
+      const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
+      const linked = await db('scheduled_services')
+        .where((q) => {
+          q.where({ source_estimate_id: estimate.id });
+          if (linkedSvcId) q.orWhere({ id: linkedSvcId });
+        })
+        .whereNotIn('status', TERMINAL_STATUSES)
+        .andWhere((q) => {
+          q.whereNotNull('customer_id')
+            .orWhereNull('reservation_expires_at')
+            .orWhereRaw('reservation_expires_at > NOW()');
+        })
+        .first();
+      if (linked) {
+        return res.status(409).json({
+          error: `Customer already has an appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
+        });
       }
     } catch (_) { /* on parse failure fall through — no false positive */ }
 

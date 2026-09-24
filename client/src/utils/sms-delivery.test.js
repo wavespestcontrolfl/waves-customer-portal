@@ -23,11 +23,8 @@ describe("needsSmsReply", () => {
 
   it.each([
     ["manual", "sent"],
-    ["ai_approved", "delivered"],
-    ["ai_revised", "sent"],
     ["ai_assistant", "delivered"],
     ["ai_assistant_reply", "sent"],
-    ["follow_up", "queued"],
   ])("treats a subsequent %s message with status %s as an answer", (messageType, status) => {
     expect(needsSmsReply([
       message("inbound", "2026-09-21T13:00:00Z"),
@@ -58,6 +55,7 @@ describe("needsSmsReply", () => {
     "review_request",
     "estimate",
     "post_service",
+    "follow_up",
   ])("does not let a successful %s automation clear the inbound", (messageType) => {
     expect(needsSmsReply([
       message("inbound", "2026-09-21T13:00:00Z"),
@@ -76,6 +74,44 @@ describe("needsSmsReply", () => {
     expect(needsSmsReply([
       message("outbound", "2026-09-21T13:03:00Z", { status: "delivered" }),
       ...messages,
+    ])).toBe(false);
+  });
+
+  it.each(["ai_approved", "ai_revised"])(
+    "only lets an %s draft answer its exact latest inbound anchor",
+    (messageType) => {
+      const oldRequest = message("inbound", "2026-09-21T13:00:00Z", { id: "inbound-old" });
+      const latestRequest = message("inbound", "2026-09-21T13:02:00Z", { id: "inbound-latest" });
+      const reply = message("outbound", "2026-09-21T13:03:00Z", {
+        messageType,
+        responseMessageType: messageType,
+        responseStatus: "delivered",
+        responseIsAnswer: true,
+        responseReplyToMessageId: "inbound-old",
+      });
+
+      expect(needsSmsReply([oldRequest, latestRequest, reply])).toBe(true);
+      expect(needsSmsReply([
+        oldRequest,
+        latestRequest,
+        { ...reply, responseReplyToMessageId: "inbound-latest" },
+      ])).toBe(false);
+    },
+  );
+
+  it("uses the provider handoff time for response chronology without changing display time", () => {
+    const request = message("inbound", "2026-09-21T13:00:00Z", { id: "inbound-latest" });
+    expect(needsSmsReply([
+      request,
+      message("outbound", "2026-09-21T13:01:00Z", {
+        responseCreatedAt: "2026-09-21T12:59:59Z",
+      }),
+    ])).toBe(true);
+    expect(needsSmsReply([
+      request,
+      message("outbound", "2026-09-21T12:59:00Z", {
+        responseCreatedAt: "2026-09-21T13:00:01Z",
+      }),
     ])).toBe(false);
   });
 
@@ -170,4 +206,68 @@ describe("needsSmsReply", () => {
       message("inbound", "2026-09-21T13:02:00Z"),
     ])).toBe(true);
   });
+});
+
+describe("conversation response state", () => {
+  const request = message("inbound", "2026-09-21T13:00:00Z", { body: "Can you check the gate?", isRead: true });
+  const closer = message("inbound", "2026-09-21T13:01:00Z", { body: "Thank you!", courtesyOnly: true });
+
+  it("keeps a read question pending and retires it when a courtesy closer follows", () => {
+    expect(needsSmsReply([request])).toBe(true);
+    expect(needsSmsReply([closer, request])).toBe(false);
+  });
+
+  it("reopens for a new question after a closer", () => {
+    expect(needsSmsReply([closer, request, message("inbound", "2026-09-21T13:02:00Z", { body: "Thanks, can you come tomorrow?", courtesyOnly: false })])).toBe(true);
+  });
+
+  it("does not let an acknowledgment on another business line retire a request", () => {
+    expect(needsSmsReply([request, { ...closer, to: "+19415550199" }])).toBe(true);
+  });
+
+  it("keeps a photo actionable even if courtesy metadata is present", () => {
+    expect(needsSmsReply([{ ...closer, media: [{ url: "https://example.invalid/photo.jpg" }] }])).toBe(true);
+  });
+
+  it("retires an enforced spam message but reopens for a later real request", () => {
+    const spam = { ...closer, courtesyOnly: false, spamEnforced: true };
+    expect(needsSmsReply([request, spam])).toBe(false);
+    expect(needsSmsReply([spam, { ...request, createdAt: "2026-09-21T13:02:00Z" }])).toBe(true);
+  });
+});
+
+it("uses authoritative legacy response types and delivery states without changing reply context", () => {
+  const request = message("inbound", "2026-09-21T13:00:00Z", { id: "request" });
+  const stop = message("inbound", "2026-09-21T13:01:00Z", { responseMessageType: "opt_out" });
+  expect(needsSmsReply([request, stop])).toBe(false);
+  const reply = message("outbound", "2026-09-21T13:01:00Z", { status: "queued", responseStatus: "failed" });
+  expect(needsSmsReply([request, reply])).toBe(true);
+  expect(needsSmsReply([request, { ...reply, responseStatus: "delivered" }])).toBe(false);
+  expect(needsSmsReply([request, { ...reply, responseStatus: "delivered", responseMessageType: "reminder" }])).toBe(true);
+});
+
+it("keeps the real question pending after a delayed receipt-backed STOP retry", () => {
+  const stop = message("inbound", "2026-09-21T13:00:00Z", {
+    id: "delayed-stop",
+    body: "STOP",
+    messageType: "inbound",
+    responseMessageType: "opt_out",
+  });
+  const request = message("inbound", "2026-09-21T13:01:00Z", {
+    id: "real-question",
+    body: "Can you still come Friday?",
+  });
+
+  expect(unansweredSmsReply([stop, request])).toMatchObject({
+    messageId: "real-question",
+    messageType: "inbound",
+  });
+});
+
+it("does not treat a proactive approved draft as an answer but allows a nearby real reply", () => {
+  const request = message("inbound", "2026-09-21T13:00:00Z");
+  const nudge = message("outbound", "2026-09-21T13:01:00Z", { messageType: "ai_approved", responseIsAnswer: false });
+  expect(needsSmsReply([request, nudge])).toBe(true);
+  const reply = message("outbound", "2026-09-21T13:01:30Z", { responseIsAnswer: true });
+  expect(needsSmsReply([request, nudge, reply])).toBe(false);
 });

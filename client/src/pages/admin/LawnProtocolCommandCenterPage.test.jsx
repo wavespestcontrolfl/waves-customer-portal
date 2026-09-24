@@ -90,7 +90,7 @@ describe("LawnProtocolCommandCenterPage embedded navigation", () => {
   it("renders embedded navigation as a non-sticky second-level heading", () => {
     renderProtocol("/admin/service-library?tab=protocols");
 
-    const header = screen.getByRole("button", { name: "Mixing & labels" }).parentElement;
+    const header = screen.getByRole("button", { name: "Mixing" }).parentElement;
     expect(header).toHaveAttribute("data-heading-level", "2");
     expect(header).toHaveAttribute("data-sticky", "false");
     expect(screen.getByText("Tank mixing reference")).toBeInTheDocument();

@@ -55,6 +55,29 @@ describe('canAutoRoute fail-open booking', () => {
     expect(open.allowed).toBe(true);
   });
 
+  test('a new lead with a validated on-file address (addressOnly) clears the address flags but keeps every confidence check (codex #4685 r1 P1)', () => {
+    const addressOnly = { hasAddress: true, addressOnly: true };
+    // Address flags alone: the on-file address satisfies them, booking proceeds.
+    const addr = canAutoRoute(extraction(['address_unverifiable', 'missing_service_address', 'caller_phone_missing']), {
+      failOpen: true, callerAni: '+19414651056', knownCustomer: addressOnly,
+    });
+    expect(addr.allowed).toBe(true);
+    // The Barbara call with addressOnly trust: low_extraction_confidence still holds it.
+    const ex = extraction(['address_unverifiable', 'missing_service_address', 'low_confidence_address', 'caller_phone_missing', 'low_extraction_confidence'], 0);
+    const held = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: addressOnly });
+    expect(held.allowed).toBe(false);
+    expect(held.appointmentBlockingFlags).toContain('low_extraction_confidence');
+    expect(held.appointmentBlockingFlags).not.toContain('missing_service_address');
+    // And a low overall score is not exempted either.
+    const low = extraction(['address_unverifiable'], 0);
+    low.confidence = { ...(low.confidence || {}), overall: 0.1 };
+    const lowOut = canAutoRoute(low, { failOpen: true, callerAni: '+19414651056', knownCustomer: addressOnly });
+    expect(lowOut.allowed).toBe(false);
+    expect(lowOut.reason).toBe('low_confidence');
+    const establishedOut = canAutoRoute(low, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    expect(establishedOut.allowed).toBe(true);
+  });
+
   test('address flags are NOT cleared for a new caller (no on-file address)', () => {
     const r = canAutoRoute(extraction(['address_unverifiable', 'missing_service_address']), {
       failOpen: true, callerAni: '+19419603120', knownCustomer: null,
@@ -227,6 +250,35 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     const r = canAutoRoute(agentCommitted(), opts());
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  // Owner ruling 2026-09-24: commercial/HOA calls are never auto-booked on
+  // an agreed price alone; Waves personnel dictating the booking on the
+  // recording (the same grounded agent commitment) is what clears the hold.
+  test('agent commitment demotes commercial_requires_quote to failedOpenFlags and books', () => {
+    const ex = agentCommitted(['commercial_requires_quote']);
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(true);
+    expect(r.appointmentBlockingFlags || []).not.toContain('commercial_requires_quote');
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['commercial_requires_quote']));
+  });
+
+  test('an agreed price WITHOUT an agent commitment does not clear commercial_requires_quote', () => {
+    const ex = agentCommitted(['commercial_requires_quote'], { claim: false, quote: null });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.service_request = { ...(ex.service_request || {}), quoted_price_usd: 100 };
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
+  test('gate off → commercial_requires_quote still hard-blocks even with a pinned agent commitment', () => {
+    const ex = agentCommitted(['commercial_requires_quote']);
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    const r = canAutoRoute(ex, { transcript: TRANSCRIPT, addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
   });
 
   test('gate off → caller_not_authorized still hard-blocks even with a pinned agent commitment', () => {

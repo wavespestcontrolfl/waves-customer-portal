@@ -5178,9 +5178,27 @@ const EstimateConverter = {
     // Rung 6 first in each per-step transaction (a caller trx took it before
     // the customers-row write above): every step inserts scheduled_services,
     // and the comms lock precedes the series advisory lock everywhere
-    // (scheduling/occupancy.js ORDERING CONTRACT).
+    // (scheduling/occupancy.js ORDERING CONTRACT). Customer row lock SECOND,
+    // still BEFORE fn(trx) runs its checkActiveSeriesLocked call (Codex
+    // #4716 r1 follow-up P1): a caller-provided transaction already took
+    // this row lock above (database.isTransaction branch, before this
+    // wrapper is even reached), so it is only missing here on the
+    // standalone (no caller transaction) path, where each step opens its
+    // OWN fresh transaction and previously went straight from the comms
+    // lock to the advisory lock with no row lock between them — the same
+    // gap booking.js's post-commit follow-up seeding had. executeMerge
+    // (customer-dedupe.js) holds this customer's row FOR UPDATE while
+    // waiting on the recurring-series-create advisory lock; this step's own
+    // scheduled_services insert takes a key-share lock on that same
+    // customer row via its customer_id FK. Locking the row here, before the
+    // advisory lock, keeps every seeding step on the customer ->
+    // series-advisory order.
     const runSeedingStep = (fn) => (seedsInOwnTransaction
-      ? database.transaction(async (trx) => { await lockCustomerComms(trx, customerId); return fn(trx); })
+      ? database.transaction(async (trx) => {
+        await lockCustomerComms(trx, customerId);
+        await trx('customers').where({ id: customerId }).forUpdate().first('id');
+        return fn(trx);
+      })
       : fn(database));
     const registerSeededRowsInline = !seedsInOwnTransaction && !deferFollowUpReminderRegistration;
     const existingFromReservation = await database('scheduled_services')

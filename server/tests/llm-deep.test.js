@@ -15,10 +15,20 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/models', () => ({
   DEEP: 'deep-model',
-  TEXT_POLICIES: { deepAnalysis: { fallback: { provider: 'openai', model: 'openai-backup' } } },
+  TEXT_POLICIES: {
+    deepAnalysis: {
+      name: 'deepAnalysis',
+      primary: { provider: 'anthropic', model: 'deep-model' },
+      fallback: { provider: 'openai', model: 'openai-backup' },
+    },
+  },
 }));
 const mockCallOpenAI = jest.fn();
-jest.mock('../services/llm/call', () => ({ callOpenAI: (...args) => mockCallOpenAI(...args) }));
+const mockDispatchWithFallback = jest.fn();
+jest.mock('../services/llm/call', () => ({
+  callOpenAI: (...args) => mockCallOpenAI(...args),
+  dispatchWithFallback: (...args) => mockDispatchWithFallback(...args),
+}));
 
 const { createDeepMessage, stripThinkingBlocks } = require('../services/llm/deep');
 
@@ -29,7 +39,10 @@ function clientReturning(...responses) {
 }
 
 describe('createDeepMessage', () => {
-  beforeEach(() => mockCallOpenAI.mockReset());
+  beforeEach(() => {
+    mockCallOpenAI.mockReset();
+    mockDispatchWithFallback.mockReset();
+  });
   test('defaults model to DEEP and passes params through', async () => {
     const client = clientReturning({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] });
     await createDeepMessage(client, { max_tokens: 4096, messages: [{ role: 'user', content: 'q' }] });
@@ -43,6 +56,114 @@ describe('createDeepMessage', () => {
     const client = clientReturning({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] });
     await createDeepMessage(client, { model: 'custom-model', max_tokens: 100, messages: [] });
     expect(client.messages.create).toHaveBeenCalledWith(expect.objectContaining({ model: 'custom-model' }));
+  });
+
+  test('uses the registered DEEP policy for schema-constrained calls', async () => {
+    const normalized = {
+      ok: true,
+      json: { verdict: 'pass' },
+      model: 'deep-model',
+      provider: 'anthropic',
+      fallbackUsed: false,
+      failures: [],
+    };
+    mockDispatchWithFallback.mockResolvedValue(normalized);
+    const schema = { type: 'object', required: ['verdict'] };
+    const result = await createDeepMessage(null, {
+      laneId: 'editorial_review',
+      max_tokens: 1200,
+      system: 'system prompt',
+      messages: [{ role: 'user', content: 'review this' }],
+      temperature: 0,
+    }, {
+      jsonSchema: schema,
+      timeoutMs: 45000,
+      promptVersion: 'editorial-v1',
+    });
+
+    expect(mockDispatchWithFallback).toHaveBeenCalledWith(
+      expect.objectContaining({ primary: expect.objectContaining({ model: 'deep-model' }) }),
+      {
+        anthropicClient: null,
+        laneId: 'editorial_review',
+        system: 'system prompt',
+        text: 'user: review this',
+        jsonMode: true,
+        jsonSchema: schema,
+        maxTokens: 1200,
+        timeoutMs: 45000,
+        promptVersion: 'editorial-v1',
+        temperature: 0,
+      },
+      { validate: undefined },
+    );
+    expect(result).toBe(normalized);
+  });
+
+  test('uses a params model override only for the structured primary route', async () => {
+    mockDispatchWithFallback.mockResolvedValue({ ok: true, json: {} });
+    await createDeepMessage(null, { model: 'custom-model', messages: [] }, { jsonSchema: {} });
+
+    const policy = mockDispatchWithFallback.mock.calls[0][0];
+    expect(policy.primary).toEqual(expect.objectContaining({ provider: 'anthropic', model: 'custom-model' }));
+    expect(policy.fallback).toEqual({ provider: 'openai', model: 'openai-backup' });
+  });
+
+  test('adapts semantic JSON validation so a rejected primary can fall back', async () => {
+    const validate = jest.fn((json) => (json.accepted ? null : 'semantic_mismatch'));
+    mockDispatchWithFallback.mockImplementation(async (policy, payload, options) => {
+      const primary = { ok: true, json: { accepted: false }, model: policy.primary.model };
+      const rejection = options.validate(primary, policy.primary);
+      expect(rejection).toBe('semantic_mismatch');
+      return {
+        ok: true,
+        json: { accepted: true },
+        model: policy.fallback.model,
+        provider: policy.fallback.provider,
+        fallbackUsed: true,
+        failures: [{ provider: policy.primary.provider, reason: rejection, validator: true }],
+      };
+    });
+
+    const result = await createDeepMessage(null, { messages: [] }, { jsonSchema: {}, validate });
+
+    expect(validate).toHaveBeenCalledWith(
+      { accepted: false },
+      expect.objectContaining({ ok: true, json: { accepted: false } }),
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      json: { accepted: true },
+      fallbackUsed: true,
+      failures: [expect.objectContaining({ reason: 'semantic_mismatch', validator: true })],
+    });
+  });
+
+  test('returns a structured all-provider failure unchanged', async () => {
+    const failure = {
+      ok: false,
+      reason: 'all_providers_failed',
+      failures: [
+        { provider: 'anthropic', reason: 'semantic_mismatch', validator: true },
+        { provider: 'openai', reason: 'openai_503' },
+      ],
+    };
+    mockDispatchWithFallback.mockResolvedValue(failure);
+
+    const result = await createDeepMessage(null, { messages: [] }, { jsonSchema: {} });
+
+    expect(result).toBe(failure);
+  });
+
+  test('structured calls inherit the client deadline unless options override it', async () => {
+    mockDispatchWithFallback.mockResolvedValue({ ok: true, json: {} });
+    const client = { timeout: 60000 };
+
+    await createDeepMessage(client, { messages: [] }, { jsonSchema: {} });
+    await createDeepMessage(client, { messages: [] }, { jsonSchema: {}, timeoutMs: 30000 });
+
+    expect(mockDispatchWithFallback.mock.calls[0][1].timeoutMs).toBe(60000);
+    expect(mockDispatchWithFallback.mock.calls[1][1].timeoutMs).toBe(30000);
   });
 
   test('strips thinking blocks so content[0] is the text block again', async () => {

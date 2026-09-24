@@ -4,6 +4,7 @@ const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
+const { isV2Extraction } = require('../../utils/extraction-compat');
 
 
 let TwilioService;
@@ -15,7 +16,107 @@ const CSR_SCORE_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 
   : 180000;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 
+// The 15-point rubric below is a SALES call rubric (greeting → close →
+// upsell). Applying it to every transcribed call (2026-09-23 audit: 61 rows,
+// avg 2.7/15, fifteen zeros) scored billing questions, tech ETA/coordination
+// calls, existing-customer service calls and vendor calls as botched sales
+// pitches — the model's own coaching text on those rows says "this is not a
+// sales call". Score only the calls the rubric actually describes: an
+// INBOUND call whose v2 extraction is valid and classifies it `new_lead`.
+// (The v2 `call_nature` enum has no separate "returning prospect asking for
+// pricing" value — those calls extract as `new_lead` too, so this single
+// check covers both.) When v2 is missing/invalid, fall back to the legacy
+// behavior (score) so a call is never silently dropped just because
+// extraction failed — the false-zero problem this gate fixes is about
+// MISCLASSIFYING a known non-sales call, not about an unknown one.
+const SALES_RUBRIC_CALL_NATURE = 'new_lead';
+
+/**
+ * Pure decision: does the 15-point sales rubric apply to this call?
+ * Exported so the rule is unit-testable independent of the DB/LLM.
+ *
+ * @param {object} opts
+ * @param {string} [opts.direction] - 'inbound' | 'outbound' (any other/missing value is treated as inbound)
+ * @param {string|null} [opts.callNature] - v2 extraction's `call_nature`, only meaningful when v2Valid
+ * @param {boolean} [opts.v2Valid] - whether a valid v2 extraction was available for this call
+ * @param {boolean} [opts.v2Promoted] - whether V2 is actually driving routing right now
+ *   (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED — the same
+ *   "enforce mode" test call-recording-processor.js uses elsewhere). Defaults
+ *   to false — the safe direction, since a caller that forgets to pass it
+ *   should keep scoring rather than start silently suppressing it.
+ * @returns {boolean}
+ */
+function csrScoringApplies({ direction, callNature, v2Valid, v2Promoted } = {}) {
+  const isOutbound = String(direction || '').toLowerCase().startsWith('outbound');
+  if (isOutbound) return false;
+  // v2 missing/invalid: fall back to legacy behavior rather than silently
+  // losing the call from coaching entirely.
+  if (!v2Valid) return true;
+  // The flag contract at call-recording-processor.js ~64-71 is explicit:
+  // demoting CALL_EXTRACTION_V2_DRIVES_ROUTING to shadow restores the FULL
+  // legacy V1 drive — V2 has no operational authority over anything until
+  // routing is promoted. A shadow-mode misclassification (a genuine lead
+  // read as e.g. `billing_question`) must not cost that lead its CSR score
+  // or follow-up task (codex r1 P2). Only let v2's call_nature suppress
+  // scoring once v2 is actually driving.
+  if (!v2Promoted) return true;
+  return callNature === SALES_RUBRIC_CALL_NATURE;
+}
+
 class CSRCoach {
+
+  /**
+   * Single entry point for call-recording-processor.js: applicability gate
+   * PLUS scoring, as one call (moved here 2026-09-24, codex r1 P2b). This
+   * used to be an if/else the processor owned around `scoreCall` — another
+   * decision and nesting level inside a function this diff already
+   * rewrites, which the repo's structural-warning rule treats as a P2
+   * (AGENTS.md L409-413). The processor now owns none of the applicability
+   * decision: it hands over what it has and reads back what happened.
+   *
+   * @param {object} opts
+   * @param {string} [opts.direction] - 'inbound' | 'outbound'
+   * @param {object|null} [opts.v2Extraction] - the call's v2 extraction, if any
+   * @param {string|null} [opts.v2Status] - the v2 extraction's validation status ('valid' | ...)
+   * @param {boolean} [opts.v2Promoted] - CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED
+   * @param {string} [opts.maskedCallSid] - for the skip log line only
+   * @param {...*} opts.rest - forwarded to `scoreCall` when the rubric applies
+   * @returns {Promise<{applicable: boolean, abandon?: boolean, scored?: boolean, score?: number, outcome?: string}>}
+   */
+  async scoreCallIfApplicable({
+    direction, v2Extraction, v2Status, v2Promoted, maskedCallSid,
+    stillOwnsClaim, csrName, customerId, callSource, transcript, metadata,
+  }) {
+    const v2Valid = v2Status === 'valid' && !!v2Extraction && isV2Extraction(v2Extraction);
+    const callNature = v2Valid ? (v2Extraction?.call_nature || null) : null;
+    if (!csrScoringApplies({ direction, callNature, v2Valid, v2Promoted })) {
+      logger.info(`[call-proc] CSR scoring skipped for ${maskedCallSid}: direction=${direction}, call_nature=${callNature || 'unknown'} — not a sales call, no csr_call_scores row written`);
+      return { applicable: false };
+    }
+    try {
+      const scoreResult = await this.scoreCall({
+        stillOwnsClaim, csrName, customerId, callDirection: 'inbound', callSource, transcript, metadata,
+      });
+      // The scorer's own post-await check found the claim gone. That is not
+      // "no score" — it is this pass being superseded, and the caller's
+      // route-decision insert and ai_validation write are unfenced, so a
+      // stale pass that carried on could win the unique insert or overwrite
+      // the replacement's verdict (codex #3677 P1). Abandon.
+      if (scoreResult?.skipped && scoreResult.reason === 'ownership_lost') {
+        return { applicable: true, abandon: true };
+      }
+      // scoreCall returns the score object itself (total_score, call_outcome,
+      // ...), not a wrapper — the old `.score.` read logged
+      // "undefined/15 (undefined)" on every call (2026-09-20 audit).
+      const score = scoreResult?.total_score;
+      const outcome = scoreResult?.call_outcome;
+      logger.info(`[call-proc] CSR scored: ${score}/15 (${outcome})`);
+      return { applicable: true, scored: true, score, outcome };
+    } catch (err) {
+      logger.error(`[call-proc] CSR scoring failed (non-blocking): ${err.message}`);
+      return { applicable: true, scored: false };
+    }
+  }
 
   /**
    * Score a call and grade the lead. Returns score + coaching + follow-up task.
@@ -451,3 +552,5 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
 }
 
 module.exports = new CSRCoach();
+module.exports.csrScoringApplies = csrScoringApplies;
+module.exports.SALES_RUBRIC_CALL_NATURE = SALES_RUBRIC_CALL_NATURE;

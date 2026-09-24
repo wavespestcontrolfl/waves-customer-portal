@@ -29,8 +29,8 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const PRICING_SECTIONS = [
   { key: "margins", label: "Margins", Icon: Percent },
   { key: "calibration", label: "Calibration", Icon: Gauge },
-  { key: "specs", label: "Service specs", Icon: ClipboardList },
-  { key: "logic", label: "Logic rules", Icon: SlidersHorizontal },
+  { key: "specs", label: "Services", Icon: ClipboardList },
+  { key: "logic", label: "Rules", Icon: SlidersHorizontal },
   { key: "reality", label: "Audit", Icon: Scale },
 ];
 

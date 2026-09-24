@@ -7,6 +7,7 @@ const { lineRequiresReview, lineHasHeuristicTurf } = require('./estimator-engine
 const { estimateExpiresAt } = require('./admin-estimate-persistence');
 const { moneyCents } = require('./estimate-pricing-bundle-utils');
 const { recordAuditEvent } = require('./audit-log');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 // Called only with THIS /calculate run's server result, after its existing
 // self-bookability checks. The website may request publication; it never
@@ -19,38 +20,32 @@ async function publishWebsiteQuote({ estimateId, leadId, engineInput, engineResu
   ))) return null;
 
   return db.transaction(async (trx) => {
-    // Lock order: CUSTOMER row, then the estimate row — the order the
-    // Customer 360 edit and the booking confirm use, so a publication
-    // racing either cannot deadlock (codex #4667 r39 P1). The customer id
-    // is pre-read without a lock and re-checked under the estimate lock.
-    // (Acceptance still locks estimate-then-customer, but it only touches
-    // sent / viewed rows while this mint and the booking handoff only
-    // touch drafts, so the two never contend for the same row.)
-    const preRow = await trx('estimates').where({ id: estimateId }).first('customer_id');
-    if (!preRow) return null;
-    if (preRow.customer_id) {
-      await trx('customers').where({ id: preRow.customer_id }).forUpdate().first('id');
-    }
+    // The customer's comms lock FIRST (lock-order contract,
+    // utils/customer-comms-lock.js), resolved → locked → re-verified:
+    // wizard-plan activation (booking.js activateWizardSeries) holds this
+    // same key before its customer → estimate row locks, so taking it here
+    // ahead of this path's estimate → customer row locks serializes the two
+    // before either holds a row (#4716 pre-push P1 — they deadlocked).
+    const peek = await trx('estimates').where({ id: estimateId }).first('customer_id');
+    if (!peek?.customer_id) return null;
+    await lockCustomerComms(trx, peek.customer_id);
+    // Then the same row order as acceptance: estimate, then customer. A
+    // staff edit, another calculation, or a concurrent acceptance cannot
+    // cross this mint.
     const row = await trx('estimates')
       .where({ id: estimateId, source: 'quote_wizard', status: 'draft', pricing_authority: 'SERVER' })
       .whereNull('archived_at').whereNull('price_locked_at').forUpdate().first();
-    if (!row) return null;
-    // The customer moved between the pre-read and the row lock: the lock we
-    // hold is the wrong customer's — refuse this mint, the caller retries.
-    if (String(row.customer_id || '') !== String(preRow.customer_id || '')) return null;
+    // Re-verify under the lock: a merge that repointed the draft between the
+    // peek and here would leave this transaction fenced on the wrong key.
+    if (!row || String(row.customer_id) !== String(peek.customer_id)) return null;
     const stored = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data;
     const fee = stored.setupFeeQuote || {};
     if (stored.lead_id !== leadId || fee.unverified
       || !isDeepStrictEqual(stored.engineInput, JSON.parse(JSON.stringify(engineInput)))) return null;
-    // Under the row lock, the DRAFT's own county-roll verdict — not the
-    // publishing request's: a clean request that paused while another run
-    // flagged the same draft must not publish it (pre-push audit P1).
-    if (stored.addressUnverified === true) return null;
     if (['monthly_total', 'annual_total', 'onetime_total'].some(key => (
       moneyCents(row[key]) !== moneyCents(totals[key])
     ))) return null;
 
-    // Re-lock is a no-op (already held above); the eligibility read stays.
     const customer = await trx('customers').where({ id: row.customer_id, active: true })
       .whereNull('deleted_at').whereNotIn('pipeline_stage', [...CUSTOMER_STAGES, ...FORMER_CUSTOMER_STAGES])
       .forUpdate().first();

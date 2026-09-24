@@ -50,7 +50,13 @@ app.use(express.json());
 app.use('/communications', router);
 app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
 
-async function insertThread({ contactPhone, ourEndpoint = '+19415550199', body = 'Synthetic inbound' }) {
+async function insertThread({
+  contactPhone,
+  ourEndpoint = '+19415550199',
+  body = 'Synthetic inbound',
+  metadata = {},
+  twilioSid = null,
+}) {
   const conversationId = randomUUID();
   await mockPg('conversations').insert({
     id: conversationId, channel: 'sms', our_endpoint_id: ourEndpoint,
@@ -58,7 +64,8 @@ async function insertThread({ contactPhone, ourEndpoint = '+19415550199', body =
   });
   await mockPg('messages').insert({
     id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'inbound',
-    body, author_type: 'customer', created_at: new Date(),
+    body, author_type: 'customer', metadata: JSON.stringify(metadata), twilio_sid: twilioSid,
+    created_at: new Date(),
   });
   return conversationId;
 }
@@ -83,7 +90,14 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
       CREATE TEMP TABLE conversations (id uuid PRIMARY KEY, customer_id uuid, channel text, our_endpoint_id text, contact_phone text, unknown_contact boolean DEFAULT false);
       CREATE TEMP TABLE messages (id uuid PRIMARY KEY, conversation_id uuid, channel text, direction text, body text,
         media jsonb DEFAULT '[]', author_type text, delivery_status text, message_type text, is_read boolean, read_at timestamptz,
-        created_at timestamptz DEFAULT now());
+        metadata jsonb DEFAULT '{}', twilio_sid text, created_at timestamptz DEFAULT now());
+      CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), twilio_sid text, direction text,
+        message_type text, status text, metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
+      CREATE TEMP TABLE messaging_audit_log (id bigserial PRIMARY KEY, provider_message_id text, channel text,
+        metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
+      CREATE TEMP TABLE message_drafts (id uuid PRIMARY KEY, intent text, sms_log_id uuid);
+      CREATE TEMP TABLE inbound_sms_optout_receipts (
+        message_sid text PRIMARY KEY, phone text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now());
     `);
   });
   afterAll(async () => {
@@ -91,7 +105,7 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     await mockPg?.rollback(); await database?.destroy();
   });
   beforeEach(async () => {
-    await mockPg.raw('TRUNCATE customers, conversations, messages');
+    await mockPg.raw('TRUNCATE customers, conversations, messages, sms_log, messaging_audit_log, message_drafts, inbound_sms_optout_receipts');
   });
 
   test('an unlinked +44 sender sharing a US customer\'s last 10 digits resolves to NO customer', async () => {
@@ -142,4 +156,166 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     expect(us.customerId).toBe(usCustomerId);
     expect(us.customerName).toBe('Dana Ordway');
   });
+
+  test('malformed draft metadata stays a normal log row instead of raising an invalid UUID error', async () => {
+    await insertThread({
+      contactPhone: '+19415559876',
+      body: 'Malformed draft metadata',
+      metadata: { draft_id: 'not-a-uuid' },
+      twilioSid: 'SM-malformed',
+    });
+    const { status, body } = await getLog();
+    expect(status).toBe(200);
+    expect(body.messages.find((message) => message.body === 'Malformed draft metadata')).toBeDefined();
+  });
+
+  test('projects the exact canonical inbound anchor and provider handoff time for an approved draft', async () => {
+    const conversationId = randomUUID();
+    const inboundMessageId = randomUUID();
+    const inboundLogId = randomUUID();
+    const draftId = randomUUID();
+    const outboundMessageId = randomUUID();
+    await mockPg('conversations').insert({
+      id: conversationId, channel: 'sms', our_endpoint_id: '+19415550199',
+      unknown_contact: true, contact_phone: '+19415559878',
+    });
+    await mockPg('messages').insert([
+      {
+        id: inboundMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+        body: 'Can you check the gate?', author_type: 'customer', twilio_sid: 'SM-anchor-exact',
+        created_at: '2026-09-23T12:00:00Z',
+      },
+      {
+        id: outboundMessageId, conversation_id: conversationId, channel: 'sms', direction: 'outbound',
+        body: 'Yes, we can.', author_type: 'admin', twilio_sid: 'SM-reply-exact',
+        message_type: 'ai_approved', delivery_status: 'sent', created_at: '2026-09-23T12:00:10Z',
+      },
+    ]);
+    await mockPg('sms_log').insert([
+      {
+        id: inboundLogId, twilio_sid: 'SM-anchor-exact', direction: 'inbound',
+        message_type: 'inbound', status: 'received', created_at: '2026-09-23T12:00:00Z',
+      },
+      {
+        twilio_sid: 'SM-reply-exact', direction: 'outbound', message_type: 'ai_approved',
+        status: 'sent', metadata: { draft_id: draftId }, created_at: '2026-09-23T12:00:04Z',
+      },
+    ]);
+    await mockPg('message_drafts').insert({ id: draftId, intent: 'reply', sms_log_id: inboundLogId });
+
+    const { status, body } = await getLog();
+    expect(status).toBe(200);
+    const reply = body.messages.find((item) => item.id === outboundMessageId);
+    expect(reply).toMatchObject({
+      responseIsAnswer: true,
+      responseReplyToMessageId: inboundMessageId,
+      responseCreatedAt: '2026-09-23T12:00:04.000Z',
+      createdAt: '2026-09-23T12:00:10.000Z',
+    });
+  });
+
+  test('fails closed when a draft anchor has duplicate canonical inbound twins', async () => {
+    const conversationId = randomUUID();
+    const inboundLogId = randomUUID();
+    const draftId = randomUUID();
+    const outboundMessageId = randomUUID();
+    await mockPg('conversations').insert({
+      id: conversationId, channel: 'sms', our_endpoint_id: '+19415550199',
+      unknown_contact: true, contact_phone: '+19415559879',
+    });
+    await mockPg('messages').insert([
+      ...[randomUUID(), randomUUID()].map((id) => ({
+        id, conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+        body: 'Duplicate canonical twin', author_type: 'customer', twilio_sid: 'SM-anchor-duplicate',
+      })),
+      {
+        id: outboundMessageId, conversation_id: conversationId, channel: 'sms', direction: 'outbound',
+        body: 'Draft reply', author_type: 'admin', twilio_sid: 'SM-reply-duplicate',
+        message_type: 'ai_revised', delivery_status: 'sent',
+      },
+    ]);
+    await mockPg('sms_log').insert([
+      { id: inboundLogId, twilio_sid: 'SM-anchor-duplicate', direction: 'inbound', status: 'received' },
+      {
+        twilio_sid: 'SM-reply-duplicate', direction: 'outbound', message_type: 'ai_revised',
+        status: 'sent', metadata: { draft_id: draftId },
+      },
+    ]);
+    await mockPg('message_drafts').insert({ id: draftId, intent: 'reply', sms_log_id: inboundLogId });
+
+    const { status, body } = await getLog();
+    expect(status).toBe(200);
+    expect(body.messages.find((item) => item.id === outboundMessageId)).toMatchObject({
+      responseIsAnswer: false,
+      responseReplyToMessageId: null,
+    });
+  });
+
+  test('loads prior outbound context set-wise for courtesy classification', async () => {
+    const conversationId = randomUUID();
+    await mockPg('conversations').insert({
+      id: conversationId, channel: 'sms', our_endpoint_id: '+19415550199',
+      unknown_contact: true, contact_phone: '+19415559877',
+    });
+    const insertMessage = (createdAt, direction, body) => mockPg('messages').insert({
+      id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction, body,
+      author_type: direction === 'inbound' ? 'customer' : 'admin',
+      delivery_status: direction === 'outbound' ? 'sent' : 'received',
+      message_type: direction === 'outbound' ? 'manual' : 'inbound', created_at: createdAt,
+    });
+    await insertMessage('2026-09-23T12:00:00Z', 'outbound', 'Does 9am work?');
+    await insertMessage('2026-09-23T12:01:00Z', 'inbound', 'Okay');
+    await insertMessage('2026-09-23T12:02:00Z', 'outbound', 'Your service is complete. Reply STOP to opt out.');
+    await insertMessage('2026-09-23T12:03:00Z', 'inbound', 'Thanks!');
+
+    const { status, body } = await getLog();
+    expect(status).toBe(200);
+    expect(body.messages.find((message) => message.body === 'Okay').courtesyOnly).toBe(false);
+    expect(body.messages.find((message) => message.body === 'Thanks!').courtesyOnly).toBe(true);
+  });
+
+  test.each([true, false])(
+    'projects a delayed receipt-backed STOP before a later question (legacy row: %s)',
+    async (withLegacyStop) => {
+      const conversationId = randomUUID();
+      const contactPhone = '+19415559880';
+      await mockPg('conversations').insert({
+        id: conversationId, channel: 'sms', our_endpoint_id: '+19415550199',
+        unknown_contact: true, contact_phone: contactPhone,
+      });
+      await mockPg('inbound_sms_optout_receipts').insert({
+        message_sid: 'SM-delayed-stop', phone: contactPhone, applied_at: '2026-09-23T12:01:00Z',
+      });
+      await mockPg('messages').insert([
+        {
+          id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+          body: 'Can you still come Friday?', author_type: 'customer', message_type: 'inbound',
+          twilio_sid: 'SM-real-question', created_at: '2026-09-23T12:02:00Z',
+        },
+        {
+          id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+          body: 'STOP', author_type: 'customer', message_type: 'inbound',
+          twilio_sid: 'SM-delayed-stop', created_at: '2026-09-23T12:03:00Z',
+        },
+      ]);
+      if (withLegacyStop) {
+        await mockPg('sms_log').insert({
+          twilio_sid: 'SM-delayed-stop', direction: 'inbound', message_type: 'opt_out',
+          status: 'received', created_at: '2026-09-23T12:03:00Z',
+        });
+      }
+
+      const { status, body } = await getLog();
+      expect(status).toBe(200);
+      expect(body.messages.find((message) => message.body === 'STOP')).toMatchObject({
+        messageType: 'inbound',
+        responseMessageType: 'opt_out',
+        createdAt: '2026-09-23T12:01:00.000Z',
+      });
+      expect(body.messages.find((message) => message.body === 'Can you still come Friday?')).toMatchObject({
+        responseMessageType: 'inbound',
+        createdAt: '2026-09-23T12:02:00.000Z',
+      });
+    },
+  );
 });
