@@ -39,12 +39,17 @@ const DEFAULT_CONFIG = Object.freeze({
   enabledServiceLines: ['pest', 'mosquito'],
   requireRecurringFrequency: true,
   weights: { client: 25, technician: 30, reService: 20, recurring: 15, risk: 10 },
+  // Owner ruling 2026-09-24: six bands, rounded to the nearest integer
+  // (scores are always rounded to one decimal, so every one-decimal value
+  // 0.0-5.0 must resolve with no gaps — see label.js / validateLabels).
+  // 0 = none, 1 = very low, 2 = low, 3 = moderate, 4 = elevated, 5 = high.
   labels: [
-    { key: 'very_low', name: 'Very Low', min: 0.0, max: 0.9, description: 'Little to no pest activity.' },
-    { key: 'low', name: 'Low', min: 1.0, max: 1.9, description: 'Minor or occasional activity.' },
-    { key: 'moderate', name: 'Moderate', min: 2.0, max: 2.9, description: 'Noticeable activity that should be watched.' },
-    { key: 'elevated', name: 'Elevated', min: 3.0, max: 3.9, description: 'Recurring or spreading activity.' },
-    { key: 'high', name: 'High', min: 4.0, max: 5.0, description: 'Heavy activity, repeated issues, or urgent concern.' },
+    { key: 'none', name: 'None', min: 0.0, max: 0.4, description: 'No pest activity found.' },
+    { key: 'very_low', name: 'Very Low', min: 0.5, max: 1.4, description: 'Little to no pest activity.' },
+    { key: 'low', name: 'Low', min: 1.5, max: 2.4, description: 'Minor or occasional activity.' },
+    { key: 'moderate', name: 'Moderate', min: 2.5, max: 3.4, description: 'Noticeable activity that should be watched.' },
+    { key: 'elevated', name: 'Elevated', min: 3.5, max: 4.4, description: 'Recurring or spreading activity.' },
+    { key: 'high', name: 'High', min: 4.5, max: 5.0, description: 'Heavy activity, repeated issues, or urgent concern.' },
   ],
   trendThresholds: {
     improvingAtOrBelow: -0.5,

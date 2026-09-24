@@ -963,6 +963,9 @@ export function completionPreferencesNeedDraft({
   includePayLink = true,
   requestReview = true,
   clientPestRating = null,
+  // First visits start the picker at 5 (owner ruling 2026-09-24): the
+  // prefilled default is not tech input, but clearing it is.
+  clientPestRatingDefault = null,
   backfillCloseout = false,
   backfillCloseoutDefault = false,
   backfillTimeOnSite = "",
@@ -974,7 +977,7 @@ export function completionPreferencesNeedDraft({
   return sendSms !== true
     || includePayLink !== true
     || requestReview !== true
-    || clientPestRating != null
+    || (clientPestRating ?? null) !== (clientPestRatingDefault ?? null)
     // The inspection-credit opt-out is default-ON: a cleared box that does
     // not survive the billing/draft detour silently records a credit
     // promise the tech explicitly declined (Codex #3178 r25 P2).
@@ -11467,6 +11470,9 @@ export function CompletionPanel({
   // hides the UI rather than letting the tech enter data the backend
   // will silently drop.
   const [techRatingAllowed, setTechRatingAllowed] = useState(null);
+  // Owner ruling 2026-09-24: on a customer's first visit on this service
+  // line the picker starts at 5 and the tech lowers it if they saw less.
+  const [clientPestRatingDefault, setClientPestRatingDefault] = useState(null);
   useEffect(() => {
     let cancelled = false;
     // Per-service `allowed` boolean from the server. The endpoint
@@ -11486,7 +11492,18 @@ export function CompletionPanel({
     adminFetch(`/admin/dispatch/${service.id}/tech-rating-allowed`)
       .then((body) => {
         if (cancelled) return;
-        setTechRatingAllowed(!!(body && body.allowed === true));
+        const allowed = !!(body && body.allowed === true);
+        setTechRatingAllowed(allowed);
+        if (allowed && body.firstVisit === true) {
+          setClientPestRatingDefault(5);
+          // Never over a value the tech already tapped or a restored draft
+          // (including a draft where the tech cleared the default).
+          setClientPestRating((current) => (
+            current == null && draftSnapshotRef.current?.restoredFromStorage !== true
+              ? 5
+              : current
+          ));
+        }
       })
       .catch(() => {
         // Fetch failure — keep the picker hidden so the tech can still
@@ -13064,6 +13081,7 @@ export function CompletionPanel({
         includePayLink,
         requestReview,
         clientPestRating,
+        clientPestRatingDefault,
         backfillCloseout,
         backfillCloseoutDefault,
         backfillTimeOnSite,
@@ -13242,6 +13260,7 @@ export function CompletionPanel({
     includePayLink,
     requestReview,
     clientPestRating,
+    clientPestRatingDefault,
     reviewTiming,
     reviewCustomAt,
     oneTimeRecapOnly,
@@ -18442,7 +18461,12 @@ export function CompletionPanel({
                     textAlign: "center",
                   }}
                 >
-                  0 = none, 5 = severe. Tap a number again to clear.
+                  0 = none · 1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = high. Tap a number again to clear.
+                  {clientPestRatingDefault === 5 && (
+                    <div style={{ marginTop: 4 }}>
+                      First visit — starts at 5. Lower it if you saw less.
+                    </div>
+                  )}
                 </div>
               </Field>
             )}
@@ -20819,7 +20843,12 @@ export function CompletionPanel({
                   color: D.muted,
                 }}
               >
-                0 = none, 5 = severe. Tap a number again to clear.
+                0 = none · 1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = high. Tap a number again to clear.
+                {clientPestRatingDefault === 5 && (
+                  <div style={{ marginTop: 4 }}>
+                    First visit — starts at 5. Lower it if you saw less.
+                  </div>
+                )}
               </div>
             </div>
           )}

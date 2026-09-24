@@ -196,6 +196,11 @@ describe("completion draft state", () => {
     expect(completionPreferencesNeedDraft({ includePayLink: false })).toBe(true);
     expect(completionPreferencesNeedDraft({ requestReview: false })).toBe(true);
     expect(completionPreferencesNeedDraft({ clientPestRating: 0 })).toBe(true);
+    // First visit: the prefilled 5 is the default, not tech input — but
+    // clearing or changing it is (owner ruling 2026-09-24).
+    expect(completionPreferencesNeedDraft({ clientPestRating: 5, clientPestRatingDefault: 5 })).toBe(false);
+    expect(completionPreferencesNeedDraft({ clientPestRating: null, clientPestRatingDefault: 5 })).toBe(true);
+    expect(completionPreferencesNeedDraft({ clientPestRating: 3, clientPestRatingDefault: 5 })).toBe(true);
   });
 
   it("a cleared inspection-credit opt-out is draft content (Codex #3178 r25 P2)", () => {

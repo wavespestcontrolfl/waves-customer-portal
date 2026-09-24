@@ -158,6 +158,23 @@ function calculatePestPressureScore(input, config) {
     }
   }
 
+  // Owner ruling 2026-09-24: when the technician taps a rating directly on
+  // the completion form (client_pest_rating_source === 'technician'), that
+  // tap IS the report score — not one of five blended components. Callers
+  // (orchestrate.js) pass this as a separate pure-engine input so the
+  // blended path below stays untouched for customer-submitted ratings.
+  // Component breakdown/weights are still computed from the ordinary
+  // inputs so admins retain the audit view; only score/label/trend are
+  // overridden to the direct value.
+  if (
+    input.technicianDirectRating !== null
+    && input.technicianDirectRating !== undefined
+    && (!isValidRating(input.technicianDirectRating) || !Number.isInteger(input.technicianDirectRating))
+  ) {
+    throw new RangeError('calculatePestPressureScore: technicianDirectRating must be an integer between 0 and 5');
+  }
+  const hasTechnicianDirectRating = isValidRating(input.technicianDirectRating) && Number.isInteger(input.technicianDirectRating);
+
   const allComponents = buildComponents(input, config.weights);
   const missingComponents = allComponents.filter((c) => !c.present).map((c) => c.key);
   const present = allComponents.filter((c) => c.present);
@@ -176,7 +193,12 @@ function calculatePestPressureScore(input, config) {
     configSnapshot: baseSnapshot,
   });
 
-  if (!meetsMinimum(allComponents, config.minimumDataRequired)) {
+  // A direct technician tap always has enough data to score, even when the
+  // blended engine's own minimum/weight gates would otherwise report
+  // insufficient — the tap doesn't need corroborating components.
+  const meetsMin = meetsMinimum(allComponents, config.minimumDataRequired);
+
+  if (!meetsMin && !hasTechnicianDirectRating) {
     const summary = resolveCustomerSummary({ trend: 'insufficient_data', label: null, dataCompleteness: 'insufficient' });
     return {
       score: null,
@@ -190,15 +212,13 @@ function calculatePestPressureScore(input, config) {
     };
   }
 
-  const { components: scoringComponents, weightDenominator } = applyMissingDataBehavior(
-    allComponents,
-    config.missingDataBehavior,
-    config.minimumDataRequired,
-  );
+  const { components: scoringComponents, weightDenominator } = meetsMin
+    ? applyMissingDataBehavior(allComponents, config.missingDataBehavior, config.minimumDataRequired)
+    : { components: [], weightDenominator: 0 };
 
-  const score = computeWeightedScore(scoringComponents, weightDenominator);
+  const blendedScore = computeWeightedScore(scoringComponents, weightDenominator);
 
-  if (score === null) {
+  if (blendedScore === null && !hasTechnicianDirectRating) {
     const summary = resolveCustomerSummary({ trend: 'insufficient_data', label: null, dataCompleteness: 'insufficient' });
     return {
       score: null,
@@ -211,6 +231,16 @@ function calculatePestPressureScore(input, config) {
       ...buildSharedAudit([], 0),
     };
   }
+
+  // Owner ruling 2026-09-24: the technician's direct tap IS the score,
+  // exactly (5 → 5.0), never blended with clientRating/technicianRating/
+  // reServiceImpact/riskFactor. The component breakdown above still
+  // reflects the ordinary inputs for the admin audit view; `scoreSource`
+  // flags that score/label/trend below came from the direct tap rather
+  // than the blend.
+  const score = hasTechnicianDirectRating
+    ? roundToOneDecimal(clamp(input.technicianDirectRating, 0, 5))
+    : blendedScore;
 
   const label = resolveLabel(score, config.labels);
   const { trend, delta } = resolveTrend(score, input.previousScore ?? null, config.trendThresholds);
@@ -224,6 +254,7 @@ function calculatePestPressureScore(input, config) {
     trend,
     trendDelta: delta,
     dataCompleteness,
+    scoreSource: hasTechnicianDirectRating ? 'technician_rating' : 'blended',
     summary,
     ...buildSharedAudit(scoringComponents, weightDenominator),
   };

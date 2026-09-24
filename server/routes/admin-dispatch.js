@@ -46,6 +46,7 @@ const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = 
 const { detectServiceLine, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
+const { applyCustomerVisibleServiceRecordFilter } = require('../services/pest-pressure/history-filter');
 
 const { tipsForVisit } = require('../services/service-report/tip-library');
 
@@ -220,13 +221,30 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // dropped on completion. Computing the result per-service on the server
 // keeps the UI and the write path in agreement.
 //
+// `firstVisit` (owner ruling 2026-09-24): true when the customer has no
+// completed, customer-visible service record on this service line yet —
+// the picker then starts at 5 and the tech lowers it if they saw less.
+// Only computed when the picker is allowed, and only for the assigned
+// tech or an admin (it reads the customer's visit history) — anyone else
+// gets `false` and an empty picker, same as before this ruling.
+//
 // 404 on unknown service; admin-dispatch's existing requireTechOrAdmin
 // gate covers auth.
+async function customerHasPriorVisitOnLine(knex, { customerId, serviceLine }) {
+  if (!customerId) return true;
+  const query = knex('service_records')
+    .where('customer_id', customerId)
+    .where('status', 'completed');
+  applyCustomerVisibleServiceRecordFilter(query);
+  if (serviceLine) query.where('service_line', serviceLine);
+  return Boolean(await query.first('id'));
+}
+
 router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'service_id', 'service_type');
+      .first('id', 'service_id', 'service_type', 'customer_id', 'technician_id');
     if (!svc) {
       return res.status(404).json({ error: 'Service not found' });
     }
@@ -235,13 +253,20 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
       resolveCompletionProfileForScheduledService(svc),
     ]);
     const serviceLine = detectServiceLine(svc.service_type);
-    res.json({
-      allowed: technicianPestRatingAllowedForService({
-        completionProfile,
-        pestPressureConfig: config,
-        serviceLine,
-      }),
+    const allowed = technicianPestRatingAllowedForService({
+      completionProfile,
+      pestPressureConfig: config,
+      serviceLine,
     });
+    const mayReadHistory = !completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    const firstVisit = allowed && mayReadHistory
+      ? !(await customerHasPriorVisitOnLine(db, { customerId: svc.customer_id, serviceLine }))
+      : false;
+    res.json({ allowed, firstVisit });
   } catch (err) { next(err); }
 });
 
@@ -5933,6 +5958,7 @@ module.exports.rescheduleReminderTime = rescheduleReminderTime;
 module.exports._test = {
   pastRescheduleDateError,
   technicianPestRatingAllowedForService,
+  customerHasPriorVisitOnLine,
   timeOnSiteEditPlan,
   reentryEditPlan,
   rearmRescheduleReminderWindows,

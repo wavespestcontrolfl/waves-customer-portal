@@ -29,8 +29,11 @@ describe('validateConfig', () => {
   });
 
   test('overlapping label ranges fail', () => {
+    // labels[1] ('very_low') already starts at 0.5 under the six-band
+    // default (owner ruling 2026-09-24) — push it into labels[0]'s
+    // ('none') range instead to force a genuine overlap.
     const config = cloneDefault();
-    config.labels[1].min = 0.5;
+    config.labels[1].min = 0.2;
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.message.includes('overlap'))).toBe(true);
