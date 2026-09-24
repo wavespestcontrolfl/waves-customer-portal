@@ -8,7 +8,9 @@ jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest
 jest.mock('../services/lead-attribution', () => ({
   ...jest.requireActual('../services/lead-attribution'), settleWonFunnelRow: jest.fn(),
 }));
-jest.mock('../services/lead-status-reconciliation', () => ({ getLeadStatusReconciliation: jest.fn() }));
+jest.mock('../services/lead-status-reconciliation', () => ({
+  ...jest.requireActual('../services/lead-status-reconciliation'), getLeadStatusReconciliation: jest.fn(),
+}));
 const knex = require('knex')({ client: 'pg' });
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -38,6 +40,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   failCalls = false; calls = []; callCount = 0; callQueries = [];
   delete lead.twilio_call_sid;
+  lead.status = 'new';
+  activities.splice(1);
   db.mockImplementation((table) => knex(table));
   db.raw = knex.raw.bind(knex);
   getLeadStatusReconciliation.mockResolvedValue({
@@ -101,4 +105,22 @@ test('retains initiating SID and settled-stamp calls even when they started befo
   expect(countQuery.sql).toContain('or "twilio_call_sid" = ?');
   expect(countQuery.bindings.filter((value) => value === lead.twilio_call_sid)).toHaveLength(2);
   expect(getLeadStatusReconciliation).toHaveBeenCalledWith(expect.objectContaining({ associatedCallCount: 1 }));
+});
+test('does not count calls for non-New leads while retaining their displayed history', async () => {
+  lead.status = 'contacted';
+  calls = [{ id: 'displayed-call', transcription: 'Synthetic transcript' }];
+  const { body } = await request({ leadReview: '1' });
+  expect(callQueries.some(({ sql }) => sql.includes('count(*)'))).toBe(false);
+  expect(body.calls).toEqual([expect.objectContaining({ id: 'displayed-call' })]);
+});
+test('excludes exactly verified conversation IDs from the advisory count', async () => {
+  activities.push({
+    activity_type: 'status_change', description: 'Status: new → contacted',
+    created_at: '2026-09-02T12:00:00.000Z',
+    metadata: JSON.stringify({ evidenceType: 'live_conversation', evidenceId: 'verified-call' }),
+  });
+  await request({ leadReview: '1' });
+  const countQuery = callQueries.find(({ sql }) => sql.includes('count(*)'));
+  expect(countQuery.sql).toContain('id::text not in (?)');
+  expect(countQuery.bindings).toContain('verified-call');
 });

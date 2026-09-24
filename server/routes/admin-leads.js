@@ -13,7 +13,7 @@ const { assertAdminAppointmentWindow, slotOverlapWarning } = require('../service
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer, markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
-const { getLeadStatusReconciliation } = require('../services/lead-status-reconciliation');
+const { getLeadStatusReconciliation, verifiedContactCallIds } = require('../services/lead-status-reconciliation');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const logger = require('../services/logger');
 
@@ -1012,7 +1012,7 @@ router.get('/:id', async (req, res, next) => {
               });
             }
           });
-        if (req.query.leadReview === '1') {
+        if (req.query.leadReview === '1' && lead.status === 'new') {
           const lifecycleStartMs = new Date(lead.first_contact_at || lead.created_at).getTime();
           if (Number.isFinite(lifecycleStartMs)) {
             const countRow = await associatedCallsQuery.clone()
@@ -1023,6 +1023,7 @@ router.get('/:id', async (req, res, next) => {
                 // keeps that initiating call; phone-only matches stay bounded.
                 if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
               })
+              .whereNotIn(db.raw('id::text'), verifiedContactCallIds(lead, activities))
               .count({ count: '*' })
               .first();
             associatedCallCount = Number(countRow?.count) || 0;

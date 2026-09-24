@@ -2,7 +2,7 @@ jest.mock('../services/lead-estimate-link', () => ({
   isContactEvidenceType: (value) => new Set(['live_conversation', 'assessment_booked', 'assessment_completed']).has(value),
 }));
 const knex = require('knex')({ client: 'pg' });
-const { buildLeadStatusReconciliation, getLeadStatusReconciliation, resolveAssessmentEvidence } = require('../services/lead-status-reconciliation');
+const { buildLeadStatusReconciliation, getLeadStatusReconciliation, resolveAssessmentEvidence, verifiedContactCallIds } = require('../services/lead-status-reconciliation');
 const lead = { id: 'lead-1', status: 'new', customer_id: 'customer-1', estimate_id: null, first_contact_at: '2026-09-01T12:00:00.000Z' };
 function contactActivity(overrides = {}) {
   return {
@@ -24,6 +24,16 @@ function databaseResults({ openLeads = [], assessments = [], assessmentBatches }
   return { database: (table) => knex(table), queries };
 }
 afterAll(() => knex.destroy());
+test('recognizes only exact lifecycle conversation evidence for call deduplication', () => {
+  expect(verifiedContactCallIds(lead, [
+    contactActivity(),
+    contactActivity({ created_at: '2026-08-01T12:00:00.000Z' }),
+    contactActivity({ metadata: { evidenceType: 'assessment_booked', evidenceId: 'assessment-1' } }),
+    contactActivity({ metadata: 'invalid json' }),
+    contactActivity({ metadata: { evidenceType: 'live_conversation' } }),
+    contactActivity({ description: 'Status: contacted → new' }),
+  ])).toEqual(['call-1']);
+});
 test('flags an exact historical transition only within the current lead lifecycle', () => {
   const result = buildLeadStatusReconciliation({
     lead,

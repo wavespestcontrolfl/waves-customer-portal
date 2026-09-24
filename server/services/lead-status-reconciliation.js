@@ -28,6 +28,12 @@ function exactContactActivities(lead, activities) {
       && atOrAfter(activity.created_at, floor);
   });
 }
+function verifiedContactCallIds(lead, activities) {
+  return exactContactActivities(lead, activities)
+    .map(metadataOf)
+    .filter((metadata) => metadata.evidenceType === 'live_conversation' && metadata.evidenceId != null)
+    .map((metadata) => String(metadata.evidenceId));
+}
 function assessmentQuery(database, lead, association) {
   const query = database('scheduled_services as ss')
     .leftJoin('services as svc', 'ss.service_id', 'svc.id')
@@ -206,6 +212,7 @@ async function getLeadStatusReconciliation({
   });
 }
 module.exports = {
+  verifiedContactCallIds,
   buildLeadStatusReconciliation,
   getLeadStatusReconciliation,
   resolveAssessmentEvidence,
