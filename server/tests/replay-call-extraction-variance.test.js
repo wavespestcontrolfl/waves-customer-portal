@@ -654,6 +654,7 @@ describe('call extraction replay variance reporting', () => {
         'price_prepay_term',
         'price_tier_mentioned',
         'price_stated_by',
+        'price_has_evidence',
       ]) {
         expect(allFields.has(field)).toBe(true);
       }

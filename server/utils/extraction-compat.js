@@ -59,6 +59,10 @@ function flatView(extraction) {
     price_prepay_term: price.prepay_term || null,
     price_tier_mentioned: price.tier_mentioned || null,
     price_stated_by: price.stated_by || null,
+    // Presence only: the quote is verbatim free text (never diffed), but a
+    // later extractor that keeps the numbers and drops the quote must show
+    // up in replay variance (codex #4707 r3).
+    price_has_evidence: typeof price.evidence_quote === 'string' && price.evidence_quote.trim() ? true : (price.amount_usd != null ? false : null),
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
     service_address_occupancy: property.service_address_occupancy || null,
     service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'

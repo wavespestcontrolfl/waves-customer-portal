@@ -900,7 +900,7 @@
         "price": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ANY price the agent stated on the call, whether or not the caller accepted it, a range, or a unit/tier/prepay term — distinct from quoted_price_usd, which stays the narrower accepted-total-only field. Optional: omit or leave every field null when no price was discussed.",
+          "description": "ANY price stated on the call by either party (the agent's quote, or a number the caller speaks — see stated_by), whether or not the caller accepted it, a range, or a unit/tier/prepay term — distinct from quoted_price_usd, which stays the narrower accepted-total-only field. Optional: omit or leave every field null when no price was discussed.",
           "properties": {
             "amount_usd": {
               "type": [
