@@ -439,13 +439,73 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
 // payment-pending term's reserved/sold first visit carries only
 // source_estimate_id; excluding it would seed replacement visits and
 // leave the sold visit separately billable).
-function rowLinkedToAnotherTerm(term, row) {
-  return row.annual_prepay_term_id != null
-    && term?.id != null
-    && String(row.annual_prepay_term_id) !== String(term.id);
+// A row exclusively belongs to another term only while that other term
+// STILL owns paid coverage on it — i.e. the row itself still carries the
+// live annual stamp (prepaid_method === annual_prepay_invoice with a
+// positive amount), the same evidence annualPrepayCoversVisit and every
+// other coverage-authority check in this file already trust. A refund/void
+// (syncTermForInvoicePayment's cancel branch) calls clearPrepaidStampsForTerm,
+// which nulls prepaid_method/prepaid_amount on the row but deliberately
+// LEAVES annual_prepay_term_id set (kept for audit) — without this check, a
+// row whose old term was fully refunded would stay permanently excluded from
+// every other term's coverage (a replacement term seeds a brand-new set of
+// visits while the released ones sit on the calendar, unbilled and
+// uncounted, forever "linked" to a term that no longer covers anything).
+// Customer-scoped set of OTHER term ids that have positively RELEASED
+// ownership (a true void/refund with no renewal decision —
+// syncTermForInvoicePayment's cancel branch, the exact shape
+// clearPrepaidStampsForTerm runs against). Computed once per top-level
+// coverage call and threaded through rowLinkedToAnotherTerm /
+// rowCommittedToTerm: a row's annual_prepay_term_id can be set BEFORE it is
+// ever stamped (attachScheduledServices links by date/service match first,
+// applyPrepaidCoverageForTerm stamps after), so an UNSTAMPED row linked to
+// another term does NOT by itself prove that term let go of it — the other
+// term could simply be mid-activation, or have failed partway through
+// activation while still fully live. Only a term this query positively
+// confirms cancelled-with-no-renewal-decision may have its unstamped rows
+// adopted elsewhere; every other case fails closed (still linked).
+// Only ever queried for the specific candidate ids the caller already found
+// ambiguous (unstamped rows linked to a term other than the current one) —
+// never a broad "every other term this customer ever had" scan, so the
+// normal case (no such rows at all) costs nothing extra.
+async function releasedTermIdsForCustomer(conn, candidateTermIds) {
+  if (!candidateTermIds || !candidateTermIds.length) return new Set();
+  const rows = await conn('annual_prepay_terms')
+    .whereIn('id', candidateTermIds)
+    .where({ status: 'cancelled' })
+    .whereNull('renewal_decision')
+    .select('id');
+  return new Set(rows.map((row) => String(row.id)));
 }
 
-function rowCommittedToTerm(term, row) {
+// The distinct OTHER-term ids among `rows` that are ambiguous under
+// rowLinkedToAnotherTerm's own rule: linked to a term other than `term`,
+// but NOT carrying that other term's live annual stamp — the only shape
+// that needs releasedTermIdsForCustomer's positive-release check at all.
+function ambiguousForeignTermIds(term, rows) {
+  const ids = new Set();
+  for (const row of rows) {
+    if (row.annual_prepay_term_id == null || term?.id == null) continue;
+    if (String(row.annual_prepay_term_id) === String(term.id)) continue;
+    if (row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD && Number(row.prepaid_amount) > 0) continue;
+    ids.add(String(row.annual_prepay_term_id));
+  }
+  return [...ids];
+}
+
+function rowLinkedToAnotherTerm(term, row, releasedTermIds = null) {
+  if (row.annual_prepay_term_id == null || term?.id == null) return false;
+  if (String(row.annual_prepay_term_id) === String(term.id)) return false;
+  // The row still carries the LIVE annual stamp from that other term —
+  // definitely still owned by it regardless of the other term's own status
+  // (a stamp this fresh predates any refund's own clear step).
+  if (row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD && Number(row.prepaid_amount) > 0) return true;
+  // Unstamped: only release this row to another term's coverage once the
+  // other term is POSITIVELY VERIFIED released; otherwise still linked.
+  return !(releasedTermIds && releasedTermIds.has(String(row.annual_prepay_term_id)));
+}
+
+function rowCommittedToTerm(term, row, releasedTermIds = null) {
   // Direct evidence (term link or prepaid stamp) always commits. Estimate
   // provenance commits ONLY rows that READ recurring (is_recurring /
   // recurring_pattern / recurring_parent_id, stamped at seeding) — for
@@ -457,7 +517,7 @@ function rowCommittedToTerm(term, row) {
   // (codex r21 pre-push P0, fourth pass): its prepaid stamp or shared
   // estimate must not let a neighboring/boundary term consume it, or the
   // newly paid term seeds short while the other term's visit double-counts.
-  if (rowLinkedToAnotherTerm(term, row)) return false;
+  if (rowLinkedToAnotherTerm(term, row, releasedTermIds)) return false;
   const directCommitment = (term?.id != null && String(row.annual_prepay_term_id) === String(term.id))
     || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
   if (directCommitment) return true;
@@ -517,8 +577,23 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     ? nonCallbackRows
     : nonCallbackRows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
 
-  const isCommittedToTerm = (row) => rowCommittedToTerm(term, row);
+  // Positively-released other terms for this customer (true void/refund,
+  // no renewal decision) — see rowLinkedToAnotherTerm's own comment for why
+  // an unstamped link alone must never be read as a release. Only queried
+  // when an ambiguous row (unstamped, linked elsewhere) actually exists —
+  // the normal case has none and costs nothing extra.
+  const releasedTermIds = await releasedTermIdsForCustomer(conn, ambiguousForeignTermIds(term, filtered));
+  const isCommittedToTerm = (row) => rowCommittedToTerm(term, row, releasedTermIds);
   let matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  // A row explicitly linked to a DIFFERENT term never counts toward THIS
+  // term's coverage, for EVERY coverage family (not only palm — the palm
+  // branch below already re-applies this, redundantly but harmlessly, as
+  // part of its own identity filter). Without this, a prior term's
+  // stamped visit that slips into the new term's window (a rescheduled
+  // final quarterly visit, an operator-shortened boundary) is treated as
+  // one of THIS term's existing rows: the renewal seeds and stamps one
+  // visit short while the prior term's row double-counts (ADMIN-BUG-R19).
+  matching = matching.filter((row) => !rowLinkedToAnotherTerm(term, row, releasedTermIds));
   // PALM coverage candidates require identity or provenance (codex r18
   // pre-push P0): matching is by service-type TEXT, and Waves sells
   // genuine one-time palm injections — a name-matched one-time
@@ -561,11 +636,11 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     // that term's coverage — counting it here seeds this term short while
     // attach/stamping refuse to move it.
     matching = matching.filter((row) => {
-      if (rowLinkedToAnotherTerm(term, row)) return false;
+      if (rowLinkedToAnotherTerm(term, row, releasedTermIds)) return false;
       const cls = palmRowClass(row);
       if (cls === 'recurring') return true;
       if (cls === 'foreign') return false;
-      return rowCommittedToTerm(term, row);
+      return rowCommittedToTerm(term, row, releasedTermIds);
     });
   }
   if (matching.length <= coverageVisitCount) return matching;
@@ -1126,6 +1201,13 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // #4105 P1): a same-day callback adopted under the lock would skip the
   // insert while every later attach/stamp pass filters it back out — the
   // paid term would stay one visit short on every refresh.
+  // Deliberately conservative (no releasedTermIds threaded in): this
+  // per-row adoption check runs mid-occupancy-lock during first-visit
+  // seeding, a narrow enough path that extending it the same release
+  // leniency as coverageRowsForTerm's own primary determination isn't
+  // worth the async plumbing here — an unstamped row linked elsewhere
+  // simply stays excluded, exactly as before this fix (never a regression,
+  // just not more lenient in this one edge path).
   const adoptableCoverageRow = (row) => !isCallbackRow(row)
     && serviceMatchesCoverage(row, coverageServiceType)
     && !rowLinkedToAnotherTerm(term, row)

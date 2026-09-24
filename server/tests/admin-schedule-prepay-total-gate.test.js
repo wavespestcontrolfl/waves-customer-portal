@@ -31,4 +31,35 @@ describe('assertPrepayTotalMatchesPricing', () => {
     expect(() => assertPrepayTotalMatchesPricing({ totalAmount: 320.01, finalPrice: 80, plannedCount: 4 }))
       .toThrow(expect.objectContaining({ code: 'PREPAY_TOTAL_DIVERGED' }));
   });
+
+  describe('short-placed series (Codex round-1 P2): dedicated error, not a generic "reload and try again"', () => {
+    test('blackout exhaustion placed 3 of 4 requested — totalAmount matches the REQUESTED count, not the placed one: PREPAY_SHORT_SERIES, not PREPAY_TOTAL_DIVERGED', () => {
+      expect(() => assertPrepayTotalMatchesPricing({
+        totalAmount: 400, finalPrice: 100, plannedCount: 3, requestedCount: 4,
+      })).toThrow(expect.objectContaining({
+        statusCode: 409, code: 'PREPAY_SHORT_SERIES', placedCount: 3, requestedCount: 4, expectedTotal: 300,
+        message: expect.stringContaining('Only 3 of the 4 requested visit'),
+      }));
+    });
+
+    test('a matching total for the ACTUAL placed count never throws, even when requestedCount differs', () => {
+      expect(() => assertPrepayTotalMatchesPricing({
+        totalAmount: 300, finalPrice: 100, plannedCount: 3, requestedCount: 4,
+      })).not.toThrow();
+    });
+
+    test('a genuine price divergence (matches neither count) still throws the original PREPAY_TOTAL_DIVERGED, not the short-series error', () => {
+      expect(() => assertPrepayTotalMatchesPricing({
+        totalAmount: 500, finalPrice: 100, plannedCount: 3, requestedCount: 4,
+      })).toThrow(expect.objectContaining({
+        code: 'PREPAY_TOTAL_DIVERGED', message: expect.stringContaining('changed since this was previewed'),
+      }));
+    });
+
+    test('requestedCount equal to plannedCount (nothing was short-placed) behaves exactly as before', () => {
+      expect(() => assertPrepayTotalMatchesPricing({
+        totalAmount: 360, finalPrice: 80, plannedCount: 4, requestedCount: 4,
+      })).toThrow(expect.objectContaining({ code: 'PREPAY_TOTAL_DIVERGED' }));
+    });
+  });
 });
