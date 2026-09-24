@@ -6052,6 +6052,15 @@ function priceOneTimeLawn(property, options = {}) {
     // undiscounted anchor. The caller's tier/lawnFreq still describe the
     // requested plan elsewhere; they no longer pick the one-time base.
     tier: 'standard',
+    // The 6x/standard tier stopped being SOLD 2026-09-24 (owner directive) —
+    // LAWN_TIERS.standard.hidden is now true, which drops it from the
+    // customer-facing tiers array priceLawnCare returns by default. This
+    // anchor call is not a customer selection, it is the fixed internal
+    // reference point one-time pricing has used since #3274 — without
+    // includeHiddenTiers the hidden-tier fallback (existing behavior for any
+    // requested-but-unlisted tier) would silently substitute enhanced's
+    // (9x, discounted) per-app here, inflating every one-time lawn quote.
+    includeHiddenTiers: true,
     useLawnCostFloor: false,
     // One-time derives from the raw recurring per-app market rate; the
     // recurring program minimum (a floor on sold PLANS) must not inflate it.

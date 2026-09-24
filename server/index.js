@@ -556,6 +556,26 @@ for (const publicAnalyzePrefix of ['/api/public/lawn-assessment/analyze', '/api/
 // parser so those uploads don't 413 under the 1 MB default, without widening
 // the ceiling for everything else. Authenticated + per-customer throttled.
 app.use('/api/requests', express.json({ limit: '30mb' }));
+// Customer Photo ID (dark, GATE_CUSTOMER_PHOTO_ID) carries up to 3 base64
+// photos through the same request-photo-validation caps as /api/requests —
+// same rationale, same limit. Authenticated + per-customer throttled.
+//
+// UNLIKE /api/requests above, this surface has a dark-gate contract (every
+// handler 404s while the gate is off) and the router's own `authenticate`
+// doesn't run until AFTER a body parser has already parsed up to 30 MB
+// (codex GH r1 P1) — an anonymous caller could force that parse even while
+// dark, and a malformed/oversized anonymous request would surface the
+// parser's own 400/413 instead of the promised 404. Gate-check, THEN a
+// signature-only customer-token guard (mirrors requireStaffTokenForLargeBody
+// for /api/admin /api/tech above; the route's own `authenticate` still does
+// the full DB-backed check), THEN the large parser.
+function requireCustomerPhotoIdGateOpen(req, res, next) {
+  if (!require('./config/feature-gates').isEnabled('customerPhotoId')) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
+app.use('/api/photo-id', requireCustomerPhotoIdGateOpen);
+app.use('/api/photo-id', require('./middleware/large-body-auth').requireCustomerTokenForLargeBody);
+app.use('/api/photo-id', express.json({ limit: '30mb' }));
 // Worker-route HMAC signing (link-worker-auth) hashes the RAW request bytes;
 // the verify hook stores them for /api/integrations/*-worker paths only.
 app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
@@ -593,6 +613,7 @@ app.use('/api/schedule', scheduleRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/requests', requestRoutes);
+app.use('/api/photo-id', require('./routes/photo-id'));
 app.use('/api/bouncie', bouncieRoutes);
 app.use('/api/lawn-health', lawnHealthRoutes);
 app.use('/api/feed', feedRoutes);
@@ -675,6 +696,7 @@ app.use('/api/admin/referrals', adminReferralRoutes);
 app.use('/api/reviews', reviewsPublicRoutes);
 app.use('/api/admin/dispatch', adminDispatchRoutes);
 app.use('/api/admin/auto-dispatch', require('./routes/admin-auto-dispatch'));
+app.use('/api/admin/tech-out', require('./routes/admin-tech-out'));
 app.use('/api', require('./routes/visual-service-moments'));
 app.use('/api/admin/dev', require('./routes/admin-dev-tech-status'));
 app.use('/api/admin/dev', require('./routes/admin-dev-job-status'));

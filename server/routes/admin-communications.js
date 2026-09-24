@@ -12,7 +12,15 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
-const { draftIdSql, loadPriorOutboundBodies } = require('../services/sms-response-policy');
+const {
+  draftIdSql,
+  draftReplyToMessageIdSql,
+  inboundSmsReceiptProjectionSql,
+  loadPriorOutboundBodies,
+  canonicalSmsLegacyLinkSql,
+  canonicalSmsAddressProjectionSql,
+} = require('../services/sms-response-policy');
+const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -216,7 +224,7 @@ async function resolveSmsLogCustomerFallbacks(rows) {
   const phones = new Map();
   for (const row of rows || []) {
     if (row.customer_id || row.first_name) continue;
-    const contactPhone = row.contact_phone || row.customer_phone;
+    const contactPhone = row.effective_contact_phone || row.contact_phone || row.customer_phone;
     // phoneIdentityKey (utils/phone.js) — NOT normalizePhoneLast10 — so an
     // international contact never buckets under the same key as a US
     // customer sharing its last ten digits; see findSingleCustomerForPhone.
@@ -432,7 +440,19 @@ router.post('/sms', async (req, res, next) => {
       // Composer Insert Link: the contract a freshly inserted (unwritten)
       // signing link belongs to — activated before the provider call.
       contractId,
+      // Consultation's lead-only fallback (no customer row yet): the
+      // resolved lead id, so a real send records the SAME audit trail
+      // POST /admin/leads/:id/send-sms would (pre-push Codex P1) — the
+      // send itself stays on THIS route, never rerouted, so every
+      // interlock below (the Agent Review claim, thread parking, the
+      // auto-send check) still applies.
+      leadId,
     } = req.body;
+    const trustedLeadId = leadId && UUID_RE.test(String(leadId)) ? String(leadId) : null;
+    // The lead whose outreach this send records: ONLY a lead the bearer
+    // check actually validated a consultation link for (Codex #4709 r17 P2)
+    // — a leadId riding a text with no consultation link records nothing.
+    let outreachLeadId = null;
     reviewRequestEmail = req.body.reviewRequestEmail === true;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
@@ -475,6 +495,12 @@ router.post('/sms', async (req, res, next) => {
     // ordinary path (Codex r16 P1).
     const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
     if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
+      // Codex #4709 r3 P1: a consultation link never goes out on the
+      // applicant rail — that path skips the gate/expiry/lead checks and the
+      // lead audit. Refuse rather than divert.
+      if (await require('../services/composer-customer-links').bodyCarriesConsultationLink(cleanBody)) {
+        return res.status(409).json({ error: 'This number is an active job applicant — consultation links cannot go out on the applicant thread. Remove the link or text the lead from the Leads page.' });
+      }
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
       if (media.length > 0) return res.status(400).json({ error: 'Attachments are not supported for applicant texts' });
       const RecruitingComms = require('../services/recruiting-comms');
@@ -711,8 +737,16 @@ router.post('/sms', async (req, res, next) => {
         // sharing them with a customer's US number is a different phone.
         usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
         contractId: contractId && UUID_RE.test(String(contractId)) ? String(contractId) : null,
+        // Codex #4709 r3 P1: a lead-only composer send binds its
+        // consultation links to that exact lead.
+        // Bound to the composer's lead whenever one rides along — with or
+        // without customer context (Codex #4709 r9 P1).
+        expectedLeadId: trustedLeadId,
       });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
+      // The validated consultation lead (pasted link or composer insert)
+      // drives the outreach bookkeeping (Codex #4709 r13 + r17 P2).
+      outreachLeadId = bearerCheck.consultationLeadId || null;
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
       if (bearerCheck.preps) prepLinkSends = bearerCheck.preps;
       // A bearer send to a number exactly one live customer owns is that
@@ -1236,6 +1270,44 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[admin-communications] first-response stamp failed: ${stampErr.message}`);
     }
 
+    // Consultation's lead-only fallback: no customer resolved, but a
+    // specific lead did (leadId, verified above). The audit row + status
+    // transition POST /admin/leads/:id/send-sms records for its OWN sends
+    // — the SAME function, so the two routes can never drift (pre-push
+    // Codex P1: this send is never rerouted there, only leadId rides
+    // along). Fail-soft, same rule as the stamp above — the text already left.
+    if (outreachLeadId) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) {
+          // outreachLeadId is the send check's validated lead; nothing
+          // yet confirms it's actually the lead THIS text went to (a
+          // changed recipient or a crafted request could otherwise mark an
+          // unrelated lead contacted with a false audit row — pre-push
+          // Codex P1). Re-bind it here with the SAME rule
+          // resolveConsultationLeadOnly (the /customer-link lead-only
+          // path) applies: the lead's own phone must match the
+          // destination's last ten digits, and the lead must still be
+          // open. A mismatch just skips recording — it never fails a send
+          // that already went out.
+          const { isOpenLeadRow } = require('../services/lead-statuses');
+          const boundLead = await db('leads').where({ id: outreachLeadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
+          if (boundLead && fullPhoneLast10(boundLead.phone) === fullPhoneLast10(to) && isOpenLeadRow(boundLead)) {
+            const { recordLeadSmsOutreach } = require('../services/lead-outreach');
+            await recordLeadSmsOutreach({
+              leadId: outreachLeadId,
+              message: cleanBody,
+              performedBy: req.technician?.name || [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin',
+            });
+          } else {
+            logger.debug(`[admin-communications] lead outreach skipped — leadId ${outreachLeadId} does not bind to this destination`);
+          }
+        }
+      } catch (outreachErr) {
+        logger.warn(`[admin-communications] lead outreach audit failed: ${outreachErr.message}`);
+      }
+    }
+
     let linkedDecisionSettlementComplete = true;
     if (verifiedAgentDecision && verifiedAgentDraft) {
       const draftMatched = normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
@@ -1663,18 +1735,32 @@ router.post('/call', async (req, res, next) => {
 // table since PR 2; sms_log still gets dual-written for legacy consumers).
 router.get('/log', async (req, res, next) => {
   try {
-    const { customerId, direction, messageType, page, limit, search } = req.query;
+    const { customerId, direction, messageType, page, limit, search, needsResponse } = req.query;
+    if (![undefined, 'true', 'false'].includes(needsResponse)) {
+      return res.status(400).json({ error: 'Invalid needs-response filter' });
+    }
     const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', messages.metadata->>'draft_id')");
+    const responseReplyToMessageId = draftReplyToMessageIdSql('mdx.sms_log_id');
+    const receiptProjection = inboundSmsReceiptProjectionSql({
+      messageAlias: 'messages', legacyAlias: 'sms_response', receiptAlias: 'sms_optout_receipt',
+    });
+    const legacyLinkSql = canonicalSmsLegacyLinkSql({
+      messageAlias: 'messages', conversationAlias: 'conversations',
+    });
+    const addressProjection = canonicalSmsAddressProjectionSql({
+      messageAlias: 'messages', conversationAlias: 'conversations',
+      customerAlias: 'customers', legacyAlias: 'sms_response',
+    });
+    let pendingIds = [];
+    let pendingPeers = [];
 
     let query = db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .leftJoin('customers', 'conversations.customer_id', 'customers.id')
       .joinRaw(`LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status, sl.metadata
-        FROM sms_log sl
-        WHERE sl.twilio_sid = messages.twilio_sid AND sl.direction = messages.direction
-        ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
+        ${legacyLinkSql}
       ) sms_response ON true`)
+      .joinRaw(receiptProjection.joinSql)
       .joinRaw(`LEFT JOIN LATERAL (
         SELECT mal.metadata
         FROM messaging_audit_log mal
@@ -1682,8 +1768,8 @@ router.get('/log', async (req, res, next) => {
         ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
       ) sms_audit ON true`)
       .joinRaw(`LEFT JOIN LATERAL (
-        SELECT true AS has_draft_provenance,
-               mdx.intent = 'click_followup' AS is_click_followup
+        SELECT mdx.intent = 'click_followup' AS is_click_followup,
+               ${responseReplyToMessageId} AS reply_to_message_id
         FROM message_drafts mdx
         WHERE mdx.id = ${responseDraftId}
         LIMIT 1
@@ -1698,14 +1784,17 @@ router.get('/log', async (req, res, next) => {
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
       )
       .select(
-        'sms_response.message_type as response_message_type',
+        db.raw(`${receiptProjection.responseMessageTypeSql} as response_message_type`),
         'sms_response.status as response_status',
         'sms_response.metadata as response_metadata',
+        'sms_response.created_at as response_created_at',
         'sms_audit.metadata as response_audit_metadata',
         'sms_answer.is_click_followup as response_is_click_followup',
-        'sms_answer.has_draft_provenance as response_has_draft_provenance',
-      )
-      .orderBy('messages.created_at', 'desc');
+        'sms_answer.reply_to_message_id as response_reply_to_message_id',
+        db.raw(`${receiptProjection.effectiveCreatedAtSql} as effective_created_at`),
+        db.raw(`${addressProjection.contactPhoneSql} as effective_contact_phone`),
+        db.raw(`${addressProjection.endpointSql} as effective_our_endpoint_id`),
+      );
 
     // Recruiting threads (applicant texts carry a bearer interview link) are
     // owner-only — see utils/recruiting-thread-scope.js.
@@ -1726,25 +1815,49 @@ router.get('/log', async (req, res, next) => {
     if (req.query.phone !== undefined) {
       const phones = phoneMatchDigits(req.query.phone);
       if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
-      query = query.whereRaw("regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [phones]);
+      query = query.whereRaw(`regexp_replace(${addressProjection.contactPhoneSql}, '[^0-9]', '', 'g') = ANY (?::text[])`, [phones]);
     }
     if (customerId) query = query.where('conversations.customer_id', customerId);
     if (direction) query = query.where('messages.direction', direction);
     if (messageType) query = query.where('messages.message_type', messageType);
+    if (needsResponse === 'true') {
+      const pending = await loadPendingSmsConversations({
+        excludePhones: ADMIN_PHONES,
+        customerId,
+      });
+      pendingIds = pending.filter((row) => row.source === 'canonical').map((row) => row.id);
+      pendingPeers = [...new Set(pending.map((row) => row.peer).filter(Boolean))];
+      // Shared-reader peers are derived from immutable event evidence. The
+      // ordinary route scopes still govern which history rows are visible.
+      query = query.whereRaw(`${addressProjection.peerSql} = ANY (?::text[])`, [pendingPeers]);
+      // Put one exact pending row per endpoint ahead of its history so old
+      // work is immediately visible even when the peer has a long thread.
+      query = query.orderByRaw('CASE WHEN messages.id = ANY (?::uuid[]) THEN 0 ELSE 1 END', [pendingIds]);
+    }
 
     const searchTerm = typeof search === 'string' ? search.trim() : '';
     if (searchTerm) {
       const like = `%${searchTerm}%`;
-      query = query.where(b => b
+      const matchingMessages = (needsResponse === 'true' ? query.clone().clearSelect().clearOrder() : query).where(b => b
         .where('customers.first_name', 'ilike', like)
         .orWhere('customers.last_name', 'ilike', like)
         .orWhereRaw("(customers.first_name || ' ' || customers.last_name) ILIKE ?", [like])
-        .orWhere('conversations.contact_phone', 'ilike', like)
-        .orWhere('conversations.our_endpoint_id', 'ilike', like)
+        .orWhereRaw(`${addressProjection.contactPhoneSql} ILIKE ?`, [like])
+        .orWhereRaw(`${addressProjection.endpointSql} ILIKE ?`, [like])
         .orWhere('customers.phone', 'ilike', like)
         .orWhere('messages.body', 'ilike', like)
       );
+      if (needsResponse === 'true') {
+        // Reuse every visibility/filter constraint when selecting peers. Return
+        // their history, including pending rows whose body did not match search.
+        query = query.whereIn(
+          db.raw(addressProjection.peerSql),
+          matchingMessages.select(db.raw(addressProjection.peerSql)),
+        );
+      }
     }
+
+    query = query.orderBy('messages.created_at', 'desc').orderBy('messages.id', 'desc');
 
     const requestedPage = parsePositiveInt(page) || 1;
     const requestedLimit = parsePositiveInt(limit) || DEFAULT_SMS_LOG_LIMIT;
@@ -1762,17 +1875,23 @@ router.get('/log', async (req, res, next) => {
     }
 
     const fallbackCustomers = await resolveSmsLogCustomerFallbacks(rows);
+    const pendingIdSet = new Set(pendingIds.map(String));
 
     const messages = await Promise.all(rows.map(async (m) => {
-      const initialContact = m.contact_phone || m.customer_phone;
+      const initialContact = m.effective_contact_phone || m.contact_phone || m.customer_phone;
       const fallbackCustomer = !m.customer_id && initialContact
         ? fallbackCustomers.get(phoneIdentityKey(initialContact))
         : null;
       const customerName = m.first_name
         ? `${m.first_name} ${m.last_name || ''}`.trim()
         : customerDisplayName(fallbackCustomer);
-      const ours = m.our_endpoint_id;
-      const contact = m.contact_phone || m.customer_phone || fallbackCustomer?.phone;
+      const ours = m.effective_our_endpoint_id || m.our_endpoint_id;
+      const contact = m.effective_contact_phone || m.contact_phone || m.customer_phone || fallbackCustomer?.phone;
+      const contactKey = phoneIdentityKey(contact);
+      const currentCustomerKey = phoneIdentityKey(m.customer_phone);
+      const recipientCustomerId = m.customer_id
+        ? (contactKey && currentCustomerKey && contactKey === currentCustomerKey ? m.customer_id : null)
+        : (fallbackCustomer?.id || null);
       const from = m.direction === 'inbound' ? contact : ours;
       const to = m.direction === 'inbound' ? ours : contact;
       const { courtesyOnly, spamEnforced } = require('../services/sms-response-policy').responseFlags({
@@ -1786,7 +1905,7 @@ router.get('/log', async (req, res, next) => {
       const responseIsAnswer = require('../services/sms-response-policy').outboundIsAnswer({
         direction: m.direction, messageType: responseMessageType, status: responseStatus,
         isClickFollowup: m.response_is_click_followup === true,
-        hasDraftProvenance: m.response_has_draft_provenance === true,
+        replyToMessageId: m.response_reply_to_message_id,
       });
       return {
         id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
@@ -1794,8 +1913,13 @@ router.get('/log', async (req, res, next) => {
         responseMessageType,
         responseStatus,
         responseIsAnswer,
-        customerId: m.customer_id || fallbackCustomer?.id || null, customerName,
-        createdAt: m.created_at,
+        ...(needsResponse === 'true'
+          ? { responseNeedsResponse: pendingIdSet.has(String(m.id)) }
+          : {}),
+        responseReplyToMessageId: m.response_reply_to_message_id || null,
+        responseCreatedAt: m.response_created_at || m.created_at,
+        customerId: recipientCustomerId, customerName,
+        createdAt: m.effective_created_at || m.created_at,
         isRead: !!m.is_read,
         readAt: m.read_at,
         courtesyOnly,
@@ -2692,13 +2816,17 @@ async function resolveComposerRecipient(customerId, last10) {
 // elapsed placeholders); the builder takes the picked row so the pick stays
 // route-owned. Statement is handled by statementLinkInsert before any
 // customer resolution (the key here only admits the kind).
-function composerLinkBuilders() {
+function composerLinkBuilders(body = {}) {
   const builders = require('../services/composer-customer-links');
   return {
     review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
     pay_balance: (ids) => builders.buildPayBalanceLink(ids),
     estimate: (ids) => builders.buildLatestEstimateLink(ids),
     referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
+    // Lead consultation-booking link (lead-inspection-link-scope.md §4),
+    // dark behind GATE_LEAD_INSPECTION_LINK. Per customer row like referral
+    // above — the resolved owner's own lead, not any account sibling's.
+    consultation: (ids, primaryId) => builders.buildConsultationLink(primaryId),
     // Auto Pay is per customer row (the phone's owner), same as referral.
     // The builder delegates to autopay-setup-link's single entry point —
     // gate, payer exemption, dedup and the saved-card auto-secure all
@@ -2769,7 +2897,15 @@ const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_g
 // A receipt link is account-scoped like the pay link but its text is a
 // customer bearer too — the owner rides back so /sms applies the recipient's
 // own consent policy, never the unverified-lead one (GH Codex #3893 r3 P1).
-const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report', 'receipt'];
+// Consultation resolves against ONE row (primaryId, like the
+// STRICT_OWNER_KINDS above — buildConsultationLink is called with primaryId,
+// never the whole account id set) but is not itself strict: when the
+// operator typed a phone with no explicit customerId pick, the resolved
+// owner must still ride back so the eventual /sms send carries customerId
+// and applies that customer's own consent policy — without it the send
+// goes out as an unverified conversational lead (pre-push Codex P1, same
+// class of gap appointment/service_report/receipt were already fixed for).
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report', 'receipt', 'consultation'];
 
 // The row a /customer-link kind targets: the operator-selected row first,
 // else the account row whose phone matches the number, else the first
@@ -2805,14 +2941,113 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSe
 // Builder fields that ride to the composer verbatim when set. immediateOnly:
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
-// inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'receipt', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
+// inserted as-is. leadId: consultation's lead-only fallback (no customer
+// row yet) hands back the resolved lead so the composer's eventual send
+// can route through the leads-page send route and get its audit trail
+// (pre-push Codex P2) instead of going out as an unverified conversational
+// text with no lead_activities row or new→contacted transition.
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'receipt', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone', 'leadId'];
+
+// One response shape for every /customer-link outcome — used by both the
+// normal customer-resolved path and consultation's lead-only fallback below,
+// so the two can never drift apart.
+function customerLinkResponse(kind, channel, result, firstName, customerId) {
+  return {
+    kind,
+    channel,
+    url: stripSmsUrlScheme(result.url),
+    line: stripSmsUrlScheme(result.line),
+    firstName,
+    ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
+    customerId,
+  };
+}
+
+// Consultation is the one /customer-link kind whose destination phone may
+// belong to an unconverted lead with no customers row at all (GH Codex P1):
+// resolveComposerRecipient's customer-only lookup 404s before Insert Link
+// ever reaches buildConsultationLink for that lead. Tried only after the
+// customer path finds nothing. A supplied leadId is NEVER trusted alone —
+// it must be a well-formed id (else 400, before any query — pre-push
+// Codex P2), resolve to a lead whose OWN phone is the destination number
+// (else refuse outright: a leadId for a different phone must not mint a
+// link the caller could not otherwise reach), and be a still-open,
+// unconverted lead (leads.converted_at IS NULL and status in
+// lead-statuses.js's OPEN_LEAD_STATUSES, the same canonical predicate the
+// blocked-numbers route already applies to this table — pre-push Codex
+// P1: a converted/closed lead is refused, never silently minted a link
+// for or silently swapped for a different open lead on a fall-through).
+// An id that resolves to no lead at all (stale/deleted) is treated as no
+// override and falls through to the plain newest-non-deleted-OPEN-lead-by-
+// phone lookup, same fallback shape as buildConsultationLink's own
+// leadIdOverride. That phone-only lookup fetches up to two matches and
+// refuses on ambiguity (pre-push Codex P1) rather than silently taking the
+// newest — but only when no leadId was supplied at all: an explicit
+// (stale) leadId still falls through to the best-effort newest match, the
+// caller having already named a lead.
+// Returns null (no lead either — caller keeps the original customer-not-
+// found error), { status, error } (reject), or { lead }.
+async function resolveConsultationLeadOnly(last10, leadId) {
+  if (leadId && !UUID_RE.test(String(leadId))) {
+    return { status: 400, error: 'leadId must be a valid id' };
+  }
+  // Shared with composer-customer-links.js's buildConsultationLink (the
+  // customer-resolved path's equivalent two lookups) so the two files
+  // cannot drift on what counts as a still-open lead.
+  const { isOpenLeadRow, applyOpenLeadPredicate } = require('../services/lead-statuses');
+  if (leadId) {
+    const byId = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'first_name', 'phone', 'status', 'converted_at');
+    if (byId) {
+      if (fullPhoneLast10(byId.phone) !== last10) {
+        return { status: 404, error: 'That lead does not match the destination number' };
+      }
+      if (!isOpenLeadRow(byId)) {
+        return { status: 404, error: 'That lead has already converted or closed — pick a different lead' };
+      }
+      return { lead: byId };
+    }
+    // A stale explicit selection (deleted or nonexistent lead) is refused,
+    // never treated as permission to pick another lead on this number
+    // (Codex #4709 r10 P1) — that could be a different household member.
+    return { status: 404, error: 'That lead no longer exists — reopen the lead and try again' };
+  }
+  const matches = await applyOpenLeadPredicate(
+    db('leads')
+      .whereNull('deleted_at')
+      .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+  )
+    .orderBy('created_at', 'desc')
+    .limit(2)
+    .select('id', 'first_name', 'phone');
+  if (matches.length > 1) {
+    return { status: 409, error: 'multiple leads share this number; pick the lead' };
+  }
+  return matches.length ? { lead: matches[0] } : null;
+}
+
+// The lead-only response to send for consultation when the customer path
+// found nothing (recipient 404), or null to fall through to that original
+// error (no lead either, or a different kind). Kept as its own function so
+// the route body below stays flat.
+async function consultationLeadOnlyResponse(kind, last10, leadId) {
+  if (kind !== 'consultation') return null;
+  const leadOnly = await resolveConsultationLeadOnly(last10, leadId);
+  if (!leadOnly) return null;
+  if (leadOnly.error) return { status: leadOnly.status, body: { error: leadOnly.error } };
+  const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+  const result = (await buildLeadConsultationSmsLine(leadOnly.lead.id, leadOnly.lead.first_name)) || {};
+  if (!result.url) return { status: 404, body: { error: result.reason || 'Nothing to link for this lead' } };
+  // Rides back so the composer's eventual send can route through the
+  // leads-page send route and pick up its audit trail (pre-push Codex P2).
+  result.leadId = leadOnly.lead.id;
+  return { status: 200, body: customerLinkResponse(kind, undefined, result, leadOnly.lead.first_name || '') };
+}
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
     const body = req.body || {};
     const kind = String(body.kind || '');
-    const builderByKind = composerLinkBuilders();
+    const builderByKind = composerLinkBuilders(body);
     if (!(kind in builderByKind)) {
       return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
     }
@@ -2833,7 +3068,16 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
 
     const { customerId } = body;
     const recipient = await resolveComposerRecipient(customerId, last10);
-    if (recipient.error) return res.status(recipient.status).json({ error: recipient.error });
+    if (recipient.error) {
+      // Lead-only fallback only when NO customer was selected (Codex #4709
+      // r14 P1): a selected customer that went stale is reported as such,
+      // never silently swapped for a lead on the same phone.
+      const fallback = recipient.status === 404 && !customerId
+        ? await consultationLeadOnlyResponse(kind, last10, body.leadId)
+        : null;
+      if (fallback) return res.status(fallback.status).json(fallback.body);
+      return res.status(recipient.status).json({ error: recipient.error });
+    }
     const { customerIds } = recipient;
 
     const recipientFirstName = await firstNameForPhone(last10, customerIds);
@@ -2856,19 +3100,11 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     if (!result.url) {
       return res.status(404).json({ error: result.reason || 'Nothing to link for this customer' });
     }
-    res.json({
-      kind,
-      channel,
-      url: stripSmsUrlScheme(result.url),
-      line: stripSmsUrlScheme(result.line),
-      firstName: recipientFirstName,
-      ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
-      // Owner-bound kinds (and the account-scoped bearers above): the
-      // resolved owner rides back so the composer can select it — the /sms
-      // send then carries customerId and the link's owner policy applies
-      // (GH Codex #3812 r3 P1).
-      customerId: OWNER_RIDES_BACK_KINDS.includes(kind) ? primaryId : undefined,
-    });
+    // Owner-bound kinds (and the account-scoped bearers above): the
+    // resolved owner rides back so the composer can select it — the /sms
+    // send then carries customerId and the link's owner policy applies
+    // (GH Codex #3812 r3 P1).
+    res.json(customerLinkResponse(kind, channel, result, recipientFirstName, OWNER_RIDES_BACK_KINDS.includes(kind) ? primaryId : undefined));
   } catch (err) {
     logger.error(`customer-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -2887,7 +3123,15 @@ router.get('/link-library', async (req, res) => {
       linkLibrary.listLinks(),
       linkLibrary.sitemapLastSyncedAt(),
     ]);
-    res.json({ links, lastSyncedAt, receiptLinksEnabled: require('../config/feature-gates').isEnabled('composerReceiptLinks') });
+    const featureGates = require('../config/feature-gates');
+    res.json({
+      links,
+      lastSyncedAt,
+      receiptLinksEnabled: featureGates.isEnabled('composerReceiptLinks'),
+      // Codex #4709 r3 P1: the composer omits "Free consultation" while
+      // GATE_LEAD_INSPECTION_LINK is dark.
+      consultationLinksEnabled: featureGates.leadInspectionLinkLive(),
+    });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -2956,8 +3200,14 @@ router.post('/link-library/sync', requireAdmin, async (req, res) => {
   }
 });
 
+// Admin-only (ADMIN-BUG-R38): a system-wide switch that turns automated
+// AI-composed customer SMS replies on or off company-wide is owner-only,
+// consistent with every other owner-only route in this file
+// (/reschedule-link, /customer-link, /link-library*, /collections-cases/:id/dial).
+// A technician login must get 403, not silently flip customer-facing
+// automation with no audit trail (system_config has no actor column).
 // GET /api/admin/communications/ai-auto-reply-status
-router.get('/ai-auto-reply-status', async (req, res) => {
+router.get('/ai-auto-reply-status', requireAdmin, async (req, res) => {
   try {
     const row = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
     res.json({ enabled: row?.value === 'true' });
@@ -2971,7 +3221,7 @@ router.get('/ai-auto-reply-status', async (req, res) => {
 });
 
 // POST /api/admin/communications/ai-auto-reply — toggle
-router.post('/ai-auto-reply', async (req, res) => {
+router.post('/ai-auto-reply', requireAdmin, async (req, res) => {
   try {
     const { enabled } = req.body;
     const value = enabled ? 'true' : 'false';

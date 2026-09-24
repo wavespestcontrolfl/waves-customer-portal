@@ -75,6 +75,22 @@ function etDateString(date = new Date()) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+// How many times the ET wall clock of `date` (year..minute) occurs on its
+// calendar day: 1 normally, 2 inside the fall-back fold (1:00-1:59 AM on the
+// November transition, once in EDT and once in EST). parseETDateTime keeps
+// the FIRST occurrence for a repeated wall time, so a caller storing an
+// operator-entered clock must reject a 2 rather than guess which one was
+// meant. A nonexistent (spring-forward) wall time never reaches here as its
+// own clock — parseETDateTime already rolled it forward — so callers check
+// existence with a round trip through etParts first.
+function etWallClockOccurrences(date) {
+  const at = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(at.getTime())) return 0;
+  const wall = (d) => { const p = etParts(d); return [p.year, p.month, p.day, p.hour, p.minute].join(':'); };
+  const expected = wall(at);
+  return [-3600000, 0, 3600000].filter((offset) => wall(new Date(at.getTime() + offset)) === expected).length;
+}
+
 // Returns a Date N ET-calendar-days away from `date`. Handles month/year rollover
 // via Date.UTC overflow. Anchors at noon UTC to stay clear of DST seams.
 function addETDays(date, days) {
@@ -344,9 +360,24 @@ function lastCompletedWeekEndingET(now = new Date()) {
   return etDateString(addETDays(now, -back));
 }
 
+/**
+ * Normalize a Postgres DATE value read back through pg (a JS Date at UTC
+ * midnight) — or a string already in YYYY-MM-DD / ISO form — to YYYY-MM-DD.
+ * Null/undefined pass through. The ONE normalizer for technician_absences
+ * .absence_date (tech-out sweep keys and technician-eligibility slot keys
+ * are the two halves of one invariant and must never disagree — Codex r6
+ * P1 on #4678).
+ */
+function dateOnlyString(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
 module.exports = {
+  dateOnlyString,
   lastCompletedWeekEndingET,
-  TZ, parseETDateTime, parseQuotedETDeadline, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
+  TZ, parseETDateTime, parseQuotedETDeadline, etWallClockOccurrences, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, addETDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,

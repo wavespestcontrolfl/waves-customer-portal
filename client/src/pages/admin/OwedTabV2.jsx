@@ -1,3 +1,4 @@
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 // client/src/pages/admin/OwedTabV2.jsx
 // Communications → Owed: every open promise across calls, overdue first.
 // Endpoints:
@@ -43,9 +44,53 @@ function fmtWhen(value, withTime = true) {
 const NO_CARDS = { open: 0, overdue: 0, hasMore: false };
 const CALLBACK_POLICY = { true: "after four staffed hours (office hours and blackout dates apply)", false: "after the day of the call" };
 const MORE_MARK = { true: "+", false: "" };
+const PAGE_SIZE = 200;
+const MAX_STABILITY_WALKS = 3;
 
 function humanize(value) {
   return value ? String(value).replace(/_/g, " ") : "";
+}
+
+function commitmentParams(party, showHints, offset = null) {
+  const params = new URLSearchParams();
+  if (party !== "all") params.set("party", party);
+  if (!showHints) params.set("hints", "0");
+  params.set("limit", String(PAGE_SIZE));
+  if (offset != null) params.set("offset", String(offset));
+  return params;
+}
+
+async function readCommitmentWalk({ party, showHints, pageCount, isCurrent }) {
+  const params = commitmentParams(party, showHints);
+  let body = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
+  if (!isCurrent()) return null;
+  const commitments = [...(body.commitments || [])];
+  let pagesRead = 1;
+  while (pagesRead < pageCount && body.has_more && body.next_offset != null) {
+    params.set("offset", String(body.next_offset));
+    const next = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
+    if (!isCurrent()) return null;
+    commitments.push(...(next.commitments || []));
+    pagesRead += 1;
+    const progressed = next.next_offset !== body.next_offset && (next.commitments || []).length > 0;
+    body = { ...body, ...next };
+    if (!progressed) break;
+  }
+  return { body: { ...body, commitments }, pagesRead };
+}
+
+// The endpoint has mutable offset pages and no snapshot token. Two consecutive
+// matching walks detect boundary drift that a duplicate-ID cleanup would miss;
+// callers bound the retries and retain the last rendered rows if it stays busy.
+function walksMatch(previous, current) {
+  const ids = current.body.commitments.map((row) => row.id);
+  return (
+    new Set(ids).size === ids.length &&
+    current.body.has_more === previous.body.has_more &&
+    current.body.next_offset === previous.body.next_offset &&
+    ids.length === previous.body.commitments.length &&
+    ids.every((id, index) => id === previous.body.commitments[index]?.id)
+  );
 }
 
 export function whoLabel(row) {
@@ -89,29 +134,56 @@ export default function OwedTabV2() {
   // party includes Waves, filtered by the same hints toggle, counted with the
   // list so the summary reflects everything on screen.
   const [cardSummary, setCardSummary] = useState({ enabled: false, open: 0, overdue: 0, hasMore: false });
-  const [state, setState] = useState({ status: "loading", rows: [], error: null, implicitDays: null, implicitEstimateHours: null, callbacksEnabled: false, enabled: true, hasMore: false, nextOffset: null });
+  const [state, setState] = useState({ status: "loading", rows: [], error: null, implicitDays: null, implicitEstimateHours: null, callbacksEnabled: false, enabled: true, hasMore: false, nextOffset: null, loadedPages: 1 });
   const [loadingMore, setLoadingMore] = useState(false);
   // A minute tick so a deadline that passes while the tab is open re-renders
   // as overdue without a reload.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 60 * 1000); return () => clearInterval(t); }, []);
   const [busyId, setBusyId] = useState(null);
+  const [actionError, setActionError] = useState(null);
   // Only the latest request may paint: a filter change while an earlier
   // load (or a post-action reload) is in flight would otherwise let the
   // older response overwrite the newer selection.
   const requestSeq = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ background = false, pageCount = 1 } = {}) => {
     const seq = ++requestSeq.current;
-    setState((s) => ({ ...s, status: "loading", error: null }));
+    if (!background) setState((s) => ({ ...s, status: "loading", error: null }));
     try {
-      const params = new URLSearchParams();
-      if (party !== "all") params.set("party", party);
-      if (!showHints) params.set("hints", "0");
-      params.set("limit", "200");
-      const body = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
+      const walkOptions = {
+        party,
+        showHints,
+        pageCount,
+        isCurrent: () => seq === requestSeq.current,
+      };
+      let candidate = await readCommitmentWalk(walkOptions);
+      if (!candidate) return;
+      if (pageCount > 1) {
+        let stable = false;
+        for (let walk = 1; walk < MAX_STABILITY_WALKS; walk += 1) {
+          const verified = await readCommitmentWalk(walkOptions);
+          if (!verified) return;
+          const stablePair = walksMatch(candidate, verified);
+          candidate = verified;
+          if (stablePair) {
+            stable = true;
+            break;
+          }
+        }
+        if (!stable) {
+          if (seq !== requestSeq.current) return;
+          setState((s) => ({
+            ...s,
+            status: "error",
+            error: "The owed queue changed while refreshing. Try again when updates settle.",
+          }));
+          return;
+        }
+      }
+      const { body, pagesRead } = candidate;
       if (seq !== requestSeq.current) return;
-      setState({ status: "ready", rows: body.commitments || [], error: null, implicitDays: body.overdue_implicit_days ?? null, implicitEstimateHours: body.overdue_implicit_estimate_hours ?? 24, callbacksEnabled: body.callbacks_enabled === true, enabled: body.enabled !== false, hasMore: body.has_more === true, nextOffset: body.next_offset ?? null });
+      setState({ status: "ready", rows: body.commitments || [], error: null, implicitDays: body.overdue_implicit_days ?? null, implicitEstimateHours: body.overdue_implicit_estimate_hours ?? 24, callbacksEnabled: body.callbacks_enabled === true, enabled: body.enabled !== false, hasMore: body.has_more === true, nextOffset: body.next_offset ?? null, loadedPages: pagesRead });
     } catch (err) {
       if (seq !== requestSeq.current) return;
       setState((s) => ({
@@ -122,24 +194,23 @@ export default function OwedTabV2() {
     }
   }, [party, showHints]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); return () => { requestSeq.current += 1; }; }, [load]);
+  useVisiblePageRefresh(() => load({ background: true, pageCount: state.loadedPages }), {
+    intervalMs: 60000, enabled: state.status !== "loading" && !busyId && !loadingMore,
+  });
 
   // The server pages at 200: walk the queue with the offset it returned and
   // append, under the same latest-request guard (a filter change while a
   // page is in flight drops the stale page). An action reloads page one.
   const loadMore = async () => {
     if (loadingMore || state.nextOffset == null) return;
-    const seq = requestSeq.current;
+    const seq = ++requestSeq.current;
     setLoadingMore(true);
     try {
-      const params = new URLSearchParams();
-      if (party !== "all") params.set("party", party);
-      if (!showHints) params.set("hints", "0");
-      params.set("limit", "200");
-      params.set("offset", String(state.nextOffset));
+      const params = commitmentParams(party, showHints, state.nextOffset);
       const body = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
       if (seq !== requestSeq.current) return;
-      setState((s) => ({ ...s, rows: [...s.rows, ...(body.commitments || [])], hasMore: body.has_more === true, nextOffset: body.next_offset ?? null }));
+      setState((s) => ({ ...s, rows: [...s.rows, ...(body.commitments || [])], hasMore: body.has_more === true, nextOffset: body.next_offset ?? null, loadedPages: s.loadedPages + 1 }));
     } catch (err) {
       if (seq !== requestSeq.current) return;
       setState((s) => ({ ...s, error: isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : (err.message || "Could not load more of the owed queue.") }));
@@ -155,12 +226,17 @@ export default function OwedTabV2() {
   useEffect(() => { loadRef.current = load; }, [load]);
   const act = async (row, action) => {
     if (busyId) return;
+    requestSeq.current += 1;
+    // The action just invalidated any foreground filter/Retry read that owned
+    // `loading`. Release only that state now; a newer read can set it again.
+    setState((s) => s.status === "loading" ? { ...s, status: "ready" } : s);
+    setActionError(null);
     setBusyId(row.id);
     try {
       await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
       await loadRef.current();
     } catch (err) {
-      setState((s) => ({ ...s, error: err.message || "That change did not save." }));
+      setActionError(err.message || "That change did not save.");
     } finally {
       setBusyId(null);
     }
@@ -205,7 +281,6 @@ export default function OwedTabV2() {
           {state.status === "ready" ? `${openCount}${moreMark} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
           {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours} hours, a callback ${CALLBACK_POLICY[state.callbacksEnabled]}, other promises after ${state.implicitDays} days` : ""}
         </span>
-        <Button size="sm" variant="ghost" onClick={load} disabled={state.status === "loading"}>Refresh</Button>
       </div>
 
       {state.status === "loading" && rows.length === 0 && (
@@ -214,7 +289,12 @@ export default function OwedTabV2() {
       {state.error && (
         <div className="text-13 md:text-12 text-alert-fg" role="alert">
           {state.error}{" "}
-          <button type="button" className="underline u-focus-ring" onClick={load}>Retry</button>
+          <button type="button" className="underline u-focus-ring" onClick={() => load({ pageCount: state.loadedPages })}>Retry</button>
+        </div>
+      )}
+      {actionError && (
+        <div className="text-13 md:text-12 text-alert-fg" role="alert">
+          {actionError}
         </div>
       )}
       {state.status === "ready" && state.enabled === false && (

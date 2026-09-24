@@ -47,4 +47,14 @@ describe('customer service-request photo validation', () => {
       error: 'Attach no more than 3 photos.',
     });
   });
+
+  test('accepts an uppercase MIME subtype — a data-URL MIME type is case-insensitive (codex GH P2 on PR #4752)', () => {
+    const photo = 'data:image/JPEG;base64,' + Buffer.from('valid image bytes').toString('base64');
+    expect(validateRequestPhotos([photo])).toEqual({ ok: true, photos: [photo] });
+  });
+
+  test('accepts a mixed-case "data:" / "image/" / ";base64," prefix too', () => {
+    const photo = 'DATA:Image/PNG;BASE64,' + Buffer.from('valid image bytes').toString('base64');
+    expect(validateRequestPhoto(photo)).toMatchObject({ ok: true });
+  });
 });

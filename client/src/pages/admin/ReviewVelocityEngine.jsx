@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Phone, MessageSquare, X } from "lucide-react";
 import {
   Badge,
@@ -24,6 +24,7 @@ import {
   TD,
   Textarea,
 } from "../../components/ui";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -612,6 +613,7 @@ export default function ReviewVelocityEngine() {
   // localStorage "wrev_activity_log" was per-browser and never reflected real
   // sends from other sessions; it's replaced by /outreach-activity.
   const [activityLog, setActivityLog] = useState([]);
+  const [activityError, setActivityError] = useState("");
   const [analytics, setAnalytics] = useState(null);
   // GATE_REVIEW_SEQUENCES && GATE_CRON_JOBS as the candidates response reports
   // them; null until known.
@@ -619,9 +621,13 @@ export default function ReviewVelocityEngine() {
   const [drawerCust, setDrawerCust] = useState(null);
   const [toast, setToast] = useState("");
   const [batchModal, setBatchModal] = useState(false);
+  const activityRequest = useRef(0);
   const loadActivity = useCallback(() => {
-    adminFetch("/admin/reviews/outreach-activity?limit=100")
+    const request = ++activityRequest.current;
+    return adminFetch("/admin/reviews/outreach-activity?limit=100")
       .then((d) => {
+        if (request !== activityRequest.current) return;
+        setActivityError("");
         setActivityLog(
           (d.items || []).map((it) => ({
             type: it.type,
@@ -638,10 +644,14 @@ export default function ReviewVelocityEngine() {
           })),
         );
       })
-      .catch(() => {});
+      .catch((error) => {
+        if (request === activityRequest.current) {
+          setActivityError(error?.message || "Activity could not be loaded.");
+        }
+      });
   }, []);
   const loadAnalytics = useCallback(() => {
-    adminFetch("/admin/reviews/outreach-analytics?days=90")
+    return adminFetch("/admin/reviews/outreach-analytics?days=90")
       .then((d) => setAnalytics(d))
       .catch(() => {});
   }, []);
@@ -650,7 +660,7 @@ export default function ReviewVelocityEngine() {
   const loadCandidates = useCallback(() => {
     setLoading(true);
     setLoadError(null);
-    adminFetch("/admin/reviews/outreach-candidates")
+    const candidates = adminFetch("/admin/reviews/outreach-candidates")
       .then((d) => {
         setCustomers((d.customers || []).map(apiToCustomer));
         // The gate rides with the rows (codex #4140 r15 P2); an absent value
@@ -671,18 +681,15 @@ export default function ReviewVelocityEngine() {
         setLoadError(err?.message || "Failed to load outreach candidates");
         setLoading(false);
       });
-    loadAnalytics();
-    loadActivity();
+    return Promise.all([candidates, loadAnalytics(), loadActivity()]);
   }, [loadAnalytics, loadActivity]);
   useEffect(() => {
     loadCandidates();
   }, [loadCandidates]);
-
-  // saveState is retained for the Activity tab's "Refresh" action — it now
-  // re-pulls the server feed instead of writing localStorage.
-  const saveState = useCallback(() => {
-    loadActivity();
-  }, [loadActivity]);
+  useVisiblePageRefresh(
+    () => loadActivity(),
+    { intervalMs: 120_000 },
+  );
 
   // Optimistic local prepend for instant feedback; the authoritative feed is
   // re-pulled from the server after each action.
@@ -722,6 +729,7 @@ export default function ReviewVelocityEngine() {
   // non-200 as a hard failure (audit O7).
   const sendReviewRequest = useCallback(
     async (customer, opts = {}) => {
+      activityRequest.current += 1;
       const svcType = customer.lastSvc;
       try {
         // `techName` is sent as-is (null when the candidates feed carries no
@@ -987,8 +995,8 @@ export default function ReviewVelocityEngine() {
       {page === "log" && (
         <ActivityLogPage
           activityLog={activityLog}
-          setActivityLog={setActivityLog}
-          saveState={saveState}
+          error={activityError}
+          onRetry={loadActivity}
         />
       )}
       {/* Customer Drawer */}
@@ -1734,15 +1742,20 @@ function Pipeline({
 // ══════════════════════════════════════════════════════════════
 // ACTIVITY LOG
 // ══════════════════════════════════════════════════════════════
-function ActivityLogPage({ activityLog, setActivityLog, saveState }) {
+function ActivityLogPage({ activityLog, error, onRetry }) {
   return (
     <div>
       {" "}
       <div className="flex justify-between items-center mb-[16px]">
         {" "}
         <div className="text-ui-body font-medium">Activity Log</div>{" "}
-        <Btn onClick={() => saveState()}>Refresh</Btn>{" "}
       </div>{" "}
+      {error && (
+        <Card className="mb-[14px] flex items-center justify-between gap-3 p-[14px] text-ui-body text-alert-fg">
+          <span>{error}</span>
+          <Btn onClick={onRetry}>Retry</Btn>
+        </Card>
+      )}
       <ActivityList log={activityLog} max={100} />{" "}
     </div>
   );

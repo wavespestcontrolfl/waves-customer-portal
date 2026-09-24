@@ -201,9 +201,11 @@ function buildRows() {
   const visibleLawnTiers = Object.entries(constants.LAWN_TIERS || {})
     .filter(([, t]) => !t.hidden);
   const LAWN_TIER_KEYS = visibleLawnTiers.map(([k]) => k);
-  const lawnCadenceText = visibleLawnTiers
-    .map(([, t]) => `${t.freq}x`).join(', ')
-    .replace(/, ([^,]*)$/, ', or $1');
+  // "9x or 12x" for two sold cadences, "6x, 9x, or 12x" for three.
+  const lawnCadenceParts = visibleLawnTiers.map(([, t]) => `${t.freq}x`);
+  const lawnCadenceText = lawnCadenceParts.length === 2
+    ? lawnCadenceParts.join(' or ')
+    : lawnCadenceParts.join(', ').replace(/, ([^,]*)$/, ', or $1');
   const b = constants.RODENT.bundles || {};
   // NOTE: only trapping+sanitation is advertised — the live bundle selector
   // matches service === 'exclusion', which the active V2 exclusion pricer

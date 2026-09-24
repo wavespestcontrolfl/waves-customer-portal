@@ -14,6 +14,50 @@ const message = (direction, createdAt, overrides = {}) => ({
 });
 
 describe("needsSmsReply", () => {
+  it("uses the server's pending anchor when filtered history is incomplete", () => {
+    const pending = message("inbound", "2026-09-21T13:00:00Z", {
+      id: "server-pending",
+      to: "+19415550199",
+      courtesyOnly: true,
+      responseNeedsResponse: true,
+    });
+    const misleadingReply = message("outbound", "2026-09-21T13:01:00Z", {
+      from: "+19415550199",
+      status: "delivered",
+      responseNeedsResponse: false,
+    });
+
+    expect(unansweredSmsReply([pending, misleadingReply])).toEqual({
+      businessLine: "+19415550199",
+      messageId: "server-pending",
+      messageType: "inbound",
+    });
+  });
+
+  it("does not invent a pending reply when authoritative rows are all false", () => {
+    expect(unansweredSmsReply([
+      message("inbound", "2026-09-21T13:00:00Z", { responseNeedsResponse: false }),
+    ])).toBeNull();
+  });
+
+  it("selects the newest authoritative inbound across business lines", () => {
+    expect(unansweredSmsReply([
+      message("inbound", "2026-09-21T13:00:00Z", {
+        id: "older-pending",
+        to: "+19413187612",
+        responseNeedsResponse: true,
+      }),
+      message("inbound", "2026-09-21T13:02:00Z", {
+        id: "newer-pending",
+        to: "+19415550199",
+        responseNeedsResponse: true,
+      }),
+    ])).toMatchObject({
+      businessLine: "+19415550199",
+      messageId: "newer-pending",
+    });
+  });
+
   it("returns false when there is no inbound message to answer", () => {
     expect(needsSmsReply([])).toBe(false);
     expect(needsSmsReply([
@@ -23,11 +67,8 @@ describe("needsSmsReply", () => {
 
   it.each([
     ["manual", "sent"],
-    ["ai_approved", "delivered"],
-    ["ai_revised", "sent"],
     ["ai_assistant", "delivered"],
     ["ai_assistant_reply", "sent"],
-    ["follow_up", "queued"],
   ])("treats a subsequent %s message with status %s as an answer", (messageType, status) => {
     expect(needsSmsReply([
       message("inbound", "2026-09-21T13:00:00Z"),
@@ -58,6 +99,7 @@ describe("needsSmsReply", () => {
     "review_request",
     "estimate",
     "post_service",
+    "follow_up",
   ])("does not let a successful %s automation clear the inbound", (messageType) => {
     expect(needsSmsReply([
       message("inbound", "2026-09-21T13:00:00Z"),
@@ -76,6 +118,44 @@ describe("needsSmsReply", () => {
     expect(needsSmsReply([
       message("outbound", "2026-09-21T13:03:00Z", { status: "delivered" }),
       ...messages,
+    ])).toBe(false);
+  });
+
+  it.each(["ai_approved", "ai_revised"])(
+    "only lets an %s draft answer its exact latest inbound anchor",
+    (messageType) => {
+      const oldRequest = message("inbound", "2026-09-21T13:00:00Z", { id: "inbound-old" });
+      const latestRequest = message("inbound", "2026-09-21T13:02:00Z", { id: "inbound-latest" });
+      const reply = message("outbound", "2026-09-21T13:03:00Z", {
+        messageType,
+        responseMessageType: messageType,
+        responseStatus: "delivered",
+        responseIsAnswer: true,
+        responseReplyToMessageId: "inbound-old",
+      });
+
+      expect(needsSmsReply([oldRequest, latestRequest, reply])).toBe(true);
+      expect(needsSmsReply([
+        oldRequest,
+        latestRequest,
+        { ...reply, responseReplyToMessageId: "inbound-latest" },
+      ])).toBe(false);
+    },
+  );
+
+  it("uses the provider handoff time for response chronology without changing display time", () => {
+    const request = message("inbound", "2026-09-21T13:00:00Z", { id: "inbound-latest" });
+    expect(needsSmsReply([
+      request,
+      message("outbound", "2026-09-21T13:01:00Z", {
+        responseCreatedAt: "2026-09-21T12:59:59Z",
+      }),
+    ])).toBe(true);
+    expect(needsSmsReply([
+      request,
+      message("outbound", "2026-09-21T12:59:00Z", {
+        responseCreatedAt: "2026-09-21T13:00:01Z",
+      }),
     ])).toBe(false);
   });
 
@@ -208,6 +288,24 @@ it("uses authoritative legacy response types and delivery states without changin
   expect(needsSmsReply([request, reply])).toBe(true);
   expect(needsSmsReply([request, { ...reply, responseStatus: "delivered" }])).toBe(false);
   expect(needsSmsReply([request, { ...reply, responseStatus: "delivered", responseMessageType: "reminder" }])).toBe(true);
+});
+
+it("keeps the real question pending after a delayed receipt-backed STOP retry", () => {
+  const stop = message("inbound", "2026-09-21T13:00:00Z", {
+    id: "delayed-stop",
+    body: "STOP",
+    messageType: "inbound",
+    responseMessageType: "opt_out",
+  });
+  const request = message("inbound", "2026-09-21T13:01:00Z", {
+    id: "real-question",
+    body: "Can you still come Friday?",
+  });
+
+  expect(unansweredSmsReply([stop, request])).toMatchObject({
+    messageId: "real-question",
+    messageType: "inbound",
+  });
 });
 
 it("does not treat a proactive approved draft as an answer but allows a nearby real reply", () => {

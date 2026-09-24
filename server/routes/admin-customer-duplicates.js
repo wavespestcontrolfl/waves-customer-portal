@@ -20,7 +20,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
   findDuplicateGroups, duplicatePairEligibility, executeMerge, revertMerge, recordLinkedProperty, acquirePairAdjudicationLock,
   REVERT_FINANCIAL_TABLES, CONSENT_CRITICAL_TABLES,
-  countActivityRows, activityColumnsFor,
+  countActivityRows, activityColumnsFor, UNDO_MERGE_DISMISSAL_REASON,
 } = require('../services/customer-dedupe');
 
 const router = express.Router();
@@ -163,7 +163,8 @@ async function handleMerge(req, res, { linkAsProperty }) {
       return res.status(status).json({ error: err.message });
     }
     const conflict = err.mergeConflictCode === 'inactive_primary_property_conflict'
-      || /Stripe profile|third-party payers|billing modes|per-application fees|multi-property account|not found|deleted customer|refresh the queue/.test(err.message);
+      || err.mergeConflictCode === 'duplicate_series_conflict'
+      || /Stripe profile|third-party payers|billing modes|per-application fees|multi-property account|not found|deleted customer|refresh the queue|recurring series/.test(err.message);
     res.status(conflict ? 409 : 500).json({ error: err.message });
   }
 }
@@ -624,21 +625,38 @@ router.post('/dismiss', async (req, res) => {
     return res.status(400).json({ error: 'customerIdA and customerIdB must be distinct customer UUIDs' });
   }
   const [a, b] = idA < idB ? [idA, idB] : [idB, idA];
+  // The undo-merge sentinel is system metadata that rides in this same
+  // column (Codex round 3 P2): an operator typing that exact word as their
+  // reason would record a "not a duplicate" verdict findDuplicateGroups
+  // reads as an undo suppression — the pair would stay visible and
+  // mergeable instead of leaving the queue. Reserved, refused up front.
+  const reasonText = reason == null ? '' : String(reason).trim();
+  if (reasonText === UNDO_MERGE_DISMISSAL_REASON) {
+    return res.status(400).json({ error: `"${UNDO_MERGE_DISMISSAL_REASON}" is a reserved system reason — describe why these are different people instead` });
+  }
   try {
     // Under the pair's adjudication lock: a confirmed-card merge of this
     // pair re-decides eligibility under the same lock, so a verdict here
     // and a merge there cannot interleave (customer-dedupe.js).
     await db.transaction(async (trx) => {
       await acquirePairAdjudicationLock(trx, a, b);
+      // MERGE, not ignore (Codex round 1 P1): revertMerge stamps this same
+      // row with the UNDO_MERGE_DISMISSAL_REASON sentinel, which
+      // findDuplicateGroups treats as non-hiding by default specifically so
+      // the pair stays reviewable here. An .ignore() would leave that
+      // sentinel in place forever — the operator's explicit "not a
+      // duplicate" verdict must replace it (and any prior verdict's stale
+      // reason/timestamp) so the pair is actually excluded from the queue
+      // going forward, the ordinary dismissal contract.
       await trx('customer_duplicate_dismissals')
         .insert({
           customer_id_a: a,
           customer_id_b: b,
-          reason: reason ? String(reason).slice(0, 500) : null,
+          reason: reasonText ? reasonText.slice(0, 500) : null,
           created_by: performedBy(req),
         })
         .onConflict(['customer_id_a', 'customer_id_b'])
-        .ignore();
+        .merge(['reason', 'created_by']);
     });
     res.json({ ok: true });
   } catch (err) {

@@ -33,11 +33,11 @@ function AttentionSummary({ isAdmin, customer, balance, unread, alerts, onTab })
     if (balance?.complete && balance.overdueCount > 0) attention.unshift({ text: `${balance.overdueCount} overdue invoice${balance.overdueCount === 1 ? "" : "s"} · ${money.format(balance.overdueBalance)}` });
     if (customer.servicePausedAt) attention.push({ text: "Billing is paused" });
   }
-  if (unread > 0) attention.push({ text: `${unread} unread conversation${unread === 1 ? "" : "s"}` });
+  if (unread > 0) attention.push({ text: `${unread} conversation${unread === 1 ? "" : "s"} needing a reply` });
   return <section className="c360-attention-summary"><h2>{attention.length ? "Needs attention" : "Attention"}</h2>
     {attention.length ? <ul>{attention.map((item, index) => <li key={index}>{item.text}</li>)}</ul> : <p>No alerts in the loaded records.</p>}
     {isAdmin && !balance?.complete && <p>Balance could not be verified.</p>}
-    <details><summary>Why this status?</summary><p>{isAdmin ? "Based on billing records, unread conversations, saved card expiry and recorded prepay renewals." : "Based on unread conversations."} Customer requests are listed below.</p>{isAdmin && <>{balance?.asOf && <p>Billing checked {date(balance.asOf)}.</p>}<div className="c360-summary-actions"><Button variant="secondary" onClick={() => onTab("billing")}>View billing</Button></div></>}</details>
+    <details><summary>Why this status?</summary><p>{isAdmin ? "Based on billing records, conversations needing a reply, saved card expiry and recorded prepay renewals." : "Based on conversations needing a reply."} Customer requests are listed below.</p>{isAdmin && <>{balance?.asOf && <p>Billing checked {date(balance.asOf)}.</p>}<div className="c360-summary-actions"><Button variant="secondary" onClick={() => onTab("billing")}>View billing</Button></div></>}</details>
   </section>;
 }
 

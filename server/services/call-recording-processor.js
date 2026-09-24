@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -858,6 +858,7 @@ const CONFIRM_REASON_TEXT = {
   missing_last_name: "no last name captured — get the account holder's full name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
+  on_file_house_number_conflict: 'caller gave a different house number on the same street as the address on file — confirm which number before sending the estimate or dispatching',
   email_unverified: 'email was spelled out on the call — read it back to the caller before relying on it (spelled letters mishear)',
   email_invalid: 'captured email is not a valid address — re-collect it on the callback',
   email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
@@ -6629,6 +6630,29 @@ async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) 
 }
 
 
+// The one writer for the AUTOMATED disposition passes — applyZeroTriageLayers'
+// initial decideDisposition() stamp and reviseDispositionAfterAppliedMove's
+// later correction both call this instead of writing call_log.disposition
+// directly, so there is exactly one place that persists it on this path
+// (owner follow-up from #4708 r2 P2: reuse the writer, no second write path).
+// `priorDisposition`, when passed, makes the update a compare-and-swap — it
+// only lands while the stored value is still what the caller read, so a
+// human retagging the call (PUT /calls/:id/disposition, a writer of its
+// own) or any other writer that ran in between wins and this write silently
+// no-ops instead of clobbering it. `priorGeneration`, when passed, extends
+// that CAS to processing_generation too (Codex #4721 r1 P2): finalization
+// clears processing_token before these follow-ups run, so without this a
+// newer reprocess pass's own disposition could be raced by a stale pass
+// still finishing its own.
+async function writeCallDisposition({ callId, disposition, reason, callSid, priorDisposition = undefined, priorGeneration = undefined }) {
+  const query = db('call_log').where({ id: callId });
+  if (priorDisposition !== undefined) query.where({ disposition: priorDisposition });
+  if (priorGeneration != null) query.where({ processing_generation: priorGeneration });
+  const written = await query.update({ disposition, updated_at: new Date() });
+  if (written) logger.info(`[call-proc] Disposition for ${maskSid(callSid)}: ${disposition} (${reason})`);
+  return !!written;
+}
+
 // ── Zero-triage layers (2026-07-10, all dark-gated; failures never fail the call) ──
 // Shared by the main completion path AND the spam/voicemail early exits —
 // the suspected-spam/voicemail population is exactly what the classifier's
@@ -6667,8 +6691,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
           isKnownCustomer: !!call.customer_id || !!customerId,
         },
       });
-      await db('call_log').where({ id: call.id }).update({ disposition, updated_at: new Date() });
-      logger.info(`[call-proc] Disposition for ${maskSid(callSid)}: ${disposition} (${reason})`);
+      await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
     }
     if (customerId) {
       await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
@@ -6727,26 +6750,195 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
 // (services/call-reschedule-apply.js). Runs after finalization, fenced on
 // this pass's GENERATION. Sends NOTHING to the customer. Dark behind
 // GATE_CALL_RESCHEDULE_APPLY; never blocks the call.
-// The two bookkeeping passes an APPLIED move owes, in one place so the step
-// above states the move and this states what follows from it (codex P2) —
-// both share the same precondition and both are non-blocking by design.
-async function applyRescheduleFollowUps({ call, callSid, result }) {
-  if (result?.outcome !== 'applied') return;
-  // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
-  // the move just kept was written open and its proof did not exist yet.
-  // Re-run the fulfillment lookup now that the activity row exists, or the
-  // watchdog reports an overdue promise this pass already kept (GH codex
-  // #4204 r6 P2).
-  if (isEnabled('callCommitments')) {
-    await require('./call-commitments').refreshFulfillment(db, call.id)
-      .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+// A disposition minted by decideDisposition BEFORE this move applied that
+// only made sense while the move was still outstanding — the
+// scheduling-model path leaves the callback standing on purpose (see
+// call-disposition.js step 2). cancellation_processed was originally listed
+// here too, but decideDisposition's own reschedule guard (step 2 and step
+// 4) already converts it to existing_customer_routed for every
+// reschedule_requested call, so it can never reach this function in the
+// first place — keeping it would have been dead code with a real downside:
+// a genuinely separate STALE cancellation_processed value (from an older,
+// different extraction pass) could get silently erased by an unrelated
+// later reschedule on the same call (Codex #4721 r2 P2). Dropped. Only
+// callback_task_created is ever revised; anything else (including a
+// human's own PUT /calls/:id/disposition tag) is left alone by the
+// compare-and-swap in writeCallDisposition.
+const STALE_AFTER_APPLIED_MOVE = new Set(['callback_task_created']);
+
+// callback_task_created is the one disposition value a multi-intent call
+// can still deserve after the move landed: the model's recommendation is a
+// single field for the WHOLE call, so "move the visit AND have the owner
+// call about billing" recommends callback_task_created for a reason that
+// has nothing to do with the reschedule (Codex #4721 r1 P2). Revising it
+// away needs POSITIVE evidence the callback obligation IS the resolved
+// reschedule — a scheduling field path or a bare callback window is NOT
+// that evidence on its own (Codex #4721 r2 P1): reaching this function at
+// all already means the move applied, which requires the SAME extraction
+// to have carried agent_committed_booking === true and a confirmed_start_at
+// — the reschedule's timing was settled ON THE CALL. There is nothing left
+// to call back and confirm about it. So a STILL-standing need to call the
+// customer — scheduling.callback_window_start/end still set on that same
+// extraction, or an open call_commitments row — names something ELSE, not
+// this move.
+//
+// The commitment lookup is scoped to party='waves', kind='callback' ONLY
+// (Codex #4721 r2 P2, second finding): 'call_back' is the CUSTOMER's own
+// promise to call Waves — a distinct obligation unworked-comms-watcher.js
+// never reads callback_task_created for, so it says nothing about whether
+// Waves still owes a call and must not block this revision. There is at
+// most one such row per call — 'waves:callback' is a singular
+// commitment_key (not in REPEATABLE_KINDS), so it is never split. It also
+// excludes rows staleAiRowSql (call-commitments.js) already treats as dead:
+// an untouched AI row a LATER commitments pass no longer detected, kept
+// only for the audit trail (Codex #4721 r2 P2, third finding) — the exact
+// same exclusion every live reader of this table already applies.
+//
+// An absent row is not proof either, though (Codex #4721 r3 P1): with
+// callback_window_* unset, deriveCommitmentsFromExtraction's deterministic
+// seed has no field-path evidence to ground a callback item on and never
+// writes one — detecting a callback_window-less independent obligation (a
+// free-form "call me about my invoice") then depends ENTIRELY on the
+// call-commitments MODEL pass, which is optional best-effort (a timeout or
+// provider error is caught, logged, and left with no durable marker —
+// recordCallCommitments' summary never reaches call_log). Requiring
+// callCommitments to be LIVE at least means that pass had the chance to
+// run for every call reaching this function; a silent in-pass model
+// failure is accepted as a residual, already-logged risk shared by the
+// whole call-commitments feature (github #4721 PR body: scoped out, same
+// boundary the original task drew for the fulfillment side of this same
+// question) rather than grounds to block every revision on an
+// unconfirmable negative. With the gate dark there is no visibility at
+// all, so nothing is ever revised.
+async function hasIndependentCallbackObligation(callId, v2) {
+  const schedulingCallbackWindow = v2?.scheduling?.callback_window_start || v2?.scheduling?.callback_window_end || null;
+  if (schedulingCallbackWindow) {
+    return { independent: true, reason: 'scheduling.callback_window_* still set alongside the committed booking' };
   }
-  // NOTE: the promised window this move communicated needs no capture step
-  // here. no-show-detector.js derives it from the activity_log row
-  // call-reschedule-apply.js writes in the SAME transaction as the move, so
-  // there is nothing to lose if a best-effort write fails after the call is
-  // finalized — and every move applied before that feature existed reads the
-  // same way (codex P1, PR #4403 rounds 8 and 10).
+  if (!isEnabled('callCommitments')) {
+    return { independent: true, reason: 'callCommitments is not live — no way to confirm the callback was resolved by this move' };
+  }
+  const { staleAiRowSql } = require('./call-commitments');
+  const openCallbackRow = await db('call_commitments')
+    .where({ call_log_id: callId, status: 'open', party: 'waves', kind: 'callback' })
+    .whereRaw(`NOT ${staleAiRowSql('call_commitments')}`)
+    .first('id');
+  if (openCallbackRow) {
+    return { independent: true, reason: `open commitment ${openCallbackRow.id} still outstanding` };
+  }
+  return { independent: false, reason: null };
+}
+
+// Owner follow-up from #4708 r2 P2: when the apply step actually lands the
+// move, a callback minted for the SAME call before the move landed is no
+// longer outstanding work — left alone, unworked-comms-watcher.js keeps
+// selecting it and can page someone to call a customer who is already
+// handled. Re-reads the live value and swaps it under a CAS so nothing but
+// that exact pre-move value is ever touched. `procGeneration`, when passed,
+// fences BOTH the reread and the write to this pass's processing_generation
+// (Codex #4721 r1 P2): the token that fenced this pass is already cleared
+// by finalization, so without this a stale, slow pass could revise a
+// disposition a newer reprocess generation already re-decided for itself.
+async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration = null }) {
+  const query = db('call_log').where({ id: call.id });
+  if (procGeneration != null) query.where({ processing_generation: procGeneration });
+  const fresh = await query.first('disposition', 'processing_generation', 'v2_extraction_status', 'ai_extraction_enriched');
+  if (!fresh || !STALE_AFTER_APPLIED_MOVE.has(fresh.disposition)) return;
+  const v2 = fresh.v2_extraction_status === 'valid' ? fresh.ai_extraction_enriched : null;
+  const { independent, reason } = await hasIndependentCallbackObligation(call.id, v2);
+  if (independent) {
+    logger.info(`[call-proc] Leaving callback_task_created standing for ${maskSid(callSid)} after applied move: ${reason}`);
+    return;
+  }
+  await writeCallDisposition({
+    callId: call.id,
+    priorDisposition: fresh.disposition,
+    priorGeneration: procGeneration,
+    disposition: 'existing_customer_routed',
+    reason: 'reschedule_applied',
+    callSid,
+  });
+}
+
+// Durable proof that THIS call's reschedule was applied AND still matches
+// the live call, independent of what the apply step's OWN outcome/reason
+// string says on a retry (Codex #4721 r2 P2). call-reschedule-apply.js's
+// `prior` branch only returns `already_applied` when the LIVE call_log row
+// still matches the activity row's own processing_generation/source_hash
+// snapshot EXACTLY — but processing_generation bumps on every claim, so a
+// genuine crash-then-retry (a new pass, a new generation) almost always
+// returns `prior_application_requires_review` instead, and the recovery
+// path this function exists for would never fire if it trusted that reason
+// string alone. Delegates to call-reschedule-apply.js's own
+// priorApplicationStillMatchesLiveCall, which re-runs every check the
+// `prior` branch applies EXCEPT generation equality — a row existing is not
+// enough by itself (Codex #4721 r2 P1): a reprocess that corrected the
+// transcript, or a visit the move once landed on but that is no longer in
+// that state, must not read as resolved just because SOME activity row
+// exists for this call.
+async function rescheduleWasDurablyApplied(call) {
+  return require('./call-reschedule-apply').priorApplicationStillMatchesLiveCall(db, call);
+}
+
+// Which of applyCallReschedule's results mean "this call's reschedule ask
+// is resolved" for disposition-revision purposes (Codex #4721 r2 P2):
+//   - `applied`               — the move landed this pass.
+//   - `noop`/`already_at_requested_time` — the visit was already exactly
+//     where the call asked for it; call-reschedule-apply.js's own
+//     writeDecision still records the SAME activity_log row and resolves
+//     the cards for this case, so it is resolved work, not a no-op to
+//     disposition.
+//   - `skipped`/`already_applied` or `skipped`/`prior_application_requires_review`
+//     — both are the apply step's own "a prior activity_log row for this
+//     call already exists" path; which reason string comes back depends on
+//     whether the live call_log row still matches that row's own snapshot,
+//     not on whether the move itself happened — so both need the SAME
+//     durable check (rescheduleWasDurablyApplied) rather than trusting
+//     either string.
+function resolvesRescheduleAsk(result) {
+  if (result?.outcome === 'applied') return true;
+  if (result?.outcome === 'noop' && result?.reason === 'already_at_requested_time') return true;
+  if (result?.outcome === 'skipped' && (result?.reason === 'already_applied' || result?.reason === 'prior_application_requires_review')) return true;
+  return false;
+}
+
+// The bookkeeping passes a RESOLVED reschedule ask owes, in one place so the
+// step above states the move and this states what follows from it (codex
+// P2) — non-blocking by design. Only a genuinely NEW apply this pass
+// (`result.outcome === 'applied'`) gets the fulfillment refresh and the
+// promised-window note — they are about what the move JUST did. The
+// disposition revision runs on every resolved outcome (see
+// resolvesRescheduleAsk), gated behind an explicit durable-proof check for
+// the two retry-shaped outcomes so a call whose reschedule genuinely never
+// applied is never touched.
+async function applyRescheduleFollowUps({ call, callSid, result, procGeneration = null }) {
+  if (!resolvesRescheduleAsk(result)) return;
+  const appliedNow = result.outcome === 'applied';
+  const retryShaped = result.outcome === 'skipped';
+  if (appliedNow) {
+    // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
+    // the move just kept was written open and its proof did not exist yet.
+    // Re-run the fulfillment lookup now that the activity row exists, or the
+    // watchdog reports an overdue promise this pass already kept (GH codex
+    // #4204 r6 P2).
+    if (isEnabled('callCommitments')) {
+      await require('./call-commitments').refreshFulfillment(db, call.id)
+        .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+    }
+    // NOTE: the promised window this move communicated needs no capture step
+    // here. no-show-detector.js derives it from the activity_log row
+    // call-reschedule-apply.js writes in the SAME transaction as the move, so
+    // there is nothing to lose if a best-effort write fails after the call is
+    // finalized — and every move applied before that feature existed reads the
+    // same way (codex P1, PR #4403 rounds 8 and 10).
+  }
+  if (!isEnabled('callDispositionV1')) return;
+  if (retryShaped && !(await rescheduleWasDurablyApplied(call).catch((err) => {
+    logger.warn(`[call-proc] durable-applied check failed for ${maskSid(callSid)}: ${err.message}`);
+    return false;
+  }))) return;
+  await reviseDispositionAfterAppliedMove({ call, callSid, procGeneration })
+    .catch((err) => logger.warn(`[call-proc] post-reschedule disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
 }
 
 async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
@@ -6763,7 +6955,7 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
     if (result.outcome !== 'skipped' || result.reason !== 'not_a_reschedule') {
       logger.info(`[call-proc] reschedule-apply for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
     }
-    await applyRescheduleFollowUps({ call, callSid, result });
+    await applyRescheduleFollowUps({ call, callSid, result, procGeneration });
     return result;
   } catch (err) {
     logger.warn(`[call-proc] reschedule-apply step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
@@ -9909,10 +10101,643 @@ const CallRecordingProcessor = {
           .where('created_at', '>=', cardsFiledSince)
           .update({ payload: db.raw("jsonb_set(COALESCE(payload, '{}'::jsonb), '{on_file_address}', ?::jsonb, true)", [JSON.stringify(onFileAddressSnapshot(canonical))]) });
       } catch (e) {
+        // The preliminary customer's snapshot must not stand in for the
+        // canonical customer's: a detector fed another customer's address
+        // would file a conflict against the wrong premise (codex r23 P2).
+        onFileAddress = null;
         logger.warn(`[call-proc] on-file address re-stamp skipped for ${maskSid(callSid)}: ${e.message}`);
       }
     }
 
+    // House-number disagreement lane (live incident, 2026-09-16): the call
+    // validated a premise on the SAME street as the canonical customer's
+    // on-file address but with a DIFFERENT house number. The profile keeps
+    // its filled street (never overwrite a filled field from a call), the
+    // correction lane needs correction language it did not hear, and the
+    // routing gate sees a validated address and nothing to hold — so the
+    // typo'd number (a web-form 1260 for a real 1250) reached the estimate
+    // untouched. Advisory card: "caller stated X, on file Y, confirm before
+    // sending." Filed AFTER the canonical re-stamp so it compares against
+    // the customer the call is actually linked to; skips a customer minted
+    // from this call (its street IS the call's). Best-effort, never blocks.
+    // Live 2026-09-16: the call DID file the second_service_address card
+    // below, framed as "may be a second property (a rental vs. their home)"
+    // and absent from the estimate-send surface — so it read as a landlord
+    // note, not a typo. This card replaces it for the same-street shape.
+    let houseNumberConflictFiled = false;
+    // The booking hold follows the DISPUTE, not the card write: a
+    // corroborated conflict this pass could not persist (a thrown insert,
+    // a lost claim) still must not dispatch to the disputed number
+    // (pre-push audit P1). Set on detection; the card lands or not.
+    let houseNumberDisputed = false;
+    // The caller-stated street the hold is about (function scope, so the
+    // property persistence below can hold that premise out of active
+    // properties — codex r32 P1).
+    let disputedStatedStreet = null;
+    let disputedStatedUnit = null;
+    let disputedStatedCity = null;
+    let disputedStatedZip = null;
+    // A claimed (in_progress) card that could not record this pass's newly
+    // confirmed ask: the standing-card recovery below must NOT count it as
+    // filed, or both fallback paths would suppress the task (codex r11 P1).
+    let disputeClaimedUnrecorded = false;
+    // This pass POSITIVELY found no conflict (corroborated AV on the
+    // record's own number, or a known independent property) and either
+    // retired the earlier card or left a confirmed one standing for its
+    // scheduling obligation only: the standing-card recovery must not
+    // re-arm the address hold from that card (codex r16 P1).
+    let disputePositivelyResolved = false;
+    // The scheduling snapshot from the extraction that drives booking in
+    // the current mode — shared with the shadow-mode fallback (codex r11 P1).
+    let disputeSchedulingAuthority = null;
+    // The corroborating street (routing-authority extraction) — read by the
+    // standing-card recovery too, so it is declared outside the try.
+    let corroboratingStreet = null;
+    // A standing card from an earlier pass covers the second-address lane
+    // only when its stated street is this pass's street (codex r14 P1).
+    // A card THIS pass filed always covers it.
+    let standingConflictCoversCall = true;
+    try {
+      const canCompare = !!(customerId && !createdCustomerFromCall && onFileAddress);
+      // `detected` is the detector's own verdict; the guards below may
+      // withhold the CARD (uncorroborated, a known property) without
+      // settling the disagreement — only positive evidence may retire an
+      // earlier card (pre-push audit P1).
+      const detected = canCompare
+        ? onFileHouseNumberConflict({ addressValidation: effectiveAddressValidation, onFileAddress })
+        : null;
+      let houseConflict = detected;
+      // Computed for BOTH outcomes: filing needs it, and so does retiring
+      // an earlier card — an AV premise the canonical record does not
+      // carry settles nothing either way (pre-push audit P1).
+      const avNormalized = effectiveAddressValidation?.normalized || {};
+      const { addressKey: propertyKey } = require('./customer-properties');
+      // Corroborate against the extraction that DRIVES routing in the
+      // current mode: with V2 in charge, V1's missing or disagreeing street
+      // must not clear a conflict V2 and Address Validation agree on
+      // (codex r13 P1). Shadow / kill-switch mode keeps the legacy record.
+      corroboratingStreet = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
+        ? (v2CanonicalExtraction?.property?.service_address?.street_line_1 || extracted?.address_line1)
+        : extracted?.address_line1;
+      const corroboratingZip = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
+        ? (v2CanonicalExtraction?.property?.service_address?.postal_code || extracted?.zip)
+        : extracted?.zip;
+      const canonicalZip = String(corroboratingZip || '').match(/\d{5}/)?.[0] || '';
+      const avZip = String(avNormalized.postal_code || '').match(/\d{5}/)?.[0] || '';
+      // The detector's own street identity (house token + aliased name:
+      // St == Street, N == North, St != Ave) — the same rule that judged
+      // the on-file line, so a directional spelling cannot un-corroborate
+      // what the detector just matched (codex r5 P2; r2 P2 for suffixes).
+      const corroborated = sameHouseNumberStreet(corroboratingStreet, avNormalized.street_line_1)
+        && (!canonicalZip || !avZip || canonicalZip === avZip);
+      if (houseConflict && !corroborated) houseConflict = null;
+      // The booking hold is armed HERE, before the property lookup below:
+      // a lookup that throws must leave the dispute standing, not silently
+      // release the booking (pre-push audit P1). Cleared only when an
+      // independently saved property positively resolves it.
+      if (houseConflict) {
+        houseNumberDisputed = true;
+        disputedStatedStreet = houseConflict.stated_street || null;
+        disputedStatedCity = houseConflict.stated_city || null;
+        disputedStatedZip = houseConflict.stated_zip || null;
+      }
+      // The booking authority snapshot is built HERE, before the property
+      // lookup below can throw: the shadow-mode fallback that a thrown
+      // lookup triggers must see the confirmed legacy ask, not fall back to
+      // a V2 blob that may say "none" (codex r17 P1).
+      {
+        disputeSchedulingAuthority = CALL_EXTRACTION_V2_DRIVES_ROUTING
+          ? v2CanonicalExtraction
+          : {
+            meta: v2CanonicalExtraction?.meta || null,
+            service_request: {
+              primary_service_category: extracted?.matched_service || extracted?.requested_service || null,
+              specific_service_name: extracted?.specific_service_name || extracted?.requested_service || null,
+              // The legacy record carries no structured intent — its cadence
+              // lives in the service NAME the catalog resolves — so the
+              // snapshot takes the intent that admits EITHER cadence; the
+              // service-category, window and hour checks still bind
+              // (pre-push audit P1: a null intent rejected every booking).
+              // An inspection ask (WDO, Waves Assessment) takes the
+              // inspection intent, or settlement would ignore the exact
+              // inspection booking and file a duplicate-booking task
+              // (codex #4666 r25 P1).
+              service_intent: legacyDisputeServiceIntent(extracted),
+            },
+            property: {
+              service_address: {
+                street_line_1: extracted?.address_line1 || null,
+                street_line_2: extracted?.address_line2 || null,
+                city: extracted?.city || null,
+                postal_code: extracted?.zip || null,
+              },
+              // The other requested properties ride on the snapshot too, so
+              // a booking at the primary alone cannot satisfy a multi-
+              // property ask once the sibling card is bulk-resolved (codex
+              // r24 P1).
+              additional_properties: (Array.isArray(callAdditionalProps) ? callAdditionalProps : []).map((extra) => ({
+                street_line_1: extra?.address_line1 || extra?.street_line_1 || null,
+                street_line_2: extra?.address_line2 || extra?.street_line_2 || null,
+                city: extra?.city || null,
+                postal_code: extra?.zip || extra?.postal_code || null,
+              })),
+            },
+            scheduling: {
+              status: extracted?.appointment_confirmed ? 'confirmed' : (extracted?.preferred_date_time ? 'requested' : 'none'),
+              confirmed_start_at: extracted?.appointment_confirmed ? (extracted?.preferred_date_time || null) : null,
+            },
+          };
+      }
+      // A second property the account already holds on the same street
+      // (a duplex, a rental two doors down) is a known address, not a typo
+      // — the same recognition the second-address check applies (pre-push
+      // audit P1). Only when the multi-property table is live. Independent
+      // provenance only: a property row the call pipeline itself minted
+      // from a stated address is the disagreement restated, not a
+      // confirmation of it — manual / self-book / backfill rows count.
+      // The canonical unit first (V1's in shadow/kill-switch mode), the V2
+      // unit as fallback — the same read the second-address check makes.
+      // The unit follows the same authority as the corroborating street:
+      // V2's in enforce mode (V1 only as a fallback), V1's in shadow /
+      // kill-switch mode — never a hybrid of one's street and the other's
+      // unit (codex r14 P1).
+      const statedUnitExplicit = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
+        ? (v2CanonicalExtraction?.property?.service_address?.street_line_2 || extracted?.address_line2 || null)
+        : (extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null);
+      // …or the unit riding INSIDE the authoritative street line ("1250 Main
+      // St Apt 2" with no line 2): the resolver enforces a unit only when
+      // the card records one (codex r19 P1).
+      const { splitStreetLineUnit: splitAuthorityUnit, splitUnitFirstLine: splitAuthorityUnitFirst } = require('../utils/address-normalizer');
+      // The caller's AUTHORITATIVE street is parsed first: a decisive AV
+      // verdict's normalized line carries number + route only, so a unit the
+      // caller gave inside street_line_1 would otherwise never be seen and
+      // the card would omit the door (codex r28 P1). Unit-FIRST forms ("Apt
+      // 4 123 Main St", "#204 900 Bayview Ter") are peeled the same way
+      // (codex r31 P1).
+      const unitOfLine = (line) => {
+        const text = String(line || '');
+        const first = splitAuthorityUnitFirst(text);
+        return String((first && first.unit) || splitAuthorityUnit(text).unit || '').trim();
+      };
+      const statedUnit = statedUnitExplicit
+        || unitOfLine(corroboratingStreet)
+        || unitOfLine(avNormalized.street_line_1)
+        || null;
+      if (houseConflict) disputedStatedUnit = statedUnit;
+      let knownIndependentProperty = false;
+      if (houseConflict && process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
+        const statedKey = propertyKey({ address_line1: avNormalized.street_line_1, address_line2: statedUnit, city: avNormalized.city, zip: avNormalized.postal_code });
+        const props = await db('customer_properties')
+          .where({ customer_id: customerId, active: true })
+          .whereNot({ source: 'call_pipeline' })
+          .select('address_line1', 'address_line2', 'city', 'zip');
+        // The detector's own street equivalence (directionals, suffixes),
+        // plus the unit and a ZIP-wins locality — never a raw key equality
+        // that reads "1250 N Main St" and "1250 North Main Street" as two
+        // premises (codex r34 P2).
+        const { normalizeUnitLine: propUnit } = require('../utils/address-normalizer');
+        const statedUnitKey = String(propUnit(String(statedUnit || '')) || '').toLowerCase();
+        const statedZip5 = (String(avNormalized.postal_code || '').match(/\d{5}/) || [''])[0];
+        const statedCityKey = String(avNormalized.city || '').toLowerCase().replace(/[^a-z]/g, '');
+        knownIndependentProperty = !!statedKey && props.some((prop) => {
+          if (!sameHouseNumberStreet(String(prop.address_line1 || ''), String(avNormalized.street_line_1 || ''))) return false;
+          const propUnitKey = String(propUnit(String(prop.address_line2 || '')) || unitOfLine(prop.address_line1) || '').toLowerCase();
+          if (propUnitKey !== statedUnitKey) return false;
+          const propZip5 = (String(prop.zip || '').match(/\d{5}/) || [''])[0];
+          if (statedZip5 && propZip5) return statedZip5 === propZip5;
+          const propCityKey = String(prop.city || '').toLowerCase().replace(/[^a-z]/g, '');
+          return !statedCityKey || !propCityKey || statedCityKey === propCityKey;
+        });
+        if (knownIndependentProperty) {
+          houseConflict = null;
+          houseNumberDisputed = false;
+        }
+      }
+      // Positive evidence that no conflict stands: the latest pass validated
+      // a corroborated premise and the detector found no disagreement, or
+      // an independently saved property covers the stated address (codex
+      // r4 P2) — or the call no longer has a linked customer at all, so a
+      // card about "stated vs on file" describes nothing (codex r3 P2).
+      // Missing evidence (AV off, unavailable, uncorroborated) settles
+      // nothing and leaves an earlier card standing (pre-push audit P1).
+      const avPositive = ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status)
+        && !!avNormalized.street_line_1;
+      const retireStale = !customerId
+        || (canCompare && avPositive && corroborated && (!detected || knownIndependentProperty));
+      if (houseConflict || retireStale) {
+        // The card's scheduling snapshot comes from the extraction that
+        // DRIVES booking in the current mode: V2 when it drives routing,
+        // else the legacy record (appointment_confirmed /
+        // preferred_date_time) — a shadow-mode V2 "none" over a confirmed
+        // legacy booking would file a card that looks unconfirmed and let
+        // an Accept drop the only trace of the appointment (codex r7 P1).
+        // The WHOLE evidence snapshot (scheduling, service_request,
+        // property) comes from the booking authority — in shadow mode the
+        // legacy record, never a V2 blob with only its scheduling swapped
+        // (askSnapshot reads service_request and property too; codex r8 P2).
+        const schedulingAuthority = disputeSchedulingAuthority;
+        const conflictCard = houseConflict
+          ? buildTriageItem({
+            callLogId: call.id,
+            flag: 'on_file_house_number_conflict',
+            onFileAddress,
+            extraction: schedulingAuthority,
+            severity: 'advisory',
+            addressValidation: effectiveAddressValidation,
+            // The stated unit rides on the card so the reviewer sees the
+            // whole door, not just the number (codex r1 P1).
+            extraPayload: {
+              ...houseConflict,
+              // The customer the card was FILED against: a later relink
+              // must not hand its settlement to another account (codex
+              // r24 P1).
+              dispute_customer_id: customerId ? String(customerId) : null,
+              ...(statedUnit ? { stated_unit: String(statedUnit).trim() } : {}),
+              // An AV `corrected` premise is Google's correction, not the
+              // caller's words: the pre-validation street the caller gave is
+              // kept as the caller evidence and the validated line shown as
+              // the correction (codex r21 P2).
+              // …read from the caller's ORIGINAL line (rawStreetBeforeAdopt),
+              // never the already-normalized authority streets, which the
+              // AV adoption above rewrote to the correction (codex r22 P2).
+              ...(effectiveAddressValidation?.status === 'corrected' && rawStreetBeforeAdopt
+                && !sameHouseNumberStreet(rawStreetBeforeAdopt, houseConflict.stated_street)
+                ? { spoken_street: String(rawStreetBeforeAdopt).trim() }
+                : {}),
+            },
+          })
+          : null;
+        // Both mutations under the per-call triage lock AND the
+        // processing-token lock (codex r4 P1): a pass whose claim was
+        // reclaimed must neither recreate a card the replacement pass
+        // retired nor retire one it just filed — the claim check and the
+        // write commit together or not at all, like the hold ledger.
+        const outcome = await db.transaction(async (trx) => {
+          await lockTriageCall(trx, call.id);
+          const owned = await trx('call_log')
+            .where({ id: call.id })
+            .where('processing_token', procToken)
+            .forUpdate()
+            .first('id');
+          if (!owned) return 'claim_lost';
+          if (conflictCard) {
+            // MERGE fresh evidence into an OPEN card (a force-reprocess that
+            // heard a different street or relinked the call must not leave
+            // the previous pass's address on the estimate surface — codex
+            // r3 P2) but never into a claimed (in_progress) one: an operator
+            // reviewing it would approve evidence that changed under them
+            // (codex r4 P1). A claimed card keeps its payload; the reviewer
+            // resolves it and the next pass files afresh.
+            // Refresh the ADDRESS evidence only: the open card's own
+            // scheduling snapshot (scheduling_window / scheduling_status)
+            // is the promise the sweep holds the card to, and a reprocess
+            // that now hears "none" must not erase a confirmed ask
+            // (pre-push audit P1).
+            // …while a pass that NEWLY hears a confirmed appointment does
+            // stamp it: the stronger ask wins in both directions.
+            const parsedCard = JSON.parse(conflictCard.payload);
+            const newlyConfirmed = parsedCard.scheduling_window?.status === 'confirmed' || parsedCard.scheduling_status === 'confirmed';
+            const addressEvidence = Object.fromEntries(Object.entries(parsedCard)
+              .filter(([key]) => newlyConfirmed || !['scheduling_window', 'scheduling_status'].includes(key)));
+            // A unit the caller no longer states is CLEARED on refresh — the
+            // additive merge would otherwise keep the old door on the card
+            // and make the resolver wait for it (codex r17 P2).
+            if (addressEvidence.stated_unit === undefined) addressEvidence.stated_unit = null;
+            // A fresh dispute re-opens the question: the durable "cleared"
+            // marker an earlier positive pass stamped must not survive
+            // the refresh, or the nightly rule would close the new
+            // disagreement on booking evidence alone (local audit P1).
+            addressEvidence.address_dispute_cleared_at = null;
+            addressEvidence.cleared_on_file_street = null;
+            // The conditional "Caller said" line is cleared too when this
+            // pass has none (an AV `corrected` result became a plain
+            // accept) — the additive merge would otherwise keep labelling
+            // the prior raw street beside the new validated one (codex r29
+            // P2).
+            if (addressEvidence.spoken_street === undefined) addressEvidence.spoken_street = null;
+            const landed = await trx('triage_items')
+              .insert(conflictCard)
+              .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .merge({
+                payload: trx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify(addressEvidence)]),
+                summary: conflictCard.summary,
+                updated_at: new Date(),
+              })
+              .where('triage_items.status', 'open')
+              .returning('id');
+            // A CLAIMED (in_progress) card is left untouched — and when this
+            // pass NEWLY confirms an appointment that card's snapshot never
+            // recorded, the confirmed ask is not persisted anywhere: report
+            // "unfiled" so the approved-but-unbooked fallback files it
+            // (pre-push audit P1). An unchanged, already-recorded ask on a
+            // claimed card still counts as filed.
+            if (!landed.length) {
+              // A claimed card counts as filed only when it records THIS
+              // dispute: the same stated street, and — for a confirmed ask —
+              // the same start (codex r15 + r17 P1). A claimed card about a
+              // different street, or one that never recorded a newly
+              // confirmed ask, leaves this pass's dispute unrecorded.
+              const claimed = await trx('triage_items')
+                .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'in_progress' })
+                .first('payload');
+              const claimedPayload = typeof claimed?.payload === 'string' ? (() => { try { return JSON.parse(claimed.payload); } catch { return null; } })() : claimed?.payload;
+              const sameStreet = sameHouseNumberStreet(claimedPayload?.stated_street, parsedCard.stated_street);
+              // …the SAME dispute on both sides and the same service ask,
+              // not only the caller's street (codex r23 P1).
+              const sameOnFile = sameHouseNumberStreet(claimedPayload?.on_file_address?.address_line1, parsedCard.on_file_address?.address_line1)
+                || (!claimedPayload?.on_file_address?.address_line1 && !parsedCard.on_file_address?.address_line1);
+              // …read from the fields the card actually PERSISTS
+              // (buildTriageItem writes the ask onto scheduling_window as
+              // requested_service_categories / requested_specific_service /
+              // requested_service_intent, never a service_request object),
+              // or a changed ask on the same street and start reads as the
+              // same card and its fallback task is lost (pre-push audit P1
+              // after r25).
+              const serviceKey = (p) => {
+                const w = p?.scheduling_window || {};
+                return JSON.stringify({
+                  categories: (Array.isArray(w.requested_service_categories) ? w.requested_service_categories : []).map((c) => String(c || '').toLowerCase()).sort(),
+                  specific: String(w.requested_specific_service || '').toLowerCase().trim() || null,
+                  intent: String(w.requested_service_intent || '').toLowerCase().trim() || null,
+                });
+              };
+              const sameService = serviceKey(claimedPayload) === serviceKey(parsedCard);
+              // …and the COMPLETE dispute identity: the stated unit, the
+              // on-file door's unit and locality, and the customer the card
+              // was filed against. A reprocess that moves Apt 2 to Apt 3,
+              // or lands after a relink, must not read the old card as
+              // filed and settle its stale evidence (pre-push audit P1
+              // after r25).
+              // The on-file door's unit is read from address_line2 OR the
+              // unit embedded in address_line1 (street-first "1260 Main St
+              // Apt 2" and unit-first "Apt 2, 1260 Main St" alike), with the
+              // shared helpers — sameOnFile strips embedded units, so the
+              // identity must carry them (codex r32 P1).
+              const { splitStreetLineUnit: idSplit, splitUnitFirstLine: idUnitFirst, normalizeUnitLine: idNormUnit } = require('../utils/address-normalizer');
+              const onFileUnitOf = (addr) => {
+                const line1 = String(addr?.address_line1 || '');
+                const first = idUnitFirst(line1);
+                const embedded = (first && first.unit) || idSplit(line1).unit || '';
+                return String(idNormUnit(String(addr?.address_line2 || '')) || idNormUnit(String(embedded)) || '').toLowerCase().trim() || null;
+              };
+              const identityKey = (p) => JSON.stringify({
+                unit: String(p?.stated_unit || '').toLowerCase().trim() || null,
+                onFileUnit: onFileUnitOf(p?.on_file_address),
+                city: String(p?.on_file_address?.city || '').toLowerCase().trim() || null,
+                zip: (String(p?.on_file_address?.zip || '').match(/\d{5}/) || [''])[0] || null,
+                customer: p?.dispute_customer_id ? String(p.dispute_customer_id) : null,
+              });
+              const sameIdentity = identityKey(claimedPayload) === identityKey(parsedCard);
+              // A claimed card an earlier pass durably CLEARED cannot record a
+              // freshly detected conflict (the status-gated upsert never
+              // clears its marker): the ask is unrecorded, so the fallback
+              // files it (codex r37 P1).
+              if (claimedPayload?.address_dispute_cleared_at) return 'claimed_unrecorded';
+              if (!sameStreet || !sameOnFile || !sameService || !sameIdentity) return 'claimed_unrecorded';
+              if (!newlyConfirmed) return 'filed';
+              const claimedConfirmed = claimedPayload?.scheduling_window?.status === 'confirmed' || claimedPayload?.scheduling_status === 'confirmed';
+              const sameStart = String(claimedPayload?.scheduling_window?.confirmed_start_at || '') === String(parsedCard.scheduling_window?.confirmed_start_at || '');
+              if (claimedConfirmed && sameStart) return 'filed';
+              return 'claimed_unrecorded';
+            }
+            return 'filed';
+          }
+          // A card whose call CONFIRMED an appointment carries the only
+          // scheduling ask (the booking hold suppressed the fallback card):
+          // the system may not retire it on address evidence alone — the
+          // sweep's house_number_adopted rule closes it once a booking
+          // answers the snapshotted ask (pre-push audit P1).
+          const retired = await trx('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
+            .whereRaw("COALESCE(payload->'scheduling_window'->>'status', payload->>'scheduling_status') IS DISTINCT FROM 'confirmed'")
+            .update({
+              status: 'resolved',
+              resolution_note: customerId
+                ? 'Superseded — a later pass over this call found no house-number disagreement with the record.'
+                : 'Superseded — the call is no longer linked to a customer, so there is no on-file address to disagree with.',
+              resolution_source: 'system',
+              resolved_at: new Date(),
+              updated_at: new Date(),
+            });
+          if (retired) {
+            // Same call_log.review_status bookkeeping as admin-triage's
+            // transitionCore, inside the locked transaction so the
+            // remaining-open count cannot race: the finalizer only ever
+            // SETS 'open' (when confirmation reasons exist) and the nightly
+            // sweep ignores resolved cards, so retiring the last open card
+            // here would otherwise strand a permanent review count with no
+            // card behind it (pre-push audit P1). This pass's own cards
+            // filed earlier in the run are counted like any other.
+            const stillOpen = await trx('triage_items')
+              .where({ call_log_id: call.id })
+              .whereIn('status', ['open', 'in_progress'])
+              .count({ n: '*' })
+              .first();
+            if (Number(stillOpen?.n || 0) === 0) {
+              await trx('call_log')
+                .where({ id: call.id })
+                .where('processing_token', procToken)
+                .whereIn('review_status', ['open'])
+                .update({ review_status: 'resolved', updated_at: new Date() });
+            }
+          }
+          if (retired) return 'retired';
+          // A card deliberately kept (a confirmed scheduling ask, pulled
+          // visits awaiting staff) or CLAIMED by a reviewer: report it so
+          // the standing-card recovery keeps the OBLIGATION without the
+          // address hold — this pass positively established no conflict
+          // (codex r16 + r17 P1).
+          const kept = await trx('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+            .whereIn('status', ['open', 'in_progress'])
+            .first('id');
+          if (kept) {
+            // A DURABLE marker: the disagreement is cleared (the record's
+            // own number validated), the card stands only for its
+            // scheduling ask — the nightly rule closes it once a booking
+            // covers that ask, without the record having to carry the
+            // obsolete stated street (codex r23 P1).
+            await trx('triage_items')
+              .where({ id: kept.id })
+              .update({
+                // …and the card is re-bound to the call's CURRENT customer:
+                // after a relink the settlement refuses a card filed against
+                // another account until a reprocess refreshes it — this is
+                // that refresh (pre-push audit P1 after r27).
+                // …WITH the current customer's on-file premise: rebinding
+                // the identity while keeping the previous customer's
+                // on_file_address would let an Accept file the old
+                // customer's appointment under the new account (codex r29
+                // P1).
+                // An UNLINKED call (no customer) keeps the FILING identity:
+                // nulling it would let a later Accept bypass the relink guard
+                // (which only fires on a truthy stored id) and file a recovery
+                // task for a customerless call (codex r29 P2).
+                // …and the booking ask's requested_address follows the
+                // positively resolved premise (the on-file number this pass
+                // validated), keeping its other fields (additional
+                // properties) and the service / window: a booking there
+                // must cover the card's ask, or a settled disagreement
+                // plus a booked appointment never auto-resolve (codex r34
+                // P1). Only when the card carries a scheduling_window.
+                payload: (() => {
+                  const merged = JSON.stringify({
+                    address_dispute_cleared_at: new Date().toISOString(),
+                    cleared_on_file_street: onFileAddress?.address_line1 || null,
+                    ...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),
+                  });
+                  // A conflict cleared because the STATED premise is a saved
+                  // secondary property (knownIndependentProperty) keeps the
+                  // card's original ask — only a record that validated the
+                  // on-file number re-points it there (codex r34 P1).
+                  // …and ONLY when this pass positively validated the on-file
+                  // premise itself (same street, unit and ZIP-wins locality as
+                  // the validated address): a pass whose validated street or
+                  // ZIP simply differs from the card's clears the disagreement
+                  // without vouching for the on-file number, so the original
+                  // ask stands (codex r35 P1).
+                  const validatedLine = String(avNormalized?.street_line_1 || '');
+                  // (Null-safe: an UNLINKED call reaches this kept path with no
+                  // on-file address at all — codex r37 P2.)
+                  const onFileValidated = !!validatedLine && !!onFileAddress?.address_line1 && sameHouseNumberStreet(validatedLine, String(onFileAddress.address_line1 || ''))
+                    && (() => {
+                      // The shared any-position canonical unit key ("Apt 2" ==
+                      // "Unit 2", unit-first or street-first) — codex r36 P1.
+                      const { unitKey: ovUnitKey } = require('./customer-properties');
+                      const { splitStreetLineUnit: ovSplit, splitUnitFirstLine: ovUnitFirst } = require('../utils/address-normalizer');
+                      const ovUnitOf = (l1, l2) => ovUnitKey(l2) || ovUnitKey(ovUnitFirst(String(l1 || ''))?.unit) || ovUnitKey(ovSplit(String(l1 || '')).unit) || '';
+                      if (ovUnitOf(validatedLine, avNormalized?.street_line_2) !== ovUnitOf(onFileAddress?.address_line1, onFileAddress?.address_line2)) return false;
+                      const vz = (String(avNormalized?.postal_code || '').match(/\d{5}/) || [''])[0];
+                      const oz = (String(onFileAddress?.zip || '').match(/\d{5}/) || [''])[0];
+                      if (vz && oz) return vz === oz;
+                      const vc = String(avNormalized?.city || '').toLowerCase().replace(/[^a-z]/g, '');
+                      const oc = String(onFileAddress?.city || '').toLowerCase().replace(/[^a-z]/g, '');
+                      return !vc || !oc || vc === oc;
+                    })();
+                  if (!onFileAddress?.address_line1 || knownIndependentProperty || !onFileValidated) return trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [merged]);
+                  const resolvedAddress = JSON.stringify({
+                    street_line_1: onFileAddress?.address_line1 || null,
+                    street_line_2: onFileAddress?.address_line2 || null,
+                    city: onFileAddress?.city || null,
+                    postal_code: onFileAddress?.zip || null,
+                    raw_text: null,
+                  });
+                  return trx.raw(
+                    // jsonb_exists(), never the bare `?` operator knex reads
+                    // as a binding placeholder.
+                    "CASE WHEN jsonb_exists(COALESCE(payload, '{}'::jsonb), 'scheduling_window') "
+                    + "THEN jsonb_set(COALESCE(payload, '{}'::jsonb) || ?::jsonb, '{scheduling_window,requested_address}', COALESCE(payload #> '{scheduling_window,requested_address}', '{}'::jsonb) || ?::jsonb, true) "
+                    + "ELSE COALESCE(payload, '{}'::jsonb) || ?::jsonb END",
+                    [merged, resolvedAddress, merged],
+                  );
+                })(),
+                updated_at: new Date(),
+              });
+          }
+          return kept ? 'kept' : 'nothing';
+        });
+        if (outcome === 'retired' || outcome === 'kept') disputePositivelyResolved = true;
+        if (outcome === 'filed') {
+          // Only a landed write may suppress the second-address fallback
+          // and mark the call for review — a thrown or fenced-out write
+          // would otherwise leave review_status open with no card behind it
+          // (codex r2 P2).
+          houseNumberConflictFiled = true;
+          // Rides needs_confirmation like the second-address flag it
+          // replaces: that list drives call_log.review_status, the lead's
+          // needs_confirmation and the CONFIRM BEFORE DISPATCH timeline note
+          // (pre-push audit P1) — the card alone would leave the call
+          // reading as fully processed.
+          if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+          // Ids only — the disputed numbers are parts of a customer's street
+          // address and stay out of plain-text logs (pre-push audit P1).
+          logger.info(`[call-proc] house-number conflict card filed for ${maskSid(callSid)} (call ${call.id}, customer ${customerId || 'none'})`);
+        } else if (outcome === 'claim_lost') {
+          logger.info(`[call-proc] processing claim lost — skipping the house-number conflict card write for ${maskSid(callSid)} (the owner files it)`);
+        } else if (outcome === 'claimed_unrecorded') {
+          disputeClaimedUnrecorded = true;
+          logger.info(`[call-proc] house-number conflict card is claimed and could not record a newly confirmed appointment for ${maskSid(callSid)} — fallback task will file`);
+        }
+      }
+    } catch (e) {
+      // Code/name only: a knex error message carries the insert bindings
+      // (both streets) — no addresses in logs (pre-push audit P1).
+      logger.warn(`[call-proc] house-number conflict check skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+    }
+    // Runs whether or not the lane above threw (pre-push audit P1).
+    try {
+      // An UNRESOLVED card from an earlier pass is still the owed ask
+      // (this pass may have had no AV, lost its claim, or deliberately
+      // left a confirmed card standing): the booking hold and the
+      // second-address suppression follow the standing card, not only a
+      // card this pass filed (pre-push audit P1).
+      if (!houseNumberConflictFiled && customerId) {
+        const standing = await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+          .whereIn('status', ['open', 'in_progress'])
+          .first('id', 'payload');
+        if (standing) {
+          // Does the standing card describe THIS pass's address? The hold,
+          // the reconciliation and the second-address suppression all
+          // follow the STORED ask: a reprocess that moved the call to a
+          // different street is not the dispute that card records, so its
+          // bookings are neither held nor pulled on the old card's account
+          // (codex r14 + r15 P1). A card with no stated street (backlog)
+          // is taken to cover the call.
+          const standingPayload = typeof standing.payload === 'string' ? (() => { try { return JSON.parse(standing.payload); } catch { return null; } })() : standing.payload;
+          // A pass with NO current street evidence (AV unavailable, neither
+          // extraction carries an address) keeps the standing hold — only a
+          // nonempty, positively different street releases it (codex r28
+          // P1).
+          const currentStreet = String(corroboratingStreet || extracted?.address_line1 || '').trim();
+          standingConflictCoversCall = !standingPayload?.stated_street
+            || !currentStreet
+            || sameHouseNumberStreet(standingPayload.stated_street, currentStreet);
+          // A card a prior pass DURABLY cleared (address_dispute_cleared_at
+          // — the record validated, or the stated premise is a saved
+          // secondary property) is not re-armed by a later pass that merely
+          // repeats the stated street without fresh evidence of a NEW
+          // dispute (codex r35 P1): it stands for its scheduling ask only.
+          // (`houseNumberDisputed` is true here only when THIS pass detected a
+          // fresh conflict — the standing-card branch has not armed it yet.)
+          const durablyCleared = !!standingPayload?.address_dispute_cleared_at && !houseNumberDisputed;
+          if (standingConflictCoversCall && (disputePositivelyResolved || durablyCleared)) {
+            // The card stands for its confirmed scheduling ask only; this
+            // pass established the address is not in dispute, so nothing
+            // is held or pulled on its account (codex r16 P1).
+            if (!disputeClaimedUnrecorded) houseNumberConflictFiled = true;
+            if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+            logger.info(`[call-proc] house-number card still open for ${maskSid(callSid)} for its scheduling ask — dispute resolved this pass, no hold`);
+          } else if (standingConflictCoversCall) {
+            if (!disputeClaimedUnrecorded) houseNumberConflictFiled = true;
+            houseNumberDisputed = true;
+            // The carried-over hold restores the disputed street too, so the
+            // property persistence keeps holding that premise out (codex r33
+            // P1).
+            if (!disputedStatedStreet) {
+              disputedStatedStreet = standingPayload?.stated_street || null;
+              disputedStatedUnit = standingPayload?.stated_unit || null;
+              disputedStatedCity = standingPayload?.stated_city || null;
+              disputedStatedZip = standingPayload?.stated_zip || null;
+            }
+            if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+            logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
+          } else {
+            logger.info(`[call-proc] house-number card still open for ${maskSid(callSid)} but describes another street — no hold carried over`);
+          }
+        }
+      }
+    } catch (standingErr) {
+      logger.warn(`[call-proc] standing house-number card check failed for ${maskSid(callSid)}: ${standingErr.code || standingErr.name || 'db_error'}`);
+    }
+    // Existing assignments are deliberately NOT pulled off a disputed
+    // booking (codex r6..r20): every pull grew a recovery-task, reminder-
+    // hold and settlement surface that never converged. The card, the
+    // call's review status and the CONFIRM BEFORE DISPATCH timeline note
+    // are the office's surface for an already-assigned visit; only NEW
+    // side effects (a fresh booking, a follow-up, a default technician,
+    // a card-request text, reminder repairs) are held while the dispute
+    // stands.
     const verifiableAni = firstExternalPhone(call.from_phone);
     if (customerId && verifiableAni && !createdCustomerFromCall && !isOutboundCall(call)) {
       try {
@@ -10021,7 +10846,14 @@ const CallRecordingProcessor = {
           || callAddsDifferentUnit
           || bothPresentAndDiffer(existingCust?.city, extracted.city)
           || bothPresentAndDiffer(existingCust?.zip, extracted.zip);
-        if (!knownProperty && onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
+        // A same-street house-number difference already has its own card
+        // above; framing it as a possible second property buried the typo.
+        // …but only when the units agree: a different unit is a different
+        // door, and the house-number card's auto-resolve strips units, so
+        // closing it on a line-1 edit would drop the only unit warning
+        // (codex r1 P1).
+        const houseNumberCardCoversThis = houseNumberConflictFiled && standingConflictCoversCall && !callAddsDifferentUnit;
+        if (!knownProperty && !houseNumberCardCoversThis && onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
           bridgeNeedsConfirmation.push('second_service_address');
           logger.info(`[call-proc-bridge] ${callSid} service address differs from customer record (possible second property)`);
           // This flag is appended AFTER the bridge's triage_items loop above, so
@@ -10224,7 +11056,55 @@ const CallRecordingProcessor = {
         enqueueLookup(ensured);
         // V1 persistence writes yield under V2 sole authority (codex
         // #3418 r11) — see the authority decision above.
-        if (!v2SoleAddressAuthority
+        // The DISPUTED premise (the caller's number the county-roll card is
+        // asking the office to confirm) is held out of active property
+        // persistence until the conflict is settled — never a live
+        // secondary property other workflows would treat as real (codex
+        // r32 P1). The card carries the address; Accept adopts the on-file
+        // number, a correction records the right one.
+        // The FULL disputed premise — street, unit and ZIP-wins locality —
+        // never the street alone: a second property on the same street with
+        // another unit or in another town is not the dispute (codex r36 P2).
+        const disputedPremise = (entry) => {
+          if (houseNumberDisputed !== true || !disputedStatedStreet) return false;
+          const e = typeof entry === 'string' ? { address_line1: entry } : (entry || {});
+          if (!sameHouseNumberStreet(String(e.address_line1 || ''), disputedStatedStreet)) return false;
+          const { unitKey: dpUnitKey } = require('./customer-properties');
+          const { splitStreetLineUnit: dpSplit, splitUnitFirstLine: dpUnitFirst } = require('../utils/address-normalizer');
+          const unitOf = (l1, l2) => dpUnitKey(l2) || dpUnitKey(dpUnitFirst(String(l1 || ''))?.unit) || dpUnitKey(dpSplit(String(l1 || '')).unit) || '';
+          if (unitOf(e.address_line1, e.address_line2) !== unitOf('', disputedStatedUnit)) return false;
+          const z5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+          const ck = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+          const ez = z5(e.zip); const dz = z5(disputedStatedZip);
+          if (ez && dz) return ez === dz;
+          const ec = ck(e.city); const dc = ck(disputedStatedCity);
+          return !ec || !dc || ec === dc;
+        };
+        // A row an EARLIER pass persisted for the disputed premise (an
+        // AV-unavailable pass that ran before the conflict was detected) is
+        // retired with the hold — property selectors and linkage must not
+        // keep treating the unconfirmed number as real (codex r36 P1).
+        // call_pipeline rows only; best-effort.
+        if (houseNumberDisputed === true && disputedStatedStreet && customerId) {
+          try {
+            const priorRows = await db('customer_properties')
+              .where({ customer_id: customerId, source: 'call_pipeline', active: true })
+              .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+            const staleIds = priorRows.filter(disputedPremise).map((r) => r.id);
+            // Atomic with the LIVE processing claim (codex r37 P1): a stale
+            // pass whose token a force-reprocess replaced must not retire a
+            // row the winning pass validated and kept.
+            if (staleIds.length) {
+              await db('customer_properties')
+                .whereIn('id', staleIds)
+                .whereExists(db('call_log').where({ id: call.id, processing_token: procToken }).select(db.raw('1')))
+                .update({ active: false, updated_at: new Date() });
+            }
+          } catch (retireErr) {
+            logger.warn(`[call-proc] disputed call-pipeline property not retired for ${maskSid(callSid)}: ${retireErr.code || retireErr.name || 'db_error'}`);
+          }
+        }
+        if (!v2SoleAddressAuthority && !disputedPremise({ address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip })
           && (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress))) {
           const recorded = await customerProperties.recordCallProperty({
             customerId,
@@ -10250,6 +11130,9 @@ const CallRecordingProcessor = {
           const extraCity = String(extra.city || '').trim();
           const extraZip = String(extra.zip || '').trim();
           if (!extraCity || !extraZip) continue;
+          // The disputed premise waits for the conflict card on this legacy
+          // path too (codex r36 P1).
+          if (disputedPremise(extra)) continue;
           const recordedExtra = await customerProperties.recordCallProperty({
             customerId,
             address_line1: extra.address_line1,
@@ -10368,6 +11251,8 @@ const CallRecordingProcessor = {
                 const entryCity = String(entry.city || '').trim();
                 const entryZip = String(entry.zip || '').trim();
                 if (!String(entry.address_line1 || '').trim()) continue;
+                // The disputed premise waits for the conflict card (codex r32 P1).
+                if (disputedPremise(entry)) continue;
                 const firstAddressException = isFirstAddress && firstStreetPending;
                 firstStreetPending = false;
                 if (!firstAddressException && (!entryCity || !entryZip)) continue;
@@ -13360,6 +14245,16 @@ const CallRecordingProcessor = {
           let scheduledDateForLog = null;
           let windowStartForLog = null;
           let scheduleWasReused = false;
+          // A reused AI booking held on a house-number dispute: its
+          // customer-facing reuse repairs (legacy-row activation, which
+          // arms reminders / confirmations) are skipped — no confirmation
+          // goes out for an appointment whose address is unresolved and
+          // whose technician was just pulled (codex r9 P1).
+          let disputeHeldReuse = false;
+          // …and a promised follow-up the dispute hold kept from being
+          // created is still owed: filed as the same follow-up-unbooked
+          // card the manual-attachment branch uses (pre-push audit P1).
+          let disputeSkippedFollowUpPlan = false;
           let followUpCreated = null;
           // Cross-customer overlap findings from inside the booking txn —
           // advisory only (owner's chosen behavior: the booking proceeds
@@ -13807,7 +14702,18 @@ const CallRecordingProcessor = {
                   // 'phone_call', so anything else came from the attach path.
                   const isAttachedManualBooking = String(existing.booking_source || '') !== 'phone_call';
                   let primaryRow = existing;
-                  if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId) {
+                  // A house-number DISPUTE holds the NEW side effects of a
+                  // reused AI booking (default technician backfill, follow-up
+                  // creation, card-request texts, reminder repairs). An
+                  // existing assignment is never pulled — the card is the
+                  // office's surface for it (codex r25 P2: the boolean is
+                  // used directly, no single-use decision helper).
+                  const reuseHeldForAddress = houseNumberDisputed === true;
+                  if (reuseHeldForAddress) disputeHeldReuse = true;
+                  if (reuseHeldForAddress) {
+                    logger.warn(`[call-proc] reused booking for ${maskSid(callSid)} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
+                  }
+                  if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId && !reuseHeldForAddress) {
                     // Tech-day membership fence + route_order clear (uncapped
                     // audit r26 P1): unassigned → tech is a tech-day ENTRY,
                     // so it must hold the same 'slot-reserve' fence every
@@ -13829,7 +14735,7 @@ const CallRecordingProcessor = {
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = defaultTechnicianId;
                     try {
-                      await assertAssignableTechnician(reuseTechId, { conn: trx });
+                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day });
                     } catch (eligErr) {
                       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                       logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
@@ -13883,9 +14789,35 @@ const CallRecordingProcessor = {
                   if (isAttachedManualBooking) {
                     attachedManualBookingId = primaryRow.id;
                     attachSkippedFollowUpPlan = !!callFollowUpPlan;
-                  } else if (!primaryRowSkipped) {
+                  } else if (!primaryRowSkipped && !reuseHeldForAddress) {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                  } else if (!primaryRowSkipped && reuseHeldForAddress && callFollowUpPlan) {
+                    // Only when no AI follow-up child exists yet (an earlier
+                    // pass may have created it; it was pulled above, not
+                    // lost) — otherwise the task would invite a duplicate
+                    // manual booking (pre-push audit P1).
+                    // …judged by ensureCallFollowUpVisit's OWN ownership rule
+                    // (codex r27 P1): any follow-up off this primary — an AI
+                    // child in any status (a cancelled one was cancelled on
+                    // purpose) or a completion-CTA follow-up linked through
+                    // followup_source_service_id — means dispatch already owns
+                    // the outcome, and a terminal primary gets no visit 2.
+                    const followUpOwned = ['cancelled', 'completed', 'skipped'].includes(primaryRow.status)
+                      || !!(await trx('scheduled_services')
+                        .where((qb) => qb
+                          .where({ parent_service_id: primaryRow.id, source_action: 'ai_call_pipeline_followup' })
+                          .orWhere({ followup_source_service_id: primaryRow.id }))
+                        .first('id'))
+                      // …or staff already handled visit 2 ("Follow-up booked" /
+                      // dismissed): the partial unique index excludes terminal
+                      // cards, so a reprocess would otherwise open a new task
+                      // beside the standalone booking (codex r31 P1).
+                      || !!(await trx('triage_items')
+                        .where({ call_log_id: call.id, reason_code: 'attached_booking_followup_unbooked' })
+                        .whereIn('status', ['resolved', 'dismissed'])
+                        .first('id'));
+                    if (!followUpOwned) disputeSkippedFollowUpPlan = true;
                   }
                   return primaryRow;
                 }
@@ -13948,6 +14880,62 @@ const CallRecordingProcessor = {
                 // same-day-duplicate does.
                 if (propertyLinkage.holdReason) {
                   return { __held: { reason: propertyLinkage.holdReason } };
+                }
+                // The call's house number is DISPUTED against the record
+                // (on_file_house_number_conflict card filed above): a
+                // confirmed appointment must not dispatch a technician to
+                // a number the office has been asked to confirm first —
+                // hold it like an ambiguous attach (codex #4666 r5 P1).
+                if (houseNumberDisputed) {
+                  // The promised follow-up (visit 2) rides on the card so the
+                  // recovery task the settlement files names it — otherwise
+                  // staff book the recovered primary and never see visit 2
+                  // was promised (codex r20 P1). Best-effort stamp.
+                  if (callFollowUpPlan) {
+                    try {
+                      // Under the triage-call lock, and on a MISS (the card
+                      // was settled meanwhile) the owed visit 2 gets its own
+                      // card — never silently lost (codex r23 P1).
+                      // Inside a SAVEPOINT (nested knex transaction): a failed
+                      // statement would otherwise abort the whole booking
+                      // transaction (25P02) and the swallowed error would turn
+                      // the hold's commit into a rollback, losing the card
+                      // silently (pre-push audit P1 after r27).
+                      await trx.transaction(async (sp) => {
+                        await lockTriageCall(sp, call.id);
+                        const followUpPlanPayload = { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null };
+                        const stamped = await sp('triage_items')
+                          .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+                          .whereIn('status', ['open', 'in_progress'])
+                          .update({
+                            payload: sp.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ follow_up_plan: followUpPlanPayload })]),
+                            updated_at: new Date(),
+                          });
+                        if (!stamped) {
+                          await sp('triage_items')
+                            .insert(buildTriageItem({
+                              callLogId: call.id,
+                              flag: 'attached_booking_followup_unbooked',
+                              extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
+                              severity: 'advisory',
+                              extraPayload: { skipped_reason: 'house_number_disputed', follow_up_plan: followUpPlanPayload },
+                            }))
+                            // A standing (open or claimed) follow-up card from a
+                            // prior reprocess takes the CURRENT promised plan,
+                            // as the main follow-up path does (codex r28 P1).
+                            .onConflict(sp.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                            .merge({
+                              payload: sp.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                              summary: sp.raw('EXCLUDED.summary'),
+                              updated_at: new Date(),
+                            });
+                        }
+                      });
+                    } catch (planErr) {
+                      logger.warn(`[call-proc] could not note the promised follow-up on the conflict card for ${maskSid(callSid)}: ${planErr.code || planErr.name || 'db_error'}`);
+                    }
+                  }
+                  return { __held: { reason: 'on_file_house_number_conflict' } };
                 }
                 // findExistingCallAppointment only sees THIS call's rows —
                 // a visit booked through ANY other channel (a human in the
@@ -14348,7 +15336,7 @@ const CallRecordingProcessor = {
                 // triage note already says who was auto-assigned (or nobody).
                 if (insertData.technician_id) {
                   try {
-                    await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10) });
                   } catch (eligErr) {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
@@ -14490,7 +15478,13 @@ const CallRecordingProcessor = {
                   existingScheduledServiceId: svc.__held.existingId || null,
                 };
                 logger.warn(`[call-proc] Held auto-booking for ${callSid}: ${svc.__held.reason} (existing ${svc.__held.existingId || 'n/a'}, status ${svc.__held.existingStatus || 'n/a'})`);
-                await db('triage_items')
+                // The house-number dispute's card is owned by its fenced
+                // writer (locks, evidence, retirement) — this generic
+                // insert must not recreate it evidence-less after an
+                // operator resolved it, nor outside those locks; when that
+                // writer could not persist its card, the approved-but-
+                // unbooked fallback below files instead (pre-push audit P1).
+                if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')
                   .insert(buildTriageItem({
                     callLogId: call.id,
                     flag: svc.__held.reason,
@@ -14540,7 +15534,7 @@ const CallRecordingProcessor = {
                   });
                 }
               }
-              if (scheduleWasReused) {
+              if (scheduleWasReused && !disputeHeldReuse) {
                 // The reused row can be a LEGACY outbound-review booking
                 // (created pending before the 2026-08-11 hold removal): the
                 // reuse branches convert its lead and the replay repair arms
@@ -14562,6 +15556,79 @@ const CallRecordingProcessor = {
               // rows are corrected by the office (or a dedicated backfill).
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
+              // The RETAINED visit's id rides on the open card: an Accept of
+              // the on-file number must direct staff to correct that live
+              // appointment's address, never to book a second one beside it
+              // (codex r29 P1). Under the triage-call lock, in its own
+              // transaction; best-effort. A helper, so the ATTACHED manual
+              // reuse (which takes the earlier replay branch) stamps it too
+              // (codex r38 P1).
+              const noteRetainedVisit = async () => {
+                // The RETAINED visit's id rides on the open card: an Accept
+                // of the on-file number must direct staff to correct that
+                // live appointment's address, never to book a second one
+                // beside it (codex r29 P1). Under the triage-call lock, in
+                // its own transaction; best-effort.
+                await db.transaction(async (ttrx) => {
+                  await lockTriageCall(ttrx, call.id);
+                  // A superseded worker (a force-reprocess replaced the
+                  // processing token) leaves the current card untouched
+                  // (codex r38 P1).
+                  const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+                  if (!stillOwner) return;
+                  const noted = await ttrx('triage_items')
+                    .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+                    .whereIn('status', ['open', 'in_progress'])
+                    .update({
+                      payload: ttrx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retained_service_id: svc.id })]),
+                      updated_at: new Date(),
+                    });
+                  // The card was settled between the reuse commit and this
+                  // stamp: the settlement filed its recovery task without
+                  // knowing about the retained visit, so the visit is merged
+                  // onto that task instead — never a "book another" task
+                  // beside a live appointment (codex r30 P1).
+                  if (!noted) {
+                    // A standing task already carrying the DENIAL subtype keeps
+                    // its cancel-or-review instructions — only the visit id is
+                    // attached; every other standing task takes the correction
+                    // subtype (codex r38 P1).
+                    const merged = await ttrx('triage_items')
+                      .where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })
+                      .whereIn('status', ['open', 'in_progress'])
+                      .update({
+                        payload: ttrx.raw(
+                          "CASE WHEN COALESCE(payload->>'skipped_reason', '') = 'retained_visit_review_after_denial' "
+                          + "THEN COALESCE(payload, '{}'::jsonb) || ?::jsonb "
+                          + "ELSE COALESCE(payload, '{}'::jsonb) || ?::jsonb END",
+                          [JSON.stringify({ retained_service_id: svc.id }), JSON.stringify({ retained_service_id: svc.id, skipped_reason: 'address_correction_needed_on_retained_visit' })],
+                        ),
+                        summary: ttrx.raw(
+                          "CASE WHEN COALESCE(payload->>'skipped_reason', '') = 'retained_visit_review_after_denial' THEN summary ELSE ? END",
+                          [`Address confirmed on file after a house-number dispute — the retained appointment (visit ${svc.id}) still carries the disputed number; correct its address, do not book a second one`],
+                        ),
+                        updated_at: new Date(),
+                      });
+                    // No open task either (the card was DENIED between the
+                    // reuse commit and this stamp, so the settlement filed
+                    // nothing): the live retained visit still needs explicit
+                    // cancel-or-review work — never silently left scheduled
+                    // (codex r37 P1).
+                    if (!merged) {
+                      await ttrx('triage_items')
+                        .insert(buildTriageItem({
+                          callLogId: call.id,
+                          flag: 'auto_booking_skipped_after_approval',
+                          extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
+                          severity: 'advisory',
+                          extraPayload: { skipped_reason: 'retained_visit_review_after_denial', retained_service_id: svc.id, dispute_customer_id: customerId ? String(customerId) : null },
+                        }))
+                        .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                        .ignore();
+                    }
+                  }
+                }).catch((noteErr) => logger.warn(`[call-proc] retained visit not noted on the conflict card for ${maskSid(callSid)}: ${noteErr.code || noteErr.name || 'db_error'}`));
+              };
               if (!scheduleWasReused) {
                 logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
                 await registerScheduleSideEffects({
@@ -14572,6 +15639,7 @@ const CallRecordingProcessor = {
                   serviceType: svc.service_type,
                 });
               } else if (attachedManualBookingId) {
+                if (disputeHeldReuse) await noteRetainedVisit();
                 // ATTACH reuse (call attached to a manually created booking):
                 // that booking owns its own reminder registration — only the
                 // fast redemption must re-run (Codex #3178 r37 P2) or a
@@ -14602,6 +15670,16 @@ const CallRecordingProcessor = {
                 } catch (replayErr) {
                   logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
                 }
+              } else if (disputeHeldReuse) {
+                // A reused AI booking held on a house-number dispute gets NO
+                // replay repair: registerScheduleSideEffects re-arms the
+                // confirmation SMS / email and reminders, and no confirmation
+                // may reach the customer while the address is unresolved
+                // and the technician was just pulled (codex r9 P1). The
+                // office re-arms them from the card once the number is
+                // confirmed.
+                logger.warn(`[call-proc] replay repairs skipped for reused booking ${svc.id} (${maskSid(callSid)}): house number disputed`);
+                await noteRetainedVisit();
               } else {
                 // Same-key REPLAY of this call's OWN still-live booking
                 // (idempotency conflict): the first attempt committed the
@@ -15004,12 +16082,18 @@ const CallRecordingProcessor = {
                   }
                 }
               }
-              if (attachedManualBookingId && attachSkippedFollowUpPlan) {
+              if ((attachedManualBookingId && attachSkippedFollowUpPlan) || disputeSkippedFollowUpPlan) {
                 // The call promised a follow-up treatment, but the primary is
                 // a human's booking so no AI child was created (a manually
                 // planned visit 2 would be a standalone row the child-dedup
                 // guard can't see). Surface it — visit 2 is booked by hand.
-                await db('triage_items')
+                // Serialized with the triage routes' per-call lock (the same
+                // lock transitionCore takes) so a refresh cannot interleave
+                // with a version-bound Resolve of the standing card (pre-push
+                // audit P1 after r27).
+                await db.transaction(async (ttrx) => {
+                  await require('../utils/triage-locks').lockTriageCall(ttrx, call.id);
+                  await ttrx('triage_items')
                   .insert(buildTriageItem({
                     callLogId: call.id,
                     flag: 'attached_booking_followup_unbooked',
@@ -15019,11 +16103,29 @@ const CallRecordingProcessor = {
                       scheduled_service_id: svc.id,
                       scheduled_date: svc.scheduled_date || null,
                       service: svc.service_type || null,
+                      ...(disputeSkippedFollowUpPlan ? { skipped_reason: 'house_number_disputed' } : {}),
+                      // WHEN visit 2 was promised, so the card shows the
+                      // date and window, not just that it is owed (codex
+                      // r22 P1).
+                      ...((typeof callFollowUpPlan !== 'undefined' && callFollowUpPlan)
+                        ? { follow_up_plan: { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null } }
+                        : {}),
                     },
                   }))
-                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                  .ignore()
-                  .catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+                  // A standing (open OR claimed) card is refreshed with the
+                  // CURRENT promised plan rather than left stale: a
+                  // force-reprocess that moved visit 2's date or window
+                  // must reach the staff who book it by hand (codex r27
+                  // P1). Payload merged, so nothing it recorded is lost.
+                  .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .merge({
+                    payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                    summary: ttrx.raw('EXCLUDED.summary'),
+                    updated_at: new Date(),
+                  });
+                // Code/name only: a knex message embeds the bound payload,
+                // which carries the call's address (pre-push audit P1).
+                }).catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`));
               }
               }
               if (followUpCreated) {
@@ -15084,7 +16186,10 @@ const CallRecordingProcessor = {
           // saved-method auto-secure, dedup, one-text-ever, the email leg
           // riding a confirmed text) and is idempotent on reused/attached
           // rows. Dark until APPOINTMENT_CARD_REQUEST + the template flip.
-          if (scheduledServiceId && !v2SmsBlocked && !holdImpliedSmsLeg) {
+          // Neither card-request path runs for a dispute-held reuse: no
+          // "secure your appointment" link and no auto-secure while the
+          // address is unresolved (codex r11 P1).
+          if (scheduledServiceId && !disputeHeldReuse && !v2SmsBlocked && !holdImpliedSmsLeg) {
             // Durable clearance record (codex #3234 r3): this exact guard IS
             // the call-level SMS clearance decision, and nothing else
             // persists it — the pre-visit card backstop keys on this stamp
@@ -15117,7 +16222,7 @@ const CallRecordingProcessor = {
             } catch (cardErr) {
               logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
             }
-          } else if (scheduledServiceId) {
+          } else if (scheduledServiceId && !disputeHeldReuse) {
             // No call-level SMS clearance (TCPA gate blocked, or the
             // implied-consent leg is held): run ONLY the funnel's
             // non-messaging side — the policy exemption + saved-card
@@ -15794,33 +16899,114 @@ const CallRecordingProcessor = {
     // opened. Every approved-but-unbooked confirmed call now opens ONE
     // blocking review card and corrects the route decision's recorded action
     // + forward-audit pointer.
+    // Shadow / legacy mode has no approved-but-unbooked fallback of its own:
+    // when the house-number hold landed WITHOUT its conflict card (a thrown
+    // property lookup or card write, a lost claim) and the confirmed
+    // appointment was not booked, this is the call's only scheduling trace
+    // (codex r9 P2). Enforce mode files through the block below.
+    if (!CALL_EXTRACTION_V2_DRIVES_ROUTING && houseNumberDisputed && (!houseNumberConflictFiled || disputeClaimedUnrecorded)
+      && extracted.appointment_confirmed && !appointmentResult?.scheduledServiceId) {
+      try {
+        // Under the triage-call lock (the lock every verdict / Resolve
+        // takes): a refresh must not slip between an action's version check
+        // and its status write, or the newer appointment evidence closes
+        // unreviewed (codex r31 P1).
+        await db.transaction(async (ttrx) => {
+          await lockTriageCall(ttrx, call.id);
+          // A superseded worker leaves the current task untouched (codex r38 P1).
+          const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+          if (!stillOwner) return;
+          await ttrx('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'auto_booking_skipped_after_approval',
+              // The booking-authority snapshot (legacy in shadow mode), never
+              // a V2 blob that may say 'none' (codex r11 P1).
+              extraction: disputeSchedulingAuthority || v2CanonicalExtraction || undefined,
+              extraPayload: {
+                skipped_reason: 'house_number_dispute_card_unfiled',
+                preferred_date_time: extracted.preferred_date_time || null,
+                service: extracted.matched_service || extracted.requested_service || null,
+                // Same re-binding on the shadow-mode fallback (codex r38 P1).
+                dispute_customer_id: customerId ? String(customerId) : null,
+                retained_service_id: null,
+                retained_scheduled_date: null,
+              },
+            }))
+            // A standing task (open OR claimed) is REFRESHED with the current
+            // service / window rather than left stale — the same merge the
+            // settlement path applies (codex r20 P1).
+            .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .merge({
+              payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+              summary: ttrx.raw('EXCLUDED.summary'),
+              updated_at: new Date(),
+            });
+        });
+      } catch (fallbackErr) {
+        logger.warn(`[call-proc] shadow-mode dispute fallback card failed for ${maskSid(callSid)}: ${fallbackErr.code || fallbackErr.name || 'db_error'}`);
+      }
+    }
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
       const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch']);
+      // The house-number hold has its own card only when that card actually
+      // landed (a thrown insert or a lost claim holds the booking without
+      // one) — otherwise the fallback card below is the call's only
+      // scheduling trace and must file (pre-push audit P1).
+      if (houseNumberConflictFiled && !disputeClaimedUnrecorded) heldReasons.add('on_file_house_number_conflict');
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError
           || appointmentResult?.error
           || (!customerId ? 'booked_call_without_customer' : 'auto_booking_not_created');
         try {
-          await db('triage_items')
-            .insert(buildTriageItem({
-              callLogId: call.id,
-              flag: 'auto_booking_skipped_after_approval',
-              extraction: v2ApprovedExtraction,
-              extraPayload: {
-                skipped_reason: String(skipReason).slice(0, 300),
-                missing_fields: appointmentResult?.missingFields || null,
-                existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
-                preferred_date_time: extracted.preferred_date_time || null,
-                service: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
-              },
-            }))
-            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-            .ignore();
+          // A standing task (open OR claimed) is REFRESHED with the current
+          // service / window under the triage-call lock, as the shadow-mode
+          // fallback does: a claimed conflict card that cannot record a newly
+          // confirmed ask routes it here, and an ignored conflict would
+          // discard that ask (codex r33 P1). Payload merged, status kept.
+          await db.transaction(async (ttrx) => {
+            await lockTriageCall(ttrx, call.id);
+            // A superseded worker leaves the current task untouched (codex r38 P1).
+            const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+            if (!stillOwner) return;
+            await ttrx('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'auto_booking_skipped_after_approval',
+                extraction: v2ApprovedExtraction,
+                extraPayload: {
+                  skipped_reason: String(skipReason).slice(0, 300),
+                  missing_fields: appointmentResult?.missingFields || null,
+                  existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
+                  preferred_date_time: extracted.preferred_date_time || null,
+                  service: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
+                  // A refresh re-binds the task to the call's CURRENT customer
+                  // and drops customer-specific retained-visit evidence, so a
+                  // relink → reprocess → verdict sequence completes instead of
+                  // 409ing forever (codex r38 P1).
+                  dispute_customer_id: customerId ? String(customerId) : null,
+                  retained_service_id: null,
+                  retained_scheduled_date: null,
+                },
+              }))
+              .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .merge({
+                payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                summary: ttrx.raw('EXCLUDED.summary'),
+                updated_at: new Date(),
+              });
+          });
+          // The task rides the call's review state like the conflict card
+          // would have: review_status and the lead's confirm-before-dispatch
+          // note derive from this list, not from open triage rows (codex
+          // r36 P2).
+          if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
         } catch (skipTriageErr) {
-          logger.warn(`[call-proc] skip-triage insert failed for ${maskSid(callSid)}: ${skipTriageErr.message}`);
+          // Code/name only — the bound payload carries the call's address.
+          logger.warn(`[call-proc] skip-triage insert failed for ${maskSid(callSid)}: ${skipTriageErr.code || skipTriageErr.name || 'db_error'}`);
         }
       }
       try {
@@ -16500,6 +17686,14 @@ const CallRecordingProcessor = {
         // shadow decision must hold exactly where enforce would hold, or
         // rollout metrics overstate safe fail-open bookings.
         routingResult = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);
+        // …and the house-number hold this pass actually applied (codex r38
+        // P1): a call whose legacy booking was HELD must not be persisted as
+        // a shadow auto-route candidate, or the promotion cohort counts an
+        // unsafe case as ready for enforcement.
+        if (houseNumberDisputed === true && routingResult?.allowed) {
+          routingResult = { ...routingResult, allowed: false, houseNumberDisputed: true };
+          if (!finalFlags.includes('on_file_house_number_conflict')) finalFlags = [...finalFlags, 'on_file_house_number_conflict'];
+        }
 
         if (!CALL_EXTRACTION_V2_DRIVES_ROUTING) {
           const shadowDecision = buildRouteDecision({
@@ -17644,7 +18838,23 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 // Place tail budget: leaves ≥ 255 − 100 (unit) − 80 − separators ≈ 70 chars of street.
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
+// The legacy (pre-V2-routing) dispute snapshot's service intent, read from
+// the resolved service NAME with the one inspection vocabulary the
+// settlement's cadence rule reads (triage-auto-resolve.isInspection):
+// an inspection ask is answered only by an inspection booking, a
+// treatment ask only by a treatment (codex #4666 r25 P1).
+function legacyDisputeServiceIntent(extracted) {
+  const { isInspection } = require('./triage-auto-resolve');
+  // The RESOLVED service decides; the caller's own words only when the
+  // catalog resolved nothing — a treatment requested after a prior
+  // inspection must not read as an inspection ask (codex r37 P2).
+  const resolved = String(extracted?.matched_service || '').trim();
+  const words = resolved || [extracted?.specific_service_name, extracted?.requested_service].filter(Boolean).join(' ');
+  return isInspection(words) ? 'inspection_only' : 'active_infestation_treatment';
+}
+
 CallRecordingProcessor._test = {
+  legacyDisputeServiceIntent,
   backfillLinkedCustomerFromExtraction,
   prelinkedBackfillGate,
   thirdPartyCallNatureFromV2,
@@ -17653,6 +18863,12 @@ CallRecordingProcessor._test = {
   finalizeTechFollowUpCall,
   recordCommitmentsStep,
   applyCallRescheduleStep,
+  applyRescheduleFollowUps,
+  reviseDispositionAfterAppliedMove,
+  hasIndependentCallbackObligation,
+  rescheduleWasDurablyApplied,
+  resolvesRescheduleAsk,
+  writeCallDisposition,
   recordedPartOfComposite,
   summarizeBatch,
   noteSharedPhoneSibling,
@@ -17788,3 +19004,4 @@ CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
 CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 
 module.exports = CallRecordingProcessor;
+// Pure decision helper, exported for its unit test.

@@ -139,6 +139,7 @@ beforeEach(() => {
   updates.length = 0;
   queues = {};
   for (const key of Object.keys(mockGates)) delete mockGates[key];
+  mockGates.smsGratitudeReplies = false;
   db.mockImplementation((table) => {
     const cfg = (queues[table] || []).shift() || {};
     return makeBuilder(table, cfg);

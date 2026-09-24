@@ -4,10 +4,18 @@
 describe('model-switchboard', () => {
   let sb;
   let MODELS;
+  // The image lane reads ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS at load:
+  // default-policy assertions must not inherit an operator's override, and it
+  // is handed back afterwards so the suite is environment-independent.
+  const ORIGINAL_OVERRIDE = process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
   beforeEach(() => {
+    delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
     jest.resetModules();
     MODELS = require('../config/models');
     sb = require('../services/model-switchboard');
+  });
+  afterAll(() => {
+    if (ORIGINAL_OVERRIDE === undefined) delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; else process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = ORIGINAL_OVERRIDE;
   });
 
   it('every selector names a real registry export with a model id', () => {
@@ -82,13 +90,15 @@ describe('model-switchboard', () => {
       expect(balanced.current).toBe('gpt-9.9-alias');
       expect(balanced.unpinnedModel).toBe(require('../config/models').DEFAULTS.OPENAI_BALANCED);
       // Both aliases set: deleting the active one lands on the next, not the code default.
-      const sat = lanes.find((l) => l.id === 'satellite').also[0];
+      // Satellite's OpenAI leg is the ladder's last-resort `retry` rung (owner
+      // ruling 2026-09-24: Gemini → Claude → OpenAI, no more parallel `also`).
+      const sat = lanes.find((l) => l.id === 'satellite').retry;
       expect(sat.pinEnv).toBe('OPENAI_VISION_MODEL');
       expect(sat.setEnv).toBe('OPENAI_VISION_MODEL');
       expect(sat.unpinnedModel).toBe('gpt-9.9-generic');
       delete process.env.OPENAI_VISION_MODEL;
       jest.resetModules();
-      const sat2 = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'satellite').also[0];
+      const sat2 = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'satellite').retry;
       expect(sat2.pinned).toBe(true);
       expect(sat2.setEnv).toBe('OPENAI_MODEL');
       expect(sat2.unpinnedModel).toBe('gpt-5-mini');
@@ -159,6 +169,26 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('completion captions follow the shared GEMINI_VISION_MODEL pin like the other photo lanes', () => {
+    jest.resetModules();
+    const prev = process.env.GEMINI_VISION_MODEL;
+    process.env.GEMINI_VISION_MODEL = 'gemini-pinned-rollback';
+    try {
+      const fresh = require('../services/model-switchboard');
+      const { lanes } = fresh.getSwitchboard();
+      const captions = lanes.find((l) => l.id === 'photo_scoring');
+      const lawn = lanes.find((l) => l.id === 'lawn_assess');
+      expect(captions.primary.model).toBe('gemini-pinned-rollback');
+      expect(captions.primary.pinned).toBe(true);
+      expect(captions.primary.pinEnv).toBe('GEMINI_VISION_MODEL');
+      expect(captions.primary.selector).toBe(lawn.primary.selector);
+      // The running policy agrees with what the tab reports.
+      expect(require('../config/models').TEXT_POLICIES.photoCaptions.primary.model).toBe('gemini-pinned-rollback');
+    } finally {
+      if (prev === undefined) delete process.env.GEMINI_VISION_MODEL; else process.env.GEMINI_VISION_MODEL = prev;
+    }
+  });
+
   it('models the registry alias: OPENAI_SMS_DRAFT follows OPENAI_FAST until set', () => {
     const { selectors } = sb.getSwitchboard();
     const smsDraft = selectors.find((s) => s.key === 'OPENAI_SMS_DRAFT');
@@ -192,26 +222,28 @@ describe('model-switchboard', () => {
     }
   });
 
-  it('photo lanes hide the Gemini retry leg while it resolves to the same model, and the fan-outs carry their OpenAI arm', () => {
+  it('photo ladders hide the Gemini retry leg while it resolves to the same model; satellite\'s OpenAI rung is a last resort, not a fan-out arm', () => {
     // Registry default: GEMINI_VISION_FALLBACK equals GEMINI_VISION_BEST, and every
     // ladder skips the retry rung when the two ids match — the card must not
     // show Gemini 3.8 as its own retry.
     expect(MODELS.GEMINI_VISION_FALLBACK).toBe(MODELS.GEMINI_VISION_BEST);
     const { lanes } = sb.getSwitchboard();
-    const pest = lanes.find((l) => l.id === 'pest_id');
-    expect(pest.fallback.selector).toBe('GEMINI_VISION_BEST');
-    // The retry leg stays in the payload (its selector still moves the lane —
-    // re-pinning GEMINI_VISION_FALLBACK_MODEL re-arms it) but is marked skipped.
-    expect(pest.retry.selector).toBe('GEMINI_VISION_FALLBACK');
-    expect(pest.retry.skipped).toBe(true);
     const sat = lanes.find((l) => l.id === 'satellite');
-    expect(sat.retry.skipped).toBe(true);
-    expect(sat.also.map((a) => a.pinEnv)).toEqual(['OPENAI_VISION_MODEL']);
-    expect(sat.also[0].provider).toBe('openai');
+    // Owner ruling 2026-09-24: Gemini → Claude → OpenAI, stopping at the
+    // first schema-valid result — no more three-way parallel fan-out.
+    expect(sat.fanout).toBe(false);
+    expect(sat.primary.provider).toBe('gemini');
+    expect(sat.fallback.selector).toBe('FLAGSHIP');
+    expect(sat.also).toEqual([]);
+    expect(sat.retry.pinEnv).toBe('OPENAI_VISION_MODEL');
+    expect(sat.retry.provider).toBe('openai');
     expect(lanes.find((l) => l.id === 'property_trio').also[0].pinEnv).toBe('OPENAI_PROPERTY_MODEL');
-    // The caption read and the treatment-zone map are sequential ladders in
-    // execution order (Gemini → Claude with the Gemini retry skipped), not fan-outs.
-    for (const id of ['tech_caption_vision', 'treatment_zone']) {
+    // pest_id, tree_shrub, the caption read, and the treatment-zone map are all
+    // sequential ladders in execution order (Gemini → the prior Gemini model →
+    // Claude, with the Gemini retry skipped since it resolves to the same
+    // model), not fan-outs — pest_id/tree_shrub moved off the Claude+Gemini
+    // fan-out shape under the same 2026-09-24 owner ruling as satellite.
+    for (const id of ['pest_id', 'tree_shrub', 'tech_caption_vision', 'treatment_zone']) {
       const ladder = lanes.find((l) => l.id === id);
       expect({ id, fanout: ladder.fanout, primary: ladder.primary.provider, fallback: ladder.fallback.selector, fallbackSkipped: ladder.fallback.skipped, retry: ladder.retry.selector })
         .toEqual({ id, fanout: false, primary: 'gemini', fallback: 'GEMINI_VISION_FALLBACK', fallbackSkipped: true, retry: 'VISION' });
@@ -241,14 +273,13 @@ describe('model-switchboard', () => {
       process.env.GEMINI_VISION_FALLBACK_MODEL = 'gemini-9.9-prior';
       jest.resetModules();
       const { lanes } = require('../services/model-switchboard').getSwitchboard();
-      const pest = lanes.find((l) => l.id === 'pest_id');
-      expect(pest.retry.model).toBe('gemini-9.9-prior');
-      expect(pest.retry.selector).toBe('GEMINI_VISION_FALLBACK');
-      expect(pest.retry.skipped).toBeUndefined();
-      for (const id of ['tech_caption_vision', 'treatment_zone']) {
+      // pest_id and tree_shrub moved onto the same Gemini→prior-Gemini→Claude
+      // ladder shape as tech_caption_vision/treatment_zone (owner ruling
+      // 2026-09-24) — the Gemini retry now lives in `fallback`, not `retry`.
+      for (const id of ['pest_id', 'tree_shrub', 'tech_caption_vision', 'treatment_zone']) {
         const ladder = lanes.find((l) => l.id === id);
-        expect({ id, fallback: ladder.fallback.selector, fallbackSkipped: ladder.fallback.skipped, retry: ladder.retry.selector })
-          .toEqual({ id, fallback: 'GEMINI_VISION_FALLBACK', fallbackSkipped: undefined, retry: 'VISION' });
+        expect({ id, fallback: ladder.fallback.model, fallbackSelector: ladder.fallback.selector, fallbackSkipped: ladder.fallback.skipped, retry: ladder.retry.selector })
+          .toEqual({ id, fallback: 'gemini-9.9-prior', fallbackSelector: 'GEMINI_VISION_FALLBACK', fallbackSkipped: undefined, retry: 'VISION' });
       }
     } finally {
       if (prev === undefined) delete process.env.GEMINI_VISION_FALLBACK_MODEL; else process.env.GEMINI_VISION_FALLBACK_MODEL = prev;
@@ -293,11 +324,13 @@ describe('model-switchboard', () => {
   it('the image lane resolves BLOG_IMAGE_PROVIDER as a chain: first valid slug, literal when none is valid', () => {
     const prev = process.env.BLOG_IMAGE_PROVIDER;
     try {
-      process.env.BLOG_IMAGE_PROVIDER = 'gemini-image-best, gpt-image-2';
+      // A Gemini slug in the env chain is dropped (SynthID pixel watermark,
+      // owner 2026-09-24), so the first VALID leg is the OpenAI one after it.
+      process.env.BLOG_IMAGE_PROVIDER = 'gemini-image-best, gpt-image-1.5';
       jest.resetModules();
       let lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
-      expect(lane.primary.model).toBe(MODELS.GEMINI_IMAGE_BEST);
-      expect(lane.primary.provider).toBe('gemini');
+      expect(lane.primary.model).toBe('gpt-image-1.5');
+      expect(lane.primary.provider).toBe('openai');
       expect(lane.primary.setEnv).toBe('BLOG_IMAGE_PROVIDER');
 
       process.env.BLOG_IMAGE_PROVIDER = 'not-a-provider';
@@ -309,11 +342,35 @@ describe('model-switchboard', () => {
     }
   });
 
-  it('the image lane exposes the Nano Banana Pro selector and reports it as the chain\'s second leg (Codex r1 P2 on #3964)', () => {
+  it('the image lane is OpenAI-only: fallback gpt-image-1.5, Nano Banana Pro selector kept but marked unreachable (owner 2026-09-24)', () => {
     expect(sb.SELECTORS.find((s) => s.key === 'GEMINI_IMAGE_PRO')).toMatchObject({ env: 'MODEL_GEMINI_IMAGE_PRO', accepts: { providers: ['gemini'], cap: 'image' } });
+    expect(sb.SELECTORS.find((s) => s.key === 'GEMINI_IMAGE_PRO').description).toMatch(/SynthID/);
     const lane = sb.getSwitchboard().lanes.find((l) => l.id === 'image_gen');
-    expect(lane.fallback.model).toBe(MODELS.GEMINI_IMAGE_PRO);
-    expect(lane.note).toMatch(/gpt-image-2 → GEMINI_IMAGE_PRO → gpt-image-1\.5/);
+    expect(lane.fallback.model).toBe('gpt-image-1.5');
+    expect(lane.fallback.provider).toBe('openai');
+    expect(lane.note).toMatch(/gpt-image-2 → gpt-image-1\.5 → gpt-image-1/);
+  });
+
+  it('with ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true the image lane reports the restored Gemini backup (Codex r3 P2 on #4717)', () => {
+    const prev = process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
+    const prevChain = process.env.BLOG_IMAGE_PROVIDER;
+    try {
+      delete process.env.BLOG_IMAGE_PROVIDER;
+      process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = 'true';
+      jest.resetModules();
+      let lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+      expect(lane.primary.model).toBe('gpt-image-2');
+      expect(lane.fallback.model).toBe(MODELS.GEMINI_IMAGE_PRO);
+      expect(lane.fallback.provider).toBe('gemini');
+      delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
+      jest.resetModules();
+      lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+      expect(lane.fallback.model).toBe('gpt-image-1.5');
+    } finally {
+      if (prev === undefined) delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; else process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = prev;
+      if (prevChain === undefined) delete process.env.BLOG_IMAGE_PROVIDER; else process.env.BLOG_IMAGE_PROVIDER = prevChain;
+      jest.resetModules();
+    }
   });
 
   it('locks the lanes a generic picker must not move', () => {

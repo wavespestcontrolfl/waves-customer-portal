@@ -142,13 +142,14 @@ async function deleteFile({ path, message, branch, sha }) {
 //
 // Return shape matches what publish callers read off putFile:
 // `{ commit: { sha } }`.
-async function commitFiles({ branch, message, files = [], deletes = [] }) {
+async function commitFiles({ branch, message, files = [], deletes = [], expectedHeadSha = null }) {
   const { owner, repo } = env();
   if (!branch) throw new Error('commitFiles requires branch');
   if (!files.length && !deletes.length) throw new Error('commitFiles requires at least one file or delete');
 
   const headSha = await getBranchSha(branch);
   if (!headSha) throw new Error(`branch not found: ${branch}`);
+  if (expectedHeadSha && headSha !== expectedHeadSha) throw new Error('branch changed since content was reviewed');
   const baseCommit = await ghFetch(`/repos/${owner}/${repo}/git/commits/${headSha}`);
   const baseTreeSha = baseCommit?.tree?.sha;
   if (!baseTreeSha) throw new Error(`could not resolve tree for ${branch}@${headSha}`);
@@ -262,8 +263,179 @@ async function listPrReviewComments(number) {
   return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/comments`);
 }
 
-async function mergePr(number, { method = 'squash', title, message, sha } = {}) {
+function baseMovedError(number, baseRef, detail) {
+  const moved = new Error(`PR #${number}: base ${baseRef} moved or is unavailable; re-verify before merge${detail ? ` (${detail})` : ''}`);
+  moved.code = 'BLOG_BASE_MOVED';
+  return moved;
+}
+
+// Atomic base-bound merge — used when a caller supplies `verifyPaths` (the
+// editorial-evidence gate's signed articles and sidecars). The
+// merge endpoint pins the PR HEAD (`sha` in the PUT body, 409 on mismatch)
+// but has no equivalent base precondition: a plain re-read-then-PUT leaves a
+// window where the Astro repo's main can move between the read and GitHub
+// processing the PUT, and the merge would land on a base the caller never
+// checked. Instead of the endpoint, drive the git data API directly so the
+// base check IS the merge:
+//   1. re-read the PR — base/head/mergeable must match what was gated
+//   2. read GitHub's own test-merge commit and require its parents are
+//      exactly [base, head] (proves it isn't stale)
+//   3. optionally verify specific paths resolve to the same blob at the
+//      test merge as at head (proves the base's own edits, if any, didn't
+//      touch the signed bytes)
+//   4. create a real merge commit from the verified tree
+//   5. fast-forward-only PATCH the base ref onto it — force:false makes
+//      this PATCH the atomic compare-and-swap: it 422s if base moved.
+// Trade-off: the merge endpoint's head pin is not reproduced — a push landing
+// between step 1 and step 5 does not stop the ref update. What lands is still
+// exactly the verified, signed head; settleAdvancedHead leaves the PR open and
+// comments that the later commit was not published.
+// Any inconsistency throws the same retryable BLOG_BASE_MOVED code the old
+// pre-check used, so callers that already treat that code as "re-verify
+// next tick" need no changes.
+//
+// Steps below are split into small, single-purpose helpers (each under the
+// eslint complexity cap) — behavior is identical to the inlined original.
+async function mergePrAtomic(number, { title, message, sha, expectBaseSha, baseRef, verifyPaths }) {
   const { owner, repo } = env();
+  const headSha = String(sha || '');
+  if (!headSha) throw new Error('mergePr: sha (head) is required when expectBaseSha is supplied');
+
+  const current = await assertMergeablePrSnapshot(number, { headSha, expectBaseSha, baseRef });
+  const treeSha = await assertVerifiedTestMerge(number, {
+    owner, repo, expectBaseSha, headSha, baseRef, mergeCommitSha: current.merge_commit_sha,
+  });
+  await assertVerifiedPaths(number, { verifyPaths, mergeCommitSha: current.merge_commit_sha, headSha, baseRef });
+  const newSha = await createAndFastForward(number, { owner, repo, title, message, treeSha, expectBaseSha, headSha, baseRef });
+
+  return settleAdvancedHead(number, headSha, newSha);
+}
+
+// 1. Re-read the PR: base/head/mergeable must match exactly what the caller
+// gated, and GitHub must already have computed a test-merge commit — else
+// there is nothing trustworthy to build the real merge from yet. Returns the
+// fresh PR (its merge_commit_sha feeds the next step).
+async function assertMergeablePrSnapshot(number, { headSha, expectBaseSha, baseRef }) {
+  const current = await getPr(number);
+  const currentBaseSha = String(current?.base?.sha || '').toLowerCase();
+  const currentBaseRef = String(current?.base?.ref || '');
+  const currentHeadSha = String(current?.head?.sha || '').toLowerCase();
+  if (current?.state !== 'open' || currentBaseRef !== baseRef
+      || !currentBaseSha || currentBaseSha !== String(expectBaseSha).toLowerCase()
+      || currentHeadSha !== headSha.toLowerCase()) {
+    throw baseMovedError(number, baseRef, 'base/head moved since gating');
+  }
+  // mergeable is computed async by GitHub and is null while pending, false
+  // on conflicts — either way there is no trustworthy test-merge commit yet.
+  // Retryable: the next tick re-reads a (by then) settled value.
+  if (current.mergeable !== true || !current.merge_commit_sha) {
+    throw baseMovedError(number, baseRef, `PR not cleanly mergeable (mergeable=${current.mergeable})`);
+  }
+  return current;
+}
+
+// 2. GitHub's own test-merge commit proves the merge isn't stale: its
+// parents must be exactly [base, head] as gated. Returns its tree sha, which
+// the real merge commit reuses verbatim.
+async function assertVerifiedTestMerge(number, { owner, repo, expectBaseSha, headSha, baseRef, mergeCommitSha }) {
+  const testMerge = await ghFetch(`/repos/${owner}/${repo}/git/commits/${mergeCommitSha}`);
+  const parents = Array.isArray(testMerge?.parents) ? testMerge.parents.map((p) => String(p?.sha || '').toLowerCase()) : [];
+  if (parents.length !== 2 || parents[0] !== String(expectBaseSha).toLowerCase() || parents[1] !== headSha.toLowerCase()) {
+    throw baseMovedError(number, baseRef, 'GitHub test-merge commit is stale');
+  }
+  const treeSha = testMerge?.tree?.sha;
+  if (!treeSha) throw baseMovedError(number, baseRef, 'GitHub test-merge commit has no tree');
+  return treeSha;
+}
+
+// 3. Each verified path (signed editorial articles + sidecars) must resolve
+// to the same blob at the test merge as at head — proves the base's own
+// edits, if any, didn't touch the signed bytes. No-op when verifyPaths is
+// empty/undefined.
+async function assertVerifiedPaths(number, { verifyPaths, mergeCommitSha, headSha, baseRef }) {
+  for (const path of verifyPaths || []) {
+    const [atMerge, atHead] = await Promise.all([
+      getFile(path, mergeCommitSha),
+      getFile(path, headSha),
+    ]);
+    const absentAtBoth = atMerge === null && atHead === null;
+    const sameBlob = typeof atMerge?.sha === 'string' && atMerge.sha && atMerge.sha === atHead?.sha;
+    if (!absentAtBoth && !sameBlob) throw baseMovedError(number, baseRef, `verified path changed by the merge: ${path}`);
+  }
+}
+
+// 4–5. Create the real merge commit from the verified tree, then
+// fast-forward-only PATCH the base ref onto it — force:false IS the atomic
+// compare-and-swap (422 if base moved). Returns the new commit sha.
+async function createAndFastForward(number, { owner, repo, title, message, treeSha, expectBaseSha, headSha, baseRef }) {
+  const commitMessage = [title, message].filter(Boolean).join('\n\n') || `Merge pull request #${number}`;
+  const newCommit = await ghFetch(`/repos/${owner}/${repo}/git/commits`, {
+    method: 'POST',
+    body: { message: commitMessage, tree: treeSha, parents: [expectBaseSha, headSha] },
+  });
+  const newSha = newCommit?.sha;
+  if (!newSha) throw new Error(`PR #${number}: failed to create merge commit`);
+
+  try {
+    await ghFetch(`/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(baseRef)}`, {
+      method: 'PATCH',
+      body: { sha: newSha, force: false },
+    });
+  } catch (err) {
+    if (Number(err?.status) === 422) {
+      // 422 means "not a fast-forward" — but it's also what a retried PATCH
+      // sees if an EARLIER attempt already landed (ghFetch retries 5xx
+      // internally, and GitHub can 5xx after committing the update). Re-read
+      // the ref before concluding base moved: if it's already our commit,
+      // the merge went through and this is a false alarm, not base drift.
+      const refNow = await getBranchSha(baseRef);
+      if (refNow === newSha) return newSha;
+      throw baseMovedError(number, baseRef, 'main moved during merge (ref update rejected)');
+    }
+    throw err;
+  }
+  return newSha;
+}
+
+// The ref update published exactly the verified head. A push landing in the
+// merge window leaves the PR open with that later commit unpublished. Owner
+// ruling 2026-09-24: leave it open — closing a PR whose content shipped
+// makes the pollers read "closed, unmerged" — and explain on the PR.
+// Best effort: the merge already happened and must still be reported.
+async function settleAdvancedHead(number, headSha, newSha) {
+  const result = { sha: newSha, merged: true };
+  try {
+    const after = await getPr(number);
+    const afterHead = String(after?.head?.sha || '').toLowerCase();
+    if (after?.state !== 'open' || !afterHead || afterHead === headSha.toLowerCase()) return result;
+    result.headAdvanced = afterHead;
+    logger.warn(`[github] PR #${number}: head advanced to ${afterHead.slice(0, 9)} during merge; published verified head ${headSha.slice(0, 9)}`);
+    await createIssueComment(number, `Merged the verified head ${headSha.slice(0, 9)} as ${newSha.slice(0, 9)}. Commit ${afterHead.slice(0, 9)} arrived during the merge and was NOT published; it remains on this PR and needs its own review before it can ship.`);
+  } catch (err) {
+    logger.warn(`[github] PR #${number}: post-merge head check failed: ${err.message}`);
+  }
+  return result;
+}
+
+async function mergePr(number, { method = 'squash', title, message, sha, expectBaseSha, expectBaseRef, verifyPaths } = {}) {
+  const { owner, repo, defaultBranch } = env();
+  const baseRef = expectBaseRef || defaultBranch;
+  // Signed editorial evidence must publish exactly the verified bytes, so a
+  // caller that supplies `verifyPaths` gets the atomic merge above. Other
+  // base pins (gate-off body-image check) keep the squash endpoint behind a
+  // final PR re-read: that check guards asset reachability, not signed bytes.
+  if (expectBaseSha && Array.isArray(verifyPaths)) {
+    return mergePrAtomic(number, { title, message, sha, expectBaseSha, baseRef, verifyPaths });
+  }
+  if (expectBaseSha) {
+    const current = await getPr(number);
+    const currentBaseSha = String(current?.base?.sha || '');
+    const currentBaseRef = String(current?.base?.ref || '');
+    if (current?.state !== 'open' || currentBaseRef !== baseRef
+        || !currentBaseSha || currentBaseSha.toLowerCase() !== String(expectBaseSha).toLowerCase()) {
+      throw baseMovedError(number, baseRef);
+    }
+  }
   const body = { merge_method: method, commit_title: title, commit_message: message };
   // GitHub rejects the merge with 409 when the head no longer matches `sha`,
   // so gated checks (build/review) performed against a specific head commit

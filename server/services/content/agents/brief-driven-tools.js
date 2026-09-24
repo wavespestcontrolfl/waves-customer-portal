@@ -59,6 +59,42 @@ const getGateRetryDirectives = lazy('gate-retry-directives', '../gate-retry-dire
  * sessionDrafts[sessionId] after the agent completes.
  */
 const sessionDrafts = new Map();
+const sessionEditorial = new Map();
+async function registerSessionEditorial(sessionId, brief) {
+  const editorial = require('../editorial-evidence');
+  if (!sessionId || !editorial.enabled()) return;
+
+  const refresh = brief?.page_type === 'refresh' || brief?.action_type === 'refresh_existing_page';
+  if (!refresh && !['supporting-blog', 'customer-question'].includes(brief?.page_type)) return;
+  if (!refresh) {
+    sessionEditorial.set(sessionId, { title: brief.working_title || brief.target_keyword || '', attempts: 0, plan: null });
+    return;
+  }
+
+  // Install the fail-closed context before resolving. A missing target or a
+  // transient read failure must keep emit_draft blocked, while a positively
+  // resolved non-blog target is outside the blog editorial contract.
+  const context = { title: '', requiresExistingTitle: true, attempts: 0, plan: null,
+    targetUrl: brief.target_url || brief.page_url || null };
+  sessionEditorial.set(sessionId, context);
+  await resolveRefreshEditorialTitle(sessionId, context);
+}
+
+// Resolve the refresh target's existing title. Also retried from
+// validate_answer_plan, so a transient read failure at registration does not
+// leave the session blocked for good. Returns false once the target is known
+// to be outside the blog contract (the context is removed).
+async function resolveRefreshEditorialTitle(sessionId, context) {
+  if (!context.targetUrl) return true;
+  const existing = await executeBriefTool('get_existing_page', { page_url: context.targetUrl }, { sessionId });
+  if (!existing?.file_path) return true;
+  if (!require('../editorial-evidence').applicable(existing.file_path)) {
+    sessionEditorial.delete(sessionId);
+    return false;
+  }
+  context.title = String(existing.frontmatter?.title || existing.frontmatter?.metaTitle || '').trim();
+  return true;
+}
 
 // Routes each session was SHOWN by check_existing_content. The writer
 // prompt mandates linking the existing post when writing a differentiated
@@ -90,9 +126,68 @@ function getCheckedRoutes(sessionId) {
 
 function clearDraft(sessionId) {
   sessionDrafts.delete(sessionId);
+  sessionEditorial.delete(sessionId);
   sessionCheckedRoutes.delete(sessionId);
   sessionLintOptions.delete(sessionId);
   sessionLintAttempts.delete(sessionId);
+}
+
+// Bind the approved answer plan (validate_answer_plan) to the body emit_draft
+// actually submits — validate_answer_plan only ever reviewed the proposed
+// heading/question/answer sections, so a draft with a plan-approved TITLE
+// but different SECTIONS would otherwise capture unchecked. H2 is the
+// section unit both agent prompts describe the plan in (writer-agent-config
+// / refresh-agent-config "EDITORIAL ANSWER PLAN"); the FAQ POLICY in those
+// same prompts is the one structural H2 outside the plan (Frequently Asked
+// Questions / FAQ / Common Questions), so it's exempt rather than "extra".
+const NON_PLAN_HEADING_RE = /^(frequently asked questions|faq|common questions)$/i;
+function normalizeHeadingText(value) {
+  return String(value || '').replace(/[`*_]+/g, '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+// h2 keeps raw text (for readable directives) alongside its normalized form
+// (for comparison); all is every H2/H3 normalized, for the refresh
+// containment check below.
+function bodyHeadings(body) {
+  const h2 = [];
+  const all = [];
+  const re = /^(#{2,3})\s+(.+?)\s*$/gm;
+  let match;
+  while ((match = re.exec(String(body || '')))) {
+    const raw = String(match[2]).trim();
+    const normalized = normalizeHeadingText(raw);
+    all.push(normalized);
+    if (match[1] === '##') h2.push({ raw, normalized });
+  }
+  return { h2, all };
+}
+// New-page/rewrite drafts (the full body IS the plan) are held to the plan
+// exactly: each section a body H2, in the plan's own order, no extra
+// informational H2. A refresh only inserts up to 5 small answer-gap blocks
+// (H2 or H3) into an otherwise-untouched existing page full of pre-existing
+// headings the plan never covered (refresh-agent-config.js ANSWER-GAP MODE),
+// so it is checked for containment only: every plan section must appear
+// somewhere as a heading, order and extras unconstrained.
+function planSectionMismatch(plan, body, { partial }) {
+  const { h2, all } = bodyHeadings(body);
+  const planSections = plan.map((section) => {
+    const raw = String(section?.heading || '').trim();
+    return { raw, normalized: normalizeHeadingText(raw) };
+  });
+  if (partial) {
+    const missing = planSections.filter((section) => !all.includes(section.normalized)).map((section) => section.raw);
+    return missing.length ? { missing, extra: [] } : null;
+  }
+  const missing = [];
+  let cursor = 0;
+  for (const section of planSections) {
+    const idx = h2.findIndex((heading, index) => index >= cursor && heading.normalized === section.normalized);
+    if (idx === -1) { missing.push(section.raw); continue; }
+    cursor = idx + 1;
+  }
+  const planNormalized = planSections.map((section) => section.normalized);
+  const extra = h2.filter((heading) => !planNormalized.includes(heading.normalized) && !NON_PLAN_HEADING_RE.test(heading.normalized))
+    .map((heading) => heading.raw);
+  return (missing.length || extra.length) ? { missing, extra } : null;
 }
 
 async function executeBriefTool(toolName, input, { sessionId } = {}) {
@@ -363,10 +458,34 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       }
     }
 
+    case 'validate_answer_plan': {
+      const context = sessionEditorial.get(sessionId);
+      if (!context) return { pass: true, skipped: 'editorial_gate_not_applicable' };
+      context.plan = null;
+      if (++context.attempts > 3) return { pass: false, error: 'Answer-plan attempt budget exhausted; stop this draft.' };
+      if (context.requiresExistingTitle && !String(context.title || '').trim()) {
+        try {
+          if (!await resolveRefreshEditorialTitle(sessionId, context)) return { pass: true, skipped: 'editorial_gate_not_applicable' };
+        } catch (_) { /* transient: fall through to the retryable error below */ }
+      }
+      if (context.requiresExistingTitle && !String(context.title || '').trim()) {
+        return { pass: false, error: 'Existing page title unavailable; resolve the refresh brief target before validating the answer plan.' };
+      }
+      try {
+        const result = await require('../editorial-review').reviewPlan({ title: context.title, sections: input?.sections });
+        if (result?.pass === true) context.plan = input.sections;
+        return result;
+      } catch (_) { return { pass: false, error: 'Answer-plan reviewer unavailable; retry within the attempt budget.' }; }
+    }
+
     case 'emit_draft': {
       if (!sessionId) return { error: 'session context missing — dispatcher must pass sessionId' };
       const { frontmatter, body, schema, claims_ledger, notes_for_reviewer } = input || {};
       if (!frontmatter || !body) return { error: 'frontmatter and body required' };
+      const editorialContext = sessionEditorial.get(sessionId);
+      if (editorialContext && !editorialContext.plan) {
+        return { draft_rejected: true, directives: ['Call validate_answer_plan with each informational section question and its direct first answer. Obtain pass:true before writing and submitting the full draft.'] };
+      }
       // Deterministic pre-gate repair: strip unambiguous citation artifacts
       // (<cite> wrappers, citeturn/oaicite tokens, PUA glyphs) from every
       // publishable string at capture, so the CITATION_TOKEN_RESIDUE gate
@@ -407,6 +526,23 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         }
         if (residueStripped) {
           logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): stripped citation residue from the draft — the writer model is still emitting citation markup despite the prompt ban`);
+        }
+      }
+      // Bind the approved plan to what's actually being emitted: the plan
+      // passed validate_answer_plan, but nothing upstream stops the draft's
+      // real sections from diverging from it. requiresExistingTitle marks a
+      // refresh session (registerSessionEditorial) — see planSectionMismatch.
+      if (editorialContext && editorialContext.plan) {
+        const mismatch = planSectionMismatch(editorialContext.plan, cleanBody, { partial: !!editorialContext.requiresExistingTitle });
+        if (mismatch) {
+          const directives = [];
+          if (mismatch.missing.length) {
+            directives.push(`The approved answer-plan section(s) are missing from the body as headings: ${mismatch.missing.join('; ')}. Add each as its own heading matching the plan.`);
+          }
+          if (mismatch.extra.length) {
+            directives.push(`These H2 section(s) are not part of the approved answer plan: ${mismatch.extra.join('; ')}. Remove them, fold them into a covered section, or call validate_answer_plan again with the complete section set.`);
+          }
+          return { draft_rejected: true, directives };
         }
       }
       // W1 in-loop self-lint: run the PURE guardrails evaluator at capture,
@@ -797,6 +933,7 @@ module.exports = {
   getCheckedRoutes,
   clearDraft,
   registerSessionLint,
+  registerSessionEditorial,
   // exposed for tests:
   _internals: { sessionDrafts, sessionCheckedRoutes, sessionLintOptions, sessionLintAttempts, urlToAstroPath, parseJsonbColumns },
 };

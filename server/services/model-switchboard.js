@@ -72,7 +72,7 @@ const SELECTORS = [
   { key: 'GEMINI_VISION_FALLBACK', env: 'GEMINI_VISION_FALLBACK_MODEL', description: 'Gemini photo retry model', accepts: { providers: ['gemini'], cap: 'vision' } },
   { key: 'GEMINI_TEXT_BEST', env: 'MODEL_GEMINI_TEXT', description: 'Sealed-eval Gemini leg (measurement only)', accepts: { providers: ['gemini'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'OPENAI_EMBEDDING', env: 'MODEL_OPENAI_EMBEDDING', description: 'Knowledge embeddings (1536-dim)', accepts: { providers: ['openai'], cap: 'embedding' }, lock: { kind: 'migration', label: 'Requires re-embed', detail: 'changing it re-embeds the whole corpus' } },
-  { key: 'GEMINI_IMAGE_PRO', env: 'MODEL_GEMINI_IMAGE_PRO', description: 'Image generation — Nano Banana Pro leg (second in the default chain)', accepts: { providers: ['gemini'], cap: 'image' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'image chain, not a text model' } },
+  { key: 'GEMINI_IMAGE_PRO', env: 'MODEL_GEMINI_IMAGE_PRO', description: 'Image generation — Nano Banana Pro leg (SynthID-watermarked; unreachable unless ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true)', accepts: { providers: ['gemini'], cap: 'image' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'image chain, not a text model' } },
   { key: 'GEMINI_IMAGE_BEST', env: 'MODEL_GEMINI_IMAGE', description: 'Image generation', accepts: { providers: ['gemini'], cap: 'image' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'image chain, not a text model' } },
   { key: 'GEMINI_IMAGE_STABLE', env: 'MODEL_GEMINI_IMAGE_STABLE', description: 'Image generation fallback', accepts: { providers: ['gemini'], cap: 'image' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'image chain, not a text model' } },
   { key: 'GEMINI_VIDEO_FAST', env: 'MODEL_GEMINI_VIDEO', description: 'Reels video generation', accepts: { providers: ['gemini'], cap: 'video' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'video chain, not a text model' } },
@@ -105,6 +105,7 @@ const POLICY_SELECTOR = {
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   visionAnalysis: { primary: 'VISION', fallback: 'OPENAI_BALANCED' },
+  photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
@@ -174,11 +175,21 @@ const AGENT_LOCK = LOCK.registration('Anthropic Managed Agents · model set at r
 // the first VALID slug is what the generator tries first (an all-invalid
 // value falls back to its default chain, hence null → the literal). Lazy
 // require: image-generator pulls in fetch + logger at load.
-function firstImageChainModel(value) {
-  const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
-  const [first] = parseChain(value);
-  return first ? MODEL_MAP[first].model : null;
+// The Nth leg of the EFFECTIVE image chain — image-generator's own parser,
+// which drops SynthID-watermarked Gemini slugs unless
+// ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true (and, with the override on and
+// no env chain, restores the pre-2026-09-24 interleaved defaults). The lane's
+// primary AND fallback both read through it, so the Models page shows the
+// legs that will really run, override on or off.
+function nthImageChainModel(n) {
+  return (value) => {
+    const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
+    const slug = parseChain(value)[n];
+    return slug ? MODEL_MAP[slug].model : null;
+  };
 }
+const firstImageChainModel = nthImageChainModel(0);
+const secondImageChainModel = nthImageChainModel(1);
 
 // Lane extras: `retry` = the leg tried after the fallback leg (the fan-out
 // photo lanes re-run Gemini on GEMINI_VISION_FALLBACK; the sequential caption
@@ -190,7 +201,7 @@ function firstImageChainModel(value) {
 // resolves to the same model as the one before it is not called: it is emitted
 // with `skipped: true` (kept for dependency math, hidden by the card); ladders
 // without the flag call every leg.
-const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by seven photo lanes';
+const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by eight photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
 // adapter (llm/call.js) folds the system prompt into the user turn, so moving
@@ -228,21 +239,36 @@ const LANES = [
   L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine categories on the flagship tier' }),
 
   // ── Multimodal ──
-  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  // Sequential ladder, not a fan-out (owner ruling 2026-09-24: no more
+  // Claude+Gemini fan-out): identifyPest's analyzePhoto tries Gemini, then
+  // the prior Gemini, and reaches Claude VISION only when both miss.
+  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-first (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
+  // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
+  // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
+  // not a fan-out: Gemini live, then the prior Gemini model, then Claude
+  // VISION only when both Gemini rungs miss.
+  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-only (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   L('lawn_visit_assessment', 'Lawn visit assessment', 'lawn-visit-assessment.js', 'multimodal', P('lawnVisitAssessment', 'primary'), P('lawnVisitAssessment', 'fallback'), { inbound: true, note: 'All visit photos in one chain; GATE_LAWN_VISIT_ASSESSMENT; technician review before publication' }),
-  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  // Sequential ladder, not a fan-out (owner ruling 2026-09-24): analyzePhoto
+  // tries Gemini, then the prior Gemini, and reaches Claude VISION only when
+  // both miss (with schema validation gating each rung's acceptance).
+  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-first (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   // Sequential ladder like the caption read: Gemini, then the prior Gemini,
   // then Claude VISION only when both miss (treatment-zone-suggest.js attempts).
   L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
   // Sequential ladder, not a fan-out: analyzePhoto tries Gemini, then the
   // prior Gemini, and reaches Claude VISION only when both miss.
   L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
-  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · one Gemini model (owner 2026-09-02): the retry leg resolves to the same id unless GEMINI_VISION_FALLBACK_MODEL splits them' }),
+  // Ladder, not a fan-out (owner ruling 2026-09-24): Gemini first, then
+  // Claude (FLAGSHIP — the trio's heavier reasoning leg), then OpenAI as the
+  // true last resort — stopping at the first schema-valid result. No more
+  // three-way parallel fan-out / agreement-based confidence; a single-source
+  // result always reads 'single_model', never 'high'.
+  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('FLAGSHIP'), { retry: D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } }), note: 'Gemini → Claude → OpenAI ladder (owner 2026-09-24), stopping at the first schema-valid result' }),
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), E('GEMINI_PROPERTY_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
   L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: SHARED_GEMINI_PIN }),
   L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', E('GEMINI_TURF_OCR_MODEL', T('GEMINI_VISION_BEST')), null, { fanout: true, inbound: true, also: [T('VISION')], note: 'Claude + Gemini in parallel; consensus of both readings' }),
-  L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'drives customer-facing health scores (owner 2026-07-21)' }),
+  L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('photoCaptions', 'fallback'), { inbound: true, note: `drives customer-facing health scores (owner 2026-07-21); Gemini-first, Claude fallback (owner 2026-09-24) · ${SHARED_GEMINI_PIN}` }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
@@ -324,6 +350,9 @@ const LANES = [
   L('sms_verifier', 'SMS draft fact-check verifier', 'sms-draft-verifier.js, sms-shadow-drafter.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('shadow_judge', 'SMS shadow judge', 'sms-shadow-judge.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('intent_composer', 'Estimator intent composer', 'estimator-engine/intent-composer.js', 'deep', E('ESTIMATOR_ENGINE_MODEL', T('DEEP'), { live: true }), P('deepAnalysis', 'fallback'), { inbound: true, note: 'prompt carries the call transcript, SMS thread and customer profile' }),
+  L('editorial_review', 'Editorial evidence review', 'content/editorial-review.js, llm/deep.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
+  L('editorial_repair', 'Editorial draft repair', 'content/editorial-review.js, llm/deep.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
+  L('editorial_plan_review', 'Editorial answer plan review', 'content/editorial-review.js, llm/deep.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
   L('fact_check_gate', 'Blog fact-check gate', 'content/fact-check-gate.js', 'deep', E('MODEL_FACTCHECK', P('deepAnalysis', 'primary')), P('deepAnalysis', 'fallback')),
   L('compliance_gate', 'Content compliance gate', 'content/compliance-gate.js', 'deep', E('MODEL_COMPLIANCE', P('deepAnalysis', 'primary')), P('deepAnalysis', 'fallback'), { note: 'GATE_COMPLIANCE ships dark' }),
   L('blog_optimize', 'Blog optimization pass', 'content/blog-writer.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
@@ -360,7 +389,7 @@ const LANES = [
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
-  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), T('GEMINI_IMAGE_PRO'), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'chain: gpt-image-2 → GEMINI_IMAGE_PRO → gpt-image-1.5 → GEMINI_IMAGE_BEST → GEMINI_IMAGE_STABLE → gpt-image-1' }),
+  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), D('BLOG_IMAGE_PROVIDER', secondImageChainModel(undefined) || 'gpt-image-1.5', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondImageChainModel }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'effective chain, OpenAI only by default: gpt-image-2 → gpt-image-1.5 → gpt-image-1 (owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain). ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs and this lane then reports that Gemini backup.' }),
   L('video_gen', 'Reels video generation', 'content/video-generator.js', 'locked', T('GEMINI_VIDEO_FAST'), T('GEMINI_VIDEO_QUALITY'), { lock: LOCK.provider('video chain') }),
   L('mentions_prober', 'LLM mentions prober (Claude, OpenAI, Gemini, Perplexity arms)', 'seo/llm-mention-prober.js', 'locked', E('MODEL_MENTIONS', T('WORKHORSE'), { live: true }), null, { lock: LOCK.measurement('each engine is probed directly; a fallback would falsify the measurement'), note: 'OPENAI_MENTIONS_MODEL gpt-4o-search-preview · GEMINI_MENTIONS_MODEL gemini-2.5-flash · PERPLEXITY_MENTIONS_MODEL sonar' }),
   L('sealed_eval', 'SMS sealed-eval exam legs', 'sms-sealed-eval.js', 'locked', T('SMS_SONNET'), T('OPENAI_REPORT_WRITER'), { lock: LOCK.measurement('frozen exam; Gemini / Luna / Opus / Fable measurement legs too') }),
@@ -472,6 +501,9 @@ const LANE_AREA = {
   review_reply: 'content',
   review_gate_text: 'content',
   hero_alt: 'content',
+  editorial_review: 'content',
+  editorial_repair: 'content',
+  editorial_plan_review: 'content',
   fact_check_gate: 'content',
   compliance_gate: 'content',
   codex_remediation: 'content',
@@ -604,6 +636,9 @@ const LANE_DESCRIBE = {
   review_reply: 'Replies to Google reviews',
   review_gate_text: 'Drafts the review text for a customer',
   hero_alt: 'Writes alt text for hero images',
+  editorial_review: 'Audits complete article evidence and editorial quality',
+  editorial_repair: 'Repairs editorial findings while preserving document structure',
+  editorial_plan_review: 'Checks answer-first section plans before drafting',
   fact_check_gate: 'Fact-checks a post before publish',
   compliance_gate: 'Checks a post for banned claims',
   codex_remediation: 'Fixes content findings automatically',
@@ -785,7 +820,7 @@ function getSwitchboard() {
     // On a `skipsEqualLeg` lane the implementation guards `FALLBACK !== MODEL`
     // and never calls a leg that resolves to the same model as the one before
     // it. The leg is MARKED, not dropped: its selector still moves the lane (a
-    // split GEMINI_VISION_FALLBACK_MODEL re-arms six photo ladders), so the
+    // split GEMINI_VISION_FALLBACK_MODEL re-arms five photo ladders), so the
     // change composer and previews keep the dependency; the card hides
     // `skipped` legs from the chain sentence. Ladders without the flag (e.g.
     // video_gen) call every leg regardless, so nothing is marked there.

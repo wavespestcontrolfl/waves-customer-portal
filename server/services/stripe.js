@@ -1772,6 +1772,13 @@ const StripeService = {
             card_surcharge: surchargeAmount,
             surcharge_rate_bps: rateBps,
             surcharge_policy_version: policyVersion,
+            // The key this attempt consumed at Stripe — recorded on
+            // SUCCESS rows too (Codex round-3 P1), so a charge that later
+            // fully refunds still tells retry-collectibility.js's
+            // deriveMonthlyChargeIdempotencyKey which monthly-family key
+            // is spent; a same-day recollection then gets a fresh key
+            // instead of replaying this (refunded) PaymentIntent.
+            idempotency_key: effectiveIdempotencyKey,
             // Month-of-obligation stamp: billing-cron's month dedupe and
             // the retry sweep's already-collected guard match on this
             // (metadata-first, payment_date window only as legacy fallback).
@@ -2983,11 +2990,13 @@ const StripeService = {
       .leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id')
       .select(
         'payments.*',
-        'payment_methods.card_brand',
-        'payment_methods.last_four',
+        // A removed method nulls payment_method_id (ON DELETE SET NULL) —
+        // fall back to the brand/last-four snapshot taken at charge time.
+        db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'),
+        db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four'),
         'payment_methods.processor as pm_processor',
-        'payment_methods.method_type',
-        'payment_methods.bank_name'
+        db.raw('COALESCE(payment_methods.method_type, payments.payment_method_type) as method_type'),
+        db.raw('COALESCE(payment_methods.bank_name, payments.bank_name) as bank_name')
       )
       .orderBy('payments.payment_date', 'desc')
       .limit(limit);

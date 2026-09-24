@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeData } from "./agents/modelDraft.fixture";
@@ -42,6 +42,46 @@ describe("AgentModelsTab", () => {
     expect(within(card).queryByText(/MODEL_FLAGSHIP|Model via|Where/)).toBeNull();
     const draftCard = screen.getByText("SMS draft").closest(".p-4");
     expect(within(draftCard).getByText("No backup")).toBeInTheDocument();
+  });
+
+  it("does not refresh while a picker or unsaved model draft is open", async () => {
+    renderTab();
+    const card = (await screen.findByText("SMS intent")).closest(".p-4");
+    const modelReads = () => adminFetch.mock.calls.filter(([path]) => path === "/admin/agents/models").length;
+    expect(modelReads()).toBe(1);
+
+    fireEvent.click(within(card).getByRole("button", { name: /Change/ }));
+    await screen.findByRole("dialog");
+    fireEvent(window, new Event("focus"));
+    expect(modelReads()).toBe(1);
+
+    fireEvent.click(within(screen.getByRole("dialog")).getAllByRole("button", { name: "Use" })[0]);
+    await screen.findByText(/lanes move after restart/);
+    fireEvent(window, new Event("focus"));
+    expect(modelReads()).toBe(1);
+  });
+
+  it.each(["picker", "migration"])("resumes refresh after %s supersedes a foreground retry", async (dialogType) => {
+    renderTab();
+    const card = (await screen.findByText("SMS intent")).closest(".p-4");
+    adminFetch.mockRejectedValueOnce(new Error("registry unavailable"));
+    fireEvent(window, new Event("focus"));
+    await screen.findByRole("alert");
+    let resolveRetry;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { resolveRetry = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(resolveRetry).toBeTypeOf("function"));
+    if (dialogType === "picker") {
+      fireEvent.click(within(card).getByRole("button", { name: /Change/ }));
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: /Move a model/ }));
+    }
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: dialogType === "picker" ? "Cancel" : "Close" }));
+    await act(async () => { resolveRetry(makeData()); });
+    const readsBefore = adminFetch.mock.calls.filter(([path]) => path === "/admin/agents/models").length;
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([path]) => path === "/admin/agents/models")).toHaveLength(readsBefore + 1));
   });
 
   it("?area= narrows to that area and the No backup chip filters", async () => {
@@ -223,6 +263,39 @@ describe("AgentModelsTab", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("SMS intent")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("clears a background refresh error after automatic recovery", async () => {
+    renderTab();
+    await screen.findByText("SMS intent");
+    adminFetch.mockRejectedValueOnce(new Error("temporary registry outage"));
+    fireEvent(window, new Event("focus"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("temporary registry outage");
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.getByText("SMS intent")).toBeInTheDocument();
+  });
+
+  it.each([false, true])("clears Retry loading when focus supersedes it (failure=%s)", async (fails) => {
+    adminFetch.mockRejectedValueOnce(new Error("Registry unavailable"));
+    renderTab();
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    let finishRetry;
+    let finishRefresh;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { finishRetry = resolve; }));
+    adminFetch.mockReturnValueOnce(new Promise((resolve, reject) => {
+      finishRefresh = () => fails ? reject(new Error("Refresh unavailable")) : resolve(makeData());
+    }));
+    act(() => { retry.click(); window.dispatchEvent(new Event("focus")); });
+    expect(adminFetch).toHaveBeenCalledTimes(3);
+    await act(async () => finishRetry(makeData()));
+    await act(async () => finishRefresh());
+    if (fails) expect(screen.getByRole("alert")).toHaveTextContent("Refresh unavailable");
+    else expect(screen.getByText("SMS intent")).toBeInTheDocument();
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(adminFetch).toHaveBeenCalledTimes(4);
+    expect(screen.getByText("SMS intent")).toBeInTheDocument();
   });
 
   it("Move a model… walks the migration set and drafts only the eligible env", async () => {

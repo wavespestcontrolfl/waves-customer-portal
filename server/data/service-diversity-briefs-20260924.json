@@ -1,0 +1,265 @@
+{
+  "version": 1,
+  "set": "service-diversity-20260924",
+  "owner": "adam",
+  "notes": "Prepared from the September 24 blog audit. Six informational briefs, two per week. Not automatically seeded. Existing topic ownership and source verification must pass at draft time. No new affiliate products or service offerings.",
+  "cta_codes": {
+    "CONTACT": "Contact /contact/ to confirm assessment scope; no pricing or treatment guarantees."
+  },
+  "briefs": [
+    {
+      "id": "BG01",
+      "action": "new_supporting_blog",
+      "slug": "/tree-shrub/photos-for-plant-problem-assessment-swfl/",
+      "working_title": "5 Photos to Take Before Asking About a Struggling Southwest Florida Shrub",
+      "primary_kw": "5 photos to take before asking about a struggling southwest florida shrub",
+      "secondary_kws": [],
+      "intent": "informational",
+      "window": "2026-09-28",
+      "byline": "adam",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "Help readers collect useful context for a plant assessment without diagnosing from a single leaf.",
+      "outline": [
+        "Quick answer within the first 60 words naming every list item; keep the title count and numbered H2 count equal, with what it is, why it matters, and what to do for each item",
+        "Visible Last updated: [Month Year] line below the title, using the actual current month and year when the article is prepared for publication",
+        "1. The whole plant",
+        "2. The surrounding bed and site",
+        "3. A close-up of affected leaves",
+        "4. A comparison with unaffected growth",
+        "5. The visible base and nearby watering conditions",
+        "Record onset and recent maintenance; explain why identification or a sample may still be needed",
+        "Visual: customize PestEvidenceGrid to these five photo views; use a whole-plant composition and a close-up framing demonstration, not fabricated diseased-species evidence.",
+        "How we put this list together: two or three sentences identifying the cited primary guidance and the editorial selection criteria; no invented product testing, field research, rankings, or claim that the source publishes this exact list"
+      ],
+      "sources": [
+        "https://blogs.ifas.ufl.edu/duvalco/2025/07/03/a-picture-is-worth-a-thousand-words-help-with-landscape-problem-identification/"
+      ],
+      "verify_notes": [
+        "Retrieve the cited pages at draft time. Attribute factual claims next to a source link; omit unsupported claims and never invent local data or Waves experience.",
+        "Check existing live posts and queued briefs before publishing; refresh an existing owner of the same intent instead of creating a sibling.",
+        "Use sourced measurements only when they help a decision, preserving units, geography and limitations. No quota for statistics, fabricated task duration, or unverified service-scope claims.",
+        "Plan one context image and two distinct useful body images; use owned/licensed accurate photos or clearly illustrative diagrams. Never present AI imagery as diagnostic evidence, a customer property, product testing, or a before/after result. No source logos.",
+        "Tree/shrub and irrigation education must not imply Waves offers installation, repair, pruning, removal or diagnosis beyond verified service scope. Link /contact/ for a scope check."
+      ],
+      "internal_links": [
+        "/tree-and-shrub-care-bradenton-fl/",
+        "/contact/"
+      ]
+    },
+    {
+      "id": "BG02",
+      "action": "new_supporting_blog",
+      "slug": "/mosquito/standing-water-checklist-swfl-patio/",
+      "working_title": "7 Water-Holding Spots to Check Around a Southwest Florida Patio",
+      "primary_kw": "7 water-holding spots to check around a southwest florida patio",
+      "secondary_kws": [],
+      "intent": "informational",
+      "window": "2026-10-01",
+      "byline": "adam",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "Turn CDC container-management guidance into a practical patio checklist; do not promise a mosquito-free yard.",
+      "outline": [
+        "Quick answer within the first 60 words naming every list item; keep the title count and numbered H2 count equal, with what it is, why it matters, and what to do for each item",
+        "Visible Last updated: [Month Year] line below the title, using the actual current month and year when the article is prepared for publication",
+        "1. Plant saucers",
+        "2. Buckets",
+        "3. Outdoor toys",
+        "4. Birdbaths",
+        "5. Trash containers",
+        "6. Stored tires",
+        "7. Small unused pools",
+        "Explain emptying and scrubbing where appropriate, plus limits for water that cannot be removed; no pesticide product recommendations",
+        "Visual: custom HomeZoneMap with patio/container locations as an illustrative checklist, not a treatment map; two distinct views demonstrating inspection and an emptied container.",
+        "How we put this list together: two or three sentences identifying the cited primary guidance and the editorial selection criteria; no invented product testing, field research, rankings, or claim that the source publishes this exact list"
+      ],
+      "sources": [
+        "https://www.cdc.gov/mosquitoes/mosquito-control/mosquito-control-at-home.html"
+      ],
+      "verify_notes": [
+        "Retrieve the cited pages at draft time. Attribute factual claims next to a source link; omit unsupported claims and never invent local data or Waves experience.",
+        "Check existing live posts and queued briefs before publishing; refresh an existing owner of the same intent instead of creating a sibling.",
+        "Use sourced measurements only when they help a decision, preserving units, geography and limitations. No quota for statistics, fabricated task duration, or unverified service-scope claims.",
+        "Plan one context image and two distinct useful body images; use owned/licensed accurate photos or clearly illustrative diagrams. Never present AI imagery as diagnostic evidence, a customer property, product testing, or a before/after result. No source logos.",
+        "Tree/shrub and irrigation education must not imply Waves offers installation, repair, pruning, removal or diagnosis beyond verified service scope. Link /contact/ for a scope check."
+      ],
+      "internal_links": [
+        "/contact/"
+      ]
+    },
+    {
+      "id": "BG03",
+      "action": "new_supporting_blog",
+      "slug": "/lawn-care/sprinkler-water-waste-checklist-swfl/",
+      "working_title": "4 Checks for Sprinkler Water Waste in Southwest Florida",
+      "primary_kw": "4 checks for sprinkler water waste in southwest florida",
+      "secondary_kws": [],
+      "intent": "informational",
+      "window": "2026-10-05",
+      "byline": "adam-augusta",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "Help readers record observable irrigation problems and distinguish an observation from a repair diagnosis.",
+      "outline": [
+        "Quick answer within the first 60 words naming every list item; keep the title count and numbered H2 count equal, with what it is, why it matters, and what to do for each item",
+        "Visible Last updated: [Month Year] line below the title, using the actual current month and year when the article is prepared for publication",
+        "1. Inspect for damaged parts and visible leaks",
+        "2. Check connections visually and leave repairs beyond homeowner skill to a qualified professional",
+        "3. Look for water directed onto pavement rather than landscape",
+        "4. Review the controller and current local watering requirements",
+        "Keep a zone log; no universal watering minutes or promised savings",
+        "Visual: customized PestEvidenceGrid for leak, connection, overspray and controller observations; two instructional images showing overspray and a blank zone-recording sheet without invented readings.",
+        "How we put this list together: two or three sentences identifying the cited primary guidance and the editorial selection criteria; no invented product testing, field research, rankings, or claim that the source publishes this exact list"
+      ],
+      "sources": [
+        "https://www.epa.gov/watersense/sprinkler-spruce-up"
+      ],
+      "verify_notes": [
+        "Retrieve the cited pages at draft time. Attribute factual claims next to a source link; omit unsupported claims and never invent local data or Waves experience.",
+        "Check existing live posts and queued briefs before publishing; refresh an existing owner of the same intent instead of creating a sibling.",
+        "Use sourced measurements only when they help a decision, preserving units, geography and limitations. No quota for statistics, fabricated task duration, or unverified service-scope claims.",
+        "Plan one context image and two distinct useful body images; use owned/licensed accurate photos or clearly illustrative diagrams. Never present AI imagery as diagnostic evidence, a customer property, product testing, or a before/after result. No source logos.",
+        "Tree/shrub and irrigation education must not imply Waves offers installation, repair, pruning, removal or diagnosis beyond verified service scope. Link /contact/ for a scope check."
+      ],
+      "internal_links": [
+        "/lawn-care-bradenton-fl/",
+        "/contact/"
+      ]
+    },
+    {
+      "id": "BG04",
+      "action": "new_supporting_blog",
+      "slug": "/tree-shrub/mulch-placement-around-shrubs-swfl/",
+      "working_title": "Mulch Around Southwest Florida Shrubs: Placement, Depth, and Common Mistakes",
+      "primary_kw": "mulch around southwest florida shrubs: placement, depth, and common mistakes",
+      "secondary_kws": [],
+      "intent": "informational",
+      "window": "2026-10-08",
+      "byline": "adam",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "Explain UF/IFAS placement guidance and help readers inspect existing mulch without promising pest prevention or tree recovery.",
+      "outline": [
+        "Answer first: placement and depth need attention, not just mulch type",
+        "Compare organic mulch choices with explicit supported criteria in ComparisonTable",
+        "Explain UF/IFAS depth guidance with plant-specific exceptions; keep mulch away from trunks",
+        "Distinguish a mulch mound from correct placement without diagnosing damage from a photograph",
+        "Show a labelled hypothetical bed-area calculation; measurements are illustrative, not customer results",
+        "When uncertain about decline, document conditions and ask for a qualified assessment",
+        "Visual: a schematic cross-section with dimensions in adjacent accessible HTML, plus a distinct placement photo; no invented before-and-after recovery."
+      ],
+      "sources": [
+        "https://gardeningsolutions.ifas.ufl.edu/care/planting/mulch/"
+      ],
+      "verify_notes": [
+        "Retrieve the cited pages at draft time. Attribute factual claims next to a source link; omit unsupported claims and never invent local data or Waves experience.",
+        "Check existing live posts and queued briefs before publishing; refresh an existing owner of the same intent instead of creating a sibling.",
+        "Use sourced measurements only when they help a decision, preserving units, geography and limitations. No quota for statistics, fabricated task duration, or unverified service-scope claims.",
+        "Plan one context image and two distinct useful body images; use owned/licensed accurate photos or clearly illustrative diagrams. Never present AI imagery as diagnostic evidence, a customer property, product testing, or a before/after result. No source logos.",
+        "Tree/shrub and irrigation education must not imply Waves offers installation, repair, pruning, removal or diagnosis beyond verified service scope. Link /contact/ for a scope check."
+      ],
+      "internal_links": [
+        "/tree-and-shrub-care-bradenton-fl/",
+        "/contact/"
+      ]
+    },
+    {
+      "id": "BG05",
+      "action": "new_supporting_blog",
+      "slug": "/mosquito/screens-vs-standing-water-swfl-home/",
+      "working_title": "Screens and Standing Water: Two Different Parts of a Southwest Florida Mosquito Plan",
+      "primary_kw": "screens and standing water: two different parts of a southwest florida mosquito plan",
+      "secondary_kws": [],
+      "intent": "informational",
+      "window": "2026-10-12",
+      "byline": "adam",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "Explain entry prevention versus breeding-source reduction with realistic limits, rather than ranking products or promising eradication.",
+      "outline": [
+        "Direct answer: screens and water management address different pathways",
+        "Check screens, windows and doors without claiming insect-proof performance",
+        "Inspect water-holding containers and explain the CDC weekly routine",
+        "ComparisonTable: action, what it addresses, what it cannot establish",
+        "Explain when ongoing mosquito activity needs broader assessment; no diagnosis of bites or local disease rates",
+        "Visual: custom ComparisonTable plus two distinct screen/container detail images; no universal pest-pressure chart or made-up effectiveness percentages."
+      ],
+      "sources": [
+        "https://www.cdc.gov/mosquitoes/mosquito-control/mosquito-control-at-home.html"
+      ],
+      "verify_notes": [
+        "Retrieve the cited pages at draft time. Attribute factual claims next to a source link; omit unsupported claims and never invent local data or Waves experience.",
+        "Check existing live posts and queued briefs before publishing; refresh an existing owner of the same intent instead of creating a sibling.",
+        "Use sourced measurements only when they help a decision, preserving units, geography and limitations. No quota for statistics, fabricated task duration, or unverified service-scope claims.",
+        "Plan one context image and two distinct useful body images; use owned/licensed accurate photos or clearly illustrative diagrams. Never present AI imagery as diagnostic evidence, a customer property, product testing, or a before/after result. No source logos.",
+        "Tree/shrub and irrigation education must not imply Waves offers installation, repair, pruning, removal or diagnosis beyond verified service scope. Link /contact/ for a scope check."
+      ],
+      "internal_links": [
+        "/contact/"
+      ]
+    },
+    {
+      "id": "BG06",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/property-pest-observation-log-swfl/",
+      "service": "commercial-pest",
+      "hub_link": "/commercial-pest-control-bradenton-fl/",
+      "working_title": "A Pest Observation Log for Southwest Florida Property Managers",
+      "primary_kw": "a pest observation log for southwest florida property managers",
+      "secondary_kws": [],
+      "intent": "informational",
+      "window": "2026-10-15",
+      "byline": "adam",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article"
+      ],
+      "thesis": "Give property managers a usable observation-and-follow-up format grounded in IPM recordkeeping, while distinguishing general guidance from school-specific policy.",
+      "outline": [
+        "Answer first: record what was observed, where and when, rather than guessing a diagnosis",
+        "Use a blank observation log with location, date, visible evidence, photo and follow-up fields",
+        "Separate pest evidence from food, water and access conditions",
+        "Assign follow-up and record whether a condition was corrected",
+        "Explain that EPA school guidance informs the recordkeeping concept; do not present it as a legal requirement for all commercial buildings",
+        "Ask the service provider to explain scope and next steps; no invented service-level commitments",
+        "Visual: accessible ComparisonTable with blank log fields and two illustrative inspection/documentation scenes; never use customer names or fabricated case results."
+      ],
+      "sources": [
+        "https://www.epa.gov/schools/appendix-model-program-state-school-environmental-health-guidelines"
+      ],
+      "verify_notes": [
+        "Retrieve the cited pages at draft time. Attribute factual claims next to a source link; omit unsupported claims and never invent local data or Waves experience.",
+        "Check existing live posts and queued briefs before publishing; refresh an existing owner of the same intent instead of creating a sibling.",
+        "Use sourced measurements only when they help a decision, preserving units, geography and limitations. No quota for statistics, fabricated task duration, or unverified service-scope claims.",
+        "Plan one context image and two distinct useful body images; use owned/licensed accurate photos or clearly illustrative diagrams. Never present AI imagery as diagnostic evidence, a customer property, product testing, or a before/after result. No source logos.",
+        "Tree/shrub and irrigation education must not imply Waves offers installation, repair, pruning, removal or diagnosis beyond verified service scope. Link /contact/ for a scope check."
+      ],
+      "internal_links": [
+        "/contact/"
+      ]
+    }
+  ]
+}

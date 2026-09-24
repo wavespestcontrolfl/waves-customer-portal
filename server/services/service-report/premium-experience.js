@@ -1,6 +1,8 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { resolveLabel } = require('../pest-pressure/label');
+const { DEFAULT_CONFIG } = require('../pest-pressure/config');
 const { detectServiceLine } = require('./service-line-configs');
 
 // Legacy service_records rows can have a null service_line while
@@ -186,8 +188,8 @@ function normalizeFinding(finding = {}) {
 }
 
 async function loadPremiumRows(record, knex = db) {
-  if (!record?.id) return { findings: [], applications: [], zones: [], visitRows: [] };
-  const [findings, products, zones, visitRows] = await Promise.all([
+  if (!record?.id) return { findings: [], applications: [], zones: [], visitRows: [], pressureScoreRow: null };
+  const [findings, products, zones, visitRows, pressureScoreRow] = await Promise.all([
     knex('service_findings')
       .where({ service_record_id: record.id })
       .select('id', 'service_record_id', 'category', 'severity', 'title', 'detail', 'recommendation', 'zone_id')
@@ -207,6 +209,12 @@ async function loadPremiumRows(record, knex = db) {
       })
       .select('id', 'pressure_index')
       .catch(() => []),
+    // The report's own persisted label, so the Pressure row matches the
+    // gauge even when the labels were edited in Settings.
+    knex('pest_pressure_scores')
+      .where({ service_record_id: record.id })
+      .first('displayed_score', 'label_name', 'is_overridden', 'config_snapshot')
+      .catch(() => null),
   ]);
 
   return {
@@ -219,6 +227,7 @@ async function loadPremiumRows(record, knex = db) {
       category: normalizeKey(zone.category),
     })),
     visitRows,
+    pressureScoreRow: pressureScoreRow || null,
   };
 }
 
@@ -374,7 +383,31 @@ function unfilteredBody(primaryMove, finding) {
   return `${primaryMove.title} This is the one move that gives today’s treatment more help between visits.`;
 }
 
-function buildPropertyDefenseStatusContext({ record, findings = [], applications = [], zones = [], pressureTrend } = {}) {
+// The persisted label only describes the number it was calculated for; a
+// pressure that differs from that row's displayed score (or no row at all)
+// falls back to the six-band default scale.
+function snapshotLabels(pressureScoreRow) {
+  let snapshot = pressureScoreRow?.config_snapshot;
+  if (typeof snapshot === 'string') {
+    try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+  }
+  return Array.isArray(snapshot?.labels) && snapshot.labels.length ? snapshot.labels : null;
+}
+
+function pressureLabelName(pressure, pressureScoreRow) {
+  const stored = pressureScoreRow?.displayed_score;
+  // An admin override changes displayed_score but not label_name, so an
+  // overridden row's stored label describes a different number.
+  if (pressureScoreRow?.label_name && !pressureScoreRow.is_overridden
+    && stored != null && Number(stored) === Number(pressure)) {
+    return pressureScoreRow.label_name;
+  }
+  // Otherwise resolve against the label set the score was calculated with
+  // (a customized scale stays customized), then the six-band default.
+  return resolveLabel(pressure, snapshotLabels(pressureScoreRow) || DEFAULT_CONFIG.labels)?.name || 'Tracking';
+}
+
+function buildPropertyDefenseStatusContext({ record, findings = [], applications = [], zones = [], pressureTrend, pressureScoreRow = null } = {}) {
   const pressure = pressureTrend?.current?.pressureIndex ?? customerVisiblePressureIndex(record?.pressure_index);
   const activeMethods = new Set(applications.map((app) => app.method));
   const textByZone = new Map(zones.map((zone) => [zone.id, `${zone.letter} ${zone.label}`.toLowerCase()]));
@@ -400,7 +433,7 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
   const anyRecommendation = findings.some((finding) => finding.recommendation);
   const lowPressure = Number.isFinite(pressure) && pressure < 2;
   const pressureLabel = Number.isFinite(pressure)
-    ? `${pressure < 2 ? 'Low' : pressure < 3.5 ? 'Moderate' : 'Elevated'} · ${Number(pressure).toFixed(1)} / 5`
+    ? `${pressureLabelName(pressure, pressureScoreRow)} · ${Number(pressure).toFixed(1)} / 5`
     : 'Tracking after more visits';
 
   const items = [
@@ -699,6 +732,7 @@ async function buildPremiumExperienceContext({
     applications: rows.applications,
     zones: rows.zones,
     pressureTrend: dynamicContext.pressureTrend,
+    pressureScoreRow: rows.pressureScoreRow,
   });
   const bugFiles = buildBugFilesContext({
     findings: rows.findings,
@@ -739,6 +773,7 @@ module.exports = {
     applications = [],
     zones = [],
     visitRows = [],
+    pressureScoreRow = null,
     dynamicContext = {},
     now = new Date(),
   } = {}) => {
@@ -776,6 +811,7 @@ module.exports = {
         applications: normalizedApplications,
         zones: normalizedZones,
         pressureTrend: dynamicContext.pressureTrend,
+        pressureScoreRow,
       }),
       bugFiles: buildBugFilesContext({
         findings: normalizedFindings,

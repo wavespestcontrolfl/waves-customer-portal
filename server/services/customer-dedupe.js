@@ -258,6 +258,17 @@ function pairKey(idA, idB) {
   return idA < idB ? [idA, idB] : [idB, idA];
 }
 
+// revertMerge's dismissal (see below) uses this EXACT reason as a sentinel
+// so runAutoMergeSweep alone can recognize and skip it — a regular "not a
+// duplicate" verdict (blank or free-text reason from POST /dismiss) never
+// collides with it. findDuplicateGroups treats it as a NON-hiding dismissal
+// by default (Codex round 1 P2): recording customer_duplicate_dismissals on
+// undo used to hide the pair from the review queue and every eligibility
+// check FOREVER, with no reopen endpoint — an undone merge must stay
+// reviewable for a human to re-merge on purpose, it must just never be
+// auto-merged again.
+const UNDO_MERGE_DISMISSAL_REASON = 'undo_merge';
+
 // Detection output travels to the admin browser via the review-queue route —
 // never ship the stored credential hash or raw Stripe id; the UI only needs
 // existence booleans for its badges.
@@ -266,7 +277,119 @@ function sanitizeCustomer(row) {
   return { ...rest, has_portal_login: !!passwordHash, has_stripe: !!stripeCustomerId };
 }
 
-async function findDuplicateGroups(database = db, { failClosedOnDismissals = false } = {}) {
+// The pure pair verdict (tier + reasons) from two customer rows and the
+// loser's blocker list — shared by findDuplicateGroups' queue build and
+// executeMerge's per-pair under-lock recheck for the auto sweep, so the two
+// can never drift.
+function classifyPair(winner, loser, blockers) {
+  const addr = addressCompat(winner, loser);
+  const namesOk = namesCompatible(winner, loser);
+  const reasons = [];
+  if (!namesOk) reasons.push('name_conflict');
+  if (!ADDRESS_COMPATIBLE.has(addr.status)) reasons.push(`address_${addr.status}`);
+  blockers.forEach((blocker) => reasons.push(`loser_has_${blocker}`));
+  const lastNamesDiffer = normName(winner.last_name) && normName(loser.last_name)
+    && normName(winner.last_name) !== normName(loser.last_name);
+  let tier = 'green';
+  // Different last name at a POSITIVELY different address (different
+  // street, unit, ZIP, or city) = two people sharing a line.
+  if (lastNamesDiffer && ADDRESS_CONFLICTS.has(addr.status)) tier = 'red';
+  else if (reasons.length) tier = 'yellow';
+  return { loser, tier, reasons, namesOk, addrStatus: addr.status };
+}
+
+// Every column the group build + blocker probes + winner pick read — ONE
+// list so the queue read and the sweep's under-lock group re-read can't
+// drift apart in what they see.
+const DUPLICATE_GROUP_COLUMNS = ['id', 'first_name', 'last_name', 'email', 'phone', 'address_line1',
+  'address_line2', 'city', 'zip', 'stripe_customer_id', 'password_hash',
+  'pipeline_stage', 'lead_source', 'created_at', 'payer_id', 'billing_mode', 'monthly_rate'];
+
+// ONE phone group → its identity clusters, each with a picked winner and the
+// classified (tier + reasons) candidates under it — group-level demotion
+// included. Pure over the member rows + their blocker lists. Shared by
+// findDuplicateGroups' queue build and the auto sweep's under-lock recheck
+// (lockedPairAutoEligibility), so a pair the queue would demote or re-win
+// can never read green under the lock (Codex #4694 round 4 P1).
+function buildPhoneGroupCandidates(members, blockersById) {
+  const evaluatePair = (winner, loser) => classifyPair(winner, loser, blockersById.get(loser.id) || []);
+  // Partition the phone group into IDENTITY CLUSTERS: repeatedly pick the
+  // strongest remaining row and pull in every name-compatible member.
+  // Multiple clusters = the phone is shared by multiple identities. Each
+  // cluster gets its own group + winner, so loser-vs-loser duplicates of a
+  // second identity are surfaced and mergeable — not stuck behind a single
+  // picked winner they conflict with.
+  //
+  // Cluster SEEDS must have a known name: a blank/"Unknown" row is
+  // name-compatible with everyone, so seeding from it would collapse
+  // genuinely distinct identities into one cluster and hide the conflict.
+  // Unnamed rows attach to the single known identity when there is exactly
+  // one; with multiple known identities they are unattributable and form
+  // their own cluster, which flips multiIdentity and demotes everything to
+  // review.
+  // Weight = COUNT of business signals (billing tables + active stage),
+  // excluding stripe/portal which winnerScore already weighs — a Stripe-only
+  // shell (24 under a binary boost) must never outrank a row with actual
+  // invoices/services.
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
+  const hasKnownName = (m) => !!(normName(m.first_name) || normName(m.last_name));
+  let pool = members.filter(hasKnownName);
+  const unnamed = members.filter((m) => !hasKnownName(m));
+  const clusters = [];
+  while (pool.length) {
+    const w = pickWinner(pool, businessBoost);
+    const mine = [w];
+    const rest = [];
+    for (const m of pool) {
+      if (m.id === w.id) continue;
+      (namesCompatible(w, m) ? mine : rest).push(m);
+    }
+    clusters.push(mine);
+    pool = rest;
+  }
+  if (unnamed.length) {
+    if (clusters.length === 1) {
+      clusters[0].push(...unnamed);
+    } else {
+      const w = pickWinner(unnamed, businessBoost);
+      clusters.push([w, ...unnamed.filter((m) => m.id !== w.id)]);
+    }
+  }
+  // Re-pick each cluster's winner AFTER membership settles: named rows seed
+  // clusters (identity), but an unnamed row appended later can be the real
+  // account (invoices/Stripe/active) — it must be the kept row, with the
+  // name backfilled from the merged duplicate, not retired under a shell.
+  const finalClusters = clusters.map((cluster) => {
+    const w = pickWinner(cluster, businessBoost);
+    return [w, ...cluster.filter((m) => m.id !== w.id)];
+  });
+  // Conflict evidence is structural (cluster count), NOT queue-visibility:
+  // dismissing a red pair hides it from the queue, but the other identity
+  // still exists as a cluster, so the shells stay demoted below.
+  const multiIdentity = finalClusters.length > 1;
+
+  return finalClusters.map((cluster, idx) => {
+    const winner = cluster[0];
+    const candidates = cluster.slice(1).map((loser) => evaluatePair(winner, loser));
+    // Cross-identity pairs surface once, on the first cluster's card, so
+    // the shared-phone conflict stays visible and dismissable.
+    if (idx === 0) {
+      for (const other of finalClusters.slice(1)) candidates.push(evaluatePair(winner, other[0]));
+    }
+    if (multiIdentity) {
+      for (const c of candidates) {
+        if (c.tier === 'green') {
+          c.tier = 'yellow';
+          c.reasons.push('group_has_identity_conflict');
+        }
+      }
+    }
+    return { winner, candidates };
+  });
+}
+
+async function findDuplicateGroups(database = db, { failClosedOnDismissals = false, respectUndoMergeSuppression = false } = {}) {
   // Live ROWS only (active + not deleted) — deliberately NOT restricted to
   // whereLiveCustomer's real-customer stages: the duplicates this tool exists
   // to clean up ARE lead-stage shells (intake guards refuse ambiguous
@@ -281,9 +404,7 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
     .where('active', true)
     .whereNull('deleted_at')
     .whereRaw("COALESCE(phone, '') <> ''")
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1',
-      'address_line2', 'city', 'zip', 'stripe_customer_id', 'password_hash',
-      'pipeline_stage', 'lead_source', 'created_at', 'payer_id', 'billing_mode', 'monthly_rate');
+    .select(...DUPLICATE_GROUP_COLUMNS);
   const byPhone = new Map();
   for (const row of rows) {
     const p10 = phone10(row.phone);
@@ -297,7 +418,13 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
   let dismissed = new Set();
   try {
     dismissed = new Set(
-      (await database('customer_duplicate_dismissals').select('customer_id_a', 'customer_id_b'))
+      (await database('customer_duplicate_dismissals').select('customer_id_a', 'customer_id_b', 'reason'))
+        // An undo-merge suppression hides the pair ONLY from the automatic
+        // sweep (respectUndoMergeSuppression: true) — every other caller
+        // (the review queue, dashboard alert, IB tool, manual-merge
+        // eligibility recheck) must keep surfacing it so a human can still
+        // choose to re-merge it.
+        .filter((d) => respectUndoMergeSuppression || d.reason !== UNDO_MERGE_DISMISSAL_REASON)
         .map((d) => `${d.customer_id_a}:${d.customer_id_b}`),
     );
   } catch (e) {
@@ -317,99 +444,10 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
   }
   const blockersById = await batchAutoBlockers(database, allMembers);
 
-  const evaluatePair = (winner, loser) => {
-    const addr = addressCompat(winner, loser);
-    const namesOk = namesCompatible(winner, loser);
-    const blockers = blockersById.get(loser.id) || [];
-    const reasons = [];
-    if (!namesOk) reasons.push('name_conflict');
-    if (!ADDRESS_COMPATIBLE.has(addr.status)) reasons.push(`address_${addr.status}`);
-    blockers.forEach((blocker) => reasons.push(`loser_has_${blocker}`));
-    const lastNamesDiffer = normName(winner.last_name) && normName(loser.last_name)
-      && normName(winner.last_name) !== normName(loser.last_name);
-    let tier = 'green';
-    // Different last name at a POSITIVELY different address (different
-    // street, unit, ZIP, or city) = two people sharing a line.
-    if (lastNamesDiffer && ADDRESS_CONFLICTS.has(addr.status)) tier = 'red';
-    else if (reasons.length) tier = 'yellow';
-    return { loser, tier, reasons, namesOk, addrStatus: addr.status };
-  };
-
   const groups = [];
   for (const [p10, members] of byPhone) {
     if (members.length < 2) continue;
-    // Partition the phone group into IDENTITY CLUSTERS: repeatedly pick the
-    // strongest remaining row and pull in every name-compatible member.
-    // Multiple clusters = the phone is shared by multiple identities. Each
-    // cluster gets its own group + winner, so loser-vs-loser duplicates of a
-    // second identity are surfaced and mergeable — not stuck behind a single
-    // picked winner they conflict with.
-    //
-    // Cluster SEEDS must have a known name: a blank/"Unknown" row is
-    // name-compatible with everyone, so seeding from it would collapse
-    // genuinely distinct identities into one cluster and hide the conflict.
-    // Unnamed rows attach to the single known identity when there is exactly
-    // one; with multiple known identities they are unattributable and form
-    // their own cluster, which flips multiIdentity and demotes everything to
-    // review.
-    // Weight = COUNT of business signals (billing tables + active stage),
-    // excluding stripe/portal which winnerScore already weighs — a Stripe-only
-    // shell (24 under a binary boost) must never outrank a row with actual
-    // invoices/services.
-    const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
-      .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
-    const hasKnownName = (m) => !!(normName(m.first_name) || normName(m.last_name));
-    let pool = members.filter(hasKnownName);
-    const unnamed = members.filter((m) => !hasKnownName(m));
-    const clusters = [];
-    while (pool.length) {
-      const w = pickWinner(pool, businessBoost);
-      const mine = [w];
-      const rest = [];
-      for (const m of pool) {
-        if (m.id === w.id) continue;
-        (namesCompatible(w, m) ? mine : rest).push(m);
-      }
-      clusters.push(mine);
-      pool = rest;
-    }
-    if (unnamed.length) {
-      if (clusters.length === 1) {
-        clusters[0].push(...unnamed);
-      } else {
-        const w = pickWinner(unnamed, businessBoost);
-        clusters.push([w, ...unnamed.filter((m) => m.id !== w.id)]);
-      }
-    }
-    // Re-pick each cluster's winner AFTER membership settles: named rows seed
-    // clusters (identity), but an unnamed row appended later can be the real
-    // account (invoices/Stripe/active) — it must be the kept row, with the
-    // name backfilled from the merged duplicate, not retired under a shell.
-    const finalClusters = clusters.map((cluster) => {
-      const w = pickWinner(cluster, businessBoost);
-      return [w, ...cluster.filter((m) => m.id !== w.id)];
-    });
-    // Conflict evidence is structural (cluster count), NOT queue-visibility:
-    // dismissing a red pair hides it from the queue, but the other identity
-    // still exists as a cluster, so the shells stay demoted below.
-    const multiIdentity = finalClusters.length > 1;
-
-    finalClusters.forEach((cluster, idx) => {
-      const winner = cluster[0];
-      const candidates = cluster.slice(1).map((loser) => evaluatePair(winner, loser));
-      // Cross-identity pairs surface once, on the first cluster's card, so
-      // the shared-phone conflict stays visible and dismissable.
-      if (idx === 0) {
-        for (const other of finalClusters.slice(1)) candidates.push(evaluatePair(winner, other[0]));
-      }
-      if (multiIdentity) {
-        for (const c of candidates) {
-          if (c.tier === 'green') {
-            c.tier = 'yellow';
-            c.reasons.push('group_has_identity_conflict');
-          }
-        }
-      }
+    for (const { winner, candidates } of buildPhoneGroupCandidates(members, blockersById)) {
       // Dismissals filter the VISIBLE queue only — after demotion, so
       // adjudicating one pair never re-greens the rest of the group.
       const visible = candidates.filter((c) => {
@@ -428,7 +466,7 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
           })),
         });
       }
-    });
+    }
   }
   return groups;
 }
@@ -449,6 +487,11 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 //   dismissals_unreadable — the operator "not a duplicate" verdicts could
 //                        not be read; a merge decision never falls open
 //                        past them (display does, this does not)
+// Manual callers only: this reads the queue as a human sees it, so an
+// undo-merge sentinel does NOT hide the pair (a human may deliberately
+// re-merge a pair from the still-reviewable queue after an undo). The
+// automatic sweep's under-lock recheck is lockedPairAutoEligibility, which
+// refuses on that sentinel and never rebuilds the queue.
 async function duplicatePairEligibility(winnerId, loserId, database = db) {
   let groups;
   try {
@@ -469,6 +512,72 @@ async function duplicatePairEligibility(winnerId, loserId, database = db) {
     return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
   }
   return { eligible: true, code: 'eligible', reason: null, candidate };
+}
+
+// The auto sweep's under-lock eligibility recheck, scoped to ONE pair: the
+// two locked customer rows (already read FOR UPDATE by executeMerge), this
+// pair's dismissal row (ANY verdict refuses — an operator's "not a
+// duplicate" and revertMerge's undo sentinel alike; the manual path is the
+// only one allowed past the sentinel), and the loser's own blocker probes.
+// Fails CLOSED on an unreadable dismissals table, like the sweep's snapshot.
+async function lockedPairAutoEligibility(trx, winner, loser) {
+  const [a, b] = pairKey(winner.id, loser.id);
+  let verdicts;
+  try {
+    verdicts = await trx('customer_duplicate_dismissals')
+      .where({ customer_id_a: a, customer_id_b: b })
+      .select('reason');
+  } catch (e) {
+    logger.warn(`[customer-dedupe] locked pair recheck: dismissals unreadable, refusing: ${e.message}`);
+    return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
+  }
+  if (verdicts.length) {
+    const undone = verdicts.some((v) => v.reason === UNDO_MERGE_DISMISSAL_REASON);
+    return { eligible: false, code: undone ? 'undo_merge_suppressed' : 'dismissed', reason: 'Pair was adjudicated since the sweep snapshot', candidate: null };
+  }
+  const stillLive = winner.active !== false && loser.active !== false
+    && !winner.deleted_at && !loser.deleted_at
+    && phone10(winner.phone) && phone10(winner.phone) === phone10(loser.phone);
+  if (!stillLive) {
+    return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer a live duplicate candidate', candidate: null };
+  }
+  // Re-read the whole PHONE GROUP under the lock (Codex round 4 P1): the
+  // queue's verdict on this pair is group-level — a third active customer
+  // on the same line created or renamed since the sweep snapshot makes the
+  // group multi-identity (every green demoted to review) or changes which
+  // row wins. Classifying only the two locked rows would read green where
+  // a fresh queue read would refuse. Same normalized-phone predicate the
+  // other phone lookups use (contact-correction-queue,
+  // call-created-customer-line-type); scoped to this line's rows, never
+  // the queue's all-customers scan. Same live-ROW filter as the queue
+  // build (active + not deleted, any pipeline stage).
+  const p10 = phone10(winner.phone);
+  let members;
+  try {
+    members = await trx('customers')
+      .where('active', true)
+      .whereNull('deleted_at')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [p10])
+      .select(...DUPLICATE_GROUP_COLUMNS);
+  } catch (e) {
+    logger.warn(`[customer-dedupe] locked pair recheck: phone group unreadable, refusing: ${e.message}`);
+    return { eligible: false, code: 'group_unreadable', reason: 'The phone group could not be re-read under the lock — refusing to treat this pair as mergeable right now', candidate: null };
+  }
+  // The two locked rows are the authoritative versions of themselves; every
+  // other member is a third row on the line the snapshot may never have seen.
+  const lockedById = new Map([[winner.id, winner], [loser.id, loser]]);
+  const group = [winner, loser, ...members.filter((m) => !lockedById.has(m.id))]
+    .filter((m) => phone10(m.phone) === p10);
+  const blockersById = await batchAutoBlockers(trx, group);
+  const cluster = buildPhoneGroupCandidates(group, blockersById).find((g) => g.winner.id === winner.id);
+  const verdict = cluster?.candidates.find((c) => c.loser.id === loser.id) || null;
+  if (!verdict) {
+    return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer a queue candidate under this winner (the line\'s winner or cluster membership changed)', candidate: null };
+  }
+  if (verdict.tier !== 'green') {
+    return { eligible: false, code: verdict.tier === 'red' ? 'red_pair' : 'not_green', reason: `Pair is no longer green (${verdict.reasons.join(', ')})`, candidate: verdict };
+  }
+  return { eligible: true, code: 'eligible', reason: null, candidate: verdict };
 }
 
 // ---------------------------------------------------------------------------
@@ -1219,6 +1328,283 @@ async function dbLevelMergeConflict(database, winner, loser) {
       };
     }
   }
+  // ADMIN-BUG-R15: the generic FK sweep has no per-table business check, so
+  // it used to repoint the loser's live recurring parent (and its future
+  // children) onto the winner wholesale even when the winner already has a
+  // live series of the same family AT THE SAME PROPERTY — the winner ends up
+  // with two live "Monthly Pest Control"-style series that both dispatch and
+  // (on per-visit billing) both bill. Refuse here, under the same rule the
+  // booking path already applies (findActiveRecurringSeries + a 409 unless
+  // the operator explicitly chooses a surviving series) — shared with the
+  // IB preview via this same function, so an operator never sees a
+  // confirmation card for a merge the executor would refuse anyway.
+  //
+  // Run unconditionally — NOT gated on the customers' account-level
+  // addresses matching. Different (or missing) primary addresses do not
+  // prove different service properties: a multi-property winner can already
+  // have a series at the loser's saved secondary property (this is exactly
+  // what /link-as-property merges), and duplicateSeriesMergeConflict itself
+  // decides same-property by each colliding series' OWN resolved location
+  // (property_id, else stamped service_address_*, else that row's owning
+  // customer's primary address as fallback) — never the account-level
+  // compat status.
+  const seriesConflict = await duplicateSeriesMergeConflict(database, winner, loser);
+  if (seriesConflict) {
+    return {
+      code: 'duplicate_series_conflict',
+      message: `both customers have a live recurring series of the same family (${seriesConflict.family}) at the same property — cancel or reassign one series before merging, or the merge would leave two live series`,
+    };
+  }
+  return null;
+}
+
+// The effective address for a findActiveRecurringSeries match, resolved as
+// ONE whole record from exactly one source — never mixing fields from two
+// sources (e.g. a stamped line1 with the OWNER's line2 would silently
+// inherit the owner's home apartment number onto an unrelated, unitless
+// secondary property): (1) the match's OWN property_id's row in
+// customer_properties, when resolvable — two DIFFERENT customers can each
+// own a customer_properties row for the SAME real-world address under
+// different UUIDs, so property_id equality/inequality alone proves nothing
+// across customers; resolving to the row's own address is what actually
+// decides sameness; (2) else the match's own stamped service_address_*
+// fields, taken together; (3) else the OWNING customer's primary address,
+// taken together (legacy/unstamped rows implicitly serve the customer's
+// home — the same fallback the schedule board's day view applies via
+// COALESCE(scheduled_services.service_address_line1, customers.address_line1)).
+function seriesEffectiveAddress(match, ownerCustomer, propertiesById) {
+  const resolvedProperty = match.property_id ? propertiesById.get(String(match.property_id)) : null;
+  if (resolvedProperty) return resolvedProperty;
+  if (match.service_address_line1) {
+    return {
+      address_line1: match.service_address_line1,
+      address_line2: match.service_address_line2,
+      city: match.service_address_city,
+      zip: match.service_address_zip,
+    };
+  }
+  return {
+    address_line1: ownerCustomer.address_line1,
+    address_line2: ownerCustomer.address_line2,
+    city: ownerCustomer.city,
+    zip: ownerCustomer.zip,
+  };
+}
+
+// Do two findActiveRecurringSeries matches (one per side) serve the SAME
+// property? Reuses addressCompat (the SAME street/unit/ZIP/city compatibility
+// rule the account-level pre-filter above and the auto-merge address gate
+// already apply) over each side's resolved address (see
+// seriesEffectiveAddress) — NOT a composite string key: an exact-key compare
+// would read a missing optional field (no ZIP stamped on one side, say) as a
+// mismatch, when addressCompat's own rule is to compare an optional
+// component (unit, ZIP, city) ONLY when BOTH sides provide it, and still
+// reject a genuine mismatch (different ZIPs, different units) when they do.
+// There is no separate property_id fast path, because a bare id compare
+// cannot tell "two different customers' own rows for the same address"
+// (should match) apart from "two different addresses" (should not);
+// resolving property_id to its row's address (seriesEffectiveAddress) folds
+// both correctly into the one comparison.
+function seriesSameProperty(matchA, ownerA, matchB, ownerB, propertiesById) {
+  const addressA = seriesEffectiveAddress(matchA, ownerA, propertiesById);
+  const addressB = seriesEffectiveAddress(matchB, ownerB, propertiesById);
+  return ADDRESS_COMPATIBLE.has(addressCompat(addressA, addressB).status);
+}
+
+// A genuinely ACTIVE (not lapsed) recurring series of the same identity AT
+// THE SAME PROPERTY on both the winner and the loser — the shape a plain
+// merge must never produce. Liveness AND identity both reuse
+// findActiveRecurringSeries (recurring-appointment-seeder.js) — the SAME
+// "ongoing OR an upcoming/rescheduled/in-progress occurrence" rule and the
+// SAME service_id-OR-family-label matching the booking-duplicate guard
+// applies — rather than a parallel predicate: a fixed-length series that
+// already ran its course (no outstanding children, recurring_ongoing=false)
+// is lapsed, not a live duplicate, and a catalog rename that changed a
+// series' service_type text but kept its service_id must still be caught
+// (passing BOTH serviceId and serviceType lets findActiveRecurringSeries'
+// id-match path carry a renamed label). Property comparison is by each
+// match's OWN resolved location (see seriesSameProperty), not the
+// customers' account-level addresses.
+// findActiveRecurringSeries' own candidate set excludes every CANCELLED
+// parent — but a this_only cancellation of a recurring PARENT stamps
+// status='cancelled' while the family it anchors stays live in one of two
+// shapes: an ongoing series keeps recurring_ongoing=true by design
+// (admin-dispatch.js's single-occurrence cancel: "Single-occurrence cancels
+// (scope 'this_only') never enter [the recurring_ongoing clear] branch and
+// leave the flag intact"), and a FIXED-LENGTH series (recurring_ongoing=
+// false) keeps its outstanding children on the books. Both are invisible
+// to the canonical lookup. This returns the UNION of the canonical matches
+// and those cancelled-parent shapes — decided by cancelledParentStillLive,
+// which mirrors the seeder's own liveness rule (ongoing flag OR an
+// outstanding child, same statuses and date bound) — matched on the same
+// service-id-or-family rule (duplicateGuardFamilyKey), deduplicated by id.
+// Always a union, never a fallback: a winner with a normal series at
+// property A and a cancelled-but-live anchor at property B must still
+// collide with a loser series at B. And ONLY those shapes: a lapsed
+// parent (flag off, nothing outstanding) is a historical series the
+// canonical lookup already judged lapsed and must not resurrect as a merge
+// conflict. recurringServiceAddress (booking/visit-financial-stamps.js)
+// mirrors findActiveRecurringSeries' own address normalization onto the
+// extra rows, so seriesSameProperty compares like shapes either way.
+async function cancelledParentStillLive(database, row, columns) {
+  if (row.recurring_ongoing === true) return true;
+  const { etDateString } = require('../utils/datetime-et');
+  // Tracker-aware, via the lifecycle guard's shared clause (GitHub Codex
+  // #4684 r8 P1): track_state can lead a best-effort status sync in both
+  // directions, so a status-only probe missed a tracker-live child and
+  // blocked on a tracker-finished one.
+  const { whereVisitRowLive } = require('./customer-lifecycle-guard');
+  const today = etDateString();
+  const upcoming = await database('scheduled_services')
+    .where({ recurring_parent_id: row.id, is_recurring: true })
+    .where(function liveChild() { whereVisitRowLive(this, today, { trackState: !!columns?.track_state }); })
+    .first('id');
+  return !!upcoming;
+}
+
+// Never plan evidence, cancelled or not: one-time bookings and callbacks
+// (the same two exclusions cancellation-resolution/facts.js's
+// rowIsCancellationFamilyEvidence starts with).
+function parentRowIsPlanShaped(row, isOneTimeBookingSource) {
+  if (isOneTimeBookingSource(row.source)) return false;
+  if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
+  return true;
+}
+
+async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
+  const { findActiveRecurringSeries, duplicateGuardFamilyKey, scheduledServiceColumns } = require('./recurring-appointment-seeder');
+  // Same schema guard the canonical lookup applies before it reads any
+  // recurring column: without is_recurring/recurring_parent_id/
+  // recurring_ongoing there is no series to find (and no supplemental
+  // cancelled-parent probe to run).
+  const columns = await scheduledServiceColumns(database);
+  if (!columns || !columns.is_recurring || !columns.recurring_parent_id || !columns.recurring_ongoing) return [];
+  const active = await findActiveRecurringSeries(database, { customerId, serviceId, serviceType });
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
+  // The canonical lookup neither selects nor filters is_callback/source
+  // (its own callers never seed callbacks as recurring parents, but a
+  // recurring-shaped callback or one-time booking can exist), so its rows
+  // get the same plan-shape filter the cancelled-parent additions and the
+  // loser identities already pass through (GitHub Codex #4684 r6 P2).
+  let matches = Array.isArray(active) ? [...active] : [];
+  if (matches.length) {
+    const shapeRows = await database('scheduled_services')
+      .whereIn('id', matches.map((m) => m.id))
+      .select('id', 'is_callback', 'source');
+    const shapeById = new Map((Array.isArray(shapeRows) ? shapeRows : []).map((r) => [String(r.id), r]));
+    matches = matches.filter((m) => parentRowIsPlanShaped(shapeById.get(String(m.id)) || m, isOneTimeBookingSource));
+  }
+  const rows = await database('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true, status: 'cancelled' })
+    .whereNull('recurring_parent_id')
+    .select('*');
+  const targetKey = serviceType ? duplicateGuardFamilyKey(serviceType) : null;
+  const seen = new Set(matches.map((m) => String(m.id)));
+  for (const row of (Array.isArray(rows) ? rows : [])) {
+    if (seen.has(String(row.id))) continue;
+    if (!parentRowIsPlanShaped(row, isOneTimeBookingSource)) continue;
+    const idMatch = serviceId != null && row.service_id != null && String(row.service_id) === String(serviceId);
+    const keyMatch = targetKey != null && row.service_type && duplicateGuardFamilyKey(row.service_type) === targetKey;
+    if (!idMatch && !keyMatch) continue;
+     
+    if (!(await cancelledParentStillLive(database, row, columns))) continue;
+    seen.add(String(row.id));
+    matches.push({ ...row, ...recurringServiceAddress(row) });
+  }
+  return matches;
+}
+
+async function resolveUnstampedMatchProperties(database, matches) {
+  const { sourceEstimateForScope } = require('./recurring-appointment-seeder');
+  const { parseEstimateAddress } = require('./estimate-property-linkage');
+  for (const match of matches) {
+    if (match.property_id || match.service_address_line1 || !match.source_estimate_id) continue;
+    try {
+      const src = await sourceEstimateForScope(database, match.source_estimate_id);
+      if (!src) continue;
+      if (src.property_id) { match.property_id = src.property_id; continue; }
+      // Legacy shape (GitHub Codex #4684 r5 P1): an accepted estimate with
+      // a secondary service address but no property link. The seeder's
+      // scoped duplicate check recovers this from src.address through the
+      // SAME parser (parseEstimateAddress → normalizedEstimateStreet), so
+      // the parsed components are stamped onto the match as its service
+      // address and seriesEffectiveAddress compares them like any stamped
+      // row — the primary-home fallback only remains for an estimate with
+      // no usable address at all.
+      const parts = src.address ? parseEstimateAddress(src.address) : null;
+      if (parts?.address_line1) {
+        match.service_address_line1 = parts.address_line1;
+        match.service_address_line2 = parts.address_line2 || null;
+        match.service_address_city = parts.city || null;
+        match.service_address_zip = parts.zip || null;
+      }
+    } catch { /* keep the primary-address fallback */ }
+  }
+}
+
+async function duplicateSeriesMergeConflict(database, winner, loser) {
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  // IDENTITY collection only (which service_id/service_type families the
+  // loser has ever anchored) — liveness is decided per identity by
+  // liveFamilyMatches below, so this is deliberately permissive: fetched
+  // WITHOUT a status filter (a cancelled parent's family can still be live
+  // — see cancelledParentStillLive), dropping only one-time bookings and
+  // callbacks, which are never plan evidence.
+  const loserParentRowsRaw = await database('scheduled_services')
+    .where({ customer_id: loser.id, is_recurring: true })
+    .whereNull('recurring_parent_id')
+    .select('*');
+  const loserParentRows = (Array.isArray(loserParentRowsRaw) ? loserParentRowsRaw : [])
+    .filter((row) => parentRowIsPlanShaped(row, isOneTimeBookingSource));
+  if (!loserParentRows.length) return null;
+  // Distinct (service_id, service_type) identities — usually one per
+  // family, but a loser can carry more than one parent whose service_type
+  // TEXT collides while service_id differs, or vice versa after a catalog
+  // rename; each identity gets its own liveness/collision check.
+  const seen = new Set();
+  const identities = [];
+  for (const row of loserParentRows) {
+    const identityKey = `${row.service_id || ''}::${row.service_type || ''}`;
+    if (seen.has(identityKey)) continue;
+    seen.add(identityKey);
+    identities.push({ serviceId: row.service_id || null, serviceType: row.service_type || null });
+  }
+  for (const { serviceId, serviceType } of identities) {
+    if (serviceId == null && !serviceType) continue;
+    const [loserActive, winnerActive] = await Promise.all([
+      liveFamilyMatches(database, loser.id, serviceId, serviceType),
+      liveFamilyMatches(database, winner.id, serviceId, serviceType),
+    ]);
+    if (!Array.isArray(loserActive) || !loserActive.length || !Array.isArray(winnerActive) || !winnerActive.length) continue;
+    // An UNSTAMPED parent (no property_id, no service_address_*) can still
+    // serve its creating estimate's SECONDARY property — the seeder's own
+    // scoped duplicate check recovers that from source_estimate_id
+    // (sourceEstimateForScope) before it ever falls back to the customer's
+    // primary street, and so does this: without it two customers with
+    // different homes whose unstamped series both serve the same secondary
+    // property read as different premises and merge without a conflict.
+    // Only the estimate's authoritative property_id is adopted (a bare
+    // free-text estimate address has no unit/ZIP structure addressCompat
+    // can compare); rows that resolve to nothing keep the primary fallback.
+    await resolveUnstampedMatchProperties(database, [...loserActive, ...winnerActive]);
+    const propertyIds = [...new Set(
+      [...loserActive, ...winnerActive].map((m) => m.property_id).filter(Boolean).map(String),
+    )];
+    let propertiesById = new Map();
+    if (propertyIds.length) {
+      const propertyRows = await database('customer_properties')
+        .whereIn('id', propertyIds)
+        .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+      propertiesById = new Map((propertyRows || []).map((row) => [String(row.id), row]));
+    }
+    const samePropertyCollision = loserActive.some(
+      (lm) => winnerActive.some((wm) => seriesSameProperty(lm, loser, wm, winner, propertiesById)),
+    );
+    if (samePropertyCollision) {
+      return { family: serviceType || `service ${serviceId}` };
+    }
+  }
   return null;
 }
 
@@ -1366,6 +1752,78 @@ function isEmptyValue(v) {
     || normName(v) === '';
 }
 
+// Serializes the merge against the 'recurring-series-create' advisory locks
+// the three series creators (estimate-converter, booking.js self-book,
+// admin POST /admin/schedule) take via checkActiveSeriesLocked/
+// acquireSeriesCreateLocks before they insert a new parent (GitHub Codex
+// round-4 P1 #4684). Without this, a creator for the winner's identity can
+// pass its own duplicate-series guard while the loser still owns the
+// matching series, and insert a second live series right after the merge
+// moves the loser's series onto the winner — landing two live parents in
+// the same family.
+//
+// Called by executeMerge AFTER its `customers` row lock (pre-push audit on
+// 4c3ff61175, P1) — NOT before it. Every one of the three creators takes
+// its OWN customer row lock FIRST and only waits on this advisory lock
+// SECOND (admin-schedule.js ~7186/7202, booking.js ~2933, both commented
+// "customer → series-advisory order"), so this merge has to match that
+// same order: row lock, then advisory lock. Taking the advisory lock
+// before the row lock (the original round-4 shape) is a classic ABBA — a
+// concurrent creator holding the customer row while this merge held the
+// series lock would deadlock, and checkActiveSeriesLocked is fail-open on
+// a guard error, so the deadlocked creator's OWN duplicate-series check
+// would silently pass and it would seed anyway, defeating the very lock
+// meant to stop it. Being called after the row lock also means the
+// identity read below runs under that lock: no new parent for either
+// customer can commit between the read and the acquisition.
+//
+// Both customer ids are keyed for EVERY identity either party anchors,
+// not just their own: the winner must be locked for every family the
+// loser carries, because that is exactly the family the merge is about to
+// move onto the winner, and a creator racing the winner's OWN identity
+// needs to be blocked too. Any status is read (not just active/live) —
+// a cancelled parent's family can still be "live" via cancelledParentStillLive
+// (see liveFamilyMatches), so a creator's guard can still match it; the lock
+// namespace is about serializing WHICH creators may run, not about deciding
+// liveness.
+//
+// Locks are collected as a deduped, sorted union — the same discipline
+// acquireSeriesCreateLocks uses for its own multi-unit pre-pass — so any
+// two callers taking a set of these keys in the same total order can never
+// hold-and-wait on each other.
+async function lockSeriesCreateForMerge(trx, winnerId, loserId) {
+  const { seriesCreateLockKeys } = require('./recurring-appointment-seeder');
+  const parentRowsRaw = await trx('scheduled_services')
+    .whereIn('customer_id', [winnerId, loserId])
+    .where({ is_recurring: true })
+    .whereNull('recurring_parent_id')
+    .select('customer_id', 'service_id', 'service_type');
+  const parentRows = Array.isArray(parentRowsRaw) ? parentRowsRaw : [];
+  const seenIdentity = new Set();
+  const identities = [];
+  for (const row of parentRows) {
+    const identityKey = `${row.service_id || ''}::${row.service_type || ''}`;
+    if (seenIdentity.has(identityKey)) continue;
+    seenIdentity.add(identityKey);
+    identities.push({ serviceId: row.service_id || null, serviceType: row.service_type || null });
+  }
+  const keys = [...new Set(
+    identities.flatMap(({ serviceId, serviceType }) => {
+      if (serviceId == null && !serviceType) return [];
+      return [winnerId, loserId].flatMap(
+        (customerId) => seriesCreateLockKeys({ customerId, serviceId, serviceType }),
+      );
+    }),
+  )].sort();
+  for (const lockKey of keys) {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['recurring-series-create', lockKey],
+    );
+  }
+  return keys;
+}
+
 /**
  * Merge `loserId` into `winnerId`. Everything runs in one transaction; any
  * conflict aborts the whole merge (the pair stays in the review queue).
@@ -1460,6 +1918,26 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     mergeLockedAt = new Date();
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
+    // The recurring-series-create advisory locks, AFTER the customer row
+    // lock above (pre-push audit on 4c3ff61175, P1): the three series
+    // creators (admin-schedule.js, booking.js, estimate-converter) all take
+    // their OWN customer row lock FIRST and only wait on this advisory lock
+    // SECOND — taking it in the opposite order here (advisory lock first,
+    // row lock second) is a classic ABBA: a concurrent creator holding the
+    // customer row while this merge held the series lock would deadlock,
+    // and checkActiveSeriesLocked's guard is fail-open on a guard error, so
+    // the deadlocked creator's OWN duplicate check would silently pass and
+    // it would seed anyway — the exact race this lock exists to close.
+    // Reading the identities to lock (both parties' recurring parents) HERE,
+    // under the row lock just taken, also closes the read/acquire gap: no
+    // NEW parent for either customer can commit between the identity read
+    // and the lock acquisition, because both customers are already locked.
+    // See lockSeriesCreateForMerge for the merge-vs-creator race this
+    // closes (a creator for the winner's identity could otherwise pass its
+    // own guard while the loser still owned the matching series, then
+    // insert right after this merge moved the loser's series onto the
+    // winner).
+    await lockSeriesCreateForMerge(trx, winnerId, loserId);
     // Both sides' saved cards, locked for the life of this transaction
     // (pre-push audit P1). payment_methods is read three times here — the
     // Stripe-profile derivation inside the fingerprint recheck, the same
@@ -1496,7 +1974,22 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // this the route let the pair in and the executor refused it 100%).
     if (requireQueueEligibility) {
       await acquirePairAdjudicationLock(trx, winnerId, loserId);
-      const eligibility = await duplicatePairEligibility(winnerId, loserId, trx);
+      // Codex round 1 P1: an 'auto' merge must re-check the undo-merge
+      // suppression under this SAME lock a concurrent revertMerge takes —
+      // without it, a sweep candidate snapshotted just before an operator's
+      // undo would still read 'eligible' here and re-merge the pair the
+      // undo just restored. A manual merge (mode !== 'auto') never respects
+      // it — that path exists precisely so a human can re-merge a pair from
+      // the still-reviewable queue after an undo.
+      // The auto sweep's recheck is PAIR-SCOPED (Codex round 3 P2): it reads
+      // this pair's dismissal row and re-derives the tier from the two rows
+      // already locked above plus the loser's own blocker probes — never a
+      // full findDuplicateGroups rebuild (every active customer + every
+      // blocker table for every duplicate member) per candidate while the
+      // row locks are held.
+      const eligibility = mode === 'auto'
+        ? await lockedPairAutoEligibility(trx, winner, loser)
+        : await duplicatePairEligibility(winnerId, loserId, trx);
       const admitted = eligibility.eligible || (allowAddressConflict && eligibility.code === 'address_conflict');
       if (!admitted) {
         const err = new Error(`executeMerge: the pair is no longer mergeable (${eligibility.code}) — review a fresh proposal`);
@@ -2427,17 +2920,27 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
 // Auto-merge sweep (cron entry point — caller owns the feature gate)
 // ---------------------------------------------------------------------------
 
-async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
+// onlyPair (test-only in practice today): narrows the sweep to a single
+// (winnerId, loserId) candidate — every group/candidate outside it is
+// skipped entirely, with no change to eligibility logic or safety checks.
+// Lets a test exercise the real sweep against a real database without
+// touching every other live duplicate pair the target database happens to
+// hold (Codex round 1 P2 test-hygiene finding).
+async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = null } = {}) {
   let groups;
   try {
-    groups = await findDuplicateGroups(db, { failClosedOnDismissals: true });
+    // respectUndoMergeSuppression: the ONLY reader that must treat an
+    // undo-merge dismissal as hiding the pair — see UNDO_MERGE_DISMISSAL_REASON.
+    groups = await findDuplicateGroups(db, { failClosedOnDismissals: true, respectUndoMergeSuppression: true });
   } catch (e) {
     logger.warn(`[customer-dedupe] auto-merge sweep aborted — dismissals unreadable, refusing to merge blind: ${e.message}`);
     return { merged: [], skipped: [], aborted: 'dismissals_unreadable' };
   }
   const results = { merged: [], skipped: [] };
   for (const group of groups) {
+    if (onlyPair && String(group.winner.id) !== String(onlyPair.winnerId)) continue;
     for (const candidate of group.candidates) {
+      if (onlyPair && String(candidate.loser.id) !== String(onlyPair.loserId)) continue;
       if (candidate.tier !== 'green') {
         results.skipped.push({ loserId: candidate.loser.id, tier: candidate.tier, reasons: candidate.reasons });
         continue;
@@ -2449,6 +2952,12 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
           performedBy,
           mode: 'auto',
           evidence: candidate.evidence,
+          // Codex round 1 P1: re-check eligibility (incl. the undo-merge
+          // suppression, via mode:'auto') under the pair adjudication lock
+          // right before committing — the snapshot this loop iterates over
+          // was read before the loop started and can be stale by the time
+          // any given candidate's turn comes up.
+          requireQueueEligibility: true,
         });
         const name = [group.winner.first_name, group.winner.last_name].filter(Boolean).join(' ') || 'Unknown';
         results.merged.push({ winnerId: group.winner.id, loserId: candidate.loser.id, winnerName: name });
@@ -2513,7 +3022,7 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
     logger.warn(`[customer-dedupe] red-pair auto-dismiss aborted — dismissals unreadable: ${e.message}`);
     return { dismissed: [], aborted: 'dismissals_unreadable' };
   }
-  const results = { dismissed: [], skippedStale: 0 };
+  const results = { dismissed: [], skippedStale: 0, alreadyDismissed: 0 };
   for (const group of groups) {
     for (const candidate of group.candidates) {
       if (candidate.tier !== 'red') continue;
@@ -2538,15 +3047,34 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
             && normName(rowA.last_name) !== normName(rowB.last_name)
             && ADDRESS_CONFLICTS.has(addressCompat(rowA, rowB).status));
           if (!stillRed) return 'no_longer_red';
+          await acquirePairAdjudicationLock(trx, a, b);
+          const redReason = `auto-dismissed: red tier (${candidate.reasons.join(', ')})`.slice(0, 500);
+          // Under the pair lock, the existing verdict decides the write
+          // (Codex round 3 P2): revertMerge's undo sentinel is deliberately
+          // visible to this sweep's read, so an undone pair that is red gets
+          // selected every day — an ignored conflict would leave the
+          // sentinel in place and still report 'dismissed', a repeated
+          // false digest. Replace the sentinel with the real red verdict
+          // (the pair leaves the queue, as any red pair does); a real
+          // dismissal that raced in since the snapshot is already handled.
+          const existing = await trx('customer_duplicate_dismissals')
+            .where({ customer_id_a: a, customer_id_b: b })
+            .select('reason');
+          if (existing.length && existing.every((row) => row.reason === UNDO_MERGE_DISMISSAL_REASON)) {
+            await trx('customer_duplicate_dismissals')
+              .where({ customer_id_a: a, customer_id_b: b, reason: UNDO_MERGE_DISMISSAL_REASON })
+              .update({ reason: redReason, created_by: performedBy });
+            return 'dismissed';
+          }
+          if (existing.length) return 'already_dismissed';
           // Idempotent by the ordered-pair unique constraint — a re-run or a
           // race with a manual dismissal is an ignored conflict, never an
           // error.
-          await acquirePairAdjudicationLock(trx, a, b);
           await trx('customer_duplicate_dismissals')
             .insert({
               customer_id_a: a,
               customer_id_b: b,
-              reason: `auto-dismissed: red tier (${candidate.reasons.join(', ')})`.slice(0, 500),
+              reason: redReason,
               created_by: performedBy,
             })
             .onConflict(['customer_id_a', 'customer_id_b'])
@@ -2555,6 +3083,10 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
         });
         if (outcome === 'dismissed') {
           results.dismissed.push({ winnerId: group.winner.id, loserId: candidate.loser.id });
+        } else if (outcome === 'already_dismissed') {
+          // A verdict landed between the snapshot and the lock — nothing to
+          // write, nothing to report.
+          results.alreadyDismissed += 1;
         } else {
           // Counted in the digest metadata; the pair simply stays queued for
           // the next sweep to re-classify.
@@ -4819,6 +5351,36 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: winnerId });
     }
 
+    // ADMIN-BUG-R57: an undone merge is an explicit operator decision to
+    // keep these two records separate. Without a dismissal, the next
+    // findDuplicateGroups/runAutoMergeSweep tick sees the same live pair
+    // sharing a phone with the SAME empty blocker set the shell had before
+    // (the undo repointed exactly those rows back), classifies it 'green'
+    // again, and re-merges it — silently reversing the undo overnight.
+    // Record the dismissal in the SAME transaction as the undo, mirroring
+    // runRedPairAutoDismissSweep's own write (:2544-2553): idempotent via
+    // the ordered-pair unique constraint, so a re-run or a race with a
+    // manual dismissal is an ignored conflict, never an error.
+    // Codex round 1 P2: a PLAIN dismissal (any reason) used to hide the pair
+    // from findDuplicateGroups' default read too — the review queue, the
+    // dashboard alert, the IB tool and the manual-merge eligibility recheck
+    // ALL stopped seeing it, with no reopen endpoint. UNDO_MERGE_DISMISSAL_REASON
+    // is a sentinel findDuplicateGroups recognizes and, by default, does NOT
+    // hide behind — only runAutoMergeSweep opts in (respectUndoMergeSuppression)
+    // to treat it as suppressing. The pair stays fully reviewable for a human
+    // to re-merge on purpose; it just never auto-merges again.
+    const [dismissA, dismissB] = pairKey(winnerId, loserId);
+    await acquirePairAdjudicationLock(trx, dismissA, dismissB);
+    await trx('customer_duplicate_dismissals')
+      .insert({
+        customer_id_a: dismissA,
+        customer_id_b: dismissB,
+        reason: UNDO_MERGE_DISMISSAL_REASON,
+        created_by: performedBy || 'unknown',
+      })
+      .onConflict(['customer_id_a', 'customer_id_b'])
+      .ignore();
+
     await trx('customer_merge_journal').where({ id: journalId }).update({
       undone_at: trx.fn.now(),
       undone_by: performedBy || 'unknown',
@@ -5307,6 +5869,7 @@ module.exports = {
   findDuplicateGroups,
   duplicatePairEligibility,
   executeMerge,
+  lockSeriesCreateForMerge,
   runAutoMergeSweep,
   runRedPairAutoDismissSweep,
   revertMerge,
@@ -5343,8 +5906,14 @@ module.exports = {
   // unjournaled rows count on presence.
   countActivityRows,
   activityColumnsFor,
+  // The sentinel revertMerge stamps and only runAutoMergeSweep's
+  // respectUndoMergeSuppression reads — exported so tests assert against
+  // the real constant rather than a hardcoded copy of the string.
+  UNDO_MERGE_DISMISSAL_REASON,
   // exported for tests
   _test: {
+    classifyPair,
+    lockedPairAutoEligibility,
     EMAIL_BOUND_SURFACES,
     REPOINT_PK_COLUMNS,
     countActivityRows,

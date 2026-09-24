@@ -13,6 +13,7 @@ const { assertAdminAppointmentWindow, slotOverlapWarning } = require('../service
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer, markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
+const { getLeadStatusReconciliation, verifiedContactCallIds } = require('../services/lead-status-reconciliation');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const logger = require('../services/logger');
 
@@ -58,7 +59,7 @@ function isRealCalendarDate(value) {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
-const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { startOfETMonth, etDateString, etParts, parseETDateTime, etWallClockOccurrences } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
 // A date-only end_date (e.g. "2026-06-30") parses as midnight UTC, so an
@@ -83,6 +84,26 @@ function parseInclusiveStart(startDate) {
   if (!startDate) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return parseETDateTime(`${startDate}T00:00:00`);
   return new Date(startDate);
+}
+
+// One predicate for both rows and totals: full names and formatted phones
+// must have the same membership before pagination.
+function applyLeadSearch(query, search) {
+  const term = String(search).trim().replace(/\s+/g, ' ');
+  const pattern = `%${term}%`;
+  const digits = term.replace(/\D/g, '');
+  query.where(function () {
+    this.whereILike('leads.first_name', pattern)
+      .orWhereILike('leads.last_name', pattern)
+      .orWhereRaw("CONCAT_WS(' ', NULLIF(TRIM(leads.first_name), ''), NULLIF(TRIM(leads.last_name), '')) ILIKE ?", [pattern])
+      .orWhereILike('leads.phone', pattern)
+      .orWhereILike('leads.email', pattern)
+      .orWhereILike('leads.address', pattern)
+      .orWhereILike('leads.service_interest', pattern);
+    if (digits && /^[+\d\s().-]+$/.test(term)) {
+      this.orWhereRaw("regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
+    }
+  });
 }
 
 // Speed-to-Lead fresh-start baseline — the live backlog gauge (Avg Speed to
@@ -217,7 +238,7 @@ router.use(async (req, res, next) => {
 router.get('/analytics/overview', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : startOfETMonth();
+    const start = start_date ? parseInclusiveStart(start_date) : startOfETMonth();
     // parseInclusiveEnd → end-of-ET-day, so a date-only end_date matches the
     // by-source / by-channel windows the ROI aggregation below reconciles with
     // (raw new Date('2026-06-30') is midnight UTC = June 29 ET, dropping a day).
@@ -340,7 +361,7 @@ router.get('/analytics/by-source', async (req, res, next) => {
     // The Sources table requests inactive sources too (include_inactive=1); the
     // Analytics-tab panels call without it and stay active-only.
     const results = await leadAttribution.calculateAllSourceROI(
-      start_date ? new Date(start_date) : undefined,
+      start_date ? parseInclusiveStart(start_date) : undefined,
       parseInclusiveEnd(end_date),
       { includeInactive: include_inactive === '1' || include_inactive === 'true' },
     );
@@ -353,7 +374,7 @@ router.get('/analytics/by-channel', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
     const allROI = await leadAttribution.calculateAllSourceROI(
-      start_date ? new Date(start_date) : undefined,
+      start_date ? parseInclusiveStart(start_date) : undefined,
       parseInclusiveEnd(end_date),
     );
 
@@ -386,8 +407,8 @@ router.get('/analytics/by-channel', async (req, res, next) => {
 router.get('/analytics/funnel', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : startOfETMonth();
-    const end = end_date ? new Date(end_date) : new Date();
+    const start = start_date ? parseInclusiveStart(start_date) : startOfETMonth();
+    const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
     // The same prospect population as the overview KPIs and the source
     // analytics (scopeToProspects): a suppressed rerun or a second win must
@@ -427,12 +448,13 @@ router.get('/analytics/funnel', async (req, res, next) => {
 router.get('/analytics/response', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : new Date(new Date().getFullYear(), 0, 1);
-    const end = end_date ? new Date(end_date) : new Date();
+    const start = start_date ? parseInclusiveStart(start_date) : parseETDateTime(`${etDateString().slice(0, 4)}-01-01T00:00:00`);
+    const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
     const leads = await db('leads')
       .whereNull('deleted_at')
       .whereNotNull('response_time_minutes')
+      .modify(scopeToProspects)
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end);
 
@@ -476,8 +498,8 @@ router.get('/analytics/response', async (req, res, next) => {
 router.get('/analytics/lost', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
-    const start = start_date ? new Date(start_date) : new Date(new Date().getFullYear(), 0, 1);
-    const end = end_date ? new Date(end_date) : new Date();
+    const start = start_date ? parseInclusiveStart(start_date) : parseETDateTime(`${etDateString().slice(0, 4)}-01-01T00:00:00`);
+    const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
     const reasons = await db('leads')
       .select('lost_reason')
@@ -544,7 +566,7 @@ router.get('/sources/:id', async (req, res, next) => {
     const { start_date, end_date } = req.query;
     const roi = await leadAttribution.calculateSourceROI(
       req.params.id,
-      start_date ? new Date(start_date) : undefined,
+      start_date ? parseInclusiveStart(start_date) : undefined,
       parseInclusiveEnd(end_date),
     );
     if (!roi) return res.status(404).json({ error: 'Source not found' });
@@ -753,17 +775,7 @@ router.get('/', async (req, res, next) => {
     const endDt = parseInclusiveEnd(end_date);
     if (startDt && !isNaN(startDt)) query = query.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) query = query.where('leads.first_contact_at', '<=', endDt);
-    if (search) {
-      const s = `%${search}%`;
-      query = query.where(function () {
-        this.whereILike('leads.first_name', s)
-          .orWhereILike('leads.last_name', s)
-          .orWhereILike('leads.phone', s)
-          .orWhereILike('leads.email', s)
-          .orWhereILike('leads.address', s)
-          .orWhereILike('leads.service_interest', s);
-      });
-    }
+    if (search) query.modify(applyLeadSearch, search);
 
     const validSorts = {
       first_contact_at: 'leads.first_contact_at',
@@ -815,17 +827,7 @@ router.get('/', async (req, res, next) => {
       excludeInternal(query);
       excludeInternal(countQuery);
     }
-    if (search) {
-      const s = `%${search}%`;
-      countQuery.where(function () {
-        this.whereILike('leads.first_name', s)
-          .orWhereILike('leads.last_name', s)
-          .orWhereILike('leads.phone', s)
-          .orWhereILike('leads.email', s)
-          .orWhereILike('leads.address', s)
-          .orWhereILike('leads.service_interest', s);
-      });
-    }
+    if (search) countQuery.modify(applyLeadSearch, search);
     const { count } = await countQuery.count('* as count').first();
 
     const leads = await query
@@ -834,7 +836,15 @@ router.get('/', async (req, res, next) => {
       .limit(lim)
       .offset((pg - 1) * lim);
 
-    res.json({ leads, total: parseInt(count, 10), page: pg, limit: lim });
+    res.json({
+      leads,
+      total: parseInt(count, 10),
+      page: pg,
+      limit: lim,
+      // Codex #4709 r6 P1: the Leads page reads the consultation gate once
+      // here, at the page boundary, instead of probing it per expanded row.
+      consultationLinksEnabled: require('../config/feature-gates').leadInspectionLinkLive(),
+    });
   } catch (err) { next(err); }
 });
 
@@ -928,6 +938,8 @@ router.get('/:id', async (req, res, next) => {
     // leads, so a call attached to a form lead is still found). Best-effort:
     // a call_log failure must never break the lead fetch.
     let calls = [];
+    let associatedCallsAvailable = true;
+    let associatedCallCount = 0;
     try {
       const digits = String(lead.phone || '').replace(/\D/g, '');
       let ten = digits.length >= 10 ? digits.slice(-10) : null;
@@ -973,9 +985,14 @@ router.get('/:id', async (req, res, next) => {
             // exact failure this dissent guard exists to prevent.
             .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
         };
+        const settledLeadStamp = function settledLeadStamp() {
+          this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
+            .whereNull('processing_token')
+            .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
+        };
         // The phone arms below would match a sandbox bake-off from a lead's
         // number and surface its transcript as lead history (codex r15 P2).
-        const rows = await require('../services/voice-agent/relay-protocol').whereNotSandboxCall(db('call_log'))
+        const associatedCallsQuery = require('../services/voice-agent/relay-protocol').whereNotSandboxCall(db('call_log'))
           .where(function () {
             if (lead.twilio_call_sid) {
               this.orWhere(function sidArm() {
@@ -991,16 +1008,7 @@ router.get('/:id', async (req, res, next) => {
             // mid-flight pass's provisional stamp can still be cleared or
             // repointed, and surfacing it here could expose another
             // caller's transcript on the wrong lead card (pre-push P1 r3).
-            this.orWhere(function stampArm() {
-              // Settled = token NULL AND a durable successful pass — the
-              // error path clears the token while the stamp stays pending
-              // the extraction_failed retry (pre-push P1 r8).
-              this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
-                .whereNull('processing_token')
-                // Same settled definition as the dissent arm above — legacy
-                // NULL status included (codex P1).
-                .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
-            });
+            this.orWhere(settledLeadStamp);
             if (ten) {
               this.orWhere(function phoneFromArm() {
                 this.whereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
@@ -1011,7 +1019,25 @@ router.get('/:id', async (req, res, next) => {
                   .whereNot(settledDissentingStamp);
               });
             }
-          })
+          });
+        if (req.query.leadReview === '1' && lead.status === 'new') {
+          const lifecycleStartMs = new Date(lead.first_contact_at || lead.created_at).getTime();
+          if (Number.isFinite(lifecycleStartMs)) {
+            const countRow = await associatedCallsQuery.clone()
+              .where(function lifecycleOrExactCall() {
+                this.where('created_at', '>=', new Date(lifecycleStartMs))
+                  .orWhere(settledLeadStamp);
+                // A call starts before the lead it creates. Exact linkage
+                // keeps that initiating call; phone-only matches stay bounded.
+                if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
+              })
+              .whereNotIn(db.raw('id::text'), verifiedContactCallIds(lead, activities))
+              .count({ count: '*' })
+              .first();
+            associatedCallCount = Number(countRow?.count) || 0;
+          }
+        }
+        const rows = await associatedCallsQuery
           .where(function () {
             this.whereNotNull('transcription').orWhereNotNull('recording_url');
           })
@@ -1035,10 +1061,35 @@ router.get('/:id', async (req, res, next) => {
         }));
       }
     } catch (e) {
+      associatedCallsAvailable = false;
       console.error('[leads] call_log lookup failed (non-blocking):', e.message);
     }
 
-    res.json({ lead, activities, calls });
+    const response = { lead, activities, calls };
+    if (req.query.leadReview === '1') {
+      response.linkedHistory = await require('../services/lead-linked-history').readLinkedLeadHistory(db, lead);
+      try {
+        response.reconciliation = await getLeadStatusReconciliation({
+          database: db,
+          lead,
+          activities,
+          associatedCallCount,
+          associatedCallsAvailable,
+        });
+      } catch {
+        logger.warn('[leads] status reconciliation preview unavailable', { leadId: lead.id });
+        response.reconciliation = {
+          mode: 'read_only',
+          status: 'unavailable',
+          current_status: lead.status,
+          summary: 'Status reconciliation could not be loaded. No lead data was changed.',
+          findings: [],
+          scope: { kind: 'single_record', writes: false, global_sweep: false },
+        };
+      }
+    }
+
+    res.json(response);
   } catch (err) { next(err); }
 });
 
@@ -1082,38 +1133,41 @@ router.put('/:id', async (req, res, next) => {
     if (updates.phone) updates.phone = leadAttribution.normalizePhone(updates.phone);
     updates.updated_at = new Date();
 
-    const [lead] = await db('leads').where('id', req.params.id).update(updates).returning('*');
-    if (!lead) return res.status(404).json({ error: 'Lead not found' });
-    let responseLead = lead;
+    const performedBy = [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ');
+    let previousStatus;
+    const responseLead = await db.transaction(async (trx) => {
+      const current = await trx('leads').where('id', req.params.id).whereNull('deleted_at').forUpdate().first();
+      if (!current) return null;
+      previousStatus = current.status;
+      const statusChanged = updates.status && updates.status !== current.status;
+      // Match booking/conversion semantics: first win owns the timestamp.
+      // Reopening and retrying a manual win never re-dates earned revenue.
+      if (updates.status === 'won') {
+        updates.converted_at = current.converted_at || new Date();
+        updates.is_qualified = true;
+      }
+      const [lead] = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update(updates).returning('*');
+      if (statusChanged && FIRST_RESPONSE_STATUSES.has(updates.status)) {
+        await leadAttribution.logFirstResponse(req.params.id, { database: trx });
+      }
+      await trx('lead_activities').insert({
+        lead_id: req.params.id,
+        activity_type: statusChanged ? 'status_change' : 'updated',
+        description: statusChanged
+          ? `Status: ${current.status} → ${updates.status}`
+          : `Lead updated: ${Object.keys(updates).filter(k => k !== 'updated_at').join(', ')}`,
+        performed_by: performedBy,
+        metadata: JSON.stringify({ ...updates, ...(statusChanged ? { previous_status: current.status } : {}) }),
+      });
+      return statusChanged ? trx('leads').where('id', lead.id).first() : lead;
+    });
+    if (!responseLead) return res.status(404).json({ error: 'Lead not found' });
 
-    if (
-      updates.status
-      && updates.status !== existingLead.status
-      && existingLead.response_time_minutes == null
-      && FIRST_RESPONSE_STATUSES.has(updates.status)
-    ) {
-      await leadAttribution.logFirstResponse(req.params.id);
-      responseLead = await db('leads').where('id', req.params.id).first();
-    }
-
-    // Manual status edits (Kanban drags / detail-pane changes) mirror onto the
-    // lead's ad_service_attribution funnel row. Monotonic + best-effort; a
-    // status with no funnel meaning no-ops inside the bridge. A manual WON is
-    // a conversion: it runs the shared settlement (bridge + wizard-repeat
-    // settlement) like the book route, so a repeat's win lands on its root's
-    // row instead of on the row /calculate deleted (codex #3834 r34 P1).
-    if (updates.status && updates.status !== existingLead.status) {
-      if (updates.status === 'won') await leadAttribution.settleWonFunnelRow(req.params.id, lead.customer_id || null);
+    // Existing best-effort funnel settlement runs after the atomic lead/history write.
+    if (updates.status && updates.status !== previousStatus) {
+      if (updates.status === 'won') await leadAttribution.settleWonFunnelRow(req.params.id, responseLead.customer_id || null);
       else await bridgeLeadFunnelStage(req.params.id, updates.status);
     }
-
-    await db('lead_activities').insert({
-      lead_id: req.params.id,
-      activity_type: 'updated',
-      description: `Lead updated: ${Object.keys(updates).filter(k => k !== 'updated_at').join(', ')}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
-      metadata: JSON.stringify(updates),
-    });
 
     res.json({ lead: responseLead });
   } catch (err) { next(err); }
@@ -1237,10 +1291,69 @@ router.post('/:id/assign', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/leads/:id/consultation-link — availability probe for the
+// Leads-page row expand (lead-inspection-link-scope.md §4), dark behind
+// GATE_LEAD_INSPECTION_LINK. Read-only (pre-push Codex P2): simply
+// expanding a lead row must not mint a live 14-day bearer short code —
+// this reports { available, reason } (gate live, lead still open, has a
+// phone, template active) without ever calling buildLeadConsultationLink's
+// createShortCode. The actual mint is POST /:id/consultation-link below,
+// fired only on the Send consultation link click.
+router.get('/:id/consultation-link', async (req, res, next) => {
+  try {
+    // A malformed id is a 400 before any UUID-column query (Codex #4709
+    // r12 P2), never a Postgres uuid-syntax 500.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.id))) {
+      return res.status(400).json({ error: 'Invalid lead id' });
+    }
+    const { consultationLinkAvailable } = require('../services/lead-consultation-link');
+    const availability = await consultationLinkAvailable(req.params.id);
+    res.json(availability);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/leads/:id/consultation-link — mints (or reuses, per
+// short-url.js's own existing-code lookup) the actual consultation link,
+// rendered via the admin-editable lead_consultation_link SMS template and
+// ready to drop straight into the existing text composer for the
+// unchanged POST /:id/send-sms below — no new send path there. Separate
+// from the read-only GET above precisely so the mint only happens on the
+// Send click, not on every row expand.
+router.post('/:id/consultation-link', async (req, res, next) => {
+  try {
+    // A malformed id is a 400 before any UUID-column query (Codex #4709
+    // r12 P2), never a Postgres uuid-syntax 500.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.id))) {
+      return res.status(400).json({ error: 'Invalid lead id' });
+    }
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first('id', 'first_name', 'status', 'converted_at');
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const { isOpenLeadRow } = require('../services/lead-statuses');
+    if (!isOpenLeadRow(lead)) {
+      return res.json({ url: null, line: '', reason: 'That lead has already converted or closed' });
+    }
+    const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+    const result = await buildLeadConsultationSmsLine(lead.id, lead.first_name);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/leads/:id/send-sms — send SMS to lead via Twilio
+// attachments (mediaUrls + mediaAttachments) and fromNumber: same shape and
+// same validation as POST /admin/communications/sms, since a consultation
+// link with no resolved customer routes its Communications-composer send
+// through THIS route instead, for the lead_activities audit trail below
+// (pre-push Codex P1 on the consultation-link lane — the composer sent
+// {to, message} only, so media silently vanished and an operator-picked
+// fromNumber was ignored while the UI reported success). Both flow through
+// the SAME shared send helper the generic route uses (sendCustomerMessage →
+// providers/twilio-sms.js, which reads metadata.fromNumber / .mediaUrls /
+// .media) — nothing route-specific is duplicated.
+const { isUsPhone } = require('../services/lead-consultation-link');
+
 router.post('/:id/send-sms', async (req, res, next) => {
   try {
-    const { message } = req.body;
+    const { message, mediaUrls, mediaAttachments, fromNumber } = req.body;
     if (!message) return res.status(400).json({ error: 'Message is required' });
 
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
@@ -1250,15 +1363,71 @@ router.post('/:id/send-sms', async (req, res, next) => {
       return res.status(409).json({ error: 'The lead phone changed. Reopen messages before sending.' });
     }
 
+    const { mediaFromOutboundAttachments } = require('../services/sms-media');
+    const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
+    const media = mediaFromOutboundAttachments(mediaAttachments, cleanMediaUrls);
+    // Twilio caps a single MMS at 5MB total across all media — same check
+    // and message as the generic route, so an attachment rejected here
+    // reads the same to the operator whichever composer sent it.
+    const MAX_TOTAL_MEDIA_BYTES = 5 * 1024 * 1024;
+    const totalMediaBytes = media.reduce((sum, m) => sum + (Number(m.size) || 0), 0);
+    if (media.length > 0 && totalMediaBytes > MAX_TOTAL_MEDIA_BYTES) {
+      return res.status(413).json({
+        error: `Attachments total ${(totalMediaBytes / 1024 / 1024).toFixed(1)}MB, over Twilio's 5MB per-message limit`,
+      });
+    }
+    const TWILIO_NUMBERS = require('../config/twilio-numbers');
+    if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
+      return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
+    }
+
+    // A consultation link inserted here can go stale by the time the
+    // operator actually sends (gate flipped off, the lead closed/converted,
+    // or the 14-day token itself expired) — re-checked at THIS send
+    // boundary the same way the generic /admin/communications/sms route's
+    // bearerLinkSendCheck re-checks every other bearer kind (pre-push
+    // Codex P1). Shared function, called directly here rather than the
+    // whole bearerLinkSendCheck, which needs customer/account context this
+    // route doesn't have.
+    // The SAME send-time check the Communications route runs (Codex #4709
+    // r9 local P1): every bearer re-check (consultation included, bound to
+    // THIS lead), the US-only rule, and the shared customer-owner recovery
+    // — a number exactly one live customer owns is that customer's text, so
+    // their notification preferences apply; an ambiguous number is refused.
+    const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+    // The lead's OWN linked customer is the trusted owner when it is live and
+    // its current phone is this destination (Codex #4709 r11 P2): a
+    // household of customers sharing the number is otherwise ambiguous to
+    // the generic owner recovery and every send would 409.
+    const destLast10 = String(lead.phone || '').replace(/\D/g, '').slice(-10);
+    let linkedOwnerId = null;
+    if (lead.customer_id) {
+      const linked = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('id', 'phone');
+      // Full phone identity (Codex #4709 r20 P1): an international customer
+      // number sharing the lead's last ten digits is a different phone.
+      const { phoneIdentityKey } = require('../utils/phone');
+      if (linked && phoneIdentityKey(linked.phone) && phoneIdentityKey(linked.phone) === phoneIdentityKey(lead.phone)) linkedOwnerId = linked.id;
+    }
+    const bearerCheck = await bearerLinkSendCheck(
+      message,
+      destLast10,
+      { trustedCustomerId: linkedOwnerId, usDestination: isUsPhone(lead.phone), expectedLeadId: lead.id },
+    );
+    if (!bearerCheck.ok) {
+      return res.status(409).json({ error: bearerCheck.error });
+    }
+    const ownerCustomerId = linkedOwnerId || bearerCheck.customerId || null;
+
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     const sendResult = await sendCustomerMessage({
       to: lead.phone,
       body: message,
       channel: 'sms',
-      audience: 'lead',
+      audience: ownerCustomerId ? 'customer' : 'lead',
       purpose: 'conversational',
       leadId: lead.id,
-      identityTrustLevel: 'phone_provided_unverified',
+      ...(ownerCustomerId ? { customerId: ownerCustomerId } : {}),
+      identityTrustLevel: ownerCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       // Send-window operator provenance: this is the Leads-page manual
       // send — an authenticated operator typed and clicked this message,
       // so it's allowlisted in validators/send-window.js like the other
@@ -1267,6 +1436,10 @@ router.post('/:id/send-sms', async (req, res, next) => {
       metadata: {
         original_message_type: 'lead_outreach',
         adminUserId: req.technicianId,
+        fromNumber: fromNumber || undefined,
+        mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
+        allowMediaUrls: cleanMediaUrls.length > 0,
+        media,
       },
     });
     const { isRealProviderSend } = require('../services/sms-auto-send');
@@ -1274,28 +1447,16 @@ router.post('/:id/send-sms', async (req, res, next) => {
       return res.status(422).json(sendResult);
     }
 
-    // Log activity
-    await db('lead_activities').insert({
-      lead_id: req.params.id,
-      activity_type: 'sms_sent',
-      description: `SMS sent: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
-      performed_by: req.technician.name || [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ') || 'Admin',
-      metadata: JSON.stringify({ message }),
+    // Audit row + first-response stamp + new→contacted transition — the
+    // SAME function admin-communications.js's POST /sms calls for a
+    // consultation send that resolved a lead with no customer (pre-push
+    // Codex P1), so the two routes can never drift on what this records.
+    const { recordLeadSmsOutreach } = require('../services/lead-outreach');
+    const updated = await recordLeadSmsOutreach({
+      leadId: req.params.id,
+      message,
+      performedBy: req.technician.name || [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ') || 'Admin',
     });
-
-    // Record first response time if not yet recorded
-    if (lead.response_time_minutes == null) {
-      await leadAttribution.logFirstResponse(req.params.id);
-    }
-
-    // Update status to 'contacted' if currently 'new'
-    if (lead.status === 'new') {
-      const changed = await db('leads').where('id', req.params.id).where('status', 'new').update({ status: 'contacted', updated_at: new Date() });
-      // Funnel-row mirror (monotonic, best-effort).
-      if (changed) await bridgeLeadFunnelStage(req.params.id, 'contacted');
-    }
-
-    const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated, sent: true, providerMessageId: sendResult.providerMessageId });
   } catch (err) { next(err); }
 });
@@ -1309,20 +1470,41 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    const callbackAt = new Date(`${date}T${time}`);
-
-    await db('lead_activities').insert({
-      lead_id: req.params.id,
-      activity_type: 'callback_scheduled',
-      description: `Callback scheduled for ${callbackAt.toLocaleString('en-US', { timeZone: 'America/New_York' })}${notes ? ' — ' + notes : ''}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
-      metadata: JSON.stringify({ date, time, notes, callback_at: callbackAt.toISOString() }),
+    if (!isRealCalendarDate(date) || typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+      return res.status(400).json({ error: 'A valid date and time are required' });
+    }
+    const callbackAt = parseETDateTime(`${date}T${time}`);
+    const callbackParts = etParts(callbackAt);
+    const [hour, minute] = time.split(':').map(Number);
+    if (etDateString(callbackAt) !== date || callbackParts.hour !== hour || callbackParts.minute !== minute) {
+      return res.status(400).json({ error: 'The selected time does not exist in Eastern time' });
+    }
+    // The fall-back Sunday repeats 1:00-1:59 AM ET (once in EDT, once in
+    // EST): a wall time that occurs twice round-trips cleanly under BOTH
+    // offsets, so the gap check above cannot see it, and parseETDateTime
+    // silently keeps the first (EDT) occurrence — an hour away from what the
+    // operator may have meant. Reject the ambiguity the way
+    // parseQuotedETDeadline does instead of storing a guess (codex round-3
+    // P2).
+    if (etWallClockOccurrences(callbackAt) !== 1) {
+      return res.status(400).json({ error: 'That time happens twice in Eastern time on the daylight saving change — pick a time outside 1:00–1:59 AM' });
+    }
+    const saved = await db.transaction(async (trx) => {
+      const changed = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update({
+        next_follow_up_at: callbackAt,
+        updated_at: new Date(),
+      });
+      if (!changed) return false;
+      await trx('lead_activities').insert({
+        lead_id: req.params.id,
+        activity_type: 'callback_scheduled',
+        description: `Callback scheduled for ${callbackAt.toLocaleString('en-US', { timeZone: 'America/New_York' })}${notes ? ' — ' + notes : ''}`,
+        performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+        metadata: JSON.stringify({ date, time, notes, callback_at: callbackAt.toISOString() }),
+      });
+      return true;
     });
-
-    await db('leads').where('id', req.params.id).update({
-      next_follow_up_at: callbackAt,
-      updated_at: new Date(),
-    });
+    if (!saved) return res.status(404).json({ error: 'Lead not found' });
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated });
@@ -1678,7 +1860,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
       // ---- end slot-overlap guard part 2
 
-      await assertAssignableTechnician(technicianId || null, { conn: trx });
+      await assertAssignableTechnician(technicianId || null, { conn: trx, date: String(date).slice(0, 10) });
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,

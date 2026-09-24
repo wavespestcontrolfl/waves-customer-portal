@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { formatSmsTemplateVars } = require('../utils/sms-time-format');
 const { TEMPLATES: CLEAN_DEFAULT_SMS_TEMPLATES } = require('../models/migrations/20260514000002_tighten_sms_template_copy');
 const SmsTemplateVariants = require('../services/sms-template-variants');
@@ -42,6 +42,31 @@ function extractTemplatePlaceholders(body) {
   return [...placeholders];
 }
 
+// The keep-list's canonical STOP-line literal (docs/sms-stop-line-policy.md)
+// — the SAME pattern server/tests/stop-line-off-remaining-transactional-
+// migration.test.js's own pinning assertion uses
+// (`expect(templateRows[2].body).toMatch(/Reply STOP to opt out\./)`), so
+// this detector and that pinning test can never disagree about what "has
+// the line" means. Matched directly against the body (pre-push Codex P1):
+// the earlier version used the sweep migrations' dropStop STRIP function
+// and checked `dropStop(body) !== body`, but dropStop ALSO normalizes
+// whitespace unrelated to the STOP line (3+ newlines collapse to 2,
+// trailing spaces before a newline are trimmed, trailing whitespace is
+// trimmed) — a body with a stray extra blank line and NO STOP line at all
+// still came out different, a false positive that let the disclosure be
+// silently dropped.
+const STOP_LINE_RE = /Reply STOP to opt out\./;
+function hasStopLine(body) {
+  return STOP_LINE_RE.test(String(body || ''));
+}
+// Template keys whose keep-list membership (docs/sms-stop-line-policy.md)
+// makes "Reply STOP to opt out." a REQUIRED literal, not just a default —
+// an admin edit that drops it is a keep-list violation on a first-contact
+// text, rejected at write time the same way a dropped required
+// {placeholder} is (pre-push Codex P1). lead_consultation_link is the
+// consultation-link lane's own first-contact-lead text.
+const REQUIRED_STOP_LINE_KEYS = new Set(['lead_consultation_link']);
+
 // Placeholders a specific template's FLOW depends on — the render path
 // refuses a body without them (getTemplate opts.requiredVars), so accepting
 // such an edit at write time would take the feature offline while its
@@ -61,6 +86,12 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // renders nothing the worker can send, so every promise on the queue parks
   // for manual review instead (codex #4293 r1 P2).
   reschedule_link_promise: Object.freeze(['link']),
+  // Lead consultation-booking link: the URL IS the ask — a body edited to
+  // drop {consultation_url} would otherwise render as a normal (greeted,
+  // STOP-footed) standalone text with no way to actually book (pre-push
+  // Codex P2). buildLeadConsultationSmsLine passes this same requiredVars
+  // list to getTemplate at render time.
+  lead_consultation_link: Object.freeze(['consultation_url']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {
@@ -74,6 +105,14 @@ function validateTemplateBody(body, variables, templateKey = null) {
         missing_placeholders: missing,
       };
     }
+  }
+  // Keep-list literal (docs/sms-stop-line-policy.md) — applies to the base
+  // template AND every variant, since both go through this same validator
+  // (POST/PUT /:templateKey/variants call it too).
+  if (REQUIRED_STOP_LINE_KEYS.has(templateKey) && !hasStopLine(body)) {
+    return {
+      error: `${templateKey} is a first-contact lead text and must keep "Reply STOP to opt out." — the keep-list requires it (docs/sms-stop-line-policy.md)`,
+    };
   }
   // Double-brace tokens are the email/newsletter syntax — in an SMS body the
   // renderer substitutes the INNER {token} and the leftover braces then read
@@ -198,7 +237,12 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // PUT /:id — update template body
-router.put('/:id', async (req, res, next) => {
+// Admin-only (ADMIN-BUG-R39): writes rewrite the wording/links every
+// customer's automated SMS uses (confirmations, reminders, receipts,
+// review requests) or silently switch one off — owner-only, matching the
+// 2026-08-25 role lockdown that made the Message Templates tab
+// adminOnly and the sibling admin-email-templates router.
+router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const { body, name, is_active, trigger_event_key } = req.body;
     const updates = { updated_at: new Date() };
@@ -221,7 +265,7 @@ router.put('/:id', async (req, res, next) => {
 });
 
 // POST / — create new template
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { template_key, name, category, body, description, variables, is_internal } = req.body;
     if (!template_key || !name || !body) return res.status(400).json({ error: 'template_key, name, and body required' });
@@ -237,7 +281,7 @@ router.post('/', async (req, res, next) => {
 });
 
 // DELETE /:id — delete template
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const template = await db('sms_templates').where({ id: req.params.id }).first();
     if (!template) return res.status(404).json({ error: 'Template not found' });
@@ -274,7 +318,7 @@ router.get('/:templateKey/variants', async (req, res, next) => {
 });
 
 // POST /:templateKey/variants
-router.post('/:templateKey/variants', async (req, res, next) => {
+router.post('/:templateKey/variants', requireAdmin, async (req, res, next) => {
   try {
     const { variantKey, variant_key, name, body, weight, status, isControl, is_control, metadata } = req.body || {};
     const cleanVariantKey = String(variantKey || variant_key || '').trim();
@@ -310,7 +354,7 @@ router.post('/:templateKey/variants', async (req, res, next) => {
 });
 
 // PUT /:templateKey/variants/:variantKey
-router.put('/:templateKey/variants/:variantKey', async (req, res, next) => {
+router.put('/:templateKey/variants/:variantKey', requireAdmin, async (req, res, next) => {
   try {
     const updates = { updated_at: new Date() };
     if (req.body.body !== undefined) {
@@ -340,7 +384,7 @@ router.put('/:templateKey/variants/:variantKey', async (req, res, next) => {
 });
 
 // DELETE /:templateKey/variants/:variantKey
-router.delete('/:templateKey/variants/:variantKey', async (req, res, next) => {
+router.delete('/:templateKey/variants/:variantKey', requireAdmin, async (req, res, next) => {
   try {
     await db('sms_template_variants')
       .where({ template_key: req.params.templateKey, variant_key: req.params.variantKey })
@@ -486,5 +530,10 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
 // map, so save-time and render-time can never disagree about what a
 // template must keep.
 router.REQUIRED_TEMPLATE_PLACEHOLDERS = REQUIRED_TEMPLATE_PLACEHOLDERS;
+// Same reason: lead-consultation-link.js's buildLeadConsultationSmsLine
+// re-checks the RENDERED body with this exact function (pre-push Codex
+// P1) so save-time and render-time can never disagree about whether the
+// keep-list disclosure survived.
+router.hasStopLine = hasStopLine;
 
 module.exports = router;

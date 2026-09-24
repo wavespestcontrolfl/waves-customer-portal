@@ -4,7 +4,7 @@ jest.mock('../models/db', () => {
   const conn = (...args) => mockPg(...args);
   return conn;
 });
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate === 'webhooks') }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate === 'webhooks'), gateEnvValue: () => false }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/messaging/validators/suppression', () => ({ recordSuppression: jest.fn(), clearSuppression: jest.fn() }));
