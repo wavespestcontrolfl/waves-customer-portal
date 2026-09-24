@@ -20,7 +20,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { RE_SERVICE_SERVICE_KEYS, isReService } = require('./re-service');
-const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType } = require('./assessment-booking');
+const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentBooking } = require('./assessment-booking');
 
 // The two self-bookable callback lanes. serviceKey resolves the catalog row
 // (services.service_key) at commit time — id/name/duration are read live from
@@ -267,13 +267,32 @@ async function openReserviceCallbacks(customerId, dbh = db) {
 // under the reservice-lane advisory lock keyed on this exact lane, so two
 // concurrent commits for the same lead's customer can never both pass this
 // check and both insert — one throws ALREADY_BOOKED before its insert ever
-// runs. Widening the WHERE clause's OR to also match ASSESSMENT_SERVICE_KEY
-// does not change the result for 'pest'/'lawn' callers: an assessment row is
-// now fetched, but laneForCallbackRow classifies it 'assessment', so the
-// final `.some(... === lane)` for lane 'pest'/'lawn' is unaffected —
-// reservice's own behavior and tests stay byte-identical.
+// runs.
+//
+// The assessment lane does NOT reuse the pest/lawn callback predicate below
+// (Codex round-12 P1): that predicate requires is_callback/a re-service
+// catalog key and a scheduled_date >= today, which an assessment row need
+// not carry — a legacy 'Waves Assessment' row can have service_id NULL and
+// is_callback false, and an assessment left open past its date (rescheduled
+// or simply overdue) is still an open commitment. It instead mirrors
+// inspection-public.js's own findOpenVisit(assessmentOnly): any non-terminal
+// status, no date bound, and assessment identity by name OR catalog
+// (isAssessmentBooking) — the exact predicate the phase-2 commit's own
+// open-assessment checks already use, so this atomic re-check can never miss
+// a row those checks would have caught.
 async function openCallbackExistsForLane(dbh, customerId, lane) {
   if (!customerId || !(RESERVICE_LANES[lane] || lane === 'assessment')) return false;
+  if (lane === 'assessment') {
+    const rows = await dbh('scheduled_services')
+      .where({ customer_id: customerId })
+      .whereNotIn('status', TERMINAL_STATUSES)
+      .select('service_type', 'service_id')
+      .limit(50);
+    for (const row of rows) {
+      if (await isAssessmentBooking(row, dbh)) return true;
+    }
+    return false;
+  }
   const rows = await dbh('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
@@ -281,8 +300,7 @@ async function openCallbackExistsForLane(dbh, customerId, lane) {
     .where('s.scheduled_date', '>=', etDateString())
     .where((qb) => qb
       .where('s.is_callback', true)
-      .orWhereIn('sv.service_key', Array.from(RE_SERVICE_SERVICE_KEYS))
-      .orWhere('sv.service_key', ASSESSMENT_SERVICE_KEY))
+      .orWhereIn('sv.service_key', Array.from(RE_SERVICE_SERVICE_KEYS)))
     .select('s.service_type', 'sv.service_key')
     .limit(50);
   return rows.some((row) => laneForCallbackRow({ serviceKey: row.service_key, serviceType: row.service_type }) === lane);

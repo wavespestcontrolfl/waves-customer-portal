@@ -25,12 +25,79 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const listResults = { scheduled_services: [] };
 jest.mock('../models/db', () => {
+  // A row that never sets a given field is UNDECIDED on any filter over
+  // that field and passes it — this keeps every pre-existing fixture below
+  // (which only ever sets service_type/service_key) byte-identical to the
+  // old dumb passthrough mock. A row that DOES set the field is filtered
+  // for real, which is what round-12's new tests need: proving the
+  // assessment lane's query no longer bounds by scheduled_date or requires
+  // is_callback/a re-service catalog key the way the pest/lawn query still
+  // does.
+  function stripAlias(field) {
+    return String(field).replace(/^[a-z]+\./, '');
+  }
+  function evalClause(row, field, op, value) {
+    const f = stripAlias(field);
+    const rv = row[f];
+    if (rv === undefined) return null; // undecided
+    if (op === '=') return rv === value;
+    if (op === '>=') return rv >= value;
+    return true;
+  }
   const mkChain = () => {
+    const filters = [];
     const q = {};
-    const passthrough = ['leftJoin', 'where', 'whereIn', 'select', 'limit'];
-    for (const m of passthrough) q[m] = () => q;
-    q.then = (onOk, onErr) => Promise.resolve(listResults.scheduled_services).then(onOk, onErr);
-    q.catch = (fn) => Promise.resolve(listResults.scheduled_services).catch(fn);
+    q.leftJoin = () => q;
+    q.select = () => q;
+    q.limit = () => q;
+    q.where = (...args) => {
+      if (typeof args[0] === 'function') {
+        // Sub-builder: qb.where(...).orWhere(...).orWhereIn(...) — an OR
+        // group. Any clause resolving true passes the group; if every
+        // clause is decided and none is true, the group fails; a group
+        // with no decided clause at all is undecided (passes).
+        const subClauses = [];
+        const subQb = {
+          where: (f, v) => { subClauses.push((row) => evalClause(row, f, '=', v)); return subQb; },
+          orWhere: (f, v) => { subClauses.push((row) => evalClause(row, f, '=', v)); return subQb; },
+          orWhereIn: (f, arr) => { subClauses.push((row) => {
+            const rv = row[stripAlias(f)];
+            return rv === undefined ? null : arr.includes(rv);
+          }); return subQb; },
+        };
+        args[0](subQb);
+        filters.push((row) => {
+          const results = subClauses.map((fn) => fn(row));
+          if (results.some((r) => r === true)) return true;
+          if (results.every((r) => r === null)) return true;
+          return false;
+        });
+      } else if (args.length >= 2) {
+        const [field, opOrValue, maybeValue] = args;
+        const op = args.length === 3 ? opOrValue : '=';
+        const value = args.length === 3 ? maybeValue : opOrValue;
+        filters.push((row) => evalClause(row, field, op, value) !== false);
+      }
+      return q;
+    };
+    q.whereIn = (field, arr) => {
+      filters.push((row) => {
+        const rv = row[stripAlias(field)];
+        return rv === undefined || arr.includes(rv);
+      });
+      return q;
+    };
+    q.whereNotIn = (field, arr) => {
+      filters.push((row) => {
+        const rv = row[stripAlias(field)];
+        return rv === undefined || !arr.includes(rv);
+      });
+      return q;
+    };
+    q.first = async () => null;
+    const rows = () => listResults.scheduled_services.filter((row) => filters.every((f) => f(row)));
+    q.then = (onOk, onErr) => Promise.resolve(rows()).then(onOk, onErr);
+    q.catch = (fn) => Promise.resolve(rows()).catch(fn);
     return q;
   };
   return jest.fn(() => mkChain());
@@ -95,6 +162,43 @@ describe('openCallbackExistsForLane — the transactional dedupe check', () => {
   test('lane "pest" still finds a real open pest re-service — unaffected', async () => {
     listResults.scheduled_services = [{ service_type: 'Pest Control Re-Service', service_key: RESERVICE_LANES.pest.serviceKey }];
     expect(await openCallbackExistsForLane(dbh, 'cust-1', 'pest')).toBe(true);
+  });
+
+  test('lane "assessment": a legacy row named "Waves Assessment" with no catalog link and is_callback false still counts as open (Codex round-12 P1)', async () => {
+    // No service_key/service_id, is_callback explicitly false — the
+    // pest/lawn query's is_callback/catalog-key OR clause would have
+    // dropped this row; the assessment lane's own predicate (mirroring
+    // inspection-public.js's findOpenVisit(assessmentOnly)) goes by name/
+    // catalog identity alone, never is_callback.
+    listResults.scheduled_services = [{
+      service_type: 'Waves Assessment',
+      service_id: null,
+      is_callback: false,
+      status: 'pending',
+    }];
+    expect(await openCallbackExistsForLane(dbh, 'cust-1', 'assessment')).toBe(true);
+  });
+
+  test('lane "assessment": an overdue non-terminal assessment still counts as open — no date bound (Codex round-12 P1)', async () => {
+    // scheduled_date is well in the past; the pest/lawn query's
+    // `scheduled_date >= today` bound would have dropped this row. The
+    // assessment lane has no date bound — only non-terminal status.
+    listResults.scheduled_services = [{
+      service_type: 'Waves Assessment',
+      service_key: ASSESSMENT_SERVICE_KEY,
+      status: 'pending',
+      scheduled_date: '2020-01-01',
+    }];
+    expect(await openCallbackExistsForLane(dbh, 'cust-1', 'assessment')).toBe(true);
+  });
+
+  test('lane "assessment": a TERMINAL-status assessment (e.g. completed) does not count as open', async () => {
+    listResults.scheduled_services = [{
+      service_type: 'Waves Assessment',
+      service_key: ASSESSMENT_SERVICE_KEY,
+      status: 'completed',
+    }];
+    expect(await openCallbackExistsForLane(dbh, 'cust-1', 'assessment')).toBe(false);
   });
 
   test('an unrecognized lane (neither RESERVICE_LANES nor "assessment") short-circuits false with no query', async () => {

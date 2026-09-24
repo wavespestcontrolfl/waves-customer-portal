@@ -525,6 +525,29 @@ describe('Codex #4737 r9: lead-scoped dedupe, trusted-customer change to null, c
     expect(res.body).toMatchObject({ state: 'already_booked', visit: null, rescheduleUrl: null });
   });
 
+  // Codex round-12 P2: commitVerdict's 'ineligible' also fires when the
+  // lead simply CONVERTED since phase 1 (resolveEligibility's 'converted'
+  // state, not only an open assessment) — booking.js maps both outcomes to
+  // the same ALREADY_BOOKED code. Resolving the response against the STALE
+  // pre-conversion `lead` this route captured at the very top would
+  // misreport a genuine conversion as already_booked; the fix reloads the
+  // lead before re-deriving eligibility.
+  test('P2: ALREADY_BOOKED from a lead that converted since phase 1 answers converted, not already_booked', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce(slotDay());
+    // The lead converts DURING the booking attempt — after this route's own
+    // initial loadLead already captured the pre-conversion snapshot.
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      firstResults.leads = { ...firstResults.leads, converted_at: new Date('2026-09-24T12:00:00Z') };
+      return { ok: false, status: 409, error: 'You already have a consultation on the books.', code: 'ALREADY_BOOKED' };
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.body).toMatchObject({ state: 'converted', visit: null, rescheduleUrl: null });
+    expect(res.body.code).toBeUndefined();
+  });
+
   test('P1: a trusted customer that changed to null under the lead lock is a retry — nothing linked, created or booked', async () => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
     firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
@@ -1298,6 +1321,10 @@ describe('POST /:token commit', () => {
   // the customer row so the lead isn't asked for it again.
   test('a supplied address wins when the stored one fails to geocode, and gets persisted onto the customer', async () => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    // cust-1 is this flow's own prospect (Codex round-12 P2: correction in
+    // place is restricted to a profile PROVEN created by this flow — a
+    // coordinate-less profile alone is no longer enough).
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-1' }) };
     const custRow = { id: 'cust-1', phone: '9415550101', address_line1: '1 Bad Rd', city: 'Nowhere', state: 'FL', zip: '00000', latitude: null, longitude: null };
     firstResults.customers = custRow;
     listResults.scheduled_services = [];
@@ -1622,6 +1649,29 @@ describe('POST /:token commit', () => {
       expect(insertCalls.find((c) => c.table === 'customers').payload).toMatchObject({ account_id: 'acct-1', address_line1: '9 Rental Ln' });
     });
 
+    // Codex round-12 P2: a coordinate-less profile is NOT, on its own,
+    // grounds for in-place correction — only a profile THIS FLOW'S OWN
+    // provenance names outright is. A legacy LINKED profile whose stored
+    // address simply never geocoded (no lead_activities provenance at all
+    // here) is another property already on file, and must be preserved
+    // exactly like the validated-coordinates case above.
+    test('a visitless LINKED profile with NO coordinates and no provenance is preserved — the new address is another profile, not an overwrite', async () => {
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', account_id: 'acct-1', phone: '9415550101', address_line1: '1 Legacy Rd', city: 'Nowhere', state: 'FL', zip: '00000', latitude: null, longitude: null };
+      listResults.scheduled_services = [];
+      listResults.customers = [firstResults.customers];
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.6, lng: -82.4 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '9 Rental Ln, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(200);
+      // The linked profile (cust-1) is never overwritten...
+      expect(updateCalls.some((c) => c.table === 'customers' && c.payload.address_line1)).toBe(false);
+      // ...the new address lands on a NEW profile under the same account.
+      expect(insertCalls.find((c) => c.table === 'customers').payload).toMatchObject({ account_id: 'acct-1', address_line1: '9 Rental Ln' });
+    });
+
     // Codex #4737 r6 P1: an ESTABLISHED linked profile (it has visits) is
     // never overwritten by a different supplied address — that is another
     // property of the account, booked on its own profile.
@@ -1820,6 +1870,9 @@ describe('POST /:token commit', () => {
 
     test('stored address present but unresolvable, unchanged under the lock: the validated supplied replacement wins and is written back, fixing up the bad stored address', async () => {
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      // cust-1 is this flow's own prospect (Codex round-12 P2) — otherwise a
+      // coordinate-less profile alone no longer earns in-place correction.
+      firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-1' }) };
       firstResults.customers = {
         id: 'cust-1', phone: '9415550101', address_line1: '999 Existing Rd', address_line2: null,
         city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null,
@@ -1866,6 +1919,9 @@ describe('POST /:token commit', () => {
   // confirmed unchanged.
   test('stored address unresolvable pre-lock, unchanged under the lock: the pre-lock in-area supplied resolution wins, books successfully (P1 :839, :845)', async () => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    // cust-1 is this flow's own prospect (Codex round-12 P2) — otherwise a
+    // coordinate-less profile alone no longer earns in-place correction.
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-1' }) };
     firstResults.customers = {
       id: 'cust-1', phone: '9415550101', address_line1: '1 Rooftop Rd', address_line2: null,
       city: 'Fort Worth', state: 'TX', zip: '76102', latitude: null, longitude: null,

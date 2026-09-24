@@ -745,6 +745,13 @@ describe('new recurring welcome SMS', () => {
     expect(mockInserts).toEqual([]);
   });
 
+  test('a free assessment booking never queues the one-time welcome, even for a first-time prospect', async () => {
+    const booking = firstOneTimeBooking();
+    booking.service_type = 'Waves Assessment';
+    expect(await service.queueOneTimeWelcomeEmail(booking)).toMatchObject({ queued: false, reason: 'assessment_booking' });
+    expect(mockInserts).toEqual([]);
+  });
+
   test('one-time email excludes existing service history and missing email', async () => {
     firstOneTimeBooking();
     mockPriorServicedVisit = { id: 'legacy', created_at: '2029-01-01T12:00:00Z' };

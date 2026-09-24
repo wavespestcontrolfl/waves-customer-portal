@@ -1403,12 +1403,16 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
 });
 
 // Whether a linked profile may take a corrected address in place (see
-// provisionLinkedCustomer): no visit history, and either this flow's own
-// outright-trusted prospect or an address that never geocoded.
+// provisionLinkedCustomer): no visit history AND this flow's own
+// outright-trusted prospect (the lead's latest provenance names this exact
+// profile, not merely `requires_verification`). A coordinate-less profile is
+// NOT, on its own, grounds for in-place correction (Codex round-12 P2) — an
+// address that never geocoded is exactly as true of a legacy LINKED
+// customer (another property this account already had on file) as it is of
+// a flow-created prospect, and only the latter is safe to overwrite.
 async function correctableInPlace(trx, freshLead, profile) {
   const history = await trx('scheduled_services').where({ customer_id: profile.id }).select('id').limit(1);
   if (history.length > 0) return false;
-  if (profile.latitude == null || profile.longitude == null) return true;
   const prior = await latestProvenance(trx, freshLead.id);
   return prior?.customer_id === profile.id && !prior.requires_verification;
 }
@@ -1801,7 +1805,18 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
     // already_booked shape GET returns, pointing at whichever visit is
     // now the open assessment — on ANY of the lead's profiles (the
     // lead-scoped dedupe, Codex #4737 r9 P1).
-    return res.json(eligibilityResponse(await leadWideEligibility(lead, custRow, profileIds), leadPayload));
+    //
+    // ALREADY_BOOKED also fires for commitVerdict's 'ineligible' (Codex
+    // round-12 P2) — which the lead lock's revalidate found under FRESH
+    // DB state, e.g. the lead converted since phase 1. Re-deriving
+    // eligibility here on the pre-conversion `lead` closure would see a
+    // stale converted_at=null, resolveEligibility would come back 'ok' for
+    // every profile, and leadWideEligibility's own last-resort fallback
+    // (no profile shows why) would then mislabel a genuine conversion as
+    // already_booked. Reload the lead fresh so 'converted' resolves
+    // directly, matching what actually made the commit ineligible.
+    const freshLead = await loadLead(db, lead.id);
+    return res.json(eligibilityResponse(await leadWideEligibility(freshLead || lead, custRow, profileIds), leadPayload));
   }
   // An address/account edit under the booking fence (Codex #4737 r8 + r9
   // P2s): fresh times at the customer's CURRENT pin.
