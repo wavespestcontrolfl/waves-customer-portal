@@ -408,6 +408,18 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     </div>
   );
 
+  // Admin ROLE only (AdminLayoutV2 mounts this bell for technicians too, still
+  // as type 'admin'): the per-event bell/push toggles live on Settings →
+  // Notifications, a tab CommunicationsPageV2 hides from non-admins, and it
+  // reads the hash as #tab=<name>.
+  const settingsLink = type === 'admin' && staffRoleFromToken() === 'admin' && (
+    <div style={{ padding: '12px 20px 16px', textAlign: 'center' }}>
+      <a href="/admin/communications#tab=notifications" style={{ color: colors.teal, fontSize: 14, fontWeight: 500, textDecoration: 'none' }}>
+        Notification settings →
+      </a>
+    </div>
+  );
+
   return (
     <div ref={bellRef} style={{ position: 'relative' }}>
       {/* Bell Button */}
@@ -595,6 +607,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 </div>
               ))}
               {tab === 'account' && moreControl}
+              {settingsLink}
             </div>
           </div>
         ) : (
@@ -724,6 +737,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 </div>
               ))}
               {moreControl}
+              {settingsLink}
             </div>
           </div>
         ),

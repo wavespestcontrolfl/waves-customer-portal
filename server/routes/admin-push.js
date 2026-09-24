@@ -198,11 +198,14 @@ router.get('/preferences', async (req, res, next) => {
     const byKey = new Map(rows.map((r) => [r.trigger_key, r]));
     const merged = triggers.map((t) => {
       const r = byKey.get(t.key);
+      // Absent row = the trigger's default, so the page shows the live state
+      // (quietByDefault triggers read OFF, not on).
+      const on = !t.quietByDefault;
       return {
         ...t,
-        push_enabled: r ? r.push_enabled !== false : true,
-        bell_enabled: r ? r.bell_enabled !== false : true,
-        sound_enabled: r ? r.sound_enabled !== false : true,
+        push_enabled: r ? r.push_enabled !== false : on,
+        bell_enabled: r ? r.bell_enabled !== false : on,
+        sound_enabled: r ? r.sound_enabled !== false : on,
       };
     });
     // Bell-category overrides ('category:<cat>' pseudo-keys) for the admin

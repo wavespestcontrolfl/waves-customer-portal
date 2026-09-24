@@ -601,6 +601,9 @@ const TRIGGER_REGISTRY = {
   job_complete: {
     // Tech-visible: links to a day-to-day surface (schedule) a field tech works in.
     techVisible: true,
+    // Owner ruling 2026-09-24: 13% of these bells were ever opened — off
+    // (bell, push, sound) unless an admin turns it on in Settings.
+    quietByDefault: true,
     label: 'Tech marked job complete',
     category: 'service',
     priority: 'low',
@@ -994,15 +997,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     const prefsByUser = new Map(prefs.map((p) => [p.admin_user_id, p]));
-    const anyBellEnabled = activeAdmins.some((u) => {
-      const pref = prefsByUser.get(u.id);
-      return !pref || pref.bell_enabled !== false;
-    });
+    // No row = the trigger's default (on, or off for quietByDefault triggers).
+    const anyBellEnabled = activeAdmins.some((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).bell_enabled !== false);
     const pushEnabledIds = activeAdmins
-      .filter((u) => {
-        const pref = prefsByUser.get(u.id);
-        return !pref || pref.push_enabled !== false;
-      })
+      .filter((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).push_enabled !== false)
       .map((u) => u.id);
     let bellWritten = false;
     let replayedSmsBell = false;
@@ -1029,7 +1027,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     for (const user of activeAdmins) {
-      const userPref = prefsByUser.get(user.id) || { bell_enabled: true, push_enabled: true, sound_enabled: true };
+      const userPref = prefsByUser.get(user.id) || defaultPreference(trigger);
 
       if (userPref.bell_enabled && !bellWritten) {
         // Write a single bell entry for "admin" recipients (existing model is shared)
@@ -1194,15 +1192,24 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
   }
 }
 
+// The preference an admin WITHOUT a notification_preferences row gets.
+// quietByDefault triggers (job_complete) are off on every channel until an
+// admin turns them on; everything else defaults on (unchanged behavior).
+function defaultPreference(trigger) {
+  const on = !trigger?.quietByDefault;
+  return { bell_enabled: on, push_enabled: on, sound_enabled: on };
+}
+
 function listTriggers() {
   return Object.entries(TRIGGER_REGISTRY).map(([key, t]) => ({
-    key, label: t.label, group: t.group, priority: t.priority,
+    key, label: t.label, group: t.group, priority: t.priority, quietByDefault: t.quietByDefault === true,
   }));
 }
 
 module.exports = {
   triggerNotification,
   listTriggers,
+  defaultPreference,
   TRIGGER_REGISTRY,
   __private: {
     maskEmail,
