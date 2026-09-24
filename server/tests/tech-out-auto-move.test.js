@@ -333,6 +333,29 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
     return jest.fn(() => query(rows.shift()));
   }
 
+  async function capturedGuardWithSiblings() {
+    SmartRebooker.reschedule.mockResolvedValue({ success: true });
+    const queue = [query(baseAlert()), query(baseStop()), query([{ id: JOB_ID }, { id: 'job-sib' }]), query([CANDIDATE]), query([]), query([])];
+    db.mockImplementation(() => queue.shift());
+    await autoAssignParkedAlert({ alertId: ALERT_ID });
+    return SmartRebooker.reschedule.mock.calls[0][5].beforeMove;
+  }
+
+  test('an excluded sibling left the absent day before the move: refuses as stale', async () => {
+    const guard = await capturedGuardWithSiblings();
+    const rows = [[], { id: 'abs-1' }, { id: ALERT_ID }];
+    await expect(guard(jest.fn(() => query(rows.shift())))).rejects.toMatchObject({ code: 'TECH_OUT_EXCLUSION_STALE' });
+  });
+
+  test('excluded siblings still on the absent day: locked FOR SHARE and the move proceeds', async () => {
+    const guard = await capturedGuardWithSiblings();
+    const siblingRead = query([{ id: 'job-sib' }]);
+    const rows = [siblingRead, query({ id: 'abs-1' }), query({ id: ALERT_ID })];
+    await expect(guard(jest.fn(() => rows.shift()))).resolves.toBeUndefined();
+    expect(siblingRead.whereIn).toHaveBeenCalledWith('id', ['job-sib']);
+    expect(siblingRead.forShare).toHaveBeenCalled();
+  });
+
   test('absence cleared ("Tech is back") after the read: refuses inside the move transaction', async () => {
     const guard = await capturedGuard();
     await expect(guard(trxReturning(null, { id: ALERT_ID }))).rejects.toMatchObject({ code: 'TECH_OUT_CLEARED' });

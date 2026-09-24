@@ -245,6 +245,10 @@ function makeCapabilityGuard() {
 // it. Either way there is nothing left to do — a no-op, never a retry on
 // the next candidate.
 const STALE_CODES = new Set(['TECH_OUT_CLEARED', 'TECH_OUT_ALERT_RESOLVED']);
+// The excluded batch changed between the read and the move (a sibling left
+// the absent tech's day): the probe's exclusion is no longer true, so the
+// move refuses and the alert stays parked for the next run to re-read.
+const EXCLUSION_STALE = 'TECH_OUT_EXCLUSION_STALE';
 
 /**
  * Runs inside the mover's own transaction (options.beforeMove — after its
@@ -256,8 +260,26 @@ const STALE_CODES = new Set(['TECH_OUT_CLEARED', 'TECH_OUT_ALERT_RESOLVED']);
  * only other lock is the ABSENT tech-day fence, which the mover does not
  * take), so the wait cannot cycle.
  */
-function makeStillParkedGuard({ alertId, absentTechId, date }) {
+function makeStillParkedGuard({ alertId, absentTechId, date, stopId, excludeServiceIds }) {
   return async (trx) => {
+    // The commit probe skips excludeServiceIds; that is only sound while
+    // each of them still sits open on the absent tech's day. Re-read them
+    // here, FOR SHARE, so none can leave that day until this move commits.
+    // Other rebooker moves on this date already wait on the date-occupancy
+    // lock the mover took before calling us, so this cannot cycle with one.
+    const siblings = excludeServiceIds.filter((id) => id !== String(stopId));
+    if (siblings.length) {
+      const still = await trx('scheduled_services')
+        .whereIn('id', siblings)
+        .where({ technician_id: absentTechId, scheduled_date: date })
+        .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
+        .orderBy('id')
+        .forShare()
+        .select('id');
+      if (still.length !== siblings.length) {
+        throw Object.assign(new Error('The absent technician\'s day changed during the move'), { statusCode: 409, code: EXCLUSION_STALE });
+      }
+    }
     const absence = await trx('technician_absences')
       .where({ technician_id: absentTechId, absence_date: date })
       .whereNull('cleared_at')
@@ -463,7 +485,7 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
             status: stop.status,
           },
           moveGuard: makeCapabilityGuard(),
-          beforeMove: makeStillParkedGuard({ alertId, absentTechId, date }),
+          beforeMove: makeStillParkedGuard({ alertId, absentTechId, date, stopId: stop.id, excludeServiceIds }),
         },
       );
       await db.transaction(async (trx) => {
@@ -485,6 +507,8 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
         return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
       }
       lastErr = err;
+      // Same answer for every candidate: stop and let the next run re-read.
+      if (err && err.code === EXCLUSION_STALE) break;
       // Membership changed: no other candidate can make it ungrouped again.
       if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED') break;
     }
@@ -493,9 +517,10 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
   // A membership-change CAS miss means the stop got grouped into a visit
   // between our pre-read and the move — the same manual-decision rule as
   // the up-front visit_id check, not a candidate-availability failure.
-  const reason = lastErr && lastErr.code === 'VISIT_MEMBERSHIP_CHANGED'
-    ? 'grouped_visit_manual'
-    : (lastErr ? `move_failed: ${lastErr.message}` : 'no_eligible_candidate');
+  let reason = 'no_eligible_candidate';
+  if (lastErr && lastErr.code === 'VISIT_MEMBERSHIP_CHANGED') reason = 'grouped_visit_manual';
+  else if (lastErr && lastErr.code === EXCLUSION_STALE) reason = 'schedule_changed';
+  else if (lastErr) reason = `move_failed: ${lastErr.message}`;
   await annotateAttempt(alertId, reason);
   return { moved: false, alert_id: alertId, reason };
 }
