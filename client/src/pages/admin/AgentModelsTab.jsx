@@ -64,7 +64,10 @@ export default function AgentModelsTab() {
     }
     try {
       const next = await adminFetch("/admin/agents/models");
-      if (seq === loadSeq.current) setData(next);
+      if (seq === loadSeq.current) {
+        setData(next);
+        setError(null);
+      }
     } catch (e) {
       if (seq === loadSeq.current) setError(e?.message || "Failed to load the model registry");
     } finally {

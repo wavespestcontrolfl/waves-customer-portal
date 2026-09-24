@@ -4896,7 +4896,12 @@ function BacklinkAgentPanel() {
   const [intakeBusy, setIntakeBusy] = useState(false);
   const [intakeResult, setIntakeResult] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const loadRequest = useRef(0);
+  const invalidateLoad = () => {
+    loadRequest.current += 1;
+  };
   const loadData = () => {
+    const request = ++loadRequest.current;
     setLoadError(null);
     return Promise.allSettled([
       adminFetch("/admin/backlink-agent/stats"),
@@ -4904,6 +4909,7 @@ function BacklinkAgentPanel() {
       adminFetch("/admin/backlink-agent/profiles"),
       adminFetch("/admin/backlink-agent/targets"),
     ]).then(([s, q, p, t]) => {
+      if (request !== loadRequest.current) return;
       if (s.status === "fulfilled") setStats(s.value);
       if (q.status === "fulfilled") setQueue(q.value.items || []);
       if (p.status === "fulfilled") setProfiles(p.value.profiles || []);
@@ -4931,6 +4937,7 @@ function BacklinkAgentPanel() {
       .filter(Boolean)
       .map((u) => (u.startsWith("http") ? u : `https://${u}`));
     if (urls.length === 0) return;
+    invalidateLoad();
     const result = await adminPost("/admin/backlink-agent/queue", { urls });
     setAddResult(result);
     setUrlInput("");
@@ -4938,6 +4945,7 @@ function BacklinkAgentPanel() {
   };
   const runIntake = async (dryRun) => {
     if (!intakeText.trim()) return;
+    if (!dryRun) invalidateLoad();
     setIntakeBusy(true);
     try {
       const r = await adminPost("/admin/backlink-agent/opportunities/bulk", {
@@ -4956,6 +4964,7 @@ function BacklinkAgentPanel() {
     }
   };
   const handleProcess = async () => {
+    invalidateLoad();
     setProcessing(true);
     try {
       await adminPost("/admin/backlink-agent/process", { limit: 3 });
@@ -4968,15 +4977,18 @@ function BacklinkAgentPanel() {
     }
   };
   const handleRetry = async (id) => {
+    invalidateLoad();
     await adminPost(`/admin/backlink-agent/queue/${id}/retry`, {});
     loadData();
   };
   const handleSkip = async (id) => {
+    invalidateLoad();
     await adminPost(`/admin/backlink-agent/queue/${id}/skip`, {});
     loadData();
   };
   const handleAddTarget = async () => {
     if (!newTarget.trim()) return;
+    invalidateLoad();
     await adminPost("/admin/backlink-agent/targets", {
       username: newTarget.trim(),
     });
@@ -4984,16 +4996,19 @@ function BacklinkAgentPanel() {
     loadData();
   };
   const handleDeleteTarget = async (id) => {
+    invalidateLoad();
     await adminFetch(`/admin/backlink-agent/targets/${id}`, {
       method: "DELETE",
     });
     loadData();
   };
   const handlePoll = async () => {
+    invalidateLoad();
     await adminPost("/admin/backlink-agent/poll", {});
     loadData();
   };
   const handleVerifyEmails = async () => {
+    invalidateLoad();
     await adminPost("/admin/backlink-agent/verify-emails", {});
     loadData();
   };

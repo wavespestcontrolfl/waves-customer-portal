@@ -45,3 +45,19 @@ it('requires validation and typed SEND before the campaign send request',async()
  fireEvent.change(within(dialog).getByPlaceholderText('SEND'),{target:{value:'SEND'}});expect(send).toBeEnabled();fireEvent.click(send);
  await waitFor(()=>expect(fetch).toHaveBeenCalledWith('/api/admin/newsletter/sends/draft-1/send',expect.objectContaining({method:'POST'})));
 });
+it('clears stale summary badges when an automatic summary refresh fails',async()=>{
+ render(<MemoryRouter><NewsletterPage/></MemoryRouter>);
+ expect(await screen.findByRole('button',{name:'Audience (3)'})).toBeInTheDocument();
+ expect(screen.getByRole('button',{name:'Schedule (0)'})).toBeInTheDocument();
+ const priorImplementation=fetch.getMockImplementation();
+ fetch.mockImplementation((url,options)=>{
+  const route=String(url).split('?')[0];
+  if(route.endsWith('/sends')||route.endsWith('/subscribers'))return Promise.reject(new Error('summary unavailable'));
+  return priorImplementation(url,options);
+ });
+ fireEvent(window,new Event('online'));
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Audience'})).toBeInTheDocument());
+ expect(screen.getByRole('button',{name:'Schedule'})).toBeInTheDocument();
+ expect(screen.queryByRole('button',{name:'Audience (3)'})).not.toBeInTheDocument();
+ expect(screen.queryByRole('button',{name:'Schedule (0)'})).not.toBeInTheDocument();
+});

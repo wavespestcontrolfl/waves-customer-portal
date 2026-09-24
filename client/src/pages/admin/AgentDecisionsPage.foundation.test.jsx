@@ -76,3 +76,34 @@ it('initializes reply fields when switching away from an edited decision whose c
   fireEvent.click(screen.getByText('Customer B'));
   await waitFor(() => expect(reply).toHaveValue('Suggested B'));
 });
+
+it('clears and disables reply training when the next decision context fails', async () => {
+  let rejectContext;
+  adminFetch.mockImplementation(async (url) => {
+    if (url === '/admin/agent-decisions/decision-b/context') {
+      return new Promise((resolve, reject) => { rejectContext = reject; });
+    }
+    if (url.endsWith('/context')) return { context: { actualHumanReply: { body: 'Human reply A' } } };
+    return { decisions: [
+      { id: 'decision-a', status: 'pending', customerName: 'Customer A', suggestedMessage: 'Suggested A' },
+      { id: 'decision-b', status: 'pending', customerName: 'Customer B', suggestedMessage: 'Suggested B' },
+    ] };
+  });
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  const reply = await screen.findByLabelText('Final / rewrite reply');
+  await waitFor(() => expect(reply).toHaveValue('Suggested A'));
+  fireEvent.change(reply, { target: { value: 'Edited A' } });
+  fireEvent.click(screen.getByText('Customer B'));
+  await waitFor(() => expect(rejectContext).toBeTypeOf('function'));
+  expect(reply).toHaveValue('');
+  expect(reply).toBeDisabled();
+  rejectContext(new Error('Context unavailable'));
+  await screen.findByText('Context unavailable');
+  expect(screen.getByLabelText('Actual human reply')).toHaveValue('');
+  for (const name of ['Accept draft', 'Edit & save', 'Reject & rewrite', 'No reply needed']) {
+    const button = screen.getByRole('button', { name });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+  }
+  expect(adminFetch.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(0);
+});

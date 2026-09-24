@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -29,6 +30,14 @@ function jsonResponse(body = {}) {
       return this;
     },
   });
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }
 
 function RouterState() {
@@ -190,5 +199,76 @@ describe("SEOPage workspace navigation", () => {
       "page",
     );
     expect(await screen.findByText("SEO dashboard fixture")).toBeInTheDocument();
+  });
+
+  it("does not restore a skipped backlink from an older automatic refresh", async () => {
+    const staleQueue = deferred();
+    let queueReads = 0;
+    fetch.mockImplementation((url, options = {}) => {
+      const route = String(url);
+      if (route.endsWith("/admin/seo/backlinks")) return jsonResponse({});
+      if (route.includes("/admin/backlink-agent/queue?")) {
+        queueReads += 1;
+        if (queueReads === 1) {
+          return jsonResponse({
+            items: [
+              {
+                id: "queue-1",
+                url: "https://stale.example/page",
+                domain: "stale.example",
+                source: "manual",
+                status: "pending",
+              },
+            ],
+          });
+        }
+        if (queueReads === 2) return staleQueue.promise;
+        return jsonResponse({ items: [] });
+      }
+      if (route.endsWith("/admin/backlink-agent/stats")) {
+        return jsonResponse({ total: 1, pending: 1 });
+      }
+      if (route.endsWith("/admin/backlink-agent/profiles")) {
+        return jsonResponse({ profiles: [] });
+      }
+      if (route.endsWith("/admin/backlink-agent/targets")) {
+        return jsonResponse({ targets: [] });
+      }
+      if (
+        route.endsWith("/admin/backlink-agent/queue/queue-1/skip") &&
+        options.method === "POST"
+      ) {
+        return jsonResponse({});
+      }
+      return jsonResponse({});
+    });
+
+    renderPage(["/admin/seo?workspace=authority&view=backlinks"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Agent" }));
+    expect(await screen.findByText("stale.example")).toBeInTheDocument();
+
+    fireEvent(window, new Event("online"));
+    await waitFor(() => expect(queueReads).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    await waitFor(() =>
+      expect(screen.queryByText("stale.example")).not.toBeInTheDocument(),
+    );
+
+    await act(async () => {
+      staleQueue.resolve(
+      await jsonResponse({
+        items: [
+          {
+            id: "queue-1",
+            url: "https://stale.example/page",
+            domain: "stale.example",
+            source: "manual",
+            status: "pending",
+          },
+        ],
+      }),
+      );
+    });
+    expect(screen.queryByText("stale.example")).not.toBeInTheDocument();
   });
 });

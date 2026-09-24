@@ -1693,17 +1693,21 @@ export default function NewsletterPage() {
       if (sendsLoading) return undefined;
       const request = ++summaryRequest.current;
       return Promise.allSettled([
-        adminFetch("/admin/newsletter/sends").then((d) => {
-          if (request === summaryRequest.current) {
-            setSendsData(d || { sends: [], counts: {} });
-          }
-        }),
-        adminFetch("/admin/newsletter/subscribers?limit=1").then((d) => {
-          if (request === summaryRequest.current) {
-            setSubscribersActive(d.counts?.active ?? 0);
-          }
-        }),
-      ]);
+        adminFetch("/admin/newsletter/sends"),
+        adminFetch("/admin/newsletter/subscribers?limit=1"),
+      ]).then(([sends, subscribers]) => {
+        if (request !== summaryRequest.current) return;
+        setSendsData(
+          sends.status === "fulfilled"
+            ? sends.value || { sends: [], counts: {} }
+            : null,
+        );
+        setSubscribersActive(
+          subscribers.status === "fulfilled"
+            ? subscribers.value.counts?.active ?? 0
+            : null,
+        );
+      });
     },
     { intervalMs: 120_000 },
   );

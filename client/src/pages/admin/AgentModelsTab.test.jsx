@@ -242,6 +242,18 @@ describe("AgentModelsTab", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("clears a background refresh error after automatic recovery", async () => {
+    renderTab();
+    await screen.findByText("SMS intent");
+    adminFetch.mockRejectedValueOnce(new Error("temporary registry outage"));
+    fireEvent(window, new Event("focus"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("temporary registry outage");
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.getByText("SMS intent")).toBeInTheDocument();
+  });
+
   it("Move a model… walks the migration set and drafts only the eligible env", async () => {
     renderTab();
     await screen.findByText("SMS intent");

@@ -152,10 +152,19 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     const nextActions = selected?.recommendedActions?.join("\n") || "";
     setCorrectionNote("");
     setCorrectedActions(nextActions);
+    setActualReply("");
+    setIdealReply("");
+    setReplyReviewNote("");
+    setReplyScenarioLabel("");
+    setDetail(null);
     draftBaselineRef.current = {
       ...draftBaselineRef.current,
       correctionNote: "",
       correctedActions: nextActions,
+      actualReply: "",
+      idealReply: "",
+      replyReviewNote: "",
+      replyScenarioLabel: "",
     };
   }, [selected?.id]);
 
@@ -208,6 +217,9 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       replyScenarioLabel: nextScenarioLabel,
     };
   }, [detail, selected?.id, selected?.suggestedMessage]);
+
+  const replyContextReady = !detailLoading && !!detail && !detail.error
+    && detailAppliedRef.current.decisionId === selected?.id;
 
   const hasDraftChanges = correctionNote !== draftBaselineRef.current.correctionNote
     || correctedActions !== draftBaselineRef.current.correctedActions
@@ -265,7 +277,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   }, [correctedActions, correctionNote, load]);
 
   const saveReplyTraining = useCallback(async (decision, replyVerdict) => {
-    if (!decision) return;
+    if (!decision || !replyContextReady) return;
     setBusyId(`${decision.id}:reply:${replyVerdict}`);
     setError("");
     setNotice("");
@@ -299,7 +311,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     } finally {
       setBusyId("");
     }
-  }, [actualReply, idealReply, replyReviewNote, replyScenarioLabel]);
+  }, [actualReply, idealReply, replyReviewNote, replyScenarioLabel, replyContextReady]);
 
   const metrics = data.metrics || {};
   const replyMetrics = metrics.replyTraining || {};
@@ -583,6 +595,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                     <div className="grid gap-3 xl:grid-cols-2">
                       <FormField label="Actual human reply">
                         <Textarea
+                          disabled={!replyContextReady}
                           value={actualReply}
                           onChange={(event) => updateDraft(setActualReply, event.target.value)}
                           rows={5}
@@ -591,6 +604,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       </FormField>
                       <FormField label="Final / rewrite reply">
                         <Textarea
+                          disabled={!replyContextReady}
                           value={idealReply}
                           onChange={(event) => updateDraft(setIdealReply, event.target.value)}
                           rows={5}
@@ -601,6 +615,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                     <div className="grid gap-3 xl:grid-cols-[minmax(180px,260px)_1fr]">
                       <FormField label="Scenario label">
                       <Input
+                        disabled={!replyContextReady}
                         value={replyScenarioLabel}
                         onChange={(event) => updateDraft(setReplyScenarioLabel, event.target.value)}
                         placeholder="scenario, e.g. scheduling"
@@ -608,6 +623,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       </FormField>
                       <FormField label="Review note">
                       <Input
+                        disabled={!replyContextReady}
                         value={replyReviewNote}
                         onChange={(event) => updateDraft(setReplyReviewNote, event.target.value)}
                         placeholder="What should the agent learn from this reply?"
@@ -617,7 +633,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                     <div className="ui-record-actions justify-end">
                       <Button
                         type="button"
-                        disabled={!!busyId || !(idealReply.trim() || selected.suggestedMessage)}
+                        disabled={!replyContextReady || !!busyId || !(idealReply.trim() || selected.suggestedMessage)}
                         onClick={() => saveReplyTraining(selected, "accepted")}
                         variant="secondary"
                         loading={busyId === `${selected.id}:reply:accepted`}
@@ -626,7 +642,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       </Button>
                       <Button
                         type="button"
-                        disabled={!!busyId || !idealReply.trim()}
+                        disabled={!replyContextReady || !!busyId || !idealReply.trim()}
                         onClick={() => saveReplyTraining(selected, "edited")}
                         variant="secondary"
                         loading={busyId === `${selected.id}:reply:edited`}
@@ -635,7 +651,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       </Button>
                       <Button
                         type="button"
-                        disabled={!!busyId || !idealReply.trim()}
+                        disabled={!replyContextReady || !!busyId || !idealReply.trim()}
                         onClick={() => saveReplyTraining(selected, "rejected")}
                         variant="danger"
                         loading={busyId === `${selected.id}:reply:rejected`}
@@ -644,7 +660,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                       </Button>
                       <Button
                         type="button"
-                        disabled={!!busyId}
+                        disabled={!replyContextReady || !!busyId}
                         onClick={() => saveReplyTraining(selected, "no_reply_needed")}
                         variant="secondary"
                         loading={busyId === `${selected.id}:reply:no_reply_needed`}
