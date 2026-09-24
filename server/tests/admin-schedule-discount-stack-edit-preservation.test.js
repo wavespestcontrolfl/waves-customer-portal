@@ -1964,9 +1964,63 @@ describe('financialStateDrifted — a concurrent same-price primary service swit
     expect(financialStateDrifted(snapshot, { parent: { ...parent, service_key_snapshot: 'termite_bond' }, addons: [] })).toBe(true);
     expect(financialStateDrifted(snapshot, { parent: { ...parent, service_category_snapshot: 'termite' }, addons: [] })).toBe(true);
   });
+  // GitHub Codex round 26 P1 (#4657, :10884): cap + scope of the stored
+  // appointment discount.
+  test('discount_max_dollars (money) and the two scope filters (identity) are compared', () => {
+    const withCap = { ...parent, discount_max_dollars: 10, discount_service_key_filter: null, discount_service_category_filter: 'pest' };
+    const snap = { parent: withCap, addons: [] };
+    expect(financialStateDrifted(snap, { parent: { ...withCap }, addons: [] })).toBe(false);
+    expect(financialStateDrifted(snap, { parent: { ...withCap, discount_max_dollars: 20 }, addons: [] })).toBe(true);
+    expect(financialStateDrifted(snap, { parent: { ...withCap, discount_max_dollars: null }, addons: [] })).toBe(true);
+    expect(financialStateDrifted(snap, { parent: { ...withCap, discount_service_key_filter: 'termite_bond' }, addons: [] })).toBe(true);
+    expect(financialStateDrifted(snap, { parent: { ...withCap, discount_service_category_filter: 'termite' }, addons: [] })).toBe(true);
+  });
+
   test('both CAS snapshot builders capture the identity fields (source pin)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
     expect(src.match(/service_id: existing\.service_id,\n\s+\.\.\.\(cols\.service_key_snapshot \? \{ service_key_snapshot: existing\.service_key_snapshot \}/g)).toHaveLength(1);
     expect(src.match(/\.\.\.\(cols\.service_id \? \{ service_id: existingPrice\.service_id \} : null\),/g)).toHaveLength(1);
+    // round 26 P1 (:10884): cap + scope in BOTH builders, and the scope columns selected on the single-service read.
+    expect(src.match(/discount_service_key_filter: existing\.discount_service_key_filter/g)).toHaveLength(1);
+    expect(src.match(/discount_service_key_filter: existingPrice\.discount_service_key_filter/g)).toHaveLength(1);
+    expect(src.match(/discount_max_dollars: existing\.discount_max_dollars/g)).toHaveLength(1);
+    expect(src.match(/discount_max_dollars: existingPrice\.discount_max_dollars/g)).toHaveLength(1);
+    expect(src.match(/\.\.\.\(cols\.discount_service_key_filter \? \['discount_service_key_filter'\] : \[\]\),/g)).toHaveLength(1);
+  });
+});
+
+// GitHub Codex round 26 P1 (#4657, :11902): the null witness on the blank-
+// price path of an unpriced no-add-on visit had no under-lock recheck.
+describe('lockedWitnessDrifted — the witness is rechecked against the LOCKED row when no snapshot covered estimated_price (round 26 P1, #4657 :11902)', () => {
+  const { lockedWitnessDrifted } = require('../routes/admin-schedule')._test;
+
+  test('the repro: "Not priced" confirmed (null witness), no snapshot, no planned price, but the locked row is now priced: drift', () => {
+    expect(lockedWitnessDrifted({ expectedTotal: null, financialCasSnapshot: null, plannedEstimatedPrice: undefined, lockedEstimatedPrice: 120 })).toBe(true);
+  });
+
+  test('null witness, locked row still unpriced: no drift', () => {
+    expect(lockedWitnessDrifted({ expectedTotal: null, financialCasSnapshot: null, plannedEstimatedPrice: undefined, lockedEstimatedPrice: null })).toBe(false);
+  });
+
+  test('numeric witness against the locked retained total: match passes, a concurrent reprice or clear drifts', () => {
+    expect(lockedWitnessDrifted({ expectedTotal: 100, financialCasSnapshot: null, plannedEstimatedPrice: undefined, lockedEstimatedPrice: 100 })).toBe(false);
+    expect(lockedWitnessDrifted({ expectedTotal: 100, financialCasSnapshot: null, plannedEstimatedPrice: undefined, lockedEstimatedPrice: 120 })).toBe(true);
+    expect(lockedWitnessDrifted({ expectedTotal: 100, financialCasSnapshot: null, plannedEstimatedPrice: undefined, lockedEstimatedPrice: null })).toBe(true);
+  });
+
+  test('a planned write wins over the locked stored value', () => {
+    expect(lockedWitnessDrifted({ expectedTotal: 90, financialCasSnapshot: null, plannedEstimatedPrice: 90, lockedEstimatedPrice: 120 })).toBe(false);
+  });
+
+  test('no witness posted, or a snapshot already covering estimated_price: never fires here', () => {
+    expect(lockedWitnessDrifted({ expectedTotal: undefined, financialCasSnapshot: null, plannedEstimatedPrice: undefined, lockedEstimatedPrice: 120 })).toBe(false);
+    expect(lockedWitnessDrifted({ expectedTotal: null, financialCasSnapshot: { parent: {}, addons: [] }, plannedEstimatedPrice: undefined, lockedEstimatedPrice: 120 })).toBe(false);
+  });
+
+  test('the locked block is entered on a posted witness alone and selects estimated_price for it (source pin)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+    expect(src.match(/\|\| financialCasSnapshot \|\| expectedTotal !== undefined\) \{/g)).toHaveLength(1);
+    expect(src.match(/: \['id', 'estimated_price'\];/g)).toHaveLength(1);
+    expect(src.match(/if \(lockedWitnessDrifted\(\{/g)).toHaveLength(1);
   });
 });

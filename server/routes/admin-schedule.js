@@ -1556,7 +1556,10 @@ function financialStateDrifted(snapshot, fresh) {
       || key === 'line_discount_id' || key === 'line_discount_type'
       // GitHub Codex round 26 P1 (#4657, :10824): the primary's service
       // identity is compared as identity, never as money.
-      || key === 'service_id' || key === 'service_key_snapshot' || key === 'service_category_snapshot') {
+      || key === 'service_id' || key === 'service_key_snapshot' || key === 'service_category_snapshot'
+      // GitHub Codex round 26 P1 (#4657, :10884): scope filters are identity;
+      // discount_max_dollars falls through to the money compare below.
+      || key === 'discount_service_key_filter' || key === 'discount_service_category_filter') {
       if (identityValuesDiffer(before, after)) return true;
     } else if (moneyValuesDiffer(before, after)) {
       return true;
@@ -1666,6 +1669,23 @@ function addonServiceIdentityForFreshness({
 // `cols` is optional (the PUT has no columnInfo in hand at its check);
 // a failed read resolves null, which the drift check then treats as the
 // unpriced state exactly as before.
+// GitHub Codex round 26 P1 (#4657, :11902): the blank-price path on an
+// UNPRICED no-add-on visit posts no price fields, so no pricing branch runs
+// and no financialCasSnapshot exists — the null witness ("Not priced") was
+// checked only before the transaction. Another writer pricing the visit in
+// between let this save proceed (and could flip create_invoice_on_complete,
+// "Save & take payment" included) against a total the operator never
+// confirmed. Pure decision for the under-lock recheck: when a witness was
+// posted and no snapshot covers estimated_price, compare it again against
+// the total this save leaves on the LOCKED row (planned write, else the
+// locked stored value) — the same previewTotalDrifted contract.
+function lockedWitnessDrifted({ expectedTotal, financialCasSnapshot, plannedEstimatedPrice, lockedEstimatedPrice }) {
+  if (expectedTotal === undefined) return false;
+  if (financialCasSnapshot) return false; // financialStateDrifted already compared estimated_price
+  const total = plannedEstimatedPrice !== undefined ? plannedEstimatedPrice : (lockedEstimatedPrice ?? null);
+  return previewTotalDrifted(expectedTotal, total);
+}
+
 async function resolvePlannedTotal(db, id, updates, cols = null) {
   if (updates.estimated_price !== undefined) return updates.estimated_price;
   if (cols && !cols.estimated_price) return null;
@@ -10113,6 +10133,10 @@ async function computeSingleServiceEstimatedPricePlan({
           .where({ id: id })
           .first('estimated_price', 'discount_type', 'discount_amount',
             ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
+            // GitHub Codex round 26 P1 (#4657, :10884): scope filters, for
+            // this branch's financialCasSnapshot.
+            ...(cols.discount_service_key_filter ? ['discount_service_key_filter'] : []),
+            ...(cols.discount_service_category_filter ? ['discount_service_category_filter'] : []),
             ...(cols.service_id ? ['service_id'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []),
@@ -10167,6 +10191,11 @@ async function computeSingleServiceEstimatedPricePlan({
             ...(cols.service_id ? { service_id: existingPrice.service_id } : null),
             ...(cols.service_key_snapshot ? { service_key_snapshot: existingPrice.service_key_snapshot } : null),
             ...(cols.service_category_snapshot ? { service_category_snapshot: existingPrice.service_category_snapshot } : null),
+            // GitHub Codex round 26 P1 (#4657, :10884): cap + scope, same as
+            // the addons-array branch's snapshot.
+            ...(cols.discount_max_dollars ? { discount_max_dollars: existingPrice.discount_max_dollars } : null),
+            ...(cols.discount_service_key_filter ? { discount_service_key_filter: existingPrice.discount_service_key_filter } : null),
+            ...(cols.discount_service_category_filter ? { discount_service_category_filter: existingPrice.discount_service_category_filter } : null),
             ...(cols.primary_line_price ? { primary_line_price: existingPrice.primary_line_price } : null),
             ...(cols.discount_dollars ? { discount_dollars: existingPrice.discount_dollars } : null),
             ...(cols.discount_id ? { discount_id: existingPrice.discount_id } : null),
@@ -10887,6 +10916,13 @@ async function computeUpdateDetailsFinancialPlan({
               service_id: existing.service_id,
               ...(cols.service_key_snapshot ? { service_key_snapshot: existing.service_key_snapshot } : null),
               ...(cols.service_category_snapshot ? { service_category_snapshot: existing.service_category_snapshot } : null),
+              // GitHub Codex round 26 P1 (#4657, :10884): the stored appointment
+              // discount's CAP and SCOPE — a concurrent re-stamp of the same
+              // preset after a catalog cap/scope change leaves id/type/amount
+              // and (below both caps) the total identical.
+              ...(cols.discount_max_dollars ? { discount_max_dollars: existing.discount_max_dollars } : null),
+              ...(cols.discount_service_key_filter ? { discount_service_key_filter: existing.discount_service_key_filter } : null),
+              ...(cols.discount_service_category_filter ? { discount_service_category_filter: existing.discount_service_category_filter } : null),
               ...(cols.discount_id ? { discount_id: existing.discount_id } : null),
               ...(cols.line_discount_id ? { line_discount_id: existing.line_discount_id } : null),
               ...(cols.line_discount_type ? { line_discount_type: existing.line_discount_type } : null),
@@ -12702,16 +12738,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // to the pre-existing addonsReplaced gate (this plan is about to
         // delete/replace add-on rows), so either reason for needing the
         // lock reaches it.
-        if ((addonsReplaced && Array.isArray(expectedAddonRowIds)) || financialCasSnapshot) {
+        // GitHub Codex round 26 P1 (#4657, :11902): a posted witness with NO
+        // snapshot (the blank-price path on an unpriced no-add-on visit)
+        // reaches the lock too, so the witness is rechecked against the
+        // locked row — see lockedWitnessDrifted.
+        if ((addonsReplaced && Array.isArray(expectedAddonRowIds)) || financialCasSnapshot || expectedTotal !== undefined) {
           // GitHub Codex round 21 P1 (#4657, :12301): this SAME locked
           // .first() also serves financialStateDrifted's parent-side
           // re-read when this plan carries a financialCasSnapshot — select
           // its exact field set here instead of issuing a second query.
           // 'id' is always included so the row lock/shape stays meaningful
-          // even when there's no snapshot (a schedule-only save).
+          // even when there's no snapshot (a schedule-only save);
+          // estimated_price joins it for the witness recheck.
           const parentRecheckFields = financialCasSnapshot
             ? Array.from(new Set(['id', ...Object.keys(financialCasSnapshot.parent)]))
-            : ['id'];
+            : ['id', 'estimated_price'];
           const freshParentRow = await trx('scheduled_services')
             .where({ id: req.params.id }).forUpdate().first(...parentRecheckFields);
           const addonRecheckFields = financialCasSnapshot
@@ -12738,6 +12779,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (financialStateDrifted(financialCasSnapshot, { parent: freshParentRow, addons: freshAddonIdRows })) {
             throw Object.assign(new Error('This appointment’s pricing changed while saving — reload and save again.'), {
               statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'FINANCIAL_STATE_DRIFT',
+            });
+          }
+          // GitHub Codex round 26 P1 (#4657, :11902): the witness, again,
+          // against the LOCKED row when no snapshot covered estimated_price.
+          if (lockedWitnessDrifted({
+            expectedTotal, financialCasSnapshot,
+            plannedEstimatedPrice: updates.estimated_price, lockedEstimatedPrice: freshParentRow?.estimated_price,
+          })) {
+            throw Object.assign(new Error('The total changed while saving — review the new total and save again.'), {
+              statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'PREVIEW_TOTAL_DRIFT',
             });
           }
         }
@@ -22032,6 +22083,7 @@ router._test = {
   discountChangeWithoutPricePosted,
   addonServiceIdentityForFreshness,
   legacyPrimaryGrossUnknownFor,
+  lockedWitnessDrifted,
   buildPresetEligibilityCheck,
   resolvePlannedTotal,
   addonRowIdsDrifted,

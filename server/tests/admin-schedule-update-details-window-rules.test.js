@@ -596,7 +596,10 @@ describe('financialStateDrifted wiring under the write lock (source-pattern guar
   // rows), while the financial-state check runs unconditionally (it's a
   // no-op on a null snapshot already, per financialStateDrifted's own
   // contract).
-  const gateIdx = ud.indexOf('if ((addonsReplaced && Array.isArray(expectedAddonRowIds)) || financialCasSnapshot) {');
+  // GitHub Codex round 26 P1 (#4657, :11902): a posted witness with no
+  // snapshot (the blank-price path on an unpriced no-add-on visit) enters
+  // the block too, for lockedWitnessDrifted's under-lock recheck.
+  const gateIdx = ud.indexOf('if ((addonsReplaced && Array.isArray(expectedAddonRowIds)) || financialCasSnapshot || expectedTotal !== undefined) {');
   const idCheckIdx = ud.indexOf('addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))');
   const moneyCheckIdx = ud.indexOf('if (financialStateDrifted(financialCasSnapshot, { parent: freshParentRow, addons: freshAddonIdRows })) {');
   const writeIdx = ud.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
