@@ -130,7 +130,9 @@ function normalizeQuotedAmount(rawValue) {
   // sitting exactly at the boundary can't land on the wrong side of the
   // check from float rounding.
   const cents = Math.round(num * 100);
-  if (cents < 0 || cents > 9999999999) {
+  // A negative input is rejected BEFORE rounding can turn it into -0
+  // (Codex #4710 r18 P2: -0.001 rounds to negative zero, which is not < 0).
+  if (num < 0 || cents > 9999999999) {
     throw makeError('quotedAmount must be between 0 and 99,999,999.99', 400, 'VALIDATION');
   }
   return cents / 100;

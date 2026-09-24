@@ -485,6 +485,9 @@ describe('recordOutcome — validation', () => {
     ['  ', 'valid', null],
     [true, 'invalid', undefined],
     [-1, 'invalid', undefined],
+    // Codex #4710 r18 P2: rounds to -0 — still negative, still rejected.
+    [-0.001, 'invalid', undefined],
+    ['-0.004', 'invalid', undefined],
     ['abc', 'invalid', undefined],
     [1e9, 'invalid', undefined],
     ['149.50', 'valid', 149.5],
