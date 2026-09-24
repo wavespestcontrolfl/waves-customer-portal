@@ -914,11 +914,17 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   // Several live accounts can legitimately share one phone (Codex #4737 r5
   // P1 — admin-customers.js supports it), while ensureCustomerAccount picks
   // the first. So a verified lead's property is matched across EVERY
-  // phone-matched account: a unique address match is reused; none or
+  // phone-matched household: a unique address match is reused; none or
   // several get a separate new account, never an "Additional property"
-  // under an arbitrarily chosen household.
-  const sharedPhoneAccounts = verifiedContact ? await phoneMatchedHouseholds(trx, freshLead.phone) : [];
-  const multiAccount = sharedPhoneAccounts.length > 1;
+  // under an arbitrarily chosen household. The shared-phone match runs
+  // BEFORE any account is created (local audit P1), so a reuse or an
+  // already_booked answer never leaves an orphan customer_accounts row.
+  const sharedPhoneHouseholds = verifiedContact ? await phoneMatchedHouseholds(trx, freshLead.phone) : [];
+  const multiAccount = sharedPhoneHouseholds.length > 1;
+  if (multiAccount) {
+    const matched = await uniqueProfileAcrossAccounts(trx, sharedPhoneHouseholds, resolved);
+    if (matched) return reuseMatchedProfile(trx, freshLead, matched, resolved);
+  }
   const account = await ensureCustomerAccount(trx, {
     firstName: freshLead.first_name || 'New Lead',
     lastName: freshLead.last_name || '',
@@ -932,38 +938,9 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
     // of deadlocking a merge-undo.
     fenceAttach: true,
   });
-  if (verifiedContact) {
-    const matched = multiAccount
-      ? await uniqueProfileAcrossAccounts(trx, sharedPhoneAccounts, resolved)
-      : await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
-    if (matched) {
-      // includeRescheduleUrl:false — this runs under the caller's advisory
-      // lock (round 13, Codex pre-push P1, 2026-09-24); see
-      // resolveEligibility's own docblock.
-      const eligibility = await resolveEligibility(trx, freshLead, matched, { includeRescheduleUrl: false });
-      if (eligibility.state !== 'ok') return { eligibility };
-      if (matched.latitude != null && matched.longitude != null) {
-        return { customer: matched, location: { lat: parseFloat(matched.latitude), lng: parseFloat(matched.longitude) } };
-      }
-      // A legacy profile with no stored coordinates gets the validated ones
-      // (Codex #4737 r3 P1): createSelfBooking reloads the customer's own
-      // coordinates for its commit-time travel check, so leaving them null
-      // would run that check locationless.
-      // The customer-comms fence for this customer, which only became known
-      // mid-transaction (local audit P1), is taken NON-blocking: the lead row
-      // is already locked, and a blocking wait here could deadlock a
-      // merge-undo that holds the fence and wants the lead. Not acquired →
-      // the coordinates are simply not persisted (the booking still carries
-      // the validated location as expectedLocation).
-      const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
-      if (!(await tryLockCustomerComms(trx, matched.id))) {
-        logger.warn(`[inspection-public] comms fence busy for ${matched.id}; coordinates not persisted`);
-        return { customer: matched, location: resolved.location };
-      }
-      const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
-      await trx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
-      return { customer: { ...matched, ...after }, location: resolved.location };
-    }
+  if (verifiedContact && !multiAccount) {
+    const matched = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
+    if (matched) return reuseMatchedProfile(trx, freshLead, matched, resolved);
   }
   const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
   // Server-owned provenance for loadTrustedCustomer (local audit P1): this
@@ -976,6 +953,36 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
     metadata: JSON.stringify({ customer_id: created.id }),
   });
   return { customer: created };
+}
+
+// A verified lead's existing property, reused: its own open assessment wins
+// (already_booked), else it is the booking customer, at its OWN stored pin
+// when it has one.
+async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
+  // includeRescheduleUrl:false — this runs under the caller's advisory
+  // lock (round 13, Codex pre-push P1, 2026-09-24); see
+  // resolveEligibility's own docblock.
+  const eligibility = await resolveEligibility(trx, freshLead, matched, { includeRescheduleUrl: false });
+  if (eligibility.state !== 'ok') return { eligibility };
+  if (matched.latitude != null && matched.longitude != null) {
+    return { customer: matched, location: { lat: parseFloat(matched.latitude), lng: parseFloat(matched.longitude) } };
+  }
+  // A legacy profile with no stored coordinates gets the validated ones
+  // (Codex #4737 r3 P1): createSelfBooking reloads the customer's own
+  // coordinates for its commit-time travel check. The customer-comms fence
+  // for this customer (known only mid-transaction) is taken NON-blocking:
+  // the lead row is already locked, and a blocking wait could deadlock a
+  // merge-undo. Not acquired → the coordinates are simply not persisted
+  // (the booking still carries the validated location as expectedLocation).
+  const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
+
+  if (!(await tryLockCustomerComms(trx, matched.id))) {
+    logger.warn(`[inspection-public] comms fence busy for ${matched.id}; coordinates not persisted`);
+    return { customer: matched, location: resolved.location };
+  }
+  const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
+  await trx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
+  return { customer: { ...matched, ...after }, location: resolved.location };
 }
 
 router.get('/:token', async (req, res, next) => {

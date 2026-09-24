@@ -477,13 +477,14 @@ describe('Codex #4737 r5 P1: a verified phone shared by several accounts', () =>
       { id: 'legacy-2', account_id: null, address_line1: '2 Two St', zip: '34209' },
     ];
     listResults.scheduled_services = [];
-    mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-new', existingCustomer: null, matchType: null });
     mockBuildAvailability.mockResolvedValueOnce({
       days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
     });
     const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '1 One St, Bradenton, FL 34209' });
     expect(res.statusCode).toBe(200);
     expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe('legacy-1');
+    // Resolved BEFORE any account is created (local audit P1): no orphan.
+    expect(mockEnsureCustomerAccount).not.toHaveBeenCalled();
   });
 
   test('no unique address match across the phone-matched accounts → a SEPARATE new account, never an additional property under one of them', async () => {
