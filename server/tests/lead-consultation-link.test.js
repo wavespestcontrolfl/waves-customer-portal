@@ -76,7 +76,7 @@ describe('buildLeadConsultationLink — gate off', () => {
 
 describe('buildLeadConsultationLink — gate on', () => {
   test('mints a short-wrapped consultation link with the composer line shape', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }) };
     const result = await buildLeadConsultationLink(LEAD_ID);
     expect(result.url).toBe('https://waves.link/l/abc123');
     // The bearer-token long URL never rides the line itself.
@@ -93,7 +93,7 @@ describe('buildLeadConsultationLink — gate on', () => {
   });
 
   test('fails closed when the short code cannot be minted (never passes the token URL through)', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }) };
     createShortCode.mockRejectedValueOnce(new Error('short_codes insert failed'));
     const result = await buildLeadConsultationLink(LEAD_ID);
     expect(result.url).toBeNull();
@@ -102,7 +102,7 @@ describe('buildLeadConsultationLink — gate on', () => {
   });
 
   test('accepts a lead object and re-resolves it from the DB (never trusts the passed-in row)', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }) };
     const result = await buildLeadConsultationLink({ id: LEAD_ID, phone: 'stale-should-be-ignored' });
     expect(result.url).toBeTruthy();
     expect(mockDb).toHaveBeenCalledWith('leads');
@@ -115,8 +115,28 @@ describe('buildLeadConsultationLink — gate on', () => {
     expect(result.reason).toMatch(/not found/i);
   });
 
+  // Pre-push Codex P1: this is the CHOKEPOINT every caller (composer-
+  // customer-links.js's buildConsultationLink, admin-communications.js's
+  // resolveConsultationLeadOnly, admin-leads.js's GET
+  // /:id/consultation-link) inherits — enforced here regardless of which
+  // caller resolved the lead id and however permissive that caller's own
+  // early filter is (or isn't).
+  test.each([
+    ['a CLOSED status (disqualified)', { status: 'disqualified', converted_at: null }],
+    ['a CLOSED status (unresponsive)', { status: 'unresponsive', converted_at: null }],
+    ['a CONVERTED lead (won, converted_at set)', { status: 'won', converted_at: new Date('2026-01-01') }],
+    ['converted_at set even with an open-looking status', { status: 'new', converted_at: new Date('2026-01-01') }],
+  ])('%s is unavailable — no link minted, whoever the caller is', async (_label, statusFields) => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', ...statusFields } }) };
+    const result = await buildLeadConsultationLink(LEAD_ID);
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toBe('That lead has already converted or closed');
+    expect(createShortCode).not.toHaveBeenCalled();
+  });
+
   test('lead with no phone returns a reason, no link', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: null } }) };
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: null, status: 'new', converted_at: null } }) };
     const result = await buildLeadConsultationLink(LEAD_ID);
     expect(result.url).toBeNull();
     expect(result.reason).toMatch(/no phone/i);
@@ -125,7 +145,7 @@ describe('buildLeadConsultationLink — gate on', () => {
   test('no signing secret configured fails closed with a reason', async () => {
     delete process.env.LEAD_PREFILL_SECRET;
     delete process.env.JWT_SECRET;
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }) };
     const result = await buildLeadConsultationLink(LEAD_ID);
     expect(result.url).toBeNull();
     expect(result.reason).toMatch(/secret/i);
@@ -161,7 +181,7 @@ describe('consultationSmsLineFor', () => {
 describe('buildLeadConsultationSmsLine', () => {
   test('renders the admin template with {first_name, consultation_url}, collapsed to one line and flagged standalone', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
       sms_templates: chainBuilder({ firstRow: { is_active: true } }),
     };
     getTemplate.mockResolvedValue(
@@ -186,9 +206,25 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(result.immediateOnly).toBe(true);
   });
 
+  // Inherited from buildLeadConsultationLink's chokepoint check — the SMS
+  // wrapper never even reaches the template render for a closed/converted
+  // lead (pre-push Codex P1).
+  test('a closed/converted lead is unavailable — the template is never rendered', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'won', converted_at: new Date('2026-01-01') } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toBe('That lead has already converted or closed');
+    expect(result.standalone).toBeUndefined();
+    expect(getTemplate).not.toHaveBeenCalled();
+  });
+
   test('missing first name falls back to "there"', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
       sms_templates: chainBuilder({ firstRow: { is_active: true } }),
     };
     getTemplate.mockResolvedValue('Hi {first_name}');
@@ -207,7 +243,7 @@ describe('buildLeadConsultationSmsLine', () => {
   // reason } instead.
   test('a missing template row (never seeded) is unavailable — no bare fallback clause, no standalone flag', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
       sms_templates: chainBuilder({ firstRow: null }),
     };
     getTemplate.mockResolvedValue(null);
@@ -220,7 +256,7 @@ describe('buildLeadConsultationSmsLine', () => {
 
   test('a body that lost its required {consultation_url} placeholder is unavailable — getTemplate already refused to render it', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
       sms_templates: chainBuilder({ firstRow: { is_active: true } }),
     };
     // getTemplate's own opts.requiredVars check returns null for a body an
@@ -239,7 +275,7 @@ describe('buildLeadConsultationSmsLine', () => {
   // to render it.
   test('a DISABLED template returns an unavailable result — never the bare fallback clause, never rendered', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
       sms_templates: chainBuilder({ firstRow: { is_active: false } }),
     };
     const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
@@ -251,7 +287,7 @@ describe('buildLeadConsultationSmsLine', () => {
 
   test('a template render that throws is unavailable — no bare fallback clause', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
       sms_templates: chainBuilder({ firstRow: { is_active: true } }),
     };
     getTemplate.mockRejectedValue(new Error('render exploded'));
@@ -264,7 +300,7 @@ describe('buildLeadConsultationSmsLine', () => {
 
   test('the sms_templates lookup itself throwing is unavailable — no bare fallback clause', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }),
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
       sms_templates: { where: jest.fn(() => ({ first: jest.fn(async () => { throw new Error('db down'); }) })) },
     };
     const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');

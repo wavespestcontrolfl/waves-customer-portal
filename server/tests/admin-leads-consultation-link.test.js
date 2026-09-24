@@ -38,12 +38,12 @@ let lead;
 
 beforeEach(() => {
   jest.clearAllMocks();
-  lead = { id: 'lead-qa', first_name: 'Pat', deleted_at: null };
+  lead = { id: 'lead-qa', first_name: 'Pat', deleted_at: null, status: 'new', converted_at: null };
   db.mockImplementation((table) => {
     const builder = {
       where: jest.fn(() => builder),
       whereNull: jest.fn(() => builder),
-      first: jest.fn(async () => (table === 'leads' ? (lead ? { id: lead.id, first_name: lead.first_name } : undefined) : undefined)),
+      first: jest.fn(async () => (table === 'leads' ? (lead ? { id: lead.id, first_name: lead.first_name, status: lead.status, converted_at: lead.converted_at } : undefined) : undefined)),
     };
     return builder;
   });
@@ -94,6 +94,28 @@ test('gate off (or otherwise unavailable): passes the builder\'s reason straight
     line: '',
     reason: 'Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)',
   });
+});
+
+// Pre-push Codex P1: the third caller with the same eligibility gap
+// (buildConsultationLink and resolveConsultationLeadOnly were already
+// fixed) — a closed or converted lead must show unavailable up front, with
+// no short code minted for a doomed link (the builder is never even
+// called).
+test('a CLOSED lead (e.g. disqualified) is unavailable up front — no link minted, builder never called', async () => {
+  lead.status = 'disqualified';
+  const { status, body } = await get();
+  expect(status).toBe(200);
+  expect(body).toEqual({ url: null, line: '', reason: 'That lead has already converted or closed' });
+  expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+});
+
+test('a CONVERTED lead (converted_at set) is unavailable up front — no link minted, builder never called', async () => {
+  lead.status = 'won';
+  lead.converted_at = new Date('2026-01-01');
+  const { status, body } = await get();
+  expect(status).toBe(200);
+  expect(body).toEqual({ url: null, line: '', reason: 'That lead has already converted or closed' });
+  expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
 });
 
 test('gate on: returns the rendered url/line for the Leads-page composer to insert', async () => {

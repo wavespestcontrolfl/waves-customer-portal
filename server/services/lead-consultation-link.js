@@ -8,7 +8,9 @@
  * Contract mirrors composer-customer-links.js / reservice-link.js:
  * buildLeadConsultationLink returns { url, line, reason } — url null + a
  * `reason` sentence when the gate is off, the lead is missing/deleted, has
- * no phone, or no token can be minted (no secret configured). `line` is a
+ * already converted or closed (isOpenLeadRow, lead-statuses.js — the
+ * chokepoint every caller inherits, pre-push Codex P1), has no phone, or
+ * no token can be minted (no secret configured). `line` is a
  * self-contained plain-ASCII SMS clause ending in '\n\n'.
  *
  * The /inspection/:token page itself (route trio + ScheduleFlowPage flow) is
@@ -22,6 +24,18 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { createShortCode } = require('./short-url');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
 const { mintLeadConsultationToken, TTL_SECONDS } = require('../utils/lead-consultation-token');
+// The chokepoint (pre-push Codex P1): every caller of this module —
+// composer-customer-links.js's buildConsultationLink, admin-communications.js's
+// resolveConsultationLeadOnly, and admin-leads.js's GET
+// /:id/consultation-link — resolves a lead id from a different angle
+// (customer-owned, phone-only, or a UI row) and had its own copy of the
+// eligibility gap before this. Enforcing isOpenLeadRow HERE, on the lead
+// buildLeadConsultationLink itself re-resolves, means every caller inherits
+// the rule regardless of how it got the id; a caller's own predicate
+// (applyOpenLeadPredicate on a picking query, or its own isOpenLeadRow
+// early-check) stays purely an efficiency/messaging early filter, never
+// the only enforcement.
+const { isOpenLeadRow } = require('./lead-statuses');
 
 function consultationSmsLineFor(url) {
   return url ? `Pick a time for us to stop by for a free consultation: ${url}\n\n` : '';
@@ -46,9 +60,13 @@ async function buildLeadConsultationLink(leadOrId) {
 
     // Always re-resolve from the DB (never trust a caller-supplied object's
     // phone/deleted_at) so a stale in-memory lead can't mint a link for a
-    // since-deleted or since-edited row.
-    const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'phone');
+    // since-deleted or since-edited row. status/converted_at ride along for
+    // the isOpenLeadRow check below — the CHOKEPOINT for every caller
+    // (pre-push Codex P1): a won/lost/closed lead must never mint a
+    // free-consultation invitation, however its id reached this function.
+    const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
     if (!lead) return { url: null, line: '', reason: 'Lead not found' };
+    if (!isOpenLeadRow(lead)) return { url: null, line: '', reason: 'That lead has already converted or closed' };
     if (!lead.phone) return { url: null, line: '', reason: 'Lead has no phone number' };
 
     const longUrl = consultationUrlForLead(lead.id);

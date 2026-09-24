@@ -1240,14 +1240,23 @@ router.post('/:id/assign', async (req, res, next) => {
 // GET /api/admin/leads/:id/consultation-link — Virginia's "Send consultation
 // link" action (lead-inspection-link-scope.md §4), dark behind
 // GATE_LEAD_INSPECTION_LINK. Returns { url, line, reason }: url null + a
-// reason when the gate is off or the lead has no phone/token; `line` is the
-// admin-editable lead_consultation_link SMS template body, rendered and
-// ready to drop straight into the existing text composer for the unchanged
-// POST /:id/send-sms below — no new send path.
+// reason when the gate is off, the lead has already converted or closed
+// (isOpenLeadRow, lead-statuses.js — early filter here so the button
+// disables with the specific reason up front, without minting a short
+// code first; the same rule is enforced again at the chokepoint,
+// buildLeadConsultationLink itself, pre-push Codex P1), or the lead has no
+// phone/token; `line` is the admin-editable lead_consultation_link SMS
+// template body, rendered and ready to drop straight into the existing
+// text composer for the unchanged POST /:id/send-sms below — no new send
+// path.
 router.get('/:id/consultation-link', async (req, res, next) => {
   try {
-    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first('id', 'first_name');
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first('id', 'first_name', 'status', 'converted_at');
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const { isOpenLeadRow } = require('../services/lead-statuses');
+    if (!isOpenLeadRow(lead)) {
+      return res.json({ url: null, line: '', reason: 'That lead has already converted or closed' });
+    }
     const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
     const result = await buildLeadConsultationSmsLine(lead.id, lead.first_name);
     res.json(result);
