@@ -159,12 +159,19 @@ function MessageBubble({ m }) {
 // each consultation mint is a FRESH short code (a new 14-day token), so a
 // second insert never matches the first insert's literal URL the way a
 // static link would.
+//
+// Scheme-free links count too (Codex #4709 P1): the SMS template renderer
+// strips https://, so the real consultation line reads "wavespest.co/l/abc".
+// A scheme-free match needs a dotted host AND a path, so ordinary prose
+// ("it's Waves.") never reads as a URL.
 function firstUrlIn(text) {
-  const match = String(text || "").match(/https?:\/\/\S+/);
+  const match = String(text || "").match(/(?:https?:\/\/\S+|(?<![\w@.\/])(?:[a-z0-9-]+\.)+[a-z]{2,}\/\S+)/i);
   return match ? match[0] : null;
 }
 function urlHost(url) {
-  try { return new URL(url).host.toLowerCase(); } catch { return null; }
+  if (!url) return null;
+  const withScheme = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+  try { return new URL(withScheme).host.toLowerCase(); } catch { return null; }
 }
 
 // initialDraft only SEEDS an empty draft — an existing per-identity draft

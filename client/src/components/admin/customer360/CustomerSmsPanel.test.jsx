@@ -221,6 +221,24 @@ describe("CustomerSmsPanel", () => {
     expect(sessionStorage.getItem("c360:sms-draft:staff-a:cust-a")).not.toContain("old111");
   });
 
+  // Codex #4709 P1: the template renderer strips https://, so the real line
+  // is scheme-free. Re-inserting must still replace the previous invite.
+  it("re-inserting a scheme-free consultation line (the renderer's real output) replaces the previous one", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.includes("/comms")) return { comms: [] };
+      return {};
+    });
+    const first = "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/old111\n\nReply STOP to opt out.";
+    const second = "Hi Avery, it's Waves. Pick a time for a free consultation: wavespest.co/l/new222\n\nReply STOP to opt out.";
+    const { rerender } = render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={first} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    await waitFor(() => expect(box.value).toContain("old111"));
+    rerender(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} appendDraft={second} />);
+    await waitFor(() => expect(box.value).toContain("new222"));
+    expect(box.value).not.toContain("old111");
+    expect((box.value.match(/wavespest\.co\/l\//g) || []).length).toBe(1);
+  });
+
   it("sends once per click through the canonical route, pinned to the customer, and keeps the draft on failure", async () => {
     const send = deferred();
     adminFetch.mockImplementation(async (path, options = {}) => {
