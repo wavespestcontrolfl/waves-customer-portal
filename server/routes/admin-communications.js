@@ -2639,13 +2639,17 @@ async function resolveComposerRecipient(customerId, last10) {
 // elapsed placeholders); the builder takes the picked row so the pick stays
 // route-owned. Statement is handled by statementLinkInsert before any
 // customer resolution (the key here only admits the kind).
-function composerLinkBuilders() {
+function composerLinkBuilders(body = {}) {
   const builders = require('../services/composer-customer-links');
   return {
     review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
     pay_balance: (ids) => builders.buildPayBalanceLink(ids),
     estimate: (ids) => builders.buildLatestEstimateLink(ids),
     referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
+    // Lead consultation-booking link (lead-inspection-link-scope.md §4),
+    // dark behind GATE_LEAD_INSPECTION_LINK. Per customer row like referral
+    // above — the resolved owner's own lead, not any account sibling's.
+    consultation: (ids, primaryId) => builders.buildConsultationLink(primaryId, body.leadId),
     // Auto Pay is per customer row (the phone's owner), same as referral.
     // The builder delegates to autopay-setup-link's single entry point —
     // gate, payer exemption, dedup and the saved-card auto-secure all
@@ -2759,7 +2763,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
     const body = req.body || {};
     const kind = String(body.kind || '');
-    const builderByKind = composerLinkBuilders();
+    const builderByKind = composerLinkBuilders(body);
     if (!(kind in builderByKind)) {
       return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
     }

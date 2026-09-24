@@ -122,6 +122,9 @@ const KEEP_STOP_KEYS = [
   'missed_call',
   'lead_auto_reply_biz',
   'voicemail_quote_link',
+  // Seeded later (20260923000020) — same "first text to a lead, not yet a
+  // customer" class as voicemail_quote_link above.
+  'lead_consultation_link',
   'dropped_call_address_request',
   'booking_abandonment_recovery',
   'estimate_sent',

@@ -1237,6 +1237,23 @@ router.post('/:id/assign', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/leads/:id/consultation-link — Virginia's "Send consultation
+// link" action (lead-inspection-link-scope.md §4), dark behind
+// GATE_LEAD_INSPECTION_LINK. Returns { url, line, reason }: url null + a
+// reason when the gate is off or the lead has no phone/token; `line` is the
+// admin-editable lead_consultation_link SMS template body, rendered and
+// ready to drop straight into the existing text composer for the unchanged
+// POST /:id/send-sms below — no new send path.
+router.get('/:id/consultation-link', async (req, res, next) => {
+  try {
+    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first('id', 'first_name');
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+    const result = await buildLeadConsultationSmsLine(lead.id, lead.first_name);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/leads/:id/send-sms — send SMS to lead via Twilio
 router.post('/:id/send-sms', async (req, res, next) => {
   try {

@@ -75,4 +75,49 @@ async function buildLeadConsultationLink(leadOrId) {
   }
 }
 
-module.exports = { buildLeadConsultationLink, consultationUrlForLead, consultationSmsLineFor };
+// The admin-editable SMS template Virginia's send actually uses (PR "Piece
+// 2, Virginia's link" — lead-inspection-link-scope.md §4).
+const CONSULTATION_SMS_TEMPLATE_KEY = 'lead_consultation_link';
+
+/**
+ * Same contract as buildLeadConsultationLink — { url, line, reason } — but
+ * `line` is the full lead_consultation_link SMS template body (greeting +
+ * "Reply STOP to opt out." disclosure already included) rendered with
+ * {first_name, consultation_url}, collapsed to one line and flagged
+ * `standalone: true` so a caller inserting it into a composer (rather than
+ * sending it directly) knows to use it as-is instead of wrapping it in a
+ * generic greeting — same reason and shape as Auto Pay's rendered setup
+ * text (composer-customer-links.js buildAutopaySetupLink). Falls back to
+ * the bare buildLeadConsultationLink clause (no `standalone`) when the
+ * template row is inactive or missing, per admin-sms-templates'
+ * isTemplateActive/getTemplate semantics (a deliberate admin toggle, not a
+ * defect — never a hardcoded stand-in for an admin-disabled template).
+ *
+ * firstName: the lead's first name for the {first_name} placeholder — the
+ * caller supplies it (this module's own DB reads intentionally select only
+ * id/phone for buildLeadConsultationLink's stale-object-mistrust rule
+ * above).
+ */
+async function buildLeadConsultationSmsLine(leadOrId, firstName) {
+  const built = await buildLeadConsultationLink(leadOrId);
+  if (!built.url) return built;
+  try {
+    const templates = require('../routes/admin-sms-templates');
+    const body = await templates.getTemplate(CONSULTATION_SMS_TEMPLATE_KEY, {
+      first_name: firstName || 'there',
+      consultation_url: built.url,
+    });
+    if (body) {
+      return {
+        url: built.url,
+        line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
+        standalone: true,
+      };
+    }
+  } catch (err) {
+    logger.warn(`[lead-consultation-link] template render failed: ${err.message}`);
+  }
+  return built;
+}
+
+module.exports = { buildLeadConsultationLink, buildLeadConsultationSmsLine, consultationUrlForLead, consultationSmsLineFor };

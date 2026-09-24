@@ -894,6 +894,23 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
+  // Consultation link (lead-inspection-link-scope.md §4), dark behind
+  // GATE_LEAD_INSPECTION_LINK — { [leadId]: { loading, url, line, reason } },
+  // fetched once per expanded lead so the button can show its disabled
+  // reason as a tooltip rather than only failing on click.
+  const [consultationLinks, setConsultationLinks] = useState({});
+  const loadConsultationLink = useCallback(async (leadId) => {
+    setConsultationLinks((m) => ({ ...m, [leadId]: { loading: true } }));
+    try {
+      const data = await adminFetch(`/admin/leads/${leadId}/consultation-link`);
+      setConsultationLinks((m) => ({ ...m, [leadId]: { loading: false, ...data } }));
+    } catch (e) {
+      setConsultationLinks((m) => ({
+        ...m,
+        [leadId]: { loading: false, url: null, reason: e.message || "Could not load the consultation link" },
+      }));
+    }
+  }, []);
   useEffect(() => {
     if (!newLeadRequest) return;
     setFormData({});
@@ -1127,6 +1144,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     }
     setActiveLead(lead.id);
     loadLeadActivities(lead.id);
+    if (!consultationLinks[lead.id]) loadConsultationLink(lead.id);
   };
   const updateLeadStatus = async (leadId, status) => {
     try {
@@ -2010,6 +2028,29 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     }}
                                   >
                                     Message
+                                  </Button>{" "}
+                                  <Button
+                                    variant={"secondary"}
+                                    disabled={
+                                      consultationLinks[lead.id]?.loading ||
+                                      !consultationLinks[lead.id]?.url
+                                    }
+                                    title={
+                                      consultationLinks[lead.id]?.loading
+                                        ? "Loading…"
+                                        : consultationLinks[lead.id]?.url
+                                          ? undefined
+                                          : consultationLinks[lead.id]?.reason ||
+                                            "Consultation link unavailable"
+                                    }
+                                    onClick={() =>
+                                      messageLead(
+                                        lead,
+                                        consultationLinks[lead.id]?.line || "",
+                                      )
+                                    }
+                                  >
+                                    Send consultation link
                                   </Button>{" "}
                                   <Button
                                     variant={"primary"}

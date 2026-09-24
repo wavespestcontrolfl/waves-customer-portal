@@ -342,6 +342,34 @@ async function buildReferralLink(customerId) {
   };
 }
 
+/**
+ * Consultation link (lead-inspection-link-scope.md §4) for the Insert Link
+ * sheet's `consultation` kind. The composer has no lead picker of its own,
+ * so the row it inserts for is the resolved customer's newest non-deleted
+ * lead (leads.customer_id = customerId) — a caller-supplied leadId
+ * (leadIdOverride; not sent by the composer today, kept for a future
+ * lead-scoped composer per the scope doc) wins when present. Renders the
+ * same admin-editable lead_consultation_link SMS template the Leads page
+ * action uses (buildLeadConsultationSmsLine) so both surfaces send
+ * identical copy and never drift.
+ */
+async function buildConsultationLink(customerId, leadIdOverride) {
+  const { buildLeadConsultationSmsLine } = require('./lead-consultation-link');
+  let lead = null;
+  if (leadIdOverride) {
+    lead = await db('leads').where({ id: leadIdOverride }).whereNull('deleted_at').first('id', 'first_name');
+  }
+  if (!lead) {
+    lead = await db('leads')
+      .where({ customer_id: customerId })
+      .whereNull('deleted_at')
+      .orderBy('created_at', 'desc')
+      .first('id', 'first_name');
+  }
+  if (!lead) return { url: null, line: '', reason: 'No lead on file for this customer' };
+  return buildLeadConsultationSmsLine(lead.id, lead.first_name);
+}
+
 // Every skip requestAutopaySetupLink can return, phrased for the composer
 // (same vocabulary as cardLinkStatus.describeAutopaySetupLinkResult on the
 // Customers page — one plain sentence per outcome, unknown reasons stay
@@ -2300,6 +2328,7 @@ module.exports = {
   resolveConfirmationEstimate,
   appendEstimateAcceptLine,
   buildReferralLink,
+  buildConsultationLink,
   AUTOPAY_SKIP_REASONS,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
