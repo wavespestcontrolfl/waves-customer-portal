@@ -9,7 +9,7 @@ const {
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
-const { isAssignable } = require('./technician-eligibility');
+const { isAssignable, absentTechDays } = require('./technician-eligibility');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -1325,6 +1325,29 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
       if (!isAssignable(inheritedTech)) {
         require('./logger').warn(`[recurring-seeder] parent ${parent.id} technician ${inheritedTechId} is not assignable; seeding follow-ups unassigned`);
         rows = rows.map((r) => (r.technician_id === inheritedTechId ? { ...r, technician_id: null } : r));
+      }
+    }
+    // Tech-out (GATE_TECH_OUT_REDISTRIBUTE, Codex r7 P1 on #4678): a
+    // follow-up whose own date is a day the inherited tech is marked out
+    // (uncleared technician_absences row) is seeded UNASSIGNED so
+    // auto-dispatch places it — the same per-date rule the recurring-series
+    // maintenance seeder applies — instead of landing on the absent tech
+    // for the sweep to park later. One read over the seeded date range.
+    const inheritedDates = rows
+      .filter((r) => inheritedTechId && r.technician_id === inheritedTechId)
+      .map((r) => dateOnly(r.scheduled_date))
+      .filter(Boolean)
+      .sort();
+    if (inheritedDates.length) {
+      const absentDays = await absentTechDays(conn, {
+        dateFrom: inheritedDates[0], dateTo: inheritedDates[inheritedDates.length - 1], technicianIds: [inheritedTechId],
+      });
+      if (absentDays.size) {
+        rows = rows.map((r) => (
+          r.technician_id === inheritedTechId && absentDays.has(`${inheritedTechId}:${dateOnly(r.scheduled_date)}`)
+            ? { ...r, technician_id: null }
+            : r
+        ));
       }
     }
   }

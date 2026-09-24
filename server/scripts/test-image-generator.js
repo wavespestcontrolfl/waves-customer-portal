@@ -11,7 +11,13 @@
  *   node server/scripts/test-image-generator.js                       # capability check only
  *   node server/scripts/test-image-generator.js --confirm --title="Test image"
  *   node server/scripts/test-image-generator.js --confirm --mode=social-square --title="X"
- *   node server/scripts/test-image-generator.js --confirm --provider=gemini --title="X"
+ *   node server/scripts/test-image-generator.js --confirm --provider=gemini --allow-watermarked --title="X"
+ *
+ * Gemini providers are SynthID pixel-watermarked and dropped from every chain
+ * (owner 2026-09-24). A --provider naming one is REFUSED unless
+ * --allow-watermarked (sets ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true for
+ * this process) — the script never silently spends through a different
+ * provider than the one asked for. Never ship what such a run produces.
  *
  * For prod env (DataForSEO unrelated — only OPENAI/GEMINI keys needed):
  *   railway run -- bash -c '
@@ -47,7 +53,19 @@ const ESTIMATED_COSTS = {
 };
 
 (async function main() {
+  if (ARGS['allow-watermarked']) process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = 'true';
   const envChain = PROVIDER_OVERRIDE || process.env.BLOG_IMAGE_PROVIDER;
+  if (PROVIDER_OVERRIDE) {
+    const { parseChain } = require('../services/content/image-generator')._internals;
+    const asked = parseChain(PROVIDER_OVERRIDE, { allowPixelWatermark: true });
+    const kept = parseChain(PROVIDER_OVERRIDE);
+    const dropped = asked.filter((s) => !kept.includes(s));
+    if (dropped.length) {
+      console.error(`--provider=${PROVIDER_OVERRIDE}: ${dropped.join(', ')} is pixel-watermarked (SynthID) and dropped by policy — pass --allow-watermarked for a deliberate run; refusing to substitute another provider.`);
+      process.exit(1);
+    }
+    if (!kept.length) { console.error(`--provider=${PROVIDER_OVERRIDE}: no such provider`); process.exit(1); }
+  }
   const gen = new ImageGenerator({ envChain });
 
   console.log('\n── image-generator dry-check ──\n');

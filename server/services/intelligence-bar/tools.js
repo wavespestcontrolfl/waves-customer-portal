@@ -2286,7 +2286,7 @@ async function createAppointment(input, actionContext = {}) {
     }
     // Re-asserted FOR SHARE on the writing trx: the name/id resolution above
     // ran before this transaction opened.
-    await assertAssignableTechnician(technician_id, { conn: trx });
+    await assertAssignableTechnician(technician_id, { conn: trx, date: dateStr });
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       // Sole-active-property anchor for the visit-group stamp below —

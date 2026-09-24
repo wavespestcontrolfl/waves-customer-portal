@@ -136,8 +136,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.11.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.11.0');
+  test('schema version is 1.13.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.13.0');
   });
 
   describe('model-output schema', () => {
@@ -338,6 +338,213 @@ describe('schema validation', () => {
       const { valid } = validateModelOutput(data);
       expect(valid).toBe(true);
     });
+
+    // service_request.price (call-agent audit 2026-09-23): captures any
+    // price the agent states, accepted or not — distinct from
+    // quoted_price_usd, which stays accepted-total-only.
+    describe('service_request.price', () => {
+      test('a full price object with every field set validates', () => {
+        const data = validModelOutput();
+        data.service_request.price = {
+          amount_usd: 90,
+          amount_max_usd: 100,
+          unit: 'per_quarter',
+          accepted: false,
+          stated_by: 'agent',
+          prepay_term: 'annual',
+          tier_mentioned: 'gold',
+          evidence_quote: 'that runs ninety to a hundred a quarter',
+        };
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('omitting price entirely is valid (backward compatible with older prompts)', () => {
+        const data = validModelOutput();
+        delete data.service_request.price;
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('a price object with every field null is valid', () => {
+        const data = validModelOutput();
+        data.service_request.price = {
+          amount_usd: null,
+          amount_max_usd: null,
+          unit: null,
+          accepted: null,
+          stated_by: null,
+          prepay_term: null,
+          tier_mentioned: null,
+          evidence_quote: null,
+        };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('a range with only amount_usd/amount_max_usd set is valid', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 350, amount_max_usd: null, unit: 'one_time', accepted: null, stated_by: 'agent', prepay_term: null, tier_mentioned: null, evidence_quote: '$350 to set the traps' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('an invalid unit value fails', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, unit: 'weekly' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an invalid tier_mentioned value fails', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, tier_mentioned: 'diamond' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an invalid prepay_term value fails', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, prepay_term: 'monthly' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an invalid stated_by value fails', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, stated_by: 'office' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an unknown field on price fails (additionalProperties: false)', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 65, extra: 'nope' };
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('a price object survives persisted validation alongside the unchanged quoted_price_usd', () => {
+        const data = validPersisted();
+        data.meta.schema_version = SCHEMA_VERSION;
+        data.service_request.quoted_price_usd = null;
+        data.service_request.price = { amount_usd: 65, amount_max_usd: null, unit: 'per_application', accepted: null, stated_by: 'agent', prepay_term: null, tier_mentioned: null, evidence_quote: '$65 per application' };
+        const { valid, errors } = validatePersisted(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      // caller_response (schema 1.13.0, #4707 follow-up 1): replaces the
+      // boolean-only accepted, which conflated "declined" with "never
+      // responded". accepted stays for backward compatibility, derived.
+      describe('caller_response', () => {
+        test('every caller_response enum value validates alongside its derived accepted', () => {
+          const cases = [
+            { caller_response: 'accepted', accepted: true },
+            { caller_response: 'declined', accepted: false },
+            { caller_response: 'no_response', accepted: false },
+            { caller_response: 'not_at_issue', accepted: null },
+            { caller_response: null, accepted: null },
+          ];
+          for (const { caller_response, accepted } of cases) {
+            const data = validModelOutput();
+            data.service_request.price = { amount_usd: 65, caller_response, accepted };
+            const { valid, errors } = validateModelOutput(data);
+            expect(errors).toBeNull();
+            expect(valid).toBe(true);
+          }
+        });
+
+        test('an invalid caller_response value fails', () => {
+          const data = validModelOutput();
+          data.service_request.price = { amount_usd: 65, caller_response: 'maybe' };
+          const { valid } = validateModelOutput(data);
+          expect(valid).toBe(false);
+        });
+
+        test('a price object omitting caller_response is still valid (backward compatible with pre-1.13.0 prompts)', () => {
+          const data = validModelOutput();
+          data.service_request.price = { amount_usd: 65, accepted: false };
+          const { valid, errors } = validateModelOutput(data);
+          expect(errors).toBeNull();
+          expect(valid).toBe(true);
+        });
+
+        test('caller_response survives persisted validation', () => {
+          const data = validPersisted();
+          data.meta.schema_version = SCHEMA_VERSION;
+          data.service_request.price = { amount_usd: 65, caller_response: 'declined', accepted: false };
+          const { valid, errors } = validatePersisted(data);
+          expect(errors).toBeNull();
+          expect(valid).toBe(true);
+        });
+      });
+    });
+
+    // prices[] (schema 1.13.0, #4707 follow-up 2): one price per call — a
+    // call that states both a one-time and a monthly price keeps every one
+    // of them here; `price` stays the single primary entry.
+    describe('service_request.prices', () => {
+      test('an array of distinct prices validates, with price kept as the primary entry', () => {
+        const data = validModelOutput();
+        data.service_request.price = { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true };
+        data.service_request.prices = [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true },
+          { amount_usd: 40, unit: 'per_month', caller_response: 'not_at_issue', accepted: null },
+        ];
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('omitting prices entirely is valid (backward compatible)', () => {
+        const data = validModelOutput();
+        delete data.service_request.prices;
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('an empty prices array is valid', () => {
+        const data = validModelOutput();
+        data.service_request.prices = [];
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(true);
+      });
+
+      test('more than 6 prices fails maxItems', () => {
+        const data = validModelOutput();
+        data.service_request.prices = Array.from({ length: 7 }, (_, i) => ({ amount_usd: i, unit: 'one_time' }));
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an unknown field on a prices[] entry fails (additionalProperties: false)', () => {
+        const data = validModelOutput();
+        data.service_request.prices = [{ amount_usd: 65, extra: 'nope' }];
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('an invalid unit inside a prices[] entry fails', () => {
+        const data = validModelOutput();
+        data.service_request.prices = [{ amount_usd: 65, unit: 'weekly' }];
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('prices[] survives persisted validation', () => {
+        const data = validPersisted();
+        data.meta.schema_version = SCHEMA_VERSION;
+        data.service_request.prices = [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true },
+          { amount_usd: 40, unit: 'per_month', caller_response: 'not_at_issue', accepted: null },
+        ];
+        const { valid, errors } = validatePersisted(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+    });
   });
 
   describe('persisted schema', () => {
@@ -456,6 +663,299 @@ describe('normalize extraction v2', () => {
     const result = normalizeExtractionV2(extraction);
     expect(result.caller.email).toBeNull();
     expect(result.caller.last_name).toBeNull();
+  });
+
+  // #4722 codex r1 P1s: server-side derivation + the primary/prices
+  // compatibility contract — the model can disagree with itself
+  // (caller_response 'accepted' alongside accepted: false, or a price that
+  // doesn't match the accepted prices[] entry) and both must be corrected
+  // before persistence, not left for readers to reconcile.
+  describe('service_request.price / prices normalization', () => {
+    test('derives accepted from caller_response on price, overriding a disagreeing model value', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 65, caller_response: 'accepted', accepted: false };
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price.accepted).toBe(true);
+    });
+
+    test('derives accepted for every caller_response value', () => {
+      const cases = [
+        ['accepted', true],
+        ['declined', false],
+        ['no_response', false],
+        ['not_at_issue', null],
+        [null, null],
+      ];
+      for (const [caller_response, expected] of cases) {
+        const extraction = validModelOutput();
+        extraction.service_request.price = { amount_usd: 65, caller_response, accepted: 'stale' };
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price.accepted).toBe(expected);
+      }
+    });
+
+    test('when caller_response is absent (key not present), the old accepted value is preserved unchanged', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 65, accepted: false };
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price.accepted).toBe(false);
+      expect(result.service_request.price).not.toHaveProperty('caller_response');
+    });
+
+    test('derives accepted on every prices[] entry independently', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true };
+      extraction.service_request.prices = [
+        { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: false },
+        { amount_usd: 40, unit: 'per_month', caller_response: 'declined', accepted: true },
+      ];
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.prices[0].accepted).toBe(true);
+      expect(result.service_request.prices[1].accepted).toBe(false);
+    });
+
+    test('a nonempty prices[] with price missing fills price from the accepted entry (first such), else prices[0]', () => {
+      const withAccepted = validModelOutput();
+      delete withAccepted.service_request.price;
+      withAccepted.service_request.prices = [
+        { amount_usd: 40, unit: 'per_month', caller_response: 'declined' },
+        { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+      ];
+      const resultA = normalizeExtractionV2(withAccepted);
+      expect(resultA.service_request.price).toMatchObject({ amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true });
+
+      const noneAccepted = validModelOutput();
+      delete noneAccepted.service_request.price;
+      noneAccepted.service_request.prices = [
+        { amount_usd: 40, unit: 'per_month', caller_response: 'declined' },
+        { amount_usd: 300, unit: 'one_time', caller_response: 'no_response' },
+      ];
+      const resultB = normalizeExtractionV2(noneAccepted);
+      expect(resultB.service_request.price).toMatchObject({ amount_usd: 40, unit: 'per_month', caller_response: 'declined', accepted: false });
+    });
+
+    // codex #4722 r1 push-gate P1: primary selection must key off the
+    // NORMALIZED accepted, not caller_response directly — caller_response
+    // is optional (pre-1.13.0 shape / a field the model omitted), and an
+    // entry that omits it keeps its own accepted value unchanged. Checking
+    // caller_response alone would skip that entry and fall through to
+    // prices[0], demoting a genuinely accepted price.
+    test('selects the accepted entry as primary even when it omits caller_response (legacy accepted-only shape)', () => {
+      const extraction = validModelOutput();
+      delete extraction.service_request.price;
+      extraction.service_request.prices = [
+        { amount_usd: 40, unit: 'per_month', accepted: false },
+        { amount_usd: 300, unit: 'one_time', accepted: true },
+      ];
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price).toMatchObject({ amount_usd: 300, unit: 'one_time', accepted: true });
+      expect(result.service_request.price).not.toHaveProperty('caller_response');
+    });
+
+    test('a price that disagrees with the accepted prices[] entry is replaced by that entry', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 40, unit: 'per_month', caller_response: 'declined', accepted: false };
+      extraction.service_request.prices = [
+        { amount_usd: 40, unit: 'per_month', caller_response: 'declined' },
+        { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+      ];
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price).toMatchObject({ amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true });
+    });
+
+    // codex #4722 r2 P1: when the selected prices[] entry describes the
+    // SAME price as the existing `price` (same amount_usd/amount_max_usd/
+    // unit), merge rather than replace wholesale — a wholesale replacement
+    // would discard richer fields (stated_by, evidence_quote,
+    // tier_mentioned, prepay_term...) the top-level price carried and the
+    // sparser prices[] echo omitted.
+    describe('primary price merge vs replace (codex #4722 r2 P1)', () => {
+      test('merges when the selected entry describes the same price, filling its gaps from the existing richer price', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65,
+          amount_max_usd: null,
+          unit: 'one_time',
+          caller_response: 'accepted',
+          accepted: true,
+          stated_by: 'agent',
+          prepay_term: 'none',
+          tier_mentioned: 'gold',
+          evidence_quote: 'it is sixty five dollars, one time',
+        };
+        // The prices[] echo of the SAME price, but sparser — only what the
+        // model repeated when listing every distinct price.
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({
+          amount_usd: 65,
+          unit: 'one_time',
+          caller_response: 'accepted',
+          accepted: true,
+          // Preserved from the existing price — the sparser prices[] entry
+          // never carried these, so they must survive the merge.
+          stated_by: 'agent',
+          prepay_term: 'none',
+          tier_mentioned: 'gold',
+          evidence_quote: 'it is sixty five dollars, one time',
+        });
+      });
+
+      test('the selected entry\'s non-null fields win over the existing price\'s on a genuine conflict', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent', tier_mentioned: 'silver',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted', stated_by: 'caller', tier_mentioned: 'gold' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', stated_by: 'caller', tier_mentioned: 'gold' });
+      });
+
+      test('a different price (amount or unit mismatch) still replaces outright, never merges', () => {
+        const sameAmountDifferentUnit = validModelOutput();
+        sameAmountDifferentUnit.service_request.price = { amount_usd: 65, unit: 'per_month', stated_by: 'agent', tier_mentioned: 'gold' };
+        sameAmountDifferentUnit.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+        ];
+        const result = normalizeExtractionV2(sameAmountDifferentUnit);
+        expect(result.service_request.price).toEqual({ amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true });
+        expect(result.service_request.price).not.toHaveProperty('tier_mentioned');
+      });
+
+      test('an amount_max_usd mismatch (range vs single) also replaces outright', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = { amount_usd: 90, amount_max_usd: 100, unit: 'per_quarter', stated_by: 'agent', tier_mentioned: 'gold' };
+        extraction.service_request.prices = [
+          { amount_usd: 90, amount_max_usd: null, unit: 'per_quarter', caller_response: 'accepted' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toEqual({ amount_usd: 90, amount_max_usd: null, unit: 'per_quarter', caller_response: 'accepted', accepted: true });
+        expect(result.service_request.price).not.toHaveProperty('tier_mentioned');
+      });
+
+      // codex #4722 r2 push-gate P1: the generic "overlay's non-null fields
+      // win" rule must NOT apply to caller_response/accepted — null is a
+      // real, meaningful caller_response value ('not_at_issue' is not
+      // null, but a null caller_response must still win over a stale base
+      // value), and accepted is purely derived from it. A merge that
+      // filtered out a null caller_response, or merged accepted field-by-
+      // field instead of re-deriving it, would resurrect a stale
+      // acceptance the call no longer supports.
+      test('merging a same-identity prices[] entry with caller_response not_at_issue clears a stale accepted, never resurrects it', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent', tier_mentioned: 'gold',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'not_at_issue' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({
+          amount_usd: 65, unit: 'one_time', caller_response: 'not_at_issue', accepted: null,
+          // Merge still fills the gap from the richer existing price.
+          stated_by: 'agent', tier_mentioned: 'gold',
+        });
+      });
+
+      test('an explicit null caller_response on the selected entry wins over the existing price\'s caller_response, and accepted is re-derived to null', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', caller_response: null },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', caller_response: null, accepted: null, stated_by: 'agent' });
+      });
+
+      // codex #4722 r2 push-gate P1 (2nd round): a same-identity prices[]
+      // entry that sets an explicit accepted (a valid, optional-field,
+      // caller_response-less shape) must win outright — re-deriving from
+      // an inherited caller_response instead would resurrect a stale
+      // acceptance the overlay never claimed. The stale caller_response is
+      // cleared rather than left contradicting the winning accepted.
+      test('a same-identity entry with an explicit accepted but no caller_response of its own wins, clearing the inherited caller_response', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', accepted: false },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', accepted: false, stated_by: 'agent' });
+        expect(result.service_request.price).not.toHaveProperty('caller_response');
+      });
+
+      // codex #4722 r2 push-gate P1 (3rd round): accepted: null is a valid,
+      // schema-legal, explicit claim on a caller_response-less prices[]
+      // entry ("acceptance was never discussed" for THIS entry) — checking
+      // for a non-null accepted value missed it and let the merge fall
+      // through to the base's stale caller_response: 'accepted' / accepted:
+      // true instead of clearing it.
+      test('a same-identity entry with an explicit accepted: null and no caller_response still wins, clearing the inherited caller_response', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', accepted: null },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', accepted: null, stated_by: 'agent' });
+        expect(result.service_request.price).not.toHaveProperty('caller_response');
+      });
+
+      // codex #4722 r2 push-gate P1 (2nd round): the merged/enriched
+      // primary must be written back into prices[0] itself, not just into
+      // the sibling `price` field — a reader of prices[] alone (the Calls
+      // tab "All prices" row) must see the SAME enriched entry, never a
+      // sparser stale echo that drops stated_by and could misattribute a
+      // caller-mentioned price to the agent by default.
+      test('writes the merged primary entry back into prices[0], not just into price', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 40, unit: 'per_month', caller_response: 'not_at_issue', accepted: null, stated_by: 'caller', evidence_quote: 'a competitor charges forty a month',
+        };
+        extraction.service_request.prices = [
+          // Same price, sparser — missing stated_by/evidence_quote.
+          { amount_usd: 40, unit: 'per_month', caller_response: 'not_at_issue' },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 40, unit: 'per_month', stated_by: 'caller' });
+        expect(result.service_request.prices[0]).toEqual(result.service_request.price);
+      });
+    });
+
+    test('a single price with no prices array is left alone (only accepted derivation applies)', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: false };
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true });
+      expect(result.service_request.prices).toBeUndefined();
+    });
+
+    test('an empty prices[] array leaves price alone', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 65, caller_response: 'accepted', accepted: false };
+      extraction.service_request.prices = [];
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price).toMatchObject({ amount_usd: 65, caller_response: 'accepted', accepted: true });
+      expect(result.service_request.prices).toEqual([]);
+    });
+
+    test('a service_request with neither price nor prices is untouched', () => {
+      const extraction = validModelOutput();
+      delete extraction.service_request.price;
+      const before = JSON.stringify(extraction.service_request);
+      const result = normalizeExtractionV2(extraction);
+      expect(JSON.stringify(result.service_request)).toBe(before);
+    });
   });
 });
 
