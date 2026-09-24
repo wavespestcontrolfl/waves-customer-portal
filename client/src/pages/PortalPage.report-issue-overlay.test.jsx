@@ -208,4 +208,34 @@ describe('ReportIssueOverlay mount safety', () => {
       expect(link).toHaveAttribute('href', '/reservice/tok-1');
     }
   });
+
+  // The overlay stays mounted across opens, so urgency (like every other
+  // field) can carry a stale value into a later Photo ID handoff — Photo ID
+  // never sets urgency itself, so a handoff must always land on the routine
+  // default (Codex r7 P2).
+  it('a Photo ID handoff resets urgency to routine, not an Urgent left over from a cancelled manual entry', async () => {
+    echo.value = undefined;
+    const { fireEvent } = await import('@testing-library/react');
+    const { rerender } = render(
+      <ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope />,
+    );
+    await screen.findByRole('button', { name: /submit request/i });
+    fireEvent.click(screen.getByRole('button', { name: /pest issue/i }));
+    await screen.findByText('Priority');
+    fireEvent.click(screen.getByRole('button', { name: /urgent/i }));
+    expect(screen.getByRole('button', { name: /urgent/i })).toHaveAttribute('aria-pressed', 'true');
+
+    // Cancel without submitting — an unseeded (manual) close leaves state as-is.
+    rerender(<ReportIssueOverlay open={false} onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope />);
+
+    rerender(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{ category: 'pest_issue', location: '', note: 'From Photo ID', photos: [] }}
+      />,
+    );
+    await screen.findByText('Priority');
+    expect(screen.getByRole('button', { name: /routine/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /urgent/i })).toHaveAttribute('aria-pressed', 'false');
+  });
 });

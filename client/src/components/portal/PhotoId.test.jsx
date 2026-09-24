@@ -23,7 +23,16 @@ vi.mock('../../utils/api', () => ({
   },
 }));
 
+// Spy on (not replace) the real ET helper so a history-date regression is
+// pinned by which function ran, not by the test runner's own local
+// timezone happening to already be America/New_York.
+vi.mock('../../lib/timezone', async () => {
+  const actual = await vi.importActual('../../lib/timezone');
+  return { ...actual, formatETDateTime: vi.fn(actual.formatETDateTime) };
+});
+
 import api from '../../utils/api';
+import { formatETDateTime } from '../../lib/timezone';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from './PhotoId';
 
 // Mirrors how PortalPage wires the two entry points to one shared gate read
@@ -466,5 +475,160 @@ describe('session/account switching (Codex r5 P1)', () => {
     resolveFirst({ items: [{ id: 'a1', type: 'pest', created_at: '2026-09-01T00:00:00Z', headline: 'Account A item' }] });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.getByText('status:available items:Account B item')).toBeInTheDocument();
+  });
+
+  it('closes to loading/none SYNCHRONOUSLY on a sessionKey change — no stale-account flash before the refetch resolves', async () => {
+    api.getPhotoIds.mockResolvedValueOnce({ items: [{ id: 'a1', type: 'pest', created_at: '2026-09-01T00:00:00Z', headline: 'Account A item' }] });
+    const { rerender } = render(<KeyedHarness sessionKey={1} />);
+    await screen.findByText('status:available items:Account A item');
+
+    // Never resolves within this test — proves the reset isn't waiting on it.
+    api.getPhotoIds.mockImplementationOnce(() => new Promise(() => {}));
+    rerender(<KeyedHarness sessionKey={2} />);
+    // No `await` — a passive-effect-only reset would still show account A's
+    // data at this exact point; the render-phase reset shows it closed
+    // immediately, in the same commit as the sessionKey change.
+    expect(screen.getByText('status:loading items:none')).toBeInTheDocument();
+    expect(screen.queryByText(/Account A item/)).not.toBeInTheDocument();
+  });
+
+  it('never calls GET /api/photo-id when disabled (a cancelled account) and reports unavailable immediately', async () => {
+    function DisabledHarness() {
+      const gate = usePhotoIdGate(1, false);
+      return <div>status:{gate.status}</div>;
+    }
+    render(<DisabledHarness />);
+    expect(screen.getByText('status:unavailable')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(api.getPhotoIds).not.toHaveBeenCalled();
+  });
+});
+
+describe('history date formatting (Codex r7 P1)', () => {
+  it('formats a history row date through the portal Eastern-time helper, not the browser local zone', async () => {
+    // 02:30 UTC reads as the PREVIOUS calendar day in America/New_York —
+    // exercises the exact case a browser-local (unzoned) format would get
+    // wrong for a customer outside Eastern time.
+    api.getPhotoIds.mockResolvedValueOnce({
+      items: [{ id: 'h1', type: 'pest', created_at: '2026-09-20T02:30:00Z', headline: 'Ghost ant', next_step_kind: 'reservice' }],
+    });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    await screen.findByText('Ghost ant');
+
+    expect(formatETDateTime).toHaveBeenCalledWith('2026-09-20T02:30:00Z', { month: 'short', day: 'numeric' });
+    expect(screen.getByText('Sep 19')).toBeInTheDocument();
+  });
+});
+
+describe('photo validation before resize/upload (Codex r7 P2)', () => {
+  it('rejects an unsupported image type before it ever reaches resize or the API', async () => {
+    api.getPhotoIds.mockResolvedValueOnce({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+
+    const gif = new File(['gif'], 'bug.gif', { type: 'image/gif' });
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [gif] } });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'One photo was skipped — photos must be JPG, PNG, WebP, or HEIC and under 5 MB each.',
+    );
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  });
+
+  it('rejects an oversized original even when it is a supported type — the "already small enough" resize shortcut never sees it', async () => {
+    api.getPhotoIds.mockResolvedValueOnce({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+
+    const big = new File(['x'], 'big.jpg', { type: 'image/jpeg' });
+    Object.defineProperty(big, 'size', { value: 6 * 1024 * 1024 });
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [big] } });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('under 5 MB');
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  });
+});
+
+describe('request handoff falls back to live inputs (Codex r7 P2)', () => {
+  it('a live actionable result missing request_prefill falls back to the type/note/location the customer already entered', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    const onOpenRequest = vi.fn();
+    render(<Harness onOpenRequest={onOpenRequest} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Lawn spot'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+    fireEvent.change(screen.getByPlaceholderText('Anything else worth mentioning?'), {
+      target: { value: 'Yellow patches by the driveway' },
+    });
+    fireEvent.change(screen.getByLabelText('Where on the property (optional)'), { target: { value: 'back_yard' } });
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'x1', type: 'lawn', created_at: '2026-09-24T00:00:00Z',
+      result: { grass_type: 'Bahia', scores: { turf_density: 50, weed_coverage: 20, color_health: 5 }, signals: [], observations: 'obs' },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: "Let's have the team look." }, // no request_prefill
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await screen.findByText('Not sure yet');
+    fireEvent.click(screen.getByRole('button', { name: 'Send to the team' }));
+
+    expect(onOpenRequest).toHaveBeenCalledTimes(1);
+    const call = onOpenRequest.mock.calls[0][0];
+    expect(call.category).toBe('lawn_concern');
+    expect(call.location).toBe('back_yard');
+    expect(call.note).toBe('Yellow patches by the driveway');
+    expect(call.photos).toHaveLength(1);
+  });
+
+  it('a live tree/shrub result with no request_prefill falls back to a blank category (no matching ticket category exists)', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    const onOpenRequest = vi.fn();
+    render(<Harness onOpenRequest={onOpenRequest} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Tree or shrub'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'x2', type: 'tree_shrub', created_at: '2026-09-24T00:00:00Z',
+      result: { plant_groups: [], scores: { foliage_fullness: 50, leaf_color_vigor: 50, overall: 5 }, signals: [], summary: 's' },
+      next_step: { kind: 'request', title: 'Send this in', body: 'y' }, // no request_prefill
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await screen.findByText('Send this in');
+    fireEvent.click(screen.getByRole('button', { name: 'Request service' }));
+
+    expect(onOpenRequest).toHaveBeenCalledTimes(1);
+    expect(onOpenRequest.mock.calls[0][0].category).toBe('');
+  });
+
+  it('a HISTORY result missing request_prefill stays blank — no live note/location to fall back to', async () => {
+    api.getPhotoIds.mockResolvedValueOnce({
+      items: [{ id: 'h1', type: 'pest', created_at: '2026-09-01T00:00:00Z', headline: 'Ghost ant', next_step_kind: 'unclear' }],
+    });
+    api.getPhotoId.mockResolvedValueOnce({
+      id: 'h1', type: 'pest', created_at: '2026-09-01T00:00:00Z',
+      result: { label: 'Ghost ant', confidence: 'high', safety: {}, about: 'x', urgency: 'low' },
+      next_step: { kind: 'unclear', title: 'Not sure', body: 'y' }, // no request_prefill
+    });
+    const onOpenRequest = vi.fn();
+    render(<Harness onOpenRequest={onOpenRequest} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(await screen.findByText('Ghost ant'));
+    await screen.findByText('Not sure');
+    fireEvent.click(screen.getByRole('button', { name: 'Send to the team' }));
+
+    expect(onOpenRequest).toHaveBeenCalledTimes(1);
+    const call = onOpenRequest.mock.calls[0][0];
+    expect(call.category).toBe('');
+    expect(call.location).toBe('');
+    expect(call.note).toBe('');
+    expect(call.photos).toHaveLength(0);
   });
 });

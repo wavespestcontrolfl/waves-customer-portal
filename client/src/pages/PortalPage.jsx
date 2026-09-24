@@ -14399,6 +14399,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         seededByHandoffRef.current = true;
         setCategory(initialValues.category || '');
         setDescription(initialValues.note || '');
+        // A cancelled manual entry (Urgent selected, then closed) must not
+        // leak into a Photo ID handoff — Photo ID never sets urgency itself,
+        // so every handoff restores the routine default explicitly (Codex
+        // r7 P2).
+        setUrgency('routine');
         setLocation(initialValues.location || '');
         setPhotos(Array.isArray(initialValues.photos) ? initialValues.photos.slice(0, photoLimit) : []);
       } else {
@@ -16258,7 +16263,7 @@ export default function PortalPage() {
   // the feature is live (404 hides both). reportIssuePrefill carries the
   // category/location/note/photos a "Request service" next-step hands to
   // the New Request form.
-  const photoIdGate = usePhotoIdGate(sessionEpoch);
+  const photoIdGate = usePhotoIdGate(sessionEpoch, !cancelledAccount);
   const [showPhotoId, setShowPhotoId] = useState(false);
   const [reportIssuePrefill, setReportIssuePrefill] = useState(null);
   const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount;

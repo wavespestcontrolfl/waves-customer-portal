@@ -6,6 +6,7 @@ import Icon from '../Icon';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useModalFocus from '../../hooks/useModalFocus';
 import { captureCameraPhoto } from '../../native/camera';
+import { formatETDateTime } from '../../lib/timezone';
 
 // =========================================================================
 // Photo ID — customer-facing photo identifier (GATE_CUSTOMER_PHOTO_ID).
@@ -78,6 +79,13 @@ const NEXT_STEP_CTA_LABEL = {
   unclear: 'Send to the team',
 };
 
+// Fallback category for a LIVE result's request handoff when the server
+// omits request_prefill.category (request_prefill is optional on every
+// kind) — matches ReportIssueOverlay's fixed category enum. tree_shrub has
+// no matching category there, so it's left unmapped (blank / customer
+// picks) rather than mis-categorizing.
+const TYPE_TO_CATEGORY = { pest: 'pest_issue', lawn: 'lawn_concern' };
+
 function levelWord(level) {
   const s = String(level || '').replace(/_/g, ' ').trim();
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : '—';
@@ -100,6 +108,16 @@ const EXT_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp
 function mimeFromName(name) {
   return EXT_MIME[String(name || '').split('.').pop().toLowerCase()] || null;
 }
+
+// Mirror the server's photo rules HERE too (request-photo-validation.js:
+// jpeg/png/webp/heic + 5MB decoded) — same list ReportIssueOverlay's own
+// picker uses. The file input accepts any `image/*`, and resizeImage's
+// "already small enough" shortcut passes an untouched original straight
+// through when its dimensions are under the resize threshold, so without
+// this a GIF/SVG or an oversized-but-small-dimension file would reach the
+// API unchanged and only fail once the customer taps Identify.
+const PHOTO_TYPE_RE = /^image\/(jpeg|jpg|png|webp|heic|heif)$/i;
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 
 function fileToDataUrl(file) {
   return new Promise((resolve) => {
@@ -151,15 +169,39 @@ function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
 // since a property can belong to a different customerId). PortalPage itself
 // never remounts on those changes, so without this the gate would otherwise
 // keep serving the PREVIOUS account's availability/history (Codex r5 P1).
+//
+// `enabled` (default true) skips the read entirely — PortalPage passes
+// `!cancelledAccount`: `/api/photo-id` isn't one of the reads a cancelled
+// customer's restricted session is allowed, so asking anyway would just
+// 401 and burn a refresh-retry on every mount for a feature that's already
+// hidden for that account (Codex r7 P2).
 // =========================================================================
-export function usePhotoIdGate(sessionKey) {
+export function usePhotoIdGate(sessionKey, enabled = true) {
   // 'loading' | 'available' | 'unavailable'
-  const [status, setStatus] = useState('loading');
+  const [status, setStatus] = useState(enabled ? 'loading' : 'unavailable');
   const [items, setItems] = useState([]);
-  // Bumped every time sessionKey changes so a response still in flight from
-  // the PREVIOUS account/session — including one kicked off by an external
-  // refresh() call — is discarded instead of being applied here.
+  // Bumped every time sessionKey/enabled changes so a response still in
+  // flight from the PREVIOUS account/session — including one kicked off by
+  // an external refresh() call — is discarded instead of being applied here.
   const genRef = useRef(0);
+  const prevKeyRef = useRef(sessionKey);
+  const prevEnabledRef = useRef(enabled);
+
+  // Reset SYNCHRONOUSLY during render, not only in the effect below, so the
+  // very next paint already shows the new session's closed/loading state.
+  // An effect-only reset commits AFTER paint, so the keyed portal subtree
+  // could paint the PREVIOUS account's availability/history for one frame
+  // before the effect clears it — the gate must read closed the instant
+  // sessionKey changes, not after the refetch resolves (Codex r7 P1). This
+  // is React's documented "adjust state during render" pattern: guarded by
+  // the ref comparison so it runs at most once per actual change.
+  if (prevKeyRef.current !== sessionKey || prevEnabledRef.current !== enabled) {
+    prevKeyRef.current = sessionKey;
+    prevEnabledRef.current = enabled;
+    genRef.current += 1;
+    setStatus(enabled ? 'loading' : 'unavailable');
+    setItems([]);
+  }
 
   const refresh = useCallback(() => {
     const myGen = genRef.current;
@@ -186,13 +228,9 @@ export function usePhotoIdGate(sessionKey) {
   }, []);
 
   useEffect(() => {
-    // A new session/account: invalidate anything the old one had in flight,
-    // fail closed while the new read is pending, then ask again.
-    genRef.current += 1;
-    setStatus('loading');
-    setItems([]);
+    if (!enabled) return;
     refresh();
-  }, [refresh, sessionKey]);
+  }, [refresh, sessionKey, enabled]);
 
   return { status, items, refresh };
 }
@@ -288,6 +326,10 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [resultData, setResultData] = useState(null); // { id, type, created_at, result, next_step }
+  // 'live' (just identified, note/location are this session's own inputs) or
+  // 'history' (opened from a past item — GET never returns photos/note/
+  // location, so there is nothing of the customer's to fall back to).
+  const [resultSource, setResultSource] = useState(null);
   const [historyError, setHistoryError] = useState('');
   const [loadingHistoryId, setLoadingHistoryId] = useState(null);
 
@@ -312,6 +354,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       setSubmitting(false);
       setBusyPhotos(false);
       setResultData(null);
+      setResultSource(null);
       setHistoryError('');
       setLoadingHistoryId(null);
     }
@@ -337,13 +380,24 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   const addFiles = async (fileList) => {
     const remaining = PHOTO_LIMIT - photos.length;
     if (remaining <= 0) return;
-    const files = Array.from(fileList || []).slice(0, remaining);
-    if (!files.length) return;
+    const all = Array.from(fileList || []);
+    if (!all.length) return;
+    // Filter BEFORE processing — an empty file.type (some browsers on HEIC)
+    // is accepted only when the extension resolves to a recognized mime, so
+    // fileToDataUrl can still rebuild the data URL's mime prefix.
+    const usable = all
+      .filter((f) => (f.type ? PHOTO_TYPE_RE.test(f.type) : !!mimeFromName(f.name)) && f.size <= MAX_PHOTO_BYTES)
+      .slice(0, remaining);
+    const rejectedCount = all.length - usable.length;
+    setSubmitError(rejectedCount > 0
+      ? `${rejectedCount === 1 ? 'One photo was' : `${rejectedCount} photos were`} skipped — photos must be JPG, PNG, WebP, or HEIC and under 5 MB each.`
+      : '');
+    if (!usable.length) return;
     const myGen = genRef.current;
     setBusyPhotos(true);
     try {
       const added = [];
-      for (const file of files) {
+      for (const file of usable) {
         const original = await fileToDataUrl(file);
         if (!original) continue;
         const resized = await resizeImage(original, 1600, 0.85);
@@ -390,6 +444,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       const result = await api.createPhotoId(selectedType, payload);
       if (genRef.current !== myGen) return; // sheet closed / reset mid-request
       setResultData(result);
+      setResultSource('live');
       setStep('result');
       // Best-effort: the history list refreshing in the background must
       // never turn a successful identify into a failure screen.
@@ -422,6 +477,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       const result = await api.getPhotoId(item.type, item.id);
       if (genRef.current !== myGen) return; // sheet closed / another item opened meanwhile
       setResultData(result);
+      setResultSource('history');
       setSelectedType(item.type);
       setStep('result');
     } catch (err) {
@@ -440,14 +496,21 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   const handleNextStepRequest = () => {
     const nextStep = resultData?.next_step;
     const prefill = nextStep?.request_prefill || {};
-    // Same shape as ReportIssueOverlay's own `photos` state ({ preview, data,
-    // name }) — the New Request form seeds it directly, so the customer
-    // never has to re-attach what they just took. Empty for a result opened
-    // from history (see openHistoryItem — the API never returns photo data).
+    // request_prefill is optional on every kind — for a LIVE result (this
+    // session's own identify) missing it, fall back to what the customer
+    // already typed on the photos step rather than blanking the New Request
+    // form out from under them. A HISTORY result has none of that to fall
+    // back to (GET never returns it), so it stays limited to whatever the
+    // server actually sent (Codex r7 P2).
+    const isLive = resultSource === 'live';
     onOpenRequest?.({
-      category: prefill.category || '',
-      location: prefill.location || '',
-      note: prefill.note || '',
+      category: prefill.category || (isLive ? (TYPE_TO_CATEGORY[selectedType] || '') : ''),
+      location: prefill.location || (isLive ? location : ''),
+      note: prefill.note || (isLive ? note : ''),
+      // Same shape as ReportIssueOverlay's own `photos` state ({ preview,
+      // data, name }) — the New Request form seeds it directly, so the
+      // customer never has to re-attach what they just took. Already empty
+      // for a history result (openHistoryItem clears it on open).
       photos,
     });
   };
@@ -623,7 +686,7 @@ function PickerStep({ items, historyError, loadingHistoryId, onPick, onOpenHisto
                       {item.headline || typeInfo?.label || 'Photo ID'}
                     </span>
                     <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: SHELL.muted }}>
-                      {new Date(item.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                      {formatETDateTime(item.created_at, { month: 'short', day: 'numeric' })}
                     </span>
                   </span>
                   <Icon name="chevronRight" size={16} strokeWidth={2} style={{ color: SHELL.muted }} />
@@ -673,7 +736,7 @@ function PhotosStep({ type, photos, busyPhotos, note, location, submitError, fil
             opacity: busyPhotos ? 0.6 : 1,
           }}>
             <Icon name="camera" size={20} strokeWidth={2} />
-            <span style={{ fontSize: 13, fontWeight: 700 }}>{busyPhotos ? 'Adding…' : 'Add'}</span>
+            <span style={{ fontSize: 14, fontWeight: 700 }}>{busyPhotos ? 'Adding…' : 'Add'}</span>
           </button>
         )}
       </div>
@@ -743,7 +806,7 @@ function MetricTile({ label, value }) {
   return (
     <div data-glass="chip" style={{ flex: 1, minWidth: 92, padding: '10px 12px', borderRadius: 8, textAlign: 'center' }}>
       <div data-gt="metric" style={{ fontSize: 22, fontWeight: 700, color: SHELL.text }}>{value}</div>
-      <div style={{ fontSize: 13, color: SHELL.muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 2 }}>{label}</div>
+      <div style={{ fontSize: 14, color: SHELL.muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 2 }}>{label}</div>
     </div>
   );
 }
