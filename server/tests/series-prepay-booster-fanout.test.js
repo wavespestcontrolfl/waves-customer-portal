@@ -137,4 +137,52 @@ postgres('r1-sched-visits-1: in-person series prepay vs booster rows', () => {
     expect(rows).toHaveLength(3);
     for (const r of rows) expect(r.prepaid_amount).toBeNull();
   });
+
+  test('restamp reconciliation: a family a PRIOR (pre-fix) stamp fanned across boosters has those stale booster slices cleared, not left stacked on top of the new total', async () => {
+    const { parentId } = await insertFamily({ boosterDates: ['2026-12-15', '2027-01-15'] });
+    const rows = await family(parentId);
+    const boosterIds = rows.filter((r) => r.is_recurring === false).map((r) => r.id);
+    // Simulate the PRE-FIX state: an earlier stampSeriesPrepaid call (before
+    // this fix shipped) fanned $600 across all 6 rows ($100 each, including
+    // the 2 boosters) and left the matching allocation-audit evidence —
+    // exactly what the old, unfixed fan-out and its audit trail produced.
+    await trx('scheduled_services').whereIn('id', boosterIds)
+      .update({ prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: new Date() });
+    for (const boosterId of boosterIds) {
+      await trx('audit_log').insert({
+        actor_type: 'system', action: 'prepaid_series.allocated', resource_type: 'scheduled_service',
+        resource_id: boosterId, metadata: { customer_id: customerId, series_parent_id: parentId, prepaid_amount: 100, prepaid_method: 'cash' },
+      });
+    }
+    // Now restamp the series at the CORRECT (fixed) $400 total for the 4
+    // cadence visits only.
+    await stampSeriesPrepaid(trx, {
+      anchorServiceId: parentId, totalAmount: 400, method: 'cash', note: null, useExistingTransaction: true,
+    });
+    const after = await family(parentId);
+    const base = after.filter((r) => r.is_recurring === true);
+    const boosters = after.filter((r) => r.is_recurring === false);
+    for (const r of base) expect(Number(r.prepaid_amount)).toBe(PER_VISIT);
+    // EXPECTED: the boosters' stale slice from the superseded series-level
+    // allocation is cleared — not left stacked on top of the new $400,
+    // which would otherwise show $600 of "covered" money for a $400 total.
+    for (const r of boosters) expect(r.prepaid_amount).toBeNull();
+  });
+
+  test('restamp reconciliation does NOT touch a booster paid independently of any series fan-out', async () => {
+    const { parentId } = await insertFamily({ boosterDates: ['2026-12-15', '2027-01-15'] });
+    const rows = await family(parentId);
+    const boosterId = rows.find((r) => r.is_recurring === false).id;
+    // This booster was marked prepaid on its OWN, single-visit (e.g. POST
+    // /:id/prepaid on that one row) — no prepaid_series.allocated audit row
+    // for it at all, so it is not part of any series-level allocation.
+    await trx('scheduled_services').where({ id: boosterId })
+      .update({ prepaid_amount: 75, prepaid_method: 'zelle', prepaid_at: new Date() });
+    await stampSeriesPrepaid(trx, {
+      anchorServiceId: parentId, totalAmount: 400, method: 'cash', note: null, useExistingTransaction: true,
+    });
+    const after = await family(parentId);
+    const untouchedBooster = after.find((r) => r.id === boosterId);
+    expect(Number(untouchedBooster.prepaid_amount)).toBe(75);
+  });
 });

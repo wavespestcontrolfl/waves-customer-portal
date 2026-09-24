@@ -86,6 +86,34 @@ function splitTotalAcrossVisits(totalDollars, visitCount) {
   return slices;
 }
 
+// Rows (by scheduled_services.id) among `ids` that still carry an ACTIVE
+// prepaid_series.allocated audit row for this customer — i.e. their current
+// prepaid stamp was allocated by a PRIOR call to stampSeriesPrepaid and has
+// not since been retired. Shared by retireActiveAllocationAudits (which
+// retires the evidence) and a restamp's booster reconciliation (which also
+// needs to know WHICH excluded rows to clear, without touching a booster
+// that was stamped independently of any series-level fan-out).
+async function activeAllocationResourceIds(trx, { customerId, ids }) {
+  if (!ids.length) return [];
+  const audits = await trx('audit_log as allocation')
+    .where({
+      'allocation.action': 'prepaid_series.allocated',
+      'allocation.resource_type': 'scheduled_service',
+    })
+    .whereIn('allocation.resource_id', ids)
+    .whereRaw("allocation.metadata->>'customer_id' = ?", [customerId])
+    .whereNotExists(function activeClear() {
+      this.select(trx.raw('1')).from('audit_log as cleared')
+        .where({
+          'cleared.action': 'prepaid_series.cleared',
+          'cleared.resource_type': 'prepaid_series_allocation',
+        })
+        .whereRaw('cleared.resource_id = allocation.id');
+    })
+    .select('allocation.resource_id');
+  return audits.map((row) => row.resource_id);
+}
+
 async function retireActiveAllocationAudits(trx, { customerId, parentId, ids }) {
   const audits = await trx('audit_log as allocation')
     .where({
@@ -237,14 +265,39 @@ async function stampSeriesPrepaid(db, {
     // requested plannedCount). Here we only ever split whatever total the
     // caller passed evenly across the resolved stampTargets.
     slices = splitTotalAcrossVisits(amount, stampTargets.length);
+    // A restamp of a family that a PRIOR call to stampSeriesPrepaid (before
+    // this fix, or before a Customer 360 amendment) fanned across boosters
+    // must not leave those boosters holding a stale slice: the new stamp
+    // below reallocates the WHOLE submitted total across the cadence rows
+    // only, so a booster's old series-level slice would otherwise survive
+    // untouched — money on the books for a visit the office never actually
+    // collected for, suppressing its completion billing. Only clear a
+    // booster's stamp when it traces to THIS series mechanism's own prior
+    // allocation (an active prepaid_series.allocated audit row) — a
+    // booster stamped independently (its own single-visit prepayment,
+    // unrelated to any series fan-out) is left alone.
+    const excludedBoosterRows = eligible.filter((row) => boosterIds.has(row.id) && Number(row.prepaid_amount) > 0);
+    if (excludedBoosterRows.length) {
+      const staleBoosterIds = await activeAllocationResourceIds(trx, {
+        customerId: anchor.customer_id,
+        ids: excludedBoosterRows.map((row) => row.id),
+      });
+      if (staleBoosterIds.length) {
+        await trx('scheduled_services').whereIn('id', staleBoosterIds)
+          .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null });
+      }
+    }
     // An explicit series restamp is an amendment, including a repair after a
     // visit was cleared. Retire the prior allocation evidence atomically
-    // before writing the replacement; a single-visit clear remains the path
-    // that intentionally leaves evidence for reconciliation.
+    // before writing the replacement — over the WHOLE family, not just the
+    // rows being restamped, so a superseded booster allocation (just
+    // reconciled above) is marked retired too, not left as a dangling
+    // "active" audit row. A single-visit clear remains the path that
+    // intentionally leaves evidence for reconciliation.
     await retireActiveAllocationAudits(trx, {
       customerId: anchor.customer_id,
       parentId,
-      ids: stampTargets.map((row) => row.id),
+      ids: eligible.map((row) => row.id),
     });
     for (let i = 0; i < stampTargets.length; i++) {
       const row = stampTargets[i];
