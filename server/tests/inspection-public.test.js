@@ -691,6 +691,55 @@ describe('main merge: ADDRESS_UNVERIFIED from the shared booking', () => {
   });
 });
 
+describe('Codex #4737 r22: the lead-wide profile universe (fences + detail-free checks), fallback hero', () => {
+  test('P0: a merged-away prospect whose winner has a future paid visit → converted, with no details', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: null };
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-loser' }) };
+    listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-loser' }) }];
+    firstResults.customer_merge_journal = (q) => (q.conds.loser_customer_id === 'cust-loser' ? { winner_customer_id: 'cust-winner' } : null);
+    firstResults.customers = (q) => (q.conds.id === 'cust-winner' ? { id: 'cust-winner', phone: '9415559999', address_line1: '9 Winner Way' } : null);
+    listResults.scheduled_services = (q) => (q.conds.customer_id === 'cust-winner'
+      ? [{ id: 'ss-paid', scheduled_date: '2099-02-01', window_start: '09:00', window_end: '10:00', service_type: 'Quarterly Pest Control', reschedule_token: 'winner-tok' }]
+      : []);
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.state).toBe('converted');
+    expect(res.body.visit ?? null).toBeNull();
+    expect(JSON.stringify(res.body)).not.toMatch(/winner-tok|Winner Way/);
+  });
+
+  test('P0: the booking fences every profile of the lead (sorted) before its own; a profile added since the fences is a retry', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-z' }) }];
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(200);
+    const { leadDedupe } = mockCreateSelfBooking.mock.calls[0][0].callbackVisit;
+    const fenced = await leadDedupe.fenceIds(db);
+    expect(fenced).toEqual([...fenced].sort());
+    expect(fenced).toEqual(expect.arrayContaining(['cust-1', 'cust-z']));
+    expect(await leadDedupe.revalidate(db)).toBe('ok');
+    listResults.lead_activities = [
+      { metadata: JSON.stringify({ customer_id: 'cust-z' }) },
+      { metadata: JSON.stringify({ customer_id: 'cust-new-after-fence' }) },
+    ];
+    expect(await leadDedupe.revalidate(db)).toBe('customer_changed');
+  });
+
+  test('P2: when the stored address does not geocode and the lead\'s address wins, the hero shows the lead\'s address', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1', address: '77 Lead Rd', city: 'Bradenton', zip: '34209' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '1 Unmappable Way', city: 'Nowhere', state: 'FL', zip: '00000', latitude: null, longitude: null };
+    listResults.scheduled_services = [];
+    mockGeocode.mockImplementation(async (addr) => (String(addr).includes('Unmappable') ? { location: null } : { location: { lat: 27.5, lng: -82.6 } }));
+    mockBuildAvailability.mockResolvedValueOnce({ slots: [], days: [{ date: FUTURE_DATE, slots: [] }] });
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.lead.address_display).toMatch(/77 Lead Rd/);
+  });
+});
+
 describe('Codex #4737 r20 P2: an elapsed same-day visit is not a future visit', () => {
   const visitToday = (end) => [{ id: 'ss-today', scheduled_date: etDateString(), window_start: '00:00', window_end: end, service_type: 'Quarterly Pest Control', reschedule_token: 'today-tok' }];
   test('a visit from earlier today whose window ended does not make the lead converted', async () => {

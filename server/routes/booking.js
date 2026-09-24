@@ -2888,6 +2888,12 @@ async function createSelfBooking(payload = {}) {
       // below resolves its comms recipients LIVE from the customer row, so
       // it must serialize against a concurrent customer-merge undo's
       // absence probes — after the scheduling rungs, BEFORE every row lock.
+      // The consultation page fences EVERY profile its lead touches first,
+      // in sorted order (Codex #4737 r22 P0 — the same order the waitlist
+      // uses); re-taking this customer's own fence below is a no-op.
+      if (typeof callbackVisit?.leadDedupe?.fenceIds === 'function') {
+        for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) await lockCustomerComms(trx, id);
+      }
       await lockCustomerComms(trx, custId);
       if (custId) {
         const freshBookingCustomer = await trx('customers')

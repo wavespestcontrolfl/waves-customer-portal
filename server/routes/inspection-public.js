@@ -1344,6 +1344,13 @@ router.get('/:token', async (req, res, next) => {
     // page state, not fall through to needs_address:false with an empty
     // calendar (Codex pre-push P1, 2026-09-24).
     const resolved = await finalizeBookingLocation(lead, custRow, null);
+    // The hero shows the address actually being booked (Codex #4737 r22
+    // P2): when the stored one did not geocode and the lead's address won,
+    // that fallback is what the times and the commit use.
+    if (resolved.address?.line1 && resolved.source !== 'customer') {
+      leadPayload.has_address = true;
+      leadPayload.address_display = addressDisplay({ line1: resolved.address.line1, city: resolved.address.city, zip: resolved.address.zip });
+    }
     if (resolved.failure === 'out_of_area') {
       return res.json({ state: 'out_of_area', county: resolved.county || null, lead: leadPayload, waitlist_ticket: mintWaitlistTicket(lead.id, resolved.county) });
     }
@@ -1843,7 +1850,7 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
 // customer; 'ineligible' when the lead is no longer bookable (converted,
 // or a visit landed since phase 1 — the same resolveEligibility GET uses,
 // Codex #4737 r10 pre-push P1); else 'ok'.
-async function commitVerdict(conn, leadId, token, customerId) {
+async function commitVerdict(conn, leadId, token, customerId, fencedIds = null) {
   // Row-locked through the booking transaction (Codex #4737 r11 pre-push
   // P1): admin-leads updates the lead's phone/customer_id without the
   // inspection-lead lock, so an unlocked read could be overtaken before the
@@ -1852,6 +1859,14 @@ async function commitVerdict(conn, leadId, token, customerId) {
   const freshLead = await loadLead(conn, leadId, { forUpdate: true });
   const trusted = freshLead ? await loadTrustedCustomer(conn, freshLead, token) : null;
   if (!trusted || String(trusted.id) !== String(customerId)) return 'customer_changed';
+  // The whole profile universe was fenced by the booking before this read
+  // (leadDedupe.fenceIds); a profile that joined it since is not covered —
+  // retry (Codex #4737 r22 P0).
+  if (fencedIds) {
+    const fenced = new Set(fencedIds.map(String));
+    const now = await leadFenceIds(conn, leadId, token, customerId);
+    if (now.some((id) => !fenced.has(id))) return 'customer_changed';
+  }
   // Every trusted profile, as the read side does (Codex #4737 r17 P0).
   const eligibility = await readEligibility(freshLead, trusted, token, { conn, includeRescheduleUrl: false });
   return eligibility.state === 'ok' ? 'ok' : 'ineligible';
@@ -1864,6 +1879,49 @@ async function commitVerdict(conn, leadId, token, customerId) {
 // find-slots must show another trusted profile's open assessment BEFORE
 // offering times the commit would refuse. Only trusted profiles are read,
 // so nothing about an untrusted one is revealed.
+// EVERY profile this lead's own consultation flow touches (Codex #4737
+// r22 P0s — the one set for existence checks and fences): the booked
+// profile, every consultation_prospect provenance profile, and the live
+// winner of any of them that was merged away. Used ONLY for yes/no
+// existence checks and for comms fences — never to return details. The
+// lead's own customer_id is deliberately NOT in it unless trusted (it is
+// in the trusted set then): an unverified link can point at a stranger,
+// and even a detail-free "already booked" would reveal their booking.
+async function leadProfileUniverse(conn, leadId, custId = null) {
+  const ids = new Set([custId].filter(Boolean).map(String));
+  const rows = await conn('lead_activities').where({ lead_id: leadId, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata');
+  for (const row of rows || []) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+    if (!meta?.customer_id) continue;
+    ids.add(String(meta.customer_id));
+    const winner = await mergedWinnerId(conn, meta.customer_id);
+    if (winner) ids.add(String(winner));
+  }
+  return [...ids].sort();
+}
+
+// The comms fences a booking or waitlist write must hold: this lead's own
+// profile universe plus every profile the token is trusted for (a verified
+// link included), sorted.
+async function leadFenceIds(conn, leadId, token, custId = null) {
+  const universe = await leadProfileUniverse(conn, leadId, custId);
+  const trusted = await trustedLeadProfileIds(conn, leadId, token, custId);
+  return [...new Set([...universe, ...trusted.map(String)])].sort();
+}
+
+// A booking on any of these profiles, as a detail-free eligibility: an
+// open assessment → already_booked, a future non-assessment visit →
+// converted; null when none.
+async function detailFreeHold(conn, ids) {
+  for (const id of ids) {
+    if (await findOpenVisit(conn, id, { assessmentOnly: true })) return { state: 'already_booked', visit: null, rescheduleUrl: null };
+  }
+  for (const id of ids) {
+    if (await findOpenVisit(conn, id, { excludeAssessment: true, futureOnly: true })) return { state: 'converted', visit: null, rescheduleUrl: null };
+  }
+  return null;
+}
+
 async function readEligibility(lead, custRow, token, { conn = db, includeRescheduleUrl = true } = {}) {
   const opts = { includeRescheduleUrl };
   const own = await resolveEligibility(conn, lead, custRow, opts);
@@ -1875,7 +1933,12 @@ async function readEligibility(lead, custRow, token, { conn = db, includeResched
     const other = profile ? await resolveEligibility(conn, lead, profile, opts) : null;
     if (other && other.state !== 'ok') return other;
   }
-  return own;
+  // Every OTHER profile the lead touches (untrusted links, merge-tainted
+  // prospects and their winners) still blocks booking — detail-free
+  // (Codex #4737 r22 P0).
+  const trusted = new Set([custRow?.id, ...ids].filter(Boolean).map(String));
+  const others = (await leadProfileUniverse(conn, lead.id, custRow?.id || null)).filter((id) => !trusted.has(id));
+  return (await detailFreeHold(conn, others)) || own;
 }
 
 // The ALREADY_BOOKED answer from FRESH state only: the lead reloaded, its
@@ -2164,7 +2227,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // assessment across all of them, so two commits with different
     // addresses never both book.
     const resolveCustomerIds = (conn, opts) => trustedLeadProfileIds(conn, lead.id, verified, custRow.id, opts);
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id) } });
+    let fencedUniverse = null;
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
       return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, verified });
@@ -2205,7 +2269,7 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
     // page) holds a customer's comms fence while it inserts a visit, so no
     // visit can land on a trusted profile between the eligibility read and
     // the writes. Same order as the booking: comms, inspection-lead, lead.
-    const preIds = (await trustedLeadProfileIds(db, lead.id, verified, null)).map(String).sort();
+    const preIds = await leadFenceIds(db, lead.id, verified, null);
     const written = await db.transaction(async (trx) => {
       for (const id of preIds) await lockCustomerComms(trx, id);
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['inspection-lead', String(lead.id)]);
@@ -2218,7 +2282,7 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
       // A trusted profile that appeared after the fences were taken is not
       // covered by them — fail closed (generic 404), recoverable.
       const lockedIds = new Set(preIds);
-      const nowIds = await trustedLeadProfileIds(trx, lead.id, verified, null);
+      const nowIds = await leadFenceIds(trx, lead.id, verified, null);
       if (nowIds.some((id) => !lockedIds.has(String(id)))) return false;
       const eligibility = await readEligibility(freshLead, await loadTrustedCustomer(trx, freshLead, verified), verified, { conn: trx, includeRescheduleUrl: false });
       if (eligibility.state !== 'ok') return false;
