@@ -82,7 +82,7 @@
       "thesis": "Different building openings serve different purposes. Explain how to document possible pest entry points and choose an appropriate exclusion approach without blocking drainage, ventilation, or required clearances.",
       "outline": [
         "Distinguish incidental gaps from designed drainage openings, vents, and utility clearances",
-        "Do not instruct readers to stuff weep holes or seal vents; verify the building assembly and manufacturer guidance before recommending a material",
+        "Do not instruct readers to stuff weep holes or seal vents; use the cited Extension guidance for general material selection and verify the building assembly before recommending an incidental-gap application",
         "Compare copper mesh with other exclusion materials only on verified specifications; do not promise rust-proof, moisture-proof, or rodent-proof performance",
         "Place the approved copper-mesh link only in a suitable, verified incidental-gap application; if suitability cannot be established, park the brief for revision rather than force the product",
         "Inspect from ground level; leave roof access and utility penetrations needing specialist work to a qualified professional",
@@ -98,15 +98,15 @@
       ],
       "sources": [
         "https://edis.ifas.ufl.edu/in1269",
-        "https://www.pestcontrolproductsdepot.com/products/stuff-it-copper-netting-roll",
-        "Use UF/IFAS for general exclusion context only. Verify the specific building opening and cited manufacturer-supplied product description, within its stated limits; this source does not establish mesh suitability for a weep hole or vent. Park an unsupported product use.",
-        "The distributor attributes its copy to the manufacturer; it is not independent testing or an exact-variant installation manual. Use only supported identity/material facts, not roll dimensions, corrosion guarantees or pest-proof claims. Do not endorse its weep-hole/vent suggestions. If a suitable incidental-gap use is not established, park the brief; do not force an application."
+        "https://cals.cornell.edu/integrated-pest-management/outreach-education/ipm-areas/community-ipm/pest-exclusion",
+        "Use UF/IFAS for Florida exclusion context and Cornell IPM for general material selection. Cornell identifies copper gauze such as Stuff-It for cracks and small structural openings; it does not establish suitability for designed drainage openings, vents or utility clearances. Verify the specific building opening and park an unsupported product use.",
+        "Cornell is an Extension information source, not a retailer or exact-variant manufacturer manual. Attribute only its general material guidance; do not infer roll dimensions, composition percentages, corrosion guarantees or pest-proof performance. Do not transfer New York wildlife rules, seasonal examples or wildlife-trapping advice to Florida. No device-specific installation tutorial. If a suitable incidental-gap use is not established, park the brief; do not force an application."
       ],
       "verify_notes": [
         "Verify the weep-hole drainage claim and the exclusion-material comparison against UF/IFAS before writing; omit anything unsourced.",
         "Rodent is a FAQ-blocked topic: no FAQ section and no FAQPage schema.",
         "No rodenticide, bait, or pesticide of any kind is recommended in this post.",
-        "Do not invent Waves inspection findings, local prevalence, product testing, task durations, or diagnostic certainty. Verify product suitability against the model-matched documentation identified in sources before drafting; observe its provenance and claim limits.",
+        "Do not invent Waves inspection findings, local prevalence, product testing, task durations, or diagnostic certainty. Stay within the cited Extension material guidance; no exact-variant installation steps or performance claims without retrievable documentation. Product purchase links remain approved AffiliateLink components only, never retailer citations.",
         "Visual plan: one context image plus two distinct instructional views when accurate assets are available, and an article-specific ComparisonTable or PestEvidenceGrid with explicit supported props. No generic pest seasonality graphic, fabricated readings, source logos, or generated images presented as field evidence."
       ],
       "internal_links": []
