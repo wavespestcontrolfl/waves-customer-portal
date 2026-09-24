@@ -2805,7 +2805,25 @@ async function createSelfBooking(payload = {}) {
         .whereNot('status', 'cancelled');
       if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);
       const existing = await replayQuery.first();
-      if (existing) return { existing };
+      if (existing) {
+        // A callback/consultation replay (round-10 P2) must also confirm the
+        // VISIT it is replaying is still live — an admin can cancel the
+        // linked scheduled_services row (scheduled_services.self_booking_id)
+        // without touching this self_booked_appointments row's own status,
+        // and replaying that as success would silently refuse a genuine
+        // rebooking attempt for an assessment nobody is actually holding
+        // anymore. Non-callback replays (paid /book) are unaffected — they
+        // never carried this extra check before.
+        const replayIsLive = !callbackVisit || Boolean(await trx('scheduled_services')
+          .where({ self_booking_id: existing.id })
+          // Any dead visit status, not only cancelled (skipped/rescheduled
+          // rows no longer hold the booking either).
+          .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
+          .first('id'));
+        if (replayIsLive) return { existing };
+        // Else: the linked assessment was cancelled — fall through to a
+        // normal insert instead of replaying a dead booking.
+      }
 
       // Self-serve notice window (owner ruling 2026-09-23), replacing the old
       // same-day-only "already passed" floor: a customer can't self-book a

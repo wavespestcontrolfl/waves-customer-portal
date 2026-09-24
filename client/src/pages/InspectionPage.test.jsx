@@ -475,6 +475,78 @@ describe('InspectionPage booking', () => {
   });
 });
 
+// Round-10 P2 :1682 — a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY race
+// answers SLOT_TAKEN with the customer's CURRENT address (address_changed +
+// lead). The client must drop its held resolvedAddress and update the hero,
+// so a retry never resubmits the stale supplied address.
+describe('InspectionPage: an address race resets the held address (round-10 P2 :1682)', () => {
+  it('after a 409 with address_changed, the hero shows the current address and the next commit carries no stale address', async () => {
+    let commitCalls = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ error: 'unexpected find-slots call' }, 500));
+      if (u.includes('/waitlist')) return Promise.resolve(jsonResponse({ error: 'unexpected waitlist call' }, 500));
+      if (u.includes('/availability') && opts.method === 'POST') {
+        // The address gate's own resolve call — the STALE supplied address.
+        return Promise.resolve(jsonResponse({ availability: okPayload().availability, needs_address: false }));
+      }
+      if (opts.method === 'POST') {
+        commitCalls += 1;
+        if (commitCalls === 1) {
+          // First confirm loses a race: the customer's stored address moved
+          // under the booking fence. The server answers with the address
+          // actually on file NOW, never the stale one the gate resolved.
+          return Promise.resolve(jsonResponse({
+            error: 'Your address just changed — please pick a time again.',
+            code: 'SLOT_TAKEN',
+            address_changed: true,
+            lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '456 New Moved-To St, Sarasota 34231' },
+            availability: okPayload().availability,
+          }, 409));
+        }
+        return Promise.resolve(jsonResponse({
+          success: true, state: 'ok',
+          visit: { date: '2026-07-12', window: { start: '13:00', end: '13:30' } },
+          startLabel: '1:00 PM', endLabel: '1:30 PM', rescheduleUrl: null,
+        }));
+      }
+      // Initial GET — addressless lead, asked for one (the address-first gate).
+      return Promise.resolve(jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+    // The gate's own resolve already shows the supplied address in the hero.
+    expect(await screen.findByText(/123 Palm Ave/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(screen.getByText(/just taken/i)).toBeInTheDocument());
+
+    // The hero now shows the CURRENT address, never the stale supplied one.
+    expect(await screen.findByText(/456 New Moved-To St/i)).toBeInTheDocument();
+    expect(screen.queryByText(/123 Palm Ave/i)).not.toBeInTheDocument();
+
+    // Retry — the next commit must NOT resubmit the stale supplied address.
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(screen.getByText(/you.re on the calendar/i)).toBeInTheDocument());
+
+    const commitReqs = fetchMock.mock.calls.filter(([url, opts]) => opts?.method === 'POST'
+      && !String(url).includes('find-slots') && !String(url).includes('availability') && !String(url).includes('waitlist'));
+    expect(commitReqs).toHaveLength(2);
+    expect(JSON.parse(commitReqs[1][1].body).address).toBeUndefined();
+  });
+});
+
 // Codex pre-push P1, round 8, 2026-09-24 — an addressless lead's held
 // resolvedAddress must survive EVERY availability refresh path, not just
 // the address gate's own initial resolve. Before this fix, "Show all open

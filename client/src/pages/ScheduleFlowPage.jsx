@@ -1573,6 +1573,14 @@ export default function ScheduleFlowPage({ flow }) {
         setSelectedSlot(null);
         setAiFiltered(false); // refreshed availability spans the full window
         setAiSession((n) => n + 1); // remount the card — its recap is stale too
+        // Inspection only: a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY
+        // race answers with the customer's CURRENT address (round-10 P2) —
+        // drop the held supplied address so the next confirm doesn't
+        // resubmit the stale one, and show the address actually on file.
+        if (flow === 'inspection' && body.address_changed) {
+          setResolvedAddress('');
+          if (body.lead) mergeData({ lead: body.lead });
+        }
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
         } else if (flow === 'inspection') {

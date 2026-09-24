@@ -301,6 +301,37 @@ describe('createSelfBooking — DB-free forged-payload rejections', () => {
   });
 });
 
+// Round-10 P2 :1593 — a callback/consultation replay (self_booked_appointments
+// idempotency lookup) must not trust a row whose linked scheduled_services
+// visit was cancelled out from under it (self_booking_id, admin cancel never
+// touches the sba row's own status). Source-pattern guard: the DB-round-trip
+// behavior needs a real Postgres harness the rest of this suite doesn't set
+// up (see file header — DB-free rejections only).
+describe('createSelfBooking idempotent replay — linked-visit liveness gate (round-10 P2 :1593)', () => {
+  test('a callback replay is trusted only when its linked scheduled_services row is still non-cancelled', () => {
+    expect(src).toMatch(
+      /const replayIsLive = !callbackVisit \|\| Boolean\(await trx\('scheduled_services'\)\s*\n\s*\.where\(\{ self_booking_id: existing\.id \}\)[\s\S]*?\.whereNotIn\('status', \['cancelled', 'skipped', 'rescheduled'\]\)\s*\n\s*\.first\('id'\)\);/
+    );
+    expect(src).toMatch(/if \(replayIsLive\) return \{ existing \};/);
+  });
+
+  test('a non-callback (paid /book) replay is unaffected — !callbackVisit short-circuits the check', () => {
+    // The liveness check is OR-short-circuited for a non-callback caller, so
+    // a plain /book double-submit replay never pays for (or is gated by) a
+    // scheduled_services lookup that never applied to it before this fix.
+    expect(src).toMatch(/const replayIsLive = !callbackVisit \|\|/);
+  });
+
+  test('the fall-through comment: a dead-linked-visit replay is NOT returned — falls to a normal insert instead', () => {
+    const gateIdx = src.indexOf("const replayIsLive = !callbackVisit ||");
+    expect(gateIdx).toBeGreaterThan(-1);
+    // Nothing between the gate and the next statement unconditionally
+    // returns `{ existing }` — the old unconditional
+    // `if (existing) return { existing };` is gone.
+    expect(src).not.toMatch(/if \(existing\) return \{ existing \};/);
+  });
+});
+
 describe('createSelfBooking commit-path wiring (source guards)', () => {
   test('geometry validation runs at commit with the server-resolved duration', () => {
     expect(src).toMatch(/const geometryError = validateBookingSlotGeometry\(\{\s*\n?\s*startMin: timeToMin\(slot_start\), duration, config,/);
@@ -443,7 +474,10 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
   });
 
   test('day cap re-checked INSIDE the transaction, after the idempotent-replay lookup', () => {
-    const replayIdx = src.indexOf("if (existing) return { existing };");
+    // Round-10 P2 :1593 replaced the unconditional replay return with a
+    // linked-visit liveness gate — `if (replayIsLive) return { existing };`
+    // is the new terminal marker for "the replay decision is settled".
+    const replayIdx = src.indexOf("if (replayIsLive) return { existing };");
     const capIdx = src.indexOf("code: 'DAY_FULL',");
     const conflictIdx = src.indexOf("code: 'SLOT_TAKEN',");
     expect(replayIdx).toBeGreaterThan(-1);
@@ -820,8 +854,11 @@ describe('self-serve notice window — offer/commit parity (source guards)', () 
     expect(idx).toBeGreaterThan(-1);
     // After the replay lookup (a booking that landed just outside the boundary
     // whose response was lost must still replay as success when the retry
-    // crosses it), before the day-cap / slot-conflict re-checks.
-    const replayIdx = src.indexOf('if (existing) return { existing };');
+    // crosses it), before the day-cap / slot-conflict re-checks. Round-10 P2
+    // :1593 replaced the unconditional replay return with a linked-visit
+    // liveness gate — `if (replayIsLive) return { existing };` is the new
+    // terminal marker for "the replay decision is settled".
+    const replayIdx = src.indexOf('if (replayIsLive) return { existing };');
     const dayCapIdx = src.indexOf('if (selfBookDayCapEnabled()) {', replayIdx);
     expect(replayIdx).toBeGreaterThan(-1);
     expect(idx).toBeGreaterThan(replayIdx);

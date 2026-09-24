@@ -585,6 +585,61 @@ describe('Codex #4737 r8 P2: LOCATION_CHANGED_RETRY answers like a slot race, at
   });
 });
 
+// Round-10 P2 :1682 — the SLOT_TAKEN answer for a LOCATION_CHANGED_RETRY/
+// CUSTOMER_CHANGED_RETRY race carries the customer's CURRENT address so the
+// client can drop the stale supplied one instead of resubmitting it.
+describe('round-10 P2 :1682: LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY carries the current address', () => {
+  test.each(['LOCATION_CHANGED_RETRY', 'CUSTOMER_CHANGED_RETRY'])('%s: response carries address_changed + the address now on file, not the stale pre-race one', async (raceCode) => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null };
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockGeocode.mockResolvedValueOnce({ location: { lat: 27.4, lng: -82.5 } }); // the pre-race pin
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    mockCreateSelfBooking.mockImplementationOnce(async () => {
+      // The race moved the customer's stored address (text AND pin) between
+      // phase 1 and createSelfBooking's own fence.
+      firstResults.customers = {
+        ...firstResults.customers,
+        address_line1: '456 New Moved-To St', city: 'Sarasota', zip: '34231',
+        latitude: 27.9, longitude: -82.9,
+      };
+      return { ok: false, status: 409, error: 'Your address just changed — please pick a time again.', code: raceCode };
+    });
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe('SLOT_TAKEN');
+    expect(res.body.address_changed).toBe(true);
+    // The CURRENT address (Sarasota), never the stale pre-race one (Bradenton).
+    expect(res.body.lead.address_display).toContain('456 New Moved-To St');
+    expect(res.body.lead.address_display).toContain('Sarasota');
+    expect(res.body.lead.address_display).not.toContain('123 Palm Ave');
+    expect(res.body.lead.has_address).toBe(true);
+  });
+
+  test('an ordinary slot-taken 409 (no address race) carries neither address_changed nor lead', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    mockCreateSelfBooking.mockImplementationOnce(async () => ({
+      ok: false, status: 409, error: 'That time is no longer open.', code: undefined,
+    }));
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe('SLOT_TAKEN');
+    expect(res.body.address_changed).toBeUndefined();
+    expect(res.body.lead).toBeUndefined();
+  });
+});
+
 describe('Codex #4737 r5 P2: a retired assessment catalog row is not bookable', () => {
   test.each([{ is_active: false }, { is_archived: true }, { booking_enabled: false }])('%o → commit answers 503 temporarily unavailable', async (flags) => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
@@ -805,6 +860,36 @@ describe('POST /:token/find-slots (P1 :457)', () => {
     const res = await callFindSlots(token, { query: 'this weekend', address: 'gibberish text' });
     expect(res.statusCode).toBe(400);
     expect(res.body.error).toMatch(/couldn.t find that address/i);
+  });
+
+  // Round-10 P2 :1260 — find-slots never re-checked eligibility, so a
+  // converted or already-booked lead could keep calling the paid parseWhen
+  // LLM and the availability builder on every search.
+  test('already_booked lead: find-slots answers the same terminal shape GET returns, and never reaches parseWhen or availability (round-10 P2 :1260)', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [
+      { id: 'svc-1', scheduled_date: '2027-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok' },
+    ];
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callFindSlots(token, { query: 'this weekend' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.state).toBe('already_booked');
+    expect(res.body.code).toBe('ALREADY_BOOKED');
+    expect(mockParseWhen).not.toHaveBeenCalled();
+    expect(mockBuildAvailability).not.toHaveBeenCalled();
+  });
+
+  test('converted lead: find-slots answers converted and never reaches parseWhen (round-10 P2 :1260)', async () => {
+    firstResults.leads = { ...LEAD_ROW, converted_at: new Date() };
+    firstResults.customers = null;
+    listResults.scheduled_services = [];
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callFindSlots(token, { query: 'this weekend', address: '123 Palm Ave, Bradenton, FL 34209' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.state).toBe('converted');
+    expect(mockParseWhen).not.toHaveBeenCalled();
+    expect(mockBuildAvailability).not.toHaveBeenCalled();
   });
 });
 
@@ -2451,5 +2536,102 @@ describe('assessment-not-a-win invariant backstop', () => {
     const { promoteCustomerOnBooking } = require('../services/customer-stages');
     const result = await promoteCustomerOnBooking(require('../models/db'), 'any-customer-id', { serviceType: 'Waves Assessment' });
     expect(result).toBe(false);
+  });
+});
+
+// Codex round-10 P1 :347 — provenance across a customer merge. Exercised
+// through router._test's direct helper exports with a small hand-built
+// dbConn fake (table + where-column keyed), rather than the router-level
+// mock above: that mock's firstResults[table] is a single global value per
+// table for the whole test, which can't tell a soft-deleted LOSER id's
+// lookup apart from the WINNER id's lookup the same helper makes a moment
+// later inside one call.
+describe('provenance across a customer merge (round-10 P1 :347)', () => {
+  const { provenanceCustomer, trustedLeadProfileIds, mergedWinnerId } = inspectionPublicRouter._test;
+
+  // customers: { [id]: row | null } (only consulted once a winner id is
+  // resolved — mergedWinnerId itself never queries `customers`).
+  // journal: { [loserId]: { winner_customer_id } }.
+  // activityRows: consultation_prospect lead_activities rows (metadata JSON strings).
+  function makeMergeFakeDb({ customers = {}, journal = {}, lead = null, activityRows = [] } = {}) {
+    return (table) => {
+      const state = { where: {} };
+      const chain = {
+        where(cond) { if (cond && typeof cond === 'object') Object.assign(state.where, cond); return chain; },
+        whereNull() { return chain; },
+        whereNotNull() { return chain; },
+        whereNot() { return chain; },
+        orderBy() { return chain; },
+        select(...cols) { state.select = cols; return chain; },
+        first: async () => {
+          if (table === 'customers') {
+            const id = state.where.id;
+            return Object.prototype.hasOwnProperty.call(customers, id) ? customers[id] : null;
+          }
+          if (table === 'customer_merge_journal') {
+            return journal[state.where.loser_customer_id] || null;
+          }
+          if (table === 'lead_activities') return activityRows[0] || null;
+          if (table === 'leads') return lead;
+          return null;
+        },
+        then(resolve, reject) {
+          // Only trustedLeadProfileIds awaits a table directly (after
+          // .select(), no .first()) — the consultation_prospect list.
+          const rows = table === 'lead_activities' ? activityRows : [];
+          return Promise.resolve(rows).then(resolve, reject);
+        },
+        catch(fn) { return Promise.resolve([]).catch(fn); },
+      };
+      return chain;
+    };
+  }
+
+  test('mergedWinnerId follows a merged loser to its live winner id', async () => {
+    const fakeDb = makeMergeFakeDb({
+      journal: { 'loser-1': { winner_customer_id: 'winner-1' } },
+    });
+    expect(await mergedWinnerId(fakeDb, 'loser-1')).toBe('winner-1');
+  });
+
+  test('mergedWinnerId returns null for an id with no merge record (never merged)', async () => {
+    const fakeDb = makeMergeFakeDb({ journal: {} });
+    expect(await mergedWinnerId(fakeDb, 'never-merged-1')).toBeNull();
+  });
+
+  test('mergedWinnerId follows a two-hop merge chain (the winner was itself later merged)', async () => {
+    const fakeDb = makeMergeFakeDb({
+      journal: {
+        'loser-1': { winner_customer_id: 'mid-1' },
+        'mid-1': { winner_customer_id: 'winner-2' },
+      },
+    });
+    expect(await mergedWinnerId(fakeDb, 'loser-1')).toBe('winner-2');
+  });
+
+  // The actual regression: without the fix, provenanceCustomer's plain
+  // loadCustomer(meta.customer_id) returns null for the soft-deleted loser
+  // and loadTrustedCustomer treats the lead as having no prospect at all.
+  test('provenanceCustomer resolves a merged-away outright-trusted prospect to its winner', async () => {
+    const fakeDb = makeMergeFakeDb({
+      customers: { 'winner-1': { id: 'winner-1', phone: '9415551234', account_id: null } },
+      journal: { 'loser-1': { winner_customer_id: 'winner-1' } },
+      activityRows: [{ metadata: JSON.stringify({ customer_id: 'loser-1' }) }],
+    });
+    const lead = { id: 'lead-1', phone: '9415551234', customer_id: null };
+    const result = await provenanceCustomer(fakeDb, lead, 'tok');
+    expect(result).toEqual(expect.objectContaining({ id: 'winner-1' }));
+  });
+
+  test('trustedLeadProfileIds: a merged prospect resolves to the winner, which lands in the dedupe set', async () => {
+    const fakeDb = makeMergeFakeDb({
+      customers: { 'winner-1': { id: 'winner-1', phone: '9415551234', account_id: null } },
+      journal: { 'loser-1': { winner_customer_id: 'winner-1' } },
+      lead: { id: 'lead-1', phone: '9415551234', customer_id: null },
+      activityRows: [{ metadata: JSON.stringify({ customer_id: 'loser-1' }) }],
+    });
+    const ids = await trustedLeadProfileIds(fakeDb, 'lead-1', 'tok', 'booked-cust-id');
+    expect(ids).toEqual(expect.arrayContaining(['winner-1']));
+    expect(ids).not.toEqual(expect.arrayContaining(['loser-1']));
   });
 });

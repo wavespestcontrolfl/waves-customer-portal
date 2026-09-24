@@ -332,7 +332,10 @@ describe('lane dedupe atomicity (source guards, codex P1 #3194)', () => {
   test('a callback commit only replays ITS OWN service — a parallel other-lane or paid booking at the same start falls through to the real checks (codex r3 P2)', () => {
     const replayIdx = bookingSrc.indexOf("const replayQuery = trx('self_booked_appointments')");
     const laneQualifierIdx = bookingSrc.indexOf("if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);");
-    const replayReturnIdx = bookingSrc.indexOf('if (existing) return { existing };');
+    // Round-10 P2 :1593 replaced the unconditional replay return with a
+    // linked-visit liveness gate — `if (replayIsLive) return { existing };`
+    // is the new terminal marker for "the replay decision is settled".
+    const replayReturnIdx = bookingSrc.indexOf('if (replayIsLive) return { existing };');
     const recheckIdx = bookingSrc.indexOf('await openCallbackExistsForLane(trx, custId, lane)');
     expect(replayIdx).toBeGreaterThan(-1);
     // The service qualifier applies to the replay lookup, before its return,

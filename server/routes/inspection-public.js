@@ -336,14 +336,48 @@ async function loadTrustedCustomer(dbConn, lead, token) {
   return linked || prospect;
 }
 
+// A provenance customer_id can go stale when customer-dedupe.js merges that
+// row into a winner elsewhere: the loser is soft-deleted (deleted_at) and
+// this file's lead_activities metadata is never rewritten (round-10 P1).
+// loadCustomer alone would then quietly lose the prospect — a reopened link
+// mints a SECOND prospect and a second consultation can book. Follows
+// customer_merge_journal's winner chain (loser_customer_id →
+// winner_customer_id, undone_at IS NULL) FROM the id, hop-bounded for a
+// chain where the winner was itself later merged elsewhere — never touches
+// `customers`, so an id that was never merged costs one indexed lookup and
+// nothing more. Returns the resolved winner id, or null when `customerId`
+// was never merged (callers keep using the original id, trusted exactly as
+// before) — this helper only resolves identity, never a verification
+// decision; the winner keeps whatever trust level the caller was already
+// applying to the original id.
+const MAX_MERGE_CHAIN_HOPS = 8;
+async function mergedWinnerId(dbConn, customerId) {
+  let id = customerId;
+  let resolved = null;
+  for (let hop = 0; hop < MAX_MERGE_CHAIN_HOPS; hop += 1) {
+    const merge = await dbConn('customer_merge_journal')
+      .where({ loser_customer_id: id })
+      .whereNull('undone_at')
+      .orderBy('created_at', 'desc')
+      .first('winner_customer_id');
+    if (!merge?.winner_customer_id || String(merge.winner_customer_id) === String(id)) break;
+    id = merge.winner_customer_id;
+    resolved = id;
+  }
+  return resolved;
+}
+
 // The customer the lead's newest provenance names, when trusted: outright
 // for a flow-created prospect; under the verified-phone proof for an
 // existing account's property (requires_verification — Codex #4737 r7
-// pre-push P0).
+// pre-push P0). Follows a merged-away id to its winner (mergedWinnerId,
+// round-10 P1) so a reopened link finds the prospect again instead of
+// minting a second one.
 async function provenanceCustomer(dbConn, lead, token) {
   const meta = await latestProvenance(dbConn, lead.id);
   if (!meta?.customer_id) return null;
-  const prospect = await loadCustomer(dbConn, meta.customer_id);
+  const winnerId = await mergedWinnerId(dbConn, meta.customer_id);
+  const prospect = await loadCustomer(dbConn, winnerId || meta.customer_id);
   if (!prospect) return null;
   if (!meta.requires_verification) return prospect;
   return (await verifiedForCustomer(lead, prospect, token, dbConn)) ? prospect : null;
@@ -1243,6 +1277,17 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
   }
 });
 
+// The find-slots-specific copy for a failed finalizeBookingLocation
+// resolution (distinct from sendLocationFailure's default — this route's own
+// error contract), named out of the route handler so the message choice
+// lives in one place instead of an inline ternary in the handler's own
+// branch count.
+function findSlotsAddressFailureMessage(failure) {
+  return failure === 'address_unresolved'
+    ? "We couldn't find that address. Please check it and try again."
+    : 'An address is needed before we can search for times.';
+}
+
 router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   if (!leadInspectionLinkLive()) return res.status(404).json({ error: 'not_found' });
   // Token before body validation (Codex #4737 r1 P0): an invalid token
@@ -1258,6 +1303,16 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const lead = await loadLead(db, verified.leadId);
     if (!lead) return res.status(404).json({ error: 'not_found' });
     const custRow = await loadTrustedCustomer(db, lead, verified);
+
+    // Same eligibility predicate GET and the commit's pre-lock fast path run
+    // (round-10 P2) — a converted or already-booked lead must stop here,
+    // BEFORE the paid parseWhen LLM call and a geocode/availability build,
+    // not just be refused by the commit at the end.
+    const eligibility = await resolveEligibility(db, lead, custRow);
+    if (eligibility.state !== 'ok') {
+      return res.json(eligibilityResponse(eligibility, buildLeadPayload(lead, custRow)));
+    }
+
     // Routed through finalizeBookingLocation (not a raw resolveServiceAddress
     // call) so a directly-supplied out-of-area address can't be used to pull
     // slot availability for a location that would never survive the commit
@@ -1266,11 +1321,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     if (resolved.failure) {
       if (resolved.failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
       if (resolved.failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: resolved.county || null });
-      return res.status(400).json({
-        error: resolved.failure === 'address_unresolved'
-          ? "We couldn't find that address. Please check it and try again."
-          : 'An address is needed before we can search for times.',
-      });
+      return res.status(400).json({ error: findSlotsAddressFailureMessage(resolved.failure) });
     }
 
     const booking = require('./booking');
@@ -1489,19 +1540,25 @@ function sendLocationFailure(res, failure, county) {
 }
 
 // 409 SLOT_TAKEN with the latest open times at `location` (best-effort
-// refresh — answered without it on failure).
-async function sendSlotTaken(res, { location, range, config, catalog, leadId, error }) {
+// refresh — answered without it on failure). `leadPayload`/`addressChanged`
+// (round-10 P2) let a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY caller
+// hand back the customer's CURRENT address alongside the refreshed times —
+// every other caller omits them and the body is byte-identical to before.
+async function sendSlotTaken(res, { location, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
   let refreshed = null;
   try {
     refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes });
   } catch (err) {
     logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
   }
-  return res.status(409).json({
+  const body = {
     error: error || 'That time is no longer open. Here are the latest available times.',
     code: 'SLOT_TAKEN',
     availability: refreshed ? shapeAvailability(refreshed, range) : null,
-  });
+  };
+  if (leadPayload) body.lead = leadPayload;
+  if (addressChanged) body.address_changed = true;
+  return res.status(409).json(body);
 }
 
 // The picked slot re-checked at a location that differs from the one it
@@ -1643,9 +1700,18 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId) {
   const rows = await dbConn('lead_activities').where({ lead_id: leadId, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata');
   for (const row of rows || []) {
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-    if (!meta?.customer_id || ids.has(String(meta.customer_id))) continue;
-    if (!meta.requires_verification) { ids.add(String(meta.customer_id)); continue; }
-    const profile = await loadCustomer(dbConn, meta.customer_id);
+    if (!meta?.customer_id) continue;
+    // Resolved through a merge if the named id was merged away (round-10
+    // P1) — gate the dedupe-set check on the LIVE id, not the dead one, or
+    // a merged prospect's winner would be added a second time under a
+    // different key. Outright trust (no requires_verification) stays a
+    // zero-`customers`-query add, exactly as before, when the id was never
+    // merged (mergedWinnerId returns null without touching `customers`).
+    const winnerId = await mergedWinnerId(dbConn, meta.customer_id);
+    const targetId = winnerId || meta.customer_id;
+    if (ids.has(String(targetId))) continue;
+    if (!meta.requires_verification) { ids.add(String(targetId)); continue; }
+    const profile = await loadCustomer(dbConn, targetId);
     if (profile && await verifiedForCustomer(lead, profile, token, dbConn)) ids.add(String(profile.id));
   }
   return [...ids];
@@ -1675,11 +1741,23 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
     // moved AFTER phase 1 committed (Codex #4737 r8 P2) — `bookingLocation`
     // is the pin as it stood then, now stale. Answer with fresh times at
     // the address on file RIGHT NOW, not the pin that just lost the race.
-    const fresh = await db('customers').where({ id: custRow.id }).first('latitude', 'longitude');
+    const fresh = await db('customers').where({ id: custRow.id }).first(
+      'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip'
+    );
     const currentLocation = (fresh?.latitude != null && fresh?.longitude != null)
       ? { lat: parseFloat(fresh.latitude), lng: parseFloat(fresh.longitude) }
       : bookingLocation;
-    return sendSlotTaken(res, { location: currentLocation, range, config, catalog, leadId: lead.id, error: result.error });
+    // The client held its own resolvedAddress/hero copy from BEFORE this
+    // race (round-10 P2) — hand back the address actually on the customer
+    // now so it can drop the stale supplied one and stop showing it, rather
+    // than resubmitting it on the next confirm.
+    const currentLeadPayload = fresh?.address_line1
+      ? { ...leadPayload, has_address: true, address_display: addressDisplay({ line1: fresh.address_line1, city: fresh.city, zip: fresh.zip }) }
+      : leadPayload;
+    return sendSlotTaken(res, {
+      location: currentLocation, range, config, catalog, leadId: lead.id, error: result.error,
+      leadPayload: currentLeadPayload, addressChanged: true,
+    });
   }
   if (result.status === 409) {
     return sendSlotTaken(res, { location: bookingLocation, range, config, catalog, leadId: lead.id, error: result.error });
@@ -1914,6 +1992,9 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
 
 router._test = {
   loadTrustedCustomer,
+  provenanceCustomer,
+  trustedLeadProfileIds,
+  mergedWinnerId,
   verifyIgnoringExpiry,
   maskPhone,
   addressDisplay,
