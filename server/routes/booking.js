@@ -2790,6 +2790,18 @@ async function createSelfBooking(payload = {}) {
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['inspection-lead', String(callbackVisit.leadDedupe.leadId)],
         );
+        // The caller's authority over this customer, re-checked HERE under
+        // the lead lock (Codex #4737 r10 pre-push P0): a phone change or
+        // relink after the caller's own locks released must not still
+        // book (and hand back a reschedule bearer).
+        const { revalidate } = callbackVisit.leadDedupe;
+        if (typeof revalidate === 'function' && !(await revalidate(trx))) {
+          throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'CUSTOMER_CHANGED_RETRY',
+          });
+        }
       }
 
       // Idempotent replay: same customer, same day, same start time →

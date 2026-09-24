@@ -569,6 +569,17 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
   // lock is taken AFTER the per-customer lane lock and BEFORE the replay /
   // slot checks, and every other profile of the lead is checked for an open
   // assessment, refusing ALREADY_BOOKED.
+  // Codex #4737 r10 pre-push P0: the caller's authority is re-checked
+  // under the lead lock, before the replay / insert.
+  test('leadDedupe.revalidate runs right after the inspection-lead lock and refuses CUSTOMER_CHANGED_RETRY', () => {
+    const leadLock = src.indexOf("['inspection-lead', String(callbackVisit.leadDedupe.leadId)]");
+    const revalidate = src.indexOf('!(await revalidate(trx))', leadLock);
+    const replay = src.indexOf("const replayQuery = trx('self_booked_appointments')");
+    expect(revalidate).toBeGreaterThan(leadLock);
+    expect(revalidate).toBeLessThan(replay);
+    expect(src.slice(revalidate, revalidate + 400)).toMatch(/code: 'CUSTOMER_CHANGED_RETRY'/);
+  });
+
   test('leadDedupe takes the inspection-lead lock after the lane lock and refuses a lead with an open assessment on another profile', () => {
     const laneLock = src.indexOf("['reservice-lane', `${custId}:${callbackVisit.serviceKey}`]");
     const leadLock = src.indexOf("['inspection-lead', String(callbackVisit.leadDedupe.leadId)]");

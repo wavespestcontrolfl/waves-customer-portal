@@ -1692,6 +1692,14 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
   });
 }
 
+// Whether the token still trusts exactly this customer, read on `conn`
+// (the booking transaction, under its lead lock).
+async function tokenStillTrustsCustomer(conn, leadId, token, customerId) {
+  const freshLead = await loadLead(conn, leadId);
+  const trusted = freshLead ? await loadTrustedCustomer(conn, freshLead, token) : null;
+  return Boolean(trusted) && String(trusted.id) === String(customerId);
+}
+
 // The first non-ok eligibility across the booked profile and the lead's
 // other profiles, else the booked profile's own.
 async function leadWideEligibility(lead, custRow, profileIds) {
@@ -1950,7 +1958,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // assessment across all of them, so two commits with different
     // addresses never both book.
     const resolveCustomerIds = (conn, opts) => trustedLeadProfileIds(conn, lead.id, verified, custRow.id, opts);
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }) } });
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), revalidate: (conn) => tokenStillTrustsCustomer(conn, lead.id, verified, custRow.id) } });
 
     if (!result.ok) {
       const profileIds = result.code === 'ALREADY_BOOKED' ? await resolveCustomerIds(db) : [custRow.id];

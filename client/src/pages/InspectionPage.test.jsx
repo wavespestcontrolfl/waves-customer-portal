@@ -547,6 +547,55 @@ describe('InspectionPage: an address race resets the held address (round-10 P2 :
   });
 });
 
+// Codex #4737 r10 pre-push P1: an address race with NO availability in the
+// response refreshes through the plain GET (the customer's current
+// address), never a POST of the stale held address.
+describe('InspectionPage: an address race without availability refreshes at the current address', () => {
+  it('address_changed + availability null → GET refresh, no POST of the stale address', async () => {
+    let commitCalls = 0;
+    let getCalls = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/availability') && opts.method === 'POST') {
+        return Promise.resolve(jsonResponse({ availability: okPayload().availability, needs_address: false }));
+      }
+      if (opts.method === 'POST') {
+        commitCalls += 1;
+        return Promise.resolve(jsonResponse({
+          error: 'Your address just changed — please pick a time again.',
+          code: 'SLOT_TAKEN',
+          address_changed: true,
+          lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '456 New Moved-To St, Sarasota 34231' },
+          availability: null,
+        }, 409));
+      }
+      getCalls += 1;
+      if (getCalls === 1) {
+        return Promise.resolve(jsonResponse(okPayload({
+          needs_address: true,
+          availability: null,
+          lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+        })));
+      }
+      return Promise.resolve(jsonResponse(okPayload({
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '456 New Moved-To St, Sarasota 34231' },
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(commitCalls).toBe(1));
+    await waitFor(() => expect(getCalls).toBe(2));
+    const availabilityPosts = fetchMock.mock.calls.filter(([url, opts]) => String(url).includes('/availability') && opts?.method === 'POST');
+    expect(availabilityPosts).toHaveLength(1); // only the gate's own resolve, never a refresh with the stale address
+  });
+});
+
 // Codex pre-push P1, round 8, 2026-09-24 — an addressless lead's held
 // resolvedAddress must survive EVERY availability refresh path, not just
 // the address gate's own initial resolve. Before this fix, "Show all open

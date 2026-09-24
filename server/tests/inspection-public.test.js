@@ -476,6 +476,22 @@ describe('Codex #4737 r9: lead-scoped dedupe, trusted-customer change to null, c
 
   // Pre-push P0: an existing account's property (requires_verification)
   // joins the set only under the verified-phone proof.
+  // Codex #4737 r10 pre-push P0: the booking re-checks the token's
+  // authority over the customer on its own transaction.
+  test('P0: leadDedupe.revalidate is true for the trusted customer and false once the lead is relinked', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce(slotDay());
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(200);
+    const { leadDedupe } = mockCreateSelfBooking.mock.calls[0][0].callbackVisit;
+    expect(await leadDedupe.revalidate(db)).toBe(true);
+    // Staff moves the customer to another phone: the token no longer trusts it.
+    firstResults.customers = { ...firstResults.customers, phone: '9415559999' };
+    expect(await leadDedupe.revalidate(db)).toBe(false);
+  });
+
   test('P0: a requires_verification provenance profile is left out of the set for an unverified token', async () => {
     firstResults.leads = { ...LEAD_ROW, customer_id: null };
     firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };

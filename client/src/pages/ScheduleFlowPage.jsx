@@ -1456,8 +1456,11 @@ export default function ScheduleFlowPage({ flow }) {
   // and yank the picker back to a blank address form mid-session. When the
   // lead already has an address on file (no resolvedAddress held), the
   // plain GET is correct and unchanged — same as every other flow.
-  const refreshInspectionAvailability = useCallback(async ({ signal } = {}) => {
-    if (flow === 'inspection' && resolvedAddress) {
+  // ignoreHeldAddress: the held address was just invalidated (an address
+  // race — Codex #4737 r10 pre-push P1); this call's closure still holds
+  // it, so the plain GET (the customer's current address) is used instead.
+  const refreshInspectionAvailability = useCallback(async ({ signal, ignoreHeldAddress = false } = {}) => {
+    if (flow === 'inspection' && resolvedAddress && !ignoreHeldAddress) {
       const { res, body } = await postInspectionAvailability(token, resolvedAddress, { signal });
       if (signal?.aborted) return;
       if (!res.ok) throw new Error(body.error || 'availability refresh failed');
@@ -1590,7 +1593,7 @@ export default function ScheduleFlowPage({ flow }) {
           // addressless lead's held resolvedAddress must not be dropped
           // here either (Codex pre-push P1, 2026-09-24).
           try {
-            await refreshInspectionAvailability();
+            await refreshInspectionAvailability({ ignoreHeldAddress: Boolean(body.address_changed) });
           } catch { /* keep the current calendar rather than blanking it */ }
         } else {
           await load();
