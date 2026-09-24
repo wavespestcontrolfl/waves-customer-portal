@@ -98,9 +98,14 @@ postgres('scheduled_services discount/provenance GET fields against migrated Pos
     return layer.route.stack[layer.route.stack.length - 1].handle;
   }
 
-  async function invoke(method, path, { query = {}, params = {} } = {}) {
+  async function invoke(method, path, { query = {}, params = {}, techRole, technicianId } = {}) {
     const handler = findHandler(method, path);
     const req = { query, params, headers: {} };
+    // Pre-push fallback audit P1 on #4657 (d17e523d73): a technician-role
+    // staff token (req.techRole === 'technician', scoped to its own
+    // technician_id by technicianCurrentVisitFilter) reaches every feed.
+    if (techRole !== undefined) req.techRole = techRole;
+    if (technicianId !== undefined) req.technicianId = technicianId;
     let statusCode = 200;
     let payload = null;
     const res = {
@@ -195,6 +200,72 @@ postgres('scheduled_services discount/provenance GET fields against migrated Pos
     assertDiscountedRow(discountedRow);
     expect(discountedRow.primaryLinePrice).toBe(50);
     assertUndiscountedRow(day.services.find((s) => s.id === plain.id));
+  });
+
+  // Pre-push fallback audit P1 on #4657 (d17e523d73): the discount /
+  // provenance projection exists for the admin Edit appointment modal
+  // only. This router is requireTechOrAdmin, so a technician-role token
+  // reaches every feed (scoped to its own visits); main's #4673 closed the
+  // other technician-reachable pricing projections in this file. A
+  // technician request gets NONE of these fields; an admin request is
+  // unchanged (the four tests above).
+  const TECH_REDACTED = [
+    'discountType', 'discountAmount', 'discountId', 'discountMaxDollars',
+    'discountServiceKeyFilter', 'discountServiceCategoryFilter',
+    'lineDiscountType', 'lineDiscountAmount', 'lineDiscountId', 'lineDiscountDollars',
+    'pricingProvenance',
+  ];
+  async function technicianFixture() {
+    const technicianId = randomUUID();
+    await trx('technicians').insert({ id: technicianId, name: 'Fixture Tech' });
+    const row = await visit({ ...DISCOUNTED_OVERRIDES, technician_id: technicianId });
+    return { technicianId, row };
+  }
+  function expectRedacted(row) {
+    for (const key of TECH_REDACTED) expect(row).not.toHaveProperty(key);
+  }
+
+  test('technician: GET / (day) withholds every discount/provenance field on the technician\'s own visit; the base row still comes through', async () => {
+    const { technicianId, row } = await technicianFixture();
+    const { statusCode, payload } = await invoke('get', '/', { query: { date: DATE }, techRole: 'technician', technicianId });
+    expect(statusCode).toBe(200);
+    const found = payload.services.find((r) => r.id === row.id);
+    expect(found).toBeTruthy();
+    expectRedacted(found);
+    expect(found.serviceType).toBeTruthy(); // the feed's normalized label — the base row itself still comes through
+  });
+
+  test('technician: GET /week withholds every discount/provenance field', async () => {
+    const { technicianId, row } = await technicianFixture();
+    const { statusCode, payload } = await invoke('get', '/week', { query: { start: DATE }, techRole: 'technician', technicianId });
+    expect(statusCode).toBe(200);
+    const day = payload.days.find((d) => d.date === DATE);
+    const found = day.services.find((r) => r.id === row.id);
+    expect(found).toBeTruthy();
+    expectRedacted(found);
+  });
+
+  test('technician: GET /list withholds every discount/provenance field', async () => {
+    const { technicianId, row } = await technicianFixture();
+    const { statusCode, payload } = await invoke('get', '/list', { query: { from: DATE, to: DATE, start: DATE, end: DATE }, techRole: 'technician', technicianId });
+    expect(statusCode).toBe(200);
+    expect(JSON.stringify(payload)).toContain(row.id);
+    expect(JSON.stringify(payload)).not.toMatch(/"pricingProvenance"|"discountMaxDollars"|"lineDiscountDollars"|"discountType"/);
+  });
+
+  test('technician: GET /month withholds the discount/provenance fields AND the two price fields this PR added to that feed', async () => {
+    const { technicianId, row } = await technicianFixture();
+    const { statusCode, payload } = await invoke('get', '/month', { query: { month: DATE.slice(0, 7), date: DATE, year: '2040', monthNumber: '2' }, techRole: 'technician', technicianId });
+    expect(statusCode).toBe(200);
+    const text = JSON.stringify(payload);
+    expect(text).toContain(row.id);
+    expect(text).not.toMatch(/"pricingProvenance"|"discountMaxDollars"|"lineDiscountDollars"|"discountType"|"primaryLinePrice"|"estimatedPrice"/);
+  });
+
+  test('admin (or role-less) request: the projection is unchanged — every field present', async () => {
+    const row = await visit(DISCOUNTED_OVERRIDES);
+    const { payload } = await invoke('get', '/', { query: { date: DATE }, techRole: 'admin' });
+    assertDiscountedRow(payload.services.find((r) => r.id === row.id));
   });
 });
 

@@ -384,7 +384,45 @@ const DISCOUNT_PROVENANCE_COLUMNS = [
   // rate change since, or a cap that applied at save time).
   'line_discount_dollars',
   'pricing_provenance',
+  // Pre-push fallback audit P2 on #4657 (3299d41965 / d17e523d73): the
+  // month feed selects these two beside the guarded columns above — same
+  // guard, so a mid-migration database never 500s that feed either.
+  'estimated_price', 'primary_line_price',
 ];
+// Pre-push fallback audit P1 on #4657 (d17e523d73): the read-only discount
+// + provenance projection the four schedule feeds (GET /, /week, /month,
+// /list) added for the admin Edit appointment modal — stored appointment
+// discount identity/amount/cap/scope, the primary line's own stored
+// discount, and the frozen per-discount caps in pricing_provenance. This
+// router is requireTechOrAdmin (technicians reach every feed, scoped to
+// their own visits), and main's #4673 closed the other technician-reachable
+// pricing projections in this file. Nothing technician-facing reads these
+// fields (the mobile edit modal and the tech 360 never did), so a
+// technician request gets none of them — the same isTechnicianRequest
+// gate #4673 used for estimateToken. Admin callers get the full set.
+const DISCOUNT_PROVENANCE_PROJECTION_KEYS = [
+  'discountType', 'discountAmount', 'discountId', 'discountMaxDollars',
+  'discountServiceKeyFilter', 'discountServiceCategoryFilter',
+  'lineDiscountType', 'lineDiscountAmount', 'lineDiscountId', 'lineDiscountDollars',
+  'pricingProvenance',
+];
+function discountProvenanceProjection(req, s) {
+  if (isTechnicianRequest(req)) return {};
+  return {
+    discountType: s.discount_type || null,
+    discountAmount: s.discount_amount != null ? Number(s.discount_amount) : null,
+    discountId: s.discount_id || null,
+    discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
+    discountServiceKeyFilter: s.discount_service_key_filter || null,
+    discountServiceCategoryFilter: s.discount_service_category_filter || null,
+    lineDiscountType: s.line_discount_type || null,
+    lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
+    lineDiscountId: s.line_discount_id || null,
+    lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
+    pricingProvenance: s.pricing_provenance ?? null,
+  };
+}
+
 let discountProvenanceColumnCache = null;
 async function scheduledServicesDiscountProvenanceColumns(database) {
   if (discountProvenanceColumnCache !== null) return discountProvenanceColumnCache;
@@ -5767,17 +5805,7 @@ router.get('/', async (req, res, next) => {
         // choose compound-vs-additive math the same way resolveUpdateDetailsAddonFinancials
         // does server-side, instead of guessing. No write path reads these — pure
         // additive projection.
-        discountType: s.discount_type || null,
-        discountAmount: s.discount_amount != null ? Number(s.discount_amount) : null,
-        discountId: s.discount_id || null,
-        discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
-        pricingProvenance: s.pricing_provenance ?? null,
-        discountServiceKeyFilter: s.discount_service_key_filter || null,
-        discountServiceCategoryFilter: s.discount_service_category_filter || null,
-        lineDiscountType: s.line_discount_type || null,
-        lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
-        lineDiscountId: s.line_discount_id || null,
-        lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
+        ...discountProvenanceProjection(req, s),
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
@@ -6344,17 +6372,7 @@ router.get('/week', async (req, res, next) => {
           // choose compound-vs-additive math the same way resolveUpdateDetailsAddonFinancials
           // does server-side, instead of guessing. No write path reads these — pure
           // additive projection.
-          discountType: s.discount_type || null,
-          discountAmount: s.discount_amount != null ? Number(s.discount_amount) : null,
-          discountId: s.discount_id || null,
-          discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
-          pricingProvenance: s.pricing_provenance ?? null,
-          discountServiceKeyFilter: s.discount_service_key_filter || null,
-          discountServiceCategoryFilter: s.discount_service_category_filter || null,
-          lineDiscountType: s.line_discount_type || null,
-          lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
-          lineDiscountId: s.line_discount_id || null,
-          lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
+          ...discountProvenanceProjection(req, s),
           prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
@@ -6496,8 +6514,8 @@ router.get('/month', async (req, res, next) => {
         // provenance) has to project here too, or the modal misclassifies
         // a marked, discounted visit as plain unmarked the moment it's
         // opened from Month.
-        'scheduled_services.estimated_price',
-        'scheduled_services.primary_line_price',
+        ...(discountProvenanceCols.estimated_price ? ['scheduled_services.estimated_price'] : []),
+        ...(discountProvenanceCols.primary_line_price ? ['scheduled_services.primary_line_price'] : []),
         ...(discountProvenanceCols.discount_type ? ['scheduled_services.discount_type'] : []),
         ...(discountProvenanceCols.discount_amount ? ['scheduled_services.discount_amount'] : []),
         ...(discountProvenanceCols.discount_id ? ['scheduled_services.discount_id'] : []),
@@ -6543,19 +6561,13 @@ router.get('/month', async (req, res, next) => {
         serviceKey: s.service_key_snapshot || null,
         serviceCategorySnapshot: s.service_category_snapshot || null,
         excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
-        estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
-        primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
-        discountType: s.discount_type || null,
-        discountAmount: s.discount_amount != null ? Number(s.discount_amount) : null,
-        discountId: s.discount_id || null,
-        discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
-        discountServiceKeyFilter: s.discount_service_key_filter || null,
-        discountServiceCategoryFilter: s.discount_service_category_filter || null,
-        lineDiscountType: s.line_discount_type || null,
-        lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
-        lineDiscountId: s.line_discount_id || null,
-        lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
-        pricingProvenance: s.pricing_provenance ?? null,
+        // Both new on the month feed in #4657 (admin modal only) — withheld
+        // from a technician request alongside the projection below.
+        ...(isTechnicianRequest(req) ? {} : {
+          estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+          primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+        }),
+        ...discountProvenanceProjection(req, s),
         status: s.status,
         techName: s.tech_name,
         technicianId: s.technician_id,
@@ -9120,17 +9132,7 @@ router.get('/list', async (req, res, next) => {
       // choose compound-vs-additive math the same way resolveUpdateDetailsAddonFinancials
       // does server-side, instead of guessing. No write path reads these — pure
       // additive projection.
-      discountType: s.discount_type || null,
-      discountAmount: s.discount_amount != null ? Number(s.discount_amount) : null,
-      discountId: s.discount_id || null,
-      discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
-      pricingProvenance: s.pricing_provenance ?? null,
-      discountServiceKeyFilter: s.discount_service_key_filter || null,
-      discountServiceCategoryFilter: s.discount_service_category_filter || null,
-      lineDiscountType: s.line_discount_type || null,
-      lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
-      lineDiscountId: s.line_discount_id || null,
-      lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
+      ...discountProvenanceProjection(req, s),
       serviceAddons: listAddonsByServiceId.get(s.id) || [],
       prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
       prepaidMethod: s.prepaid_method || null,
@@ -22470,6 +22472,8 @@ router._test = {
   addonStackGroupConflictRows,
   assertNewStackGroupConflicts,
   scheduledServicesDiscountProvenanceColumns,
+  discountProvenanceProjection,
+  DISCOUNT_PROVENANCE_PROJECTION_KEYS,
   resetDiscountProvenanceColumnCache,
   weeklyBlackoutRefreshDates,
   blackoutDateString,
