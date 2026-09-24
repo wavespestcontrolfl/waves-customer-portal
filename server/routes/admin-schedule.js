@@ -74,6 +74,7 @@ const {
   buildPrepaidSeriesContext,
   hasAnnualCoverage,
   withoutAnnualCoverage,
+  ANNUAL_PREPAY_METHOD,
 } = require('../services/prepaid-series');
 // Single-visit prepaid stamp: refuse only rows that are genuinely over.
 // NOT the series helper's TERMINAL_STATUSES — that set also skips
@@ -6200,11 +6201,37 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
 // recurringGroupRequestFields mirrors (finiteCount ?? 4) -- a mismatch
 // throws a retryable 409, matching DISCOUNT_STACKING_GATE_DIVERGED's own
 // shape and "before any write" contract for its own field.
-function assertPrepayTotalMatchesPricing({ totalAmount, finalPrice, plannedCount }) {
+// `requestedCount` (optional) is the count the CLIENT actually priced
+// totalAmount from — the recurringGroupRequestFields visit count the
+// operator saw on screen — distinct from `plannedCount`, the count this
+// total is being validated against here (which the booking route now
+// passes as the cadence rows ACTUALLY PLACED, not the request). When the two
+// counts differ AND totalAmount matches what requestedCount x finalPrice
+// would produce, the mismatch isn't a stale/changed price at all — it's a
+// short-placed series (blackout/day-off exhaustion placed fewer visits than
+// requested) submitting the total it correctly computed for the REQUEST,
+// which will never match a total keyed on fewer placed rows. Telling the
+// operator to "reload and try again" loops forever in that case (reloading
+// hits the same blackout exhaustion); a dedicated error names the actual
+// placed count and the total that would reconcile against it instead.
+function assertPrepayTotalMatchesPricing({ totalAmount, finalPrice, plannedCount, requestedCount }) {
   const authoritativePrepayTotal = Math.round((Number(finalPrice) || 0) * (Number(plannedCount) || 0) * 100) / 100;
-  if (Math.round(Number(totalAmount) * 100) !== Math.round(authoritativePrepayTotal * 100)) {
-    throw Object.assign(httpError(409, 'The price changed since this was previewed — reload and try again'), { code: 'PREPAY_TOTAL_DIVERGED' });
+  if (Math.round(Number(totalAmount) * 100) === Math.round(authoritativePrepayTotal * 100)) return;
+  if (requestedCount != null && Number(requestedCount) !== Number(plannedCount)) {
+    const requestedTotal = Math.round((Number(finalPrice) || 0) * Number(requestedCount) * 100) / 100;
+    if (Math.round(Number(totalAmount) * 100) === Math.round(requestedTotal * 100)) {
+      throw Object.assign(
+        httpError(409, `Only ${plannedCount} of the ${requestedCount} requested visit(s) could be placed — the $${totalAmount} prepayment (priced for ${requestedCount} visits) does not match the $${authoritativePrepayTotal} total for the ${plannedCount} visit(s) actually placed. Adjust the prepay amount to $${authoritativePrepayTotal}, add the missing visit(s) manually, or book without collecting a prepayment.`),
+        {
+          code: 'PREPAY_SHORT_SERIES',
+          placedCount: plannedCount,
+          requestedCount: Number(requestedCount),
+          expectedTotal: authoritativePrepayTotal,
+        },
+      );
+    }
   }
+  throw Object.assign(httpError(409, 'The price changed since this was previewed — reload and try again'), { code: 'PREPAY_TOTAL_DIVERGED' });
 }
 
 // Codex pre-push audit P0 (round 6, blocked push 8 on PR #4656): only the
@@ -7548,7 +7575,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           // and then fan the full amount across fewer rows than it prices
           // for, over-stamping every placed visit above its own price.
           const actualPlacedCadenceCount = 1 + plannedChildDates.length;
-          assertPrepayTotalMatchesPricing({ totalAmount, finalPrice: pricing.finalPrice, plannedCount: actualPlacedCadenceCount });
+          assertPrepayTotalMatchesPricing({
+            totalAmount, finalPrice: pricing.finalPrice, plannedCount: actualPlacedCadenceCount, requestedCount: plannedCount,
+          });
           await stampSeriesPrepaid(trx, {
             anchorServiceId: svc.id,
             totalAmount,
@@ -13484,25 +13513,50 @@ router.delete('/:id/prepaid', async (req, res, next) => {
     // with no record the visit was already paid inside the annual term, so
     // it mints a second invoice for it (ADMIN-BUG-R33). Reconcile the term
     // (void/refund) instead of clearing the manual stamp field.
+    //
+    // Gate on the row's ACTUAL annual stamp (prepaid_method), not the bare
+    // annual_prepay_term_id link (Codex round-1 P1): attachScheduledServices
+    // links a row to a term by date/service match BEFORE the term ever
+    // stamps it, and applyPrepaidCoverageForTerm deliberately preserves an
+    // existing non-annual prepaid_method rather than overwrite it — "its
+    // stamp is a real out-of-band payment" (annual-prepay-renewals.js). A
+    // row can therefore carry a live term link while its stamp is a genuine
+    // manual cash/Zelle payment collected before the term ever claimed it.
+    // Reusing the link-based withoutAnnualCoverage here trapped that
+    // payment: staff could never clear or refund it. IS DISTINCT FROM keeps
+    // a NULL method (never stamped at all) eligible.
     const cleared = await db('scheduled_services').where({ id: req.params.id })
       .modify((q) => technicianLiveVisitFilter(req, q))
-      .modify(withoutAnnualCoverage)
+      .whereRaw('prepaid_method IS DISTINCT FROM ?', [ANNUAL_PREPAY_METHOD])
       .update({
         prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null,
       })
-      .returning(['id']);
+      .returning(['id', 'annual_prepay_term_id']);
     // 0 rows = the visit was reassigned/settled after the pre-check, or it
-    // carries annual coverage — tell the operator which before claiming the
-    // prepayment was cleared.
+    // carries a genuine annual stamp — tell the operator which before
+    // claiming the prepayment was cleared.
     if (!cleared.length) {
-      const current = await db('scheduled_services').where({ id: req.params.id }).first('annual_prepay_term_id', 'prepaid_method');
-      if (current && hasAnnualCoverage(current)) {
+      const current = await db('scheduled_services').where({ id: req.params.id }).first('prepaid_method');
+      if (current && current.prepaid_method === ANNUAL_PREPAY_METHOD) {
         return res.status(409).json({
           error: 'This visit has annual prepay coverage — reconcile that term (void/refund) before clearing a manual prepayment.',
           code: 'annual_prepay_coverage',
         });
       }
       return res.status(404).json({ error: 'Scheduled service not found' });
+    }
+    // The cleared row may still be linked to a live annual term (its manual
+    // stamp was occupying a slot the term itself would otherwise have
+    // claimed) — reapply that term's coverage so the now-unstamped visit is
+    // picked up if the term still needs it, rather than left uncovered by
+    // either payment. Best-effort: never blocks the clear response itself.
+    const linkedTermId = cleared[0]?.annual_prepay_term_id;
+    if (linkedTermId) {
+      try {
+        await require('../services/annual-prepay-renewals').refreshTermSnapshot(linkedTermId, db);
+      } catch (err) {
+        logger.warn(`[schedule] prepaid clear: term coverage re-apply failed for term ${linkedTermId}: ${err.message}`);
+      }
     }
     res.json({ success: true });
   } catch (err) { next(err); }

@@ -31,7 +31,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() }));
 
-const { stampSeriesPrepaid } = require('../services/prepaid-series');
+const { stampSeriesPrepaid, clearSeriesPrepaid } = require('../services/prepaid-series');
 const { assertPrepayTotalMatchesPricing } = require('../routes/admin-schedule')._test;
 
 const PER_VISIT = 100;
@@ -217,5 +217,92 @@ postgres('r1-sched-visits-1: in-person series prepay vs booster rows', () => {
     const after = await family(parentId);
     const untouchedBooster = after.find((r) => r.id === boosterId);
     expect(Number(untouchedBooster.prepaid_amount)).toBe(75);
+  });
+
+  test('clearSeriesPrepaid (?series=1) does NOT wipe a booster\'s own independent cash/Zelle stamp', async () => {
+    const { parentId } = await insertFamily({ boosterDates: ['2026-12-15', '2027-01-15'] });
+    await stampSeriesPrepaid(trx, {
+      anchorServiceId: parentId, totalAmount: 400, method: 'cash', note: null, useExistingTransaction: true,
+    });
+    const rows = await family(parentId);
+    const boosterId = rows.find((r) => r.is_recurring === false).id;
+    // The booster's own, separately-collected payment for that specific
+    // visit — nothing to do with the series-level allocation above.
+    await trx('scheduled_services').where({ id: boosterId })
+      .update({ prepaid_amount: 60, prepaid_method: 'zelle', prepaid_at: new Date() });
+    const anchor = await trx('scheduled_services').where({ id: parentId }).first();
+    const result = await clearSeriesPrepaid(trx, anchor);
+    const after = await family(parentId);
+    const base = after.filter((r) => r.is_recurring === true);
+    const untouchedBooster = after.find((r) => r.id === boosterId);
+    // EXPECTED: the 4 cadence rows are cleared; the booster's independent
+    // payment survives — it must not be re-billed at completion for a
+    // visit the customer already separately paid for.
+    for (const r of base) expect(r.prepaid_amount).toBeNull();
+    expect(Number(untouchedBooster.prepaid_amount)).toBe(60);
+    expect(untouchedBooster.prepaid_method).toBe('zelle');
+    expect(result.clearedCount).toBe(4);
+  });
+
+  test('clearSeriesPrepaid (?series=1) DOES clear a booster whose stamp still traces to an active (pre-fix-style) series allocation', async () => {
+    const { parentId } = await insertFamily({ boosterDates: ['2026-12-15', '2027-01-15'] });
+    const rows = await family(parentId);
+    const boosterId = rows.find((r) => r.is_recurring === false).id;
+    // Simulate the PRE-FIX state: a prior stampSeriesPrepaid call fanned the
+    // series total across this booster too, and left the matching
+    // allocation-audit evidence (never retired since — nothing has
+    // restamped or cleared it yet).
+    const priorPrepaidAt = new Date('2026-01-01T12:00:00.000Z');
+    await trx('scheduled_services').where({ id: boosterId })
+      .update({ prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: priorPrepaidAt });
+    await trx('audit_log').insert({
+      actor_type: 'system', action: 'prepaid_series.allocated', resource_type: 'scheduled_service',
+      resource_id: boosterId, metadata: { customer_id: customerId, series_parent_id: parentId, prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: priorPrepaidAt.toISOString() },
+    });
+    const anchor = await trx('scheduled_services').where({ id: parentId }).first();
+    const result = await clearSeriesPrepaid(trx, anchor);
+    const after = await family(parentId);
+    const clearedBooster = after.find((r) => r.id === boosterId);
+    // EXPECTED: this stamp traces to the series mechanism's own prior
+    // allocation (an active audit row whose recorded amount/method/
+    // timestamp still exactly match the row) — the clear reconciles it too.
+    expect(clearedBooster.prepaid_amount).toBeNull();
+    expect(result.clearedCount).toBeGreaterThanOrEqual(1);
+  });
+
+  test('clearSeriesPrepaid protects an unrelated historical annual-covered row instead of refusing the whole mixed-history family', async () => {
+    const { parentId } = await insertFamily({ childDates: ['2027-02-02', '2027-05-03', '2027-08-02'] });
+    // A long-completed visit from a PRIOR, unrelated (now decided/expired)
+    // annual term — its own paid-coverage record for a visit that already
+    // ran. Ongoing families spanning billing periods keep this kind of
+    // historical row around.
+    const [oldTerm] = await trx('annual_prepay_terms').insert({
+      customer_id: customerId, term_start: '2024-08-01', term_end: '2025-08-01',
+      status: 'cancelled', prepay_amount: 400, coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4,
+    }).returning('id');
+    const oldTermId = oldTerm.id || oldTerm;
+    const [historical] = await trx('scheduled_services').insert({
+      customer_id: customerId, scheduled_date: '2025-08-02', service_type: 'Quarterly Pest Control',
+      status: 'completed', is_recurring: true, recurring_parent_id: parentId, estimated_price: PER_VISIT,
+      annual_prepay_term_id: oldTermId, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100, prepaid_at: new Date('2025-08-02T12:00:00.000Z'),
+    }).returning('id');
+    const historicalId = historical.id || historical;
+    // The family's LIVE siblings carry an ordinary manual (cash) stamp —
+    // entirely separate money the office wants to clear.
+    await trx('scheduled_services').where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+      .whereNot('id', historicalId)
+      .update({ prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: new Date() });
+    const anchor = await trx('scheduled_services').where({ id: parentId }).first();
+    const result = await clearSeriesPrepaid(trx, anchor);
+    const after = await family(parentId);
+    const live = after.filter((r) => r.id !== historicalId);
+    const historicalAfter = after.find((r) => r.id === historicalId);
+    // EXPECTED: the request succeeds — the live manual stamps are cleared —
+    // and the unrelated historical annual coverage is left completely alone.
+    expect(result.success).toBe(true);
+    expect(result.clearedCount).toBe(live.length);
+    for (const r of live) expect(r.prepaid_amount).toBeNull();
+    expect(Number(historicalAfter.prepaid_amount)).toBe(100);
+    expect(historicalAfter.prepaid_method).toBe('annual_prepay_invoice');
   });
 });

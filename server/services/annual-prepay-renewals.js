@@ -439,10 +439,24 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
 // payment-pending term's reserved/sold first visit carries only
 // source_estimate_id; excluding it would seed replacement visits and
 // leave the sold visit separately billable).
+// A row exclusively belongs to another term only while that other term
+// STILL owns paid coverage on it — i.e. the row itself still carries the
+// live annual stamp (prepaid_method === annual_prepay_invoice with a
+// positive amount), the same evidence annualPrepayCoversVisit and every
+// other coverage-authority check in this file already trust. A refund/void
+// (syncTermForInvoicePayment's cancel branch) calls clearPrepaidStampsForTerm,
+// which nulls prepaid_method/prepaid_amount on the row but deliberately
+// LEAVES annual_prepay_term_id set (kept for audit) — without this check, a
+// row whose old term was fully refunded would stay permanently excluded from
+// every other term's coverage (a replacement term seeds a brand-new set of
+// visits while the released ones sit on the calendar, unbilled and
+// uncounted, forever "linked" to a term that no longer covers anything).
 function rowLinkedToAnotherTerm(term, row) {
   return row.annual_prepay_term_id != null
     && term?.id != null
-    && String(row.annual_prepay_term_id) !== String(term.id);
+    && String(row.annual_prepay_term_id) !== String(term.id)
+    && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(row.prepaid_amount) > 0;
 }
 
 function rowCommittedToTerm(term, row) {

@@ -373,7 +373,7 @@ async function clearSeriesPrepaid(db, anchor) {
     // stamps so a concurrent payment cannot be retired without being cleared.
     await fetchSeriesRows(trx, parentId, { lock: true });
     const family = await fetchSeriesRows(trx, parentId);
-    const ids = family.filter((row) => row.customer_id === anchor.customer_id).map((row) => row.id);
+    const familyIds = family.filter((row) => row.customer_id === anchor.customer_id).map((row) => row.id);
     // Symmetry with the manual writers (stampSeriesPrepaid, POST
     // /:id/prepaid, bulk mark_prepaid): a series clear must never erase
     // annual-prepay coverage evidence. Nulling the stamp here (with the
@@ -384,13 +384,64 @@ async function clearSeriesPrepaid(db, anchor) {
     // The only sanctioned way to remove annual coverage is
     // clearPrepaidStampsForTerm (the void/refund path), which operates on
     // the term directly rather than through this manual clear.
-    if (family.filter((row) => ids.includes(row.id)).some(hasAnnualCoverage)) {
+    //
+    // An ONGOING family spans billing periods: a long-completed visit from a
+    // prior, unrelated annual term keeps its historical annual_prepay_term_id
+    // / prepaid_method stamp (by design — that's the paid-coverage record
+    // for the visit that actually ran), while the family's LIVE siblings can
+    // carry an entirely separate, ordinary manual (cash/Zelle) stamp the
+    // office legitimately wants to clear. Scanning the WHOLE family for any
+    // annual coverage and refusing the entire request punished that
+    // unrelated historical row onto every future series clear (Codex
+    // round-1 P2). Protect each annual-covered row individually — leave it
+    // out of the update entirely — and clear the rest; only refuse outright
+    // when EVERY row in the family is annual-covered, i.e. there is no
+    // manual stamp here at all to legitimately clear.
+    const annualCoveredIds = new Set(
+      family.filter((row) => familyIds.includes(row.id) && hasAnnualCoverage(row)).map((row) => row.id),
+    );
+    if (annualCoveredIds.size > 0 && annualCoveredIds.size === familyIds.length) {
       const err = new Error('Series has annual prepay coverage; reconcile that term (void/refund) before clearing a manual prepayment');
       err.status = 409;
       err.statusCode = 409;
       err.isOperational = true;
       throw err;
     }
+    // A booster (is_recurring:false, no recurring_pattern — same identity
+    // stampSeriesPrepaid's own fan-out uses) can carry its OWN, independent
+    // prepayment: its own cash/Zelle stamp collected for that specific
+    // visit, unrelated to any series-level allocation. A `?series=1` clear
+    // must not wipe that money too — the booster would then be re-billed at
+    // completion for a visit the customer already separately paid for.
+    // Reuse stampSeriesPrepaid's own provenance check: only a booster row
+    // whose CURRENT stamp still exactly matches an ACTIVE
+    // prepaid_series.allocated allocation (amount/method/timestamp) traces
+    // to THIS series mechanism (e.g. a pre-fix stamp that fanned across it,
+    // or an explicit series re-stamp that included it) and is fair game to
+    // clear here; anything else is left alone.
+    const boosterIds = new Set(
+      family.filter((row) => row.is_recurring === false && !row.recurring_pattern).map((row) => row.id),
+    );
+    const independentBoosterIds = new Set();
+    if (boosterIds.size > 0) {
+      const stampedBoosters = family.filter((row) => boosterIds.has(row.id) && Number(row.prepaid_amount) > 0);
+      if (stampedBoosters.length) {
+        const activeAllocations = await mostRecentActiveAllocations(trx, {
+          customerId: anchor.customer_id,
+          ids: stampedBoosters.map((row) => row.id),
+        });
+        for (const row of stampedBoosters) {
+          const metadata = activeAllocations.get(row.id);
+          const rowPrepaidAt = row.prepaid_at instanceof Date ? row.prepaid_at.toISOString() : (row.prepaid_at ? new Date(row.prepaid_at).toISOString() : null);
+          const tracesToSeries = !!metadata
+            && Number(metadata.prepaid_amount) === Number(row.prepaid_amount)
+            && (metadata.prepaid_method || null) === (row.prepaid_method || null)
+            && metadata.prepaid_at === rowPrepaidAt;
+          if (!tracesToSeries) independentBoosterIds.add(row.id);
+        }
+      }
+    }
+    const ids = familyIds.filter((id) => !independentBoosterIds.has(id) && !annualCoveredIds.has(id));
     const cleared = await trx('scheduled_services').whereIn('id', ids)
       .whereNotNull('prepaid_amount')
       .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null })

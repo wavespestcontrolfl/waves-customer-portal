@@ -66,6 +66,15 @@ const PRIOR_TERM_ROW = {
   prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', is_recurring: true, status: 'pending',
 };
 
+// Same row, but term-OLD was voided/refunded: syncTermForInvoicePayment's
+// cancel branch already ran clearPrepaidStampsForTerm, which nulls the
+// per-visit stamp but deliberately LEAVES annual_prepay_term_id set (kept
+// for audit). This row no longer carries any live coverage from term-OLD.
+const REFUNDED_PRIOR_TERM_ROW = {
+  ...PRIOR_TERM_ROW,
+  prepaid_amount: null, prepaid_method: null,
+};
+
 describe('audit r1-sched-series-1: non-palm row linked to another term must not consume a renewal slot', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -117,5 +126,57 @@ describe('audit r1-sched-series-1: non-palm row linked to another term must not 
         expect(call[0].recurring_parent_id).not.toBe('v-prior-term');
       }
     }
+  });
+
+  test('coverageRowsForTerm INCLUDES a row linked to a REFUNDED prior term (its stamp was cleared, only the audit link remains)', async () => {
+    setDbQueues({ scheduled_services: [query({ rows: [REFUNDED_PRIOR_TERM_ROW] })] });
+    const selected = await _private.coverageRowsForTerm({
+      id: 'term-NEW', customer_id: 'customer-1',
+      coverage_service_type: 'Quarterly Pest Control Service', coverage_visit_count: 4,
+      term_start: '2026-06-15', term_end: '2027-06-15',
+    });
+    // EXPECTED: a refund releases the row — it is no longer permanently
+    // excluded from every other term's coverage just because the audit
+    // link (annual_prepay_term_id) survives the refund's stamp clear.
+    expect(selected.map((r) => r.id)).toEqual(['v-prior-term']);
+  });
+
+  test('coverageRowsForTerm still EXCLUDES the row while its prior term retains live paid coverage (contrast)', async () => {
+    setDbQueues({ scheduled_services: [query({ rows: [PRIOR_TERM_ROW] })] });
+    const selected = await _private.coverageRowsForTerm({
+      id: 'term-NEW', customer_id: 'customer-1',
+      coverage_service_type: 'Quarterly Pest Control Service', coverage_visit_count: 4,
+      term_start: '2026-06-15', term_end: '2027-06-15',
+    });
+    expect(selected.map((r) => r.id)).toEqual([]);
+  });
+
+  test('ensureCoverageRowsForTerm adopts a released (refunded-prior-term) row as one of the new term\'s existing rows instead of seeding a duplicate', async () => {
+    const colQ = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, is_recurring: {},
+        recurring_pattern: {}, recurring_parent_id: {}, recurring_ongoing: {}, technician_id: {},
+        window_start: {}, window_end: {}, time_window: {}, customer_notes: {}, zone: {}, notes: {},
+        estimated_duration_minutes: {},
+      },
+    });
+    const rowsQ = query({ rows: [REFUNDED_PRIOR_TERM_ROW] });
+    const inserts = [
+      query({ returning: [{ id: 'svc-t2', scheduled_date: '2026-09-15' }] }),
+      query({ returning: [{ id: 'svc-t3', scheduled_date: '2026-12-15' }] }),
+      query({ returning: [{ id: 'svc-t4', scheduled_date: '2027-03-15' }] }),
+    ];
+    setDbQueues({ scheduled_services: [colQ, rowsQ, query({ first: undefined }), ...inserts] });
+
+    const result = await _private.ensureCoverageRowsForTerm({
+      id: 'term-NEW', customer_id: 'customer-1',
+      term_start: '2026-06-15', term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control Service', coverage_visit_count: 4,
+    }, undefined, { today: '2026-01-01' });
+
+    // EXPECTED: the released row counts as one of the 4 sold visits already
+    // on the calendar — only 3 more are seeded, not a full duplicate set of 4.
+    expect(result.existingCount).toBe(1);
+    expect(result.createdCount).toBe(3);
   });
 });

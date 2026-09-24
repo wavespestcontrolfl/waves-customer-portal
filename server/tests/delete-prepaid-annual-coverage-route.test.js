@@ -130,6 +130,36 @@ postgres('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
     expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx)).toBe(true);
   });
 
+  test('single form: a MANUAL (cash) stamp on a row merely LINKED to a term is clearable — the link alone must not trap a genuine out-of-band payment', async () => {
+    const { techId, termId, parentId } = await seed();
+    // Overwrite the seeded row to the exact shape attachScheduledServices +
+    // applyPrepaidCoverageForTerm leave behind when a visit was manually
+    // prepaid (cash) BEFORE the annual term ever claimed it: LINKED
+    // (annual_prepay_term_id set, by date/service match) but the stamp
+    // itself is the manual method — applyPrepaidCoverageForTerm
+    // deliberately never overwrites it ("its stamp is a real out-of-band
+    // payment", annual-prepay-renewals.js).
+    await trx('scheduled_services').where({ id: parentId }).update({ prepaid_method: 'cash', prepaid_amount: 90 });
+    global.__TECH_ID = techId; mockCurrentRole = 'technician';
+    const spy = jest.spyOn(AnnualPrepayRenewals, 'refreshTermSnapshot');
+    const res = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid`);
+    console.log('manual-stamp-on-linked-row DELETE ->', res.status, JSON.stringify(res.body));
+    // EXPECTED: this is a genuine manual payment, not annual coverage —
+    // clearable like any other manual stamp (not the 409 a real annual
+    // stamp gets).
+    expect(res.status).toBe(200);
+    // The term coverage is reapplied for the now-freed row's term.
+    expect(spy).toHaveBeenCalledWith(termId, expect.anything());
+    spy.mockRestore();
+    const after = await row(parentId);
+    // The audit link survives the clear either way; the row's coverage is
+    // whatever refreshTermSnapshot's real logic decides (it may reclaim the
+    // row into the term's own coverage, since it is now unstamped and
+    // in-window) — the load-bearing assertion here is that the clear
+    // itself was never refused just because the link was present.
+    expect(after.annual_prepay_term_id).toBe(termId);
+  });
+
   test('series form, ADMIN token: every stamped sibling wiped in one call, term ids left, gate false on all', async () => {
     const { techId, parentId, childIds } = await seed({ children: 3 });
     global.__TECH_ID = techId; mockCurrentRole = 'admin';
