@@ -2794,8 +2794,19 @@ async function createSelfBooking(payload = {}) {
         // the lead lock (Codex #4737 r10 pre-push P0): a phone change or
         // relink after the caller's own locks released must not still
         // book (and hand back a reschedule bearer).
+        // It also answers the lead's eligibility (r10 pre-push P1): a lead
+        // converted, or given another visit, since phase 1 is refused like
+        // any duplicate (ALREADY_BOOKED — the page resolves the real state).
         const { revalidate } = callbackVisit.leadDedupe;
-        if (typeof revalidate === 'function' && !(await revalidate(trx))) {
+        const verdict = typeof revalidate === 'function' ? await revalidate(trx) : 'ok';
+        if (verdict === 'ineligible') {
+          throw Object.assign(new Error('You already have a consultation on the books.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'ALREADY_BOOKED',
+          });
+        }
+        if (verdict !== 'ok') {
           throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
             statusCode: 409,
             isOperational: true,

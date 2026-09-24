@@ -573,11 +573,13 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
   // under the lead lock, before the replay / insert.
   test('leadDedupe.revalidate runs right after the inspection-lead lock and refuses CUSTOMER_CHANGED_RETRY', () => {
     const leadLock = src.indexOf("['inspection-lead', String(callbackVisit.leadDedupe.leadId)]");
-    const revalidate = src.indexOf('!(await revalidate(trx))', leadLock);
+    const revalidate = src.indexOf('await revalidate(trx)', leadLock);
     const replay = src.indexOf("const replayQuery = trx('self_booked_appointments')");
     expect(revalidate).toBeGreaterThan(leadLock);
     expect(revalidate).toBeLessThan(replay);
-    expect(src.slice(revalidate, revalidate + 400)).toMatch(/code: 'CUSTOMER_CHANGED_RETRY'/);
+    const body = src.slice(revalidate, revalidate + 900);
+    expect(body).toMatch(/verdict === 'ineligible'[\s\S]*code: 'ALREADY_BOOKED'/);
+    expect(body).toMatch(/code: 'CUSTOMER_CHANGED_RETRY'/);
   });
 
   test('leadDedupe takes the inspection-lead lock after the lane lock and refuses a lead with an open assessment on another profile', () => {

@@ -1692,12 +1692,17 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
   });
 }
 
-// Whether the token still trusts exactly this customer, read on `conn`
-// (the booking transaction, under its lead lock).
-async function tokenStillTrustsCustomer(conn, leadId, token, customerId) {
+// The booking transaction's own re-check (under its lead lock), read on
+// `conn`: 'customer_changed' when the token no longer trusts exactly this
+// customer; 'ineligible' when the lead is no longer bookable (converted,
+// or a visit landed since phase 1 — the same resolveEligibility GET uses,
+// Codex #4737 r10 pre-push P1); else 'ok'.
+async function commitVerdict(conn, leadId, token, customerId) {
   const freshLead = await loadLead(conn, leadId);
   const trusted = freshLead ? await loadTrustedCustomer(conn, freshLead, token) : null;
-  return Boolean(trusted) && String(trusted.id) === String(customerId);
+  if (!trusted || String(trusted.id) !== String(customerId)) return 'customer_changed';
+  const eligibility = await resolveEligibility(conn, freshLead, trusted, { includeRescheduleUrl: false });
+  return eligibility.state === 'ok' ? 'ok' : 'ineligible';
 }
 
 // The first non-ok eligibility across the booked profile and the lead's
@@ -1958,7 +1963,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // assessment across all of them, so two commits with different
     // addresses never both book.
     const resolveCustomerIds = (conn, opts) => trustedLeadProfileIds(conn, lead.id, verified, custRow.id, opts);
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), revalidate: (conn) => tokenStillTrustsCustomer(conn, lead.id, verified, custRow.id) } });
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id) } });
 
     if (!result.ok) {
       const profileIds = result.code === 'ALREADY_BOOKED' ? await resolveCustomerIds(db) : [custRow.id];
