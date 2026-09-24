@@ -34,7 +34,14 @@ jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest
 // the actual warm/cold→won flip is proved against a real store in
 // consultation-outcomes.test.js; this file only proves the ROUTE calls it
 // for every non-assessment booking (not just a first-time conversion).
-jest.mock('../services/consultation-outcomes', () => ({ markWonForCustomer: jest.fn(async () => 1) }));
+// isQualifyingSaleBooking stays the REAL implementation — it's a pure
+// function the route now calls directly (round 8), and stubbing it would
+// hide exactly the regression these tests exist to catch; only
+// markWonForCustomer (a DB write) is replaced.
+jest.mock('../services/consultation-outcomes', () => ({
+  ...jest.requireActual('../services/consultation-outcomes'),
+  markWonForCustomer: jest.fn(async () => 1),
+}));
 
 const express = require('express');
 const db = require('../models/db');

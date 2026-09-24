@@ -1787,19 +1787,19 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // that converted BEFORE a consultation outcome was recorded must still
       // reconcile when it later books again. Best-effort, savepoint-isolated
       // inside markWonForCustomer (waves-db §5b).
-      // P1-B: gated on `appt` (this same INSERT's own RETURNING row) rather
-      // than a fresh re-query — this manual booking form never sets
-      // is_callback/recurring_parent_id/followup_included (none are in
-      // insertData above, so all come back at their DB defaults), but a
-      // free callback, a recurring-series child spawned onto an EXISTING
-      // plan, an included $0 follow-up (admin-dispatch.js's
-      // schedule-followup — a different endpoint, but the guard stays
-      // correct if THIS one ever grows the field), or any other always-free
-      // service type by name is never itself a sale
-      // (server/services/re-service.js, recurring-appointment-seeder.js,
-      // no-cost-visit-types.js).
-      if (!assessmentVisit && !appt.is_callback && !appt.recurring_parent_id && !appt.followup_included
-        && !require('../services/no-cost-visit-types').isAlwaysFreeServiceType(appt.service_type)) {
+      // round 8: `isQualifyingSaleBooking` (server/services/
+      // consultation-outcomes.js) is the ONE positive-allow-list predicate
+      // for "this scheduled_services row is evidence of a real, confirmed
+      // sale" — same decision point findSaleEvidenceForConsultation's own
+      // booking-evidence check uses, so the two can never drift. Read
+      // straight off `appt` (this same INSERT's own RETURNING row, `*`) —
+      // no extra query. This manual booking form's insertData never sets
+      // source_action/customer_confirmed/is_callback/recurring_parent_id/
+      // followup_included (all come back at their DB defaults), so the
+      // predicate is currently a no-op gate here beyond `assessmentVisit`,
+      // but stays correct if this endpoint ever grows any of those fields.
+      if (!assessmentVisit
+        && require('../services/consultation-outcomes').isQualifyingSaleBooking(appt)) {
         await require('../services/consultation-outcomes')
           .markWonForCustomer(customerId, { via: 'office_booking', trx });
       }

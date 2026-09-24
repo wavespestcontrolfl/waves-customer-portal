@@ -19,6 +19,7 @@ const {
   isAssessmentBooking,
 } = require('./assessment-booking');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 
 const OUTCOME_VALUES = ['warm', 'cold', 'lost'];
 const LOST_REASON_VALUES = ['price', 'competitor', 'diy', 'not_ready', 'no_show', 'other'];
@@ -247,6 +248,60 @@ function toDateOnlyString(value) {
   return String(value).slice(0, 10);
 }
 
+// Round 8: four straight rounds patched findSaleEvidenceForConsultation's
+// non-assessment-booking evidence check with one more excluded class at a
+// time (P1-B is_callback, then recurring_parent_id, then followup_included +
+// isAlwaysFreeServiceType). This is the restructure — ONE positive
+// predicate, THE decision point both call sites use, instead of scattered
+// negative checks that need re-deriving (and re-missing a case) every time
+// a new non-sale booking shape turns up.
+//
+// THE RULE: a scheduled_services row counts as evidence of a real,
+// confirmed sale only if its status is one still on the books in some
+// active-or-done form (not cancelled/skipped/no_show — a visit that never
+// happened proves nothing was bought), it is not an AI-created booking
+// still awaiting office review (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS +
+// customer_confirmed — voice-agent/outbound-callback bookings; office
+// confirm is what makes one real, exactly as job-status.js's own
+// OFFICE_REVIEW_PENDING_SOURCE_ACTIONS + customer_confirmed check keys the
+// SAME "still needs activation" decision on), and it is not one of the
+// four already-established non-sale classes: a free re-service callback
+// (is_callback), a recurring-series child spawned onto an EXISTING plan
+// (recurring_parent_id), an included $0 follow-up minted from a completion
+// (followup_included), or any other service type this codebase already
+// treats as ALWAYS no-cost by name (isAlwaysFreeServiceType).
+//
+// 'pending' is deliberately IN the qualifying status set: it is the
+// default initial status for every ordinary staff/customer booking (e.g.
+// admin-leads.js's schedule-appointment inserts status:'pending' and is
+// confirmed later) — plain 'pending' is NOT itself an office-review
+// signal. Only the source_action + customer_confirmed combination marks a
+// row as still awaiting office review; a manual booking's customer_confirmed
+// defaults to false too (schema default), so that field is read ONLY in
+// combination with OFFICE_REVIEW_PENDING_SOURCE_ACTIONS membership, never
+// standalone — reading it standalone would wrongly disqualify every manual
+// booking, which never sets it at all.
+//
+// NOT the "another consultation is not a sale" check (isAssessmentBooking)
+// — that one is async (a legacy-row catalog lookup) and stays a separate
+// check in the caller's loop; this predicate is intentionally sync and
+// single-argument (`row`) so both call sites can run it against a plain
+// scheduled_services row with no extra query.
+const QUALIFYING_BOOKING_STATUSES = new Set([
+  'pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed',
+]);
+
+function isQualifyingSaleBooking(row) {
+  if (!row) return false;
+  if (!QUALIFYING_BOOKING_STATUSES.has(row.status)) return false;
+  if (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) && !row.customer_confirmed) return false;
+  if (row.is_callback) return false;
+  if (row.recurring_parent_id) return false;
+  if (row.followup_included) return false;
+  if (isAlwaysFreeServiceType(row.service_type)) return false;
+  return true;
+}
+
 /**
  * Reconciliation from the CONSULTATION side (P1-1): a sale can commit
  * BEFORE the technician gets around to recording the visit's outcome, in
@@ -317,34 +372,16 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
     .where('created_at', '>=', lowerBound)
     .where('created_at', '<=', upperBound)
     .orderBy('created_at', 'asc')
-    .select('id', 'service_type', 'service_id', 'created_at', 'is_callback', 'recurring_parent_id', 'followup_included');
+    .select(
+      'id', 'service_type', 'service_id', 'created_at',
+      // Every field isQualifyingSaleBooking's single positive rule needs —
+      // see the comment above that function for what each one decides.
+      'status', 'source_action', 'customer_confirmed',
+      'is_callback', 'recurring_parent_id', 'followup_included',
+    );
   for (const booking of bookings) {
-    if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale
-    // P1-B: a free re-service callback (the persisted flag every
-    // completion/billing path already keys off — server/services/
-    // re-service.js) is not a purchase; neither is a recurring-series
-    // child the scheduler auto-spawns onto an EXISTING plan
-    // (recurring_parent_id set — server/services/recurring-appointment-
-    // seeder.js stamps `is_recurring: true, recurring_parent_id: <root
-    // id>` on every occurrence it generates). The series ROOT itself
-    // (is_recurring true, recurring_parent_id null — a customer's first
-    // enrollment) is unaffected and still qualifies as a genuine new sale.
-    if (booking.is_callback) continue;
-    if (booking.recurring_parent_id) continue;
-    // round 8: admin-dispatch.js's POST /:serviceId/schedule-followup mints
-    // an included $0 appointment for a typed-completion follow-up — it
-    // inherits the SOURCE visit's own service_type (so it rarely matches
-    // isAlwaysFreeServiceType by name) and is neither a callback nor a
-    // recurring child, so followup_included is the ONLY signal that marks
-    // it not-a-sale. Also exclude any OTHER service type this codebase
-    // already treats as never-billable by name — appointment / estimate /
-    // re-service / follow-up / re-visit (isAlwaysFreeServiceType,
-    // server/services/no-cost-visit-types.js) — the same combined check
-    // field-team-program.js and job-costing.js already use together
-    // (`followup_included === true || isAlwaysFreeServiceType(...)`) for
-    // "is this visit free/no-cost".
-    if (booking.followup_included) continue;
-    if (isAlwaysFreeServiceType(booking.service_type)) continue;
+    if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale — separate, async, not part of the sync predicate
+    if (!isQualifyingSaleBooking(booking)) continue;
     return { won_via: 'office_booking', won_at: new Date(booking.created_at) };
   }
 
@@ -783,6 +820,7 @@ module.exports = {
   CADENCE_VALUES,
   WON_WINDOW_DAYS,
   isConsultationVisit,
+  isQualifyingSaleBooking,
   recordOutcome,
   markWonForCustomer,
   markNoShow,

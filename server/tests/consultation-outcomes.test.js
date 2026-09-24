@@ -21,7 +21,12 @@ const {
   markWonForCustomer,
   markNoShow,
   consultationStats,
+  isQualifyingSaleBooking,
 } = require('../services/consultation-outcomes');
+const {
+  VOICE_AGENT_BOOKING_SOURCE_ACTION,
+  CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+} = require('../services/call-booking-source-actions');
 
 // ---- tiny in-memory knex-shim -------------------------------------------
 // Real enough to prove the ATOMIC guards (waves-db P1 fix): the ON
@@ -185,6 +190,47 @@ function makeFakeDb(seed = {}) {
   table.__store = store;
   return table;
 }
+
+// ---- isQualifyingSaleBooking (round 8) -------------------------------------
+
+describe('isQualifyingSaleBooking — the ONE positive-allow-list predicate for "is this row a real, confirmed sale"', () => {
+  const BASE = { status: 'confirmed', service_type: 'Quarterly Pest Control' };
+
+  it.each([
+    ['a confirmed manual booking', { ...BASE, status: 'confirmed' }, true],
+    ['a plain pending booking (the default initial status for every ordinary booking — NOT itself an office-review signal)', { ...BASE, status: 'pending' }, true],
+    ['a completed real visit', { ...BASE, status: 'completed' }, true],
+    ['en_route', { ...BASE, status: 'en_route' }, true],
+    ['on_site', { ...BASE, status: 'on_site' }, true],
+    ['rescheduled', { ...BASE, status: 'rescheduled' }, true],
+
+    ['a pending voice-agent request awaiting office review (relay-booking.js shape)', {
+      ...BASE, status: 'pending', source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION, customer_confirmed: false,
+    }, false],
+    ['a pending outbound-callback review booking (the OTHER office-review source_action)', {
+      ...BASE, status: 'pending', source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION, customer_confirmed: false,
+    }, false],
+    ['a voice-agent booking the office HAS confirmed (customer_confirmed true) — office confirm is what makes it real', {
+      ...BASE, status: 'confirmed', source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION, customer_confirmed: true,
+    }, true],
+    ['a plain manual booking with customer_confirmed at its schema default (false) and no office-review source_action — must NOT be disqualified by that field alone', {
+      ...BASE, status: 'pending', source_action: null, customer_confirmed: false,
+    }, true],
+
+    ['cancelled', { ...BASE, status: 'cancelled' }, false],
+    ['skipped', { ...BASE, status: 'skipped' }, false],
+    ['no_show', { ...BASE, status: 'no_show' }, false],
+
+    ['a free re-service callback (is_callback)', { ...BASE, is_callback: true }, false],
+    ['a recurring-series child (recurring_parent_id)', { ...BASE, recurring_parent_id: 'parent-visit-0' }, false],
+    ['an included $0 follow-up (followup_included)', { ...BASE, followup_included: true }, false],
+    ['an always-free-by-name service type (isAlwaysFreeServiceType)', { ...BASE, service_type: 'Estimate Visit' }, false],
+
+    ['a null row', null, false],
+  ])('%s → %s', (_label, row, expected) => {
+    expect(isQualifyingSaleBooking(row)).toBe(expected);
+  });
+});
 
 // ---- recordOutcome --------------------------------------------------------
 
@@ -433,8 +479,8 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
   test('a non-assessment booking created after the visit flips a freshly-recorded warm to won (won_via office_booking); another assessment does not', async () => {
     const fakeDb = seededDb();
     fakeDb.__store.scheduled_services.push(
-      { id: 'visit-2', service_type: 'Waves Assessment', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z') }, // another consultation — not a sale
-      { id: 'visit-3', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-17T00:00:00Z') },
+      { id: 'visit-2', service_type: 'Waves Assessment', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z'), status: 'pending' }, // another consultation — not a sale
+      { id: 'visit-3', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-17T00:00:00Z'), status: 'confirmed' },
     );
     const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
     expect(saved.outcome).toBe('won');
@@ -495,11 +541,11 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
       // All dated BEFORE the real sale — proves the loop doesn't just skip
       // the first non-qualifying row and stop; it keeps scanning until it
       // finds (or exhausts) real evidence.
-      { id: 'visit-cb', service_type: 'Pest Control Re-Service', customer_id: 'cust-1', created_at: new Date('2026-09-11T00:00:00Z'), is_callback: true },
-      { id: 'visit-child', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-12T00:00:00Z'), recurring_parent_id: 'parent-visit-0' },
-      { id: 'visit-followup', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-13T00:00:00Z'), followup_included: true },
-      { id: 'visit-estimate', service_type: 'Estimate Visit', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z') },
-      { id: 'visit-real', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-17T00:00:00Z') },
+      { id: 'visit-cb', service_type: 'Pest Control Re-Service', customer_id: 'cust-1', created_at: new Date('2026-09-11T00:00:00Z'), status: 'confirmed', is_callback: true },
+      { id: 'visit-child', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-12T00:00:00Z'), status: 'confirmed', recurring_parent_id: 'parent-visit-0' },
+      { id: 'visit-followup', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-13T00:00:00Z'), status: 'confirmed', followup_included: true },
+      { id: 'visit-estimate', service_type: 'Estimate Visit', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z'), status: 'confirmed' },
+      { id: 'visit-real', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-17T00:00:00Z'), status: 'confirmed' },
     );
     const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
     expect(saved.outcome).toBe('won');
