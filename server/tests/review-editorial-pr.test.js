@@ -8,6 +8,9 @@ jest.mock('../services/content/editorial-evidence', () => ({
   filesForDocument: jest.fn(), prepareDraft: jest.fn(),
   evidenceDomain: jest.fn(),
 }));
+jest.mock('../services/content-astro/astro-publisher', () => ({
+  _internals: { schemaTypesForContent: jest.fn((body, base) => (/## FAQ/.test(body) ? [...base, 'FAQPage'] : base)) },
+}));
 jest.mock('../../packages/editorial-evidence/index.cjs', () => ({
   evidencePath: (path) => `${path}.json`, verifyManifest: jest.fn(),
 }));
@@ -222,4 +225,13 @@ test('an unresolvable article domain never verifies and gets a fresh review', as
   await reviewPr(1);
   expect(contract.verifyManifest).not.toHaveBeenCalled();
   expect(editorial.filesForDocument).toHaveBeenCalled();
+});
+
+test('a CLI body repair that adds a visible FAQ declares FAQPage', async () => {
+  gh.getPr.mockResolvedValue({ ...pr, head: { ...pr.head, ref: 'feature/manual' } });
+  gh.getFile.mockImplementation(async (name) => ({ content: name.endsWith('.json') ? '{}' : '---\ntitle: Test\nschema_types:\n  - Article\n---\nTest body' }));
+  editorial.prepareDraft.mockResolvedValue({ body: 'Test body\n\n## FAQ\n\n### Why?\n\nBecause.' });
+  await reviewPr(1);
+  const repaired = editorial.filesForDocument.mock.calls[0][0].document;
+  expect(repaired).toMatch(/FAQPage/);
 });

@@ -65,7 +65,10 @@ async function validateAndRepair(pr, file) {
   if (!pr.head.ref.startsWith('content/')) {
     const draft = await editorial.prepareDraft({ frontmatter: parsed.data, body: parsed.content }, { page_type: 'supporting-blog' });
     if (draft.body.trim() !== parsed.content.trim()) {
-      document = fm.stringify(parsed.data, draft.body);
+      // A repair can add or remove the visible FAQ; FAQPage must follow it.
+      const { schemaTypesForContent } = require('../services/content-astro/astro-publisher')._internals;
+      const baseTypes = (Array.isArray(parsed.data.schema_types) ? parsed.data.schema_types : []).filter((type) => type !== 'FAQPage');
+      document = fm.stringify({ ...parsed.data, schema_types: schemaTypesForContent(draft.body, baseTypes) }, draft.body);
       commits.push({ path: file.path, content: document });
     }
   }

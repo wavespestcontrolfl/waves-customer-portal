@@ -298,7 +298,31 @@ async function assertPrEvidence(pr) {
     await verifyArticleEvidence(gh, contract, file, headSha);
     articlePaths.push(file.filename);
   }
+  for (const file of files) {
+    const articlePath = await verifyChangedSidecar(gh, contract, file, headSha, articlePaths);
+    if (articlePath) articlePaths.push(articlePath);
+  }
   return { baseSha, baseRef, articlePaths };
+}
+
+// A sidecar changed without its article would otherwise ride into the base
+// unverified. Removals and renames are refused; any other changed sidecar
+// must name an applicable article and verify against its bytes at head.
+// Returns that article path when the article itself was not in the PR, so
+// the atomic merge also pins its blob.
+async function verifyChangedSidecar(gh, contract, file, headSha, verifiedPaths) {
+  const touches = [file.filename, file.previous_filename].filter(Boolean)
+    .some((name) => String(name).startsWith('content-ops/editorial-evidence/'));
+  if (!touches) return null;
+  if (file.status === 'removed' || file.status === 'renamed') throw reviewError(null);
+  const evidence = await gh.getFile(file.filename, headSha);
+  let manifest;
+  try { manifest = JSON.parse(evidence?.content); } catch { throw reviewError(null); }
+  const articlePath = manifest?.path;
+  if (!applicable(articlePath) || contract.evidencePath(articlePath) !== file.filename) throw reviewError(null);
+  if (verifiedPaths.includes(articlePath)) return null;
+  await verifyArticleEvidence(gh, contract, { filename: articlePath }, headSha);
+  return articlePath;
 }
 
 // A signing-only follow-up commit may advance an autonomous PR after the

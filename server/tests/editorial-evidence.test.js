@@ -76,6 +76,33 @@ describe('merge-output evidence proof', () => {
     expect(gh.compareFiles).toHaveBeenCalledWith(headSha, baseSha);
   });
 
+  test('verifies a sidecar changed without its article and pins that article for the merge', async () => {
+    const sidecar = await arrangeSignedArticle();
+    gh.ghFetchPaginated.mockResolvedValue([{ filename: sidecar.path, status: 'modified' }]);
+    gh.getFile.mockImplementation(async (name) => (name === path ? { content: document } : sidecar));
+
+    await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
+      .resolves.toEqual({ baseSha, baseRef: 'main', articlePaths: [path] });
+  });
+
+  test('rejects a sidecar changed without its article when it no longer verifies', async () => {
+    const sidecar = await arrangeSignedArticle();
+    gh.ghFetchPaginated.mockResolvedValue([{ filename: sidecar.path, status: 'modified' }]);
+    gh.getFile.mockImplementation(async (name) => (name === path ? { content: document + 'Tampered.' } : sidecar));
+
+    await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
+      .rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+  });
+
+  test('rejects a removed evidence sidecar', async () => {
+    const sidecar = await arrangeSignedArticle();
+    gh.ghFetchPaginated.mockResolvedValue([{ filename: sidecar.path, status: 'removed' }]);
+    gh.getFile.mockImplementation(async (name) => (name === path ? { content: document } : sidecar));
+
+    await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
+      .rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+  });
+
   test('allows a new article when its path is absent from both fork and current base', async () => {
     const sidecar = await arrangeSignedArticle();
     gh.ghFetchPaginated.mockResolvedValue([{ filename: path, status: 'added' }]);
