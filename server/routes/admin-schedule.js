@@ -14762,19 +14762,28 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // arithmetic decides both "should this series even be attempted" and "what
 // window does the insert actually use." Returns null when nothing needs
 // normalizing (a windowless template, or a start already on the hour AND
-// within every admin window rule) — the caller keeps its existing window
-// fields. Returns `{ unplaceable: true }` when the FINAL window (floored, if
-// flooring was needed) fails the SAME validator every other admin write path
-// runs through (assertAdminAppointmentWindow, window-rules.js) — never a
-// narrower reimplementation of just its midnight-overflow case. That
-// narrower check (Codex GitHub r3 P2: never build an out-of-range "24:15"
-// end) covered a start needing flooring whose duration pushed past 24:00,
-// but skipped validation ENTIRELY for a start that was already on the hour —
-// so an already-on-the-hour "21:00" template with a 60-minute duration
-// (ending 22:00, past the 20:00 admin day bound) would insert unchecked
-// (Codex GitHub r6 P2). The caller skips the series (or refuses the insert)
-// on `unplaceable` either way.
-function normalizeTopUpWindow(windowStart, durationMinutes) {
+// a stored windowEnd that already matches the duration-derived one) — the
+// caller keeps its existing window fields. Returns `{ start, end }` — the
+// VALIDATED pair, never the caller's stale stored one — whenever EITHER the
+// start needed flooring OR the stored windowEnd disagrees with the
+// duration-derived end (Codex GitHub r7 P2: a 19:00 start with a 60-minute
+// duration but a stored end of 21:00 — left over from an earlier duration
+// change, or edited independently — used to validate fine as 19:00-20:00
+// (start already on the hour, so the old code returned null) and then
+// insert the stale 19:00-21:00 anyway, since the caller's own window_end was
+// never touched). Returns `{ unplaceable: true }` when the FINAL window
+// (floored start, if flooring was needed, with its duration-derived end)
+// fails the SAME validator every other admin write path runs through
+// (assertAdminAppointmentWindow, window-rules.js) — never a narrower
+// reimplementation of just its midnight-overflow case. That narrower check
+// (Codex GitHub r3 P2: never build an out-of-range "24:15" end) covered a
+// start needing flooring whose duration pushed past 24:00, but skipped
+// validation ENTIRELY for a start that was already on the hour — so an
+// already-on-the-hour "21:00" template with a 60-minute duration (ending
+// 22:00, past the 20:00 admin day bound) would insert unchecked (Codex
+// GitHub r6 P2). The caller skips the series (or refuses the insert) on
+// `unplaceable` either way.
+function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   if (!windowStart) return null;
   const startMin = parseHHMM(windowStart);
   const needsFlooring = startMin != null && startMin % 60 !== 0;
@@ -14785,7 +14794,8 @@ function normalizeTopUpWindow(windowStart, durationMinutes) {
   } catch {
     return { unplaceable: true };
   }
-  if (!needsFlooring) return null;
+  const endStale = windowEnd != null && windowEnd !== '' && parseHHMM(windowEnd) !== parseHHMM(validated.window_end);
+  if (!needsFlooring && !endStale) return null;
   return { start: validated.window_start, end: validated.window_end };
 }
 
@@ -14831,7 +14841,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     let nextWindowStart = parent.window_start;
     let nextWindowEnd = parent.window_end;
     if (opts.normalizeOffHourStart) {
-      const normalized = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes);
+      const normalized = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
       if (normalized) {
         if (normalized.unplaceable) {
           // topUpRecurringSeriesLocked already skips the series upfront on
@@ -15221,12 +15231,55 @@ function topupCustomerSkipReason(customer) {
 // prepaid_method here (the pre-fix version) was wrong: a single ordinary
 // cash/Zelle stamp on one visit (POST /api/admin/schedule/:id/prepaid) has
 // nothing to do with the annual mechanism, and would have marked the WHOLE
-// family annual forever (Codex GitHub r6 P1). OR the customer holds any
-// annual_prepay_terms row still live or undecided — active, renewal_pending
-// (ACTIVE_STATUSES) or payment_pending (an invoice not yet paid;
-// PAYMENT_PENDING_STATUS) — reusing the SAME status vocabulary
-// coveredTermsAsOf already treats as live, never a second hand-picked list
-// that could drift from it.
+// family annual forever (Codex GitHub r6 P1). OR the customer holds a term
+// that still counts as a live prepay footprint — see isCustomerPrepayLive's
+// own comment for why that's TWO predicates, not the single date-only OR
+// r5 shipped (Codex GitHub r7 P1: a refunded/voided/chargeback-lost term
+// could carry a future term_end and so over-excluded under r5, keeping a
+// customer who is genuinely back on ordinary billing skipped until then).
+async function isCustomerPrepayLive(conn, customerId) {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  const { INVOICE_CANCELLED_STATUSES } = require('../services/annual-prepay-invoice-statuses');
+  // (a) Reuse coveredTermsAsOf(conn, null) — the SAME canonical "is this
+  // term's paid coverage still live" query the completion gate
+  // (annualPrepayCoversVisit) and the renewal sweep share, so this can
+  // never drift from what they treat as covered. `null` skips its window
+  // filter (returns every still-validly-paid term regardless of window);
+  // restrict here to THIS customer and to a term whose OWN window hasn't
+  // ended (term_end unset or >= today) — active/renewal_pending, a PAID
+  // payment_pending, and a decided-and-paid term all match, and
+  // coveredTermsAsOf's own invoice/payment guards already exclude a
+  // voided, cancelled, refunded or chargeback-lost one. Called through the
+  // module object, not destructured, so a test can jest.spyOn it directly
+  // — the fake connection builder used elsewhere in this suite has no
+  // leftJoin to model the real query's join.
+  const coveredNow = await AnnualPrepayRenewals.coveredTermsAsOf(conn, null)
+    .where('t.customer_id', customerId)
+    .where(function inWindow() {
+      this.whereNull('t.term_end').orWhere('t.term_end', '>=', etDateString());
+    })
+    .first('t.id');
+  if (coveredNow) return true;
+  // (b) A payment_pending term whose invoice is NOT cancelled/void/
+  // refunded — still genuinely awaiting payment, so coveredTermsAsOf's own
+  // "actually PAID" gate correctly leaves it out of (a), but it is still
+  // expected to activate and seed its own coverage rows
+  // (ensureCoverageRowsForTerm) once paid. Top-up must not race that —
+  // booking a batch of visits now that the activation would then need to
+  // reconcile with. A pending term whose invoice WAS voided/cancelled/
+  // refunded is genuinely dead (never activates) and does not exclude.
+  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const pendingUnresolved = await conn('annual_prepay_terms as t')
+    .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.customer_id', customerId)
+    .where('t.status', AnnualPrepayRenewals.PAYMENT_PENDING_STATUS)
+    .whereRaw(
+      `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
+      cancelledStatuses,
+    )
+    .first('t.id');
+  return !!pendingUnresolved;
+}
 async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
   if (cols.annual_prepay_term_id || cols.prepaid_method) {
     const stampedRow = await conn('scheduled_services')
@@ -15240,21 +15293,7 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
       .first('id');
     if (stampedRow) return true;
   }
-  const { ACTIVE_STATUSES, PAYMENT_PENDING_STATUS } = require('../services/annual-prepay-renewals');
-  // Any term still inside its window counts, WHATEVER its status: a decided
-  // term (renewed / switch_plan / cancelled-with-decision) keeps providing
-  // paid coverage until term_end in coveredTermsAsOf, so a status list alone
-  // misses real prepay footprints (Codex GitHub r5 P1). v1 errs wide — a
-  // customer excluded here is simply left exactly as they are today.
-  const liveTerm = await conn('annual_prepay_terms')
-    .where({ customer_id: parent.customer_id })
-    .where(function stillCovering() {
-      this.whereIn('status', [...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS])
-        .orWhereNull('term_end')
-        .orWhere('term_end', '>=', etDateString());
-    })
-    .first('id');
-  return !!liveTerm;
+  return isCustomerPrepayLive(conn, parent.customer_id);
 }
 
 // A held family (lawn_care / mosquito / tree_shrub — cancellation-
@@ -15404,12 +15443,12 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   const seriesSkip = await topupSeriesSkipReason(conn, parent, parentId, cols);
   if (seriesSkip) return { spawnedVisits: [], skipped: seriesSkip };
 
-  // Pure/no-DB — depends only on parent.window_start + duration, so it's
-  // the SAME verdict extendSeriesOnceLocked's own per-insert normalization
-  // would reach on every attempt this run; check once upfront rather than
-  // discover it 24 times (Codex GitHub r3 P2 — never build an out-of-range
-  // "24:15" end time).
-  if (normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes)?.unplaceable) {
+  // Pure/no-DB — depends only on parent.window_start/window_end/duration,
+  // so it's the SAME verdict extendSeriesOnceLocked's own per-insert
+  // normalization would reach on every attempt this run; check once
+  // upfront rather than discover it 24 times (Codex GitHub r3 P2 — never
+  // build an out-of-range "24:15" end time).
+  if (normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end)?.unplaceable) {
     return { spawnedVisits: [], skipped: 'window_unplaceable' };
   }
 
@@ -21245,6 +21284,7 @@ router._test = {
   topUpRecurringSeriesLocked,
   topupSeriesSkipReason,
   isAnnualPrepaySeries,
+  isCustomerPrepayLive,
   isFamilyOnPlanHold,
   normalizeTopUpWindow,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,

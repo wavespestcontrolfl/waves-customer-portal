@@ -48,6 +48,16 @@ jest.mock('../services/cancellation-processor', () => ({
   ...jest.requireActual('../services/cancellation-processor'),
   familyOfServiceRow: jest.fn(() => null),
 }));
+// isCustomerPrepayLive (Codex GitHub r7 P1) calls coveredTermsAsOf through
+// the module object at call time specifically so it can be jest.spyOn'd/
+// mocked like this — the fake connection builder (makeConn, below) has no
+// leftJoin to model that query's real SQL shape, and re-deriving the exact
+// same canonical predicate a second time in this suite would risk drifting
+// from it. Everything else on the module stays real.
+jest.mock('../services/annual-prepay-renewals', () => ({
+  ...jest.requireActual('../services/annual-prepay-renewals'),
+  coveredTermsAsOf: jest.fn(),
+}));
 
 const adminScheduleRouter = require('../routes/admin-schedule');
 const {
@@ -56,14 +66,28 @@ const {
 const AppointmentReminders = require('../services/appointment-reminders');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { familyOfServiceRow } = require('../services/cancellation-processor');
-const { ACTIVE_STATUSES, PAYMENT_PENDING_STATUS } = require('../services/annual-prepay-renewals');
+const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+const { PAYMENT_PENDING_STATUS } = AnnualPrepayRenewals;
 const { ANNUAL_PREPAY_METHOD } = require('../services/prepaid-series');
+
+// A minimal chainable stand-in for coveredTermsAsOf's real knex query
+// builder — isCustomerPrepayLive only ever calls .where(...) (twice, one a
+// nested predicate function it never invokes on this stub) and .first(...)
+// on the result, so that's all this needs to support.
+function chainableCoveredTermsAsOf(matchRow) {
+  const chain = { where: () => chain, first: () => Promise.resolve(matchRow) };
+  return chain;
+}
+
 beforeEach(() => {
   findConflictingVisits.mockReset().mockResolvedValue([]);
   // Default: no family at all (matches every fixture that never sets
   // stampedAnnualTermId/stampedPrepaidMethod's own family concerns) — a
   // series with no resolvable WaveGuard family can never be plan-held.
   familyOfServiceRow.mockReset().mockReturnValue(null);
+  // Default: no covered term for anyone — every OTHER describe block's
+  // fixtures are unaffected by the v1 scope cut unless they opt in.
+  AnnualPrepayRenewals.coveredTermsAsOf.mockReset().mockReturnValue(chainableCoveredTermsAsOf(undefined));
 });
 const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
 const { etDateString } = require('../utils/datetime-et');
@@ -103,7 +127,7 @@ function makeConn(handler, opts = {}) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'forShare', 'forUpdate', 'distinct', 'andWhere']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'forShare', 'forUpdate', 'distinct', 'andWhere', 'leftJoin']) {
       b[m] = record(m);
     }
     b.modify = (fn) => { fn(b); return b; };
@@ -155,22 +179,33 @@ function makeConn(handler, opts = {}) {
 // as the new "latest" on the next iteration — the real anchor-chaining
 // behavior extendSeriesOnceLocked relies on.
 //
-// `stampedAnnualTermId` / `stampedPrepaidMethod` / `customerLiveTerm`:
-// control isAnnualPrepaySeries' two DB probes (a stamped scheduled_services
-// row anywhere in the series — annual_prepay_term_id set, and/or
-// prepaid_method set to a specific value, evaluated the SAME way the
-// production query's own conditional OR does; any live/undecided
-// annual_prepay_terms row for the customer) — all default to "no prepay
-// footprint" so every OTHER describe block's fixtures are unaffected by
-// the v1 scope cut. `activeHold`: whether a plan_holds row matching
-// isFamilyOnPlanHold's own query (customer/family/status='active'/
-// resume_on > today) exists — the family itself is controlled per-test via
-// the mocked familyOfServiceRow (cancellation-processor.js), not this flag.
+// `stampedAnnualTermId` / `stampedPrepaidMethod`: control isAnnualPrepaySeries'
+// own stamped-row probe (a stamped scheduled_services row anywhere in the
+// series — annual_prepay_term_id set, and/or prepaid_method set to a
+// specific value, evaluated the SAME way the production query's own
+// conditional OR does). `customerCoveredTerm` / `customerPendingUnresolvedTerm`:
+// control isCustomerPrepayLive's two customer-wide probes — see that
+// function's own comment. All default to "no prepay footprint" so every
+// OTHER describe block's fixtures are unaffected by the v1 scope cut.
+// `activeHold`: whether a plan_holds row matching isFamilyOnPlanHold's own
+// query (customer/family/status='active'/resume_on > today) exists — the
+// family itself is controlled per-test via the mocked familyOfServiceRow
+// (cancellation-processor.js), not this flag.
 function topupScenario({
   parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
-  colsOverrides = {}, stampedAnnualTermId = false, stampedPrepaidMethod = null, customerLiveTerm = false,
+  colsOverrides = {}, stampedAnnualTermId = false, stampedPrepaidMethod = null,
+  customerCoveredTerm = false, customerPendingUnresolvedTerm = false,
   captureCustomerCalls = null, activeHold = false,
 } = {}) {
+  // isCustomerPrepayLive's two customer-wide probes (Codex GitHub r7 P1):
+  // (a) coveredTermsAsOf(conn, null) — a still-validly-paid term (active/
+  // renewal_pending/paid-pending/decided-and-paid), refund/void/chargeback
+  // already excluded by that canonical query itself; (b) a payment_pending
+  // term whose invoice ISN'T cancelled/void/refunded — not yet paid (so (a)
+  // correctly excludes it) but still expected to activate.
+  AnnualPrepayRenewals.coveredTermsAsOf.mockReturnValue(
+    chainableCoveredTermsAsOf(customerCoveredTerm ? { id: 'covered-term' } : undefined),
+  );
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'weekly',
     recurring_ongoing: true, scheduled_date: daysOut(0),
@@ -275,9 +310,11 @@ function topupScenario({
         return customer;
       }
     }
-    if (table === 'annual_prepay_terms') {
-      // isAnnualPrepaySeries' customer-wide live/undecided-term probe.
-      if (op === 'first') return customerLiveTerm ? { id: 'live-term' } : undefined;
+    if (table === 'annual_prepay_terms as t') {
+      // isCustomerPrepayLive's own (b) probe — a payment_pending term whose
+      // invoice isn't cancelled/void/refunded. (a) goes through the mocked
+      // coveredTermsAsOf instead, never this fake connection.
+      if (op === 'first') return customerPendingUnresolvedTerm ? { id: 'pending-term' } : undefined;
     }
     if (table === 'services') {
       // isFamilyOnPlanHold's service_key/name lookup — irrelevant to the
@@ -433,46 +470,67 @@ describe('topUpRecurringSeriesLocked — annual-prepay scope cut v1 (Codex GitHu
     expect(inserted.length).toBeGreaterThan(0);
   });
 
-  test('skips a series whose customer holds ANY live/undecided annual_prepay_terms row, even with no scheduled_services link at all', async () => {
-    // No annual_prepay_term_id/prepaid_method column even in scope — the
-    // customer-level check runs independently of the series-level one.
-    const { conn, inserted } = topupScenario({ customerLiveTerm: true });
+  test('a covered decided term (renewed / switch_plan / a decided lapse still riding out its paid window) excludes', async () => {
+    // coveredTermsAsOf's own decidedCoveredAndPaid branch is what makes this
+    // count — it's mocked here to return a match, so this test pins
+    // isCustomerPrepayLive's OWN behavior (treats a coveredTermsAsOf hit as
+    // exclusion), not coveredTermsAsOf's internal status logic, which has
+    // its own dedicated coverage.
+    const { conn, inserted } = topupScenario({ customerCoveredTerm: true });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
     expect(result.skipped).toBe('annual_prepay_series');
     expect(inserted).toHaveLength(0);
   });
 
-  test('queries the exact live/undecided status vocabulary — reused from annual-prepay-renewals.js, never a second hand-picked list', async () => {
-    const capturedCalls = [];
-    const { customer, parent } = topupScenario();
-    const conn = makeConn(({ table, calls, op }) => {
-      if (table === 'scheduled_services' && op === 'columnInfo') return BASE_COLS;
-      if (table === 'scheduled_services' && op === 'first') {
-        const firstCall = calls.find((c) => c[0] === 'first');
-        if (!firstCall[1]) return parent;
-        return null;
-      }
-      if (table === 'customers' && op === 'first') return customer;
-      if (table === 'annual_prepay_terms') {
-        if (op === 'first') { capturedCalls.push(calls); return undefined; }
-      }
-      return null;
+  test('calls coveredTermsAsOf(conn, null) and restricts it to this customer + a term whose window has not ended (Codex GitHub r7 P1)', async () => {
+    const { conn, customer } = topupScenario();
+    const whereCalls = [];
+    AnnualPrepayRenewals.coveredTermsAsOf.mockImplementationOnce(() => {
+      const chain = {
+        where(...args) { whereCalls.push(args); return chain; },
+        first: () => Promise.resolve(undefined),
+      };
+      return chain;
     });
     await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    expect(capturedCalls).toHaveLength(1);
-    const coveringFn = capturedCalls[0].find((c) => c[0] === 'whereFn');
-    expect(coveringFn).toBeDefined();
-    const nested = coveringFn[1];
-    const whereInCall = nested.find((c) => c[0] === 'whereIn');
-    expect(whereInCall).toBeDefined();
-    expect(whereInCall[2].slice().sort()).toEqual([...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS].sort());
+    expect(AnnualPrepayRenewals.coveredTermsAsOf).toHaveBeenCalledWith(conn, null);
+    expect(whereCalls[0]).toEqual(['t.customer_id', customer.id]);
+    // The second .where() is the in-window predicate function — invoke it
+    // against a spy to confirm it expresses "term_end unset or >= today",
+    // never a second hand-picked window rule.
+    const inWindowFn = whereCalls[1][0];
+    const spy = { calls: [], whereNull(...a) { this.calls.push(['whereNull', ...a]); return this; }, orWhere(...a) { this.calls.push(['orWhere', ...a]); return this; } };
+    inWindowFn.call(spy, spy);
+    expect(spy.calls).toContainEqual(['whereNull', 't.term_end']);
+    expect(spy.calls).toContainEqual(['orWhere', 't.term_end', '>=', etDateString()]);
   });
 
-  test('also counts a DECIDED term still inside its window (renewed / switch_plan / cancelled-with-decision), whatever its status (Codex GitHub r5 P1)', async () => {
-    // coveredTermsAsOf keeps decided terms covering until term_end, so the
-    // status list alone would let an unstamped series of a still-covered
-    // customer through. The exclusion also matches any term whose term_end
-    // is unset or today-or-later.
+  test('a refunded, voided or chargeback-lost term (coveredTermsAsOf itself excludes it) does NOT exclude, even with a future term_end (Codex GitHub r7 P1)', async () => {
+    // The r5 fix's date-only OR (term_end unset or >= today, whatever the
+    // status) over-excluded exactly this case: a refunded/voided term can
+    // still carry a future term_end even though the customer is genuinely
+    // back on ordinary billing. coveredTermsAsOf's own refund/void/
+    // chargeback guards already exclude it, so mocking it to return nothing
+    // (as it would for a real refunded term) must not exclude here.
+    const { conn, inserted } = topupScenario({ customerCoveredTerm: false, customerPendingUnresolvedTerm: false });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+  });
+
+  test('an unpaid payment_pending term whose invoice is still live excludes — not yet paid, but still expected to activate (Codex GitHub r7 P1)', async () => {
+    // coveredTermsAsOf itself correctly excludes an AS-YET-UNPAID
+    // payment_pending term (its own paidPending branch requires the invoice
+    // to already be paid) — this is the SEPARATE branch (b) that still
+    // excludes it, since the term is expected to activate and seed its own
+    // coverage rows once paid, and top-up must not race that.
+    const { conn, inserted } = topupScenario({ customerCoveredTerm: false, customerPendingUnresolvedTerm: true });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('annual_prepay_series');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('the (b) probe filters on the canonical PAYMENT_PENDING_STATUS constant and excludes a cancelled/void/refunded invoice, never a second hand-picked list', async () => {
     const capturedCalls = [];
     const { customer, parent } = topupScenario();
     const conn = makeConn(({ table, calls, op }) => {
@@ -482,14 +540,22 @@ describe('topUpRecurringSeriesLocked — annual-prepay scope cut v1 (Codex GitHu
         return firstCall[1] ? null : parent;
       }
       if (table === 'customers' && op === 'first') return customer;
-      if (table === 'annual_prepay_terms' && op === 'first') { capturedCalls.push(calls); return { id: 'renewed-term' }; }
+      if (table === 'annual_prepay_terms as t' && op === 'first') { capturedCalls.push(calls); return undefined; }
       return null;
     });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(capturedCalls).toHaveLength(1);
+    expect(capturedCalls[0]).toContainEqual(['where', 't.status', PAYMENT_PENDING_STATUS]);
+    const raw = capturedCalls[0].find((c) => c[0] === 'whereRaw');
+    expect(raw).toBeDefined();
+    expect(raw[2]).toEqual(expect.arrayContaining(['void', 'cancelled', 'canceled', 'refunded']));
+  });
+
+  test('a payment_pending term whose invoice was voided does NOT exclude — genuinely dead, never activates', async () => {
+    const { conn, inserted } = topupScenario({ customerCoveredTerm: false, customerPendingUnresolvedTerm: false });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
-    expect(result.skipped).toBe('annual_prepay_series');
-    const nested = capturedCalls[0].find((c) => c[0] === 'whereFn')[1];
-    expect(nested).toContainEqual(['orWhereNull', 'term_end']);
-    expect(nested).toContainEqual(['orWhere', 'term_end', '>=', etDateString()]);
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
   });
 
   test('a series with no prepay stamp anywhere and no live customer term proceeds normally', async () => {
@@ -700,6 +766,45 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
     for (const row of inserted) {
       expect(row.window_start).toBeFalsy();
       expect(row.window_end).toBeFalsy();
+    }
+  });
+
+  test('persists the duration-derived end when the stored window_end is stale, even though the start needed no flooring (Codex GitHub r7 P2)', async () => {
+    // 19:00 is already on the hour (no flooring needed), but the stored
+    // window_end (21:00) disagrees with the 60-minute duration's own
+    // derived end (20:00) — left over from an earlier duration edit, or
+    // edited independently. The pre-fix version returned null here (nothing
+    // needed flooring) and the caller kept the STALE stored end, so
+    // assertAdminAppointmentWindow validated 19:00-20:00 while the actual
+    // insert used 19:00-21:00 — a window nobody validated.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '19:00', window_end: '21:00',
+        estimated_duration_minutes: 60,
+      },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+    for (const row of inserted) {
+      expect(row.window_start).toBe('19:00');
+      expect(row.window_end).toBe('20:00');
+    }
+  });
+
+  test('a consistent on-the-hour window (stored end matches the duration-derived one) passes through unchanged', async () => {
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00',
+        estimated_duration_minutes: 60,
+      },
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 14 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+    for (const row of inserted) {
+      expect(row.window_start).toBe('09:00');
+      expect(row.window_end).toBe('10:00');
     }
   });
 
