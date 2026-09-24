@@ -4341,23 +4341,40 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
     // cancellation-processor.js write (disarmCustomerBillingFields +
     // disarmPaymentRails), so a churn label can never coexist with a row
     // the dues cron, or a saved card's autopay flag, would still select.
-    if (stage === 'churned') {
-      const decision = await LifecycleGuard.churnGuardForRow(db, req.params.id);
-      if (decision.blocked) {
-        return res.status(409).json({
-          error: 'customer_still_billing_or_scheduled',
-          message: decision.liveVisit
-            ? `${LifecycleGuard.describeLiveVisit(decision.liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
-            : decision.liveTerm
-              ? 'This customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.'
-              : `This customer ${decision.error}.`,
-          liveVisit: decision.liveVisit,
-          liveTerm: decision.liveTerm,
-          pendingPrepayInvoice: decision.pendingPrepayInvoice,
-        });
-      }
+    // The guard/disarm and the stage write commit TOGETHER under the row
+    // lock (pre-push audit P1 on 1e776e385e): the disarm is a real write,
+    // and a refusal or a failed stage write must roll it back rather than
+    // leave a still-labelled row with billing disabled. The interaction
+    // note below is deliberately outside — it is a log line, not lifecycle
+    // state, and must not be able to undo a committed churn.
+    try {
+      await db.transaction(async (trx) => {
+        await trx('customers').where({ id: req.params.id }).forUpdate().first();
+        if (stage === 'churned') {
+          const decision = await LifecycleGuard.churnGuardForRow(trx, req.params.id);
+          if (decision.blocked) {
+            const err = new Error('customer_still_billing_or_scheduled');
+            err.churnBlocked = true;
+            err.payload = {
+              error: 'customer_still_billing_or_scheduled',
+              message: decision.liveVisit
+                ? `${LifecycleGuard.describeLiveVisit(decision.liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+                : decision.liveTerm
+                  ? 'This customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.'
+                  : `This customer ${decision.error}.`,
+              liveVisit: decision.liveVisit,
+              liveTerm: decision.liveTerm,
+              pendingPrepayInvoice: decision.pendingPrepayInvoice,
+            };
+            throw err;
+          }
+        }
+        await trx('customers').where({ id: req.params.id }).update(stageUpdates);
+      });
+    } catch (e) {
+      if (e && e.churnBlocked) return res.status(409).json(e.payload);
+      throw e;
     }
-    await db('customers').where({ id: req.params.id }).update(stageUpdates);
     await db('customer_interactions').insert({
       customer_id: req.params.id, interaction_type: 'note',
       subject: `Stage changed: ${oldStage} → ${stage}`,
@@ -4540,20 +4557,10 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     // winds billing down through the SAME canonical write the churn path
     // uses (disarmCustomerBillingFields + disarmPaymentRails) — unconditional
     // and idempotent, so a repeated archive click self-heals too.
-    const churnDecision = await LifecycleGuard.churnGuardForRow(db, req.params.id);
-    if (churnDecision.blocked) {
-      return res.status(409).json({
-        error: 'customer_still_billing_or_scheduled',
-        message: churnDecision.liveVisit
-          ? `${LifecycleGuard.describeLiveVisit(churnDecision.liveVisit)}. Cancel the plan (visits, prepay term and autopay) before archiving.`
-          : churnDecision.liveTerm
-            ? 'This customer still has an active prepay term. Cancel the plan before archiving.'
-            : `This customer ${churnDecision.error} before archiving.`,
-        liveVisit: churnDecision.liveVisit,
-        liveTerm: churnDecision.liveTerm,
-        pendingPrepayInvoice: churnDecision.pendingPrepayInvoice,
-      });
-    }
+    // The guard/disarm runs INSIDE the archive transaction below, under the
+    // row lock (pre-push audit P1 on 1e776e385e) — a relink or audit
+    // failure rolls the disarm back with deleted_at, never leaving an
+    // un-archived row with billing disabled.
 
     // Archive + newsletter relink + critical audit are one transaction: the
     // subscriber link must move to the live same-email twin (if any) in the
@@ -4564,17 +4571,41 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     // customer's current email, and those rows must move too (each to the
     // twin of its OWN email).
     const { relinkSubscribersFromArchivedCustomer } = require('../services/newsletter-subscribers');
-    const relink = await db.transaction(async (trx) => {
-      // Billing was already wound down by churnGuardForRow above — only
-      // deleted_at is left to stamp here.
-      await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
-      const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
-      await auditCustomerMutation(req, 'customer.archive', req.params.id, {
-        previousDeletedAt: customer.deleted_at || null,
-        newsletterRelinked: result.relinked,
-      }, true, trx);
-      return result;
-    });
+    let relink;
+    try {
+      relink = await db.transaction(async (trx) => {
+        await trx('customers').where({ id: req.params.id }).forUpdate().first();
+        const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id);
+        if (churnDecision.blocked) {
+          const err = new Error('customer_still_billing_or_scheduled');
+          err.churnBlocked = true;
+          err.payload = {
+            error: 'customer_still_billing_or_scheduled',
+            message: churnDecision.liveVisit
+              ? `${LifecycleGuard.describeLiveVisit(churnDecision.liveVisit)}. Cancel the plan (visits, prepay term and autopay) before archiving.`
+              : churnDecision.liveTerm
+                ? 'This customer still has an active prepay term. Cancel the plan before archiving.'
+                : `This customer ${churnDecision.error} before archiving.`,
+            liveVisit: churnDecision.liveVisit,
+            liveTerm: churnDecision.liveTerm,
+            pendingPrepayInvoice: churnDecision.pendingPrepayInvoice,
+          };
+          throw err;
+        }
+        // Billing was just wound down by churnGuardForRow on this same
+        // transaction — only deleted_at is left to stamp here.
+        await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
+        const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
+        await auditCustomerMutation(req, 'customer.archive', req.params.id, {
+          previousDeletedAt: customer.deleted_at || null,
+          newsletterRelinked: result.relinked,
+        }, true, trx);
+        return result;
+      });
+    } catch (e) {
+      if (e && e.churnBlocked) return res.status(409).json(e.payload);
+      throw e;
+    }
     logger.info(`[customers] Soft-deleted customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -4605,6 +4636,18 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
       // allowance (isCancelledCustomerRow) is keyed on exactly
       // active=false + churned — re-arming active there would turn a
       // cancelled customer's read-only portal into full admission.
+      //
+      // Disarm FIRST, on this same transaction (pre-push audit P0 on
+      // 1e776e385e): rows archived BEFORE this change never received the
+      // archive-time disarm, so a legacy archived monthly member can still
+      // carry autopay_enabled=true / next_charge_date / an Auto Pay card /
+      // an armed retry — re-arming active on that row would put it straight
+      // back into the dues cron's charge set. The canonical
+      // cancellation-processor.js disarm is idempotent, so a row this
+      // change DID archive is a no-op here.
+      const { disarmCustomerBillingFields, disarmPaymentRails } = require('../services/cancellation-processor');
+      await disarmCustomerBillingFields(trx, req.params.id);
+      await disarmPaymentRails(trx, req.params.id);
       await trx('customers').where({ id: req.params.id }).update({
         deleted_at: null,
         active: customer.pipeline_stage !== 'churned',

@@ -1168,6 +1168,11 @@ async function updateCustomer(customerId, updates, expectedVersion) {
   if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
     return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
   }
+  // `active` is an IB-updatable field: a churn write must never let a
+  // payload's active=true ride over churnGuardForRow's disarm in the same
+  // UPDATE (pre-push audit P1 on 1e776e385e) — cancelled-account admission
+  // (auth.js isCancelledCustomerRow) is keyed on active=false + churned.
+  if (clean.pipeline_stage === 'churned') delete clean.active;
   // ADMIN-BUG-R10 (round 3): the churn guard + billing wind-down run INSIDE
   // the transaction below, after the row lock and the expectedVersion
   // check — churnGuardForRow's own disarm write bumps customers.updated_at,
@@ -1458,6 +1463,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
   if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
     return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
   }
+  // `active` is an IB-updatable field: a churn write must never let a
+  // payload's active=true ride over churnGuardForRow's disarm in the same
+  // UPDATE (pre-push audit P1 on 1e776e385e) — cancelled-account admission
+  // (auth.js isCancelledCustomerRow) is keyed on active=false + churned.
+  if (clean.pipeline_stage === 'churned') delete clean.active;
   if (clean.pipeline_stage) {
     // IS DISTINCT FROM, not <>: legacy NULL-stage rows must still get the
     // audit stamp (NULL <> x is NULL in Postgres, silently skipping them).

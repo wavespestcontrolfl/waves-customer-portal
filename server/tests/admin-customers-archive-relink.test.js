@@ -41,6 +41,9 @@ jest.mock('../models/db', () => {
     // terms; this fixture has none, so a no-op chain resolving to an
     // object with no .length (→ !pending.length → true → null) is correct.
     q.select = () => q;
+    // The archive/restore/stage transactions take the customers row lock
+    // before the guard (pre-push audit on 1e776e385e).
+    q.forUpdate = () => q;
     q.first = async () => (table === 'customers' ? mockState.customer : null);
     q.update = async (patch) => { mockState.updates.push({ table, viaTrx, where: { ...q._where }, patch }); return 1; };
     return q;
@@ -80,15 +83,17 @@ describe('DELETE /admin/customers/:id (archive)', () => {
       await expect(res.json()).resolves.toEqual({ success: true });
     });
     expect(db.transaction).toHaveBeenCalledTimes(1);
-    // ADMIN-BUG-R14 (round 3): churnGuardForRow now runs BEFORE this
-    // transaction (bare db, not trx) and writes the canonical billing
+    // ADMIN-BUG-R14 (round 3): churnGuardForRow runs INSIDE this
+    // transaction, under the row lock, and writes the canonical billing
     // disarm (customers active/autopay_enabled/next_charge_date,
-    // payment_methods.autopay_enabled, payments.next_retry_at) — this test
-    // only pins the TRANSACTIONAL write (deleted_at), so it checks the
-    // array CONTAINS that entry rather than an exact full match.
-    expect(mockState.updates).toEqual(expect.arrayContaining([
-      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ deleted_at: expect.any(Date) }) }),
-    ]));
+    // payment_methods.autopay_enabled, payments.next_retry_at) on the trx
+    // BEFORE deleted_at is stamped — every write is transactional.
+    expect(mockState.updates).toEqual([
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ active: false, autopay_enabled: false, next_charge_date: null }) }),
+      expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
+      expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
+    ]);
     // By id: a subscriber whose stored email drifted from customer.email is
     // still found (it carries the archived customer_id) and moves to the twin
     // of its own email — the email-keyed helper would have missed it.
@@ -123,11 +128,15 @@ describe('PATCH /admin/customers/:id/restore', () => {
     });
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(mockState.updates).toEqual([
-      // ADMIN-BUG-R14 (round 3): restore also re-establishes active=true —
-      // archive now winds it down as part of the billing disarm, and a
-      // restored customer must read active again (autopay_enabled/
-      // next_charge_date deliberately stay wound down; the office re-arms
-      // billing explicitly).
+      // ADMIN-BUG-R14 (round 3): restore disarms billing FIRST (a legacy
+      // row archived before the archive-time disarm existed may still be
+      // billing-armed), then re-establishes active=true — a restored
+      // customer must read active again while autopay_enabled/
+      // next_charge_date and the payment rails stay wound down; the office
+      // re-arms billing explicitly.
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ active: false, autopay_enabled: false, next_charge_date: null }) }),
+      expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
+      expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: null, active: true } }),
     ]);
     expect(relinkSubscribersForEmail).toHaveBeenCalledWith(mockTrx, 'Household@Example.com');
