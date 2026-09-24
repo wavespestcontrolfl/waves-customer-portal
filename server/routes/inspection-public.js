@@ -814,14 +814,44 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
       // resolveEligibility's own docblock.
       const eligibility = await resolveEligibility(trx, freshLead, matched, { includeRescheduleUrl: false });
       if (eligibility.state !== 'ok') return { eligibility };
-      const matchedLocation = matched.latitude != null && matched.longitude != null
-        ? { lat: parseFloat(matched.latitude), lng: parseFloat(matched.longitude) }
-        : resolved.location;
-      return { customer: matched, location: matchedLocation };
+      if (matched.latitude != null && matched.longitude != null) {
+        return { customer: matched, location: { lat: parseFloat(matched.latitude), lng: parseFloat(matched.longitude) } };
+      }
+      // A legacy profile with no stored coordinates gets the validated ones
+      // (Codex #4737 r3 P1): createSelfBooking reloads the customer's own
+      // coordinates for its commit-time travel check, so leaving them null
+      // would run that check locationless. Undone if the booking fails.
+      const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
+      await trx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
+      return {
+        customer: { ...matched, ...after },
+        location: resolved.location,
+        addressWrite: { customerId: matched.id, before: { latitude: null, longitude: null }, after },
+      };
     }
   }
   const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
   return { customer: created };
+}
+
+// Puts back a customer address/coordinate write phase 1 made, when the
+// booking it was for did not happen (Codex #4737 r3 P1). Guarded: only a row
+// still holding exactly the values phase 1 wrote is reverted, so a newer
+// edit (the office, another commit) is never clobbered. Best-effort — logged,
+// never thrown over the booking's own answer.
+async function undoAddressWrite(addressWrite, leadId) {
+  if (!addressWrite) return;
+  try {
+    const guard = { id: addressWrite.customerId };
+    const q = db('customers').where(guard);
+    for (const [field, value] of Object.entries(addressWrite.after)) {
+      if (value == null) q.whereNull(field);
+      else q.where(field, value);
+    }
+    await q.update({ ...addressWrite.before, updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[inspection-public] address write-back undo failed for lead ${leadId}: ${err.message}`);
+  }
 }
 
 router.get('/:token', async (req, res, next) => {
@@ -1106,6 +1136,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
       let provisioned = freshCustRow;
       let location = resolved.location;
+      // Any customer address/coordinate write phase 1 makes, so a booking
+      // that then fails can undo it (undoAddressWrite).
+      let addressWrite = null;
 
       if (!freshCustRow) {
         // ensureCustomerAccount may resolve an EXISTING customer by phone
@@ -1118,6 +1151,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         const linkResult = await resolveOrLinkCustomerForLead(trx, freshLead, resolved, verified);
         if (linkResult.eligibility) return { eligibility: linkResult.eligibility };
         provisioned = linkResult.customer;
+        if (linkResult.addressWrite) addressWrite = linkResult.addressWrite;
         // A reused (verified) profile's OWN stored location, when it has
         // one — never the lead's pre-lock resolved.location — so the
         // post-transaction "location differs from pre-lock" re-check below
@@ -1153,7 +1187,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           // geocode and a lead/supplied fallback won) — write the
           // validated resolution back so a missing/bad address isn't
           // asked for again (this file's own contract — see the header).
-          await trx('customers').where({ id: freshCustRow.id }).update({
+          const after = {
             address_line1: resolved.address.line1,
             address_line2: resolved.address.line2,
             city: resolved.address.city,
@@ -1161,8 +1195,15 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             zip: resolved.address.zip,
             latitude: resolved.location.lat,
             longitude: resolved.location.lng,
-            updated_at: new Date(),
-          });
+          };
+          await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
+          // Recorded so a failed booking can put the row back (Codex #4737
+          // r3 P1 — the address stays ephemeral until a visit commits).
+          addressWrite = {
+            customerId: freshCustRow.id,
+            before: Object.fromEntries(Object.keys(after).map((f) => [f, freshCustRow[f] ?? null])),
+            after,
+          };
           provisioned = {
             ...freshCustRow,
             address_line1: resolved.address.line1, address_line2: resolved.address.line2,
@@ -1175,7 +1216,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         // write back; `location` stays resolved.location, set above.
       }
 
-      return { custRow: provisioned, location };
+      return { custRow: provisioned, location, addressWrite };
     });
 
     if (phase1.eligibility) {
@@ -1263,7 +1304,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // same `{ state: 'already_booked', visit, rescheduleUrl }` shape GET
     // returns, resolved against whichever visit survived.
     const { createSelfBooking } = booking._internals;
-    const result = await createSelfBooking({
+    let result;
+    try {
+      result = await createSelfBooking({
       slot_date: date,
       slot_start: bookingSlot.start_time,
       slot_end: bookingSlot.end_time,
@@ -1287,9 +1330,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         isCallback: false,
         alertLabel: '🔁 Free consultation self-booked:',
       },
-    });
+      });
+    } catch (err) {
+      await undoAddressWrite(phase1.addressWrite, lead.id);
+      throw err;
+    }
 
     if (!result.ok) {
+      // No visit from THIS request — phase 1's address write-back must not
+      // outlive it (Codex #4737 r3 P1).
+      await undoAddressWrite(phase1.addressWrite, lead.id);
       if (result.code === 'ALREADY_BOOKED') {
         // The atomic lane dedupe inside createSelfBooking's own insert
         // transaction caught a duplicate — resolve and return the SAME

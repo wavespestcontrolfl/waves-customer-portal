@@ -68,6 +68,10 @@ async function subscribeOrResubscribe({
   strict = true,
   linkCustomer = true,
   requireConfirmation = false,
+  // An operator's explicit single add (admin-newsletter.js POST
+  // /subscribers) may promote a waitlist row straight to active; bulk and
+  // automatic trusted flows never do (Codex #4737 r3 P2).
+  promoteWaitlist = false,
 } = {}) {
   if (!email) {
     const err = new Error('email required');
@@ -143,7 +147,7 @@ async function subscribeOrResubscribe({
       // newsletter consent, so only the subscriber's own double-opt-in
       // brings it into sends — the same rule the inactive branch below
       // applies to sunset rows.
-      if (!requireConfirmation) {
+      if (!requireConfirmation && !promoteWaitlist) {
         return { subscriber: existing, action: 'skipped_waitlist' };
       }
       const updates = {
@@ -151,14 +155,19 @@ async function subscribeOrResubscribe({
         first_name: firstName !== null ? firstName : existing.first_name,
         last_name: lastName !== null ? lastName : existing.last_name,
         updated_at: new Date(),
-        status: 'pending',
-        confirmation_sent_at: new Date(),
-        confirmation_token: db.raw('gen_random_uuid()'),
       };
+      if (requireConfirmation) {
+        updates.status = 'pending';
+        updates.confirmation_sent_at = new Date();
+        updates.confirmation_token = db.raw('gen_random_uuid()');
+      } else {
+        updates.status = 'active';
+        updates.confirmed_at = new Date();
+      }
       await db('newsletter_subscribers').where({ id: existing.id }).update(updates);
       if (linkCustomer) await linkToCustomer(lc);
       const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
-      return { subscriber: fresh, action: 'confirmation_sent' };
+      return { subscriber: fresh, action: requireConfirmation ? 'confirmation_sent' : 'resubscribed' };
     }
 
     if (existing.status === 'unsubscribed' || existing.status === 'inactive') {

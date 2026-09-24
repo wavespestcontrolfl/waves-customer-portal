@@ -111,6 +111,18 @@ describe('subscribeOrResubscribe — existing "waitlist" row (P1 :1087)', () => 
   });
 });
 
+describe('Codex #4737 r3 P2: an explicit admin add may promote a waitlist row', () => {
+  test('promoteWaitlist:true with requireConfirmation:false → active', async () => {
+    firstResults.newsletter_subscribers = { ...WAITLIST_ROW };
+    const result = await subscribeOrResubscribe({
+      email: 'pat@example.com', source: 'admin_manual', requireConfirmation: false, linkCustomer: false, promoteWaitlist: true,
+    });
+    expect(result.action).toBe('resubscribed');
+    const update = updateCalls.find((c) => c.table === 'newsletter_subscribers');
+    expect(update.payload.status).toBe('active');
+  });
+});
+
 describe('joining the waitlist alone sends no email (unaffected by the fix)', () => {
   test('purgeStalePendingSubscribers — the one proactive sweep in this module — is blind to a "waitlist" row: it only ever matches status="pending"', async () => {
     // A fresh waitlist row (as inspection-public.js's own insert leaves it —

@@ -939,6 +939,30 @@ describe('POST /:token commit', () => {
       expect(customerUpdate.payload.longitude).toBe(LOC.lng);
     });
 
+    // Codex #4737 r3 P1: the write-back stays ephemeral until a visit
+    // commits — a booking that loses its slot puts the row back.
+    test('a booking that fails after the write-back restores the customer\'s prior (empty) address', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', address_line1: null, address_line2: null, city: null, state: 'FL', zip: null, latitude: null, longitude: null };
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const LOC = { lat: 27.55, lng: -82.55 };
+      mockGeocode.mockResolvedValueOnce({ location: LOC });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time was just taken' }));
+
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '123 Any St, Bradenton, FL 34209' });
+
+      expect(res.statusCode).toBe(409);
+      const customerUpdates = updateCalls.filter((c) => c.table === 'customers');
+      expect(customerUpdates).toHaveLength(2);
+      expect(customerUpdates[0].payload.latitude).toBe(LOC.lat);
+      expect(customerUpdates[1].payload).toMatchObject({ address_line1: null, city: null, state: 'FL', latitude: null, longitude: null });
+    });
+
     test('stored address present but unresolvable, unchanged under the lock: the validated supplied replacement wins and is written back, fixing up the bad stored address', async () => {
       firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
       firstResults.customers = {
@@ -1143,7 +1167,7 @@ describe('POST /:token commit', () => {
         expect(res.statusCode).toBe(200);
         expect(res.body.success).toBe(true);
         expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
-        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toEqual(existingCustomer);
+        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject(existingCustomer);
         expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
         expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'cust-9')).toBe(true);
       });
@@ -1173,6 +1197,26 @@ describe('POST /:token commit', () => {
         expect(customerInsert.payload.address_line1).toBe('123 Palm Ave');
         expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe('new-cust-2');
         expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'new-cust-2')).toBe(true);
+      });
+
+      // Codex #4737 r3 P1: a legacy matched profile with NO stored
+      // coordinates gets the validated ones before createSelfBooking reloads
+      // it for the commit-time travel check.
+      test('a matched legacy profile without coordinates has the validated location persisted onto it', async () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        mockOneSlot();
+        const existingCustomer = existingCustomerAt('123 Palm Ave', { latitude: null, longitude: null });
+        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        listResults.scheduled_services = [];
+
+        const token = mintLeadConsultationToken(LEAD_ID);
+        const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
+
+        expect(res.statusCode).toBe(200);
+        const coordWrite = updateCalls.find((c) => c.table === 'customers' && c.payload.latitude != null);
+        expect(coordWrite).toBeTruthy();
+        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(coordWrite.payload.latitude);
       });
 
       test('coords mismatch on the matched row → re-validates the slot against ITS stored location and fails closed (SLOT_TAKEN), never books', async () => {
@@ -1260,7 +1304,7 @@ describe('POST /:token commit', () => {
 
         expect(res.statusCode).toBe(200);
         expect(res.body.success).toBe(true);
-        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toEqual(existingCustomer);
+        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject(existingCustomer);
         expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.not.objectContaining({ forceNewAccount: true }));
       });
     });
