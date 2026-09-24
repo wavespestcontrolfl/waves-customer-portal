@@ -16573,23 +16573,36 @@ const CallRecordingProcessor = {
           || appointmentResult?.error
           || (!customerId ? 'booked_call_without_customer' : 'auto_booking_not_created');
         try {
-          await db('triage_items')
-            .insert(buildTriageItem({
-              callLogId: call.id,
-              flag: 'auto_booking_skipped_after_approval',
-              extraction: v2ApprovedExtraction,
-              extraPayload: {
-                skipped_reason: String(skipReason).slice(0, 300),
-                missing_fields: appointmentResult?.missingFields || null,
-                existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
-                preferred_date_time: extracted.preferred_date_time || null,
-                service: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
-              },
-            }))
-            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-            .ignore();
+          // A standing task (open OR claimed) is REFRESHED with the current
+          // service / window under the triage-call lock, as the shadow-mode
+          // fallback does: a claimed conflict card that cannot record a newly
+          // confirmed ask routes it here, and an ignored conflict would
+          // discard that ask (codex r33 P1). Payload merged, status kept.
+          await db.transaction(async (ttrx) => {
+            await lockTriageCall(ttrx, call.id);
+            await ttrx('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'auto_booking_skipped_after_approval',
+                extraction: v2ApprovedExtraction,
+                extraPayload: {
+                  skipped_reason: String(skipReason).slice(0, 300),
+                  missing_fields: appointmentResult?.missingFields || null,
+                  existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
+                  preferred_date_time: extracted.preferred_date_time || null,
+                  service: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
+                },
+              }))
+              .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .merge({
+                payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                summary: ttrx.raw('EXCLUDED.summary'),
+                updated_at: new Date(),
+              });
+          });
         } catch (skipTriageErr) {
-          logger.warn(`[call-proc] skip-triage insert failed for ${maskSid(callSid)}: ${skipTriageErr.message}`);
+          // Code/name only — the bound payload carries the call's address.
+          logger.warn(`[call-proc] skip-triage insert failed for ${maskSid(callSid)}: ${skipTriageErr.code || skipTriageErr.name || 'db_error'}`);
         }
       }
       try {
