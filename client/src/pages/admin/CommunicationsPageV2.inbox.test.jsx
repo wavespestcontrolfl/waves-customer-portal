@@ -8,6 +8,11 @@ import { SmsTab } from "./CommunicationsPageV2";
 import { SMS_DRAFT_STORAGE_KEY } from "../../hooks/useSmsDraft";
 
 vi.mock("../../utils/imageCompression", async (original) => ({ ...await original(), fitImagesToBudget: async (files) => ({ ok: true, files }) }));
+const mockNavigate = vi.fn();
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, useNavigate: () => mockNavigate };
+});
 
 const line = "+19413187612";
 const inbound = (id, body, phone = "+19415550100") => ({
@@ -30,6 +35,7 @@ const saveDraft = (owner, draft) => sessionStorage.setItem(SMS_DRAFT_STORAGE_KEY
 
 beforeEach(() => {
   vi.useFakeTimers();
+  mockNavigate.mockReset();
   Element.prototype.scrollIntoView = vi.fn();
   localStorage.setItem("waves_admin_token", "synthetic-token");
   sessionStorage.clear();
@@ -550,4 +556,43 @@ it("blocks submit when the selected photos belong to different customers", async
   fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
   expect(screen.getByText("Selected photos belong to different customers — pick photos from one customer.")).toBeInTheDocument();
   expect(fetch.mock.calls.some(([url]) => String(url).includes("/photo-assessments/"))).toBe(false);
+});
+
+it("a successful Analyze photos submit navigates to the new assessment and closes the dialog", async () => {
+  const photoPhone = "+19415550400";
+  messages = [{
+    id: "photo-solo", from: photoPhone, to: line, direction: "inbound", body: "A single photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-solo",
+    media: [{ key: "sms-media/inbound/solo", url: "https://signed.example/solo", contentType: "image/jpeg" }],
+  }];
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/photo-assessments/")
+    ? response({ success: true, id: "assessment-789", type: "lawn" }, 201)
+    : originalFetch(url, options));
+  setupWithOwner("analyze-photos-success"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" })); await tick();
+  expect(mockNavigate).toHaveBeenCalledWith("/admin/lawn-assessments?open=lawn:assessment-789");
+  expect(screen.queryByText("Analyze photos from this thread")).not.toBeInTheDocument();
+});
+
+it("a failed Analyze photos submit keeps the dialog open with the server's error and never navigates", async () => {
+  const photoPhone = "+19415550500";
+  messages = [{
+    id: "photo-solo-2", from: photoPhone, to: line, direction: "inbound", body: "A single photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-solo-2",
+    media: [{ key: "sms-media/inbound/solo2", url: "https://signed.example/solo2", contentType: "image/jpeg" }],
+  }];
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/photo-assessments/")
+    ? response({ error: "At least one photo is required" }, 400)
+    : originalFetch(url, options));
+  setupWithOwner("analyze-photos-failure"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" })); await tick();
+  expect(screen.getByText("At least one photo is required")).toBeInTheDocument();
+  expect(screen.getByText("Analyze photos from this thread")).toBeInTheDocument();
+  expect(mockNavigate).not.toHaveBeenCalled();
 });
