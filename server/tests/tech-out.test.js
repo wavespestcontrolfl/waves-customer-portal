@@ -571,6 +571,28 @@ describe('sweepAbsentTechDays', () => {
     expect(createAlert).not.toHaveBeenCalled();
   });
 
+  test('a dismissed GROUPED card covers only the row it opened: siblings still on the absent tech are parked again as their own unit (Codex r5 P1)', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    db.__state.alerts.push({
+      id: 'alert-group', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'rep', resolved_at: 'earlier',
+      payload: { date: DATE, absence_id: 'absence-1', visit_member_ids: ['rep', 'sib-1', 'sib-2'] },
+    });
+    // The representative was reassigned away (detached); the siblings remain.
+    dayStopsQuery.mockImplementation(() => fakeQuery([
+      stop({ id: 'sib-1', visit_id: 'v1' }), stop({ id: 'sib-2', visit_id: 'v1' }),
+    ]));
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 2 });
+    expect(createAlert).toHaveBeenCalledTimes(1);
+    expect(createAlert.mock.calls[0][0]).toMatchObject({ jobId: 'sib-1' });
+    expect(createAlert.mock.calls[0][0].payload.visit_member_ids).toEqual(['sib-1', 'sib-2']);
+  });
+
   test('a SYSTEM auto-resolve (payload.superseded_at) does not cover — the stop is parked afresh', async () => {
     process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
     db.__state.absences['absence-1'] = {

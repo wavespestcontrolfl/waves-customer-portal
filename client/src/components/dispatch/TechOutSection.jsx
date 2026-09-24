@@ -22,7 +22,7 @@
  * zinc ramp, fontWeight 400/500, 14px text minimum.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Badge, Button, Card, Select, Textarea, cn } from '../ui';
+import { Badge, Button, Card, Select, Textarea } from '../ui';
 import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -224,16 +224,12 @@ export default function TechOutSection({ techId, techName, onChanged }) {
 
   if (absence) {
     const redistribution = absence.redistribution || {};
-    // Park-only foundation (Codex r4 on PR #4678): a mark-out parks EVERY
-    // open stop as a "Needs a decision" alert and moves nothing
-    // automatically — moved/failed ship empty until the follow-up PR adds
-    // automatic reassignment. The stat cells for moved/failed are noise
-    // when they're always zero, so they (and the moved list) only render
-    // once that follow-up actually starts populating them.
-    const moved = redistribution.moved || [];
+    // Park-only foundation (Codex r4 + r5 on PR #4678): a mark-out parks
+    // EVERY open stop as a "Needs a decision" alert and moves nothing
+    // automatically. The summary's moved / failed lists are not rendered —
+    // the server never populates them in this version; the follow-up PR
+    // that adds automatic reassignment brings its own UI for them.
     const parked = redistribution.parked || [];
-    const failed = redistribution.failed || [];
-    const showStatCells = moved.length > 0 || failed.length > 0;
     return (
       <Card className="p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
@@ -244,36 +240,6 @@ export default function TechOutSection({ techId, techName, onChanged }) {
         <div className="text-14 text-ink-primary mb-3">
           {parked.length} stop{parked.length === 1 ? '' : 's'} parked in the Action Queue — decide who to move
         </div>
-        {showStatCells && (
-          <div
-            className={cn(
-              'grid gap-2 mb-3',
-              moved.length > 0 && failed.length > 0 ? 'grid-cols-2' : 'grid-cols-1'
-            )}
-          >
-            {moved.length > 0 && (
-              <div className="text-center">
-                <div className="text-18 tabular-nums text-ink-primary">{moved.length}</div>
-                <div className="text-11 text-ink-tertiary">moved</div>
-              </div>
-            )}
-            {failed.length > 0 && (
-              <div className="text-center">
-                <div className="text-18 tabular-nums text-alert-fg">{failed.length}</div>
-                <div className="text-11 text-ink-tertiary">failed</div>
-              </div>
-            )}
-          </div>
-        )}
-        {moved.length > 0 && (
-          <div className="mb-3">
-            {moved.map((m) => (
-              <div key={m.job_id} className="text-14 text-ink-primary">
-                → {m.to_technician_name}
-              </div>
-            ))}
-          </div>
-        )}
         <div className="text-12 text-ink-tertiary mb-3">
           Parked stops are in the Action Queue as &quot;Needs a decision&quot;.
         </div>

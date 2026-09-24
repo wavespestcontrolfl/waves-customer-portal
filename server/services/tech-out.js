@@ -304,6 +304,12 @@ async function sweepAbsentTechDays({ now } = {}) {
           && !payload.superseded_at;
         if (alert.resolved_at && !manuallyDismissedForThisAbsence) continue;
         if (alert.job_id) covered.add(alert.job_id);
+        // A grouped visit's OPEN card covers every member. A dismissed card
+        // covers only the row it opened: "Open job" reassigns and detaches
+        // that one row (dispatch-assignment.js), so the siblings it leaves
+        // on the absent tech get their own card on the next tick (Codex r5
+        // P1 on #4678) instead of being silently covered forever.
+        if (alert.resolved_at) continue;
         const memberIds = payload.visit_member_ids;
         if (Array.isArray(memberIds)) memberIds.forEach((id) => covered.add(id));
       }

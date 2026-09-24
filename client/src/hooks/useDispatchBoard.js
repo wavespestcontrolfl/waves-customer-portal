@@ -277,11 +277,12 @@ export function useDispatchBoard() {
       // A newer load started while this one was pending: its response is
       // the fresher server reading, so this one applies nothing.
       if (seq !== refreshSeqRef.current) return;
-      setTechsMap((prev) => {
-        const next = new Map(prev);
-        for (const t of data.techs || []) next.set(t.id, t);
-        return next;
-      });
+      // The response is the whole roster (the endpoint already excludes
+      // inactive, office-only and location-stale techs), so a tech it
+      // omits is gone from the board too — never retained from an earlier
+      // read (Codex r5 P2 on #4678). Socket events buffered meanwhile are
+      // replayed on top by the finally block.
+      setTechsMap(new Map((data.techs || []).map((t) => [t.id, t])));
       setJobs(data.jobs || []);
       hydratedRef.current = true;
       setError(null);

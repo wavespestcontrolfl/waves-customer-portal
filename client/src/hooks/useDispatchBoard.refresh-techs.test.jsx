@@ -396,3 +396,29 @@ describe('a failed refresh that superseded hydration settles the board (pre-push
     expect(result.current.techs).toHaveLength(1);
   });
 });
+
+describe('a refresh is the whole roster (Codex r5 P2 on PR #4678)', () => {
+  it('drops a technician the /board response no longer lists', async () => {
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        techs: [
+          { id: 'tech-1', name: 'Tech One', status: 'idle', out_today: false, updated_at: 't0' },
+          { id: 'tech-2', name: 'Tech Two', status: 'idle', out_today: false, updated_at: 't0' },
+        ],
+        jobs: [],
+      }),
+    });
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.techs).toHaveLength(2);
+
+    // tech-2 was deactivated / went office-only: the roster omits them.
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ techs: [{ id: 'tech-1', name: 'Tech One', status: 'idle', out_today: false, updated_at: 't1' }], jobs: [] }),
+    });
+    await act(async () => { await result.current.refreshTechs(); });
+    expect(result.current.techs.map((t) => t.id)).toEqual(['tech-1']);
+  });
+});
