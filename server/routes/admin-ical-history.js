@@ -5,9 +5,14 @@
  */
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// Admin-only: this legacy Square-import mirror has no client caller anywhere
+// in the repo, and returns unprojected rows (name/phone/email/address/price)
+// plus aggregate revenue (stats.total_revenue, timeline[].revenue) — the same
+// class of financial data that admin-dashboard, admin-kpi-targets and
+// admin-equipment already keep owner-only (ADMIN-BUG-R08).
+router.use(adminAuthenticate, requireAdmin);
 
 // GET /admin/ical-history — paginated appointment history
 router.get('/', async (req, res) => {

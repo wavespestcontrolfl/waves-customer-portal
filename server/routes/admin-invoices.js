@@ -17,6 +17,7 @@ const { generateInvoiceSummary, generateThankYouMessage } = require('../services
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: the invoice workspace is owner-only, with ONE
@@ -862,11 +863,19 @@ router.get('/:id/recipients', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /:id — single invoice with full details
+// GET /:id — single invoice with full details. The router's GET exemption
+// above lets a technician token reach this handler for their own tap-to-pay
+// checkout (PrepaySwitchSheet / AnnualPrepayLauncher re-reading after
+// tender) — so a technician request must be scoped here to an invoice on a
+// customer they currently service, same predicate as
+// admin-customers.js's /:id/cards. Admin requests are unscoped (ADMIN-BUG-R05).
 router.get('/:id', async (req, res, next) => {
   try {
     const invoice = await InvoiceService.getById(req.params.id);
     if (!invoice) return res.status(404).json({ error: 'Not found' });
+    if (!(await technicianServicesCustomer(req, invoice.customer_id))) {
+      return res.status(404).json({ error: 'Not found' });
+    }
     // Coverage-service suggestion for the annual-prepay modal (real recurring
     // service, not the invoice title). Modal-only; safe to attach for all GETs.
     invoice.suggested_coverage = await suggestCoverageServiceType(invoice.customer_id);

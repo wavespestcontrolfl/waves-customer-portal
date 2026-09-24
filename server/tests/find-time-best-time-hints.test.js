@@ -34,6 +34,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
+  // find-time is admin-only (ADMIN-BUG-R07); this suite only ever exercises
+  // the admin path (techRole set to 'admin' above), so requireAdmin passes.
+  requireAdmin: (_req, _res, next) => next(),
 }));
 // The lat/lng request path never geocodes; stubbing keeps the module's DB
 // and fetch dependencies out of the suite.
