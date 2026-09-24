@@ -206,9 +206,12 @@ function teaserFindingLabel(type, analysis) {
 // before anything else when the copy would run long.
 function buildDraftText({ firstName, findingLabel }) {
   const finding = findingLabel
-    ? ` From what we can see, it looks like ${findingLabel}.`
-    : ' We are taking a closer look now.';
-  const close = " We'll send a full report link shortly. Want us to schedule a visit to take a look in person?";
+    ? ` From what we can see, it's consistent with ${findingLabel}.`
+    : '';
+  // Promises nothing Approve does not deliver: approving sends only this
+  // text, and the report link exists only once staff mint it from the
+  // assessment (the draft's View assessment link).
+  const close = ' Want us to come take a closer look and quote treatment?';
   const compose = (name) => `Thanks for the photo${name ? `, ${name}` : ''}.${finding}${close}`;
   const named = compose(safePublicFirstName(firstName));
   return countSegments(named).segmentCount <= MAX_DRAFT_SEGMENTS ? named : compose(null);
@@ -218,30 +221,39 @@ function buildDraftText({ firstName, findingLabel }) {
 // per-contact advisory lock, so two photo texts from one contact whose vision
 // calls finish at the same moment can never both park a draft. Returns the
 // draft id, or null when a pending draft already exists.
-async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method }) {
+// The one pending-draft dedupe path for this lane's writers — the photo
+// triage draft and its legacy AI draft fallback: the final check and the
+// insert commit together under a per-contact advisory lock, so no two
+// pending drafts can land for one conversation. Returns the draft id, or
+// null when a pending draft already exists.
+async function insertDraftUnlessPending({ from, customer }, row) {
   return db.transaction(async (trx) => {
     // Keyed like hasPendingDraft's widest match: the customer when the text
     // resolved to one (two stored numbers are one conversation), else the
     // phone.
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', [CONTACT_LOCK_KEY, customer?.id ? `customer:${customer.id}` : phoneKey(from)]);
     if (await hasPendingDraft(from, customer?.id, trx)) return null;
-    const [draft] = await trx('message_drafts').insert({
-      sms_log_id: smsLogId,
-      customer_id: customer?.id || null,
-      inbound_message: body || null,
-      draft_response: text,
-      intent: DRAFT_INTENT,
-      status: 'pending',
-      context_summary: `Photo triage ran a ${created.type} assessment on this text's photo. Review the assessment before approving.`,
-      flags: JSON.stringify({
-        origin: DRAFT_INTENT,
-        assessment_type: created.type,
-        assessment_id: created.id,
-        message_id: messageId,
-        classifier_method: method,
-      }),
-    }).returning(['id']);
+    const [draft] = await trx('message_drafts').insert(row).returning(['id']);
     return draft.id;
+  });
+}
+
+async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method }) {
+  return insertDraftUnlessPending({ from, customer }, {
+    sms_log_id: smsLogId,
+    customer_id: customer?.id || null,
+    inbound_message: body || null,
+    draft_response: text,
+    intent: DRAFT_INTENT,
+    status: 'pending',
+    context_summary: `Photo triage ran a ${created.type} assessment on this text's photo. Review the assessment before approving.`,
+    flags: JSON.stringify({
+      origin: DRAFT_INTENT,
+      assessment_type: created.type,
+      assessment_id: created.id,
+      message_id: messageId,
+      classifier_method: method,
+    }),
   });
 }
 
@@ -330,9 +342,11 @@ async function runPhotoTriage(candidacy, { legacyFallback = null } = {}) {
   const result = await assessAndDraft(candidacy);
   // A candidate suppressed the legacy AI draft; a terminal failure hands the
   // text back to it so the customer still gets a reply draft to approve.
+  // The fallback parks through the same contact-locked dedupe as the
+  // triage draft, so it never lands beside another pending draft.
   if (FALLBACK_REASONS.has(result.reason) && legacyFallback) {
     logger.info(`[photo-triage] message ${candidacy.messageId} ${result.reason}; parking the legacy AI draft instead`);
-    await legacyFallback();
+    await legacyFallback({ park: (row) => insertDraftUnlessPending(candidacy, row) });
   }
   return result;
 }
@@ -390,6 +404,7 @@ module.exports = {
     visionBudgetLeft,
     releaseVisionSlot,
     parkDraftUnlessPending,
+    insertDraftUnlessPending,
     teaserFindingLabel,
     buildDraftText,
   },

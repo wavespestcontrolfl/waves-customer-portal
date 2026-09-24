@@ -1504,7 +1504,7 @@ router.post('/sms', async (req, res) => {
     // vision call never holds this block.
     // A triage that fails terminally parks the legacy draft it displaced.
     void require('../services/photo-text-triage').runPhotoTriage(photoTriage, {
-      legacyFallback: () => runLegacyAiDraft({ ...legacyDraftContext, enabled: isEnabled('legacyAiDrafts') }),
+      legacyFallback: ({ park }) => runLegacyAiDraft({ ...legacyDraftContext, enabled: isEnabled('legacyAiDrafts'), park }),
     }).catch((err) => logger.error(`[photo-triage] inbound triage failed: ${err.message}`));
 
     // SMS SHADOW DRAFTER (brand-voice loop, Phase B) — silently record what
@@ -2054,7 +2054,9 @@ async function runLegacyAiDraft(ctx) {
     if (LEGACY_AI_DRAFT_SKIP_LOGS[skip]) logger.info(LEGACY_AI_DRAFT_SKIP_LOGS[skip]);
     return;
   }
-  const { customer, Body, From, smsLogEntry } = ctx;
+  const {
+    customer, Body, From, smsLogEntry, park = async (row) => { await db('message_drafts').insert(row); return true; },
+  } = ctx;
   try {
     const ContextAggregator = require('../services/context-aggregator');
     const ResponseDrafter = require('../services/response-drafter');
@@ -2076,8 +2078,10 @@ async function runLegacyAiDraft(ctx) {
 
     const draft = await ResponseDrafter.draftResponse(Body, context, intent);
 
-    // Store draft for approval — DO NOT send
-    await db('message_drafts').insert({
+    // Store draft for approval — DO NOT send. A photo-triage fallback
+    // passes `park` (the lane's contact-locked pending-draft dedupe), which
+    // returns null when a pending draft already exists for the contact.
+    const parked = await park({
       sms_log_id: smsLogEntry?.id || null,
       customer_id: customer.id,
       inbound_message: Body,
@@ -2088,6 +2092,10 @@ async function runLegacyAiDraft(ctx) {
       flags: JSON.stringify(context.flags),
       status: 'pending',
     });
+    if (!parked) {
+      logger.info(`[sms-intent] legacy AI draft skipped for customer ${customer.id}: a pending draft already exists`);
+      return;
+    }
 
     // Auto-suggest appointment for schedule inquiries
     if (intent.intent === 'SCHEDULE_INQUIRY' && customer) {

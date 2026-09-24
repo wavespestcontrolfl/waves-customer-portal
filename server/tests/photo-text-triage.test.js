@@ -362,7 +362,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
       classifier_method: 'regex',
     });
     expect(draft.draft_response).toBe(
-      "Thanks for the photo, Dana. From what we can see, it looks like chinch bug activity. We'll send a full report link shortly. Want us to schedule a visit to take a look in person?",
+      "Thanks for the photo, Dana. From what we can see, it's consistent with chinch bug activity. Want us to come take a closer look and quote treatment?",
     );
     expect(draft.draft_response).not.toMatch(/RAW MODEL|INTERNAL|https?:|www\./i);
     expect(countSegments(draft.draft_response).segmentCount).toBeLessThanOrEqual(2);
@@ -374,7 +374,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
     expect(result).toMatchObject({ status: 'drafted', type: 'pest' });
     expect(mockState.inserts.pest_identifications[0].source).toBe('auto_triage');
     const [draft] = mockState.inserts.message_drafts;
-    expect(draft.draft_response).toContain('it looks like an ant species.');
+    expect(draft.draft_response).toContain("it's consistent with an ant species.");
     // The species name is withheld pre-capture exactly like the public teaser.
     expect(draft.draft_response).not.toMatch(/ghost/i);
     expect(draft.draft_response).not.toMatch(/RAW MODEL/);
@@ -485,6 +485,13 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
 });
 
 describe('draft text builder', () => {
+  test('promises nothing Approve does not send: no report, no link', () => {
+    for (const findingLabel of [null, 'weed pressure']) {
+      const text = buildDraftText({ firstName: 'Dana', findingLabel });
+      expect(text).not.toMatch(/report|link|https?:|shortly/i);
+    }
+  });
+
   test('every lawn label the teaser can publish fits two segments with a long first name, and carries no link', () => {
     for (const label of CONDITION_LABEL_VALUES) {
       const text = buildDraftText({ firstName: 'Bartholomew-Alexander', findingLabel: label });
@@ -502,7 +509,7 @@ describe('draft text builder', () => {
 
   test('first name only, sanitized; dropped when it would push past two segments', () => {
     expect(buildDraftText({ firstName: 'Dana Reed', findingLabel: null }))
-      .toBe("Thanks for the photo, Dana. We are taking a closer look now. We'll send a full report link shortly. Want us to schedule a visit to take a look in person?");
+      .toBe('Thanks for the photo, Dana. Want us to come take a closer look and quote treatment?');
     expect(buildDraftText({ firstName: '12345', findingLabel: null })).toMatch(/^Thanks for the photo\. /);
     // A non-GSM letter flips the whole text to UCS-2 (67 chars/segment), so
     // the name goes rather than the copy running to a third segment.

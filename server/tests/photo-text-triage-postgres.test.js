@@ -242,6 +242,18 @@ postgres('photo-text triage draft parking under concurrency', () => {
     await expect(park(anchors[0])).resolves.toBeNull();
   });
 
+  test('the legacy fallback row goes through the same dedupe: blocked beside a pending draft, parked once otherwise', async () => {
+    const customer = { id: randomUUID() };
+    const legacyRow = (anchorId) => ({ sms_log_id: anchorId, customer_id: customer.id, draft_response: 'legacy', intent: 'GENERAL', status: 'pending' });
+    const [anchor] = await pooled('sms_log').insert({
+      id: randomUUID(), direction: 'inbound', from_phone: '+12025550133', to_phone: '+19415550000',
+    }).returning(['id']);
+    const first = await triage.insertDraftUnlessPending({ from: '+12025550133', customer }, legacyRow(anchor.id));
+    expect(first).toBeTruthy();
+    await expect(triage.insertDraftUnlessPending({ from: '+12025550144', customer }, legacyRow(anchor.id))).resolves.toBeNull();
+    expect(await pooled('message_drafts').where({ customer_id: customer.id })).toHaveLength(1);
+  });
+
   test('one customer texting from two stored numbers at once parks exactly one draft', async () => {
     const customer = { id: randomUUID(), first_name: 'Synthetic' };
     const phones = ['+12025550111', '+12025550122'];

@@ -197,6 +197,20 @@ test('failure before paid analysis → stamp released AND legacy fallback draft 
   expect(mockState.drafts.map((d) => d.draft_response)).toEqual(['Legacy synthetic draft']);
 });
 
+test('fallback goes through the contact dedupe: a pending draft that appeared meanwhile blocks it', async () => {
+  // A concurrent text from the same contact parked its draft while this
+  // one's assessment ran, then this assessment failed terminally.
+  mockCreate.mockImplementation(async () => {
+    mockState.drafts.push({ id: 'concurrent', status: 'pending', intent: 'photo_triage' });
+    throw new Error('S3 timeout');
+  });
+  await receive('what is this in my lawn?');
+  await settle(() => logger.info.mock.calls.some(([m]) => String(m).includes('a pending draft already exists')));
+  expect(mockState.drafts.map((d) => d.id)).toEqual(['concurrent']);
+  expect(require('../services/response-drafter').draftResponse).toHaveBeenCalledTimes(1);
+  expect(logger.info).toHaveBeenCalledWith(`[sms-intent] legacy AI draft skipped for customer ${CUSTOMER.id}: a pending draft already exists`);
+});
+
 test('legacy gate off: a failed triage parks nothing (the fallback honors the gate)', async () => {
   mockState.legacyGate = false;
   mockCreate.mockRejectedValue(new Error('S3 timeout'));
