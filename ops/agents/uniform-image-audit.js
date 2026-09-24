@@ -21,12 +21,13 @@
  */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const MODELS = require('../../server/config/models');
 const { dispatchWithFallback } = require('../../server/services/llm/call');
 
 const PROMPT = `You are auditing a company blog image. Answer ONLY with JSON:
-{"person": true|false, "role": "technician"|"homeowner"|"other"|"none", "shirt": "<color and sleeve length or none>", "cap": "<color or none>", "head": "capped"|"bare"|"hidden", "pants": "<color or none>", "uniform_ok": true|false, "note": "<one short line>"}
-Rules: "person" is true only if a human figure (even partial: hands, torso) is visible. A technician is anyone doing pest-control or lawn-care work or wearing work clothes/gloves. "head" is "capped" when the technician wears any cap or hat, "bare" when their head is clearly in frame with no cap or hat, and "hidden" when the head is out of frame, cut off, or hidden. uniform_ok is FALSE when a technician's garment is actually visible AND wrong: a shirt that is not red, a red shirt whose sleeves are visibly SHORT (the uniform is a red LONG-SLEEVE polo; sleeves hidden or out of frame are not judged), a cap that is not light blue or red, pants that are not black/dark navy — or when head is "bare" (a Waves technician always wears a cap). If only hands, gloves or tools are visible (no shirt/cap/pants/head to judge), uniform_ok=true. A homeowner or an image with no person also gets uniform_ok=true (nothing to fix).`;
+{"person": true|false, "role": "technician"|"homeowner"|"other"|"none", "shirt": "<color and sleeve length or none>", "shirt_type": "polo"|"other"|"hidden", "cap": "<color or none>", "cap_type": "baseball"|"other"|"none"|"hidden", "head": "capped"|"bare"|"hidden", "pants": "<color or none>", "uniform_ok": true|false, "note": "<one short line>"}
+Rules: "person" is true only if a human figure (even partial: hands, torso) is visible. A technician is anyone doing pest-control or lawn-care work or wearing work clothes/gloves. "head" is "capped" when the technician wears any cap or hat, "bare" when their head is clearly in frame with no cap or hat, and "hidden" when the head is out of frame, cut off, or hidden. uniform_ok is FALSE when a technician's garment is actually visible AND wrong: a shirt that is not red, a red shirt whose sleeves are visibly SHORT (the uniform is a red LONG-SLEEVE polo; sleeves hidden or out of frame are not judged), a shirt that is visibly not a collared polo (a sweatshirt, t-shirt, hoodie, jacket or coverall — shirt_type "other"), a cap that is not light blue or red, headwear that is visibly not a baseball cap (a bucket hat, hard hat, beanie or visor — cap_type "other"), pants that are not black/dark navy — or when head is "bare" (a Waves technician always wears a baseball cap). shirt_type/cap_type are "hidden" only when that garment cannot be judged. If only hands, gloves or tools are visible (no shirt/cap/pants/head to judge), uniform_ok=true. A homeowner or an image with no person also gets uniform_ok=true (nothing to fix).`;
 
 const MIME = { '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };
 
@@ -64,7 +65,11 @@ function classifierShapeProblem(p) {
 // model left uniform_ok true.
 function outOfUniform(parsed) {
   if (!parsed || !parsed.person || parsed.role !== 'technician') return false;
-  return parsed.uniform_ok === false || String(parsed.head || '').toLowerCase() === 'bare';
+  const lc = (v) => String(v || '').toLowerCase();
+  // Server-side too, so a model that leaves uniform_ok true on a sweatshirt or
+  // bucket hat still lands in toFix: the uniform is a long-sleeve POLO and a
+  // BASEBALL cap, not just those colors.
+  return parsed.uniform_ok === false || lc(parsed.head) === 'bare' || lc(parsed.shirt_type) === 'other' || lc(parsed.cap_type) === 'other';
 }
 function walk(d) {
   return fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
@@ -83,10 +88,13 @@ async function main() {
     try {
       let buf;
       try { buf = fs.readFileSync(path.join(DIR, rel)); } catch (err) { rows.push({ file: key, path: rel, error: `unreadable: ${err.message}` }); process.stdout.write(`? ${key} (unreadable)\n`); continue; }
+      // The verdict is bound to these exact bytes: the regenerate script
+      // refuses to overwrite a file whose sha256 no longer matches.
+      const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
       const res = await classifyUniform({ buffer: buf, mimeType: MIME[path.extname(rel).toLowerCase()] });
-      if (!res.ok) { rows.push({ file: key, path: rel, error: res.reason, raw: res.raw }); process.stdout.write(`? ${key} (${res.reason})\n`); continue; }
+      if (!res.ok) { rows.push({ file: key, path: rel, sha256, error: res.reason, raw: res.raw }); process.stdout.write(`? ${key} (${res.reason})\n`); continue; }
       const parsed = res.parsed;
-      rows.push({ file: key, path: rel, ...parsed });
+      rows.push({ file: key, path: rel, sha256, ...parsed });
       const flag = outOfUniform(parsed);
       process.stdout.write(`${flag ? 'FIX' : ' ok'} ${key}${parsed.person ? ` — ${parsed.role}: ${parsed.shirt}; cap ${parsed.cap} (${parsed.head || '?'}); pants ${parsed.pants}` : ' — no person'}\n`);
     } finally {
@@ -94,12 +102,16 @@ async function main() {
     }
   }
   const fix = writeReport();
+  const errors = rows.filter((r) => r.error).length;
   function writeReport() {
     const fixRows = rows.filter((r) => !r.error && outOfUniform(r));
     fs.writeFileSync(OUT, JSON.stringify({ auditedAt: new Date().toISOString(), dir: DIR, total: rows.length, toFix: fixRows.map((r) => r.file), rows }, null, 2));
     return fixRows;
   }
-  console.log(`\n${rows.length} images audited · ${fix.length} need regeneration · ${rows.filter((r) => r.error).length} errors · report: ${OUT}`);
+  console.log(`\n${rows.length} images audited · ${fix.length} need regeneration · ${errors} errors · report: ${OUT}`);
+  // An unclassified image is an incomplete sweep, not a clean one: exit 1 so
+  // a wrapper cannot treat the report as complete (the partial report is on disk).
+  if (errors) process.exitCode = 1;
 }
 
 module.exports = { classifyUniform, outOfUniform, classifierShapeProblem, PROMPT, MIME };

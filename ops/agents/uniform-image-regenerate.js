@@ -29,6 +29,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { etDateString } = require('../../server/utils/datetime-et');
 const { classifyUniform, outOfUniform } = require('./uniform-image-audit');
 const contentGuardrails = require('../../server/services/content/content-guardrails');
@@ -58,7 +59,11 @@ function repoPathFor(auditKey) {
   const parts = auditKey.split('__');
   const fileName = parts.pop();
   const ext = path.extname(fileName); const file = fileName.slice(0, -ext.length || undefined);
-  return { dir: parts.join('/'), file, ext, kind: file === 'hero' ? 'hero' : 'body' };
+  // Only publisher-managed names are regenerable: `hero` and `body-N`. A
+  // curated asset (e.g. inspection-team.webp) has no deterministic plan to
+  // reconstruct and is a hand job.
+  const kind = file === 'hero' ? 'hero' : (/^body-\d+$/.test(file) ? 'body' : null);
+  return { dir: parts.join('/'), file, ext, kind };
 }
 function findPostFile(dir) {
   const stem = dir.split('/').pop();
@@ -93,23 +98,41 @@ function sectionFor(body, at) {
 // `imagePath`, by span (the shared balanced parser — titled, angle-bracket
 // and reference-style forms included), never by a hand regex. Returns the
 // new post text, or null when there is not exactly one such reference.
-function replaceBodyAlt(text, imagePath, alt) {
+function replaceBodyAlt(text, imagePath, alt, publisher, { mdx = true } = {}) {
   const { fmText, body } = splitPost(text);
-  // The guardrails' definition map (continuation destinations included) —
-  // the same one bodyImageRefs resolves against, so every plannable
-  // reference is also rewritable.
-  const defs = contentGuardrails.markdownReferenceDefinitions(body);
+  // Spans are found on the publisher's RENDERED view (comments, code, MDX
+  // expressions and tag attributes blanked — the same view planItem counted
+  // on) and spliced into the raw body at the same offsets: the masking is
+  // length-preserving, which is asserted rather than assumed.
+  const view = publisher._internals.renderedBodyView(body, { mdx });
   const spans = [];
-  for (const span of contentGuardrails.eachMarkdownLink(body)) {
+  for (const span of contentGuardrails.eachMarkdownLink(view.text)) {
     if (!span.isImage) continue;
     let dest = null;
-    if (span.kind === 'inline') dest = contentGuardrails.parseLinkDestination(body.slice(span.destStart, span.destEnd + 1), { allowEmpty: true });
-    else if (span.kind === 'reference') dest = defs.get(contentGuardrails.normalizeReferenceLabel(body.slice(span.refStart + 1, span.refEnd))) || defs.get(contentGuardrails.normalizeReferenceLabel(body.slice(span.labelStart + 1, span.labelEnd))) || null;
+    if (span.kind === 'inline') dest = contentGuardrails.parseLinkDestination(view.text.slice(span.destStart, span.destEnd + 1), { allowEmpty: true });
+    else if (span.kind === 'reference') {
+      // Full `[alt][label]` uses the tail; collapsed `[alt][]` / shortcut `[alt]` use the alt (the publisher's rule).
+      const tail = span.refStart >= 0 ? view.text.slice(span.refStart, span.refEnd + 1) : '';
+      dest = view.defs.get(contentGuardrails.normalizeReferenceLabel(tail || view.text.slice(span.labelStart + 1, span.labelEnd))) || null;
+    }
     if (dest !== null && String(dest).split(/[?#]/)[0] === imagePath) spans.push(span);
   }
   if (spans.length !== 1) return null;
   const s = spans[0];
-  return fmText + body.slice(0, s.labelStart + 1) + alt.replace(/[[\]]/g, '') + body.slice(s.labelEnd);
+  // The view is newline-preserving but not byte-preserving (masks can shrink
+  // a line), so the span is mapped by LINE: the rendered line that holds the
+  // label must be byte-for-byte the same length as the raw line, and the
+  // label must sit inside that one line — otherwise the alt is left alone.
+  const before = view.text.slice(0, s.labelStart);
+  const lineNo = (before.match(/\n/g) || []).length;
+  const col = s.labelStart - (before.lastIndexOf('\n') + 1);
+  const rawLines = body.split('\n'); const viewLines = view.text.split('\n');
+  const rawLine = rawLines[lineNo]; const viewLine = viewLines[lineNo];
+  const labelLen = s.labelEnd - s.labelStart;
+  if (rawLine === undefined || rawLine.length !== viewLine.length || col + labelLen > rawLine.length) return null;
+  if (rawLine.slice(col + 1, col + labelLen) !== viewLine.slice(col + 1, col + labelLen) || rawLine[col] !== '[') return null;
+  rawLines[lineNo] = rawLine.slice(0, col + 1) + alt.replace(/[[\]]/g, '') + rawLine.slice(col + labelLen);
+  return fmText + rawLines.join('\n');
 }
 function replaceHeroAlt(text, alt) {
   const next = text.replace(/^(hero_image:\n(?:[ \t]+\w+:.*\n)*?[ \t]+alt:[ \t]*).*$/m, (_, head) => `${head}${JSON.stringify(alt)}`);
@@ -121,8 +144,9 @@ function replaceHeroAlt(text, alt) {
 // for that slot (frontmatter via the publisher's YAML reader; city from the
 // authoritative service_areas_tag; body slot + caption from the rendered
 // body-image order), or { skip } with the reason.
-function planItem(t, publisher) {
+function planItem(t, publisher, audited) {
   const { dir, file, ext, kind } = repoPathFor(t);
+  if (!kind) return { t, skip: `not a publisher-managed asset name (hero / body-N) — handle by hand` };
   if (ext !== '.webp') return { t, skip: `only .webp assets are regenerated (got ${ext}) — convert by hand` };
   const postFile = findPostFile(dir);
   if (!postFile) return { t, skip: 'post file not found' };
@@ -132,6 +156,11 @@ function planItem(t, publisher) {
   const imagePath = `/images/blog/${dir}/${file}${ext}`;
   const target = path.join(ASTRO, 'public/images/blog', dir, `${file}${ext}`);
   if (!fs.existsSync(target)) return { t, skip: `image not in worktree: ${target}` };
+  // The audit's verdict is bound to the bytes it looked at; a worktree cut
+  // from a newer revision (or an asset changed since) is never overwritten
+  // on a stale verdict.
+  const stale = auditBindingProblem(audited.get(t), target);
+  if (stale) return { t, skip: stale };
   const item = { t, kind, postFile: path.relative(ASTRO, postFile), imagePath, target, index: 0, captions: [], ...postFields(fm, dir), siblings: siblingAssets(dir, `${file}${ext}`) };
   if (kind === 'hero') {
     // Only the post's ACTIVE hero is regenerated: a stale hero.webp beside a
@@ -141,8 +170,13 @@ function planItem(t, publisher) {
   }
   // Legacy .md posts render raw HTML blocks as HTML (image-like Markdown
   // inside them is not an image); MDX does not — the publisher's own flag.
-  const refs = publisher._internals.bodyImageRefs(body, { mdx: !postFile.endsWith('.md') }).map((r, i) => ({ ...r, ordinal: i, src: String(r.src || '').split(/[?#]/)[0] }));
-  const hits = refs.filter((r) => r.src === imagePath);
+  // The publisher's slot k counts only ITS managed body-N images in
+  // rendered order (an authored image before body-1 is not a slot), so the
+  // ordinal is taken among managed refs of this post, not among all images.
+  const managedRe = new RegExp(`^${imagePath.replace(/body-\d+\.webp$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}body-\\d+\\.webp$`, 'i');
+  const refs = publisher._internals.bodyImageRefs(body, { mdx: !postFile.endsWith('.md') }).map((r) => ({ ...r, src: String(r.src || '').split(/[?#]/)[0] }));
+  const managed = refs.filter((r) => managedRe.test(r.src)).map((r, i) => ({ ...r, ordinal: i }));
+  const hits = managed.filter((r) => r.src === imagePath);
   if (hits.length !== 1) return { t, skip: hits.length ? `image referenced ${hits.length}× in post body (need exactly one)` : 'image reference not found in post body' };
   const ref = hits[0]; const sec = sectionFor(body, ref.line);
   const heading = String(sec.heading || '').trim();
@@ -152,6 +186,13 @@ function planItem(t, publisher) {
     captions: heading && heading.length <= CAPTION_MAX ? [heading] : [],
     avoid: item.heroAlt || fm.title,
   };
+}
+// Why the audited verdict may not be applied to the file now on disk (null = it may).
+function auditBindingProblem(auditedSha, target) {
+  if (!auditedSha) return 'report row carries no sha256 — re-run the audit (older report format)';
+  const currentSha = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+  if (currentSha !== auditedSha) return `file changed since the audit (sha256 ${currentSha.slice(0, 12)} ≠ audited ${auditedSha.slice(0, 12)}) — re-audit`;
+  return null;
 }
 // The generation inputs a post's frontmatter supplies (the publisher's own
 // YAML reader; city = the authoritative first service_areas_tag, never title copy).
@@ -216,11 +257,11 @@ async function deriveAlt(p, gen, webp, ctx) {
 }
 // The image is on disk first; nothing below may leave the post untouched —
 // lastmod is bumped regardless so the sitemap sees the changed image.
-function writeReplacement(p, webp, alt) {
+function writeReplacement(p, webp, alt, publisher) {
   fs.writeFileSync(p.target, webp);
   const postPath = path.join(ASTRO, p.postFile);
   const text = fs.readFileSync(postPath, 'utf8');
-  const next = alt ? (p.kind === 'hero' ? replaceHeroAlt(text, alt) : replaceBodyAlt(text, p.imagePath, alt)) : null;
+  const next = alt ? (p.kind === 'hero' ? replaceHeroAlt(text, alt) : replaceBodyAlt(text, p.imagePath, alt, publisher, { mdx: !p.postFile.endsWith('.md') })) : null;
   if (!alt) console.log(`    WARNING ${p.t}: no alt passed the guardrails — image swapped, alt left as-is (fix by hand)`);
   else if (next === null) console.log(`    WARNING ${p.t}: image reference could not be rewritten in place — image swapped, alt left as-is (fix by hand)`);
   fs.writeFileSync(postPath, bumpModified(next || text));
@@ -236,7 +277,8 @@ function writeReplacement(p, webp, alt) {
   BODY_IMAGE_SHOTS = publisher._internals.BODY_IMAGE_SHOTS;
   const ctx = { publisher, generatePlannedImage: publisher.generatePlannedImage, compressToWebp: publisher._internals.compressToWebp, describeHeroForAlt, sanitizeAlt };
 
-  const plan = targets.map((t) => planItem(t, publisher));
+  const audited = new Map((report.rows || []).filter((r) => r && r.file && r.sha256).map((r) => [r.file, r.sha256]));
+  const plan = targets.map((t) => planItem(t, publisher, audited));
   const doable = plan.filter((p) => !p.skip);
   console.log(`${targets.length} flagged · ${doable.length} regenerable · ${plan.length - doable.length} skipped · est. $${(doable.length * EST_COST).toFixed(2)} (${LIVE ? 'LIVE' : 'DRY RUN'})\n`);
   for (const p of plan) console.log(describe(p));
@@ -247,7 +289,7 @@ function writeReplacement(p, webp, alt) {
     try {
       const { gen, webp } = await generateVerified(p, ctx);
       const alt = await deriveAlt(p, gen, webp, ctx);
-      const altUpdated = writeReplacement(p, webp, alt);
+      const altUpdated = writeReplacement(p, webp, alt, publisher);
       results.push({ t: p.t, ok: true, altUpdated, model: gen.model, style: gen.plan.style, screen: gen.screen && gen.screen.ok, uniform: gen.uniform, alt });
       console.log(`  ✓ ${p.t} via ${gen.model} (${gen.plan.style}) — alt: ${alt ? alt.slice(0, 80) : '(kept)'}`);
     } catch (err) {
