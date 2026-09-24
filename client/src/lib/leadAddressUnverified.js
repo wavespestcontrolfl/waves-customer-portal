@@ -59,8 +59,20 @@ const streetKeyNoUnit = (v) => lineKey(String(v || '').replace(UNIT_TAIL, ''))
   .map((token) => SUFFIX_ALIASES[token] || token)
   .join(' ');
 
+// A composed lead address split into segments with unit segments removed
+// (dedicated "Apt 4" segments and the unit-first forms the server's
+// normalizer supports), so neither the street nor the city is misread as a
+// unit (codex #4667 r33 P2).
+const UNIT_SEGMENT_RE = /^(?:#|(?:apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\b)/i;
+const STATE_ZIP_TAIL_RE = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$|^\d{5}(?:-\d{4})?$|^[a-z]{2}$/i;
+function leadAddressSegments(address) {
+  return String(address || '').split(',').map((s) => s.trim()).filter(Boolean)
+    .filter((seg) => !UNIT_SEGMENT_RE.test(seg));
+}
+
 function flagCoversLeadAddress(flag, lead) {
-  const leadLine = streetKeyNoUnit(String(lead?.address || '').split(',')[0]);
+  const segments = leadAddressSegments(lead?.address);
+  const leadLine = streetKeyNoUnit(segments[0] || '');
   if (!leadLine || leadLine !== streetKeyNoUnit(flag.address_line1)) return false;
   // ZIP from the lead's zip column, else from the composed address's
   // state/ZIP tail — never the first five digits of the whole string,
@@ -70,7 +82,7 @@ function flagCoversLeadAddress(flag, lead) {
   if (a && b && a !== b) return false;
   // City too (a ZIP-less lead can change city alone): the lead's city
   // column, else the second comma segment of its composed address.
-  const leadCity = cityKey(lead?.city) || cityKey(String(lead?.address || '').split(',')[1]);
+  const leadCity = cityKey(lead?.city) || cityKey(segments.slice(1).find((seg) => !STATE_ZIP_TAIL_RE.test(seg)) || '');
   const flagCity = cityKey(flag.city);
   return !flagCity || !leadCity || flagCity === leadCity;
 }

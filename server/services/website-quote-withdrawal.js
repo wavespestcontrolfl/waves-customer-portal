@@ -38,12 +38,15 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
   const matched = candidates
     .filter((row) => (String(row.lead_id || '') === String(leadId) && samePremiseDisplay(row.address, fullAddress))
       || samePremiseDisplay(row.address, fullAddress, { requireLocality: true }));
-  const toWithdraw = matched.filter((row) => row.website === true).map((row) => row.id);
-  const toBlock = matched.filter((row) => row.website !== true).map((row) => row.id);
-  if (toBlock.length) {
+  const toWithdraw = matched.filter((row) => row.website === true);
+  const toBlock = matched.filter((row) => row.website !== true);
+  // Every write re-asserts the EXACT address the row was matched on (codex
+  // r33 P1): a Customer 360 correction fanning a new premise onto the row
+  // between the SELECT and this row lock must win, or the block would be
+  // stamped onto the corrected premise and its valid link would 404.
+  for (const row of toBlock) {
     await trx('estimates')
-      .whereIn('id', toBlock)
-      .where({ source: 'quote_wizard' })
+      .where({ id: row.id, source: 'quote_wizard', address: row.address })
       // The candidate query's live statuses re-asserted on the write: a
       // decline (or any terminal transition) that commits between the
       // SELECT and this row lock wins, so a successful decline token is
@@ -64,19 +67,22 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
   // The verdict rides on the archived row (addressUnverified +
   // addressUnverifiedFlag) for later recovery and the off-surface
   // guard; a carried draft marker is persisted as the real flag.
-  const rows = await trx('estimates')
-    .whereIn('id', toWithdraw)
-    .where({ source: 'quote_wizard' })
-    .whereIn('status', WITHDRAWABLE_PUBLICATION_STATES)
-    .whereNull('archived_at')
-    .whereNull('price_locked_at')
-    .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
-    .update({
-      archived_at: new Date(),
-      updated_at: new Date(),
-      estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: flag || null, addressUnverifiedClearedBy: null })]),
-    })
-    .returning('id');
+  const rows = [];
+  for (const row of toWithdraw) {
+    const archived = await trx('estimates')
+      .where({ id: row.id, source: 'quote_wizard', address: row.address })
+      .whereIn('status', WITHDRAWABLE_PUBLICATION_STATES)
+      .whereNull('archived_at')
+      .whereNull('price_locked_at')
+      .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
+      .update({
+        archived_at: new Date(),
+        updated_at: new Date(),
+        estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: flag || null, addressUnverifiedClearedBy: null })]),
+      })
+      .returning('id');
+    rows.push(...archived);
+  }
   const { recordAuditEvent } = require('../services/audit-log');
   for (const row of rows) {
     const id = row?.id ?? row;
