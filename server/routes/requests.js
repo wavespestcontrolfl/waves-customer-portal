@@ -1327,3 +1327,6 @@ router.get('/', authenticate, async (req, res, next) => {
 });
 
 module.exports = router;
+// Shared with server/routes/photo-id.js (request_prefill.location must name a
+// value this router's own createSchema accepts).
+module.exports.VALID_LOCATIONS = VALID_LOCATIONS;

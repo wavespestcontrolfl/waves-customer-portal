@@ -527,6 +527,10 @@ for (const publicAnalyzePrefix of ['/api/public/lawn-assessment/analyze', '/api/
 // parser so those uploads don't 413 under the 1 MB default, without widening
 // the ceiling for everything else. Authenticated + per-customer throttled.
 app.use('/api/requests', express.json({ limit: '30mb' }));
+// Customer Photo ID (dark, GATE_CUSTOMER_PHOTO_ID) carries up to 3 base64
+// photos through the same request-photo-validation caps as /api/requests —
+// same rationale, same limit. Authenticated + per-customer throttled.
+app.use('/api/photo-id', express.json({ limit: '30mb' }));
 // Worker-route HMAC signing (link-worker-auth) hashes the RAW request bytes;
 // the verify hook stores them for /api/integrations/*-worker paths only.
 app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
@@ -564,6 +568,7 @@ app.use('/api/schedule', scheduleRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/requests', requestRoutes);
+app.use('/api/photo-id', require('./routes/photo-id'));
 app.use('/api/bouncie', bouncieRoutes);
 app.use('/api/lawn-health', lawnHealthRoutes);
 app.use('/api/feed', feedRoutes);

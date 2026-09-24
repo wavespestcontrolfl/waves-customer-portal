@@ -38,6 +38,7 @@
  *   GATE_OPS_DIGESTS_IN_APP=true (owner ops digests become ops_digest bell rows in the Activity feed instead of contact@ emails; dark in dev AND prod)
  *   GATE_CLOSEOUT_MONEY_COMMS_ALERTS=true (closeout alerts also map the comms / invoice / invoiceDelivery facts — failed completion notice, invoice owed but not minted, invoice or receipt delivery incomplete — as per-visit cards + closeout_gaps_today members; their outage holds the floor; read-only, no comms; dark in dev AND prod)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
+ *   GATE_CUSTOMER_PHOTO_ID=true (authenticated customer Photo ID API — POST/GET /api/photo-id/*, comms-free; dark: every handler 404s while off)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
  *   GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE=true (portal GET /api/billing/cards stamps holdsAppointment on a card holding a future secured visit, so Remove opens the call-us disclaimer; removal itself is never blocked — off = field absent, payload unchanged)
@@ -618,6 +619,13 @@ const gates = {
   // 404s while off (same unobservable-when-dark contract as payerStatements).
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
+
+  // Authenticated customer Photo ID (pest / lawn / tree & shrub) API —
+  // POST/GET /api/photo-id/*. Comms-free (no sendCustomerMessage, no email,
+  // no notifications) — dark until Adam flips it: every handler 404s
+  // {error:'Not found'} while off, including GET /, so the client can hide
+  // the feature entirely off a single 404.
+  customerPhotoId: process.env.GATE_CUSTOMER_PHOTO_ID === 'true',
   // Public careers application funnel (POST /api/public/careers/apply).
   // Dark until the owner turns hiring on; the admin recruiting queue works
   // at any setting (it only reads/updates existing rows).

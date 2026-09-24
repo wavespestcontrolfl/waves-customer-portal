@@ -303,6 +303,47 @@ function buildTreeShrubTechFindings({ scores = {}, observations = '' } = {}) {
   return { aiSummary, suggestedCustomerAction, findings };
 }
 
+/**
+ * Customer-facing report for the customer Photo ID API (server/routes/photo-id.js).
+ * Reduces a preview/assessment-like `{ scores, observations, aiSummary, plantGroups }`
+ * shape (camelCase scores — previewTreeShrubAssessment's own return shape, or
+ * formatAssessmentScores(row) + row fields for a stored assessment) to the
+ * customer-safe contract: three "signals" (never a confirmed diagnosis — see the
+ * module guardrail) plus two health scores and an overall. `plant_groups` stays
+ * empty unless the caller supplies plantGroups (a single-shot photo-id submission
+ * has no plant inventory).
+ */
+function buildCustomerTreeShrubReport(assessmentLike = {}) {
+  const scores = assessmentLike.scores || {};
+  const categories = buildTreeShrubVisualCategories({ scores });
+  const byKey = {};
+  for (const cat of categories) byKey[cat.key] = cat;
+
+  const SIGNAL_KEYS = ['pest_activity', 'disease_leaf_spot', 'water_heat_mechanical_stress'];
+  const signals = SIGNAL_KEYS.filter((key) => byKey[key]).map((key) => ({
+    key,
+    label: byKey[key].label,
+    level: byKey[key].status, // strong | healthy | watch | needs_attention | tracking
+  }));
+
+  const plantGroups = Array.isArray(assessmentLike.plantGroups) ? assessmentLike.plantGroups : [];
+
+  return {
+    plant_groups: plantGroups.map((g) => ({
+      label: (g && (g.label || g.key)) || 'Plant group',
+      status: (g && g.status) || 'tracking',
+    })),
+    scores: {
+      foliage_fullness: byKey.foliage_fullness ? byKey.foliage_fullness.score : null,
+      leaf_color_vigor: byKey.leaf_color_vigor ? byKey.leaf_color_vigor.score : null,
+      overall: scores.overallScore != null ? scores.overallScore : null,
+    },
+    signals,
+    summary: assessmentLike.aiSummary
+      || (assessmentLike.observations ? String(assessmentLike.observations).slice(0, 500) : 'No urgent visible plant issues found.'),
+  };
+}
+
 // ── Scoring + persistence (auto-score at completion) ────────────────────────────
 
 // Merge several per-photo raw composites into ONE assessment-level raw result.
@@ -724,6 +765,7 @@ module.exports = {
   treeShrubPhotosHash,
   buildTreeShrubTechFindings,
   mergePhotoComposites,
+  buildCustomerTreeShrubReport,
   scoreAndStoreTreeShrubAssessment,
   applyReviewDecisions,
   storeTreeShrubAssessmentFromReview,
