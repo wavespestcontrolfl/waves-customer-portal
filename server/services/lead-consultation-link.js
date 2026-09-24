@@ -182,9 +182,33 @@ async function probeLeadConsultationLink(leadOrId) {
  * to insert" and surface `reason` — no caller change needed.
  */
 async function buildLeadConsultationSmsLine(leadOrId, firstName) {
+  const unavailable = (reason) => ({ url: null, line: '', reason });
+  // Nothing is minted until everything that could still refuse has passed
+  // (Codex #4709 r9 P2): first the cheap availability probe (gate, open
+  // lead, phone, signing secret, template switched on — no render), then a
+  // dry render of the template with a placeholder URL, then the mint and
+  // the real render below. A disabled, missing or STOP-less template never
+  // leaves a live, unused 14-day short code behind.
+  const availability = await consultationLinkAvailable(leadOrId);
+  if (!availability.available) return unavailable(availability.reason);
+  try {
+    const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');
+    if (!row || row.is_active === false) return unavailable('template disabled');
+    const templates = require('../routes/admin-sms-templates');
+    const dry = await templates.getTemplate(CONSULTATION_SMS_TEMPLATE_KEY, {
+      first_name: firstName || 'there',
+      consultation_url: 'https://wavespest.co/l/preview',
+    }, {}, { requiredVars: ['consultation_url'] });
+    if (!dry) return unavailable('Consultation text template is unavailable');
+    if (!templates.hasStopLine(dry)) {
+      return unavailable('Consultation text is missing the required "Reply STOP to opt out." disclosure');
+    }
+  } catch (err) {
+    logger.warn(`[lead-consultation-link] template pre-check failed: ${err.message}`);
+    return unavailable('Consultation text template is unavailable');
+  }
   const built = await buildLeadConsultationLink(leadOrId);
   if (!built.url) return built;
-  const unavailable = (reason) => ({ url: null, line: '', reason });
   try {
     const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');
     if (row && row.is_active === false) {

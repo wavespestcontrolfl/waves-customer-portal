@@ -731,7 +731,9 @@ router.post('/sms', async (req, res, next) => {
         contractId: contractId && UUID_RE.test(String(contractId)) ? String(contractId) : null,
         // Codex #4709 r3 P1: a lead-only composer send binds its
         // consultation links to that exact lead.
-        expectedLeadId: trustedCustomerId ? null : trustedLeadId,
+        // Bound to the composer's lead whenever one rides along — with or
+        // without customer context (Codex #4709 r9 P1).
+        expectedLeadId: trustedLeadId,
       });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
@@ -1263,7 +1265,7 @@ router.post('/sms', async (req, res, next) => {
     // — the SAME function, so the two routes can never drift (pre-push
     // Codex P1: this send is never rerouted there, only leadId rides
     // along). Fail-soft, same rule as the stamp above — the text already left.
-    if (!trustedCustomerId && trustedLeadId) {
+    if (trustedLeadId) {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
         if (isRealProviderSend(result)) {

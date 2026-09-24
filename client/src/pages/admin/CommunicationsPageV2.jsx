@@ -1510,7 +1510,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         // leadId rides in the body instead; the server records the lead
         // audit trail (mirroring /admin/leads/:id/send-sms's own via a
         // shared function) when no customer resolved.
-        const consultationLeadId = !selectedCustomerId ? insertedCustomerLinks.consultation?.leadId : null;
+        // Sent with or without a selected customer, so the server binds the
+        // link to its lead and records the outreach (Codex #4709 r9 P1).
+        const consultationLeadId = insertedCustomerLinks.consultation?.leadId || null;
         const sent = await adminFetch("/admin/communications/sms", {
           method: "POST",
           body: JSON.stringify({

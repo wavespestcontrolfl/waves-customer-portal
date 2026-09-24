@@ -496,6 +496,8 @@ describe('buildConsultationLink', () => {
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/abc', line: 'line\n\n', standalone: true });
     const r = await buildConsultationLink('c1', 'aaaaaaaa-0000-4000-8000-000000000001');
     expect(r.url).toBe('https://waves.link/l/abc');
+    // Codex #4709 r9 P1: the chosen lead rides back for the send's binding.
+    expect(r.leadId).toBe('aaaaaaaa-0000-4000-8000-000000000001');
     expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000001', 'Pat');
   });
 
@@ -2816,6 +2818,14 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(refusal.error).toMatch(/different lead/);
     wireConsultation();
     expect(await checkConsultationLinkSend(BODY, '9415550100', null, 'lead-1')).toBeNull();
+  });
+
+  test('Codex #4709 r9 P1: expectedLeadId binds even with customer context', async () => {
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [{ id: 'c1' }] });
+    const result = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: 'c1', expectedLeadId: 'lead-2' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/different lead/);
   });
 
   test('expectedLeadId threads through bearerLinkSendCheck', async () => {

@@ -413,7 +413,10 @@ async function buildConsultationLink(customerId, leadIdOverride) {
   if (!digitsLast10(destination?.phone) || digitsLast10(lead.phone) !== digitsLast10(destination.phone)) {
     return { url: null, line: '', reason: "This lead's phone differs from the customer's number — send the link from the Leads page" };
   }
-  return buildLeadConsultationSmsLine(lead.id, lead.first_name);
+  // The chosen lead rides back so the composer's send can bind the link to
+  // it even with customer context (Codex #4709 r9 P1).
+  const built = await buildLeadConsultationSmsLine(lead.id, lead.first_name);
+  return built?.url ? { ...built, leadId: lead.id } : built;
 }
 
 // Every skip requestAutopaySetupLink can return, phrased for the composer

@@ -229,6 +229,27 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(getTemplate).not.toHaveBeenCalled();
   });
 
+  test('Codex #4709 r9 P2: a disabled or missing template mints nothing', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: false } }),
+    };
+    expect((await buildLeadConsultationSmsLine(LEAD_ID, 'Pat')).url).toBeNull();
+    mockBuilders.sms_templates = chainBuilder({ firstRow: null });
+    expect((await buildLeadConsultationSmsLine(LEAD_ID, 'Pat')).url).toBeNull();
+    expect(createShortCode).not.toHaveBeenCalled();
+  });
+
+  test('Codex #4709 r9 P2: a STOP-less template is refused before any bearer is minted', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    getTemplate.mockResolvedValue("Hi Pat, it's Waves. Pick a time: https://waves.link/l/abc123");
+    expect((await buildLeadConsultationSmsLine(LEAD_ID, 'Pat')).url).toBeNull();
+    expect(createShortCode).not.toHaveBeenCalled();
+  });
+
   // Pre-push Codex P1: save-time validation (admin-sms-templates.js) now
   // refuses an edit that drops the keep-list disclosure, but a row that
   // slipped through before that guard existed (or was edited directly at
