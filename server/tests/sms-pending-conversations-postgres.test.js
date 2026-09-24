@@ -138,6 +138,45 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
   });
 
+  test.each(['canonical', 'legacy-only'])(
+    'an unlinked %s reply on the same immutable peer and endpoint closes global and customer-scoped work',
+    async (source) => {
+      const candidate = await seed({ customerId: 'new', body: 'Please confirm this visit' });
+      const reply = await seed({
+        customerId: null,
+        phone: '+19415550100',
+        ours: '+19415550190',
+        direction: 'outbound',
+        messageType: 'manual',
+        status: 'sent',
+        body: 'Confirmed.',
+        legacy: source === 'legacy-only',
+      });
+      if (source === 'legacy-only') await mockTrx('messages').where({ id: reply.messageId }).del();
+      await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+      await expect(countPendingSmsConversations({ customerId: candidate.customerId }))
+        .resolves.toEqual({ conversations: 0, messages: 0 });
+    },
+  );
+
+  test.each([
+    ['peer', { phone: '+19415550109', ours: '+19415550190' }],
+    ['endpoint', { phone: '+19415550100', ours: '+19415550191' }],
+  ])('an unlinked reply on a different %s does not close customer-scoped work', async (_difference, reply) => {
+    const candidate = await seed({ customerId: 'new', body: 'Please confirm this visit' });
+    await seed({
+      customerId: null,
+      ...reply,
+      direction: 'outbound',
+      messageType: 'manual',
+      status: 'sent',
+      body: 'Confirmed.',
+    });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+    await expect(countPendingSmsConversations({ customerId: candidate.customerId }))
+      .resolves.toEqual({ conversations: 1, messages: 1 });
+  });
+
   test.each(['manual', 'ai_approved'])('a legacy-only %s reply closes canonical work for badge and digest', async (messageType) => {
     const candidate = await seed({ body: 'Please answer this question' });
     const metadata = {};

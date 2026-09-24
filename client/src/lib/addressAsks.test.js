@@ -19,6 +19,43 @@ const mismatchPriorityCases = lowerPriorityReasons.flatMap((reason) => (
   })))
 ));
 
+describe('on_file_house_number_conflict', () => {
+  it('is an address ask whose evidence is the street the caller stated', () => {
+    const n = notice(ask('on_file_house_number_conflict', {
+      stated_street: '1250 Example Street',
+      on_file_street: '1260 Example Street',
+      on_file_address: { address_line1: '1260 Example Street' },
+    }, 7, 3));
+    expect(n).toMatchObject({
+      cardId: 3,
+      callId: 7,
+      unitOnly: false,
+      readbackOnly: false,
+      reason: 'the caller gave a different house number than the one on file',
+      heard: '1250 Example Street',
+    });
+    expect(filterAddressAsks([ask('on_file_house_number_conflict')])).toHaveLength(1);
+  });
+
+  it('carries the stated unit in its evidence', () => {
+    const n = notice(ask('on_file_house_number_conflict', { stated_street: '1250 Example Street', stated_unit: 'Apt 4' }, 7, 3));
+    expect(n.heard).toBe('1250 Example Street, Apt 4');
+  });
+
+  it('shows the caller\'s own street first when Address Validation corrected the number', () => {
+    const n = notice(ask('on_file_house_number_conflict', { stated_street: '1250 Example Street', spoken_street: '1240 Example Street' }, 7, 3));
+    expect(n.heard).toBe('1240 Example Street (validated as 1250 Example Street)');
+  });
+
+  it('is picked over an older same-rank card that carries no evidence', () => {
+    const n = notice(
+      ask('address_unverified', {}, 5, 1),
+      ask('on_file_house_number_conflict', { stated_street: '1250 Example Street' }, 7, 3),
+    );
+    expect(n).toMatchObject({ cardId: 3, heard: '1250 Example Street' });
+  });
+});
+
 describe('filterAddressAsks', () => {
   it('keeps validation-ask cards only', () => {
     const items = [

@@ -407,6 +407,13 @@ runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
+the photo-text triage (`services/photo-text-triage.js`) likewise runs after
+acknowledgment under `GATE_PHOTO_TRIAGE` (default off) for an ordinary
+inbound carrying an image: the admin photo assessment (paid vision, one run
+per message, capped per ET day by `PHOTO_TRIAGE_DAILY_CAP`, default 20; its
+caption classifier by `PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP`) and one pending
+owner-approval reply draft, which replaces the legacy AI draft for that
+message — never a send, no response change;
 unknown domain/van-tracking SMS stays unlinked in the inbox and does not
 create customer/account rows or guess a customer name from message prose.
 Substantive messages ring a per-message `new_lead` bell/push linking to the

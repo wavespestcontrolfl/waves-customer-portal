@@ -1,8 +1,17 @@
 /**
- * Admin API for photo assessments (lawn assessment + pest identification).
+ * Admin API for photo assessments (lawn assessment, pest identification,
+ * tree & shrub assessment).
  *
- * One surface over both funnel tables — lawn_diagnostics (mode='prospect')
- * and pest_identifications — backing /admin/lawn-assessments:
+ * One surface over the three assessment tables — lawn_diagnostics
+ * (mode='prospect'), pest_identifications, and tree_shrub_identifications —
+ * backing /admin/lawn-assessments. Tree & shrub has no public funnel and no
+ * tokenized customer report page yet: its rows are admin-created only,
+ * generate-link / send-report refuse it (TYPES.tree_shrub.reportPath = null),
+ * it is not in /funnel, and its table has no report/claim/funnel columns
+ * (report_token, report_expires_at, claim_token, claimed_at,
+ * report_first_viewed_at, pricing_snapshot, last_sent_at — dropped by
+ * 20260924010100). The shared list/detail shaping reads those columns
+ * generically, so on a tree_shrub row they are simply absent (null/false).
  *
  *   GET  /                      unified list (type/status filters, newest first)
  *   GET  /funnel                per-type funnel counts (analyzed → claimed → viewed → booked)
@@ -17,41 +26,29 @@
  *
  * Assessments are standalone-but-linkable: unlock auto-links the lead the
  * public claim created; this API adds the manual link path and admin-created
- * rows (source='admin') that never touched the public funnel.
+ * rows (source='admin') that never touched the public funnel. The per-type
+ * config (TYPES / configFor) and the create path live in
+ * services/photo-assessment-create.js, shared with the inbound photo-text
+ * triage (source='auto_triage').
  */
 
 const express = require('express');
 const crypto = require('crypto');
-const sharp = require('sharp');
 const router = express.Router();
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { parseStoredMedia, isSignableStoredMediaKey } = require('../services/sms-media');
-const lawnAssessment = require('../services/lawn-assessment');
-const {
-  buildDiagnosticReportContract,
-  classifyReleaseMode,
-  applyAutoReleaseRepair,
-} = require('../services/lawn-diagnostic-report');
-const {
-  runFindingsLadder,
-  applyWriterSummary,
-  deriveOverallScore,
-} = require('../services/lawn-diagnostic-analyze');
-const { buildPublicLawnReport } = require('./public-lawn-diagnostic');
-const {
-  identifyPest,
-  buildPestReportContract,
-  buildPublicPestReport,
-  PEST_LIBRARY,
-} = require('../services/pest-identification');
 const { sendAssessmentReportEmail } = require('../services/assessment-report-email');
-const { storeFunnelPhotos } = require('../utils/funnel-photos');
-const { overallStatusLabel } = require('../utils/public-report-egress');
 const { portalUrl } = require('../utils/portal-url');
-const { etParts } = require('../utils/datetime-et');
+const {
+  TYPES,
+  TYPE_KEYS,
+  UUID_RE,
+  cleanString,
+  configFor,
+  createAdminAssessment,
+} = require('../services/photo-assessment-create');
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
@@ -59,136 +56,15 @@ try { PhotoService = require('../services/photos'); } catch { PhotoService = nul
 router.use(adminAuthenticate, requireAdmin);
 
 const REPORT_TTL_DAYS = 30;
-const MAX_PHOTOS = 5;
-const MAX_PHOTO_CHARS = 6_000_000;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const LIBRARY_BY_SLUG = new Map(PEST_LIBRARY.map((e) => [e.slug, e]));
-
-// Inbound MMS photos pulled into an assessment: resized to this max
-// dimension and re-encoded as JPEG so every downstream consumer (vision
-// ladder, funnel photo storage) sees the same shape normalizePhotos always
-// produced — no separate code path for an SMS-sourced photo.
-const MESSAGE_PHOTO_MAX_PX = 1600;
-const MESSAGE_PHOTO_JPEG_QUALITY = 82;
-const MESSAGE_PHOTO_ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
-
-// Resolves one { message_id, key } request-photo entry into a
-// normalizePhotos-shaped { data, mimeType } photo, or an { error, status }
-// describing why it was refused. The key must belong to THIS message's own
-// stored inbound media AND pass isSignableStoredMediaKey — the guard against
-// an admin (or a compromised admin session) reading an arbitrary S3 object
-// by key.
-async function loadMessagePhoto(entry) {
-  const messageId = cleanString(entry?.message_id, 64);
-  const key = typeof entry?.key === 'string' ? entry.key : null;
-  if (!messageId || !UUID_RE.test(messageId) || !key) {
-    return { error: 'Each message_photos entry needs a valid message_id and key', status: 400 };
-  }
-
-  const message = await db('messages').where({ id: messageId }).first();
-  if (!message) return { error: `Message ${messageId} not found`, status: 404 };
-  if (message.direction !== 'inbound') {
-    return { error: `Message ${messageId} is not an inbound message`, status: 400 };
-  }
-
-  const storedMedia = parseStoredMedia(message.media);
-  const mediaItem = storedMedia.find((item) => item && item.key === key);
-  if (!mediaItem || !isSignableStoredMediaKey(key)) {
-    return { error: `Photo key is not available on message ${messageId}`, status: 400 };
-  }
-
-  const declaredMime = cleanString(mediaItem.contentType || mediaItem.mimeType, 80);
-  if (!declaredMime || !MESSAGE_PHOTO_ALLOWED_MIME.has(declaredMime.toLowerCase())) {
-    return { error: `Unsupported photo type on message ${messageId}`, status: 400 };
-  }
-
-  if (!PhotoService) {
-    logger.error(`[admin-photo-assessments] photo storage service unavailable for ${key}`);
-    return { error: 'Could not fetch the photo from storage — try again in a moment.', status: 502 };
-  }
-  let raw;
-  try {
-    ({ buffer: raw } = await PhotoService.getPhotoBuffer(key));
-  } catch (err) {
-    logger.error(`[admin-photo-assessments] S3 fetch failed for ${key}: ${err.message}`);
-    return { error: 'Could not fetch the photo from storage — try again in a moment.', status: 502 };
-  }
-
-  let jpegBuffer;
-  try {
-    jpegBuffer = await sharp(raw)
-      .rotate()
-      .resize(MESSAGE_PHOTO_MAX_PX, MESSAGE_PHOTO_MAX_PX, { fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: MESSAGE_PHOTO_JPEG_QUALITY })
-      .toBuffer();
-  } catch (err) {
-    logger.error(`[admin-photo-assessments] photo resize failed for ${key}: ${err.message}`);
-    return { error: 'Could not process the photo — try again in a moment.', status: 502 };
-  }
-
-  let conversationCustomerId = null;
-  if (message.conversation_id) {
-    const conversation = await db('conversations').where({ id: message.conversation_id }).select('customer_id').first();
-    conversationCustomerId = conversation?.customer_id || null;
-  }
-
-  return {
-    photo: { data: jpegBuffer.toString('base64'), mimeType: 'image/jpeg' },
-    customerId: conversationCustomerId,
-  };
-}
-
-// Resolves every message_photos entry in order, short-circuiting on the
-// first failure. Returns { photos, customerId } when every entry's own
-// conversation customer agrees (including all-null), or an
-// { error, status } when they don't.
-async function resolveMessagePhotos(entries) {
-  const photos = [];
-  // Every selected message's own conversation customer, INCLUDING null for
-  // an unlinked conversation — null is a distinct ownership state, not "no
-  // opinion". Collecting only truthy ids would let a selection mixing a
-  // customer-linked message with an unlinked one slip through as
-  // "one distinct customer" and silently attribute the unlinked sender's
-  // photo to that customer. A phone-keyed thread on the client can mix
-  // messages from more than one customer (a shared/reassigned number) —
-  // the client already refuses to submit a mixed selection, but this is
-  // the authoritative check: message_photos whose messages don't all agree
-  // (including agreeing on "none") is refused outright rather than
-  // silently attributed to whichever entry happened to resolve first.
-  const customerIds = [];
-  for (const entry of entries) {
-    const result = await loadMessagePhoto(entry);
-    if (result.error) return { error: result.error, status: result.status };
-    photos.push(result.photo);
-    customerIds.push(result.customerId || null);
-  }
-  if (new Set(customerIds).size > 1) {
-    return { error: 'Selected photos belong to different customers — pick photos from one customer.', status: 400 };
-  }
-  return { photos, customerId: customerIds[0] || null };
-}
-
-const TYPES = {
-  lawn: {
-    table: 'lawn_diagnostics',
-    photoTable: 'lawn_diagnostic_photos',
-    photoFk: 'diagnostic_id',
-    photoKeyPrefix: 'lawnfunnel',
-    reportPath: (token) => `/lawn-report/${token}`,
-    label: 'Lawn Assessment',
-  },
-  pest: {
-    table: 'pest_identifications',
-    photoTable: 'pest_identification_photos',
-    photoFk: 'identification_id',
-    photoKeyPrefix: 'pestid',
-    reportPath: (token) => `/pest-report/${token}`,
-    label: 'Pest Identification',
-  },
-};
+// Types with a public lead-magnet funnel (teaser → claim → report). Only
+// these have the claim/view/report columns funnelCounts counts; tree_shrub
+// has neither the funnel nor the columns. (TYPES, TYPE_KEYS and configFor —
+// the per-type config — live in services/photo-assessment-create.js with
+// the create path that inserts through it.)
+const FUNNEL_TYPE_KEYS = ['lawn', 'pest'];
 
 function typeConfig(req, res) {
-  const config = TYPES[String(req.params.type || '')];
+  const config = configFor(req.params.type);
   if (!config) {
     res.status(404).json({ error: 'Unknown assessment type' });
     return null;
@@ -205,18 +81,6 @@ function parseJson(value, fallback = {}) {
   } catch {
     return fallback;
   }
-}
-
-function cleanString(value, max = 200) {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  return trimmed ? trimmed.slice(0, max) : null;
-}
-
-// The admin lane = prospect-mode rows. Internal tech diagnostics (mode
-// 'internal') belong to the tech portal flow, not this list.
-function scopeLawn(qb) {
-  return qb.where({ mode: 'prospect' });
 }
 
 function listRowShape(type, row) {
@@ -242,17 +106,8 @@ function listRowShape(type, row) {
       phone: contact.phone || null,
     },
   };
-  if (type === 'lawn') {
-    return { ...shared, headline: overallStatusLabel(row.overall_score) };
-  }
-  const item = row.species_slug ? LIBRARY_BY_SLUG.get(row.species_slug) : null;
-  return {
-    ...shared,
-    headline: item ? item.label : (row.category || 'Unidentified'),
-    category: row.category || null,
-    urgency: row.urgency || null,
-    service_line: row.service_line || null,
-  };
+  const typeFields = configFor(type).listFields(row);
+  return { ...shared, ...typeFields };
 }
 
 async function fetchListRows(type, { status, limit, offset }) {
@@ -267,21 +122,21 @@ async function fetchListRows(type, { status, limit, offset }) {
     // correctly — the merged top (offset+limit) is always contained in the
     // union of each table's top (offset+limit).
     .limit(offset + limit);
-  if (type === 'lawn') qb = scopeLawn(qb);
+  if (config.scope) qb = config.scope(qb);
   if (status && status !== 'all') qb = qb.where(`${config.table}.status`, status);
   const rows = await qb;
   return rows.map((row) => listRowShape(type, row));
 }
 
-// GET /api/admin/photo-assessments?type=lawn|pest|all&status=analyzed|sent|archived|all
+// GET /api/admin/photo-assessments?type=lawn|pest|tree_shrub|all&status=analyzed|sent|archived|all
 router.get('/', async (req, res, next) => {
   try {
-    const type = ['lawn', 'pest'].includes(req.query.type) ? req.query.type : 'all';
+    const type = configFor(req.query.type) ? req.query.type : 'all';
     const status = cleanString(req.query.status, 20) || 'all';
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
 
-    const typesToFetch = type === 'all' ? ['lawn', 'pest'] : [type];
+    const typesToFetch = type === 'all' ? TYPE_KEYS : [type];
     const lists = await Promise.all(typesToFetch.map((t) => fetchListRows(t, { status, limit, offset })));
     const merged = lists.flat().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     res.json({
@@ -302,7 +157,7 @@ async function funnelCounts(type, sinceDate) {
   // admin-created phone-prospect assessments never saw the teaser → unlock
   // funnel and would skew unlock/booking rates. They're reported separately.
   let qb = db(config.table).where({ source: 'public_funnel' });
-  if (type === 'lawn') qb = scopeLawn(qb);
+  if (config.scope) qb = config.scope(qb);
   if (sinceDate) qb = qb.where('created_at', '>=', sinceDate);
   const [counts] = await qb
     .select(
@@ -315,7 +170,7 @@ async function funnelCounts(type, sinceDate) {
   let adminCreated = 0;
   try {
     let adminQb = db(config.table).where({ source: 'admin' });
-    if (type === 'lawn') adminQb = scopeLawn(adminQb);
+    if (config.scope) adminQb = config.scope(adminQb);
     if (sinceDate) adminQb = adminQb.where('created_at', '>=', sinceDate);
     const [row] = await adminQb.count('* as n');
     adminCreated = Number(row?.n || 0);
@@ -343,15 +198,14 @@ async function funnelCounts(type, sinceDate) {
 }
 
 // GET /api/admin/photo-assessments/funnel?days=30 (days=0 → all time)
+// One key per funnel type (lawn, pest) — tree_shrub has no public funnel.
 router.get('/funnel', async (req, res, next) => {
   try {
     const days = Math.min(Math.max(Number(req.query.days ?? 30), 0), 365);
     const sinceDate = days > 0 ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : null;
-    const [lawn, pest] = await Promise.all([
-      funnelCounts('lawn', sinceDate),
-      funnelCounts('pest', sinceDate),
-    ]);
-    res.json({ days, lawn, pest });
+    const types = FUNNEL_TYPE_KEYS;
+    const counts = await Promise.all(types.map((type) => funnelCounts(type, sinceDate)));
+    res.json({ days, ...Object.fromEntries(types.map((type, i) => [type, counts[i]])) });
   } catch (err) {
     next(err);
   }
@@ -360,7 +214,7 @@ router.get('/funnel', async (req, res, next) => {
 async function loadRow(config, id) {
   if (!UUID_RE.test(String(id || ''))) return null;
   let qb = db(config.table).where({ id });
-  if (config.table === 'lawn_diagnostics') qb = scopeLawn(qb);
+  if (config.scope) qb = config.scope(qb);
   return qb.first();
 }
 
@@ -379,32 +233,6 @@ async function loadPhotos(config, rowId) {
     }
     return { id: photo.id, photo_index: photo.photo_index, mime_type: photo.mime_type, url };
   }));
-}
-
-function pestTechView(row, contract) {
-  const ident = contract.identification || {};
-  const item = ident.slug ? LIBRARY_BY_SLUG.get(ident.slug) : null;
-  const alternates = (Array.isArray(contract.alternate_slugs) ? contract.alternate_slugs : [])
-    .map((slug) => LIBRARY_BY_SLUG.get(slug))
-    .filter(Boolean)
-    .map((alt) => ({ slug: alt.slug, label: alt.label, tech_notes: alt.tech_notes }));
-  return {
-    identification: {
-      slug: ident.slug || null,
-      label: item ? item.label : null,
-      category: ident.category || null,
-      confidence: ident.confidence || null,
-      contested: !!ident.contested,
-    },
-    urgency: contract.urgency || null,
-    safety: contract.safety || {},
-    service: contract.service || {},
-    tech_notes: item ? item.tech_notes : null,
-    differentials: alternates,
-    // Raw model observations — internal only; never rendered on a customer surface.
-    observations: Array.isArray(contract.observations) ? contract.observations : [],
-    distinguishing_features: Array.isArray(contract.distinguishing_features) ? contract.distinguishing_features : [],
-  };
 }
 
 // GET /api/admin/photo-assessments/:type/:id
@@ -439,8 +267,13 @@ router.get('/:type/:id', async (req, res, next) => {
         // Copy-link is only offered for links a customer can actually open.
         // Mirror the public readers' exact contract (status='sent' + non-null
         // FUTURE expiry) — archived rows and missing-expiry tokens 404 there,
-        // so handing staff those URLs would ship dead links.
-        report_url: row.status === 'sent' && row.report_token && row.report_expires_at
+        // so handing staff those URLs would ship dead links. A type with no
+        // report page (tree_shrub) never has one.
+        report_available: config.reportPath !== null,
+        // The SAME gate generate-link / send-report enforce, so the sheet
+        // offers Get link / Send report only when the server would accept.
+        can_release: releaseRefusal(config, row, 'release a report') === null,
+        report_url: config.reportPath && row.status === 'sent' && row.report_token && row.report_expires_at
           && new Date(row.report_expires_at).getTime() > Date.now()
           ? portalUrl(config.reportPath(row.report_token))
           : null,
@@ -451,9 +284,10 @@ router.get('/:type/:id', async (req, res, next) => {
       customer: customer || null,
       // Internal treatment-oriented view (confirmation steps, tech notes,
       // raw observations) — admin/tech eyes only.
-      tech_view: type === 'lawn' ? { contract } : pestTechView(row, contract),
-      // Exactly what the customer sees at the tokenized report URL.
-      customer_preview: type === 'lawn' ? buildPublicLawnReport(row) : buildPublicPestReport(row),
+      tech_view: config.techView(row, contract),
+      // Exactly what the customer sees at the tokenized report URL (null
+      // for a type with no customer report page).
+      customer_preview: config.customerPreview(row),
     });
   } catch (err) {
     next(err);
@@ -520,6 +354,19 @@ function isReleasable(row) {
 }
 const UNCLAIMED_ERROR = 'This prospect has not unlocked the report yet — sending now would skip lead capture and permanently block their claim. Link or create the lead via their unlock instead.';
 
+// The one release gate generate-link and send-report share: a type with no
+// customer report page, a non-releasable status, or an unclaimed public
+// funnel row all refuse (409) before anything is minted or sent. Returns
+// the refusal message, or null when the row may be released.
+function releaseRefusal(config, row, action) {
+  if (!config.reportPath) {
+    return `There is no customer report for ${config.label.toLowerCase()} yet — review it here and follow up directly.`;
+  }
+  if (!['analyzed', 'sent'].includes(row.status)) return `Cannot ${action} for a ${row.status} assessment`;
+  if (!isReleasable(row)) return UNCLAIMED_ERROR;
+  return null;
+}
+
 // Atomic mint: COALESCE keeps the FIRST token under concurrent mints /
 // double-submits (both requests read back the same persisted token, so
 // neither caller carries a link the other invalidated). Every mint refreshes
@@ -551,10 +398,8 @@ router.post('/:type/:id/generate-link', async (req, res, next) => {
     if (!config) return undefined;
     const row = await loadRow(config, req.params.id);
     if (!row) return res.status(404).json({ error: 'Assessment not found' });
-    if (!['analyzed', 'sent'].includes(row.status)) {
-      return res.status(409).json({ error: `Cannot generate a report link for a ${row.status} assessment` });
-    }
-    if (!isReleasable(row)) return res.status(409).json({ error: UNCLAIMED_ERROR });
+    const refusal = releaseRefusal(config, row, 'generate a report link');
+    if (refusal) return res.status(409).json({ error: refusal });
     const { reportToken, expiresAt } = await mintReportToken(config, row.id);
     return res.json({ success: true, reportUrl: portalUrl(config.reportPath(reportToken)), expiresAt });
   } catch (err) {
@@ -573,10 +418,8 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
     if (!config) return undefined;
     const row = await loadRow(config, req.params.id);
     if (!row) return res.status(404).json({ error: 'Assessment not found' });
-    if (!['analyzed', 'sent'].includes(row.status)) {
-      return res.status(409).json({ error: `Cannot send a report for a ${row.status} assessment` });
-    }
-    if (!isReleasable(row)) return res.status(409).json({ error: UNCLAIMED_ERROR });
+    const refusal = releaseRefusal(config, row, 'send a report');
+    if (refusal) return res.status(409).json({ error: refusal });
 
     const contact = parseJson(row.contact_snapshot, {});
     // Recipient resolution: explicit override → snapshot → linked lead →
@@ -676,257 +519,17 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
   }
 });
 
-function normalizePhotos(rawPhotos) {
-  const photos = Array.isArray(rawPhotos) ? rawPhotos.filter(Boolean) : [];
-  return photos.map((photo, index) => ({
-    photo_id: `photo-${index + 1}`,
-    data: typeof photo.data === 'string' && photo.data ? photo.data : null,
-    mimeType: cleanString(photo.mimeType || photo.mime_type, 80) || 'image/jpeg',
-    quality: 'limited',
-    limitations: [],
-  }));
-}
-
-// Same pipeline the public funnel runs (shared ladder → contract → writer →
-// release repair) — one analysis implementation, three front doors (tech,
-// public funnel, admin-created).
-async function runLawnAnalysis(photos, prospectNote) {
-  const season = lawnAssessment.getSeason(etParts(new Date()).month);
-  const { findings, findingsSource, fallbackReason, provenance } = await runFindingsLadder({
-    photos,
-    season,
-    products: [],
-    compliance: {},
-  });
-  const reportContract = buildDiagnosticReportContract({
-    photos: photos.map((photo) => ({ photo_id: photo.photo_id, quality: photo.quality, limitations: photo.limitations })),
-    findings,
-    products: [],
-    compliance: {},
-    seasonal_context: '',
-  });
-  const releaseMode = classifyReleaseMode(reportContract);
-  await applyWriterSummary(reportContract, { season, findingsSource, releaseMode, provenance });
-  const sanitizedContract = applyAutoReleaseRepair(reportContract, releaseMode);
-  return {
-    insert: {
-      ai_analysis: JSON.stringify({
-        release_mode: releaseMode,
-        findings_source: findingsSource,
-        fallback_reason: fallbackReason,
-        prospect_note: prospectNote,
-        provenance: {
-          source: 'admin',
-          perception_model: provenance.perceptionModel || null,
-          challenge_model: provenance.challengeModel || null,
-          writer: provenance.writerModel || 'deterministic',
-        },
-      }),
-      report_contract: JSON.stringify(sanitizedContract),
-      overall_score: deriveOverallScore(sanitizedContract, null),
-      ai_summary: cleanString(sanitizedContract.customer_summary, 2000),
-    },
-  };
-}
-
-async function runPestAnalysis(photos, prospectNote) {
-  const result = await identifyPest(photos);
-  if (!result.ok) return { error: 'Photo analysis is unavailable right now — try again in a few minutes.' };
-  const contract = buildPestReportContract(result);
-  return {
-    insert: {
-      ai_analysis: JSON.stringify({
-        prospect_note: prospectNote,
-        per_photo: result.perPhoto.map((photo) => ({
-          slug: photo.entry ? photo.entry.slug : null,
-          confidence: photo.confidence,
-          category: photo.category,
-          agreement: photo.agreement,
-          model_count: photo.model_count,
-          observations: photo.observations,
-        })),
-      }),
-      report_contract: JSON.stringify(contract),
-      category: contract.identification.category,
-      species_slug: contract.identification.slug,
-      service_line: contract.service.line,
-      urgency: contract.urgency,
-      ai_summary: (result.observations || []).join(' ').slice(0, 2000) || null,
-    },
-  };
-}
-
-// Resolves the request's photo inputs (photos + message_photos) into the
-// normalizePhotos-shaped list the analysis ladder runs on, or an
-// { error, status }. Owns every count/size/shape check for BOTH sources so
-// the route handler makes exactly one decision (did this fail) instead of
-// re-checking the combined list at each stage.
-async function resolveRequestPhotos(body) {
-  const rawPhotos = Array.isArray(body.photos) ? body.photos.filter(Boolean) : [];
-  const messagePhotoRequests = Array.isArray(body.message_photos) ? body.message_photos.filter(Boolean) : [];
-  if (!rawPhotos.length && !messagePhotoRequests.length) {
-    return { error: 'At least one photo is required', status: 400 };
-  }
-  if (rawPhotos.length + messagePhotoRequests.length > MAX_PHOTOS) {
-    return { error: `At most ${MAX_PHOTOS} photos per assessment`, status: 400 };
-  }
-
-  // Pulled BEFORE the vision ladder runs — a bad key or an unreachable S3
-  // object fails the request outright rather than silently dropping a
-  // photo the operator explicitly selected.
-  const messagePhotos = await resolveMessagePhotos(messagePhotoRequests);
-  if (messagePhotos.error) return messagePhotos;
-
-  const photos = normalizePhotos([...rawPhotos, ...messagePhotos.photos]);
-  if (!photos.length || !photos.some((photo) => photo.data)) {
-    return { error: 'At least one photo is required', status: 400 };
-  }
-  if (photos.length > MAX_PHOTOS) {
-    return { error: `At most ${MAX_PHOTOS} photos per assessment`, status: 400 };
-  }
-  if (photos.some((photo) => photo.data && photo.data.length > MAX_PHOTO_CHARS)) {
-    return { error: 'One of the photos is too large — resize it and retry.', status: 413 };
-  }
-
-  return { photos, messageCustomerId: messagePhotos.customerId };
-}
-
-// One id → row lookup for both lead_id and customer_id, so the two
-// association fields share a single validated-UUID-then-exists shape
-// instead of two parallel hand-written blocks.
-const ASSOCIATION_LOOKUPS = {
-  lead_id: { table: 'leads', notFoundLabel: 'Lead' },
-  customer_id: { table: 'customers', notFoundLabel: 'Customer' },
-};
-async function lookupAssociation(field, id) {
-  const spec = ASSOCIATION_LOOKUPS[field];
-  if (!UUID_RE.test(String(id))) return { error: `invalid ${field}`, status: 400 };
-  const row = await db(spec.table).where({ id }).first();
-  if (!row) return { error: `${spec.notFoundLabel} not found`, status: 404 };
-  return { id: row.id, row };
-}
-
-// The linked customer's own contact fields, shaped like a contact_snapshot,
-// so an assessment created without an explicit contact (Customer 360 or an
-// inbound-thread pick) still lists a name/email/phone instead of "No
-// contact yet" while its Linked column says Customer.
-function customerContactSnapshot(customer) {
-  if (!customer) return null;
-  return {
-    first_name: cleanString(customer.first_name, 80),
-    last_name: cleanString(customer.last_name, 80),
-    email: cleanString(customer.email, 254),
-    phone: cleanString(customer.phone, 20),
-  };
-}
-
-// Resolves lead_id/customer_id into { leadId, customerId, customerContact }
-// (customerContact = the linked customer's contact fields, or null), or an
-// { error, status }. customerId prefers an explicit body value, otherwise
-// defaults from the inbound message thread (messageCustomerId, from
-// resolveRequestPhotos) — same existence check either way, so a
-// stale/deleted id never links. An explicit customer_id that CONTRADICTS
-// the selected messages' own (non-null) customer is refused rather than
-// silently overriding it — the client only ever sends an explicit
-// customer_id from the Customer 360-embedded composer, where it should
-// always agree with the thread it pulled photos from.
-async function resolveAssociations(body, messageCustomerId) {
-  let leadId = null;
-  let customerId = null;
-  let customerContact = null;
-
-  if (body.lead_id) {
-    const lead = await lookupAssociation('lead_id', body.lead_id);
-    if (lead.error) return lead;
-    leadId = lead.id;
-  }
-
-  if (body.customer_id && messageCustomerId && String(body.customer_id) !== String(messageCustomerId)) {
-    return { error: 'customer_id does not match the selected photos’ customer', status: 400 };
-  }
-  const requestedCustomerId = body.customer_id || messageCustomerId;
-  if (requestedCustomerId) {
-    const customer = await lookupAssociation('customer_id', requestedCustomerId);
-    if (customer.error) return customer;
-    customerId = customer.id;
-    customerContact = customerContactSnapshot(customer.row);
-  }
-
-  return { leadId, customerId, customerContact };
-}
-
-// An explicit body.contact wins; otherwise the linked customer's own
-// contact fields (customerContact, from resolveAssociations) stand in so
-// the row is never "No contact yet" while linked to a customer.
-function buildSnapshots(body, customerContact = null) {
-  const contact = body.contact && typeof body.contact === 'object' && !Array.isArray(body.contact) ? body.contact : {};
-  const explicitContact = {
-    first_name: cleanString(contact.first_name, 80),
-    last_name: cleanString(contact.last_name, 80),
-    email: cleanString(contact.email, 254),
-    phone: cleanString(contact.phone, 20),
-  };
-  const contactSnapshot = Object.values(explicitContact).some(Boolean) ? explicitContact : (customerContact || {});
-  const address = body.address && typeof body.address === 'object' && !Array.isArray(body.address) ? body.address : {};
-  const addressSnapshot = {
-    line1: cleanString(address.line1),
-    city: cleanString(address.city),
-    state: cleanString(address.state, 20),
-    zip: cleanString(address.zip, 12),
-  };
-  return {
-    contactSnapshot: Object.values(contactSnapshot).some(Boolean) ? contactSnapshot : null,
-    addressSnapshot: Object.values(addressSnapshot).some(Boolean) ? addressSnapshot : null,
-    prospectNote: cleanString(body.note, 500),
-  };
-}
-
 // POST /api/admin/photo-assessments/:type
 // Admin-created assessment (prospect on the phone, or an existing customer)
 // — no public funnel involved: no lead is created, no attribution row, no
-// email. Paid vision behind admin auth, so no gate/Turnstile applies.
+// email. Paid vision behind admin auth, so no gate/Turnstile applies. The
+// create path itself lives in services/photo-assessment-create.js (shared
+// with the inbound photo-text triage).
 router.post('/:type', async (req, res, next) => {
   try {
-    const config = typeConfig(req, res);
-    if (!config) return undefined;
-    const body = req.body || {};
-
-    const requestPhotos = await resolveRequestPhotos(body);
-    if (requestPhotos.error) return res.status(requestPhotos.status || 400).json({ error: requestPhotos.error });
-    const { photos, messageCustomerId } = requestPhotos;
-
-    const associations = await resolveAssociations(body, messageCustomerId);
-    if (associations.error) return res.status(associations.status || 400).json({ error: associations.error });
-    const { leadId, customerId, customerContact } = associations;
-
-    const { contactSnapshot, addressSnapshot, prospectNote } = buildSnapshots(body, customerContact);
-
-    const analysis = req.params.type === 'lawn'
-      ? await runLawnAnalysis(photos, prospectNote)
-      : await runPestAnalysis(photos, prospectNote);
-    if (analysis.error) return res.status(503).json({ error: analysis.error });
-
-    const [row] = await db(config.table).insert({
-      mode: 'prospect',
-      status: 'analyzed',
-      source: 'admin',
-      lead_id: leadId,
-      customer_id: customerId,
-      contact_snapshot: contactSnapshot ? JSON.stringify(contactSnapshot) : null,
-      address_snapshot: addressSnapshot ? JSON.stringify(addressSnapshot) : null,
-      ...analysis.insert,
-    }).returning(['id']);
-
-    await storeFunnelPhotos({
-      table: config.photoTable,
-      fkColumn: config.photoFk,
-      rowId: row.id,
-      keyPrefix: config.photoKeyPrefix,
-      photos,
-    });
-
-    logger.info(`[admin-photo-assessments] admin-created ${req.params.type} assessment ${row.id}`);
-    return res.status(201).json({ success: true, id: row.id, type: req.params.type });
+    const created = await createAdminAssessment({ ...(req.body || {}), type: req.params.type, source: 'admin' });
+    if (created.error) return res.status(created.status || 400).json({ error: created.error });
+    return res.status(201).json({ success: true, id: created.id, type: created.type });
   } catch (err) {
     return next(err);
   }
@@ -935,10 +538,5 @@ router.post('/:type', async (req, res, next) => {
 module.exports = router;
 module.exports._test = {
   listRowShape,
-  normalizePhotos,
-  TYPES,
-  resolveRequestPhotos,
-  resolveAssociations,
-  lookupAssociation,
-  buildSnapshots,
+  releaseRefusal,
 };

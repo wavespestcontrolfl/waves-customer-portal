@@ -34,6 +34,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { GRATITUDE_INTENT } = require('./sms-gratitude');
 
 const LADDER = ['shadow', 'suggest', 'auto_send'];
 
@@ -406,6 +407,25 @@ async function computeReadiness({ intents, dbi = db } = {}) {
 
   const out = new Map();
   for (const { intent, mode, locked, suggest } of intents) {
+    // Fixed-copy gratitude qualifies through its non-delivery exam. Never
+    // fabricate live accepted outcomes or lower thresholds for other intents.
+    if (intent === GRATITUDE_INTENT) {
+      const qualification = await evaluateAutoSendEligibility({ intent, dbi });
+      const currentMode = LADDER.includes(mode) ? mode : 'shadow';
+      const nextRung = currentMode === 'auto_send' ? null : 'auto_send';
+      out.set(intent, {
+        currentMode, nextRung,
+        eligible: qualification.eligible,
+        eligibleFor: qualification.eligible ? nextRung : null,
+        blockers: qualification.blockers,
+        autoSendHealth: currentMode === 'auto_send'
+          ? { sendReady: qualification.eligible, blockers: qualification.blockers } : null,
+        qualification,
+        judge: { judged: 0, unsafe: 0, unsafeRate: 0, avgSafety: null,
+          recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 },
+      });
+      continue;
+    }
     const judge = judgeSignals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 };
     const verdict = evaluateRung({ mode, locked, judge, suggest, judgeAvailable });
     if (examBlockers && examBlockers.length && !locked && verdict.nextRung) {
@@ -492,6 +512,9 @@ async function fetchSuggestOutcomes({ intent, dbi = db, cohortVersions, voicePro
  * and any signal-fetch error, return not-eligible.
  */
 async function evaluateAutoSendEligibility({ intent, dbi = db, voiceProfileVersion } = {}) {
+  if (intent === GRATITUDE_INTENT) {
+    return require('./sms-gratitude-qualification').evaluateGratitudeQualification({ dbi, voiceProfileVersion });
+  }
   const { isEscalationIntent } = require('./sms-suggest-mode');
   if (isEscalationIntent(intent)) {
     return { eligible: false, blockers: ['Escalation intent — never auto-sends.'] };

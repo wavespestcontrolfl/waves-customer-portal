@@ -138,3 +138,60 @@ describe('agent dispatcher — a captured draft leaves on the terminal event', (
     expect(err.code).toBe('session_stream_eof');
   });
 });
+
+describe('agent dispatcher — editorial registration failure', () => {
+  let clearDraft;
+  let recordSessionUsage;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = {
+      ...ORIGINAL_ENV,
+      ANTHROPIC_API_KEY: 'k',
+      CONTENT_AGENT_ENVIRONMENT_ID: 'env-1',
+      CONTENT_REFRESHER_AGENT_ID: 'agent-refresh',
+    };
+    clearDraft = jest.fn();
+    recordSessionUsage = jest.fn(async () => {});
+    jest.doMock('../services/content/agents/brief-driven-tools', () => ({
+      executeBriefTool: jest.fn(),
+      getDraft: jest.fn(),
+      getCheckedRoutes: jest.fn(() => []),
+      clearDraft,
+      registerSessionLint: jest.fn(),
+      registerSessionEditorial: jest.fn(async () => { throw new Error('target lookup exploded'); }),
+    }));
+    jest.doMock('../services/llm-dispatch-metrics', () => ({ recordSessionUsage }));
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'sess-registration' }),
+      text: async () => '',
+    }));
+  });
+
+  afterAll(() => { process.env = ORIGINAL_ENV; global.fetch = ORIGINAL_FETCH; });
+
+  it('records and cleans a created session without posting the initial message', async () => {
+    const dispatcher = load();
+    const result = await dispatcher.runWithBrief({
+      opportunity_id: 'opp-refresh',
+      action_type: 'refresh_existing_page',
+      page_type: 'refresh',
+      target_url: '/blog/door/',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      reason: 'editorial_registration_failed: target lookup exploded',
+      session_id: 'sess-registration',
+      agent_id: 'agent-refresh',
+    }));
+    expect(recordSessionUsage).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'sess-registration',
+      failure: 'editorial_registration_failed',
+    }));
+    expect(clearDraft).toHaveBeenCalledWith('sess-registration');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});

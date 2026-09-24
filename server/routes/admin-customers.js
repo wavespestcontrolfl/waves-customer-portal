@@ -3054,7 +3054,7 @@ router.get('/:id', async (req, res, next) => {
         .orderBy('service_records.service_date', 'desc')
         .limit(20),
       db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
-      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
+      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'), db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       customerScheduledHistory(db, c.id, { focusServiceId }),
       // Upcoming, active-only — drives Customer 360's next appointment.

@@ -36,6 +36,7 @@ import {
   TBody,
   TD,
   UiSurface,
+  ActionFeedback,
 } from "../../components/ui";
 import {
   Users,
@@ -537,15 +538,21 @@ function DashboardView({
   };
   const [events, setEvents] = useState([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
+  const [eventsError, setEventsError] = useState("");
   const eventsRequest = useRef(0);
   const loadEvents = useCallback((background = false) => {
     const request = ++eventsRequest.current;
     if (!background) setLoadingEvents(true);
     return adminFetch("/admin/newsletter/events?days=14&limit=12")
       .then((d) => {
-        if (request === eventsRequest.current) setEvents(d.events || []);
+        if (request !== eventsRequest.current) return;
+        setEvents(d.events || []);
+        setEventsError("");
       })
-      .catch(() => {})
+      .catch((error) => {
+        if (request !== eventsRequest.current) return;
+        setEventsError(error.message || "Upcoming events could not be loaded.");
+      })
       .finally(() => {
         if (request === eventsRequest.current) setLoadingEvents(false);
       });
@@ -608,11 +615,20 @@ function DashboardView({
           title="Upcoming events worth writing about"
           hint="Pulled from local SWFL feeds (Tampa.gov, Bay News 9, Manatee Chamber, Sarasota Magazine, The Gabber, Lakewood Ranch). Refreshes daily 4am ET."
         />
-        {loadingEvents ? (
+        {eventsError && (
+          <ActionFeedback
+            error
+            onRetry={loadingEvents ? undefined : () => loadEvents()}
+            className="mb-3"
+          >
+            {eventsError}
+          </ActionFeedback>
+        )}
+        {loadingEvents && events.length === 0 ? (
           <div className="text-ui-body text-ink-tertiary p-3">
             Loading events…
           </div>
-        ) : events.length === 0 ? (
+        ) : events.length === 0 && !eventsError ? (
           <Card>
             {" "}
             <CardBody className="text-center">
@@ -626,7 +642,7 @@ function DashboardView({
               </div>{" "}
             </CardBody>{" "}
           </Card>
-        ) : (
+        ) : events.length > 0 ? (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
             {events.map((e) => (
               <EventCard
@@ -636,7 +652,7 @@ function DashboardView({
               />
             ))}
           </div>
-        )}
+        ) : null}
       </div>
       {/* Recent posts */}
       <div className="mb-6">
