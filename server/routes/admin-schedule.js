@@ -1757,6 +1757,20 @@ function addonServiceIdentityForFreshness({
 // posted and no snapshot covers estimated_price, compare it again against
 // the total this save leaves on the LOCKED row (planned write, else the
 // locked stored value) — the same previewTotalDrifted contract.
+function lockedWitnessDrifted({ expectedTotal, financialCasSnapshot, plannedEstimatedPrice, lockedEstimatedPrice }) {
+  if (expectedTotal === undefined) return false;
+  if (financialCasSnapshot) return false; // financialStateDrifted already compared estimated_price
+  const total = plannedEstimatedPrice !== undefined ? plannedEstimatedPrice : (lockedEstimatedPrice ?? null);
+  return previewTotalDrifted(expectedTotal, total);
+}
+
+async function resolvePlannedTotal(db, id, updates, cols = null) {
+  if (updates.estimated_price !== undefined) return updates.estimated_price;
+  if (cols && !cols.estimated_price) return null;
+  const row = await db('scheduled_services').where({ id }).first('estimated_price').catch(() => null);
+  return row?.estimated_price ?? null;
+}
+
 // Generic row-version CAS for PUT /:id/update-details (follow-up to #4657,
 // owner-approved 2026-09-24 over moving the planner under the lock). The
 // planner reads the visit row + its add-on rows BEFORE the transaction;
@@ -1806,20 +1820,6 @@ function rowVersionsDrifted(snapshot, fresh) {
     if (after == null || String(after) !== String(before)) return true;
   }
   return false;
-}
-
-function lockedWitnessDrifted({ expectedTotal, financialCasSnapshot, plannedEstimatedPrice, lockedEstimatedPrice }) {
-  if (expectedTotal === undefined) return false;
-  if (financialCasSnapshot) return false; // financialStateDrifted already compared estimated_price
-  const total = plannedEstimatedPrice !== undefined ? plannedEstimatedPrice : (lockedEstimatedPrice ?? null);
-  return previewTotalDrifted(expectedTotal, total);
-}
-
-async function resolvePlannedTotal(db, id, updates, cols = null) {
-  if (updates.estimated_price !== undefined) return updates.estimated_price;
-  if (cols && !cols.estimated_price) return null;
-  const row = await db('scheduled_services').where({ id }).first('estimated_price').catch(() => null);
-  return row?.estimated_price ?? null;
 }
 
 function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
