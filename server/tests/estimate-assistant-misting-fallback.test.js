@@ -99,6 +99,34 @@ describe('Ask Waves fallback — mosquito misting SYSTEM quote-required question
   // a misting estimate with the design-visit/pricing copy — a weather or
   // safety question got that same copy instead of its own answer. Each
   // intent below is sourced from wiki/protocols/mosquito-misting-systems.md.
+  describe('Codex round-4: no "-safe" claims, re-entry wording, mixed-estimate scoping', () => {
+    test('safety answer never uses "*-safe" terminology', () => {
+      const answer = answerEstimateQuestionFallback('Is it safe for my bees and koi?', mistingContext);
+      expect(answer).not.toMatch(/\b\w+-safe\b/i);
+      expect(answer.toLowerCase()).toContain('specific product label decides');
+    });
+    test.each(['Can we go outside after it sprays?', 'Is the spray bad to breathe on the lanai?'])('%s gets the safety answer', (question) => {
+      const answer = answerEstimateQuestionFallback(question, mistingContext);
+      expect(answer.toLowerCase()).toContain('nozzles are placed under 10 ft');
+    });
+    const mixedContext = {
+      billing: { quoteRequired: true, amountText: null },
+      services: [
+        { service: 'mosquito_misting_system', label: 'Mosquito Misting System Service' },
+        { service: 'pest_general_quarterly', label: 'Quarterly Pest Control Service' },
+      ],
+    };
+    test('mixed estimate: a question about the other service is not answered with misting copy', () => {
+      const answer = answerEstimateQuestionFallback('What does the pest control plan include?', mixedContext);
+      expect(answer.toLowerCase()).not.toContain('design visit');
+      expect(answer.toLowerCase()).not.toContain('nozzles');
+    });
+    test('mixed estimate: a misting question still gets misting copy', () => {
+      const answer = answerEstimateQuestionFallback('How often do you clean the misting nozzles?', mixedContext);
+      expect(answer.toLowerCase()).toContain('quarterly nozzle cleaning');
+    });
+  });
+
   describe('intent order: price first, booking last (topic questions containing "when" stay on topic)', () => {
     test.each([
       ['When should I pause it before a storm?', 'should be paused for rain'],

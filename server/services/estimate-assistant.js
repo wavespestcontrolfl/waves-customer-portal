@@ -1192,6 +1192,21 @@ function estimateContextHasMistingSystem(context = {}) {
   return rows.some((row) => isMistingSystemService({ serviceKey: row?.service || row?.key, name: row?.label || row?.name }));
 }
 
+// A mixed estimate (misting + another service) only routes a question to the
+// misting fallback when the question is about the misting system; questions
+// about the other service keep their own branches.
+function estimateContextIsMistingOnly(context = {}) {
+  const rows = [
+    ...(Array.isArray(context.services) ? context.services : []),
+    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+  ];
+  return rows.length > 0 && rows.every((row) => isMistingSystemService({ serviceKey: row?.service || row?.key, name: row?.label || row?.name }));
+}
+
+function isMistingSystemQuestion(q = '') {
+  return isMistingSystemService({ text: q }) || /\b(mist\w*|nozzles?|design\s*visit|reservoir|cabinet)\b/i.test(q);
+}
+
 // Intent-specific misting-system copy, sourced from
 // wiki/protocols/mosquito-misting-systems.md (the tech protocol — the source
 // of truth for every fact below). Checked in this order; the first match
@@ -1205,7 +1220,7 @@ function estimateContextHasMistingSystem(context = {}) {
 const MISTING_PRICE_INTENT_PATTERN = /\b(price|prices|pricing|cost|costs|quote|charge|fee|fees|payment)\b|\bhow\s+much\b/i;
 const MISTING_BOOKING_INTENT_PATTERN = /\b(book|booking|schedule|scheduling|appointment|reschedule)\b|\bdesign\s*visit\b/i;
 const MISTING_WEATHER_INTENT_PATTERN = /\b(weather|wind|windy|rain|rains|raining|rainy|storm|storms|hurricane|hurricanes|cold|freeze|freezing|temperature|temp)\b/i;
-const MISTING_SAFETY_INTENT_PATTERN = /\b(safe|safety|kids?|child(?:ren)?|pets?|dogs?|cats?|bees?|bee|pollinators?|fish|pond|pool|expos\w*|allerg\w*|sick|misted)\b/i;
+const MISTING_SAFETY_INTENT_PATTERN = /\b(safe|safety|kids?|child(?:ren)?|pets?|dogs?|cats?|bees?|bee|pollinators?|fish|pond|pool|expos\w*|allerg\w*|sick|misted|outside|outdoors|spray\w*|re-?entry|breath\w*|inhal\w*|smell\w*|skin|lanai|patio)\b|\bgo\s+out\b/i;
 const MISTING_MAINTENANCE_INTENT_PATTERN = /\b(refill\w*|maintain\w*|maintenance|clog(?:ged|s)?|service\w*|nozzle\w*|filter\w*|clean\w*|repair\w*|broken|leak\w*)\b/i;
 
 function mistingSystemFallbackAnswer(question, phone) {
@@ -1218,7 +1233,7 @@ function mistingSystemFallbackAnswer(question, phone) {
     return `Cycles should be paused for rain, fog, wind over 10 mph, or temperatures below 50°F — automatically by an optional weather sensor where one is installed, otherwise from the app. Before a named storm we pause every system from the app, then do a post-storm inspection visit before resuming. Call or text Waves at ${phone} with questions about your system.`;
   }
   if (MISTING_SAFETY_INTENT_PATTERN.test(q)) {
-    return `Nozzles are placed under 10 ft and aimed away from pools, ponds, and other water, dining areas, and air intakes, and cycles run at dawn and dusk when people and pets are not outside. The system can also be paused from the app at any time. Pollinator and fish label precautions are reviewed for your property — "botanical" products are not automatically bee- or fish-safe. If you suspect any exposure (a person, pet, fish, or bees), pause the system and call the office right away at ${phone}. The system reduces adult mosquitoes in the treated zone; it does not prevent disease.`;
+    return `Nozzles are placed under 10 ft and aimed away from pools, ponds, and other water, dining areas, and air intakes, and cycles run at dawn and dusk when people and pets are not outside. The system can also be paused from the app at any time. Pollinator and fish label precautions are reviewed for your property — "botanical" products can still be toxic to bees or fish, so the specific product label decides. If you suspect any exposure (a person, pet, fish, or bees), pause the system and call the office right away at ${phone}. The system reduces adult mosquitoes in the treated zone; it does not prevent disease.`;
   }
   if (MISTING_MAINTENANCE_INTENT_PATTERN.test(q)) {
     return `The service plan includes a monthly check and solution refill, plus quarterly nozzle cleaning and a filter change. Only Waves-licensed techs handle or refill the solution — it is not a self-refill system, by company policy. Call or text Waves at ${phone} if something needs attention before your next visit.`;
@@ -1269,7 +1284,8 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // (mistingSystemFallbackAnswer) so a weather, safety, or maintenance
   // question gets its own protocol-sourced answer instead of design-visit/
   // pricing copy on every question.
-  if (context.billing?.quoteRequired && estimateContextHasMistingSystem(context)) {
+  if (context.billing?.quoteRequired && estimateContextHasMistingSystem(context)
+    && (estimateContextIsMistingOnly(context) || isMistingSystemQuestion(q))) {
     return mistingSystemFallbackAnswer(question, phone);
   }
 

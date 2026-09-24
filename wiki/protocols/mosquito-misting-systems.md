@@ -12,7 +12,7 @@
 - **Locked reservoir.** Cabinet locked at all times. Company policy: only Waves licensed techs handle or refill solution. EPA guidance is to secure the reservoir and use state-licensed installers/technicians.
 - **Placement (EPA guidance):** nozzles under 10 ft, aimed at resting sites and AWAY from pools, ponds, canals, other water, grills and dining areas, and AC or air intakes. Also keep them off siding, painted or metal surfaces, and vehicles (staining).
 - **Timing:** cycles at dawn and dusk, when people and pets are not outside. Cycle length comes from the install calibration (label + system output), not a fixed number of seconds. Pause for rain, fog, wind over 10 mph, or temperatures below 50°F, by a weather sensor where installed or from the app.
-- **Pollinators and water:** keep nozzles off flowering plants. Pyrethrins and permethrin kill bees; permethrin is very highly toxic to fish. "Botanical" is not automatically bee- or fish-safe, so review each product's label precautions with the customer. Waterfront lots get a wider buffer at the water.
+- **Pollinators and water:** keep nozzles off flowering plants. Pyrethrins and permethrin kill bees; permethrin is very highly toxic to fish. "Botanical" products can still be toxic to bees or fish; the specific product label decides, so review its precautions with the customer. Waterfront lots get a wider buffer at the water.
 - **Never claim disease prevention.** The system reduces adult mosquitoes in the treated zone. It does nothing to larvae; pair it with source reduction and larvicide.
 
 ## 1. Design visit (free)
