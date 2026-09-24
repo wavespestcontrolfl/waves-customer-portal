@@ -85,14 +85,25 @@ Currently live:
   `property-lookup-v2.js`, `ai-chart-builder.js` image intent) plus the per-service-env lanes that default to the
   same registry selector (`GEMINI_TURF_OCR_MODEL`, `LAWN_VISION_MODEL`,
   `GEMINI_PROPERTY_MODEL`). Owner ruling 2026-09-06: one model for all of them.
+  Completion-photo captions also run on it (`TEXT_POLICIES.photoCaptions`,
+  `laneId: 'photo_scoring'` in `admin-dispatch.js`) — owner directive
+  2026-09-24, Claude Opus fallback only.
 
 **Every cross-provider call site keeps an automatic fallback to Claude** so
 a provider issue never causes a gap:
 - OpenAI features → Claude (the estimate assistant then falls to a
   deterministic template).
 - Gemini vision → retry `GEMINI_VISION_FALLBACK_MODEL` only when it names a
-  different model (the default equals BEST, so the retry rung is skipped), and
-  the parallel Claude-vision fan-out still runs.
+  different model (the default equals BEST, so the retry rung is skipped),
+  THEN Claude VISION only if both Gemini rungs miss. Most photo lanes
+  (`pest-identification.js`, `tree-shrub-assessment.js`, `satellite-analyzer.js`)
+  still run Gemini and Claude in PARALLEL and merge the two — check the
+  lane before assuming Gemini-then-Claude is universal. **Lawn health
+  scoring is the one exception that changed 2026-09-24**: owner ruling —
+  no more Claude+Gemini averaging. `lawn-assessment.js#analyzePhoto` calls
+  Gemini only; Claude runs ONLY when Gemini returns nothing. `averageScores`
+  still exists (single-model passthrough, or true averaging when a caller
+  hands it two results directly) but live scoring never calls it with both.
 
 Gemini parsing trap (twin of the DEEP thinking-block rule): Gemini 3.x
 Flash is a thinking model — always JOIN ALL text parts of the response,

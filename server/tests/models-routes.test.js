@@ -69,4 +69,12 @@ describe('models registry — cross-provider routing', () => {
     expect(M.TEXT_POLICIES.report.primary).toEqual({ provider: 'openai', model: M.OPENAI_REPORT_WRITER });
     expect(M.TEXT_POLICIES.report.fallback).toEqual({ provider: 'anthropic', model: M.FLAGSHIP });
   });
+
+  test('photoCaptions runs Gemini first, Claude only as the fallback (owner 2026-09-24)', () => {
+    const M = require('../config/models');
+    expect(M.TEXT_POLICIES.photoCaptions.primary).toEqual({ provider: 'gemini', model: M.GEMINI_VISION_BEST });
+    expect(M.TEXT_POLICIES.photoCaptions.fallback).toEqual({ provider: 'anthropic', model: M.VISION });
+    // visionAnalysis (vision-delta, and every other photo lane) is untouched.
+    expect(M.TEXT_POLICIES.visionAnalysis.primary).toEqual({ provider: 'anthropic', model: M.VISION });
+  });
 });

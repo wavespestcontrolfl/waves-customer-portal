@@ -3436,8 +3436,8 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
       contextLines,
     });
     const generated = await dispatchWithFallback(
-      MODELS.TEXT_POLICIES.visionAnalysis,
-      { laneId: 'photo_scoring', text: basePrompt, images, jsonMode: false, maxTokens: 700, temperature: 0.2 },
+      MODELS.TEXT_POLICIES.photoCaptions,
+      { laneId: 'photo_scoring', text: basePrompt, images, jsonMode: false, maxTokens: 2048, temperature: 0.2 },
       {
         validate: (candidate) => {
           const parsed = PhotoAnalysis.parsePhotoAnalysisResponse(candidate.text, { photoCount: photos.length });

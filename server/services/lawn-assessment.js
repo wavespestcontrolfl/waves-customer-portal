@@ -1,9 +1,10 @@
 /**
  * Lawn Health Assessment Service
  *
- * Dual-vision analysis using Claude and Gemini to score lawn health
- * from photos. Averages results, flags divergences, applies seasonal
- * normalization, and tracks baselines over time.
+ * Gemini-only vision scoring of lawn health from photos (owner ruling
+ * 2026-09-24: no more Claude+Gemini averaging). Claude runs ONLY as a
+ * fallback when Gemini returns nothing. Applies seasonal normalization
+ * and tracks baselines over time.
  */
 
 const db = require('../models/db');
@@ -27,7 +28,8 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 // Gemini vision scorer model — live default is the registry's best; override
 // via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. On any miss (HTTP/parse/empty)
 // callGeminiVision retries the registry's GEMINI_VISION_FALLBACK when it names
-// a different model (by default it does not). Fan-out/averaging is unchanged.
+// a different model (by default it does not). Gemini-only per owner ruling
+// 2026-09-24 — Claude runs only when Gemini returns nothing (see analyzePhoto).
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
@@ -228,17 +230,17 @@ async function callGeminiVision(base64Image, mimeType, context = {}) {
 // ── Core service methods ────────────────────────────────────────
 
 /**
- * Analyze a single photo with both Claude and Gemini vision in parallel.
- * Returns { claude, gemini, composite, divergenceFlags }
+ * Analyze a single photo with Gemini vision — Gemini-only per owner ruling
+ * 2026-09-24 (no more Claude+Gemini averaging). Claude runs ONLY as a
+ * fallback when Gemini returns nothing (empty/error), matching the
+ * waves-llm skill's cross-provider-fallback rule.
+ * Returns { claude, gemini, composite, divergenceFlags } — with a single
+ * model in play, averageScores returns that model's result unchanged as
+ * composite with no divergence flags.
  */
 async function analyzePhoto(base64Image, mimeType, context = {}) {
-  const [claudeResult, geminiResult] = await Promise.allSettled([
-    callClaudeVision(base64Image, mimeType, context),
-    callGeminiVision(base64Image, mimeType, context),
-  ]);
-
-  const claude = claudeResult.status === 'fulfilled' ? claudeResult.value : null;
-  const gemini = geminiResult.status === 'fulfilled' ? geminiResult.value : null;
+  const gemini = await callGeminiVision(base64Image, mimeType, context);
+  const claude = gemini ? null : await callClaudeVision(base64Image, mimeType, context);
 
   if (!claude && !gemini) return null;
 
@@ -367,8 +369,11 @@ function averageScores(claudeResult, geminiResult) {
   composite.observationsGemini = geminiResult.observations || null;
   // Gemini's prose wins the observations slot (owner 2026-07-21 — same
   // preference as tree-shrub: Gemini gave the named-diagnosis specificity on
-  // real field photos). Claude stands in when Gemini has no read; scores
-  // stay dual-model averaged.
+  // real field photos). Claude stands in when Gemini has no read. Since
+  // 2026-09-24 analyzePhoto only ever hands this function ONE result (Gemini,
+  // or Claude as its fallback) — this branch (both present) only runs when a
+  // caller passes both directly (e.g. dual-input unit tests); it is kept for
+  // that shape, not for live scoring, which no longer averages two models.
   composite.observations = String(geminiResult?.observations || claudeResult?.observations || '').trim();
 
   // Either model seeing a direct overwatering tell (mushrooms/standing water/

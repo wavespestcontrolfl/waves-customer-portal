@@ -105,6 +105,7 @@ const POLICY_SELECTOR = {
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   visionAnalysis: { primary: 'VISION', fallback: 'OPENAI_BALANCED' },
+  photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
@@ -229,7 +230,11 @@ const LANES = [
 
   // ── Multimodal ──
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
+  // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
+  // not a fan-out: Gemini live, then the prior Gemini model, then Claude
+  // VISION only when both Gemini rungs miss.
+  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-only (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   L('lawn_visit_assessment', 'Lawn visit assessment', 'lawn-visit-assessment.js', 'multimodal', P('lawnVisitAssessment', 'primary'), P('lawnVisitAssessment', 'fallback'), { inbound: true, note: 'All visit photos in one chain; GATE_LAWN_VISIT_ASSESSMENT; technician review before publication' }),
   L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
   // Sequential ladder like the caption read: Gemini, then the prior Gemini,
@@ -242,7 +247,7 @@ const LANES = [
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), E('GEMINI_PROPERTY_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
   L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: SHARED_GEMINI_PIN }),
   L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', E('GEMINI_TURF_OCR_MODEL', T('GEMINI_VISION_BEST')), null, { fanout: true, inbound: true, also: [T('VISION')], note: 'Claude + Gemini in parallel; consensus of both readings' }),
-  L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'drives customer-facing health scores (owner 2026-07-21)' }),
+  L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js', 'multimodal', P('photoCaptions', 'primary'), P('photoCaptions', 'fallback'), { note: 'drives customer-facing health scores (owner 2026-07-21); Gemini-first, Claude fallback (owner 2026-09-24)' }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
