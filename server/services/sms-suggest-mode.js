@@ -854,7 +854,7 @@ async function reserveHumanReply({
   });
 }
 
-async function settleHumanReply({ phoneLast10 = null, startedAt = null, parkedDecisionIds = [], heldDecisionIds = parkedDecisionIds, reservationId = null, sent, ambiguous = false, reviewedBy, reason }) {
+async function settleHumanReply({ phoneLast10 = null, startedAt = null, parkedDecisionIds = [], heldDecisionIds = parkedDecisionIds, reservationId = null, sent, acceptedResult = null, ambiguous = false, reviewedBy, reason }) {
   // tech-line deliberately passes [] instead of its reserved parked ids for
   // an ambiguous provider result, and sets `ambiguous: true` explicitly —
   // needed because a reservation created solely to fence an in-flight
@@ -872,7 +872,7 @@ async function settleHumanReply({ phoneLast10 = null, startedAt = null, parkedDe
   // Promote the reservation to accepted evidence before later bookkeeping.
   // If the normal provider row or the ignore update failed, recovery can use
   // this linked row instead of reopening cards on an answered thread.
-  if (!await settleReplyHoldingReservation({ reservationId, acceptedResult: {} })) return;
+  if (!await settleReplyHoldingReservation({ reservationId, acceptedResult: acceptedResult || {} })) return;
   const ignored = parkedDecisionIds.length
     ? await ignoreParkedSuggestions({ decisionIds: parkedDecisionIds, reviewedBy })
     : 0;

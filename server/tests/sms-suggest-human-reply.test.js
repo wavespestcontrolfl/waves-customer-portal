@@ -172,8 +172,12 @@ function settleDb({ stale = [], acceptedUpdate = 1 } = {}) {
 
 test('settle: deletes the marker; sent → parked ignored, not sent → reopened', async () => {
   const { del, update } = settleDb();
-  await suggest.settleHumanReply({ phoneLast10: '9415550100', startedAt: new Date(), parkedDecisionIds: ['d1'], reservationId: 'resv-1', sent: true, reviewedBy: 'tech-1' });
+  const acceptedResult = { sent: true, providerMessageId: `SM${'a'.repeat(32)}` };
+  await suggest.settleHumanReply({ phoneLast10: '9415550100', startedAt: new Date(), parkedDecisionIds: ['d1'], reservationId: 'resv-1', sent: true, acceptedResult, reviewedBy: 'tech-1' });
   expect(del).toHaveBeenCalled();
+  expect(update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'sent', twilio_sid: acceptedResult.providerMessageId,
+  }));
   expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'ignored', reviewed_by: 'tech-1' }));
 
   jest.clearAllMocks();

@@ -140,22 +140,28 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
   });
 
   test.each([
-    ['exact provider SID', 'auto', `SM${'b'.repeat(32)}`],
-    ['exact MMS provider SID', 'auto', `MM${'c'.repeat(32)}`],
-    ['post-reservation endpoint/body fallback', 'manual', null],
-  ])('%s lets explicit cleanup remove only the duplicate reservation', async (_label, kind, reservationSid) => {
-    const body = `Ordinary provider receipt ${kind}`;
+    ['exact provider SID despite normalized provider body', 'auto', `SM${'b'.repeat(32)}`, 'On my way… https://wavespestcontrol.com/pay', 'On my way... wavespestcontrol.com/pay'],
+    ['exact MMS provider SID', 'auto', `MM${'c'.repeat(32)}`, 'Ordinary provider receipt auto', 'Ordinary provider receipt auto'],
+    ['bounded endpoint/body fallback for legacy no-SID callers', 'manual', null, 'Ordinary provider receipt manual', 'Ordinary provider receipt manual'],
+  ])('%s lets explicit cleanup remove only the duplicate reservation', async (_label, kind, reservationSid, reservationBody, providerBody) => {
+    const body = reservationBody;
     const reservationId = await suggest.createReplyHoldingReservation(trx, {
       to: '+12025550101', fromNumber: '+19413529161', body,
       reservationKind: kind, uncertain: true,
     });
+    if (!reservationSid) {
+      await trx('sms_log').where({ id: reservationId }).update({
+        created_at: new Date(Date.now() - 2000),
+      });
+    }
     const reservation = await trx('sms_log').where({ id: reservationId }).first('created_at');
     const providerId = randomUUID();
     const providerSid = reservationSid || `SM${randomUUID().replaceAll('-', '')}`;
+    const providerCreatedAt = new Date(new Date(reservation.created_at).getTime() + 1000);
     await trx('sms_log').insert({
       id: providerId, direction: 'outbound', from_phone: '+19413529161', to_phone: '+12025550101',
-      message_body: body, twilio_sid: providerSid, status: 'sent', message_type: kind === 'auto' ? 'ai_autosent' : 'manual',
-      created_at: new Date(new Date(reservation.created_at).getTime() + 1000), metadata: {},
+      message_body: providerBody, twilio_sid: providerSid, status: 'sent', message_type: kind === 'auto' ? 'ai_autosent' : 'manual',
+      created_at: providerCreatedAt, metadata: {},
     });
     expect(await suggest.settleReplyHoldingReservation({
       reservationId,
@@ -166,6 +172,21 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     expect(await trx('sms_log').where({ id: reservationId }).first('id')).toBeUndefined();
     expect(await trx('sms_log').where({ id: providerId }).first('twilio_sid'))
       .toMatchObject({ twilio_sid: providerSid });
+  });
+
+  test('a later identical message cannot erase the sole no-SID accepted receipt', async () => {
+    const body = 'Same reply sent on two different days';
+    const reservationId = await acceptedReservation({ kind: 'manual', body });
+    const reservation = await trx('sms_log').where({ id: reservationId }).first('updated_at');
+    await trx('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: '+19413529161', to_phone: '+12025550101',
+      message_body: body, twilio_sid: `SM${'d'.repeat(32)}`, status: 'sent', message_type: 'manual',
+      created_at: new Date(new Date(reservation.updated_at).getTime() + 24 * 60 * 60 * 1000), metadata: {},
+    });
+
+    await suggest.settleReplyHoldingReservation({ reservationId });
+    expect(await trx('sms_log').where({ id: reservationId }).first('status'))
+      .toMatchObject({ status: 'sent' });
   });
 
   test('a suppression sentinel cannot replace a sole accepted receipt', async () => {
