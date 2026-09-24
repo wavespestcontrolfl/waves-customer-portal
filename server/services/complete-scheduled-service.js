@@ -48,6 +48,10 @@ function definiteRejectionMarkerFromAttemptError(error) {
 
 const PropertyZones = require('../services/property-zones');
 const TermiteStations = require('../services/termite-stations');
+// Visit-specific station counts a "customer declined" closeout can never
+// truthfully carry (the roster-sized total_stations is not a visit claim).
+// Mirrors the CompletionPanel auto-count zeroing on customer_declined.
+const DECLINED_VISIT_STATION_COUNT_KEYS = ['stations_checked', 'stations_inaccessible', 'stations_with_activity', 'traps_checked'];
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
@@ -2579,6 +2583,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // pin that will never be persisted must not 400 the closeout (codex
     // round-2 P2). ONE definition, shared by the preflights and the sync.
     const stationBlanketSkip = isIncompleteVisit || visitOutcome === 'customer_declined';
+    // A declined visit inspected NOTHING, and the whole station payload is
+    // discarded above/below — but the typed findings still freeze into the
+    // report snapshot, and termite-report-v2 falls back to the typed counts
+    // when a visit has no check rows. The current client zeroes these
+    // counts on customer_declined; a completion tab loaded before that
+    // deploy, or a count the tech hand-edited before switching the outcome,
+    // still posts the auto-filled roster size (codex round-3 P1). Zero the
+    // VISIT-specific counts server-side on every section that carries them
+    // (total_stations is the roster, not a visit claim) before validation
+    // so the frozen findings can never say stations were inspected.
+    if (visitOutcome === 'customer_declined') {
+      const zeroed = [];
+      for (const section of [structuredFindings, ...(Array.isArray(companionFindings) ? companionFindings : [])]) {
+        const values = section?.values;
+        if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
+        for (const key of DECLINED_VISIT_STATION_COUNT_KEYS) {
+          if (!Object.prototype.hasOwnProperty.call(values, key)) continue;
+          if (String(values[key] ?? '').trim() !== '' && Number(values[key]) !== 0) zeroed.push(`${section?.type || 'primary'}.${key}=${values[key]}`);
+          values[key] = '0';
+        }
+      }
+      if (zeroed.length) logger.warn('[completion] declined visit station counts zeroed', { serviceId: completionInput.serviceId, zeroed });
+    }
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;

@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { etParts, etDateString } = require('../utils/datetime-et');
+const { etParts, etDateString, validCalendarDate } = require('../utils/datetime-et');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const { taxPeriodFor } = require('../utils/tax-period');
 const {
@@ -204,8 +204,11 @@ router.post('/rates', async (req, res, next) => {
     if (!county || typeof county !== 'string' || !county.trim()) {
       return res.status(400).json({ error: 'county is required' });
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(effectiveDate || ''))) {
-      return res.status(400).json({ error: 'effectiveDate must be a YYYY-MM-DD date' });
+    // Strict calendar date, not shape-only: '2026-02-31' matches the regex
+    // and reached Postgres as a DATE cast error — a 500 the operator could
+    // not act on instead of the documented 400 (codex round-3 P2).
+    if (!validCalendarDate(effectiveDate)) {
+      return res.status(400).json({ error: 'effectiveDate must be a real YYYY-MM-DD calendar date' });
     }
     const parsedStateRate = parseRateField(stateRate);
     const parsedCountySurtax = parseRateField(countySurtax);
@@ -285,17 +288,38 @@ router.post('/rates', async (req, res, next) => {
         // July rate that was already live). A future-dated post (staging)
         // skips this branch entirely and leaves the current rate completely
         // untouched until its own effective_date arrives.
+        //
+        // "In force at the submitted date" is a WINDOW test, not an `active`
+        // test (codex round-3 P2): once a later immediate rate has been
+        // posted, the true predecessor of a backfill between the two is
+        // already active:false with its expiry at that later date. Gating
+        // on `active` missed it, so it kept its old expiry and overlapped
+        // the backfill (January displayed through September after a July
+        // backfill). The predicate is the readers' own eligibility rule
+        // evaluated at the submitted date: newest effective_date before it
+        // whose expiry is open or later than it — and, like the readers,
+        // never a row switched off with no expiry at all.
         const predecessor = await trx('tax_rates')
-          .where({ county: countyKey, active: true })
+          .where({ county: countyKey })
           .andWhere('effective_date', '<', effectiveDate)
+          .andWhere(function () {
+            this.where(function () { this.whereNull('expiry_date').andWhere('active', true); })
+              .orWhere('expiry_date', '>', effectiveDate);
+          })
           .orderBy('effective_date', 'desc')
           .first();
-        // dateOnlyStamp: pg hydrates the DATE column as a JS Date, and a
-        // Date compared to a 'YYYY-MM-DD' string is always false — an
-        // active predecessor that already carried an expiry (a corrected
-        // row that inherited its successor boundary) was never truncated
-        // to the new effective date (fallback-auditor P1 on 3cfda7b5b3).
-        if (predecessor && (predecessor.expiry_date == null || dateOnlyStamp(predecessor.expiry_date) > effectiveDate)) {
+        if (predecessor) {
+          // The predecessor's remaining window passes to the new row: a
+          // backfill between two posted rates ends where the retired
+          // predecessor used to end (the later rate's effective date), so
+          // the chain stays gap- and overlap-free. dateOnlyStamp: pg
+          // hydrates the DATE column as a JS Date, and a Date compared to a
+          // 'YYYY-MM-DD' string is always false (fallback-auditor P1 on
+          // 3cfda7b5b3).
+          const predecessorExpiry = predecessor.expiry_date ? dateOnlyStamp(predecessor.expiry_date) : null;
+          if (inheritedExpiry == null && predecessorExpiry && predecessorExpiry > effectiveDate) {
+            inheritedExpiry = predecessorExpiry;
+          }
           await trx('tax_rates').where({ id: predecessor.id }).update({ active: false, expiry_date: effectiveDate });
         }
       }

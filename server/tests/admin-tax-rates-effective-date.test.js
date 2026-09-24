@@ -130,6 +130,75 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   });
 });
 
+describe('POST /admin/tax/rates rejects an impossible calendar date before touching the database (codex round-3 P2)', () => {
+  test.each(['2026-02-31', '2023-02-29', '2026-13-01', '2026-04-31'])('%s is a 400, not a Postgres cast error', async (effectiveDate) => {
+    const res = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ county: 'Sarasota', stateRate: 0.06, countySurtax: 0.01, effectiveDate }),
+    }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/calendar date/);
+  });
+});
+
+(process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('backfilling between two posted rates retires the already-inactive predecessor and hands its window on (codex round-3 P2)', () => {
+  const county = 'Sarasota';
+  const customerId = randomUUID();
+  // Post "September" (immediate, retires the baseline row with expiry =
+  // September), then backfill "July". The baseline row is the TRUE
+  // predecessor of July even though September's post already marked it
+  // active:false — an `active`-gated lookup missed it, so it kept its
+  // September expiry and overlapped the July row.
+  const laterDate = etDateString(addETDays(new Date(), -30));
+  const backfillDate = etDateString(addETDays(new Date(), -60));
+  let restoreCounty;
+  let baselineId;
+
+  beforeAll(async () => {
+    restoreCounty = await snapshotCounty(county);
+    const baseline = await db('tax_rates').where({ county, active: true }).orderBy('effective_date', 'desc').first();
+    baselineId = baseline.id;
+    await db('customers').insert({
+      id: customerId, first_name: 'TaxMidBackfill', last_name: 'Commercial', phone: '9415550194',
+      email: `tax-mid-backfill-${customerId}@example.com`, zip: '34236', property_type: 'commercial',
+    });
+  });
+
+  afterAll(async () => {
+    await db('customers').where({ id: customerId }).del();
+    await restoreCounty();
+  });
+
+  test('the retired baseline now ends at the July backfill, July ends at September, and today still charges September', async () => {
+    const post = (effectiveDate, countySurtax, notes) => withServer((base) => fetch(`${base}/admin/tax/rates`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ county, stateRate: 0.06, countySurtax, effectiveDate, notes }),
+    }).then((r) => r.json()));
+    expect((await post(laterDate, 0.02, 'later (September) rate')).success).toBe(true);
+    const retiredBySeptember = await db('tax_rates').where({ id: baselineId }).first();
+    expect(retiredBySeptember.active).toBe(false);
+    expect(dateOnlyStamp(retiredBySeptember.expiry_date)).toBe(laterDate);
+
+    expect((await post(backfillDate, 0.015, 'July backfill')).success).toBe(true);
+
+    const baselineRow = await db('tax_rates').where({ id: baselineId }).first();
+    // EXPECTED: the baseline's window now ends where July begins (before
+    // the fix it stayed at September and overlapped the July row).
+    expect(dateOnlyStamp(baselineRow.expiry_date)).toBe(backfillDate);
+    const julyRow = await db('tax_rates').where({ county, effective_date: backfillDate }).first();
+    expect(julyRow.active).toBe(true);
+    // EXPECTED: July inherits the predecessor's old boundary — it ends
+    // where September begins, so the chain has neither a gap nor an overlap.
+    expect(dateOnlyStamp(julyRow.expiry_date)).toBe(laterDate);
+    const septemberRow = await db('tax_rates').where({ county, effective_date: laterDate }).first();
+    expect(septemberRow.active).toBe(true);
+    expect(septemberRow.expiry_date).toBeNull();
+
+    const today = await TaxCalculator.calculateTax(customerId, 'nonresidential_pest_control', 100);
+    expect(today.rate).toBeCloseTo(0.08, 6);
+  });
+});
+
 (process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('backfilling a historical rate must not touch a later rate already in force (codex round-1 P1)', () => {
   const county = 'Manatee';
   const customerId = randomUUID();

@@ -273,4 +273,35 @@ postgres('r2-completion-panel-client-contract-1: declined / inspection-only clos
         .then((row) => Number(row.n))).toBe(TermiteStations.MAX_ACTIVE_STATIONS);
     } finally { await cleanup(f); }
   });
+
+  test('a "customer_declined" closeout posting NONZERO visit counts (hand-edited, or a pre-deploy tab) freezes zero stations checked — the report can never claim an inspection (codex round-3 P1)', async () => {
+    const f = await seedTermiteVisit({ stationCount: 3 });
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const declinedBody = {
+        ...body(f, 'customer_declined'),
+        // A completion tab loaded before the client-side zeroing shipped, or
+        // a count the tech typed over the auto-fill before switching the
+        // outcome, still posts the roster size.
+        structuredFindings: { type: 'termite_bait_station', values: { stations_checked: '3', stations_inaccessible: '1', stations_with_activity: '1', total_stations: '3', termite_activity: 'None observed', bait_consumption: 'None — bait intact' } },
+      };
+      const out = await completeScheduledService({
+        serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body: declinedBody,
+      });
+      expect(out).toMatchObject({ status: 200 });
+      expect(await checksFor(f)).toEqual([]);
+      const record = await mockPg('service_records').where({ customer_id: f.customerId }).first();
+      const serviceData = typeof record.service_data === 'string' ? JSON.parse(record.service_data) : record.service_data;
+      const frozen = serviceData?.typedReportSnapshot?.values || {};
+      // Before: the frozen findings carried stations_checked '3', and
+      // termite-report-v2 (no visit-backed check rows to reconcile against)
+      // rendered "3 stations inspected" for a customer who declined.
+      expect(Number(frozen.stations_checked)).toBe(0);
+      expect(Number(frozen.stations_inaccessible)).toBe(0);
+      expect(Number(frozen.stations_with_activity)).toBe(0);
+      // The roster size is not a visit claim and stays.
+      expect(Number(frozen.total_stations)).toBe(3);
+    } finally { await cleanup(f); }
+  });
 });

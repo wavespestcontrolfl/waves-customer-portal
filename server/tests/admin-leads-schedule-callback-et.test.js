@@ -29,20 +29,28 @@ function appServer() {
   return { server, baseUrl: `http://127.0.0.1:${server.address().port}` };
 }
 
+// The route writes the lead + activity inside one transaction (main); the
+// lead lookup runs on the plain connection. Both hand out the same builder.
+function mockDb({ updates, inserts }) {
+  const builder = (table) => {
+    const q = {
+      where: jest.fn(() => q),
+      whereNull: jest.fn(() => q),
+      first: jest.fn(async () => (table === 'leads' ? { id: 'lead-1' } : undefined)),
+      insert: jest.fn(async (row) => { inserts.push(row); return [1]; }),
+      update: jest.fn(async (row) => { updates.push(row); return 1; }),
+    };
+    return q;
+  };
+  db.mockImplementation(builder);
+  db.transaction = jest.fn(async (work) => work(builder));
+}
+
 describe('schedule-callback parses the operator date+time as ET', () => {
   it('stores 2026-09-23 14:00 entered in the admin as 14:00 ET (18:00Z)', async () => {
     const updates = [];
     const inserts = [];
-    db.mockImplementation((table) => {
-      const q = {
-        where: jest.fn(() => q),
-        whereNull: jest.fn(() => q),
-        first: jest.fn(async () => (table === 'leads' ? { id: 'lead-1' } : undefined)),
-        insert: jest.fn(async (row) => { inserts.push(row); return [1]; }),
-        update: jest.fn(async (row) => { updates.push(row); return 1; }),
-      };
-      return q;
-    });
+    mockDb({ updates, inserts });
 
     const { server, baseUrl } = appServer();
     try {
@@ -68,16 +76,7 @@ describe('schedule-callback parses the operator date+time as ET', () => {
 
   it('rejects a spring-forward wall time that does not exist in Eastern Time (codex round-1 P2)', async () => {
     const updates = [];
-    db.mockImplementation((table) => {
-      const q = {
-        where: jest.fn(() => q),
-        whereNull: jest.fn(() => q),
-        first: jest.fn(async () => (table === 'leads' ? { id: 'lead-1' } : undefined)),
-        insert: jest.fn(async () => [1]),
-        update: jest.fn(async (row) => { updates.push(row); return 1; }),
-      };
-      return q;
-    });
+    mockDb({ updates, inserts: [] });
 
     const { server, baseUrl } = appServer();
     let res;
@@ -94,5 +93,36 @@ describe('schedule-callback parses the operator date+time as ET', () => {
     }
     expect(res.status).toBe(400);
     expect(updates).toHaveLength(0);
+  });
+
+  it('rejects a fall-back wall time that happens twice in Eastern Time instead of storing the first occurrence (codex round-3 P2)', async () => {
+    const updates = [];
+    mockDb({ updates, inserts: [] });
+    const { server, baseUrl } = appServer();
+    let res;
+    let repeated;
+    let unique;
+    try {
+      // 2026-11-01 is the US fall-back date: 1:00-1:59 AM ET happens once in
+      // EDT and again in EST. 01:30 is ambiguous; 03:30 the same day is not.
+      repeated = await fetch(`${baseUrl}/admin/leads/lead-1/schedule-callback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: '2026-11-01', time: '01:30' }),
+      });
+      unique = await fetch(`${baseUrl}/admin/leads/lead-1/schedule-callback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: '2026-11-01', time: '03:30' }),
+      });
+      res = repeated;
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/twice/);
+    expect(unique.status).toBe(200);
+    expect(updates).toHaveLength(1);
+    expect(new Date(updates[0].next_follow_up_at).toISOString()).toBe('2026-11-01T08:30:00.000Z'); // 03:30 EST
   });
 });
