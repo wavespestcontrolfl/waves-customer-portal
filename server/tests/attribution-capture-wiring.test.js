@@ -263,7 +263,10 @@ describe('lead-funnel-bridge call sites', () => {
   test('admin manual transitions bridge (PUT status edit, send-sms contacted, schedule-appointment won)', () => {
     const src = read('../routes/admin-leads.js');
     expect(src).toMatch(/bridgeLeadFunnelStage\(req\.params\.id, updates\.status\)/);
-    expect(src).toMatch(/bridgeLeadFunnelStage\(req\.params\.id, 'contacted'\)/);
+    // send-sms's contacted bridge lives in the shared lead-outreach helper
+    // both lead send paths call (consultation-link lane, #4709).
+    expect(src).toMatch(/recordLeadSmsOutreach\(/);
+    expect(read('../services/lead-outreach.js')).toMatch(/bridgeLeadFunnelStage\(leadId, 'contacted'\)/);
     // The book route's won mirror is the shared settlement (bridge + wizard
     // repeat settlement), not a bare bridge (codex #3834 r32 P1).
     expect(src).toMatch(/leadAttribution\.settleWonFunnelRow\(req\.params\.id, customerId\)/);
