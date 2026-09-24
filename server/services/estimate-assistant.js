@@ -1198,7 +1198,12 @@ function estimateContextHasMistingSystem(context = {}) {
 // wins. Never a price (pricing is owner-pending) and never an online-
 // booking offer (the system is design-visit-first and not self-bookable —
 // wiki/services/service-dispatch-rules.md).
-const MISTING_DESIGN_VISIT_INTENT_PATTERN = /\b(price|prices|pricing|cost|costs|quote|estimate|charge|fee|payment)\b|\b(book|booking|schedule|scheduling|appointment|reschedule|when)\b|\bdesign\s*visit\b/i;
+// Price intents win first; booking intents are checked only after the topic
+// intents, so "when should I pause it before a storm?" or "is it safe to be
+// outside when it sprays?" reach their protocol answer, not the design-visit
+// copy. Bare "when" and "estimate" are deliberately not intents.
+const MISTING_PRICE_INTENT_PATTERN = /\b(price|prices|pricing|cost|costs|quote|charge|fee|fees|payment)\b|\bhow\s+much\b/i;
+const MISTING_BOOKING_INTENT_PATTERN = /\b(book|booking|schedule|scheduling|appointment|reschedule)\b|\bdesign\s*visit\b/i;
 const MISTING_WEATHER_INTENT_PATTERN = /\b(weather|wind|windy|rain|rains|raining|rainy|storm|storms|hurricane|hurricanes|cold|freeze|freezing|temperature|temp)\b/i;
 const MISTING_SAFETY_INTENT_PATTERN = /\b(safe|safety|kids?|child(?:ren)?|pets?|dogs?|cats?|bees?|bee|pollinators?|fish|pond|pool|expos\w*|allerg\w*|sick|misted)\b/i;
 const MISTING_MAINTENANCE_INTENT_PATTERN = /\b(refill\w*|maintain\w*|maintenance|clog(?:ged|s)?|service\w*|nozzle\w*|filter\w*|clean\w*|repair\w*|broken|leak\w*)\b/i;
@@ -1206,11 +1211,11 @@ const MISTING_MAINTENANCE_INTENT_PATTERN = /\b(refill\w*|maintain\w*|maintenance
 function mistingSystemFallbackAnswer(question, phone) {
   const q = cleanText(question).toLowerCase();
 
-  if (MISTING_DESIGN_VISIT_INTENT_PATTERN.test(q)) {
-    return `The misting system is designed and priced at a free on-site design visit — there is no published price yet and it is not self-bookable online. The Waves team will call to schedule that visit; you can also call or text Waves at ${phone} any time.`;
-  }
+  const designVisitAnswer = `The misting system is designed and priced at a free on-site design visit — there is no published price yet and it is not self-bookable online. The Waves team will call to schedule that visit; you can also call or text Waves at ${phone} any time.`;
+
+  if (MISTING_PRICE_INTENT_PATTERN.test(q)) return designVisitAnswer;
   if (MISTING_WEATHER_INTENT_PATTERN.test(q)) {
-    return `The system pauses on its own for rain, fog, wind over 10 mph, or temperatures below 50°F, using an optional weather sensor where installed or the app. Before a named storm we pause every system from the app, then do a post-storm inspection visit before resuming. Call or text Waves at ${phone} with questions about your system.`;
+    return `Cycles should be paused for rain, fog, wind over 10 mph, or temperatures below 50°F — automatically by an optional weather sensor where one is installed, otherwise from the app. Before a named storm we pause every system from the app, then do a post-storm inspection visit before resuming. Call or text Waves at ${phone} with questions about your system.`;
   }
   if (MISTING_SAFETY_INTENT_PATTERN.test(q)) {
     return `Nozzles are placed under 10 ft and aimed away from pools, ponds, and other water, dining areas, and air intakes, and cycles run at dawn and dusk when people and pets are not outside. The system can also be paused from the app at any time. Pollinator and fish label precautions are reviewed for your property — "botanical" products are not automatically bee- or fish-safe. If you suspect any exposure (a person, pet, fish, or bees), pause the system and call the office right away at ${phone}. The system reduces adult mosquitoes in the treated zone; it does not prevent disease.`;
@@ -1218,6 +1223,7 @@ function mistingSystemFallbackAnswer(question, phone) {
   if (MISTING_MAINTENANCE_INTENT_PATTERN.test(q)) {
     return `The service plan includes a monthly check and solution refill, plus quarterly nozzle cleaning and a filter change. Only Waves-licensed techs handle or refill the solution — it is not a self-refill system, by company policy. Call or text Waves at ${phone} if something needs attention before your next visit.`;
   }
+  if (MISTING_BOOKING_INTENT_PATTERN.test(q)) return designVisitAnswer;
   return `Your Waves technician will cover that at the free on-site design visit. Call or text Waves at ${phone} with any questions before then.`;
 }
 

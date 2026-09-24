@@ -99,6 +99,20 @@ describe('Ask Waves fallback — mosquito misting SYSTEM quote-required question
   // a misting estimate with the design-visit/pricing copy — a weather or
   // safety question got that same copy instead of its own answer. Each
   // intent below is sourced from wiki/protocols/mosquito-misting-systems.md.
+  describe('intent order: price first, booking last (topic questions containing "when" stay on topic)', () => {
+    test.each([
+      ['When should I pause it before a storm?', 'should be paused for rain'],
+      ['Is it safe to be outside when it sprays?', 'nozzles are placed under 10 ft'],
+      ['When do you refill it?', 'monthly check and solution refill'],
+      ['How much does a system cost?', 'designed and priced at a free on-site design visit'],
+      ['Can I schedule the design visit?', 'designed and priced at a free on-site design visit'],
+    ])('%s', (question, expected) => {
+      const answer = answerEstimateQuestionFallback(question, mistingContext);
+      expect(answer.toLowerCase()).toContain(expected);
+      expect(answer).not.toContain('Pick one of the available times');
+    });
+  });
+
   describe('intent-routed answers (Codex round-3 P1)', () => {
     test('weather questions get the pause-conditions answer, not design-visit/pricing copy', () => {
       const answer = answerEstimateQuestionFallback('Do you pause it in high wind?', mistingContext);
@@ -116,7 +130,8 @@ describe('Ask Waves fallback — mosquito misting SYSTEM quote-required question
 
     test('a rain question gets the weather answer', () => {
       const answer = answerEstimateQuestionFallback('Will it still run if it rains?', mistingContext);
-      expect(answer.toLowerCase()).toContain('pauses on its own for rain');
+      expect(answer.toLowerCase()).toContain('should be paused for rain');
+      expect(answer.toLowerCase()).toContain('optional weather sensor');
     });
 
     test('a pet-safety question ("what if my dog gets misted?") gets the placement/safety answer, not design-visit copy', () => {
