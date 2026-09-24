@@ -345,31 +345,37 @@ async function buildReferralLink(customerId) {
 /**
  * Consultation link (lead-inspection-link-scope.md §4) for the Insert Link
  * sheet's `consultation` kind. The composer has no lead picker of its own,
- * so the row it inserts for is the resolved customer's newest non-deleted
- * lead (leads.customer_id = customerId) — a caller-supplied leadId
- * (leadIdOverride; not sent by the composer today, kept for a future
- * lead-scoped composer per the scope doc) wins when present, but ONLY when
- * it is actually the resolved customer's own lead (pre-push Codex P1): an
- * override is bound to the recipient the SAME way the route's lead-only
- * fallback binds one (resolveConsultationLeadOnly in admin-communications.js)
- * — the lead's own leads.customer_id, or its phone against the resolved
- * customer's, last-10-digit normalized (digitsLast10, this file's own
- * matcher, shared with the payer-statement and card-link owner checks
- * below). A mismatch refuses with the same reason the fallback uses rather
- * than silently falling back to the customer's own newest lead, so a wrong
- * leadId never inserts another lead's bearer link into this customer's
- * message. An id that resolves to no lead at all (stale/deleted) is
- * treated as no override and falls through to the plain newest lead
- * lookup, same as before. Renders the same admin-editable
- * lead_consultation_link SMS template the Leads page action uses
- * (buildLeadConsultationSmsLine) so both surfaces send identical copy and
- * never drift.
+ * so the row it inserts for is the resolved customer's newest non-deleted,
+ * still-OPEN lead (leads.customer_id = customerId, applyOpenLeadPredicate
+ * — lead-statuses.js's canonical status IN OPEN_LEAD_STATUSES AND
+ * converted_at IS NULL, pre-push Codex P1: an existing customer's won/lost
+ * lead must never mint a free-consultation invitation) — a caller-supplied
+ * leadId (leadIdOverride; not sent by the composer today, kept for a
+ * future lead-scoped composer per the scope doc) wins when present, but
+ * ONLY when it is actually the resolved customer's own lead (pre-push
+ * Codex P1): an override is bound to the recipient the SAME way the
+ * route's lead-only fallback binds one (resolveConsultationLeadOnly in
+ * admin-communications.js) — the lead's own leads.customer_id, or its
+ * phone against the resolved customer's, last-10-digit normalized
+ * (digitsLast10, this file's own matcher, shared with the payer-statement
+ * and card-link owner checks below) — AND still open by the same
+ * predicate (isOpenLeadRow, checked against the already-fetched row); both
+ * files share these two helpers so they can never drift on what counts as
+ * still-open. Either mismatch refuses with a specific reason rather than
+ * silently falling back to the customer's own newest lead, so a wrong or
+ * closed leadId never mints a bearer link. An id that resolves to no lead
+ * at all (stale/deleted) is treated as no override and falls through to
+ * the plain newest-OPEN-lead lookup, same as before. Renders the same
+ * admin-editable lead_consultation_link SMS template the Leads page
+ * action uses (buildLeadConsultationSmsLine) so both surfaces send
+ * identical copy and never drift.
  */
 async function buildConsultationLink(customerId, leadIdOverride) {
   const { buildLeadConsultationSmsLine } = require('./lead-consultation-link');
+  const { isOpenLeadRow, applyOpenLeadPredicate } = require('./lead-statuses');
   let lead = null;
   if (leadIdOverride) {
-    const candidate = await db('leads').where({ id: leadIdOverride }).whereNull('deleted_at').first('id', 'first_name', 'customer_id', 'phone');
+    const candidate = await db('leads').where({ id: leadIdOverride }).whereNull('deleted_at').first('id', 'first_name', 'customer_id', 'phone', 'status', 'converted_at');
     if (candidate) {
       const belongsToCustomer = candidate.customer_id && String(candidate.customer_id) === String(customerId);
       let phoneMatches = false;
@@ -381,13 +387,16 @@ async function buildConsultationLink(customerId, leadIdOverride) {
       if (!belongsToCustomer && !phoneMatches) {
         return { url: null, line: '', reason: 'That lead does not match the destination number' };
       }
+      if (!isOpenLeadRow(candidate)) {
+        return { url: null, line: '', reason: 'That lead has already converted or closed — pick a different lead' };
+      }
       lead = candidate;
     }
   }
   if (!lead) {
-    lead = await db('leads')
-      .where({ customer_id: customerId })
-      .whereNull('deleted_at')
+    lead = await applyOpenLeadPredicate(
+      db('leads').where({ customer_id: customerId }).whereNull('deleted_at')
+    )
       .orderBy('created_at', 'desc')
       .first('id', 'first_name');
   }

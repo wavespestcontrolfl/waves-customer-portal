@@ -482,23 +482,36 @@ describe('buildReferralLink', () => {
 describe('buildConsultationLink', () => {
   const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 
-  test('a caller-supplied leadId override wins over the customer lookup when it is the resolved customer\'s own lead', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-override', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111' } }) };
+  test('a caller-supplied leadId override wins over the customer lookup when it is the resolved customer\'s own OPEN lead', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-override', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111', status: 'new', converted_at: null } }) };
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/abc', line: 'line\n\n', standalone: true });
     const r = await buildConsultationLink('c1', 'lead-override');
     expect(r.url).toBe('https://waves.link/l/abc');
     expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-override', 'Pat');
   });
 
-  test('a caller-supplied leadId override wins when it is not the customer\'s own lead by customer_id but shares the resolved phone', async () => {
+  test('a caller-supplied leadId override wins when it is not the customer\'s own lead by customer_id but shares the resolved phone (and is open)', async () => {
     mockBuilders = {
-      leads: chainBuilder({ firstRow: { id: 'lead-other', first_name: 'Jamie', customer_id: 'c9', phone: '+19415550111' } }),
+      leads: chainBuilder({ firstRow: { id: 'lead-other', first_name: 'Jamie', customer_id: 'c9', phone: '+19415550111', status: 'contacted', converted_at: null } }),
       customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
     };
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/phone-match', line: 'line\n\n', standalone: true });
     const r = await buildConsultationLink('c1', 'lead-other');
     expect(r.url).toBe('https://waves.link/l/phone-match');
     expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-other', 'Jamie');
+  });
+
+  // Pre-push Codex P1: the explicit override had the same eligibility gap
+  // as the newest-lead lookup below — an existing customer's own WON/LOST
+  // lead could still mint a free-consultation invitation when named
+  // explicitly by id. Rejected outright (specific reason), never silently
+  // falls through to the customer's newest OPEN lead instead.
+  test('a caller-supplied leadId override that IS the customer\'s own lead but already converted is rejected — no fallback substitution', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-won', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111', status: 'won', converted_at: new Date('2026-01-01') } }) };
+    const r = await buildConsultationLink('c1', 'lead-won');
+    expect(r.url).toBeNull();
+    expect(r.reason).toBe('That lead has already converted or closed — pick a different lead');
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
   });
 
   // Pre-push Codex P1: the customer path let leadIdOverride select ANY
@@ -517,12 +530,37 @@ describe('buildConsultationLink', () => {
     expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
   });
 
-  test('no leadId override: resolves the customer\'s newest non-deleted lead', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris' } }) };
+  test('no leadId override: resolves the customer\'s newest non-deleted OPEN lead', async () => {
+    const leads = chainBuilder({ firstRow: { id: 'lead-newest', first_name: 'Chris' } });
+    mockBuilders = { leads };
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/xyz', line: 'line\n\n', standalone: true });
     const r = await buildConsultationLink('c1');
     expect(r.url).toBe('https://waves.link/l/xyz');
     expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-newest', 'Chris');
+    // The open-lead predicate rides on this same query (lead-statuses.js's
+    // applyOpenLeadPredicate, shared with resolveConsultationLeadOnly in
+    // admin-communications.js — pre-push Codex P1).
+    const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+    expect(leads.whereIn).toHaveBeenCalledWith('status', OPEN_LEAD_STATUSES);
+    expect(leads.whereNull).toHaveBeenCalledWith('converted_at');
+  });
+
+  // Pre-push Codex P1: the newest-lead lookup had no status/converted_at
+  // check at all — an existing customer's won/lost lead was still the
+  // "newest lead" the query would return. The predicate now excludes it at
+  // the query itself (mocked here as the query finding nothing, the same
+  // as a real WHERE clause would), landing on the same "no lead" outcome
+  // as a customer with no lead on file at all — never a fallback mint.
+  test('the customer\'s only lead is already converted: excluded by the open-lead predicate, same "no lead" outcome', async () => {
+    const leads = chainBuilder({ firstRow: null });
+    mockBuilders = { leads };
+    const r = await buildConsultationLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/no lead/i);
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+    const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+    expect(leads.whereIn).toHaveBeenCalledWith('status', OPEN_LEAD_STATUSES);
+    expect(leads.whereNull).toHaveBeenCalledWith('converted_at');
   });
 
   test('a leadId override for a deleted/missing lead falls back to the customer lookup', async () => {
@@ -531,6 +569,7 @@ describe('buildConsultationLink', () => {
       leads: {
         where: jest.fn(function () { return this; }),
         whereNull: jest.fn(function () { return this; }),
+        whereIn: jest.fn(function () { return this; }),
         orderBy: jest.fn(function () { return this; }),
         first: jest.fn(async () => (call++ === 0 ? null : { id: 'lead-fallback', first_name: 'Sam' })),
       },

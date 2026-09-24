@@ -2806,24 +2806,27 @@ async function resolveConsultationLeadOnly(last10, leadId) {
   if (leadId && !UUID_RE.test(String(leadId))) {
     return { status: 400, error: 'leadId must be a valid id' };
   }
-  const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+  // Shared with composer-customer-links.js's buildConsultationLink (the
+  // customer-resolved path's equivalent two lookups) so the two files
+  // cannot drift on what counts as a still-open lead.
+  const { isOpenLeadRow, applyOpenLeadPredicate } = require('../services/lead-statuses');
   if (leadId) {
     const byId = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'first_name', 'phone', 'status', 'converted_at');
     if (byId) {
       if (fullPhoneLast10(byId.phone) !== last10) {
         return { status: 404, error: 'That lead does not match the destination number' };
       }
-      if (byId.converted_at || !OPEN_LEAD_STATUSES.includes(byId.status)) {
+      if (!isOpenLeadRow(byId)) {
         return { status: 404, error: 'That lead has already converted or closed — pick a different lead' };
       }
       return { lead: byId };
     }
   }
-  const matches = await db('leads')
-    .whereIn('status', OPEN_LEAD_STATUSES)
-    .whereNull('converted_at')
-    .whereNull('deleted_at')
-    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+  const matches = await applyOpenLeadPredicate(
+    db('leads')
+      .whereNull('deleted_at')
+      .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+  )
     .orderBy('created_at', 'desc')
     .limit(2)
     .select('id', 'first_name', 'phone');
