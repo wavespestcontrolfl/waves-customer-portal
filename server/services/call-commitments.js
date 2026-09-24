@@ -111,9 +111,27 @@ function normalizeKind(value, party = null) {
 // vocabulary slip fails soft (to 'unknown' / 'other') instead of failing the
 // response. Structural problems (missing evidence, wrong types) still reach
 // the schema.
+// The ONE definition of "this quote grounds this commitment": verbatim in
+// the transcript (in the committing party's own turns when the transcript
+// is speaker-labelled) AND action-bearing. Shared by the pre-schema
+// evidence cap and by groundModelCommitments so the two can never rank
+// or accept quotes differently (Codex #4704 r2/r3).
+function evidenceGrounder(transcript) {
+  const flat = normalizeForMatch(transcript);
+  const turns = speakerTurns(transcript);
+  return (e, item) => {
+    const q = normalizeForMatch(e?.quote);
+    if (q.length < 3) return false;
+    if (!quoteExpressesAction(q, item)) return false;
+    const speaker = PARTY_SPEAKER[item.party] || null;
+    if (!turns || !speaker) return flat.includes(q);
+    return turns[speaker].some((turn) => turn.includes(q));
+  };
+}
+
 function normalizeModelOutput(parsed, transcript = '') {
   if (!parsed || !Array.isArray(parsed.commitments)) return parsed;
-  const flat = normalizeForMatch(transcript);
+  const grounded = evidenceGrounder(transcript);
   for (const item of parsed.commitments) {
     if (!item || typeof item !== 'object') continue;
     if (typeof item.channel === 'string') item.channel = normalizeChannel(item.channel);
@@ -125,11 +143,7 @@ function normalizeModelOutput(parsed, transcript = '') {
     // transcript AND action-bearing) ahead of the rest, so a promise whose
     // only usable quote came fourth is not lost to the trim (Codex r2 P2).
     if (Array.isArray(item.evidence) && item.evidence.length > 3) {
-      const usable = (e) => {
-        const q = normalizeForMatch(e?.quote);
-        return q.length >= 3 && flat.includes(q) && quoteExpressesAction(q, item);
-      };
-      const preferred = item.evidence.filter(usable);
+      const preferred = item.evidence.filter((e) => grounded(e, item));
       const rest = item.evidence.filter((e) => !preferred.includes(e));
       item.evidence = preferred.concat(rest).slice(0, 3);
     }
@@ -621,8 +635,8 @@ function normalizedRescheduleSubject(item, transcript, reference) {
 }
 
 function groundModelCommitments(items, transcript, reference = null) {
-  const flat = normalizeForMatch(transcript);
   const turns = speakerTurns(transcript);
+  const isGrounded = evidenceGrounder(transcript);
   const kept = [];
   let droppedUngrounded = 0;
   let droppedLowConfidence = 0;
@@ -633,13 +647,7 @@ function groundModelCommitments(items, transcript, reference = null) {
     // is a cross-field rule the schema cannot express.
     if (!kindBelongsToParty(item.party, item.kind)) { droppedMismatched += 1; continue; }
     const speaker = PARTY_SPEAKER[item.party] || null;
-    const grounded = (item.evidence || []).filter((e) => {
-      const q = normalizeForMatch(e?.quote);
-      if (q.length < 3) return false;
-      if (!quoteExpressesAction(q, item)) return false;
-      if (!turns || !speaker) return flat.includes(q);
-      return turns[speaker].some((turn) => turn.includes(q));
-    });
+    const grounded = (item.evidence || []).filter((e) => isGrounded(e, item));
     if (!grounded.length) { droppedUngrounded += 1; continue; }
     if (typeof item.confidence !== 'number' || item.confidence < MIN_MODEL_CONFIDENCE) { droppedLowConfidence += 1; continue; }
     const malformedDue = Number.isNaN(parseDueAt(item.due_at));

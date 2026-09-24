@@ -986,6 +986,16 @@ describe('model vocabulary slips are normalized before schema validation (audit 
     expect(out2.droppedUngrounded).toBe(0);
     expect(out2.items).toHaveLength(1);
     expect(out2.items[0].evidence.map((e) => e.quote)).toEqual(['I will call you back tomorrow morning with the price']);
+    // Opposite-speaker quotes rank like ungrounded ones: a Waves promise
+    // needs an agent turn, so three caller lines ahead of the one agent
+    // line must not consume the cap (Codex r3 P2).
+    const twoParty = 'Caller: I will send you the photos tonight and I will pay the deposit tomorrow and I will text you the gate code.\nAgent: I will call you back tomorrow morning with the price.';
+    const callerLines = ['I will send you the photos tonight', 'I will pay the deposit tomorrow', 'I will text you the gate code'].map((quote) => ({ quote, speaker: 'agent' }));
+    const create3 = jest.fn(async () => reply([item({ evidence: [...callerLines, { quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }] })]));
+    const out3 = await extractCommitmentsWithModel(twoParty, { client: { messages: { create: create3 } } });
+    expect(out3.droppedUngrounded).toBe(0);
+    expect(out3.items).toHaveLength(1);
+    expect(out3.items[0].evidence.map((e) => e.quote)).toEqual(['I will call you back tomorrow morning with the price']);
     const many = { commitments: Array.from({ length: 13 }, () => item()) };
     expect(normalizeModelOutput(many).commitments).toHaveLength(12);
     expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most three quotes per commitment/);
