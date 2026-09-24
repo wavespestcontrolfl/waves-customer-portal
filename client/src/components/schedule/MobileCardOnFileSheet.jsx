@@ -207,9 +207,24 @@ export default function MobileCardOnFileSheet({
         },
       );
       const d = await r.json().catch(() => ({}));
-      // The charge already happened (or is in flight) by this point — this
-      // is only about not touching an unmounted component's state.
-      if (abortedRef.current) return;
+      // The charge already happened (or is in flight) by this point. If the
+      // sheet was removed while the POST was in flight, skip only THIS
+      // component's state — the parent must still learn the outcome
+      // (pre-push fallback audit P1): a collected charge it never hears
+      // about is a refresh it never does and an invitation to charge
+      // again; a terminal orphan/ambiguous/in-progress outcome is already
+      // raised server-side as an operator alert, so it is logged here
+      // rather than lost silently.
+      if (abortedRef.current) {
+        if (r.ok) {
+          onChargeSuccess?.(d);
+        } else if (d.orphan === true || d.ambiguous === true || d.in_progress === true) {
+          console.error(
+            `[MobileCardOnFileSheet] charge-card on invoice ${invoiceId} returned a terminal outcome after the sheet closed: ${d.error || "see server alert"} — do not charge again; the server alert carries the reconciliation`,
+          );
+        }
+        return;
+      }
       if (!r.ok) {
         const terminal =
           d.orphan === true || d.ambiguous === true || d.in_progress === true;

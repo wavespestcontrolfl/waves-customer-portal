@@ -216,6 +216,52 @@ describe.each(["legacy", "comfortable"])(
       });
     });
 
+    it("still notifies the parent when the sheet unmounts while the charge POST is in flight (money moved)", async () => {
+      let resolveCharge;
+      const chargePromise = new Promise((resolve) => {
+        resolveCharge = resolve;
+      });
+      const onChargeSuccess = vi.fn();
+      fetch.mockImplementation((url) => {
+        const u = String(url);
+        if (u.includes("/cards")) return jsonResponse({ cards });
+        if (u.includes("/charge-card-quote")) return jsonResponse({ quote: QUOTE });
+        return chargePromise;
+      });
+      const { unmount } = render(
+        <UiSurface density={density}>
+          <MobileCardOnFileSheet
+            presentation={density === "comfortable" ? "admin" : "legacy"}
+            desktopVisible
+            invoiceId="inv-1"
+            customerId="cust-1"
+            customerName="Test Customer"
+            onChargeSuccess={onChargeSuccess}
+          />
+        </UiSurface>,
+      );
+      await screen.findByText("Visa 1111");
+      fireEvent.click(
+        screen.getAllByRole("button", { name: /^Charge(?: |$)/ })[0],
+      );
+      await waitFor(() => {
+        expect(
+          fetch.mock.calls.some(([u]) => String(u).endsWith("/charge-card")),
+        ).toBe(true);
+      });
+
+      // Sheet removed while /charge-card is in flight — the charge still
+      // completes upstream, so the parent must still be told.
+      unmount();
+      resolveCharge(jsonResponse({ success: true, status: "paid", payment: { id: "pay-1" } }));
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(onChargeSuccess).toHaveBeenCalledTimes(1);
+      expect(onChargeSuccess).toHaveBeenCalledWith(
+        expect.objectContaining({ success: true, status: "paid" }),
+      );
+    });
+
     it("never posts /charge-card if the sheet unmounts while the quote is still in flight", async () => {
       let resolveQuote;
       const quotePromise = new Promise((resolve) => {
