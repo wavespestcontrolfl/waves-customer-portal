@@ -23,9 +23,8 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
 // Live default is the registry's best Gemini vision model; override via
-// GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. analyzeWithGemini retries the
-// registry's GEMINI_VISION_FALLBACK only when it names a different model (one
-// Gemini model by default — owner ruling 2026-09-02).
+// GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. analyzeWithGemini makes ONE call
+// (no GEMINI_VISION_FALLBACK retry) — Claude then OpenAI follow in the ladder.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 
 const VISION_PROMPT = `Analyze this satellite/aerial image of a residential property in Southwest Florida. Estimate the following measurements and features as accurately as possible from the image.
