@@ -10317,7 +10317,9 @@ const CallRecordingProcessor = {
           // (pre-push audit P1) — the card alone would leave the call
           // reading as fully processed.
           if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
-          logger.info(`[call-proc] house-number conflict card for ${maskSid(callSid)}: stated ${houseConflict.stated_house_number}, on file ${houseConflict.on_file_house_number}`);
+          // Ids only — the disputed numbers are parts of a customer's street
+          // address and stay out of plain-text logs (pre-push audit P1).
+          logger.info(`[call-proc] house-number conflict card filed for ${maskSid(callSid)} (call ${call.id}, customer ${customerId || 'none'})`);
         } else if (outcome === 'claim_lost') {
           logger.info(`[call-proc] processing claim lost — skipping the house-number conflict card write for ${maskSid(callSid)} (the owner files it)`);
         } else if (outcome === 'claimed_unrecorded') {

@@ -420,11 +420,20 @@ export default function TriageInboxTabV2() {
         // reprocess on a house-number conflict): reload so the operator
         // answers the CURRENT evidence, instead of resubmitting the same
         // stale version forever (codex #4666 r25 P2).
-        if (err?.status === 409) {
+        if (err?.status === 409 && err?.code === 'STALE_CARD_VERSION') {
           setDenyFor(null);
           setDenyFields([]);
           load(mode, status, autoOnly);
           setError("This card's evidence changed since it loaded — review the refreshed card before answering.");
+          return;
+        }
+        // Any other 409 (a relinked call, a reschedule proposal on the
+        // card) carries the server's own instruction — a reload would not
+        // change it, so show the message rather than loop on it.
+        if (err?.status === 409 && err?.message) {
+          setDenyFor(null);
+          setDenyFields([]);
+          setError(err.message);
           return;
         }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");

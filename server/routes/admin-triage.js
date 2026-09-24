@@ -387,7 +387,7 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'not_found': return res.status(404).json({ error: 'Triage item not found' });
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
-    case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest' });
+    case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
     default: return res.json({ ok: true, id, status: nextStatus });
   }
 }
@@ -1090,7 +1090,10 @@ router.post('/:id/verdict', async (req, res) => {
     }
 
     if (staleConflictVersion) {
-      return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest' });
+      // A distinct code so the client can tell the stale-version 409 (reload
+      // and re-read) from a relink or proposal conflict, whose messages
+      // carry their own instruction (pre-push audit P1 after r27).
+      return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
     }
     // Calibration: an Accept on a house-number conflict card means the
     // CALLER'S extracted number was rejected in favour of the record — for

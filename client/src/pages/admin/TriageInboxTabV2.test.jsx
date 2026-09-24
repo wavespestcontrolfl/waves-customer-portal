@@ -107,7 +107,7 @@ describe('verdict version binding', () => {
       }
       if (url === '/admin/triage/conflict/verdict') {
         verdictAttempts += 1;
-        if (verdictAttempts === 1) throw Object.assign(new Error('Stale version'), { status: 409 });
+        if (verdictAttempts === 1) throw Object.assign(new Error('Stale version'), { status: 409, code: 'STALE_CARD_VERSION' });
         return { ok: true };
       }
       return { ok: true };
@@ -130,6 +130,25 @@ describe('verdict version binding', () => {
     expect(adminFetch).toHaveBeenCalledWith('/admin/triage/conflict/verdict', expect.objectContaining({
       body: JSON.stringify({ verdict: 'accept', wrong_fields: [], note: null, expected_updated_at: refreshed.updated_at }),
     }));
+  });
+});
+
+describe('verdict 409 with its own instruction', () => {
+  it('shows the server message for a relinked call instead of reloading and looping', async () => {
+    const card = { ...ordinary, id: 'relinked', first_name: 'Relinked', last_name: 'Card', feedback_verdict: null };
+    let listLoads = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) { listLoads += 1; return { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } }; }
+      if (url === '/admin/triage/relinked/verdict') {
+        throw Object.assign(new Error('This call was relinked to another customer since the card was filed — reprocess the call to refresh the card, then review it.'), { status: 409, code: 'CONFLICT_CUSTOMER_RELINKED' });
+      }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relinked Card')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /accept/i }));
+    expect(await screen.findByText(/reprocess the call to refresh the card/i)).toBeInTheDocument();
+    expect(listLoads).toBe(1);
   });
 });
 
