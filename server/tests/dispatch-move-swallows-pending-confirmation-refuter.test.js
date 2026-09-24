@@ -105,17 +105,22 @@ describeOrSkip('r2-reschedule-move-engine-reminders-1: silent dispatch move keep
     expect(after.confirmation_sent).toBe(false);
   });
 
-  test('service: the exact options syncRescheduleReminder(willNotify:false) passes claim the pending confirmation', async () => {
+  test('CONTROL: handleReschedule with the OLD option set (no keepPendingConfirmation) still claims the confirmation', async () => {
+    // This is exactly what syncRescheduleReminder used to pass before the
+    // fix — confirms handleReschedule's own default is unchanged (it still
+    // supersedes a pending confirmation absent an explicit opt-out), which
+    // is why the fix adds keepPendingConfirmation at the ROUTE call site
+    // (below) rather than changing this shared service's default for every
+    // one of its other callers.
     const { svc } = await seedPending('09:00', '10:00');
     const AppointmentReminders = require('../services/appointment-reminders');
     await AppointmentReminders.handleReschedule(svc.id, `${DATE}T09:00`, { sendNotification: false, coverDueWindows: false });
     const after = await db('appointment_reminders').where({ scheduled_service_id: svc.id }).first();
-    expect(after.confirmation_sent).toBe(false);
+    expect(after.confirmation_sent).toBe(true);
   });
 
-  test('source: the dispatch route passes no keepPendingConfirmation and never re-arms confirmation_sent', () => {
+  test('source: the dispatch route now passes keepPendingConfirmation on the willNotify:false path', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-dispatch'), 'utf8');
     expect(src.includes('keepPendingConfirmation')).toBe(true);
-    expect(src.includes('confirmation_sent')).toBe(true);
   });
 });

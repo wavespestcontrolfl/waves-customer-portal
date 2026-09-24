@@ -10,6 +10,9 @@
  * EXPECTED behaviour (the extension continues from the series' cadence
  * position, as rebooker.readSiblings / recurring-schedule-audit define it),
  * so it FAILS on current code if the bug is real.
+ *
+ * Dates are computed relative to "today" (not hardcoded literals) so the
+ * suite never expires as the calendar advances.
  */
 const { randomUUID } = require('crypto');
 const mockRegister = jest.fn(async () => {});
@@ -19,6 +22,19 @@ jest.mock('../services/appointment-reminders', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 jest.setTimeout(60000);
+
+const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
+
+const noon = (ymd) => new Date(`${ymd}T12:00:00-04:00`);
+const plusDays = (ymd, n) => etDateString(addETDays(noon(ymd), n));
+const dow = (ymd) => etParts(noon(ymd)).dayOfWeek;
+// First date >= today+minOut that falls on `weekday` (0=Sun).
+function nextWeekday(minOut, weekday) {
+  let d = plusDays(etDateString(), minOut);
+  while (dow(d) !== weekday) d = plusDays(d, 1);
+  return d;
+}
+function ymdMonth(ymd) { const p = etParts(noon(ymd)); return p.year * 12 + p.month; }
 
 (process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('ongoing auto-extend after a this-visit-only move of the tail (real PG)', () => {
   let db;
@@ -69,25 +85,38 @@ jest.setTimeout(60000);
     return rows[0];
   }
 
-  test('quarterly: tail cadence slot Oct 27 (4th Tue) moved once to Nov 3 -> extension should seed Jan 26, not Feb 23', async () => {
-    // Parent Jul 28 2026 = 4th Tuesday; quarterly cadence = 4th Tuesday of Oct, Jan, Apr...
+  test('quarterly: tail cadence slot moved once (this visit only) into the next month must still extend 3 months after the cadence month, not the moved month', async () => {
+    const cadenceDate = nextWeekday(14, 2); // a Tuesday, comfortably future
+    const movedDate = plusDays(cadenceDate, 35); // crosses a month boundary
+    expect(ymdMonth(movedDate)).toBe(ymdMonth(cadenceDate) + 1);
+    // Parent completed 3 months before the cadence slot, same day-of-month
+    // (quarterly re-anchors on the parent's nth-weekday, so only the MONTH
+    // of the anchor matters for this assertion — see the primary reproducer
+    // series-extend-anchor-ignores-exception.test.js for the same method).
+    const cp = etParts(noon(cadenceDate));
+    const parentDate = etDateString(new Date(Date.UTC(cp.year, cp.month - 1 - 3, Math.min(cp.day, 28), 16)));
     const { parentId, tailId } = await seedSeries({
-      pattern: 'quarterly', parentDate: '2026-07-28', tailCadenceDate: '2026-10-27', tailMovedDate: '2026-11-03',
+      pattern: 'quarterly', parentDate, tailCadenceDate: cadenceDate, tailMovedDate: movedDate,
     });
     const parent = await db('scheduled_services').where({ id: parentId }).first();
     await maintain(db, parent);
     const child = await seededChild(parentId, [tailId]);
-    // Cadence position Oct 27 + 3 months = 4th Tuesday of Jan 2027 = Jan 26.
-    expect(child.scheduled_date).toBe('2027-01-26');
+    // Expected: cadence month + 3. Bug: moved month + 3 (= cadence month + 4).
+    expect(ymdMonth(child.scheduled_date)).toBe(ymdMonth(cadenceDate) + 3);
   });
 
-  test('biweekly: tail cadence slot Oct 6 moved once to Oct 9 -> extension should seed Oct 20, not Oct 23', async () => {
+  test('biweekly: tail cadence slot moved once (this visit only) a few days later must still extend from the cadence weekday, not the moved one', async () => {
+    const cadenceDate = nextWeekday(14, 2); // a Tuesday, comfortably future
+    const movedDate = plusDays(cadenceDate, 3); // moved to Friday, this visit only
+    const parentDate = plusDays(cadenceDate, -14);
     const { parentId, tailId } = await seedSeries({
-      pattern: 'biweekly', parentDate: '2026-09-22', tailCadenceDate: '2026-10-06', tailMovedDate: '2026-10-09',
+      pattern: 'biweekly', parentDate, tailCadenceDate: cadenceDate, tailMovedDate: movedDate,
     });
     const parent = await db('scheduled_services').where({ id: parentId }).first();
     await maintain(db, parent);
     const child = await seededChild(parentId, [tailId]);
-    expect(child.scheduled_date).toBe('2026-10-20');
+    // Expected: cadence position + 14 days (same Tuesday). Bug: moved date + 14 (Friday).
+    expect(child.scheduled_date).toBe(plusDays(cadenceDate, 14));
+    expect(dow(child.scheduled_date)).toBe(2);
   });
 });
