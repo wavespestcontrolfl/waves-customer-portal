@@ -772,6 +772,21 @@ async function stampPreconnectScreen(callSid, value) {
   }
 }
 
+// Why the default greeting is short (2026-09-23 audit): after the 30s staff
+// ring, a caller heard the 21s recorded greeting plus a spoken sentence
+// before the beep — about 55s in all — and 17 of 20 inbound voicemail-path
+// callers that week hung up first (Twilio holds no recording for any of
+// them). The short greeting keeps the recorded script's substance (name,
+// number, quick message, or hang up for a text with options — the text-back
+// is live behind GATE_VOICEMAIL_LEAD_SMS) in about 9 seconds.
+// WAVES_VOICEMAIL_GREETING=recorded restores the asset; re-record it at
+// ~8s to keep the brand voice AND the short wait.
+const DEFAULT_VOICEMAIL_ASSET = 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
+const VOICEMAIL_SHORT_GREETING = "Thanks for calling Waves. We're with another customer right now. After the tone, leave your name, number, and a quick message, and we'll call you right back. Or hang up now and we'll text you options to book or get a quote.";
+function voicemailGreetingMode() {
+  return String(process.env.WAVES_VOICEMAIL_GREETING || 'short').trim().toLowerCase() === 'recorded' ? 'recorded' : 'short';
+}
+
 function appendVoicemailRecording(twiml, { language = null } = {}) {
   if (/^es/i.test(String(language || ''))) {
     // Spanish failover (GATE_VOICE_SPANISH_MENU): a caller who chose Spanish
@@ -780,10 +795,12 @@ function appendVoicemailRecording(twiml, { language = null } = {}) {
     const spanishAudio = process.env.WAVES_VOICEMAIL_URL_ES;
     if (spanishAudio) twiml.play(spanishAudio);
     twiml.say(SPANISH_SAY, 'Su mensaje será grabado y transcrito.');
+  } else if (voicemailGreetingMode() === 'recorded') {
+    // The recorded brand greeting (21s). The sentence that used to follow it
+    // repeated what the greeting already says and is dropped.
+    twiml.play(process.env.WAVES_VOICEMAIL_URL || DEFAULT_VOICEMAIL_ASSET);
   } else {
-    const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
-    twiml.play(voicemailAudio);
-    twiml.say({ voice: SAY_VOICE }, 'Your message will be recorded and transcribed.');
+    twiml.say({ voice: SAY_VOICE }, VOICEMAIL_SHORT_GREETING);
   }
   twiml.record({
     maxLength: 120,
