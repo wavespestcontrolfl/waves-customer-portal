@@ -16,7 +16,7 @@ function normalizeRecipient(value) {
   const digits = raw.replace(/\D/g, '');
   if (digits.length === 10) return `+1${digits}`;
   if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-  return raw.startsWith('+') ? raw : raw;
+  return raw;
 }
 
 function trustedGratitudeOwnsReservation(input, { providerPreSendCheck, withSmsHandoff } = {}) {
@@ -70,7 +70,6 @@ async function prepareProviderHandoffReservation({
     if (!reservationId) throw new Error('provider handoff reservation was not created');
     return { reservationId };
   });
-  if (prepared.blocked) return prepared;
   const handle = {
     reservationId: prepared.reservationId,
     context: { to: normalizedTo, fromNumber, body, messageType, metadata: {} },

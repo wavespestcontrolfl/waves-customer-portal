@@ -153,7 +153,7 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeUndefined();
   });
 
-  test.each([false, true])('accepted push coordination %s an ordinary proof row preserves exactly one receipt', async (hasProof) => {
+  test.each([false, true])('accepted push coordination with ordinary proof row %s preserves exactly one receipt', async (hasProof) => {
     const prepared = await providerCoordination.prepareProviderHandoffReservation({
       to: '+12025550101', fromNumber: '+19413529161', body: 'Push body', messageType: 'receipt',
     });
@@ -176,6 +176,32 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     const reservation = await trx('sms_log').where({ id: prepared.handle.reservationId }).first();
     if (hasProof) expect(reservation).toBeUndefined();
     else expect(reservation).toMatchObject({ from_phone: 'push', status: 'sent', twilio_sid: null });
+  });
+
+  test.each([
+    ['an older matching', 'notification-1', -60 * 60 * 1000, true],
+    ['an older different', 'notification-2', -60 * 60 * 1000, false],
+    ['a same-window different', 'notification-2', 0, false],
+  ])('a push proof with %s notification identity removes only a true dedup reservation', async (_label, proofNotificationId, proofOffsetMs, removed) => {
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Deduped push body', messageType: 'receipt',
+    });
+    const reservation = await trx('sms_log').where({ id: prepared.handle.reservationId }).first('created_at');
+    await trx('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: 'push', to_phone: '+12025550101',
+      message_body: 'Deduped push body', message_type: 'receipt', status: 'sent', twilio_sid: null,
+      created_at: new Date(new Date(reservation.created_at).getTime() + proofOffsetMs),
+      metadata: { channel: 'push', providerAccepted: true, push_notification_id: proofNotificationId },
+    });
+    providerCoordination.captureProviderContext(prepared.handle, {
+      to: '+12025550101', fromNumber: 'push', body: 'Deduped push body', messageType: 'receipt',
+      channel: 'push', metadata: { channel: 'push', providerAccepted: true, push_notification_id: 'notification-1' },
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: 'push:notification-1', channel: 'push',
+    });
+    expect(await providerCoordination.settleProviderHandoffReservation(prepared.handle)).toBe(true);
+    expect(Boolean(await trx('sms_log').where({ id: prepared.handle.reservationId }).first())).toBe(!removed);
   });
 
   test.each([

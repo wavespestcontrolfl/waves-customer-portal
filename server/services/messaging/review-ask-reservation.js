@@ -179,8 +179,9 @@ function excludeUnresolvedSendReservations(query, table = 'sms_log') {
 // a narrow fallback: the same endpoints/body, created between reservation
 // creation and promotion. A later delivery callback can move both rows to a
 // terminal failed/undelivered/canceled status without changing that identity.
-// Push receipts have no Twilio SID, so their exact channel/type/body/window
-// identity is the corresponding proof.
+// Push receipts have no Twilio SID. A real push notification id is exact
+// identity even when a deduped receipt predates the new reservation; without
+// one, channel/type/body remain bounded to the reservation promotion window.
 function preserveSoleAcceptedReplyReceipts(query) {
   const nonReservation = SEND_RESERVATION_MARKERS
     .map(marker => `COALESCE(receipt.metadata->>'${marker}', 'false') <> 'true'`)
@@ -212,8 +213,15 @@ function preserveSoleAcceptedReplyReceipts(query) {
             AND receipt.message_type IS NOT DISTINCT FROM sms_log.message_type
             AND receipt.metadata->>'channel' = 'push'
             AND receipt.metadata->>'providerAccepted' = 'true'
-            AND receipt.created_at >= sms_log.created_at
-            AND receipt.created_at <= sms_log.updated_at
+            AND (
+              (NULLIF(receipt.metadata->>'push_notification_id', '') IS NOT NULL
+                AND sms_log.metadata->>'provider_message_id'
+                  = 'push:' || (receipt.metadata->>'push_notification_id'))
+              OR ((NULLIF(receipt.metadata->>'push_notification_id', '') IS NULL
+                  OR NULLIF(sms_log.metadata->>'provider_message_id', '') IS NULL)
+                AND receipt.created_at >= sms_log.created_at
+                AND receipt.created_at <= sms_log.updated_at)
+            )
           )
           OR (
             sms_log.twilio_sid IS NULL

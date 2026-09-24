@@ -709,13 +709,12 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
 async function createReplyHoldingReservation(dbh, {
   to, customerId = null, fromNumber, body, adminUserId = null,
   agentDecisionId = null, parkedDecisionIds = [], reservationKind = 'manual', uncertain = false,
-  manualWrapperReservation = false, messageType = null, extraMetadata = null,
+  manualWrapperReservation = false, messageType = null,
 }) {
   const reservationMarker = reservationKind === 'provider_handoff'
     ? 'provider_handoff_reservation'
     : `${reservationKind}_send_reservation`;
   const metadata = {
-    ...(extraMetadata && typeof extraMetadata === 'object' ? extraMetadata : {}),
     [reservationMarker]: true,
     ...(uncertain ? { provider_outcome_uncertain: true } : {}),
     ...(manualWrapperReservation ? { manual_wrapper_reservation: true } : {}),
@@ -766,14 +765,12 @@ async function settleReplyHoldingReservation({ reservationId, uncertain = false,
       const providerSid = /^(SM|MM)[a-f0-9]{32}$/i.test(providerMessageId || '')
         ? providerMessageId
         : null;
-      const providerAcceptedAt = context.providerAcceptedAt
-        ? new Date(context.providerAcceptedAt)
-        : null;
-      const validProviderAcceptedAt = providerAcceptedAt && !Number.isNaN(providerAcceptedAt.getTime())
+      const providerAcceptedAt = new Date(context.providerAcceptedAt);
+      const validProviderAcceptedAt = Number.isFinite(providerAcceptedAt.getTime())
         ? providerAcceptedAt
         : null;
       const metadataPatch = {
-        ...(context.metadata && typeof context.metadata === 'object' ? context.metadata : {}),
+        ...context.metadata,
         provider_outcome: 'accepted',
         ...(context.channel ? { provider_channel: context.channel } : {}),
         ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
