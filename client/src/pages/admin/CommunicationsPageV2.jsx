@@ -3403,8 +3403,8 @@ export function usageLeafFor(tab, templateKind) {
 }
 
 const TEMPLATE_KINDS = [
-  { key: "sms", label: "SMS" },
-  { key: "email", label: "Email" },
+  { key: "sms", label: "Text" },
+  { key: "email", label: "Mail" },
 ];
 
 export default function CommunicationsPageV2() {

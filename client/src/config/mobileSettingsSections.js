@@ -14,7 +14,7 @@ export const MOBILE_SETTINGS_SECTIONS = [
   },
   {
     key: "service-reports",
-    label: "Reports",
+    label: "Reporting",
     to: "/admin/settings?tab=service-reports",
     adminOnly: true,
   },

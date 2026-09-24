@@ -118,7 +118,7 @@ const SETTINGS_LEAF_META = {
   general: { label: "General", Icon: Building2 },
   "link-library": { label: "Links", Icon: Link2 },
   integrations: { label: "Integrations", Icon: Plug },
-  "service-reports": { label: "Reports", Icon: MapPinned },
+  "service-reports": { label: "Reporting", Icon: MapPinned },
   "blackout-days": { label: "Blackouts", Icon: CalendarOff },
   "kpi-targets": { label: "Targets", Icon: Target },
   "operating-costs": { label: "Costs", Icon: DollarSign },

@@ -98,7 +98,7 @@ const EQUIPMENT_SECTIONS = [{
   Icon: Beaker
 }, {
   key: "job-costs",
-  label: "Costs",
+  label: "Jobs",
   Icon: Calculator
 }, {
   key: "calibrations",
