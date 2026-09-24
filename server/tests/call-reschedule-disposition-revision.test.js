@@ -1,14 +1,25 @@
 // Owner follow-up from #4708 r2 P2 (extended by Codex #4721 r1 P2 / r2 P1 /
-// r2 P2): a resolved reschedule ask must revise a callback_task_created
+// r2 P2 x5): a resolved reschedule ask must revise a callback_task_created
 // disposition minted before it landed — otherwise unworked-comms-watcher.js
 // keeps selecting the call as an outstanding callback and pages someone to
-// call a customer who is already handled. The revision must not, however,
-// bury an INDEPENDENT callback obligation a multi-intent call also carries,
-// must not race a newer reprocess generation, and must still land on a
-// retry that only sees prior_application_requires_review (the reason a
-// genuine crash-then-retry actually returns — processing_generation bumps
-// on every claim, so it almost never matches already_applied's stricter
-// snapshot check) or a noop for a visit already at the requested time.
+// call a customer who is already handled. The revision must not, however:
+//   - bury an INDEPENDENT callback obligation a multi-intent call also
+//     carries (a scheduling.callback_window_* still standing, or an open
+//     call_commitments row of kind callback/party waves that isn't stale);
+//   - be blocked by a CUSTOMER call_back row, which unworked-comms-watcher
+//     never reads callback_task_created for and says nothing about whether
+//     Waves still owes a call;
+//   - be blocked by a STALE AI commitment row a later pass superseded but
+//     kept only for the audit trail;
+//   - race a newer reprocess generation;
+//   - trust an apply-step retry's reason string alone — a genuine
+//     crash-then-retry lands on prior_application_requires_review (a fresh
+//     generation almost never matches the strict already_applied snapshot
+//     check) or already_applied, and either needs the SAME durable,
+//     request/visit-validated proof (call-reschedule-apply.js's
+//     priorApplicationStillMatchesLiveCall, mocked here and exercised
+//     directly in call-reschedule-apply.test.js) before it counts as
+//     resolved.
 // cancellation_processed was dropped from the revisable set entirely (Codex
 // #4721 r2 P2): decideDisposition's own reschedule guard already converts
 // it to existing_customer_routed for every reschedule_requested call, so it
@@ -18,7 +29,9 @@
 // (CallRecordingProcessor._test.reviseDispositionAfterAppliedMove /
 // applyRescheduleFollowUps / hasIndependentCallbackObligation /
 // rescheduleWasDurablyApplied / resolvesRescheduleAsk) against a mocked
-// call_log + call_commitments + activity_log store.
+// call_log + call_commitments store, with call-reschedule-apply.js's own
+// durable-match check stubbed (its real behavior is call-reschedule-apply's
+// own test's responsibility).
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({
@@ -32,19 +45,28 @@ jest.mock('../config/feature-gates', () => {
   const enabled = new Set(['callDispositionV1', 'callCommitments']);
   return { ...actual, isEnabled: jest.fn((name) => enabled.has(name)) };
 });
-// call-commitments is required lazily inside applyRescheduleFollowUps for the
-// fulfillment refresh — stub it so that unrelated pass never touches a real db.
-jest.mock('../services/call-commitments', () => ({ refreshFulfillment: jest.fn().mockResolvedValue(undefined) }));
+// call-commitments is required lazily for the fulfillment refresh AND for
+// staleAiRowSql (a real, pure SQL-fragment builder — kept real so the
+// stale-AI exclusion below exercises the actual fragment, not a stand-in).
+jest.mock('../services/call-commitments', () => ({
+  refreshFulfillment: jest.fn().mockResolvedValue(undefined),
+  staleAiRowSql: jest.requireActual('../services/call-commitments').staleAiRowSql,
+}));
+// call-reschedule-apply's own request/visit-validated durable-match check is
+// stubbed here — its real behavior (source-hash + visit-state matching,
+// generation-only differences excused) is call-reschedule-apply.test.js's
+// job, next to the applyCallReschedule fixtures it shares.
+jest.mock('../services/call-reschedule-apply', () => ({ priorApplicationStillMatchesLiveCall: jest.fn() }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
 const { refreshFulfillment } = require('../services/call-commitments');
+const { priorApplicationStillMatchesLiveCall } = require('../services/call-reschedule-apply');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { reviseDispositionAfterAppliedMove, applyRescheduleFollowUps } = CallRecordingProcessor._test;
 
 const CALL_ID = 'a0000000-0000-4000-8000-000000000001';
-const ACTIVITY_ACTION = 'call_reschedule_applied';
 
 // Reaching reviseDispositionAfterAppliedMove at all already means the move
 // applied — which requires agent_committed_booking === true and a
@@ -54,23 +76,30 @@ const ACTIVITY_ACTION = 'call_reschedule_applied';
 // and confirm about).
 const resolvedRescheduleExtraction = { scheduling: { agent_committed_booking: true, confirmed_start_at: '2026-09-24T14:00:00-04:00' } };
 
-// A minimal call_log + call_commitments + activity_log store, and a
-// compare-and-swap-aware knex mock: `first()`/`update()` only match (and
-// `update()` only lands) when every `where()` condition this call chained
-// still matches the store — exactly knex's semantics for `.where({ id,
-// disposition: prior, processing_generation: gen }).update(...)`.
-// `raceOnFirstUpdate` lets a test simulate another writer (e.g. a human's
-// own PUT /calls/:id/disposition tag, or a newer reprocess pass) landing
-// between the read this function did and the write it issues.
-function mockStore({ callLog, commitments = [], activityLog = [] }) {
+// A minimal call_log + call_commitments store, and a compare-and-swap-aware
+// knex mock: `first()`/`update()` only match (and `update()` only lands)
+// when every `where()` condition this call chained still matches the
+// store — exactly knex's semantics for `.where({ id, disposition: prior,
+// processing_generation: gen }).update(...)`. `raceOnFirstUpdate` lets a
+// test simulate another writer (e.g. a human's own PUT /calls/:id/disposition
+// tag, or a newer reprocess pass) landing between the read this function did
+// and the write it issues. `commitments` rows model the WHOLE table for
+// this call (unfiltered) so the stale-AI exclusion's correlated
+// MAX(last_seen_generation) subquery can be reproduced faithfully.
+function mockStore({ callLog, commitments = [] }) {
   const store = { id: CALL_ID, ...callLog };
   let raceOnFirstUpdate = null;
   db.mockImplementation((table) => {
     if (table === 'call_commitments') {
       const where = {};
-      const inFilters = {};
+      let excludeStale = false;
+      const isStale = (r) => {
+        if (r.human_state != null || r.source !== 'ai' || r.last_seen_generation == null) return false;
+        const maxSeen = Math.max(...commitments.filter((x) => x.call_log_id === r.call_log_id).map((x) => x.last_seen_generation ?? -Infinity));
+        return r.last_seen_generation < maxSeen;
+      };
       const matching = () => commitments.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)
-        && Object.entries(inFilters).every(([k, vals]) => vals.includes(r[k])));
+        && (!excludeStale || !isStale(r)));
       const project = (rows, cols) => rows.map((r) => {
         const wanted = cols.length ? cols : Object.keys(r);
         const out = {};
@@ -79,27 +108,9 @@ function mockStore({ callLog, commitments = [], activityLog = [] }) {
       });
       const builder = {
         where(cond) { Object.assign(where, cond); return builder; },
-        whereIn(col, vals) { inFilters[col] = vals; return builder; },
+        whereRaw() { excludeStale = true; return builder; },
         select(...cols) { return Promise.resolve(project(matching(), cols)); },
         first(...cols) { return Promise.resolve(project(matching(), cols)[0] || null); },
-      };
-      return builder;
-    }
-    if (table === 'activity_log') {
-      const where = {};
-      let rawCallLogId;
-      const builder = {
-        where(cond) { Object.assign(where, cond); return builder; },
-        whereRaw(_sql, params) { rawCallLogId = Array.isArray(params) ? params[0] : params; return builder; },
-        first(...cols) {
-          const rows = activityLog.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)
-            && (rawCallLogId === undefined || r.metadata?.call_log_id === rawCallLogId));
-          if (!rows.length) return Promise.resolve(null);
-          const wanted = cols.length ? cols : Object.keys(rows[0]);
-          const out = {};
-          wanted.forEach((c) => { out[c] = rows[0][c]; });
-          return Promise.resolve(out);
-        },
       };
       return builder;
     }
@@ -127,10 +138,11 @@ function mockStore({ callLog, commitments = [], activityLog = [] }) {
   return { store, setRace: (fn) => { raceOnFirstUpdate = fn; } };
 }
 
-const durableRow = (callId = CALL_ID) => ({ action: ACTIVITY_ACTION, metadata: { call_log_id: callId } });
-
 describe('reviseDispositionAfterAppliedMove', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    priorApplicationStillMatchesLiveCall.mockResolvedValue(true);
+  });
 
   test('an applied move revises callback_task_created -> existing_customer_routed when nothing else grounds it', async () => {
     const { store } = mockStore({
@@ -188,7 +200,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
     expect(store.disposition).toBe('existing_customer_routed');
   });
 
-  describe('independent callback obligations (Codex #4721 r1 P2 / r2 P1)', () => {
+  describe('independent callback obligations (Codex #4721 r1 P2 / r2 P1 / r2 P2)', () => {
     test('scheduling.callback_window_start still set alongside the committed booking preserves the disposition', async () => {
       const { store } = mockStore({
         callLog: {
@@ -227,13 +239,16 @@ describe('reviseDispositionAfterAppliedMove', () => {
       expect(store.disposition).toBe('callback_task_created');
     });
 
-    test('an open customer call_back commitment also preserves the disposition', async () => {
+    test('an open CUSTOMER call_back commitment does NOT preserve the disposition (Codex #4721 r2 P2)', async () => {
+      // call_back is the customer's own promise to call Waves — a distinct
+      // obligation unworked-comms-watcher.js never reads callback_task_created
+      // for, so it must not block this revision.
       const { store } = mockStore({
         callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
         commitments: [{ id: 'commit-customer-1', call_log_id: CALL_ID, party: 'customer', kind: 'call_back', status: 'open' }],
       });
       await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_call_back' });
-      expect(store.disposition).toBe('callback_task_created');
+      expect(store.disposition).toBe('existing_customer_routed');
     });
 
     test('a dismissed/fulfilled commitment (not open) does not block the revision', async () => {
@@ -252,6 +267,46 @@ describe('reviseDispositionAfterAppliedMove', () => {
       });
       await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_other_call' });
       expect(store.disposition).toBe('existing_customer_routed');
+    });
+
+    test('a STALE open AI callback row (superseded by a later pass) does not block the revision (Codex #4721 r2 P2)', async () => {
+      const { store } = mockStore({
+        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
+        commitments: [
+          // The stale row: an earlier pass's detection, still 'open' for the
+          // audit trail, but a LATER pass (last_seen_generation 2) no longer
+          // detected it.
+          { id: 'commit-stale-1', call_log_id: CALL_ID, party: 'waves', kind: 'callback', status: 'open', source: 'ai', human_state: null, last_seen_generation: 1 },
+          // Some OTHER row from that later pass — establishes the MAX the
+          // correlated subquery compares against (a sibling of any kind).
+          { id: 'commit-sibling-1', call_log_id: CALL_ID, party: 'waves', kind: 'send_estimate', status: 'open', source: 'ai', human_state: null, last_seen_generation: 2 },
+        ],
+      });
+      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_stale_commit' });
+      expect(store.disposition).toBe('existing_customer_routed');
+    });
+
+    test('a CURRENT (not stale) open AI callback row still blocks the revision', async () => {
+      const { store } = mockStore({
+        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
+        commitments: [
+          { id: 'commit-current-1', call_log_id: CALL_ID, party: 'waves', kind: 'callback', status: 'open', source: 'ai', human_state: null, last_seen_generation: 2 },
+        ],
+      });
+      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_current_commit' });
+      expect(store.disposition).toBe('callback_task_created');
+    });
+
+    test('a human-confirmed row is never treated as stale, even behind a later pass', async () => {
+      const { store } = mockStore({
+        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
+        commitments: [
+          { id: 'commit-human-1', call_log_id: CALL_ID, party: 'waves', kind: 'callback', status: 'open', source: 'ai', human_state: 'confirmed', last_seen_generation: 1 },
+          { id: 'commit-sibling-2', call_log_id: CALL_ID, party: 'waves', kind: 'send_estimate', status: 'open', source: 'ai', human_state: null, last_seen_generation: 2 },
+        ],
+      });
+      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_human_commit' });
+      expect(store.disposition).toBe('callback_task_created');
     });
 
     test('callCommitments dark preserves the disposition even with no window and no visible commitment (Codex #4721 r3 P1)', async () => {
@@ -296,15 +351,16 @@ describe('reviseDispositionAfterAppliedMove', () => {
   });
 
   describe('resolved-reschedule retry durability (Codex #4721 r2 P2)', () => {
-    test('a retry under a NEWER generation that only sees prior_application_requires_review still revises, given a durable applied row', async () => {
+    test('a retry under a NEWER generation that only sees prior_application_requires_review still revises, given a durably-matching prior application', async () => {
       // This is the actual shape a real crash-then-retry takes: processing_
       // generation bumped (a fresh pass), so call-reschedule-apply.js's own
       // sameDecision check fails and it returns prior_application_requires_
       // review, NOT already_applied — the reason string alone is not
-      // reliable proof, so the durable activity_log row is what matters.
+      // reliable proof, so the durable, request/visit-validated check is
+      // what matters (priorApplicationStillMatchesLiveCall, mocked true
+      // here).
       const { store } = mockStore({
         callLog: { disposition: 'callback_task_created', processing_generation: 9, v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
-        activityLog: [durableRow()],
       });
       await applyRescheduleFollowUps({
         call: { id: CALL_ID },
@@ -315,11 +371,8 @@ describe('reviseDispositionAfterAppliedMove', () => {
       expect(store.disposition).toBe('existing_customer_routed');
     });
 
-    test('a retry that sees already_applied still revises the disposition, given a durable applied row', async () => {
-      const { store } = mockStore({
-        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
-        activityLog: [durableRow()],
-      });
+    test('a retry that sees already_applied still revises the disposition, given a durably-matching prior application', async () => {
+      const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
       await applyRescheduleFollowUps({
         call: { id: CALL_ID },
         callSid: 'CA_retry',
@@ -328,11 +381,12 @@ describe('reviseDispositionAfterAppliedMove', () => {
       expect(store.disposition).toBe('existing_customer_routed');
     });
 
-    test('a retry-shaped outcome with NO durable activity row does not revise', async () => {
-      const { store } = mockStore({
-        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
-        activityLog: [], // nothing durable for this call
-      });
+    test('a retry-shaped outcome whose prior application no longer matches the live call does not revise (Codex #4721 r2 P1)', async () => {
+      // e.g. a reprocess corrected the transcript, or the destination visit
+      // no longer reflects what the old application recorded — an activity
+      // row existing is not enough by itself.
+      priorApplicationStillMatchesLiveCall.mockResolvedValue(false);
+      const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
       await applyRescheduleFollowUps({
         call: { id: CALL_ID },
         callSid: 'CA_retry_no_proof',
@@ -344,7 +398,9 @@ describe('reviseDispositionAfterAppliedMove', () => {
     test('an already-satisfied noop (already_at_requested_time) revises the disposition', async () => {
       // applyCallReschedule's own writeDecision records the SAME activity
       // row and resolves the cards for this outcome (Codex #4721 r2 P2) —
-      // it counts as resolved work, not a no-op to disposition.
+      // it counts as resolved work, not a no-op to disposition. No durable
+      // re-check needed: the write just happened, synchronously, in the
+      // SAME call chain.
       const { store } = mockStore({
         callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
       });
@@ -354,13 +410,11 @@ describe('reviseDispositionAfterAppliedMove', () => {
         result: { outcome: 'noop', reason: 'already_at_requested_time', visitId: 'visit-1', cardsResolved: 1 },
       });
       expect(store.disposition).toBe('existing_customer_routed');
+      expect(priorApplicationStillMatchesLiveCall).not.toHaveBeenCalled();
     });
 
     test('an already_applied retry does not re-run the fulfillment refresh', async () => {
-      const { store } = mockStore({
-        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
-        activityLog: [durableRow()],
-      });
+      const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
       await applyRescheduleFollowUps({
         call: { id: CALL_ID },
         callSid: 'CA_retry_no_refresh',
@@ -378,6 +432,7 @@ describe('reviseDispositionAfterAppliedMove', () => {
         result: { outcome: 'skipped', reason: 'handled_after_call' },
       });
       expect(store.disposition).toBe('callback_task_created');
+      expect(priorApplicationStillMatchesLiveCall).not.toHaveBeenCalled();
     });
   });
 });

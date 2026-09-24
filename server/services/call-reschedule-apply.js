@@ -738,6 +738,41 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow, cardsResolved };
 }
 
+// Whether call.id has a durable call_reschedule_applied activity row whose
+// own request/visit snapshot STILL matches the live call — every check the
+// `prior` branch above applies (source hash over transcription+extraction,
+// visit identity/status/date/window) EXCEPT processing_generation equality,
+// which a genuine crash-then-retry always fails (a fresh pass bumps the
+// generation the moment it claims the row). Read-only, no locks, no side
+// effects — for a caller that only needs to know "was this call's
+// reschedule resolved", not re-run the move itself. Exported for
+// call-recording-processor.js's post-move disposition correction (Codex
+// #4721 r2 P1 on that lookup): the activity row existing is not proof by
+// itself when the CURRENT extraction or destination visit no longer
+// matches what it recorded (a corrected reprocess, a since-cancelled or
+// re-moved visit) — only the generation is allowed to differ.
+async function priorApplicationStillMatchesLiveCall(conn, call) {
+  if (!conn || !call?.id) return false;
+  const liveCall = await conn('call_log').where({ id: call.id }).first();
+  if (!liveCall || liveCall.processing_token || liveCall.v2_extraction_status !== 'valid') return false;
+  if (call.customer_id && liveCall.customer_id !== call.customer_id) return false;
+
+  const prior = await conn('activity_log').where({ action: ACTIVITY_ACTION })
+    .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('metadata');
+  if (!prior) return false;
+  const proof = typeof prior.metadata === 'string' ? JSON.parse(prior.metadata) : prior.metadata;
+
+  const sameSource = createHash('sha256').update(JSON.stringify([liveCall.transcription, liveCall.ai_extraction_enriched])).digest('hex') === proof?.source_hash;
+  if (!sameSource) return false;
+
+  const liveVisit = proof?.scheduled_service_id
+    ? await conn('scheduled_services').where({ id: proof.scheduled_service_id }).first() : null;
+  if (!liveVisit || liveVisit.customer_id !== liveCall.customer_id || !LIVE_STATUSES.includes(liveVisit.status)) return false;
+  const sameDestination = dateOnly(liveVisit.scheduled_date) === proof?.to?.date
+    && hhmm(liveVisit.window_start) === proof?.to?.start && hhmm(liveVisit.window_end) === proof?.to?.end;
+  return sameDestination;
+}
+
 module.exports = {
   applyReviewedCallReschedule,
   applyCallReschedule,
@@ -752,4 +787,5 @@ module.exports = {
   humanHandledRescheduleCard,
   RESCHEDULE_REASON_CODE,
   INITIATED_BY,
+  priorApplicationStillMatchesLiveCall,
 };

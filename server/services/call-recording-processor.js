@@ -6757,10 +6757,20 @@ const STALE_AFTER_APPLIED_MOVE = new Set(['callback_task_created']);
 // — the reschedule's timing was settled ON THE CALL. There is nothing left
 // to call back and confirm about it. So a STILL-standing need to call the
 // customer — scheduling.callback_window_start/end still set on that same
-// extraction, or an open call_commitments row of kind callback/call_back
-// (at most one 'waves:callback' row can exist — that key is not in
-// REPEATABLE_KINDS, so it is never split across two rows) — names
-// something ELSE, not this move.
+// extraction, or an open call_commitments row — names something ELSE, not
+// this move.
+//
+// The commitment lookup is scoped to party='waves', kind='callback' ONLY
+// (Codex #4721 r2 P2, second finding): 'call_back' is the CUSTOMER's own
+// promise to call Waves — a distinct obligation unworked-comms-watcher.js
+// never reads callback_task_created for, so it says nothing about whether
+// Waves still owes a call and must not block this revision. There is at
+// most one such row per call — 'waves:callback' is a singular
+// commitment_key (not in REPEATABLE_KINDS), so it is never split. It also
+// excludes rows staleAiRowSql (call-commitments.js) already treats as dead:
+// an untouched AI row a LATER commitments pass no longer detected, kept
+// only for the audit trail (Codex #4721 r2 P2, third finding) — the exact
+// same exclusion every live reader of this table already applies.
 //
 // An absent row is not proof either, though (Codex #4721 r3 P1): with
 // callback_window_* unset, deriveCommitmentsFromExtraction's deterministic
@@ -6786,9 +6796,10 @@ async function hasIndependentCallbackObligation(callId, v2) {
   if (!isEnabled('callCommitments')) {
     return { independent: true, reason: 'callCommitments is not live — no way to confirm the callback was resolved by this move' };
   }
+  const { staleAiRowSql } = require('./call-commitments');
   const openCallbackRow = await db('call_commitments')
-    .where({ call_log_id: callId, status: 'open' })
-    .whereIn('kind', ['callback', 'call_back'])
+    .where({ call_log_id: callId, status: 'open', party: 'waves', kind: 'callback' })
+    .whereRaw(`NOT ${staleAiRowSql('call_commitments')}`)
     .first('id');
   if (openCallbackRow) {
     return { independent: true, reason: `open commitment ${openCallbackRow.id} still outstanding` };
@@ -6827,25 +6838,24 @@ async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration
   });
 }
 
-// Durable proof that THIS call's reschedule was applied at some point,
-// independent of what the apply step's OWN outcome/reason string says on a
-// retry (Codex #4721 r2 P2). call-reschedule-apply.js's `prior` branch only
-// returns `already_applied` when the LIVE call_log row still matches the
-// activity row's own processing_generation/source_hash snapshot exactly
-// (`sameDecision`) — but processing_generation bumps on every claim, so a
+// Durable proof that THIS call's reschedule was applied AND still matches
+// the live call, independent of what the apply step's OWN outcome/reason
+// string says on a retry (Codex #4721 r2 P2). call-reschedule-apply.js's
+// `prior` branch only returns `already_applied` when the LIVE call_log row
+// still matches the activity row's own processing_generation/source_hash
+// snapshot EXACTLY — but processing_generation bumps on every claim, so a
 // genuine crash-then-retry (a new pass, a new generation) almost always
 // returns `prior_application_requires_review` instead, and the recovery
 // path this function exists for would never fire if it trusted that reason
-// string alone. The activity_log row itself — written in the SAME
-// transaction as the move, per call-reschedule-apply.js's own module
-// comment — is the actual durable fact: it existing at all proves this
-// call's move landed at some point, regardless of whether the row's
-// snapshot still matches the CURRENT live state.
-async function rescheduleWasDurablyApplied(callId) {
-  const { ACTIVITY_ACTION } = require('./call-reschedule-apply');
-  const row = await db('activity_log').where({ action: ACTIVITY_ACTION })
-    .whereRaw("metadata->>'call_log_id' = ?", [String(callId)]).first('id');
-  return !!row;
+// string alone. Delegates to call-reschedule-apply.js's own
+// priorApplicationStillMatchesLiveCall, which re-runs every check the
+// `prior` branch applies EXCEPT generation equality — a row existing is not
+// enough by itself (Codex #4721 r2 P1): a reprocess that corrected the
+// transcript, or a visit the move once landed on but that is no longer in
+// that state, must not read as resolved just because SOME activity row
+// exists for this call.
+async function rescheduleWasDurablyApplied(call) {
+  return require('./call-reschedule-apply').priorApplicationStillMatchesLiveCall(db, call);
 }
 
 // Which of applyCallReschedule's results mean "this call's reschedule ask
@@ -6901,7 +6911,7 @@ async function applyRescheduleFollowUps({ call, callSid, result, procGeneration 
     // same way (codex P1, PR #4403 rounds 8 and 10).
   }
   if (!isEnabled('callDispositionV1')) return;
-  if (retryShaped && !(await rescheduleWasDurablyApplied(call.id).catch((err) => {
+  if (retryShaped && !(await rescheduleWasDurablyApplied(call).catch((err) => {
     logger.warn(`[call-proc] durable-applied check failed for ${maskSid(callSid)}: ${err.message}`);
     return false;
   }))) return;
