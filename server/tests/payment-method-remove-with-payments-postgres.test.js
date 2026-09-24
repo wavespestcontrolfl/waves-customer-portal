@@ -128,4 +128,34 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       await db('customers').where({ id: customerId }).del();
     }
   });
+
+  test('snapshot backfill fills a NULL card_last_four from the linked method and never overwrites (GH codex r2 P2)', async () => {
+    const migration = require('../models/migrations/20260924000031_payments_card_snapshot_backfill');
+    const ROLLBACK = new Error('rollback-sentinel');
+    let rows;
+    await db.transaction(async (trx) => {
+      const [customer] = await trx('customers')
+        .insert({ first_name: 'FkProbe', last_name: 'Backfill', phone: '+15550001236' })
+        .returning('id');
+      const customerId = customer.id ?? customer;
+      const [method] = await trx('payment_methods')
+        .insert({ customer_id: customerId, processor: 'stripe', method_type: 'card', card_brand: 'VISA', last_four: '1310' })
+        .returning('id');
+      const methodId = method.id ?? method;
+      const base = { customer_id: customerId, payment_method_id: methodId, payment_date: '2026-09-03', amount: '10.00', status: 'paid' };
+      await trx('payments').insert([
+        { ...base, description: 'missing', card_brand: 'VISA', card_last_four: null },
+        { ...base, description: 'kept', card_brand: 'MASTERCARD', card_last_four: '9999' },
+      ]);
+      await migration.up(trx);
+      rows = await trx('payments').where({ customer_id: customerId }).orderBy('description')
+        .select('description', 'card_brand', 'card_last_four');
+      throw ROLLBACK;
+    }).catch((err) => { if (err !== ROLLBACK) throw err; });
+
+    expect(rows).toEqual([
+      { description: 'kept', card_brand: 'MASTERCARD', card_last_four: '9999' },
+      { description: 'missing', card_brand: 'VISA', card_last_four: '1310' },
+    ]);
+  });
 });
