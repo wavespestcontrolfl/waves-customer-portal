@@ -489,14 +489,22 @@ describe('next_step branches', () => {
     });
   });
 
-  test('pest: low-confidence matched entry (hedged + generic) -> unclear', async () => {
+  test('pest: low-confidence matched entry (hedged + generic) -> unclear, prefill "other" even though the lane is "pest" (codex GH r3-cloud P1)', async () => {
+    // 'unclear' means "we'll take a personal look," not "you're covered for
+    // the streamlined reservice flow" — even though ghost-ant resolves the
+    // 'pest' lane, requests.js's own interception fires on category alone
+    // whenever coverage exists for that lane, which would silently redirect
+    // this "we'll follow up personally" promise into "book your reservice"
+    // for a customer who DOES have pest coverage. Only a 'request'-kind
+    // outcome is safe to prefill with the lane-matched category.
     mockIdentifyPest.mockResolvedValue(pestResultFor('ghost-ant', 'low'));
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-pest', lanes: ['pest'] });
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/pest', photoBody());
       const body = await res.json();
       expect(body.result.hedged).toBe(true);
       expect(body.next_step.kind).toBe('unclear');
-      expect(body.next_step.request_prefill.category).toBe('pest_issue');
+      expect(body.next_step.request_prefill.category).toBe('other');
     });
   });
 
@@ -605,6 +613,12 @@ describe('next_step branches', () => {
       expect(body.result.signals).toEqual([]);
       expect(body.result.observations).not.toContain('No urgent lawn issues');
       expect(body.next_step.kind).toBe('unclear');
+      // codex GH r3 (cloud) P1: this customer HAS full lawn coverage
+      // (mockReserviceAccess above) — a 'lawn_concern' prefill here would
+      // hit requests.js's own reservice-picker interception (409) the
+      // moment they tried to submit the "we'll take a personal look"
+      // ticket this 'unclear' outcome just promised them.
+      expect(body.next_step.request_prefill.category).toBe('other');
     });
   });
 
@@ -616,6 +630,18 @@ describe('next_step branches', () => {
       const body = await res.json();
       expect(body.result.observations).not.toContain('No urgent lawn issues');
       expect(body.next_step.kind).toBe('unclear');
+    });
+  });
+
+  test('GET /:type/:id reconstructs the same "other" prefill for an unclear lawn result, even with full lawn coverage (codex GH r3-cloud P1)', async () => {
+    mockLawnAnalyzePhoto.mockResolvedValue(lawnAnalyzeResult({ fungal_activity: 'none' }));
+    await withServer(async (base) => {
+      const created = await post(base, '/api/photo-id/lawn', photoBody()).then((r) => r.json());
+      mockReserviceAccess.mockResolvedValue({ token: 'tok-would-win', lanes: ['lawn'] });
+      const res = await fetch(`${base}/api/photo-id/lawn/${created.id}`);
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('unclear');
+      expect(body.next_step.request_prefill.category).toBe('other');
     });
   });
 

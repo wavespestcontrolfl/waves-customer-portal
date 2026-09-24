@@ -80,11 +80,28 @@ const TYPE_TABLE = {
 // checked against the WRONG lane's coverage, and every tree_shrub concern
 // (never reservice-eligible — reservice-scheduler.js excludes it from both
 // lanes) filed as 'lawn_concern' could get misrouted into "book your free
-// lawn re-service" for a concern that was never a lawn issue at all. A null
-// lane (mosquito/termite/rodent/inspection-only pest, or tree_shrub) maps to
-// 'other' so requests.js's category-based interception never fires for it —
-// those are genuine office tickets, not a reservice-eligible category.
-function resolvePrefillCategory(lane) {
+// lawn re-service" for a concern that was never a lawn issue at all.
+//
+// codex GH r3 (cloud) P1: that fix alone reopened a narrower version of the
+// SAME class of bug — `kind` matters as much as `lane`. `request_prefill`
+// only ever ships on 'inspection' | 'unclear' | 'request' (buildNextStep;
+// 'reservice' carries a booking link instead, never a prefill). An
+// 'unclear' or 'inspection' outcome explicitly promises "we'll take a
+// personal look" / "we need to see this in person" — NOT the streamlined
+// reservice flow — even when the identified pest/lawn issue's lane happens
+// to be one the customer IS covered for (a hedged/low-confidence read, or a
+// partial photo batch, can still resolve a real lane). Only a 'request' kind
+// is safe to prefill with the lane-matched category: requests.js's own
+// interception only fires when coverage EXISTS for that lane, and 'request'
+// is reached specifically because either the lane is null/uncovered or the
+// submission is scoped to a secondary property (which requests.js's own
+// `!secondarySelection` guard already exempts from interception either way)
+// — so a 'request'-kind prefill can never actually trigger it. 'unclear' and
+// 'inspection' always resolve to 'other' instead, whatever the lane is,
+// so a customer who follows through never hits a 409 that contradicts the
+// promise we just made them.
+function resolvePrefillCategory(lane, kind) {
+  if (kind !== 'request') return 'other';
   if (lane === 'pest') return 'pest_issue';
   if (lane === 'lawn') return 'lawn_concern';
   return 'other';
@@ -226,10 +243,11 @@ function laneOutcomeKind(lane, access, isSecondary) {
   return (lane && access && Array.isArray(access.lanes) && access.lanes.includes(lane)) ? 'reservice' : 'request';
 }
 
-// `lane` is the RESOLVED re-service lane ('pest' | 'lawn' | null) — see
-// resolvePrefillCategory's comment above for why it can't be the upload type.
-function prefillFor(lane, { location, note } = {}) {
-  return { category: resolvePrefillCategory(lane), location: location || null, note: note || null };
+// `lane` is the RESOLVED re-service lane ('pest' | 'lawn' | null); `kind` is
+// the next_step kind this prefill ships under — see resolvePrefillCategory's
+// comment above for why both matter, not just the lane.
+function prefillFor(lane, kind, { location, note } = {}) {
+  return { category: resolvePrefillCategory(lane, kind), location: location || null, note: note || null };
 }
 
 // codex GH r1 P1: honor the customer's selected saved property (portal
@@ -401,7 +419,7 @@ async function handlePest(req, res, { note, location, propertyId, isSecondary })
   const kind = pestNextStepKind(pestResult, idLabel, lane, access, partial, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-    prefill: prefillFor(lane, { location, note }),
+    prefill: prefillFor(lane, kind, { location, note }),
   });
   const { result: finalPestResult } = finalizeCustomerResult('pest', { complete: !partial, build: () => pestResult });
 
@@ -704,7 +722,7 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   const kind = lawnUnclear ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-    prefill: prefillFor('lawn', { location, note }),
+    prefill: prefillFor('lawn', kind, { location, note }),
   });
 
   return res.status(200).json({
@@ -889,7 +907,7 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
   const kind = (noUsableScores || unreliable) ? 'unclear' : laneOutcomeKind(null, access, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-    prefill: prefillFor(null, { location, note }),
+    prefill: prefillFor(null, kind, { location, note }),
   });
   const { result: finalTreeResult } = finalizeCustomerResult('tree_shrub', {
     complete: !noUsableScores && !unreliable,
@@ -1103,7 +1121,7 @@ router.get('/:type/:id', async (req, res, next) => {
       const kind = pestNextStepKind(pestResult, idLabel, lane, access, partial, scope.isSecondary);
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-        prefill: prefillFor(lane, { location: row.location, note: row.note }),
+        prefill: prefillFor(lane, kind, { location: row.location, note: row.note }),
       });
       const { result: finalPestResult } = finalizeCustomerResult('pest', { complete: !partial, build: () => pestResult });
       return res.status(200).json({
@@ -1118,7 +1136,7 @@ router.get('/:type/:id', async (req, res, next) => {
       const kind = lawnNextStepKindFromRow(row, access, scope.isSecondary);
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-        prefill: prefillFor('lawn', { location: row.location, note: row.note }),
+        prefill: prefillFor('lawn', kind, { location: row.location, note: row.note }),
       });
       const { result: finalLawnResult } = finalizeCustomerResult('lawn', { complete: !lawnUnreliable, build: () => lawnResult });
       return res.status(200).json({
@@ -1136,7 +1154,7 @@ router.get('/:type/:id', async (req, res, next) => {
     const kind = treeNextStepKindFromRow(row, access, scope.isSecondary);
     const nextStep = buildNextStep(kind, {
       url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
-      prefill: prefillFor(null, { location: row.location, note: row.note }),
+      prefill: prefillFor(null, kind, { location: row.location, note: row.note }),
     });
     const { result: finalTreeResult } = finalizeCustomerResult('tree_shrub', {
       complete: !treeShrubIsUnreliable(row),
