@@ -191,6 +191,9 @@ describe('codex r45', () => {
     expect(claim).toBeGreaterThan(0);
     expect(claim).toBeLessThan(src.indexOf('await sendQuoteRequestEmail({'));
     const block = src.slice(claim, src.indexOf('await sendQuoteRequestEmail({'));
+    // A bare link with no claimable draft is withheld rather than sent unfenced (codex r47 P1).
+    expect(block).toContain('if ((bookingUrl || websiteEstimateUrl) && !draftEstimateId) {');
+    expect(block.indexOf('if ((bookingUrl || websiteEstimateUrl) && !draftEstimateId) {')).toBeLessThan(block.indexOf('if (draftEstimateId && (bookingUrl || websiteEstimateUrl)) {'));
     expect(block).toContain('.whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)');
     expect(block).toContain('.whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)');
     expect(block).toContain("jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text)");

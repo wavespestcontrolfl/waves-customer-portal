@@ -3717,6 +3717,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // (off-surface since the recheck, or another sender's live claim) →
     // the links are withheld, fail closed.
     let quoteDeliveryClaimToken = null;
+    if ((bookingUrl || websiteEstimateUrl) && !draftEstimateId) {
+      // A BARE link with no claimable draft (mirroring skipped — a
+      // non-wizard estimate already stands for this contact) has nothing
+      // the withdrawal can see: a county flag committed between the last
+      // recheck and the provider call would leave the visitor a link that
+      // /booking/confirm then refuses. Withheld, fail closed (codex r47
+      // P1); the office follows up from the standing estimate.
+      bookingUrl = null;
+      websiteEstimateUrl = null;
+      logger.info(`[public-quote] self-book link withheld for lead ${lead.id} — no claimable draft to fence the delivery`);
+    }
     if (draftEstimateId && (bookingUrl || websiteEstimateUrl)) {
       const token = require('crypto').randomUUID();
       try {
