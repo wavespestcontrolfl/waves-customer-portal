@@ -528,9 +528,16 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
           : JSON.stringify(completeStage),
         updated_at: new Date(),
       });
-      // The verdict keys are published UNDER the contact-pair advisory lock
-      // the booking confirm takes, never in the unlocked write above
-      // (pre-push audit P1).
+    } catch (e) {
+      logger.error(`[public-property-lookup] lead update failed: ${e.message}`);
+    }
+    // The verdict keys are published UNDER the contact-pair advisory lock
+    // the booking confirm takes, never in the unlocked write above
+    // (pre-push audit P1). FAIL CLOSED: a rolled-back verdict/quarantine
+    // (a deadlock, the withdrawal, its critical audit row) must not answer
+    // as a successful lookup while an earlier publication stays
+    // acceptable at the flagged number (codex r20 P1). The visitor retries.
+    try {
       await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(email, normPhone)]);
         // Re-reconciled UNDER the lock (codex r19 P1): a clean verdict that
@@ -578,8 +585,9 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
           updated_at: new Date(),
         });
       });
-    } catch (e) {
-      logger.error(`[public-property-lookup] lead update failed: ${e.message}`);
+    } catch (verdictErr) {
+      logger.error(`[public-property-lookup] address verdict publication failed — refusing the lookup: ${verdictErr.code || verdictErr.name || 'error'}`);
+      return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
     }
 
     res.json({

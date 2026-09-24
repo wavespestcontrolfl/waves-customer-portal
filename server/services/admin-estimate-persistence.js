@@ -3061,6 +3061,16 @@ async function reviseAdminEstimate({
     // Group advisory lock(s) BEFORE the row lock — see
     // lockScheduledGroupGuardGroups for the deadlock this order prevents.
     const lockedGuardGroups = await lockScheduledGroupGuardGroups(trx, estimate, writeFields);
+    // The contact-pair address-verdict advisory lock BEFORE the row lock —
+    // the public paths (lookup, /calculate) take it first and then touch
+    // this row during withdrawal / supersession; the reverse order here
+    // would deadlock a staff save against them (codex #4667 r20 P2).
+    {
+      const { contactPairLockKey } = require('./lead-address-unverified');
+      if (estimate?.customer_email && estimate?.customer_phone) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(estimate.customer_email, estimate.customer_phone)]);
+      }
+    }
     const lockedPrior = await trx('estimates')
       .where({ id: estimate.id })
       .forUpdate()
@@ -3240,6 +3250,8 @@ async function reviseAdminEstimate({
       // cannot read the old flag, lose to this clean verdict and then
       // overwrite it with its stale result (codex r18 P1). Lead row locked
       // too, so the premise check and the write see one state.
+      // (The advisory lock itself is taken at the top of this transaction,
+      // before the estimate row lock — one order with the public paths.)
       if (row.customer_email && row.customer_phone) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(row.customer_email, row.customer_phone)]);
       }

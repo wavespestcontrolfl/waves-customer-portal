@@ -2719,8 +2719,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
           if (!smsBody) throw new Error('The reviewed text message is unavailable; nothing was sent');
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
-            throw new Error('invalidated_before_delivery');
+          // EVERY claimed member of a grouped send, not only the anchor: a
+          // county warning landing on a sibling before the provider call
+          // aborts the shared handoff (codex #4667 r20 P1).
+          for (const deliveryId of deliveryEstimateIds) {
+            if (await estimateInvalidatedJustBeforeHandoff(deliveryId, now)) {
+              throw new Error('invalidated_before_delivery');
+            }
           }
           const result = await sendCustomerMessage({
             to: normalized,
@@ -2820,8 +2825,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // SendGrid price summary / details match the attached PDF if totals
           // changed mid-send. The PDF was built from freshEstimate above.
           const freshPriceLine = estimateEmailPriceLine(freshEstimate);
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
-            throw new Error('invalidated_before_delivery');
+          // EVERY claimed member of a grouped send, not only the anchor: a
+          // county warning landing on a sibling before the provider call
+          // aborts the shared handoff (codex #4667 r20 P1).
+          for (const deliveryId of deliveryEstimateIds) {
+            if (await estimateInvalidatedJustBeforeHandoff(deliveryId, now)) {
+              throw new Error('invalidated_before_delivery');
+            }
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
           const result = await sendEstimateEmail({

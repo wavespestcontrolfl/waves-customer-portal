@@ -1338,6 +1338,33 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // The structured audit carried with it, to land on the CURRENT lead
     // (a repeat lookup's new row was saved without it).
     let carriedAddressFlag = null;
+    // Re-reconciled right before a draft verdict is PERSISTED (codex r20
+    // P1): a flagged lookup that committed after this run's contact-pair
+    // reconciliation released its lock must not be overwritten by this
+    // run's clean marker. Under the contact-pair lock: the newest matching
+    // flag newer than this run's clean evidence, else null.
+    const draftVerdictLock = async (trx) => {
+      if (contactEmail && contactPhone) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, contactPhone)]);
+      }
+    };
+    const newerFlagUnderLock = async (trx) => {
+      if (addressUnverified || !contactEmail || !contactPhone) return null;
+      const cleanAt = Math.max(
+        Date.parse(cleanEvidenceAt || '') || 0,
+        rollAnsweredThisRun ? (Date.parse(trustedProfileCachedAt || '') || 0) : 0,
+      );
+      const rows = await trx('leads')
+        .whereNull('deleted_at')
+        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
+        .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
+        .select('extracted_data');
+      return rows
+        .map((row) => recoverAddressUnverified(typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data))
+        .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress) && (Date.parse(flag.flagged_at || '') || 0) > cleanAt)
+        .sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0] || null;
+    };
     if (addressUnverified) {
       // Stamp the judged address on a freshly derived flag (a recovered
       // prior flag already carries its own).
@@ -3129,6 +3156,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // archived and untouched: the response still carries this run's
         // pricing, it just mints no self-book handoff for it.
         await db.transaction(async (trx) => {
+          await draftVerdictLock(trx);
           const lockedEst = await trx('estimates')
             .where({ id: existingEst.id })
             .forUpdate()
@@ -3141,7 +3169,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             if (!consumedBy) return;
           }
           await applySetupFeeQuote(trx);
-          const carried = carryDraftAddressBlock(lockedEst);
+          let carried = carryDraftAddressBlock(lockedEst);
+          if (!carried) {
+            const newer = await newerFlagUnderLock(trx);
+            if (newer) { carried = true; carriedAddressFlag = newer; }
+          }
           if (carried) draftAddressBlockCarried = true;
           await trx('estimates').where({ id: existingEst.id }).update({
             ...estFields,
@@ -3176,6 +3208,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               // #3489 follow-up). draftEstimateId is set ONLY when the
               // locked row is still the wizard's own live draft and the
               // update actually landed.
+              await draftVerdictLock(trx);
               const lockedDup = await trx('estimates')
                 .where({ id: duplicateBlock.existingEstimateId })
                 .forUpdate()
@@ -3183,7 +3216,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               if (lockedDup && lockedDup.source === 'quote_wizard'
                 && lockedDup.status === 'draft' && !lockedDup.archived_at) {
                 await applySetupFeeQuote(trx);
-                const carried = carryDraftAddressBlock(lockedDup);
+                let carried = carryDraftAddressBlock(lockedDup);
+                if (!carried) {
+                  const newer = await newerFlagUnderLock(trx);
+                  if (newer) { carried = true; carriedAddressFlag = newer; }
+                }
                 if (carried) draftAddressBlockCarried = true;
                 const refreshed = await trx('estimates')
                   .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })

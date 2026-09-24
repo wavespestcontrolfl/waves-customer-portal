@@ -994,7 +994,11 @@ every non-terminal delivery state (sent, viewed, scheduled, sending,
 send_failed) and stamps the block on matching legacy quote-wizard rows
 (any of those states or draft) without archiving them; a clean verdict that
 supersedes the warning also lifts the block on those unarchived legacy
-rows; the lookup stage
+rows; `/calculate` re-reconciles under the
+contact-pair lock again right before it persists a draft verdict (a flag
+committed meanwhile is carried onto the draft, never overwritten by a
+stale clean marker); a lookup whose verdict/quarantine transaction rolls
+back answers 503, never a successful lookup; the lookup stage
 re-reconciles the contact pair under the lock before publishing (a newer
 clean verdict outranks a cached audit) and takes the advisory lock before
 any estimate row lock, the same order the booking confirm uses; it

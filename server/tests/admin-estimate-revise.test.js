@@ -1207,7 +1207,12 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
   test('the real save takes the group advisory lock BEFORE the row lock (pre-push codex P1: no deadlock against the schedule route)', async () => {
     const { database, updates } = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: null });
     const order = [];
-    database.raw.mockImplementation(async () => { order.push('group-lock'); return {}; });
+    // Both advisory locks (the scheduled-group lock and, since #4667, the
+    // contact-pair address-verdict lock) land BEFORE the row lock.
+    database.raw.mockImplementation(async (sql, bindings) => {
+      order.push(Array.isArray(bindings) && bindings[0] === 'address-verdict' ? 'address-verdict-lock' : 'group-lock');
+      return {};
+    });
     const originalDb = database;
     // Observe the FOR UPDATE read through the recording chain's forUpdate.
     const chainSpy = originalDb('estimates');
@@ -1218,7 +1223,7 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     expect(updates).toHaveLength(1);
     expect(database.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['estimate-group-send', groupedDraft.estimate_group_id]);
     expect(typeof forUpdate).toBe('function');
-    expect(order).toEqual(['group-lock']);
+    expect(order).toEqual(['group-lock', 'address-verdict-lock']);
   });
 
   test('dryRun refuses exactly like the real save (no reprice confirm the write would then 409)', async () => {

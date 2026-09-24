@@ -2852,11 +2852,17 @@ async function createSelfBooking(payload = {}) {
             .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits.slice(-10)])
             .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
             .forUpdate()
-            .select('extracted_data');
+            .select('id', 'extracted_data');
           contactSnapshots = contactLeads.map((row) => parseData(row.extracted_data)).filter(Boolean);
-          newestClean = contactSnapshots
-            .filter((snap) => cleanVerdictCovers(snap, submitted, { requireLocality: true }))
-            .map((snap) => Date.parse(snap.address_verdict?.at || '') || 0)
+          // The lead the link NAMES is judged on the unit-insensitive
+          // premise alone (a staff confirmation of a street-only intake
+          // carries no locality); other leads need the complete locality
+          // (codex r20 P1) — the same rule /calculate and the lookup apply.
+          const namedLeadId = LEAD_ID_RE.test(String(lead_id || '')) ? String(lead_id) : null;
+          newestClean = contactLeads
+            .map((row) => ({ own: namedLeadId != null && String(row.id) === namedLeadId, snap: parseData(row.extracted_data) }))
+            .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, submitted, { requireLocality: !own }))
+            .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
             .reduce((max, at) => Math.max(max, at), 0);
         }
         if (LEAD_ID_RE.test(String(lead_id || '')) && submitted) {
