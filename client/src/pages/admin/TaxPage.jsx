@@ -325,7 +325,7 @@ const TAX_LEAF_BY_KEY = Object.fromEntries(TAX_SECTIONS.map((s) => [s.key, s]));
 // ═══════════════════════════════════════════════════════════════
 // TAX RATES TAB
 // ═══════════════════════════════════════════════════════════════
-function TaxRatesTab() {
+export function TaxRatesTab() {
   const isMobile = useIsMobile(640);
   const [rates, setRates] = useState([]);
   const read = useTaxRead("/admin/tax/rates", setRates, "rates");
@@ -357,7 +357,7 @@ function TaxRatesTab() {
         }}
       >
         {rates
-          .filter((r) => r.active)
+          .filter((r) => r.status === "current")
           .map((r) => (
             <Card
               key={r.id}
@@ -435,7 +435,47 @@ function TaxRatesTab() {
             </Card>
           ))}
       </div>
-      {rates.filter((r) => !r.active).length > 0 && (
+      {rates.filter((r) => r.status === "staged").length > 0 && (
+        <div
+          style={{
+            marginTop: 20,
+          }}
+        >
+          {" "}
+          <div
+            style={{
+              fontSize: 14,
+              color: "#71717A",
+              marginBottom: 8,
+            }}
+          >
+            Staged Rates (not yet in effect)
+          </div>
+          {rates
+            .filter((r) => r.status === "staged")
+            .map((r) => (
+              <Card
+                key={r.id}
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  padding: "6px 12px",
+                  fontSize: 14,
+                  color: "#71717A",
+                  marginBottom: 3,
+                }}
+              >
+                {" "}
+                <span>{r.county}</span>
+                <span className="u-nums" style={{}}>
+                  {fmtPct(r.combinedRate)}
+                </span>{" "}
+                <span>Effective {fmtD(r.effectiveDate)}</span>{" "}
+              </Card>
+            ))}
+        </div>
+      )}
+      {rates.filter((r) => r.status === "superseded").length > 0 && (
         <div
           style={{
             marginTop: 20,
@@ -452,7 +492,7 @@ function TaxRatesTab() {
             Historical Rates
           </div>
           {rates
-            .filter((r) => !r.active)
+            .filter((r) => r.status === "superseded")
             .map((r) => (
               <Card
                 key={r.id}

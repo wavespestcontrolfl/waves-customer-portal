@@ -15,7 +15,7 @@ async function applyInboundOptout({ messageSid, phone, customerId, reason, sourc
     const receipt = await trx('inbound_sms_optout_receipts').where({ message_sid: messageSid }).first();
     if (receipt) {
       if (receipt.phone !== canonicalPhone) throw new Error('Inbound opt-out receipt phone mismatch');
-      return { applied: false };
+      return { applied: false, appliedAt: receipt.applied_at };
     }
     const suppressed = await recordSuppression({ phone: canonicalPhone, reason, source, capturedBody, dbh: trx });
     if (suppressed?.ok === false) throw new Error('Inbound opt-out suppression failed');
@@ -25,8 +25,11 @@ async function applyInboundOptout({ messageSid, phone, customerId, reason, sourc
       await trx('notification_prefs').insert({ customer_id: customerId, sms_enabled: false })
         .onConflict('customer_id').merge({ sms_enabled: false });
     }
-    await trx('inbound_sms_optout_receipts').insert({ message_sid: messageSid, phone: canonicalPhone });
-    return { applied: true };
+    const appliedAt = new Date();
+    await trx('inbound_sms_optout_receipts').insert({
+      message_sid: messageSid, phone: canonicalPhone, applied_at: appliedAt,
+    });
+    return { applied: true, appliedAt };
   });
 }
 

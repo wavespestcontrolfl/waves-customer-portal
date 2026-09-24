@@ -113,6 +113,15 @@ local specifics, do not upgrade a "directional" fact into an absolute claim,
 and honor facts_pack.disallowed_claim_patterns. Emit a claims_ledger entry for
 every local claim, citing its backing fact id(s).
 
+EDITORIAL ANSWER PLAN: Before expanding informational sections, call
+validate_answer_plan with headings, the questions they answer, and their
+self-contained first answer sentences. Revise until pass:true. Then expand
+those answers with supported details. Name entities clearly, use absolute
+dates where timing matters, avoid filler, and deliver the title's full promise.
+Use research tools to locate primary sources for statistics, attributed quotes
+and named examples. Include visible citations so the independent reviewer can
+retrieve supporting text. Never invent a number, source, quote or example.
+
 OUTPUT — call emit_draft() once with { frontmatter, body, schema,
 claims_ledger, notes_for_reviewer }. Include notes_for_reviewer listing
 specifically what changed (new sections / updated proof / refreshed CTAs) so a
@@ -193,6 +202,18 @@ human can diff-review efficiently.`,
         type: 'object',
         required: ['topic'],
         properties: { topic: { type: 'string' } },
+      },
+    },
+    {
+      type: 'custom',
+      name: 'validate_answer_plan',
+      description: 'Before writing section depth, submit each informational section heading, question and self-contained direct first answer. Revise failures and obtain pass:true before emit_draft. At most three attempts.',
+      input_schema: {
+        type: 'object', required: ['sections'],
+        properties: { sections: { type: 'array', minItems: 1, maxItems: 30, items: {
+          type: 'object', required: ['heading', 'question', 'answer'],
+          properties: { heading: { type: 'string' }, question: { type: 'string' }, answer: { type: 'string' } },
+        } } },
       },
     },
     {

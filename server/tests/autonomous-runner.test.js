@@ -123,6 +123,39 @@ describe('internal-link dry-run queue helpers', () => {
 });
 
 describe('rewrite_title_meta live adapter', () => {
+  test.each(['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'])(
+    'routes metadata %s findings through the bounded editorial retry policy', async (code) => {
+      process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
+      const claimedAt = new Date('2026-05-27T13:00:00Z');
+      const opp = { id: 'opp_meta_editorial', action_type: 'rewrite_title_meta', claimed_at: claimedAt };
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue(opp),
+        release: jest.fn(), pendingReview: jest.fn(), complete: jest.fn(),
+      };
+      const brief = { id: 'brief_meta_editorial', action_type: 'rewrite_title_meta', page_type: 'metadata',
+        target_url: 'https://www.wavespestcontrol.com/blog/pest-prevention/', human_review_required: false };
+      const runner = loadRunnerWith({ queue,
+        briefBuilder: { compose: jest.fn().mockResolvedValue(brief) },
+        dispatcher: { runWithBrief: jest.fn().mockResolvedValue({ ok: true,
+          draft: { type: 'metadata', title: 'Pest prevention', meta_description: 'A practical guide.' } }) },
+      });
+      const findings = [{ code: 'weak_answer', message: 'Answer the reader question.' }];
+      jest.spyOn(runner, '_handleMetadataRewriteAction').mockRejectedValue(
+        Object.assign(new Error('Editorial review rejected metadata'), { code, findings }),
+      );
+      const retry = jest.spyOn(runner, '_gateFailRetryOrSkip').mockResolvedValue({ outcome: 'editorial_retry' });
+
+      await expect(runner.runNext()).resolves.toEqual({ outcome: 'editorial_retry' });
+      expect(retry).toHaveBeenCalledWith(queue, expect.objectContaining({ id: opp.id }),
+        expect.any(Object), expect.any(Number), expect.any(Function), {
+          claimToken: claimedAt, skipReason: 'editorial_review_failed',
+          notes: 'Editorial review rejected metadata', blocking: findings,
+        });
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(queue.pendingReview).not.toHaveBeenCalled();
+    },
+  );
+
   test('opens a metadata PR after title/meta spam gate passes', async () => {
     const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
     process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';

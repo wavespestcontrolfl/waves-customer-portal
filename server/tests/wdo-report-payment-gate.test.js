@@ -610,7 +610,11 @@ describe('send-with-invoice hold_report_until_paid', () => {
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body.dry_run).toBe(true);
-      expect(body.invoice).toEqual(expect.objectContaining({ id: 'inv-new', total: 425 }));
+      // ADMIN-BUG-R49 fix: a non-WDO dry-run preview no longer surfaces the
+      // minted draft's real id/invoice_number — it's built inside a
+      // savepoint that is always rolled back, so nothing is persisted or
+      // linked to the project. Only the computed total carries through.
+      expect(body.invoice).toEqual(expect.objectContaining({ id: null, invoice_number: null, status: 'preview', total: 425 }));
       expect(InvoiceService.buildLineItemsForScheduledService).toHaveBeenCalledWith(
         'sched-55',
         expect.objectContaining({ fallbackDescription: expect.stringMatching(/Pre-Treatment/i) }),

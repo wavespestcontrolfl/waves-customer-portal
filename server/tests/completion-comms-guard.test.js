@@ -102,6 +102,7 @@ function makeStubKnex(rowsByTable = {}) {
       whereIn(col, list) { preds.push((r) => list.includes(r[col])); return q; },
       whereNull(col) { preds.push((r) => r[col] == null); return q; },
       whereNotNull(col) { preds.push((r) => r[col] != null); return q; },
+      joinRaw() { return q; },
       limit(n) { limitN = n; return q; },
       select() { return Promise.resolve(run()); },
       whereRaw(sql, bindings) {
@@ -190,6 +191,8 @@ function outboundRow(overrides = {}) {
     status: 'delivered',
     from_phone: WAVES_ENDPOINT,
     to_phone: CUST_PHONE,
+    metadata: null,
+    twilio_sid: null,
     created_at: new Date(NOW - 12 * 60 * 60 * 1000),
     ...overrides,
   };
@@ -270,15 +273,46 @@ describe('findOpenCommsExceptions', () => {
     expect(out.unansweredInbound?.id).toBe('sms-in-1');
   });
 
-  test('Leg B: a later human-authored outbound answers the thread', async () => {
-    for (const type of ['manual', 'ai_approved', 'ai_revised']) {
+  test('Leg B: manual replies answer normally; approved replies require the exact inbound anchor', async () => {
+    const manual = await findOpenCommsExceptions({
+      customerId: CUSTOMER_ID,
+      serviceId: SERVICE_ID,
+      knex: makeStubKnex({ sms_log: [inboundRow(), outboundRow()] }),
+    });
+    expect(manual.unansweredInbound).toBeNull();
+
+    for (const type of ['ai_approved', 'ai_revised']) {
       const out = await findOpenCommsExceptions({
         customerId: CUSTOMER_ID,
         serviceId: SERVICE_ID,
-        knex: makeStubKnex({ sms_log: [inboundRow(), outboundRow({ message_type: type })] }),
+        knex: makeStubKnex({ sms_log: [inboundRow(), outboundRow({
+          message_type: type, reply_to_sms_log_id: 'sms-in-1', draft_intent: 'reply',
+        })] }),
       });
       expect(out.unansweredInbound).toBeNull();
     }
+
+    const wrongAnchor = await findOpenCommsExceptions({
+      customerId: CUSTOMER_ID,
+      serviceId: SERVICE_ID,
+      knex: makeStubKnex({
+        sms_log: [
+          inboundRow({ id: 'older-inbound', created_at: new Date(NOW - 2 * DAY) }),
+          inboundRow(),
+          outboundRow({
+            message_type: 'ai_approved', reply_to_sms_log_id: 'older-inbound', draft_intent: 'reply',
+          }),
+        ],
+      }),
+    });
+    expect(wrongAnchor.unansweredInbound?.id).toBe('sms-in-1');
+
+    const missingProvenance = await findOpenCommsExceptions({
+      customerId: CUSTOMER_ID,
+      serviceId: SERVICE_ID,
+      knex: makeStubKnex({ sms_log: [inboundRow(), outboundRow({ message_type: 'ai_approved' })] }),
+    });
+    expect(missingProvenance.unansweredInbound?.id).toBe('sms-in-1');
   });
 
   test('Leg B ignores automated outbound types — a reminder/review broadcast does not clear a waiting customer', async () => {
@@ -328,46 +362,43 @@ describe('findOpenCommsExceptions', () => {
     }
   });
 
-  test('Leg B: a human-APPROVED proactive nudge is not an answer (mirrors the digest click_followup exclusion)', async () => {
+  test('Leg B: click-followup and wrong-anchor approved drafts are not answers', async () => {
     const inbound = inboundRow();
-    const nudge = outboundRow({ created_at: new Date(NOW - 6 * 60 * 60 * 1000) });
-    // Unanchored draft (sms_log_id NULL) finalized alongside the outbound =
-    // proactive marketing, not a reply to this thread.
+    const nudge = outboundRow({
+      message_type: 'ai_approved',
+      created_at: new Date(NOW - 6 * 60 * 60 * 1000),
+    });
     const proactive = await findOpenCommsExceptions({
       customerId: CUSTOMER_ID,
       serviceId: SERVICE_ID,
       knex: makeStubKnex({
         sms_log: [inbound, nudge],
         message_drafts: [{
-          id: 'draft-1', customer_id: CUSTOMER_ID, sms_log_id: null,
+          id: 'draft-proactive', customer_id: CUSTOMER_ID, sms_log_id: null, intent: 'click_followup',
           sent_at: new Date(nudge.created_at.getTime() + 30 * 1000),
         }],
       }),
     });
     expect(proactive.unansweredInbound?.id).toBe('sms-in-1');
 
-    // A draft ANCHORED to an inbound (sms_log_id set) is a real reply.
     const anchored = await findOpenCommsExceptions({
       customerId: CUSTOMER_ID,
       serviceId: SERVICE_ID,
       knex: makeStubKnex({
-        sms_log: [inbound, nudge],
-        message_drafts: [{
-          id: 'draft-2', customer_id: CUSTOMER_ID, sms_log_id: 'sms-in-1',
-          sent_at: new Date(nudge.created_at.getTime() + 30 * 1000),
+        sms_log: [inbound, {
+          ...nudge, reply_to_sms_log_id: 'sms-in-1', draft_intent: 'reply',
         }],
       }),
     });
     expect(anchored.unansweredInbound).toBeNull();
 
-    // A genuine reply alongside the proactive nudge still answers the thread.
     const alsoReplied = await findOpenCommsExceptions({
       customerId: CUSTOMER_ID,
       serviceId: SERVICE_ID,
       knex: makeStubKnex({
         sms_log: [inbound, nudge, outboundRow({ id: 'sms-out-2', created_at: new Date(NOW - 2 * 60 * 60 * 1000) })],
         message_drafts: [{
-          id: 'draft-3', customer_id: CUSTOMER_ID, sms_log_id: null,
+          id: 'draft-proactive', customer_id: CUSTOMER_ID, sms_log_id: null, intent: 'click_followup',
           sent_at: new Date(nudge.created_at.getTime() + 30 * 1000),
         }],
       }),
@@ -486,15 +517,18 @@ describe('findOpenCommsExceptions', () => {
     });
     expect(rightNumber.pendingFlag).toBeNull();
 
-    // A proactive nudge to the right number is NOT resolution.
+    // An approved proactive nudge to the right number is NOT resolution.
     const nudgeOnly = await findOpenCommsExceptions({
       customerId: CUSTOMER_ID,
       serviceId: SERVICE_ID,
       knex: makeStubKnex({
         agent_decisions: [flag],
-        sms_log: [outboundRow({ to_phone: CUST_PHONE_2, created_at: new Date(NOW - 2 * DAY) })],
+        sms_log: [outboundRow({
+          to_phone: CUST_PHONE_2, message_type: 'ai_approved',
+          created_at: new Date(NOW - 2 * DAY),
+        })],
         message_drafts: [{
-          id: 'draft-x', customer_id: CUSTOMER_ID, sms_log_id: null,
+          id: 'draft-proactive', customer_id: CUSTOMER_ID, sms_log_id: null, intent: 'click_followup',
           sent_at: new Date(NOW - 2 * DAY),
         }],
       }),
@@ -517,8 +551,8 @@ describe('findOpenCommsExceptions', () => {
     }
   });
 
-  test('the two legs use DIFFERENT reply-type sets — an AI reply answers a thread but not a reschedule flag', async () => {
-    for (const type of ['ai_assistant', 'ai_assistant_reply', 'follow_up']) {
+  test('the two legs use different reply types; proactive follow_up answers neither', async () => {
+    for (const type of ['ai_assistant', 'ai_assistant_reply']) {
       // Leg B: an AI-answered thread is answered.
       const thread = await findOpenCommsExceptions({
         customerId: CUSTOMER_ID,
@@ -527,6 +561,12 @@ describe('findOpenCommsExceptions', () => {
       });
       expect(thread.unansweredInbound).toBeNull();
     }
+    const followUp = await findOpenCommsExceptions({
+      customerId: CUSTOMER_ID,
+      serviceId: SERVICE_ID,
+      knex: makeStubKnex({ sms_log: [inboundRow(), outboundRow({ message_type: 'follow_up' })] }),
+    });
+    expect(followUp.unansweredInbound?.id).toBe('sms-in-1');
   });
 
   test('Leg A: a reschedule confirmation resolves ONLY a null-entity, non-ambiguous, customer-linked flag', async () => {

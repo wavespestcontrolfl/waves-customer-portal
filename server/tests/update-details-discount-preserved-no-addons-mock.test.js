@@ -168,7 +168,17 @@ beforeEach(() => {
   db.raw = jest.fn(() => 'raw');
   db.fn = { now: jest.fn(() => 'now()') };
   db.transaction = jest.fn(async (fn) => {
-    const trx = jest.fn((table) => chain(table));
+    // GitHub Codex round 22 P1 (#4657, :11627): the route's under-lock
+    // financial recheck now reads through `trx` for the no-add-on path
+    // too (previously only the addons-replaced path ever reached a
+    // trx-side re-read here), so `trx` must see the SAME per-test row
+    // shape `db` was configured with (mockDbWithAddonRow et al. override
+    // `db.mockImplementation`, not some separate trx-only fixture) — a
+    // stale `chain(table)` default would hand the locked recheck the
+    // module-level STORED fixture instead of a test's overridden row,
+    // manufacturing a false financial-drift 409 that never reaches the
+    // write this suite asserts on.
+    const trx = jest.fn((table) => db(table));
     trx.raw = jest.fn(() => 'raw');
     trx.fn = { now: jest.fn(() => 'now()') };
     trx.commit = jest.fn();

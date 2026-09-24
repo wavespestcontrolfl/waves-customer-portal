@@ -83,6 +83,8 @@ const adminScheduleRouter = require('../routes/admin-schedule');
 const {
   discountStackGroupRowsForPricing,
   assertNoDiscountStackGroupConflict,
+  addonStackGroupConflictRows,
+  assertNewStackGroupConflicts,
 } = adminScheduleRouter._test;
 
 const layer = adminScheduleRouter.stack.find(
@@ -152,6 +154,57 @@ describe('assertNoDiscountStackGroupConflict / discountStackGroupRowsForPricing 
       { id: 'silver', name: 'Silver tier', stack_group: 'tier', is_stackable: false, scope: 'line:primary' },
       { id: 'gold', name: 'Gold tier', stack_group: 'tier', is_stackable: false, scope: 'line:addon:0' },
     ]);
+  });
+});
+
+// GitHub Codex round 20 P2 (#4657, :10541): PUT /:id/update-details editor
+// variant. addonStackGroupConflictRows scopes a PERSISTED add-on row on its
+// own row id (submittedAddonId), so two separate existing rows always get
+// distinct scopes; two NEW lines (no submittedAddonId yet, the client's own
+// "add a line" flow) used to fall back to the shared submittedServiceId, so
+// the SAME non-stackable preset picked on two new lines for the same
+// service collided with itself under assertNewStackGroupConflicts even
+// though the client permits the same preset on different lines and a
+// persisted pair of rows never collides this way.
+describe('addonStackGroupConflictRows / assertNewStackGroupConflicts (update-details editor, unit)', () => {
+  const groupMetaById = new Map([
+    ['silver', { id: 'silver', name: 'Silver tier', stack_group: 'tier', is_stackable: false }],
+    ['gold', { id: 'gold', name: 'Gold tier', stack_group: 'tier', is_stackable: false }],
+  ]);
+
+  test('two NEW lines, same serviceId, same non-stackable preset -> no clash (distinct per-line scope, never the shared serviceId)', () => {
+    const normalizedAddons = [
+      { submittedAddonId: null, submittedServiceId: 'svc-1', discount: { discountId: 'silver' }, discountTermChanged: true },
+      { submittedAddonId: null, submittedServiceId: 'svc-1', discount: { discountId: 'silver' }, discountTermChanged: true },
+    ];
+    const rows = addonStackGroupConflictRows(normalizedAddons, groupMetaById);
+    // Pin the actual defect: both lines used to compute the SAME scope
+    // (the shared submittedServiceId) — assert they differ, not just that
+    // the downstream check happens to pass.
+    expect(rows[0].scope).not.toBe(rows[1].scope);
+    expect(() => assertNewStackGroupConflicts(rows)).not.toThrow();
+  });
+
+  test('two same-group DIFFERENT presets on different new lines still 400 (pre-existing behavior, guard against the scope fix over-correcting)', () => {
+    const normalizedAddons = [
+      { submittedAddonId: null, submittedServiceId: 'svc-1', discount: { discountId: 'silver' }, discountTermChanged: true },
+      { submittedAddonId: null, submittedServiceId: 'svc-2', discount: { discountId: 'gold' }, discountTermChanged: true },
+    ];
+    const rows = addonStackGroupConflictRows(normalizedAddons, groupMetaById);
+    expect(() => assertNewStackGroupConflicts(rows)).toThrow(expect.objectContaining({
+      statusCode: 400,
+      message: expect.stringContaining('Only one WaveGuard tier discount can apply'),
+    }));
+  });
+
+  test('a persisted row (submittedAddonId set) always scopes on its own row id, never the serviceId', () => {
+    const normalizedAddons = [
+      { submittedAddonId: 'row-a', submittedServiceId: 'svc-1', discount: { discountId: 'silver' }, discountTermChanged: false },
+      { submittedAddonId: 'row-b', submittedServiceId: 'svc-1', discount: { discountId: 'silver' }, discountTermChanged: false },
+    ];
+    const rows = addonStackGroupConflictRows(normalizedAddons, groupMetaById);
+    expect(rows[0].scope).toBe('row-a');
+    expect(rows[1].scope).toBe('row-b');
   });
 });
 

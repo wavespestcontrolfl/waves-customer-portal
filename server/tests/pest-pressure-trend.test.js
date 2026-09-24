@@ -88,13 +88,35 @@ describe('resolveLabel', () => {
   });
 
   test('boundary scores resolve to their stated band', () => {
+    // Six-band scheme (owner ruling 2026-09-24): 0.9 and 1.0 both fall
+    // inside very_low's 0.5-1.4 range now that 'none' owns 0-0.4.
     expect(resolveLabel(0.9, DEFAULT_CONFIG.labels).key).toBe('very_low');
-    expect(resolveLabel(1.0, DEFAULT_CONFIG.labels).key).toBe('low');
+    expect(resolveLabel(1.0, DEFAULT_CONFIG.labels).key).toBe('very_low');
     expect(resolveLabel(5.0, DEFAULT_CONFIG.labels).key).toBe('high');
   });
 
   test('out-of-range scores clamp to nearest band rather than crashing', () => {
-    expect(resolveLabel(-1, DEFAULT_CONFIG.labels).key).toBe('very_low');
+    expect(resolveLabel(-1, DEFAULT_CONFIG.labels).key).toBe('none');
     expect(resolveLabel(7, DEFAULT_CONFIG.labels).key).toBe('high');
+  });
+
+  test('a score between two bands resolves to the nearest band, not the top one', () => {
+    expect(resolveLabel(0.45, DEFAULT_CONFIG.labels).key).toBe('none');
+    expect(resolveLabel(0.46, DEFAULT_CONFIG.labels).key).toBe('very_low');
+    expect(resolveLabel(2.44, DEFAULT_CONFIG.labels).key).toBe('low');
+  });
+
+  test('every one-decimal value 0.0-5.0 resolves to a label with no gaps (owner ruling 2026-09-24)', () => {
+    const expected = [];
+    for (let i = 0; i <= 4; i += 1) expected.push([i / 10, 'none']);
+    for (let i = 5; i <= 14; i += 1) expected.push([i / 10, 'very_low']);
+    for (let i = 15; i <= 24; i += 1) expected.push([i / 10, 'low']);
+    for (let i = 25; i <= 34; i += 1) expected.push([i / 10, 'moderate']);
+    for (let i = 35; i <= 44; i += 1) expected.push([i / 10, 'elevated']);
+    for (let i = 45; i <= 50; i += 1) expected.push([i / 10, 'high']);
+    expect(expected.length).toBe(51);
+    for (const [score, key] of expected) {
+      expect(resolveLabel(Math.round(score * 10) / 10, DEFAULT_CONFIG.labels).key).toBe(key);
+    }
   });
 });

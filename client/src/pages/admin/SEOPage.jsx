@@ -12,6 +12,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import {
   ActionFeedback,
   Button,
@@ -3861,6 +3862,10 @@ function dollarsToCents(raw) {
   const cents = Number(m[1]) * 100 + Number((m[2] || "").padEnd(2, "0"));
   return cents > 0 ? cents : null;
 }
+const submissionUrlFromServer = (card) =>
+  ["live", "indexed"].includes(card.placement.status)
+    ? (card.placement.live_url ?? "")
+    : "";
 const compact = (n) =>
   n == null
     ? "—"
@@ -3871,37 +3876,102 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   const [data, setData] = useState(null);
   const [drafting, setDrafting] = useState(null);
   const [placementUrls, setPlacementUrls] = useState({});
-  const [error, setError] = useState(null);
+  const [readError, setReadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [busy, setBusy] = useState(null);
   const [amounts, setAmounts] = useState({});
   const [notes, setNotes] = useState({});
   const [acks, setAcks] = useState({}); // row id → the owner acknowledged the recipient match (§13)
   const [result, setResult] = useState(null);
   const loadGen = useRef(0);
+  const invalidatePendingLoad = () => {
+    loadGen.current += 1;
+  };
+  const beginAction = (key) => {
+    invalidatePendingLoad();
+    setBusy(key);
+  };
+  const updatePlacementUrl = (id, value, serverValue) => {
+    invalidatePendingLoad();
+    setPlacementUrls((current) => {
+      const next = { ...current };
+      if (value === serverValue) delete next[id];
+      else next[id] = value;
+      return next;
+    });
+  };
+  const updateAmount = (id, value, quoteCents) => {
+    invalidatePendingLoad();
+    setAmounts((current) => {
+      const next = { ...current };
+      const restored =
+        quoteCents == null
+          ? String(value).trim() === ""
+          : value === (quoteCents / 100).toFixed(2) || dollarsToCents(value) === quoteCents;
+      if (restored) delete next[id];
+      else next[id] = value;
+      return next;
+    });
+  };
+  const updateNote = (id, value) => {
+    invalidatePendingLoad();
+    setNotes((current) => ({ ...current, [id]: value }));
+  };
+  const updateAck = (key, value) => {
+    invalidatePendingLoad();
+    setAcks((current) => {
+      const next = { ...current };
+      if (value) next[key] = true;
+      else delete next[key];
+      return next;
+    });
+  };
+  const clearLocalValue = (setter, key) => {
+    setter((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+  const openDraft = (card) => {
+    invalidatePendingLoad();
+    setDrafting({
+      ...card.placement,
+      target_domain: card.domain.domain,
+    });
+  };
   const load = async () => {
     const gen = ++loadGen.current;
-    setError(null);
+    setReadError(null);
     try {
       const r = await adminFetch("/admin/backlink-agent/owner-queue");
       if (gen !== loadGen.current) return;
       setData(r);
     } catch (e) {
       if (gen !== loadGen.current) return;
-      setError(e?.message || "Owner queue load failed");
+      setReadError(e?.message || "Owner queue load failed");
     }
   };
   useEffect(() => {
     load();
   }, [refreshKey]);
+  const hasUnsavedOwnerInput =
+    drafting !== null ||
+    Object.keys(placementUrls).length > 0 ||
+    Object.keys(amounts).length > 0 ||
+    Object.values(notes).some((value) => Boolean(value)) ||
+    Object.values(acks).some(Boolean);
+  useVisiblePageRefresh(
+    () => (busy === null && !hasUnsavedOwnerInput ? load() : undefined),
+    { intervalMs: 120_000 },
+  );
   // after a mutation: the parent refreshes every panel when it owns the key, else this panel reloads itself
   const refresh = () => (onMutated ? onMutated() : load());
 
   // Preserve edits (including clearing) for this held attempt; untouched verified rows use their exact stored URL.
   const displayedSubmissionUrl = (card) =>
     placementUrls[card.submission_ambiguity.id] ??
-    (["live", "indexed"].includes(card.placement.status)
-      ? (card.placement.live_url ?? "")
-      : "");
+    submissionUrlFromServer(card);
   const recordSubmissionVerdict = async (card, verdict) => {
     if (
       !window.confirm(
@@ -3911,16 +3981,17 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       )
     )
       return;
-    setBusy(card.domain.id);
-    setError(null);
+    beginAction(card.domain.id);
+    setActionError(null);
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}`, {
         method: "PATCH",
         body: JSON.stringify({ submission_verdict: verdict, submission_attempt_id: card.submission_ambiguity.id, ...(verdict === "placed" ? { live_url: displayedSubmissionUrl(card) } : {}) }),
       });
+      clearLocalValue(setPlacementUrls, card.submission_ambiguity.id);
       refresh();
     } catch (e) {
-      setError(e?.message || "Submission verdict failed");
+      setActionError(e?.message || "Submission verdict failed");
     } finally {
       setBusy(null);
     }
@@ -3946,8 +4017,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         ? (row.quote_cents / 100).toFixed(2)
         : "";
   const approve = async (card, row) => {
-    setBusy(row.id);
-    setError(null);
+    beginAction(row.id);
+    setActionError(null);
     setResult(null);
     const body = {};
     if (row.dimension === "payment") {
@@ -3956,7 +4027,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       // binary float — 10.075 * 100 rounds to 1007); a blank field or >2 decimals is refused, not defaulted.
       const cents = dollarsToCents(displayedAmount(card, row));
       if (cents === null) {
-        setError(
+        setActionError(
           "Enter the amount in dollars with at most two decimals, greater than zero.",
         );
         setBusy(null);
@@ -3967,13 +4038,15 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     if (notes[card.domain.id]) body.note = notes[card.domain.id];
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/approve`, { method: "POST", body });
+      clearLocalValue(setAmounts, row.id);
+      clearLocalValue(setNotes, card.domain.id);
       setResult({
         tone: "#15803D",
         text: `Approved ${DIMENSION_LABELS[row.dimension] || row.dimension} on ${card.domain.domain}${r.attached?.length > 1 ? ` (${r.attached.length} locations share the fee)` : ""} — ${bridgeNote(r.bridge)}`,
       });
       await refresh();
     } catch (e) {
-      setError(e?.message || "Approve failed");
+      setActionError(e?.message || "Approve failed");
     } finally {
       setBusy(null);
     }
@@ -3982,8 +4055,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   // the owner's TERMINAL review of a follow-up that is theirs to send (§6.4): skipped, the conversation settles and
   // its inbox and domain are released on the closure sweep — the queue never sends an owner-routed follow-up
   const skipFollowUp = async (card, row) => {
-    setBusy(row.id);
-    setError(null);
+    beginAction(row.id);
+    setActionError(null);
     setResult(null);
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/outreach/reconcile`, { method: "POST", body: { outcome: "skip", follow_up: true } });
@@ -3993,7 +4066,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       });
       await refresh();
     } catch (e) {
-      setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Skip failed");
+      setActionError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Skip failed");
     } finally {
       setBusy(null);
     }
@@ -4001,8 +4074,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
 
   // the send click IS the approval of a communication row (§6.3 2c)
   const send = async (card, row) => {
-    setBusy(row.id);
-    setError(null);
+    beginAction(row.id);
+    setActionError(null);
     setResult(null);
     const lookupHash = row.draft?.recipient_review?.lookup_hash || "";
     const ackKey = `${row.id}:${lookupHash}`; // the acknowledgement is bound to the hash it was given for
@@ -4017,13 +4090,14 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     };
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
+      clearLocalValue(setAcks, ackKey);
       setResult({
         tone: "#15803D",
         text: `Sent the ${row.action === "outreach_followup" ? "follow-up" : "pitch"} to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}`,
       });
       await refresh();
     } catch (e) {
-      setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
+      setActionError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
       // the match changed under the card (or the lookup now yields one): drop the stale acknowledgement and reload so
       // the owner reviews the CURRENT match — the server sends only against the hash it just computed
       if (REVIEW_RESET_CODES.has(e?.code)) {
@@ -4038,25 +4112,26 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     }
   };
   const decide = async (card, action) => {
-    setBusy(card.domain.id);
-    setError(null);
+    beginAction(card.domain.id);
+    setActionError(null);
     setResult(null);
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/domains/${card.domain.id}/${action}`, { method: "POST", body: { note: notes[card.domain.id] || null } });
+      clearLocalValue(setNotes, card.domain.id);
       setResult({
         tone: "#27272A",
         text: `${card.domain.domain} → ${String(r.agent_state).replace(/_/g, " ")}${r.watch_recheck_at ? `, rechecked ${formatETDate(r.watch_recheck_at)}` : ""}`,
       });
       await refresh();
     } catch (e) {
-      setError(e?.message || `${action} failed`);
+      setActionError(e?.message || `${action} failed`);
     } finally {
       setBusy(null);
     }
   };
   const matchBacklink = async (card) => {
-    setBusy(card.domain.id);
-    setError(null);
+    beginAction(card.domain.id);
+    setActionError(null);
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/reconcile-backlink`, { method: "POST", body: { backlink_id: card.backlink_match.id } });
       setResult({
@@ -4065,7 +4140,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       });
       await refresh();
     } catch (e) {
-      setError(e?.message || "Could not match backlink");
+      setActionError(e?.message || "Could not match backlink");
     } finally {
       setBusy(null);
     }
@@ -4088,9 +4163,6 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                 : "GATE_LINK_AUTHORITY off — nothing parks until it is on"
               : "…"}
           </div>
-          <Button onClick={load} disabled={busy !== null}>
-            Refresh
-          </Button>
         </div>
       </div>
       <div className="text-ui-body text-ink-secondary [margin-bottom:12px]">
@@ -4101,9 +4173,17 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         contact@ — that click is its approval. Nothing else here signs or pays —
         the runner does that later, against the approval.
       </div>
-      {error && (
+      {actionError && (
         <div className="[margin-bottom:8px] text-ui-body text-alert-fg">
-          {error}
+          {actionError}
+        </div>
+      )}
+      {readError && (
+        <div className="[margin-bottom:8px] text-ui-body text-alert-fg flex items-center justify-between [gap:8px]">
+          <span>{readError}</span>
+          <Button onClick={load} disabled={busy !== null} variant="secondary">
+            Retry
+          </Button>
         </div>
       )}
       {result && (
@@ -4116,7 +4196,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
           {result.text}
         </div>
       )}
-      {!data && !error && (
+      {!data && !readError && (
         <div className="text-ui-body text-ink-secondary">Loading…</div>
       )}
       {data && cards.length === 0 && (
@@ -4164,10 +4244,11 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                     type="url"
                     value={displayedSubmissionUrl(c)}
                     onChange={(event) =>
-                      setPlacementUrls({
-                        ...placementUrls,
-                        [c.submission_ambiguity.id]: event.target.value,
-                      })
+                      updatePlacementUrl(
+                        c.submission_ambiguity.id,
+                        event.target.value,
+                        submissionUrlFromServer(c),
+                      )
                     }
                     placeholder="https://publisher.example/listing"
                     className="[width:100%] box-border [margin-top:4px]"
@@ -4201,12 +4282,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                 </p>
                 <Button
                   disabled={busy !== null || Boolean(c.placement.claimed_at)}
-                  onClick={() =>
-                    setDrafting({
-                      ...c.placement,
-                      target_domain: c.domain.domain,
-                    })
-                  }
+                  onClick={() => openDraft(c)}
                 >
                   Create outreach draft
                 </Button>
@@ -4406,11 +4482,10 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                                 }
                                 disabled={rowBusy}
                                 onAck={(v) =>
-                                  setAcks({
-                                    ...acks,
-                                    [`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]:
-                                      v,
-                                  })
+                                  updateAck(
+                                    `${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`,
+                                    v,
+                                  )
                                 }
                               />
                               <span>
@@ -4455,10 +4530,11 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                                     value={displayedAmount(c, r)}
                                     disabled={rowBusy}
                                     onChange={(e) =>
-                                      setAmounts({
-                                        ...amounts,
-                                        [r.id]: e.target.value,
-                                      })
+                                      updateAmount(
+                                        r.id,
+                                        e.target.value,
+                                        r.quote_cents,
+                                      )
                                     }
                                     className="[width:96px]"
                                   />
@@ -4495,12 +4571,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                 placeholder="Note (optional, kept with the decision)"
                 value={notes[c.domain.id] || ""}
                 disabled={domainBusy}
-                onChange={(e) =>
-                  setNotes({
-                    ...notes,
-                    [c.domain.id]: e.target.value,
-                  })
-                }
+                onChange={(e) => updateNote(c.domain.id, e.target.value)}
                 className="[flex:1_1_240px]"
               />
               {c.decidable ? (
@@ -4856,29 +4927,41 @@ function BacklinkAgentPanel() {
   const [intakeSeed, setIntakeSeed] = useState(false);
   const [intakeBusy, setIntakeBusy] = useState(false);
   const [intakeResult, setIntakeResult] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const loadRequest = useRef(0);
+  const invalidateLoad = () => {
+    loadRequest.current += 1;
+  };
   const loadData = () => {
-    Promise.all([
-      adminFetch("/admin/backlink-agent/stats").catch(() => null),
-      adminFetch("/admin/backlink-agent/queue?limit=50").catch(() => ({
-        items: [],
-      })),
-      adminFetch("/admin/backlink-agent/profiles").catch(() => ({
-        profiles: [],
-      })),
-      adminFetch("/admin/backlink-agent/targets").catch(() => ({
-        targets: [],
-      })),
+    const request = ++loadRequest.current;
+    setLoadError(null);
+    return Promise.allSettled([
+      adminFetch("/admin/backlink-agent/stats"),
+      adminFetch("/admin/backlink-agent/queue?limit=50"),
+      adminFetch("/admin/backlink-agent/profiles"),
+      adminFetch("/admin/backlink-agent/targets"),
     ]).then(([s, q, p, t]) => {
-      setStats(s);
-      setQueue(q.items || []);
-      setProfiles(p.profiles || []);
-      setTargets(t.targets || []);
+      if (request !== loadRequest.current) return;
+      if (s.status === "fulfilled") setStats(s.value);
+      if (q.status === "fulfilled") setQueue(q.value.items || []);
+      if (p.status === "fulfilled") setProfiles(p.value.profiles || []);
+      if (t.status === "fulfilled") setTargets(t.value.targets || []);
+      if ([s, q, p, t].some((result) => result.status === "rejected")) {
+        setLoadError("Some backlink data could not be loaded.");
+      }
       setLoading(false);
     });
   };
   useEffect(() => {
     loadData();
   }, []);
+  useVisiblePageRefresh(
+    () => {
+      if (loading || processing || intakeBusy) return undefined;
+      return loadData();
+    },
+    { intervalMs: 120_000 },
+  );
   const handleAddUrls = async () => {
     const urls = urlInput
       .split("\n")
@@ -4886,6 +4969,7 @@ function BacklinkAgentPanel() {
       .filter(Boolean)
       .map((u) => (u.startsWith("http") ? u : `https://${u}`));
     if (urls.length === 0) return;
+    invalidateLoad();
     const result = await adminPost("/admin/backlink-agent/queue", { urls });
     setAddResult(result);
     setUrlInput("");
@@ -4893,6 +4977,7 @@ function BacklinkAgentPanel() {
   };
   const runIntake = async (dryRun) => {
     if (!intakeText.trim()) return;
+    if (!dryRun) invalidateLoad();
     setIntakeBusy(true);
     try {
       const r = await adminPost("/admin/backlink-agent/opportunities/bulk", {
@@ -4911,6 +4996,7 @@ function BacklinkAgentPanel() {
     }
   };
   const handleProcess = async () => {
+    invalidateLoad();
     setProcessing(true);
     try {
       await adminPost("/admin/backlink-agent/process", { limit: 3 });
@@ -4923,15 +5009,18 @@ function BacklinkAgentPanel() {
     }
   };
   const handleRetry = async (id) => {
+    invalidateLoad();
     await adminPost(`/admin/backlink-agent/queue/${id}/retry`, {});
     loadData();
   };
   const handleSkip = async (id) => {
+    invalidateLoad();
     await adminPost(`/admin/backlink-agent/queue/${id}/skip`, {});
     loadData();
   };
   const handleAddTarget = async () => {
     if (!newTarget.trim()) return;
+    invalidateLoad();
     await adminPost("/admin/backlink-agent/targets", {
       username: newTarget.trim(),
     });
@@ -4939,16 +5028,19 @@ function BacklinkAgentPanel() {
     loadData();
   };
   const handleDeleteTarget = async (id) => {
+    invalidateLoad();
     await adminFetch(`/admin/backlink-agent/targets/${id}`, {
       method: "DELETE",
     });
     loadData();
   };
   const handlePoll = async () => {
+    invalidateLoad();
     await adminPost("/admin/backlink-agent/poll", {});
     loadData();
   };
   const handleVerifyEmails = async () => {
+    invalidateLoad();
     await adminPost("/admin/backlink-agent/verify-emails", {});
     loadData();
   };
@@ -5010,11 +5102,14 @@ function BacklinkAgentPanel() {
         <Button onClick={handleVerifyEmails} variant="secondary">
           Verify Emails
         </Button>{" "}
-        <Button onClick={loadData} variant="secondary">
-          Refresh
-        </Button>{" "}
       </div>{" "}
       <div className="flex flex-col [gap:16px]">
+        {loadError && (
+          <div className="text-ui-body text-alert-fg flex items-center justify-between [gap:8px]">
+            <span>{loadError}</span>
+            <Button onClick={loadData} variant="secondary">Retry</Button>
+          </div>
+        )}
         {/* X Targets */}
         <UiCard className="p-6">
           {" "}

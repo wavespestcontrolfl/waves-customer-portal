@@ -77,6 +77,7 @@ import {
   Mic,
   MicOff,
   PhoneCall,
+  ScanSearch,
   Sparkles,
   Zap,
   ClipboardList,
@@ -100,6 +101,12 @@ import {
   Badge,
   Button,
   Card,
+  Checkbox,
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  DialogBody,
+  DialogFooter,
   Field,
   Input,
   Textarea,
@@ -311,6 +318,11 @@ function smsMessageMatchesLine(message, lineNumber) {
 function mergeSmsMessages(existing, incoming) {
   return [...new Map([...existing, ...incoming].map((message) => [message.id, message])).values()]
     .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+}
+
+function smsMessageThreadKey(message) {
+  const contactPhone = message?.direction === "outbound" ? message.to : message?.from;
+  return smsThreadKey(contactPhone);
 }
 
 function StatCardV2({ label, value, sub, active, alert, onClick }) {
@@ -801,6 +813,247 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   return `Hi ${first}, it's Waves Pest Control. ${line}`;
 }
 
+const ANALYZE_PHOTOS_MAX = 5;
+// Mirrors MESSAGE_PHOTO_ALLOWED_MIME in server/routes/admin-photo-assessments.js
+// — only these get resized+analyzed server-side; a non-image MMS (video,
+// audio, vcard) must never appear in the picker or count toward "has photos".
+const ANALYZE_PHOTOS_ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+
+// Pure: flat, newest-first list of every inbound photo in `messages`,
+// filtered to `allowedMime` — one entry per media item, not per message,
+// since one MMS can carry several photos. Module-level (not a SmsTab
+// closure) so it is unit-testable on its own and SmsTab's own body gains
+// only the one useMemo call site below, not this function's branching.
+// Shared by the general inbox (activeThread.messages) and the Customer
+// 360-embedded composer (customerMessages) — see AnalyzePhotosAction below.
+export function collectAnalyzablePhotos(messages, allowedMime) {
+  if (!Array.isArray(messages)) return [];
+  const items = [];
+  for (const m of messages) {
+    if (m.direction !== "inbound" || !Array.isArray(m.media)) continue;
+    for (const media of m.media) {
+      if (!media?.url || !media?.key) continue;
+      const mime = String(media.contentType || media.mimeType || "").toLowerCase();
+      if (!allowedMime.has(mime)) continue;
+      items.push({ messageId: m.id, key: media.key, url: media.url, createdAt: m.createdAt, customerId: m.customerId || null });
+    }
+  }
+  items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return items;
+}
+
+// "Analyze photos" — pulls inbound MMS photos from the open thread straight
+// into the photo-assessment pipeline (POST /admin/photo-assessments/:type
+// with message_photos, same server-side analysis lawn/pest funnel rows use).
+// `photos` is a flat, newest-first list of { messageId, key, url, customerId }
+// built from the active thread's inbound messages — one entry per media
+// item, not per message, since one MMS can carry several photos.
+// `fixedCustomerId`/`fixedCustomerName` are set ONLY for the Customer 360-
+// embedded composer, where the customer is the mount's own prop, not a
+// thread-derived guess — see the general-inbox note on AnalyzePhotosAction.
+function AnalyzePhotosDialog({ open, onClose, photos, fixedCustomerId, fixedCustomerName, onCreated, layer }) {
+  const [type, setType] = useState("lawn");
+  // Selections are keyed by the photo's own S3 key (globally unique), NOT
+  // array index — the inbox polls every ~30s and can replace `photos` with a
+  // new array (a fresh inbound MMS shifts everything newest-first) while
+  // this dialog sits open. Index-based selection would then silently submit
+  // whatever photo happened to land on the same position instead of what the
+  // operator actually checked.
+  const [selectedKeys, setSelectedKeys] = useState(() => new Set());
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    setType("lawn");
+    // Most recent photo (index 0 — the list is already newest-first) starts checked.
+    setSelectedKeys(new Set(photos.length ? [photos[0].key] : []));
+    setNote("");
+    setError("");
+    setBusy(false);
+    // Only reset when the dialog opens — re-running on every `photos`
+    // recompute would clobber the operator's picks mid-edit. `photos` is
+    // deliberately left out of the deps for that reason.
+  }, [open]);
+
+  const toggle = (key) => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else if (next.size < ANALYZE_PHOTOS_MAX) {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    const selected = photos.filter((p) => selectedKeys.has(p.key));
+    if (!selected.length) {
+      setError("Select at least one photo.");
+      return;
+    }
+    // General inbox: thread membership is keyed by phone, and a shared or
+    // reassigned number can hold messages from more than one customer — the
+    // open thread's own customerId is not trustworthy enough to attribute a
+    // submission. Derive it from the SELECTED photos' own messages instead,
+    // and refuse to guess when they disagree. Mirrors the server's
+    // resolveMessagePhotos: null (an unlinked message) is a DISTINCT
+    // ownership state, not "no opinion" — filtering it out first would let
+    // a customer-linked photo mixed with an unlinked one silently pass as
+    // "one distinct customer". The Customer 360-embedded composer is
+    // exempt: fixedCustomerId there is the mount's own prop, not a thread
+    // guess.
+    if (!fixedCustomerId) {
+      const distinctCustomerIds = new Set(selected.map((p) => p.customerId || null));
+      if (distinctCustomerIds.size > 1) {
+        setError("Selected photos belong to different customers — pick photos from one customer.");
+        return;
+      }
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const data = await adminFetch(`/admin/photo-assessments/${type}`, {
+        method: "POST",
+        body: JSON.stringify({
+          message_photos: selected.map((p) => ({ message_id: p.messageId, key: p.key })),
+          // Only the Customer 360-embedded mode passes customer_id — general
+          // inbox submissions let the server default it from the selected
+          // messages' own conversation (same "first rung wins" rule the
+          // admin-created path already uses), never a thread-level guess.
+          customer_id: fixedCustomerId || undefined,
+          note: note.trim() || undefined,
+        }),
+      });
+      onClose();
+      onCreated(type, data.id);
+    } catch (err) {
+      setError(err.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={busy ? undefined : onClose} aria-label="Analyze photos from this thread" layer={layer}>
+      <DialogHeader>
+        <DialogTitle>Analyze photos from this thread</DialogTitle>
+      </DialogHeader>
+      <DialogBody className="space-y-3">
+        <div>
+          <label className="block text-14 text-zinc-500 mb-1">Type</label>
+          <Select value={type} onChange={(e) => setType(e.target.value)} disabled={busy}>
+            <option value="lawn">Lawn assessment</option>
+            <option value="pest">Pest identification</option>
+          </Select>
+        </div>
+        {fixedCustomerId ? (
+          <div>
+            <label className="block text-14 text-zinc-500 mb-1">Customer</label>
+            <div className="text-14 text-zinc-900">{fixedCustomerName || "Linked customer"}</div>
+          </div>
+        ) : null}
+        <div>
+          <label className="block text-14 text-zinc-500 mb-1">
+            Photos ({selectedKeys.size}/{ANALYZE_PHOTOS_MAX} selected)
+          </label>
+          {photos.length === 0 ? (
+            <div className="text-14 text-zinc-500">No inbound photos in this thread.</div>
+          ) : (
+            <div className="grid grid-cols-3 gap-2">
+              {photos.map((p) => {
+                const checked = selectedKeys.has(p.key);
+                const capped = !checked && selectedKeys.size >= ANALYZE_PHOTOS_MAX;
+                return (
+                  <label
+                    key={p.key}
+                    className={cn(
+                      "relative block rounded-sm border-hairline overflow-hidden cursor-pointer",
+                      checked ? "border-zinc-900" : "border-zinc-300",
+                      capped && "opacity-40 cursor-not-allowed",
+                    )}
+                    style={{ aspectRatio: "1 / 1" }}
+                  >
+                    <img
+                      src={p.url}
+                      alt="Inbound MMS attachment"
+                      className="absolute inset-0 w-full h-full object-cover"
+                    />
+                    <div className="absolute top-1 left-1">
+                      <Checkbox
+                        checked={checked}
+                        disabled={capped || busy}
+                        onChange={() => toggle(p.key)}
+                      />
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div>
+          <label className="block text-14 text-zinc-500 mb-1">Note (optional)</label>
+          <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} disabled={busy} />
+        </div>
+        {error ? <div className="text-14 text-alert-fg">{error}</div> : null}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+        <Button onClick={submit} disabled={busy || !selectedKeys.size}>{busy ? "Analyzing…" : "Run analysis"}</Button>
+      </DialogFooter>
+    </Dialog>
+  );
+}
+
+// Analyze photos — the toolbar affordance + its dialog, owned together so
+// SmsTab carries none of the feature's decisions: this component derives the
+// open thread's inbound MMS photos (general inbox → activeThread.messages;
+// Customer 360-embedded composer → customerMessages), renders nothing for a
+// technician (the endpoint is requireAdmin — a tech would get a 403) or a
+// photo-less thread, and otherwise renders the button and the (portaled)
+// dialog. Only the Customer 360 mount has a trustworthy fixed customer (its
+// own prop) — the general inbox's activeThread is keyed by phone, which a
+// shared/reassigned number can hold messages from more than one customer
+// under, so the dialog derives the customer per-selection there instead.
+// Customer 360's overlay is z-[1000] (CustomerOverlayPresentation), so the
+// dialog is raised to 1120 there, same as CancelPlanDialog and its siblings.
+function AnalyzePhotosAction({ active, isAdmin, activeThread, customerMessages, customer, onCreated }) {
+  const [open, setOpen] = useState(false);
+  const photos = useMemo(
+    () => collectAnalyzablePhotos(customer ? customerMessages : activeThread?.messages, ANALYZE_PHOTOS_ALLOWED_MIME),
+    [customer, customerMessages, activeThread],
+  );
+  if (!isAdmin || photos.length === 0) return null;
+  return (
+    <>
+      <Button
+        variant="secondary"
+        onClick={() => setOpen(true)}
+        title="Run a lawn or pest assessment on photos from this thread"
+        aria-label="Analyze photos"
+        className="sms-writing-tool ui-icon-action"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+      >
+        <ScanSearch size={16} strokeWidth={2.2} aria-hidden />
+      </Button>
+      <AnalyzePhotosDialog
+        open={active && open}
+        onClose={() => setOpen(false)}
+        photos={photos}
+        fixedCustomerId={customer?.id || null}
+        fixedCustomerName={customer ? getCustomerOptionName(customer) : null}
+        layer={customer ? 1120 : undefined}
+        onCreated={onCreated}
+      />
+    </>
+  );
+}
+
 // With a customer, render the same composer used by Messages, locked to that
 // profile. The caller keys it by customer id/phone to discard another person's
 // draft, attachments, and minted links when the selected record changes.
@@ -810,7 +1063,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // still gets the prefilled text/recipient, but sends as a plain manual
   // SMS — the AI draft stays pending for the owner (codex P2).
   const smsOutletContext = useOutletContext();
+  const location = useLocation();
+  const routeNeedsResponse = new URLSearchParams(location.search).get("needsResponse") === "true";
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
+  const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(!customer);
@@ -916,7 +1172,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
   };
   // PR 4 — status filter chips, reply-from lock.
-  const [statusFilter, setStatusFilter] = useState("all");
+  const initialStatusFilter = routeNeedsResponse ? "unanswered" : "all";
+  const [statusFilter, setStatusFilter] = useState(initialStatusFilter);
+  const statusFilterRef = useRef(initialStatusFilter);
+  const routeLocationKeyRef = useRef(location.key);
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
   const [smsHasMore, setSmsHasMore] = useState(false);
@@ -924,9 +1183,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
   const smsRequestRef = useRef(null);
+  const activeThreadRef = useRef(activeThread);
+  activeThreadRef.current = activeThread;
   const approvalDraftRequestRef = useRef(0);
   const smsPageRef = useRef(1);
   const smsLoadedSearchRef = useRef(null);
+  const smsLoadedStatusFilterRef = useRef(null);
   const rewriteContextRef = useRef({
     toNumber: "",
     selectedCustomerId: null,
@@ -989,6 +1251,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();
     const normalizedSearch = search.trim();
+    const requestedStatusFilter = options.statusFilter || statusFilterRef.current;
     const page = options.page || 1;
     const append = !!options.append;
     if (options.background && smsRequestRef.current) return Promise.resolve();
@@ -1002,27 +1265,105 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       page: String(page),
     });
     if (normalizedSearch) params.set("search", normalizedSearch);
+    if (requestedStatusFilter === "unanswered") params.set("needsResponse", "true");
     const logUrl = `/admin/communications/log?${params.toString()}`;
+    const refreshesLoadedDataset = options.refresh
+      && smsLoadedSearchRef.current === normalizedSearch
+      && smsLoadedStatusFilterRef.current === requestedStatusFilter;
+    const loadedPageCount = options.refresh
+      && requestedStatusFilter === "unanswered"
+      && refreshesLoadedDataset
+      ? Math.max(page, smsPageRef.current)
+      : page;
+    const loadedPagesRequest = loadedPageCount > page
+      ? Promise.all(Array.from({ length: loadedPageCount }, (_, index) => {
+        const pageParams = new URLSearchParams(params);
+        pageParams.set("page", String(index + 1));
+        return adminFetch(`/admin/communications/log?${pageParams.toString()}`, { signal: controller.signal });
+      })).then((pages) => {
+        const hasInvalidPage = pages.some((pageData) => !Array.isArray(pageData?.messages) || pageData.error);
+        if (hasInvalidPage) return { error: "One or more message pages could not be refreshed." };
+        return {
+          messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
+          hasMore: !!pages.at(-1)?.hasMore,
+          page: pages.at(-1)?.page || loadedPageCount,
+        };
+      })
+      : adminFetch(logUrl, { signal: controller.signal });
+    const logRequest = Promise.resolve(loadedPagesRequest).then(async (logData) => {
+      if (
+        !refreshesLoadedDataset
+        || requestedStatusFilter !== "unanswered"
+        || append
+        || !logData?.hasMore
+        || !Array.isArray(logData.messages)
+        || logData.error
+      ) {
+        return logData;
+      }
+      const openPhone = activeThreadRef.current?.contactPhone;
+      const openKey = openPhone ? smsThreadKey(openPhone) : "";
+      if (!openKey || logData.messages.some((message) => smsMessageThreadKey(message) === openKey)) {
+        return logData;
+      }
+
+      // A newer pending peer can push the open conversation just beyond the
+      // loaded page boundary. Confirm that peer directly before closing it.
+      // Reuse the active search/filter scope so this check answers the same
+      // question as the refreshed inbox.
+      const peerParams = new URLSearchParams(params);
+      peerParams.set("page", "1");
+      peerParams.set("phone", openPhone);
+      const peerData = await adminFetch(`/admin/communications/log?${peerParams.toString()}`, { signal: controller.signal });
+      if (!Array.isArray(peerData?.messages) || peerData.error) {
+        throw new Error("The open conversation could not be confirmed.");
+      }
+      const hasUnexpectedPeer = peerData.messages.some((message) => smsMessageThreadKey(message) !== openKey);
+      if (hasUnexpectedPeer) {
+        throw new Error("The open conversation returned mismatched history.");
+      }
+      if (peerData.messages.length && !peerData.messages.some((message) => message.responseNeedsResponse === true)) {
+        throw new Error("The open conversation returned incomplete pending state.");
+      }
+      return {
+        ...logData,
+        messages: mergeSmsMessages(logData.messages, peerData.messages),
+        confirmedAbsentPeerKey: peerData.messages.length ? null : openKey,
+      };
+    });
     return Promise.allSettled([
-      adminFetch(logUrl, { signal: controller.signal }),
+      logRequest,
       options.background ? null : adminFetch("/admin/communications/stats", { signal: controller.signal }),
       options.background ? null : adminFetch("/admin/communications/blocked-numbers", { signal: controller.signal }),
     ]).then(([logResult, statsResult, blockedResult]) => {
       if (
         controller.signal.aborted ||
         requestSeq !== smsLoadSeqRef.current ||
-        normalizedSearch !== smsSearchRef.current
+        normalizedSearch !== smsSearchRef.current ||
+        requestedStatusFilter !== statusFilterRef.current
       ) {
         return;
       }
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
-        const retainHistory = options.refresh && smsLoadedSearchRef.current === normalizedSearch;
+        const retainHistory = refreshesLoadedDataset && requestedStatusFilter !== "unanswered";
         setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
+        if (refreshesLoadedDataset && requestedStatusFilter === "unanswered" && !append) {
+          const openPhone = activeThreadRef.current?.contactPhone;
+          const openKey = openPhone ? smsThreadKey(openPhone) : "";
+          const openThreadStillLoaded = openKey
+            && logData.messages.some((message) => smsMessageThreadKey(message) === openKey);
+          const absenceConfirmed = !logData.hasMore || logData.confirmedAbsentPeerKey === openKey;
+          if (openKey && !openThreadStillLoaded && absenceConfirmed) {
+            setActiveThread(null);
+            setSmsView("threads");
+          }
+        }
         smsPageRef.current = logData.page || page;
         setSmsPage(smsPageRef.current);
         setSmsHasMore(!!logData.hasMore);
         smsLoadedSearchRef.current = normalizedSearch;
+        smsLoadedStatusFilterRef.current = requestedStatusFilter;
         setSmsLoadError("");
       } else {
         setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
@@ -1043,6 +1384,17 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSmsRefreshing(false);
     });
   }, [customer?.id]);
+
+  useEffect(() => {
+    if (!active || customer || routeLocationKeyRef.current === location.key) return;
+    routeLocationKeyRef.current = location.key;
+    const nextFilter = routeNeedsResponse ? "unanswered" : "all";
+    statusFilterRef.current = nextFilter;
+    setStatusFilter(nextFilter);
+    setSmsView("threads");
+    setActiveThread(null);
+    void loadData(smsSearchRef.current, { statusFilter: nextFilter });
+  }, [active, customer, loadData, location.key, routeNeedsResponse]);
 
   useEffect(() => {
     smsSearchRef.current = smsSearch.trim();
@@ -1139,11 +1491,14 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   }, [active, customer?.id, customerMessages, customerReadScope, markMessagesRead]);
 
   useEffect(() => {
-    if (customer) return;
+    // Server-enforced too (ADMIN-BUG-R38): the route is requireAdmin, so a
+    // technician's fetch would just 403 — skip it so the tab doesn't render
+    // a control it can never use.
+    if (customer || !smsIsAdminRole) return;
     adminFetch("/admin/communications/ai-auto-reply-status")
       .then((d) => setAiAutoReply(d.enabled))
       .catch(() => {});
-  }, []);
+  }, [smsIsAdminRole]);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -1551,7 +1906,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
       if (customer) await onSent?.();
-      else await loadData(smsSearch.trim());
+      else await loadData(smsSearch.trim(), { refresh: true });
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
@@ -2342,8 +2697,13 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     );
     if (nextThread && nextThread !== activeThread) {
       setActiveThread(nextThread);
+    } else if (!nextThread && statusFilter === "unanswered" && !smsHasMore) {
+      // A reply can remove the peer from the server-backed pending result.
+      // Do not leave the operator inside a stale unanswered conversation.
+      setActiveThread(null);
+      setSmsView("threads");
     }
-  }, [threads, activeThread?.contactPhone]);
+  }, [threads, activeThread?.contactPhone, statusFilter, smsHasMore]);
 
   // Deep-link from a notification: /admin/communications?thread=<customerId>
   // opens that customer's SMS conversation. The sms_reply notification carries
@@ -2590,7 +2950,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         {recoveryWarning && <ActionFeedback error>{recoveryWarning}</ActionFeedback>}
         <fieldset disabled={sending} className="m-0 min-w-0 border-0 p-0">
         {" "}
-        {!customer && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
+        {/* Owner-only (ADMIN-BUG-R38): company-wide AI auto-reply switch. */}
+        {!customer && smsIsAdminRole && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
           <button
             type="button"
             onClick={toggleAiAutoReply}
@@ -2902,6 +3263,16 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 <Link2 size={16} strokeWidth={2.2} aria-hidden />
               )}
             </Button>{" "}
+            {/* Analyze photos — button + dialog live in AnalyzePhotosAction,
+                which renders nothing for a technician or a photo-less thread. */}
+            <AnalyzePhotosAction
+              active={active}
+              isAdmin={smsIsAdminRole}
+              activeThread={activeThread}
+              customerMessages={customerMessages}
+              customer={customer}
+              onCreated={(type, id) => navigate(`/admin/lawn-assessments?open=${type}:${id}`)}
+            />{" "}
             {/* Plus — attachment menu */}
             <div className="relative">
               {" "}
@@ -3174,6 +3545,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             onClick={() => {
               setSmsView("log");
               setActiveThread(null);
+              if (statusFilterRef.current === "unanswered") {
+                statusFilterRef.current = "all";
+                setStatusFilter("all");
+                void loadData(smsSearchRef.current, { statusFilter: "all" });
+              }
             }}
             className={cn(
               "px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors",
@@ -3238,7 +3614,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             <Select
               id="sms-thread-filter"
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => {
+                const nextFilter = e.target.value;
+                statusFilterRef.current = nextFilter;
+                setStatusFilter(nextFilter);
+                void loadData(smsSearchRef.current, { statusFilter: nextFilter });
+              }}
             >
               {[
                 { key: "all", label: "All", count: chipCounts.all },
@@ -3540,7 +3921,7 @@ export default function CommunicationsPageV2() {
         secondaryAriaLabel="Template kind"
         secondaryNavGridClassName="grid-cols-2"
       />}
-      {activeTab === "events" && <NotificationEventsTabV2 />}
+      {activeTab === "events" && <NotificationEventsTabV2 isAdminRole={isAdminRole} />}
       {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 />}

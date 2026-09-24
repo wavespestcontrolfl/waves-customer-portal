@@ -1,3 +1,4 @@
+const { DEFAULT_ACTIVITY_SCALE } = require('./pest-pressure/label');
 const MODELS = require('../config/models');
 const logger = require('./logger');
 const { savepointRead } = require('../utils/savepoint-read');
@@ -182,6 +183,11 @@ function buildPrompt(input = {}) {
     && input.pestActivityRating >= 0 && input.pestActivityRating <= 5
     ? input.pestActivityRating
     : null;
+  // Scale names from the active Pest Pressure labels when the caller has
+  // them, so the recap matches the report gauge.
+  const scale = Array.isArray(input.pestActivityScale) && input.pestActivityScale.length === 6
+    ? input.pestActivityScale
+    : DEFAULT_ACTIVITY_SCALE;
 
   return `Write one customer-facing SMS recap for a Waves Pest Control & Lawn Care service visit.
 
@@ -201,7 +207,7 @@ Inputs:
 Service type: ${serviceType}
 Visit outcome: ${outcome}
 Areas treated: ${areas.length ? areas.join(', ') : 'not specified'}
-Technician notes: ${notes || 'not specified'}${observations.length ? `\nTechnician observations (what was found on site — describe in plain language):\n${observations.map((o) => `- ${o}`).join('\n')}` : ''}${recommendations.length ? `\nTechnician recommendations (future advice — frame as recommended next steps, never as completed work):\n${recommendations.map((r) => `- ${r}`).join('\n')}` : ''}${rating != null ? `\nPest activity the technician observed, on a 0 (none) to 5 (severe) scale: ${rating} — reflect the level in plain reassuring language, never quote the number or the scale.` : ''}${products.length ? `\nSolutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):\n${productPromptLines(products)}` : ''}${String(input.visitContext || '').trim() ? `\nVisit context (season, weather, expectations — use to set accurate plain-language expectations; do not copy verbatim):\n${String(input.visitContext).trim()}` : ''}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
+Technician notes: ${notes || 'not specified'}${observations.length ? `\nTechnician observations (what was found on site — describe in plain language):\n${observations.map((o) => `- ${o}`).join('\n')}` : ''}${recommendations.length ? `\nTechnician recommendations (future advice — frame as recommended next steps, never as completed work):\n${recommendations.map((r) => `- ${r}`).join('\n')}` : ''}${rating != null ? `\nPest activity the technician observed, on a 0 (${scale[0]}) to 5 (${scale[5]}) scale: ${rating} (${scale[rating]}) — reflect the level in plain reassuring language, never quote the number or the scale.` : ''}${products.length ? `\nSolutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):\n${productPromptLines(products)}` : ''}${String(input.visitContext || '').trim() ? `\nVisit context (season, weather, expectations — use to set accurate plain-language expectations; do not copy verbatim):\n${String(input.visitContext).trim()}` : ''}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
 
 Return only the recap text.`;
 }

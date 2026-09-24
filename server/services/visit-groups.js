@@ -2598,8 +2598,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
         if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
         if (options.technicianId !== undefined) {
-          await assertAssignableTechnician(options.technicianId || null, { conn: t });
+          await assertAssignableTechnician(options.technicianId || null, { conn: t, date: newDateStr });
           patch.technician_id = options.technicianId || null;
+        } else if (dateOnly(visit.scheduled_date) !== newDateStr) {
+          // Retained-tech date repair (tech-out P1): no tech change was
+          // requested, but the parent is landing on a different date than it
+          // last carried — the tech it keeps may be marked out on that date.
+          await assertAssignableTechnician(visit.technician_id || null, { conn: t, date: newDateStr });
         }
         // Mirror the normal retarget's lifecycle reset (codex r43): a
         // repaired LIVE move (allowLive) or date change must not leave the
@@ -3193,8 +3198,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         patch.stop_seq = await nextStopSeq(t, newKey);
       }
       if (options.technicianId !== undefined) {
-        await assertAssignableTechnician(options.technicianId || null, { conn: t });
+        await assertAssignableTechnician(options.technicianId || null, { conn: t, date: newDateStr });
         patch.technician_id = options.technicianId || null;
+      } else if (newDateStr !== plan.oldDate) {
+        // Retained-tech date move (tech-out P1): the unit kept its current
+        // technician, but that tech may be marked out on the NEW date.
+        await assertAssignableTechnician(visit.technician_id || null, { conn: t, date: newDateStr });
       }
       if (plan.anyLive || newDateStr !== plan.oldDate) {
         // The members' lifecycle was rewound by the rebooker; the visit's

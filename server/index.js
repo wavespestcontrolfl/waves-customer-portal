@@ -646,6 +646,7 @@ app.use('/api/admin/referrals', adminReferralRoutes);
 app.use('/api/reviews', reviewsPublicRoutes);
 app.use('/api/admin/dispatch', adminDispatchRoutes);
 app.use('/api/admin/auto-dispatch', require('./routes/admin-auto-dispatch'));
+app.use('/api/admin/tech-out', require('./routes/admin-tech-out'));
 app.use('/api', require('./routes/visual-service-moments'));
 app.use('/api/admin/dev', require('./routes/admin-dev-tech-status'));
 app.use('/api/admin/dev', require('./routes/admin-dev-job-status'));

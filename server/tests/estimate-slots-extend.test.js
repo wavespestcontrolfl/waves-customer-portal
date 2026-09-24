@@ -493,7 +493,7 @@ describe('extendReservation revalidates technician and blackout', () => {
   const fn = src.slice(src.indexOf('async function extendReservation'), src.indexOf('module.exports'));
 
   test('the held technician must still be assignable, with the commit error code', () => {
-    expect(fn).toContain("await assertAssignableTechnician(row.technician_id, { conn: trx });");
+    expect(fn).toContain("await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate });");
     const at = fn.indexOf('assertAssignableTechnician');
     expect(fn.slice(at, at + 420)).toContain("err.code = 'SLOT_UNAVAILABLE';");
   });

@@ -15,10 +15,18 @@ const db = require('../models/db');
 
 router.use(adminAuthenticate);
 
+// ADMIN-BUG-R45: adminAuthenticate alone accepts any active technician
+// token. Every route below except GET /tech-context/:customerId (the one
+// tech-portal-facing read in this file, its own requireTechOrAdmin) now
+// carries requireAdmin explicitly — company revenue-per-customer averages,
+// the weekly analytics recompute (outside the cron's runExclusive lock) and
+// contradiction detection are owner-only, matching the equipment-financials
+// class of fix. No admin or tech client calls any of these routes today.
+
 // =========================================================================
 // POST /compute — run all analytics computations (weekly cron target)
 // =========================================================================
-router.post('/compute', async (req, res, next) => {
+router.post('/compute', requireAdmin, async (req, res, next) => {
   try {
     const results = await analytics.runAll();
     res.json({ success: true, results });
@@ -28,7 +36,7 @@ router.post('/compute', async (req, res, next) => {
 // =========================================================================
 // GET /efficacy — product efficacy leaderboard
 // =========================================================================
-router.get('/efficacy', async (req, res, next) => {
+router.get('/efficacy', requireAdmin, async (req, res, next) => {
   try {
     const { season, track, minApplications, sort } = req.query;
     let query = db('product_efficacy');
@@ -65,7 +73,7 @@ router.get('/efficacy', async (req, res, next) => {
 });
 
 // POST /efficacy/compute — recompute product efficacy
-router.post('/efficacy/compute', async (req, res, next) => {
+router.post('/efficacy/compute', requireAdmin, async (req, res, next) => {
   try {
     const result = await analytics.computeProductEfficacy();
     res.json({ success: true, ...result });
@@ -75,7 +83,7 @@ router.post('/efficacy/compute', async (req, res, next) => {
 // =========================================================================
 // GET /protocol — protocol performance by track
 // =========================================================================
-router.get('/protocol', async (req, res, next) => {
+router.get('/protocol', requireAdmin, async (req, res, next) => {
   try {
     const tracks = await db('protocol_performance').orderBy('protocol_score', 'desc');
     const parsed = tracks.map(t => ({
@@ -88,7 +96,7 @@ router.get('/protocol', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/protocol/:track', async (req, res, next) => {
+router.get('/protocol/:track', requireAdmin, async (req, res, next) => {
   try {
     const track = await db('protocol_performance').where({ grass_track: req.params.track }).first();
     if (!track) return res.status(404).json({ error: 'Track not found' });
@@ -115,7 +123,7 @@ router.get('/protocol/:track', async (req, res, next) => {
 // =========================================================================
 // GET /completion — assessment completion rates
 // =========================================================================
-router.get('/completion', async (req, res, next) => {
+router.get('/completion', requireAdmin, async (req, res, next) => {
   try {
     const { from, to, technicianId } = req.query;
     let query = db('assessment_completion_tracking').orderBy('service_date', 'desc');
@@ -147,7 +155,7 @@ router.get('/completion', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/completion/compute', async (req, res, next) => {
+router.post('/completion/compute', requireAdmin, async (req, res, next) => {
   try {
     const { from, to } = req.body;
     const result = await analytics.computeCompletionRates(from, to);
@@ -158,7 +166,7 @@ router.post('/completion/compute', async (req, res, next) => {
 // =========================================================================
 // GET /roi — ROI calculator
 // =========================================================================
-router.get('/roi', async (req, res, next) => {
+router.get('/roi', requireAdmin, async (req, res, next) => {
   try {
     const roi = await analytics.computeROI();
     if (roi.assessedRetention && roi.nonAssessedRetention) {
@@ -171,7 +179,7 @@ router.get('/roi', async (req, res, next) => {
 // =========================================================================
 // GET /calibration — tech calibration summary
 // =========================================================================
-router.get('/calibration', async (req, res, next) => {
+router.get('/calibration', requireAdmin, async (req, res, next) => {
   try {
     const { technicianId } = req.query;
     const summary = await analytics.getTechCalibrationSummary(technicianId || null);
@@ -182,7 +190,7 @@ router.get('/calibration', async (req, res, next) => {
 // =========================================================================
 // GET /contradictions — knowledge contradictions
 // =========================================================================
-router.get('/contradictions', async (req, res, next) => {
+router.get('/contradictions', requireAdmin, async (req, res, next) => {
   try {
     const { status } = req.query;
     let query = db('knowledge_contradictions').orderBy('severity', 'desc').orderBy('created_at', 'desc');
@@ -194,7 +202,7 @@ router.get('/contradictions', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/contradictions/detect', async (req, res, next) => {
+router.post('/contradictions/detect', requireAdmin, async (req, res, next) => {
   try {
     const result = await analytics.detectContradictions();
     // A run that died mid-scan (including a failed page re-gate after a
@@ -235,7 +243,7 @@ router.patch('/contradictions/:id', requireAdmin, async (req, res, next) => {
 // =========================================================================
 // GET /benchmarks — neighborhood benchmarks
 // =========================================================================
-router.get('/benchmarks', async (req, res, next) => {
+router.get('/benchmarks', requireAdmin, async (req, res, next) => {
   try {
     const benchmarks = await db('neighborhood_benchmarks')
       .where('customer_count', '>=', 3)

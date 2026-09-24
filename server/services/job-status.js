@@ -1082,9 +1082,24 @@ function evaluateTerminalTransition(fromStatus, toStatus) {
   return { conflict: true, status: from };
 }
 
+// Target statuses the two bare status routes (admin-schedule PUT /:id/status,
+// admin-dispatch PUT /:serviceId/status) accept from ANY caller
+// (r1-sched-routes-2; shared here after the pre-push fallback audit on PR
+// #4673 found the dispatch route without it): 'pending' and 'rescheduled'
+// are not among them — un-confirming or hand-stamping a reschedule outside
+// the reschedule engine's side effects is not a supported transition on a
+// bare status route (self-serve/staff reschedule always goes through
+// SmartRebooker), and neither is any value outside the scheduled_services
+// status enum. 'completed' / 'cancelled' / 'no_show' pass the allow-list so
+// each route's own explicit guard can redirect or gate them.
+const STATUS_ROUTE_ALLOWED_TARGETS = new Set([
+  'confirmed', 'en_route', 'on_site', 'skipped', 'no_show', 'cancelled', 'completed',
+]);
+
 module.exports = {
   nextClaimTs,
   transitionJobStatus,
+  STATUS_ROUTE_ALLOWED_TARGETS,
   evaluateTerminalTransition,
   CUSTOMER_EVENT,
   ADMIN_EVENT,

@@ -31,11 +31,37 @@ const OP_DONE = {
 };
 
 const ORIGINAL_ENV = { ...process.env };
-beforeEach(() => { process.env.GEMINI_API_KEY = 'test-key'; });
+// The chain-mechanics tests below opt into the watermark override explicitly:
+// they test Veo plumbing, not the policy (which has its own describe).
+beforeEach(() => { process.env.GEMINI_API_KEY = 'test-key'; process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = 'true'; });
 afterEach(() => {
   jest.clearAllMocks();
-  if (ORIGINAL_ENV.GEMINI_API_KEY === undefined) delete process.env.GEMINI_API_KEY;
-  else process.env.GEMINI_API_KEY = ORIGINAL_ENV.GEMINI_API_KEY;
+  for (const k of ['GEMINI_API_KEY', 'ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS']) {
+    if (ORIGINAL_ENV[k] === undefined) delete process.env[k];
+    else process.env[k] = ORIGINAL_ENV[k];
+  }
+});
+
+describe('pixel-watermark refusal (owner ruling 2026-09-24: Veo output is SynthID-marked)', () => {
+  test('refuses before any request or key check unless the shared override is set', async () => {
+    delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
+    delete process.env.GEMINI_API_KEY;
+    const fetchFn = jest.fn();
+    await expect(VideoGenerator.generate({ prompt: 'x', fetchFn })).rejects.toMatchObject({ code: 'PIXEL_WATERMARKED_PROVIDER', message: expect.stringMatching(/synthid/i) });
+    expect(fetchFn).not.toHaveBeenCalled();
+    process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = '1'; // must be the literal 'true'
+    await expect(VideoGenerator.generate({ prompt: 'x', fetchFn })).rejects.toMatchObject({ code: 'PIXEL_WATERMARKED_PROVIDER' });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+  test('the explicit allowPixelWatermark option reaches the provider path (falls to the key check)', async () => {
+    delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
+    delete process.env.GEMINI_API_KEY;
+    await expect(VideoGenerator.generate({ prompt: 'x', fetchFn: jest.fn(), allowPixelWatermark: true })).rejects.toThrow(/GEMINI_API_KEY not set/);
+  });
+  test('every model in the chain is a Veo model (all SynthID-marked)', () => {
+    expect(VideoGenerator._internals.PIXEL_WATERMARK).toBe('synthid');
+    for (const m of VideoGenerator._internals.VIDEO_CHAIN) expect(m).toMatch(/^veo/);
+  });
 });
 
 describe('internals', () => {

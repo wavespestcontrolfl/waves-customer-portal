@@ -1629,8 +1629,13 @@ async function pricingText(input = {}) {
     // would silently resolve to enhanced and be spoken as the caller's ask.
     const lawnTrack = ['st_augustine', 'bermuda', 'zoysia', 'bahia'].includes(String(input.lawn_track || '').toLowerCase())
       ? String(input.lawn_track).toLowerCase() : 'st_augustine';
-    const lawnTier = ['standard', 'enhanced', 'premium'].includes(String(input.lawn_tier || '').toLowerCase())
-      ? String(input.lawn_tier).toLowerCase() : 'standard';
+    // 'standard' (6x/bi-monthly) is retired for new sales (owner directive
+    // 2026-09-24) — dropped from the accepted enum, same treatment as
+    // 'basic' above: Sandy can never quote or default to it, and a stray
+    // 'standard' from a stale prompt/model falls to the enhanced default
+    // like any other unrecognized value.
+    const lawnTier = ['enhanced', 'premium'].includes(String(input.lawn_tier || '').toLowerCase())
+      ? String(input.lawn_tier).toLowerCase() : 'enhanced';
     engineInput.services.lawn = { track: lawnTrack, tier: lawnTier };
   } else if (service === 'mosquito') {
     // Validated like pest frequency: the schema enum is advice to the model,

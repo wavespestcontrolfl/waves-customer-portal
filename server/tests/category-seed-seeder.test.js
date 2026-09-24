@@ -130,6 +130,32 @@ describe('category-seed-seeder: manifest validation', () => {
       .toThrow(/set city to match/);
     expect(() => seeder.loadManifest(writeManifest([VALID_BRIEF]))).not.toThrow();
   });
+
+  test('accepts only the explicit commercial-pest service contract with a published commercial city hub', () => {
+    const commercial = {
+      ...VALID_BRIEF,
+      id: 'C1',
+      slug: '/pest-control/commercial-observation-log/',
+      service: 'commercial-pest',
+      hub_link: '/commercial-pest-control-bradenton-fl/',
+      byline: 'adam',
+    };
+    expect(() => seeder.loadManifest(writeManifest([commercial]))).not.toThrow();
+    expect(() => seeder.loadManifest(writeManifest([{ ...commercial, service: 'pest' }])))
+      .toThrow(/unsupported service override/);
+    expect(() => seeder.loadManifest(writeManifest([{ ...commercial, hub_link: '/commercial-pest-control-fort-myers-fl/' }])))
+      .toThrow(/published \/commercial-pest-control-\{served-city\}-fl\/ hub_link/);
+    expect(() => seeder.loadManifest(writeManifest([{ ...commercial, slug: '/mosquito/commercial-observation-log/' }])))
+      .toThrow(/requires a \/pest-control\/ blog slug/);
+    const missingHub = { ...commercial };
+    delete missingHub.hub_link;
+    expect(() => seeder.loadManifest(writeManifest([missingHub])))
+      .toThrow(/requires a published .* hub_link/);
+    const hubWithoutService = { ...commercial };
+    delete hubWithoutService.service;
+    expect(() => seeder.loadManifest(writeManifest([hubWithoutService])))
+      .toThrow(/hub_link is supported only with service "commercial-pest"/);
+  });
 });
 
 describe('category-seed-seeder: rows', () => {
@@ -199,6 +225,7 @@ describe('category-seed-seeder: overlay', () => {
     expect(overlay.schema_types).toContain('BreadcrumbList');
     expect(overlay.operator_brief.category_seed).toBe(true);
     expect(overlay.operator_brief.slug).toBe(brief.slug);
+    expect(overlay.operator_brief).not.toHaveProperty('hub_link');
   });
 
   test('image_avoid flows into operator_brief as trimmed strings (the publisher feeds it to every image prompt); absent → []', () => {
@@ -430,5 +457,76 @@ describe('category-seed-seeder: affiliate_products (pilot briefs)', () => {
     expect(new Set(manifest.briefs.map((b) => b.slug)).size).toBe(6);
     // Playbook composition: 2 prevention (pest exclusion), 2 measurement, 2 field-tool — six distinct products across the set.
     expect(new Set(manifest.briefs.flatMap((b) => b.affiliate_products.map((p) => p.product_id))).size).toBe(6);
+  });
+});
+
+
+describe('regional service-diversity manifest', () => {
+  const manifest = seeder.loadManifest(path.join(__dirname, '../data/service-diversity-briefs-20260924.json'));
+  const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
+  const { checkHubLinkPresent } = require('../services/content/content-quality-gate')._internals;
+
+  function composeBrief(id) {
+    const payload = manifest.briefs.find((brief) => brief.id === id);
+    const opportunity = seeder._internals.rowForBrief(payload, manifest);
+    return new ContentBriefBuilder()._composeBrief({
+      opportunity: { ...opportunity, id: `opp-${id}` },
+      signals: { serp_profile: null, customer_signal: null, conversion_feedback: null },
+      decision: {
+        action_type: 'new_supporting_blog',
+        page_type: 'supporting-blog',
+        final_score: opportunity.score,
+        score_breakdown: opportunity.score_breakdown,
+        human_review_required: false,
+        human_review_reason: null,
+        router_notes: null,
+      },
+      existingBriefVersions: 0,
+    });
+  }
+
+  test.each([
+    ['BG01', '/tree-and-shrub-care-bradenton-fl/'],
+    ['BG03', '/lawn-care-bradenton-fl/'],
+    ['BG04', '/tree-and-shrub-care-bradenton-fl/'],
+  ])('%s composes a real served-city service link and passes hub_link_present', (id, route) => {
+    const brief = composeBrief(id);
+    expect(brief.city).toBeNull();
+    expect(brief.internal_links_to_add).toContain(route);
+    const writerBody = brief.internal_links_to_add.map((href) => `[required link](${href})`).join('\n');
+    expect(checkHubLinkPresent({ body: writerBody }, brief)).toEqual({ ok: true });
+    expect(brief.voice_constraints.operator_brief.binding_instructions.join(' ')).toContain('Southwest-Florida-regional');
+  });
+
+  test('BG06 composes through the commercial service contract without residential pest links', () => {
+    const brief = composeBrief('BG06');
+    const commercialHub = '/commercial-pest-control-bradenton-fl/';
+    expect(brief.service).toBe('commercial-pest');
+    expect(brief.internal_links_to_add).toEqual([commercialHub, '/contact/']);
+    expect(brief.voice_constraints.operator_brief.hub_link).toBe(commercialHub);
+    const writerBody = brief.internal_links_to_add.map((href) => `[required link](${href})`).join('\n');
+    expect(checkHubLinkPresent({ body: writerBody }, brief)).toEqual({ ok: true });
+  });
+
+  test('only the lawn brief carries the Augusta turf-care byline emphasis', () => {
+    for (const id of ['BG01', 'BG02', 'BG04', 'BG05', 'BG06']) {
+      const byline = composeBrief(id).voice_constraints.operator_brief.byline;
+      expect(byline.key).toBe('adam');
+      expect(byline.emphasis).toBeNull();
+    }
+    const lawnByline = composeBrief('BG03').voice_constraints.operator_brief.byline;
+    expect(lawnByline.key).toBe('adam-augusta');
+    expect(lawnByline.emphasis).toMatch(/Augusta National/);
+  });
+
+  test.each(['BG01', 'BG02', 'BG03'])('%s carries its own pinned listicle architecture', (id) => {
+    const payload = manifest.briefs.find((brief) => brief.id === id);
+    const opportunity = seeder._internals.rowForBrief(payload, manifest);
+    const overlay = seeder.buildCategoryOverlay({ opportunity, pageType: 'supporting-blog' });
+    const plan = overlay.required_sections.join(' ');
+    expect(plan).toContain('first 60 words naming every list item');
+    expect(plan).toContain('numbered H2 count');
+    expect(plan).toContain('Last updated: [Month Year]');
+    expect(plan).toContain('How we put this list together');
   });
 });

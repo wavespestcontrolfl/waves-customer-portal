@@ -110,20 +110,20 @@ function stripServiceSuffixes(raw) {
     .trim();
 }
 
+// Foam labels pass through UNMODIFIED — deliberately no SERVICE_TYPE_MAP
+// entry: collapsing them would drop the cadence the schedule shows
+// ("Recurring Termite Foam Service (Quarterly)"), and the 2026-08-25
+// renamed forms carry a termite token that would otherwise collapse to
+// the generic "Termite Service" (codex #3484 P2). Same token family as
+// detectServiceCategory's foamTermiteToken, plus the renamed forms.
+const FOAM_LABEL_RE = /foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*(?:termite[\s_-]*)?foam|foam[\s_-]*recurring|termite[\s_-]*foam|termidor[\s_-]*foam/i;
+
 function normalizeServiceType(raw) {
   if (!raw) return 'General Service';
 
   const cleaned = stripServiceSuffixes(raw);
 
-  // Foam labels pass through UNMODIFIED — deliberately no SERVICE_TYPE_MAP
-  // entry: collapsing them would drop the cadence the schedule shows
-  // ("Recurring Termite Foam Service (Quarterly)"), and the 2026-08-25
-  // renamed forms carry a termite token that would otherwise collapse to
-  // the generic "Termite Service" (codex #3484 P2). Same token family as
-  // detectServiceCategory's foamTermiteToken, plus the renamed forms.
-  if (/foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*(?:termite[\s_-]*)?foam|foam[\s_-]*recurring|termite[\s_-]*foam|termidor[\s_-]*foam/i.test(cleaned)) {
-    return cleaned;
-  }
+  if (FOAM_LABEL_RE.test(cleaned)) return cleaned;
 
   // A real catalog identity passes through verbatim (case-normalized). The
   // regex map below exists for legacy/raw imports and free-text labels; on a
@@ -140,6 +140,67 @@ function normalizeServiceType(raw) {
 
   // If nothing matched, return the cleaned string (capitalized)
   return cleaned || 'General Service';
+}
+
+/**
+ * The FIXED public label a raw service_type maps to under SERVICE_TYPE_MAP,
+ * or null when nothing matched. Deliberately narrower than
+ * normalizeServiceType: NO catalog branch and NO foam passthrough, because
+ * both of those can return arbitrary text a display surface must never show
+ * (2026-09-25 round-5 P1 fix). canonicalCatalogName is populated from
+ * historical scheduled_services labels — a hand-edited free-text label like
+ * "Dog In Home Call Before Arrival" can enter that cache and would then pass
+ * through verbatim; the foam branch returns any larger string merely
+ * CONTAINING a foam token ("Foam Drill Customer Complained Reservice"). A
+ * display surface that must only ever show one of a finite set of known
+ * public names (server/services/review-reply/grounding.js's
+ * servicesPerformed) calls this instead of normalizeServiceType.
+ */
+function mappedServiceLabel(raw) {
+  if (!raw) return null;
+  const cleaned = stripServiceSuffixes(raw);
+  if (!cleaned) return null;
+  // Tree & shrub labels that also carry a lawn-program word ("Tree & Shrub
+  // Fertilization", "Palm Weed & Feed") would otherwise hit the generic
+  // /fertil/ lawn mapping first and be published as "Lawn Fertilization" —
+  // a service the customer never had (2026-09-24 round-6 P1). Same family
+  // rule as detectServiceCategory: only the tree & shrub mappings apply, and
+  // the family label is the fallback.
+  //
+  // Inspection-only labels ("Bee / Yellowjacket Inspection", "Tree & Shrub
+  // Inspection") are checked first the same way: only inspection/assessment
+  // mappings apply, so an inspection never publishes as a removal or
+  // treatment (round-8 P1).
+  const family = matchesAtWordStart(INSPECTION_LABEL_RE, cleaned) ? INSPECTION_FAMILY
+    : detectServiceCategory(cleaned) === 'tree_shrub' && TREE_SHRUB_WORD_RE.test(cleaned) ? TREE_SHRUB_FAMILY : null;
+  for (const mapping of SERVICE_TYPE_MAP) {
+    if (family && !family.types.has(mapping.type)) continue;
+    if (matchesAtWordStart(mapping.match, cleaned)) return mapping.type;
+  }
+  return family ? family.fallback : null;
+}
+// detectServiceCategory's substring tokens read "Palmetto Roach Knockdown"
+// as palm care (round-10 P1); the public-label family needs a whole word.
+const TREE_SHRUB_WORD_RE = /\b(?:trees?|shrubs?|ornamentals?|palms?|arborjet)\b/i;
+const INSPECTION_LABEL_RE = /inspect|assessment|estimat|consultation/i;
+const INSPECTION_FAMILY = { types: new Set(['WDO Inspection', 'Termite Inspection', 'Waves Assessment', 'Inspection']), fallback: 'Inspection' };
+const TREE_SHRUB_FAMILY = { types: new Set(['Tree & Shrub Care', 'Palm Injection', 'Arborjet Treatment']), fallback: 'Tree & Shrub Care' };
+// The legacy map patterns are prefix stems ("fertil", "aerat"), not
+// word-bounded: /ant\s*treatment/ matches inside "Plant Treatment" (round-7
+// P1), /tent/ inside "Tentative" and /advance/ inside "Advanced" (round-9
+// P1). For a public label a match must begin a word AND end one — either on
+// a word boundary or on one of these inflection endings of the stem
+// ("Fertil|ization", "Aerat|ion", "Roach|es", "Treat|ment").
+const STEM_ENDINGS_RE = /^(?:s|es|e|ed|er|ers|ing|ping|ion|ions|ation|ations|ization|izations|izer|izers|ment|ments)$/i;
+function matchesAtWordStart(re, text) {
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  for (const m of text.matchAll(g)) {
+    if (m[0].length === 0) continue;
+    if (m.index > 0 && /[a-z0-9]/i.test(text[m.index - 1])) continue;
+    const tail = text.slice(m.index + m[0].length).match(/^[a-z0-9]*/i)[0];
+    if (!tail || STEM_ENDINGS_RE.test(tail)) return true;
+  }
+  return false;
 }
 
 /**
@@ -254,6 +315,7 @@ function safeDateLabel(d) {
 
 module.exports = {
   normalizeServiceType,
+  mappedServiceLabel,
   stripServiceSuffixes,
   detectServiceCategory,
   serviceIcon,

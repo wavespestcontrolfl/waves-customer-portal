@@ -20,6 +20,8 @@
  *   GATE_CALL_RESEARCH_MINER=true (nightly voice-of-customer call-research mining)
  *   GATE_SHADOW_JUDGE=true      (nightly shadow-draft vs human-reply scoring)
  *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
+ *   GATE_SMS_GRATITUDE_REPLIES=true (allow the delayed gratitude-only auto-reply lane; independent of GATE_SMS_AUTO_SEND)
+ *   SMS_GRATITUDE_ACTIVATED_AT=<ISO timestamp with offset> (strict live-webhook cutoff for gratitude replies)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
@@ -112,6 +114,7 @@ const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
   // Admin-only fixed test pair for one explicitly configured customer; opt-in everywhere.
+  editorialEvidence: gateEnvValue('GATE_EDITORIAL_EVIDENCE'),
   customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
   // Customer iOS icon count; opt-in everywhere, with request-time route checks.
   customerNativeBadges: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES'),
@@ -899,6 +902,13 @@ const gates = {
   // intents never auto-send — the gate only unlocks the path, the data still
   // has to earn each intent.
   smsAutoSend: process.env.GATE_SMS_AUTO_SEND === 'true',
+
+  // Narrow gratitude-only autonomous replies. This is deliberately separate
+  // from the general Phase-E gate: enabling either switch cannot open the
+  // other lane. The activation timestamp is checked at call/send time by the
+  // executor so an old shadow draft or replay can never ride a later flip.
+  // Customer-facing communication: explicit opt-in in every environment.
+  smsGratitudeReplies: process.env.GATE_SMS_GRATITUDE_REPLIES === 'true',
 
   // SMS Sealed Eval (brand-voice loop measurement) — a locked exam for the
   // house-voice drafter: frozen (inbound, day-of facts, human reply) items
@@ -2750,6 +2760,13 @@ const gates = {
   // the canonical CALL-TIME reader is leadInspectionLinkLive() below, same
   // discountStackingLive() convention, so a flip needs no redeploy.
   leadInspectionLink: process.env.GATE_LEAD_INSPECTION_LINK === 'true',
+  // "Tech out today": mark a technician absent for a date, redistribute
+  // their stops onto another eligible tech at the same promised arrival
+  // window, park the rest as ranked dispatch alerts. Sends no customer
+  // communication. This entry is for logGateStatus only; consumers
+  // (services/tech-out.js, routes/admin-tech-out.js) read gateEnvValue at
+  // CALL time.
+  techOutRedistribute: gateEnvValue('GATE_TECH_OUT_REDISTRIBUTE'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

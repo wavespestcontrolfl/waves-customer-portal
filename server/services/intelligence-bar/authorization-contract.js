@@ -234,6 +234,15 @@ const CUSTOMER_UPDATE_TOOL_NAMES = new Set(['update_customer', 'bulk_update_cust
 // it carries the same derived-effect disclosure.
 const ADDRESS_UPDATE_KEYS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 
+// One entry per excluded terminal stop, as assign_technician /
+// swap_tech_assignments report them (`{ id, status, customer? }`): the card
+// names WHICH stops stay behind, never just how many (Codex round 3 P1).
+function describeSkippedTerminal(skipped) {
+  return skipped
+    .map((st) => `${st.customer ? `${st.customer} ` : ''}#${st.id} (${st.status || 'terminal'})`)
+    .join(', ');
+}
+
 // Derived writes the lead-status executors perform BESIDE the status column
 // (GH r10 P2): the transition mirrors onto the lead's ad_service_attribution
 // funnel row via the monotonic bridge (attribution reporting moves), and a
@@ -477,6 +486,17 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // (grouped_visit_id), so joining/leaving a group mid-pending is drift,
   // and the executor re-asserts it pre-lock and under the tech-day locks.
   if (toolName === 'assign_technician' && Array.isArray(preview?.stops)) {
+    // Terminal exclusions (Codex round 1 P1): assignTechnician's preview
+    // already drops completed/cancelled/skipped/no_show stops out of
+    // `preview.stops` and reports them separately as `skipped_terminal` —
+    // without this, the operator-facing card never said so, even though
+    // the model-facing preview text did.
+    // Named, not counted (Codex round 3 P1): the operator approves leaving
+    // these exact stops behind, so the card lists each one — the same
+    // entries the fingerprint binds.
+    if (Array.isArray(preview?.skipped_terminal) && preview.skipped_terminal.length) {
+      push('operational', `${preview.skipped_terminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be reassigned — ${describeSkippedTerminal(preview.skipped_terminal)}`);
+    }
     const grouped = preview.stops.filter((st) => st && st.grouped_visit_id);
     if (grouped.length) {
       const who = grouped.map((st) => String(st.customer || st.id)).join(', ');
@@ -497,6 +517,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // grouped_visit_id, which also binds the fingerprint and the executor's
   // under-lock membership compare.
   if (toolName === 'swap_tech_assignments' && preview?.stops && typeof preview.stops === 'object' && !Array.isArray(preview.stops)) {
+    // Terminal exclusions (Codex round 1 P1): swapTechAssignments now
+    // collects the terminal rows it excludes from both techs' swappable
+    // sets and reports them as `skipped_terminal` — disclose them the same
+    // way assign_technician's card does.
+    if (Array.isArray(preview?.skipped_terminal) && preview.skipped_terminal.length) {
+      push('operational', `${preview.skipped_terminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be swapped — ${describeSkippedTerminal(preview.skipped_terminal)}`);
+    }
     const allSwap = Object.values(preview.stops).flat().filter(Boolean);
     const grouped = allSwap.filter((st) => st.grouped_visit_id);
     if (grouped.length) {
@@ -627,6 +654,30 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     }
     if (upd.pipeline_stage) {
       push('customer', `Stage → ${upd.pipeline_stage} also stamps lifecycle fields (active, member_since, churned_at/churn_reason, pipeline_stage_changed_at) derived from the customer's stage at commit`);
+    }
+    // Churn billing disarm (GitHub Codex #4684 r4, widened Codex #4715
+    // r1/r3): a stage move to 'churned' runs churnGuardOrRepair
+    // (customer-lifecycle-guard.js) at commit — REFUSE (bulk: skip and
+    // report) when findLiveFutureVisit still finds a future OR in-progress
+    // (en_route/on_site) visit OR an ongoing recurring-plan anchor with no
+    // seeded next occurrence, an active prepay term, or an unpaid
+    // annual-prepay invoice is still on file; otherwise wind billing down
+    // through cancellation-processor.js's disarmCustomerBillingFields +
+    // disarmPaymentRails. The generic stage line above never named this —
+    // the operator was confirming a smaller action than the one committed.
+    // Codex #4715 r3 P2: churnGuardOrRepair skips those live-visit/term/
+    // invoice checks entirely (churnGuardApplies) on a REPEAT save of a row
+    // ALREADY churned with customer-level billing ALREADY off — it only
+    // repairs the independent payment rails (payment_methods.autopay_enabled
+    // / payments.next_retry_at) unconditionally, never refusing. The card
+    // must not promise a re-check that does not happen on that row.
+    if (upd.pipeline_stage === 'churned') {
+      const n = toolName === 'bulk_update_customers' ? (params?.customer_ids || []).length : 1;
+      const prefix = n > 1 ? `For each of ${n} customers: ` : '';
+      const refusalClause = toolName === 'bulk_update_customers'
+        ? 'skipped at commit and reported back (not updated), never silently'
+        : 'REFUSED at commit';
+      push('billing', `${prefix}Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — ${refusalClause} if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file; an already-churned customer whose billing is already off is not re-checked — only saved-method Auto Pay and armed retries are repaired`);
     }
   }
   // Billing-lane stamp (#3140): the executors stamp billing_mode

@@ -40,15 +40,6 @@ const greeting = () => {
   return "Good evening";
 };
 
-// Human-friendly "time since last refresh" label for the header control.
-function relativeTime(ts) {
-  if (ts == null) return "never";
-  const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 30) return "just now";
-  if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}m ago`;
-  return `${Math.floor(s / 3600)}h ago`;
-}
-
 function adminFirstName() {
   try {
     if (typeof localStorage === "undefined") return "there";
@@ -85,7 +76,7 @@ export default function DashboardPageV2() {
   // Custom lookback: a START date through today, driving Core KPIs + attribution
   // when period==='custom'. End is always today, so every metric stays valid.
   const [customRange, setCustomRange] = useState(null); // { from } | null
-  // Recomputed as the dashboard's freshness clock ticks, so an overnight session
+  // Recomputed as the dashboard clock ticks, so an overnight session
   // gets the new ET day as the date-input max without a reload.
   const todayISO = useMemo(
     () => new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }),
@@ -101,7 +92,7 @@ export default function DashboardPageV2() {
   }, []);
   const periodQS = period === "custom" && customRange
     ? `period=custom&from=${customRange.from}` : `period=${period}`;
-  const { values, errors, pending, lastUpdated, refreshing, refresh } = useDashboardData(
+  const { values, errors, pending, refreshing, refresh } = useDashboardData(
     isMobile ? mobileTab : "all", periodQS,
   );
   const {
@@ -119,7 +110,6 @@ export default function DashboardPageV2() {
   const attributionReady = attributionKeys.every((key) => values[key]);
   const attributionLoading = !attributionReady && attributionKeys.some((key) => pending[key] && !values[key]);
   const attributionError = attributionReady ? null : attributionKeys.map((key) => errors[key]).find(Boolean);
-  const hasErrors = Object.values(errors).some(Boolean);
   const forbidden = Object.values(errors).some(isForbiddenError);
   const rateLimited = Object.values(errors).some(isRateLimitError);
   const retryFeed = rateLimited || refreshing ? undefined : refresh;
@@ -195,9 +185,6 @@ export default function DashboardPageV2() {
       <DashboardJumpNav
         title={`${greeting()}, ${firstName}`}
         dateLabel={`${todayLabel} · ${timeLabel}`}
-        updatedLabel={`${hasErrors ? "Some data unavailable · " : ""}Updated ${relativeTime(lastUpdated)}`}
-        onRefresh={refresh}
-        refreshing={refreshing}
         sections={SECTIONS}
         period={period}
         customRange={customRange}
@@ -210,7 +197,7 @@ export default function DashboardPageV2() {
       />
 
       {rateLimited && <ActionFeedback error className="mb-4">
-        Too many requests. Wait a few seconds, then use Refresh.
+        Too many requests. The dashboard will retry automatically.
       </ActionFeedback>}
 
       {/* Alerts stay the first dashboard content, even with AI charts pinned. */}

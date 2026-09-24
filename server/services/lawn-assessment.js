@@ -1,9 +1,10 @@
 /**
  * Lawn Health Assessment Service
  *
- * Dual-vision analysis using Claude and Gemini to score lawn health
- * from photos. Averages results, flags divergences, applies seasonal
- * normalization, and tracks baselines over time.
+ * Gemini-only vision scoring of lawn health from photos (owner ruling
+ * 2026-09-24: no more Claude+Gemini averaging). Claude runs ONLY as a
+ * fallback when Gemini returns nothing. Applies seasonal normalization
+ * and tracks baselines over time.
  */
 
 const db = require('../models/db');
@@ -27,7 +28,8 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 // Gemini vision scorer model — live default is the registry's best; override
 // via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. On any miss (HTTP/parse/empty)
 // callGeminiVision retries the registry's GEMINI_VISION_FALLBACK when it names
-// a different model (by default it does not). Fan-out/averaging is unchanged.
+// a different model (by default it does not). Gemini-only per owner ruling
+// 2026-09-24 — Claude runs only when Gemini returns nothing (see analyzePhoto).
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
@@ -142,6 +144,56 @@ function strictBool(v) {
   return v === true || String(v).trim().toLowerCase() === 'true';
 }
 
+const VISION_SEVERITY_VALUES = new Set(['none', 'minor', 'moderate', 'severe']);
+const VISION_THATCH_VALUES = new Set(['low', 'moderate', 'high']);
+const VISION_GRASS_TYPE_VALUES = new Set(['st_augustine', 'bermuda', 'zoysia', 'bahia', 'mixed']);
+
+// Codex P1 (2026-09-24): a syntactically valid response with a missing or
+// malformed schema (e.g. `{}`, or a turf_density outside 0-100) is still a
+// truthy object — without this check it reads as a real score set, skips the
+// Claude fallback, and lets mapToDisplayScores turn the missing fields into
+// false "zero density" stress findings. Validates the VISION_PROMPT contract
+// field-by-field; called AFTER normalizeDetectedGrass / normalizeVisionScores
+// have normalized grass_type and the formatting noise on the parsed object.
+// Models sometimes quote numbers ("82") or capitalize enums ("None"). Coerce
+// those in place first so the validator rejects only genuinely missing or
+// out-of-range fields, not formatting noise.
+function normalizeVisionScores(parsed) {
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  for (const field of ['turf_density', 'weed_coverage', 'color_health']) {
+    const v = parsed[field];
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) parsed[field] = Number(v);
+  }
+  for (const field of ['fungal_activity', 'insect_damage', 'drought_stress', 'mechanical_damage', 'thatch_visibility']) {
+    if (typeof parsed[field] === 'string') parsed[field] = parsed[field].trim().toLowerCase();
+  }
+  // Only an explicit true/false (or its string form) becomes a boolean. A
+  // missing or null flag stays as-is so the validator rejects it — strictBool
+  // would turn it into false and hide an overwatering finding (Codex r2 P1).
+  if (typeof parsed.overwatering_signal === 'string') {
+    const lower = parsed.overwatering_signal.trim().toLowerCase();
+    if (lower === 'true' || lower === 'false') parsed.overwatering_signal = strictBool(lower);
+  }
+  return parsed;
+}
+
+function isValidVisionScores(parsed) {
+  if (!parsed || typeof parsed !== 'object') return false;
+  const numberInRange = (v, min, max) => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
+  if (!numberInRange(parsed.turf_density, 0, 100)) return false;
+  if (!numberInRange(parsed.weed_coverage, 0, 100)) return false;
+  if (!numberInRange(parsed.color_health, 1, 10)) return false;
+  for (const field of ['fungal_activity', 'insect_damage', 'drought_stress', 'mechanical_damage']) {
+    if (!VISION_SEVERITY_VALUES.has(parsed[field])) return false;
+  }
+  if (!VISION_THATCH_VALUES.has(parsed.thatch_visibility)) return false;
+  // normalizeDetectedGrass already collapses "unknown"/unrecognized to null.
+  if (parsed.grass_type !== null && !VISION_GRASS_TYPE_VALUES.has(parsed.grass_type)) return false;
+  if (typeof parsed.overwatering_signal !== 'boolean') return false;
+  if (typeof parsed.observations !== 'string') return false;
+  return true;
+}
+
 async function callClaudeVision(base64Image, mimeType, context = {}) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
 
@@ -162,8 +214,12 @@ async function callClaudeVision(base64Image, mimeType, context = {}) {
     const text = anthropicText(response);
     if (!text) { logger.warn('[lawn-assessment] Claude returned empty content'); return null; }
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-    parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
     parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
+    normalizeVisionScores(parsed);
+    if (!isValidVisionScores(parsed)) {
+      logger.warn('[lawn-assessment] Claude vision response failed schema validation');
+      return null;
+    }
     return parsed;
   } catch (err) {
     logger.error(`Lawn assessment Claude vision failed: ${err.message}`);
@@ -200,8 +256,12 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
   if (!text) return null;
 
   const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-  parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
   parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
+  normalizeVisionScores(parsed);
+  if (!isValidVisionScores(parsed)) {
+    logger.warn(`Lawn assessment Gemini vision response failed schema validation (${model})`);
+    return null;
+  }
   return parsed;
 }
 
@@ -228,17 +288,17 @@ async function callGeminiVision(base64Image, mimeType, context = {}) {
 // ── Core service methods ────────────────────────────────────────
 
 /**
- * Analyze a single photo with both Claude and Gemini vision in parallel.
- * Returns { claude, gemini, composite, divergenceFlags }
+ * Analyze a single photo with Gemini vision — Gemini-only per owner ruling
+ * 2026-09-24 (no more Claude+Gemini averaging). Claude runs ONLY as a
+ * fallback when Gemini returns nothing (empty/error), matching the
+ * waves-llm skill's cross-provider-fallback rule.
+ * Returns { claude, gemini, composite, divergenceFlags } — with a single
+ * model in play, averageScores returns that model's result unchanged as
+ * composite with no divergence flags.
  */
 async function analyzePhoto(base64Image, mimeType, context = {}) {
-  const [claudeResult, geminiResult] = await Promise.allSettled([
-    callClaudeVision(base64Image, mimeType, context),
-    callGeminiVision(base64Image, mimeType, context),
-  ]);
-
-  const claude = claudeResult.status === 'fulfilled' ? claudeResult.value : null;
-  const gemini = geminiResult.status === 'fulfilled' ? geminiResult.value : null;
+  const gemini = await callGeminiVision(base64Image, mimeType, context);
+  const claude = gemini ? null : await callClaudeVision(base64Image, mimeType, context);
 
   if (!claude && !gemini) return null;
 
@@ -367,8 +427,11 @@ function averageScores(claudeResult, geminiResult) {
   composite.observationsGemini = geminiResult.observations || null;
   // Gemini's prose wins the observations slot (owner 2026-07-21 — same
   // preference as tree-shrub: Gemini gave the named-diagnosis specificity on
-  // real field photos). Claude stands in when Gemini has no read; scores
-  // stay dual-model averaged.
+  // real field photos). Claude stands in when Gemini has no read. Since
+  // 2026-09-24 analyzePhoto only ever hands this function ONE result (Gemini,
+  // or Claude as its fallback) — this branch (both present) only runs when a
+  // caller passes both directly (e.g. dual-input unit tests); it is kept for
+  // that shape, not for live scoring, which no longer averages two models.
   composite.observations = String(geminiResult?.observations || claudeResult?.observations || '').trim();
 
   // Either model seeing a direct overwatering tell (mushrooms/standing water/
@@ -646,6 +709,8 @@ module.exports = {
   FUNGUS_DISPLAY,
   THATCH_DISPLAY,
   buildVisionPrompt,
+  isValidVisionScores,
+  normalizeVisionScores,
   analyzePhoto,
   averageScores,
   mapToDisplayScores,

@@ -236,6 +236,25 @@ async function recordManualPayment(id, {
     } catch (err) {
       return { noLongerCollectible: err.message };
     }
+    // Saved-card claim fence (ADMIN-BUG-R20): every OTHER collection rail
+    // (pay-combined, pay-v2, Terminal, the webhook branches, void/unvoid)
+    // asks assertNoInvoiceChargeReconciliationPending before moving or
+    // accepting money. A card charge whose process died right after the
+    // Stripe call leaves the invoice 'sent' with the claim row still
+    // 'claimed'/submitted — without this check a manual settlement here
+    // would collect the invoice a SECOND time (once by card, quarantined
+    // into stripe_orphan_charges when the webhook lands, once by
+    // cash/check/Zelle/credit). Run under the SAME row lock as the paid
+    // flip so a claim that lands between the pre-lock read and here is
+    // still caught.
+    try {
+      await require('./stripe').assertNoInvoiceChargeReconciliationPending(id, trx);
+    } catch (err) {
+      if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code)) {
+        return { chargeReconciliationPending: err.message };
+      }
+      throw err;
+    }
     // Amount fence under the same lock as the paid flip: the caller settles
     // a specific sum; the ledger row below records invoiceAmountDue(row), so
     // the two must agree NOW, not when the caller last looked.
@@ -366,6 +385,9 @@ async function recordManualPayment(id, {
   }
   if (updatedInvoice?.noLongerCollectible) {
     throw refusal(409, `${updatedInvoice.noLongerCollectible} — nothing was recorded`);
+  }
+  if (updatedInvoice?.chargeReconciliationPending) {
+    throw refusal(409, `${updatedInvoice.chargeReconciliationPending} — resolve it before recording another payment`);
   }
   if (updatedInvoice?.notSelfPay) {
     throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');

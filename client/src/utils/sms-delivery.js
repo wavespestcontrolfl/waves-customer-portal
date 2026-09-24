@@ -11,8 +11,8 @@ const HUMAN_REPLY_TYPES = new Set([
   "ai_revised",
   "ai_assistant",
   "ai_assistant_reply",
-  "follow_up",
 ]);
+const DRAFT_REPLY_TYPES = new Set(["ai_approved", "ai_revised"]);
 
 // Keep this aligned with loadUnansweredThreads. `queued` means the provider
 // accepted an immediate send; delayed inbox sends use the distinct `scheduled`
@@ -44,6 +44,10 @@ function messageTime(message) {
   return new Date(message?.createdAt).getTime();
 }
 
+function responseTime(message) {
+  return new Date(message?.responseCreatedAt || message?.createdAt).getTime();
+}
+
 function isActionableInbound(message) {
   if (message?.direction !== "inbound") return false;
   const messageType = message.responseMessageType || message.messageType || "";
@@ -52,6 +56,27 @@ function isActionableInbound(message) {
 
 export function unansweredSmsReply(messages) {
   if (!Array.isArray(messages)) return null;
+
+  // The server-backed needs-response view marks every returned DTO with an
+  // authoritative boolean. Its result can contain only part of a peer's
+  // history, so do not reconstruct response state from the visible slice.
+  // Ordinary inbox responses omit the field and continue through the local
+  // fallback below.
+  if (messages.some((message) => typeof message?.responseNeedsResponse === "boolean")) {
+    const inbound = messages
+      .filter((message) => message?.direction === "inbound" && message.responseNeedsResponse === true)
+      .reduce((latest, message) => {
+        const createdAt = messageTime(message);
+        if (Number.isNaN(createdAt)) return latest;
+        return !latest || createdAt > latest.createdAt ? { createdAt, message } : latest;
+      }, null);
+    if (!inbound?.message?.to) return null;
+    return {
+      businessLine: inbound.message.to,
+      messageId: inbound.message.id,
+      messageType: inbound.message.messageType,
+    };
+  }
 
   const latestInboundByLine = new Map();
   let latestOptOutAt = -Infinity;
@@ -87,9 +112,15 @@ export function unansweredSmsReply(messages) {
       // Proactive draft nudges can carry a human-approved message type.
       // Only the server can resolve their exact draft intent.
       if (message.responseIsAnswer === false) return false;
-      if (!HUMAN_REPLY_TYPES.has(message.responseMessageType || message.messageType)) return false;
+      const messageType = message.responseMessageType || message.messageType;
+      if (!HUMAN_REPLY_TYPES.has(messageType)) return false;
+      if (DRAFT_REPLY_TYPES.has(messageType) && (
+        !inbound.id
+        || !message.responseReplyToMessageId
+        || String(message.responseReplyToMessageId) !== String(inbound.id)
+      )) return false;
       if (!ANSWERED_STATUSES.has(message.responseStatus || message.status)) return false;
-      const createdAt = messageTime(message);
+      const createdAt = responseTime(message);
       return !Number.isNaN(createdAt) && createdAt > latestInboundAt;
     });
     if (!answered && latestInboundAt > (latestUnanswered?.createdAt ?? -Infinity)) {
