@@ -28,7 +28,10 @@ const { dispatchWithFallback } = require('../llm/call');
 const { SERVED_CITIES } = require('./grounding');
 const { whereHasRealReply } = require('./draft-prefix');
 
-const REPLY_VERSION = 'reply-v1';
+// reply-v2 (2026-09-24, #4713): the safe-copy template rung is gone, so a
+// reply-v1 draft stored on a failed publish may be that canned text — the
+// runner's publish-retry reuse only takes drafts of the CURRENT version.
+const REPLY_VERSION = 'reply-v2';
 const DRAFT_TIMEOUT_MS = 45 * 1000;
 const RECENT_REPLIES_LIMIT = 10;
 
@@ -41,7 +44,7 @@ function signOffFor(locationName) {
 const MODE_RULES = {
   no_text: {
     maxWords: 40,
-    guidance: 'The reviewer left a rating with no comment. One or two sentences: thank them for the rating and say we are glad to be their pest and lawn team locally. Do not invent what they liked.',
+    guidance: 'The reviewer left a rating with no comment. One or two short sentences: thank them for the rating in plain words. Vary the wording; do not use a fixed line about being their team, and do not invent what they liked or where they live.',
   },
   tech_praise: {
     maxWords: 90,
@@ -73,7 +76,7 @@ const MODE_RULES = {
   },
 };
 
-const STOCK_PHRASE_RE = /\b(kind words|means the world|we(?:'re| are) thrilled|overjoyed|delighted to hear|made our day|thank you so much for taking the time|taking the time to (share|leave|write)|we appreciate your business|your feedback is important|we strive)\b/i;
+const STOCK_PHRASE_RE = /\b(kind words|means the world|we(?:'re| are) thrilled|overjoyed|delighted to hear|made our day|thank you so much for taking the time|taking the time to (share|leave|write)|we appreciate your business|your feedback is important|we strive|pest and lawn team|down here|here in the neighborhood)\b/i;
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/u;
 const URL_RE = /(?:https?:\/\/|www\.)|\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\/[^\s]+|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|co|us|biz|info|page|app|gl|ly|me)\b/i;
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.]+/;
@@ -286,10 +289,23 @@ what when where whether which while who why wish with would yes you your you're 
 const ORDINARY_OPENERS = new Set(`
 ants roaches spiders termites mosquitoes mosquitos bugs pests rodents rats mice fleas ticks
 wasps bees hornets silverfish earwigs millipedes centipedes scorpions bedbugs gnats flies
-armadillos grubs fungus lawns yards turf shrubs mulch finding keeping skipping having getting
-being knowing hearing seeing looking making taking staying protecting treating helping showing
-coming letting giving working watching checking
+weeds results armadillos grubs fungus lawns yards turf shrubs mulch finding keeping skipping
+having getting being knowing hearing seeing looking making taking staying protecting treating
+helping showing coming letting giving working watching checking going dealing inheriting doing
+hoping appreciating thanking glad happy sorry sounds catching tracking handling following
+answering explaining walking learning welcoming wishing sending passing putting setting turning
+moving starting switching arriving spending sticking considering choosing trusting reaching
+calling booking scheduling planning noticing nothing everything anything something
 `.split(/\s+/).filter(Boolean));
+// Openers that describe a private interaction (a call, a booking, an
+// arrival, an explanation) are exempt only when the reviewer used the same
+// word — "Calling us was easy" on a "Great service" review invents a call
+// (Codex #4713 r12).
+const INTERACTION_OPENERS = new Set(['calling', 'booking', 'scheduling', 'planning', 'reaching', 'answering', 'explaining', 'arriving', 'sending', 'coming', 'showing', 'checking', 'walking', 'texting', 'emailing', 'talking', 'speaking', 'meeting']);
+// The core interaction gerunds are gated in EVERY position, not just as a
+// capitalized opener: "We appreciate that scheduling your appointment was
+// easy" invents a booking just the same (Codex #4713 r13).
+const INTERACTION_GERUND_RE = /\b(?:calling|booking|scheduling|planning|texting|emailing)\b/gi;
 // …and a listed opener is exempt only with POSITIVE ordinary-word syntax
 // directly after it: a plural-only verb ("Ants are / love / need"), a
 // determiner ("Finding a", "Skipping the"), or a pronoun.
@@ -310,7 +326,7 @@ coming letting giving working watching checking
 // thanked …", "Ants love that …" — a pest plural reading as a speaker); and
 // the verb followers are only the non-agentive ones the dry run used (r13:
 // "Pests know Marcus did well" — know / want / like / make / keep … are out).
-const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|thrive)\b(?!\s+(?:(?:so|very|really|truly|especially|also|always|all|not|never|just|quite|pretty|extremely|genuinely|incredibly|super|still|even|both|certainly|definitely|absolutely|honestly)\s+)*(?:glad|happy|pleased|proud|thrilled|delighted|sorry|grateful|thankful|excited|honou?red|humbled|blessed|lucky|fortunate|here|back|thanked|thanking|thank|thanks|appreciat\w*|said|saying|say|told|telling|tell|hoping|hope|wishing|wish|looking\s+forward|that|how|what|when|why|whether|if|to)\b)|(?:a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|you|we|it|they|us|them)\b)(?!\s+(?:(?:the|an?|our|his|her|their|your|my)\s+)?(?:team|teams|crew|crews|staff|technician|technicians|tech|techs|owner|owners|folks|guys|colleague|colleagues|family|people|employee|employees|helper|helpers|assistant|assistants)\b)/u;
+const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|thrive)\b(?!\s+(?:(?:so|very|really|truly|especially|also|always|all|not|never|just|quite|pretty|extremely|genuinely|incredibly|super|still|even|both|certainly|definitely|absolutely|honestly)\s+)*(?:glad|happy|pleased|proud|thrilled|delighted|sorry|grateful|thankful|excited|honou?red|humbled|blessed|lucky|fortunate|here|back|thanked|thanking|thank|thanks|appreciat\w*|said|saying|say|told|telling|tell|hoping|hope|wishing|wish|looking\s+forward|that|how|what|when|why|whether|if|to)\b)|(?:a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|you|we|it|they|us|them|around)\b)(?!\s+(?:(?:the|an?|our|his|her|their|your|my)\s+)?(?:team|teams|crew|crews|staff|technician|technicians|tech|techs|owner|owners|folks|guys|colleague|colleagues|family|people|employee|employees|helper|helpers|assistant|assistants)\b)/u;
 
 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
@@ -320,17 +336,40 @@ const DATE_CLAIM_RE = /\b(?:noon|midnight|\d{1,2}(?::\d{2})?\s?(?:am|pm|a\.m\.|p
 // Service / treatment / relationship claims. Each is a factual assertion
 // about what we did or who the customer is; it must come from the review
 // text or from an allowed account fact, never from the model.
-const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|work(?:ed|ing)?|results?|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|problems?|issues?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|plans?|programs?|membership|waveguard)\b/gi;
+const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|success(?:ful(?:ly)?)?|reliefs?|relieved|did (?:its|their) job|doing (?:its|their) job|does (?:its|their) job|did the trick|does the trick|made (?:a|all the) (?:\w+ )?difference|makes? (?:a|all the) (?:\w+ )?difference|paid off|kicked in|took effect|(?<!hard[- ])working(?!\s+(?:around|with|on|hard|together|through|toward|towards|to)\b)|keeps? working|holding up|held up|paying off|(?:kept|keeps|keeping) (?:them|it|those|the \w+) (?:away|out|at bay)|at bay|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|crickets?|gnats?|flies|fruit flies|drain flies|beetles?|moths?|bees?|honey ?bees?|hornets?|yellow ?jackets?|centipedes?|millipedes?|snails?|slugs?|weevils?|aphids?|grubs?|webworms?|armyworms?|caterpillars?|whitefl(?:y|ies)|mealybugs?|mites?|thrips|springtails?|booklice|stink ?bugs?|love ?bugs?|palmetto ?bugs?|water ?bugs?|ladybugs?|boxelders?|squirrels?|raccoons?|o?possums?|snakes?|lizards?|geckos?|iguanas?|frogs?|toads?|birds?|pigeons?|bats?|armadillos?|moles?|voles?|gophers?|mildew|mold|nematodes?|crabgrass|dollarweed|nutsedge|sedge|clover|dandelions?|brown patch|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|(?:your|our|their) plans?|on (?:a|the|our|your|their) plans?|membership|members?|programs?|waveguard)\b/gi;
+// Membership/plan-status terms within SERVICE_CLAIM_RE (2026-09-25 P1 fix,
+// pre-push round 2) — an identity/relationship claim, not an outcome, so
+// deliberately absent from OUTCOME_TERM_RE. Bare "plan" is NOT a claim
+// ("explained the plan" stays ordinary prose) — only these account-status
+// shapes are. Sourced ONLY by the review's own root, the same as every
+// other SERVICE_CLAIM_RE term (round-3 fix: two completed visits alone label
+// an account "recurring" with no plan evidence at all, so that relationship
+// fact does not license calling someone a member on its own).
+// Every account-status term SERVICE_CLAIM_RE can match — plans, members,
+// programs, the WaveGuard brand and cadence words — is polar (round-7 P1:
+// "program" was missed): negated review evidence never sources it. A bare
+// "plan" stays ordinary prose ("explained the plan"), but the possessive /
+// status shapes "your plan", "on our plan" are account status (round 11).
+const MEMBERSHIP_TERM_RE = /^(?:(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?|(?:your|our|their) plans?|on (?:a|the|our|your|their) plans?|membership|members?|programs?|waveguard|quarterly|bi-?monthly|monthly|annual|yearly)$/i;
 // Outcome / result phrases within SERVICE_CLAIM_RE — the ones a negation
 // in the review flips ("did not get rid of", "never eliminated", "not under
 // control"). Topic nouns (ants, treatment, lawn) are deliberately absent.
-const OUTCOME_TERM_RE = /^(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|work(?:ed|ing)?|results?|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
+const OUTCOME_TERM_RE = /^(?:behind (?:you|us|them)|success(?:ful(?:ly)?)?|reliefs?|relieved|did (?:its|their) job|doing (?:its|their) job|does (?:its|their) job|did the trick|does the trick|made (?:a|all the) (?:\w+ )?difference|makes? (?:a|all the) (?:\w+ )?difference|paid off|kicked in|took effect|working|keeps? working|holding up|held up|paying off|(?:kept|keeps|keeping) (?:them|it|those|the \w+) (?:away|out|at bay)|at bay|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done|solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|worked|works|results?|better|improv\w*|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
 // Staff credential / award modifiers: nothing in the grounding proves them,
 // so they need the reviewer's own words (codex r52).
 const CREDENTIAL_CLAIM_RE = /\b(?:certified|licen[cs]ed|insured|bonded|background[- ]checked|vetted|accredited|award[- ]winning|trained|state[- ]licen[cs]ed|screened|degreed|qualified|experts?|specialists?|master|veteran|senior|lead|head|top[- ]rated)\b/gi;
 // Visit-experience claims (timeliness, speed, communication) — only the
 // reviewer can vouch for these.
-const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|visit(?:ed|s|ing)?|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|updates?|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
+const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
+// A narrow companion to EXPERIENCE_CLAIM_RE — "visit" is deliberately the
+// only term left here (2026-09-25 round-4 fix: explain/answered/communicat*/
+// walked…through moved INTO EXPERIENCE_CLAIM_RE above, where the normal
+// root-matched, negation-aware provenance loop already covers them — this
+// regex no longer duplicates that check for them). A review implies a visit
+// happened, so "visit" itself stays out of EXPERIENCE_CLAIM_RE too; this is
+// checked only for a no-text, no-account review below, where nothing — not
+// the review, not an account fact — proves any interaction took place.
+const INTERACTION_TERM_RE = /\b(?:visit(?:ed|s|ing)?)\b/gi;
 // A duration with a number is a specific fact; tenure buckets prove only a
 // floor. "10 years" needs the whole phrase in the review.
 const QUANTIFIED_TENURE_RE = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|many|several|couple of|few|multiple|decades?)\s+(?:\+\s*)?(?:years?|months?|seasons?|decades?)\b/gi;
@@ -453,6 +492,14 @@ function rootSupported(reviewLower, reviewWords, stem, term, windows) {
 // "Hi Dana," / "Hello there," → the greeted first name (null for "there").
 // (?!…) instead of \b: JS word boundaries are ASCII-only and would split "José".
 const GREETING_RE = /^\s*(?:hi|hello|hey|dear)\s+(\p{L}[\p{L}'-]{1,20})(?![\p{L}'-])/iu;
+// Same greeting-word list as GREETING_RE, but strips the WHOLE recognized
+// greeting clause (through its trailing comma and following whitespace) —
+// used only where the greeting needs to be dropped from a body before
+// comparing what follows it. Anchored and word-list-gated on purpose
+// (2026-09-25 P2 fix): the body's first comma alone is not a greeting
+// boundary — a manual reply opening "Thanks for choosing us for pest
+// control, we…" has no greeting word at all and must keep its full text.
+const GREETING_PREFIX_RE = /^(?:hi|hello|hey|dear)\b[^\n,]*,\s*/i;
 function greetingName(text) {
   const m = String(text || '').match(GREETING_RE);
   if (!m) return null;
@@ -521,12 +568,275 @@ function splitReply(text, locationName) {
   return { body, signOff, full: `${body}\n\n${signOff}` };
 }
 
+// Words may be joined in the body by more than plain whitespace — real
+// service names carry "&", "/", "-", or a spelled-out "and" ("Flea & Tick
+// Treatment", "Tree & Shrub Care", "One-Time Pest Control"); the normalizer
+// strips those to bare words, so the span regex has to accept any of them
+// back between words, not just \s+ (2026-09-25 P2 fix).
+const PHRASE_WORD_JOIN_RE = '(?:\\s*(?:&|and|\\/|,|-)\\s*|\\s+)';
+
+// WHOLE-PHRASE spans in `body` where one of `phrases` (the account's
+// servicesPerformed names, lowercased/normalized) appears verbatim
+// (case-insensitive, a trailing "s" allowed on the last word). Module-level
+// (2026-09-25 round-4 complexity fix, AGENTS.md: don't grow an
+// already-over-threshold function) so it is a plain, independently testable
+// function of its inputs rather than a closure inside verifyReplyDetailed.
+function servicePhraseSpans(body, phrases) {
+  const spans = [];
+  for (const phrase of phrases || []) {
+    const words = String(phrase).trim().split(/\s+/).filter(Boolean);
+    if (!words.length) continue;
+    const parts = words.map((w, i) => escapeRe(w) + (i === words.length - 1 ? 's?' : ''));
+    const phraseRe = new RegExp(`\\b${parts.join(PHRASE_WORD_JOIN_RE)}\\b`, 'gi');
+    let pm;
+    while ((pm = phraseRe.exec(body)) !== null) spans.push([pm.index, pm.index + pm[0].length]);
+  }
+  return spans;
+}
+
+// An account-only service name (one the reviewer did not write) may appear
+// ONLY as a whole sentence in one of these fixed frames (Codex #4713 r12,
+// structural): the account proves the service happened, never how it went.
+// Enumerating outcome words ("worked", "did the trick", "successful", …)
+// never converged — every round found another synonym — so the sentence
+// itself is allowlisted instead of its predicates denylisted.
+const SERVICE_FRAME_HEADS = [
+  'thanks? (?:you )?(?:so much )?for (?:choosing|trusting) us (?:with|for)',
+  '(?:we(?:\'re| are) )?glad (?:we|our team) could help with',
+  '(?:we(?:\'re| are) )?glad you chose(?: us for)?',
+];
+function serviceFrameViolation(body, spans, reviewLower) {
+  const sSpans = sentenceSpans(body);
+  for (const [a, b] of spans) {
+    const phrase = body.slice(a, b);
+    // Whole words only: "important treatment" must not source "Ant
+    // Treatment" (Codex #4713 r13).
+    const reviewFlat = ` ${reviewLower.replace(/[^a-z0-9]+/g, ' ').trim()} `;
+    if (reviewFlat.includes(` ${phrase.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `)) continue;
+    const sentence = sentenceTextAt(body, sSpans, a)
+      .replace(/^\s*(?:hi|hello|hey|dear)\s+[^,\n]{1,40},\s*/i, '')
+      .trim();
+    const frameRe = new RegExp(`^(?:${SERVICE_FRAME_HEADS.join('|')}) (?:the |your )?${escapeRe(phrase)}(?: (?:at|for) your (?:home|house|property))?[.!]?$`, 'i');
+    if (!frameRe.test(sentence)) return phrase;
+  }
+  return null;
+}
+
+// Sentence spans of `body`, split on . ! ? — module-level (2026-09-24/25
+// complexity fix) so the subject-scoping helpers below are plain functions
+// of their inputs, not closures capturing verifyReplyDetailed's locals.
+function sentenceSpans(body) {
+  const spans = [];
+  let start = 0;
+  const breakRe = /[.!?]/g;
+  let bm;
+  while ((bm = breakRe.exec(body)) !== null) { spans.push([start, bm.index + 1]); start = bm.index + 1; }
+  if (start < body.length) spans.push([start, body.length]);
+  return spans;
+}
+function sentenceTextAt(body, spans, idx) {
+  const span = spans.find(([a, b]) => idx >= a && idx < b);
+  return span ? body.slice(span[0], span[1]) : body;
+}
+// The outcome fallback below (and the RESOLUTION_PARAPHRASE_RE branch) is
+// subject-scoped (2026-09-25 P1 fix, third time raised — made structural):
+// reviewStatesOutcome() alone proves only that the review states SOME
+// un-negated outcome ANYWHERE — not that it is about the thing the reply
+// names. "Glad the Cockroach Treatment worked" must not borrow "The ants
+// are gone"'s outcome for an unrelated subject. An outcome term
+// additionally needs, in its OWN body sentence, a pest/service noun the
+// reviewer actually wrote (root-matched, same as `rooted`) with an
+// un-negated occurrence in the review.
+function sentenceHasSourcedSubject(sentenceText, reviewWords, reviewLower, reviewNeg) {
+  for (const subjTerm of sentenceText.match(SERVICE_CLAIM_RE) || []) {
+    const subj = subjTerm.toLowerCase().replace(/\s+/g, ' ');
+    if (OUTCOME_TERM_RE.test(subj)) continue; // a pest/service NOUN, not another outcome verb
+    const subjStem = stemOf(subj);
+    const subjRooted = reviewWords.has(subj) || reviewWords.has(subjStem)
+      || (subjStem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(subjStem) || (subjStem.startsWith(ws) && ws.length >= 4); }));
+    if (!subjRooted) continue;
+    if (rootSupported(reviewLower, reviewWords, subjStem, subj, reviewNeg) === true) return true;
+  }
+  return false;
+}
+
+// span rejection helper shared by verifyReplyDetailed and the two claim
+// checkers below — a pure formatter, no captured state, so it is safe to
+// share across all three (2026-09-25 round-4 complexity fix).
+function reject(code, span) {
+  return { code, span: span == null ? null : String(span).trim().slice(0, 120) };
+}
+
+// Service / treatment claim provenance (SERVICE_CLAIM_RE): the reviewer's
+// own words, one of the account's public-safe service categories, a
+// whole-phrase-sourced servicesPerformed name, or (for an outcome term with
+// no direct source) a subject-scoped fallback onto some other un-negated
+// outcome the review states about the SAME pest/service noun in the same
+// reply sentence. Extracted out of verifyReplyDetailed (2026-09-24/25 fixes
+// built this loop up to where AGENTS.md's complexity rule required moving
+// it out, round-4 P2) — behavior is unchanged, only the location moved.
+// Returns a reject object, or null when every claim in the body is sourced.
+function checkServiceClaims(ctx) {
+  const {
+    body, reviewWords, reviewLower, canonReview, reviewNeg, canonNeg,
+    bodyLower, bodyNeg, categoryWords, genericServiceWords, spans,
+  } = ctx;
+  const inServicePhraseSpan = (idx) => spans.some(([a, b]) => idx >= a && idx < b);
+  const unframed = serviceFrameViolation(body, spans, reviewLower);
+  if (unframed) return reject('unlisted_service_claim', unframed);
+  const bodyNegates = (phrase) => allOccurrencesNegated(bodyLower, phrase, bodyNeg) === true;
+  const reviewSupports = (phrase, canon) => {
+    const lit = allOccurrencesNegated(reviewLower.replace(/\s+/g, ' '), phrase, reviewNeg);
+    const can = canon ? allOccurrencesNegated(canonReview, canon, canonNeg) : null;
+    if (lit === false || can === false) return true;
+    if (lit === true || can === true) return 'negated';
+    return false;
+  };
+  let reviewResolved = null;
+  const reviewStatesOutcome = () => {
+    if (reviewResolved !== null) return reviewResolved;
+    reviewResolved = false;
+    for (const term of reviewLower.match(SERVICE_CLAIM_RE) || []) {
+      const rt = term.toLowerCase().replace(/\s+/g, ' ');
+      if (!OUTCOME_TERM_RE.test(rt)) continue;
+      if (reviewSupports(rt, canonPhrase(rt)) === true) { reviewResolved = true; break; }
+    }
+    return reviewResolved;
+  };
+  const sSpans = sentenceSpans(body);
+  const hasSourcedSubject = (idx) => sentenceHasSourcedSubject(sentenceTextAt(body, sSpans, idx), reviewWords, reviewLower, reviewNeg);
+  for (const claimMatch of body.matchAll(SERVICE_CLAIM_RE)) {
+    const term = claimMatch[0];
+    const termIdx = claimMatch.index;
+    const t = term.toLowerCase().replace(/\s+/g, ' ');
+    if (RESOLUTION_PARAPHRASE_RE.test(t) && !bodyNegates(t)) {
+      const support = reviewSupports(t, canonPhrase(t));
+      if (support === true || (reviewStatesOutcome() && hasSourcedSubject(termIdx))) continue;
+      return reject(support === 'negated' ? 'negated_review_claim' : 'unlisted_service_claim', t);
+    }
+    // A phrase the reviewer wrote ("took care of" ↔ "take care of", "under
+    // control") is sourced — canonical-phrase check before token matching.
+    const support = reviewSupports(t, canonPhrase(t));
+    if (support === true) continue;
+    // Negation matters for OUTCOME phrases (got rid of, gone, solved …):
+    // "did not get rid of the ants" must not license "we got rid of the
+    // ants". A bare topic noun ("ants", "treatment") inside a negated clause
+    // is still a fine thing to name in the reply.
+    const outcome = OUTCOME_TERM_RE.test(t);
+    // Membership/plan status is polar too (round-6 P1): "I am not a member"
+    // must not source "Glad to have you as a member".
+    const polar = outcome || MEMBERSHIP_TERM_RE.test(t);
+    if (support === 'negated' && polar && !bodyNegates(t)) return reject('negated_review_claim', t);
+    if (support === 'negated') continue;
+    const stem = stemOf(t);
+    if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
+    // Same root in the reviewer's words ("eliminate" ↔ "eliminated",
+    // "infestation" ↔ "infested") — an un-negated occurrence of that root.
+    const rooted = reviewWords.has(t) || reviewWords.has(stem)
+      || (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); }));
+    if (rooted) {
+      const rootSupport = rootSupported(reviewLower, reviewWords, stem, t, reviewNeg);
+      if (rootSupport === true) continue;
+      if (rootSupport === 'negated' && polar && !bodyNegates(t)) return reject('negated_review_claim', t);
+      continue;
+    }
+    // Not sourced by a literal or root match, and (checked above) not
+    // something the review's own words directly negate. An outcome term the
+    // review never used in these words still passes if the review states
+    // SOME un-negated outcome in different words ("got much better", "under
+    // control" → "handled") AND the reply's own sentence names a
+    // pest/service subject the review actually wrote, un-negated: "Glad the
+    // Cockroach Treatment worked" (review: only ants) still rejects.
+    if (outcome && reviewStatesOutcome() && hasSourcedSubject(termIdx)) continue;
+    return reject('unlisted_service_claim', t);
+  }
+  return null;
+}
+
+// Visit-experience claim provenance (EXPERIENCE_CLAIM_RE, root-matched, the
+// reviewer's words only) plus the INTERACTION_TERM_RE ("visit") gate: a
+// no-text, no-account review has nothing proving any interaction happened
+// at all, and a TEXT review that NEGATES "visit" must not be answered with
+// the un-negated claim. Extracted out of verifyReplyDetailed for the same
+// complexity reason as checkServiceClaims (round-4 P2); returns a reject
+// object, or null when every experience claim (and the interaction gate) is
+// clear.
+function checkExperienceClaims(ctx) {
+  const {
+    body, grounding, reviewWords, reviewLower, canonReview, reviewNeg, canonNeg,
+    bodyLower, bodyNeg, categoryWords, spans,
+  } = ctx;
+  const inServicePhraseSpan = (idx) => spans.some(([a, b]) => idx >= a && idx < b);
+  const bodyNegates = (phrase) => allOccurrencesNegated(bodyLower, phrase, bodyNeg) === true;
+  for (const experienceMatch of body.matchAll(EXPERIENCE_CLAIM_RE)) {
+    const term = experienceMatch[0];
+    const termIdx = experienceMatch.index;
+    const t = term.toLowerCase().replace(/\s+/g, ' ');
+    const stem = stemOf(t.replace(/[- ]/g, ' '));
+    const flat = t.replace(/[- ]+/g, ' ');
+    const support = (() => {
+      const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
+      const can = allOccurrencesNegated(canonReview, canonPhrase(t), canonNeg);
+      if (lit === false || can === false) return true;
+      if (lit === true || can === true) return 'negated';
+      return false;
+    })();
+    if (support === true) continue;
+    if (support === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
+    if (support === 'negated') continue;
+    // An account service-category word sources an experience claim too; a
+    // servicesPerformed name sources it only inside its own whole-phrase
+    // span (e.g. "treatment" from "Cockroach Treatment" — 2026-09-25 P1 fix).
+    if (categoryWords.has(t) || categoryWords.has(flat) || categoryWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
+    if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) {
+      const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
+      if (rootSupport === true) continue;
+      if (rootSupport === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
+      continue;
+    }
+    return reject('unlisted_experience_claim', t);
+  }
+  // A no-text, no-account review has NOTHING — not the review, not an
+  // account fact — proving any interaction (a visit) happened at all: "the
+  // visit went smoothly" would invent one (2026-09-24/25 P1 fix; narrowed to
+  // "visit" only in round 4 — explain/answered/communicat* now go through
+  // EXPERIENCE_CLAIM_RE's own provenance check above instead).
+  // Only a COMPLETED service proves a visit: a linked customer row with no
+  // completed scheduled_services has account.relationship === null (round-8 P1).
+  for (const gm of body.matchAll(INTERACTION_GERUND_RE)) {
+    const gs = stemOf(gm[0].toLowerCase());
+    if (![...reviewWords].some((rw) => stemOf(rw) === gs)) return reject('unlisted_experience_claim', gm[0]);
+  }
+  if (!grounding.review.hasText && !grounding.account?.relationship) {
+    const interactionMatch = body.match(INTERACTION_TERM_RE);
+    if (interactionMatch) return reject('unlisted_experience_claim', interactionMatch[0]);
+  }
+  // A TEXT review does not need to positively source "visit" ("the visit
+  // went well" is ordinary prose either way — a review implies a visit), but
+  // a review that NEGATES it — "we never got a visit" — must not be answered
+  // with the un-negated claim (2026-09-25 P1 fix, pre-push round 3).
+  // Root-matched the same way SERVICE_CLAIM_RE terms are, via rootSupported;
+  // a root the review never uses at all is left alone.
+  if (grounding.review.hasText) {
+    for (const term of body.match(INTERACTION_TERM_RE) || []) {
+      const t = term.toLowerCase().replace(/\s+/g, ' ');
+      const flat = t.replace(/[- ]+/g, ' ');
+      const stem = stemOf(flat);
+      const rooted = reviewWords.has(flat) || reviewWords.has(stem)
+        || (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); }));
+      if (!rooted) continue;
+      const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
+      if (rootSupport === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
+    }
+  }
+  return null;
+}
+
 /**
  * Deterministic verifier. Returns null when the reply is acceptable, else a
  * short reason code. Every rule the model is told is re-checked here.
  */
 function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {}) {
-  const reject = (code, span) => ({ code, span: span == null ? null : String(span).trim().slice(0, 120) });
   const locationName = grounding.locationName;
   const { body, signOff } = splitReply(text, locationName);
   const m = mode || classifyReplyMode(grounding);
@@ -595,6 +905,15 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   // brand word. A hallucinated "Kevin" (or a former tech, a date, a product)
   // has no provenance and is rejected. Served cities are judged above.
   const reviewWords = new Set(normalizeWords(grounding.review.text));
+  // WHOLE-PHRASE spans in the body where one of the account's
+  // servicesPerformed names appears verbatim — 2026-09-25 P1 fix: a claim
+  // term or capitalized word is sourced by the account ONLY when it falls
+  // inside one of these spans, never by a bare word alone. Without this, a
+  // review word ("ant") and an unrelated account-phrase word ("treatment"
+  // from "Cockroach Treatment") could compose into "ant treatment" — a claim
+  // neither the review nor the account actually supports.
+  const spans = servicePhraseSpans(body, grounding.allow?.servicePhrases);
+  const inServicePhraseSpan = (idx) => spans.some(([a, b]) => idx >= a && idx < b);
   // Only THIS location's area words (and the account city) are sourced;
   // fragments of unrelated served cities are not ("Charlotte" from "Port
   // Charlotte" must not launder a name).
@@ -609,6 +928,18 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     while ((cm = re.exec(body)) !== null) citySpans.push([cm.index, cm.index + cm[0].length]);
   }
   const inCitySpan = (idx) => citySpans.some(([a, b]) => idx >= a && idx < b);
+  // A punctuated allowed name ("O'Neil", "Mary-Jane") is scanned below as
+  // pieces; a piece is sourced ONLY inside an occurrence of the whole name
+  // (round-8 P2 greeting fix, scoped by round-9 P1: a bare "Neil" or "Jane"
+  // elsewhere is still an unsourced name).
+  const nameSpans = [];
+  for (const name of grounding.allow.names || []) {
+    if (!/['’-]/.test(name)) continue;
+    const re = new RegExp(`(?<![\\p{L}'’-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}’-])`, 'giu');
+    let nm;
+    while ((nm = re.exec(body)) !== null) nameSpans.push([nm.index, nm.index + nm[0].length]);
+  }
+  const inNameSpan = (idx) => nameSpans.some(([a, b]) => idx >= a && idx < b);
   // A lowercase name after a staff role noun ("our technician kevin") is a
   // name too (codex r59): it must be the reviewer's word or an allowed name.
   const roleNameRe = /\b(?:tech(?:nician)?|inspector|specialist|team\s+member|crew\s+member|technician\s+named|rep|representative|manager|owner|guy|gal|man|lady|woman|fella)\s+([a-z][a-z'-]{1,20})\b/g;
@@ -641,6 +972,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   while ((bw = bareWordRe.exec(body)) !== null) {
     const w = bw[1];
     if (!COMMON_FIRST_NAMES.has(w)) continue;
+    if (inNameSpan(bw.index + bw[0].length - w.length)) continue;
     if (allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || cityWords.has(w)) continue;
     if (DUAL_USE_FIRST_NAMES.has(w) && inProseContext(body, bw.index + bw[0].length - w.length, w)) continue;
     return reject('unlisted_name', w);
@@ -649,14 +981,14 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   const properNounRe = /(^|[^\p{L}'])(\p{Lu}[\p{Ll}'-]+|\p{Lu}{2,})/gu;
   let pn;
   while ((pn = properNounRe.exec(body)) !== null) {
-    if (inCitySpan(pn.index + pn[1].length)) continue;
+    if (inCitySpan(pn.index + pn[1].length) || inNameSpan(pn.index + pn[1].length)) continue;
     const before = body.slice(0, pn.index + pn[1].length);
     // Sentence-initial = start of text, after terminal punctuation, or the
     // first word of a new line (the greeting line ends with a comma).
     const sentenceInitial = /(?:^|[.!?]|\n)\s*$/.test(before);
     // "Adam's" is the allowed name in the possessive.
-    const w = pn[2].toLowerCase().replace(/'s?$/, '');
-    if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || BRAND_WORDS.has(w)) continue;
+    const w = pn[2].toLowerCase().replace(/'s?$/, '').replace(/[-']+$/, '');
+    if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || BRAND_WORDS.has(w) || inServicePhraseSpan(pn.index + pn[1].length)) continue;
     // A sentence-initial inflection of the reviewer's own word ("Ants are"
     // for "ant problems") is sourced when an ordinary-word follower proves
     // the syntax — "Fields did a great job" is a surname even if the review
@@ -669,7 +1001,18 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
-    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
+    // 2026-09-25 fix (pre-push round 2, third time raised): the standalone
+    // morphology exemption ("ends in ing/ed/ly") is DELETED — "Sterling
+    // around your property…" and "Harding around your property…" both end
+    // in "ing" and are surnames, not gerunds, so that shape admitted them
+    // too. The only sentence-initial pass now goes through the existing,
+    // explicitly enumerated ORDINARY_OPENERS allowlist above (extended with
+    // the common reply openers this fix needed: inheriting, dealing, going,
+    // answering, explaining, walking, …) plus the review-word-inflection
+    // check above it. A capitalized word not on either list has no
+    // provenance from mere morphology.
+    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))
+      && (!INTERACTION_OPENERS.has(w) || [...reviewWords].some((rw) => stemOf(rw) === stemOf(w)))) continue;
     return reject('unlisted_name', pn[2]);
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
@@ -692,9 +1035,12 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
       && !reviewLower.includes(city.toLowerCase())) return reject('unlisted_city', city);
   }
 
-  // Provenance for service / treatment claims: the reviewer's own words, or
-  // one of the account's public-safe service categories ("lawn care" →
-  // lawn, care). Generic identity words (pest, lawn, bugs, home) are fine.
+  // Provenance for service / treatment claims (the reviewer's own words, an
+  // account service category, or a whole-phrase-sourced servicesPerformed
+  // name) and for visit-experience claims share this ctx — each is a
+  // sizeable decision tree that grew past AGENTS.md's complexity threshold
+  // (2026-09-24/25 fixes), so checkServiceClaims / checkExperienceClaims
+  // hold them now (round-4 P2 complexity fix; behavior unchanged).
   const categoryWords = new Set((grounding.account?.serviceCategories || []).flatMap((c) => normalizeWords(c)));
   const canonReview = canonPhrase(normalizeWords(grounding.review.text).join(' '));
   // Negation-aware provenance (codex r26): "they did not get rid of the
@@ -705,60 +1051,14 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   const reviewNeg = negationIndex(reviewLower);
   const canonNeg = negationIndex(canonReview);
   const bodyNeg = negationIndex(bodyLower);
-  const bodyNegates = (phrase) => allOccurrencesNegated(bodyLower, phrase, bodyNeg) === true;
-  // true = sourced (an un-negated occurrence exists); 'negated' = every
-  // occurrence is negated; false = absent.
-  const reviewSupports = (phrase, canon) => {
-    const lit = allOccurrencesNegated(reviewLower.replace(/\s+/g, ' '), phrase, reviewNeg);
-    const can = canon ? allOccurrencesNegated(canonReview, canon, canonNeg) : null;
-    if (lit === false || can === false) return true;
-    if (lit === true || can === true) return 'negated';
-    return false;
-  };
   const genericServiceWords = new Set(['pest', 'pests', 'lawn', 'bug', 'bugs', 'home', 'house', 'property']);
-  let reviewResolved = null;
-  const reviewStatesOutcome = () => {
-    if (reviewResolved !== null) return reviewResolved;
-    reviewResolved = false;
-    for (const term of reviewLower.match(SERVICE_CLAIM_RE) || []) {
-      const rt = term.toLowerCase().replace(/\s+/g, ' ');
-      if (!OUTCOME_TERM_RE.test(rt)) continue;
-      if (reviewSupports(rt, canonPhrase(rt)) === true) { reviewResolved = true; break; }
-    }
-    return reviewResolved;
+  const claimCtx = {
+    body, grounding, reviewWords, reviewLower, canonReview, reviewNeg, canonNeg,
+    bodyLower, bodyNeg, categoryWords, genericServiceWords, spans,
   };
-  for (const term of body.match(SERVICE_CLAIM_RE) || []) {
-    const t = term.toLowerCase().replace(/\s+/g, ' ');
-    if (RESOLUTION_PARAPHRASE_RE.test(t) && !bodyNegates(t)) {
-      const support = reviewSupports(t, canonPhrase(t));
-      if (support === true || reviewStatesOutcome()) continue;
-      return reject(support === 'negated' ? 'negated_review_claim' : 'unlisted_service_claim', t);
-    }
-    // A phrase the reviewer wrote ("took care of" ↔ "take care of", "under
-    // control") is sourced — canonical-phrase check before token matching.
-    const support = reviewSupports(t, canonPhrase(t));
-    if (support === true) continue;
-    // Negation matters for OUTCOME phrases (got rid of, gone, solved …):
-    // "did not get rid of the ants" must not license "we got rid of the
-    // ants". A bare topic noun ("ants", "treatment") inside a negated clause
-    // is still a fine thing to name in the reply.
-    const outcome = OUTCOME_TERM_RE.test(t);
-    if (support === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
-    if (support === 'negated') continue;
-    const stem = stemOf(t);
-    if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem)) continue;
-    // Same root in the reviewer's words ("eliminate" ↔ "eliminated",
-    // "infestation" ↔ "infested") — an un-negated occurrence of that root.
-    const rooted = reviewWords.has(t) || reviewWords.has(stem)
-      || (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); }));
-    if (rooted) {
-      const rootSupport = rootSupported(reviewLower, reviewWords, stem, t, reviewNeg);
-      if (rootSupport === true) continue;
-      if (rootSupport === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
-      continue;
-    }
-    return reject('unlisted_service_claim', t);
-  }
+  const serviceClaimReject = checkServiceClaims(claimCtx);
+  if (serviceClaimReject) return serviceClaimReject;
+
   // Provenance for relationship / tenure claims: the reviewer's words or the
   // account's derived facts (recurring → "again"/"regular"; long_term → "years").
   const rel = grounding.account?.relationship;
@@ -782,29 +1082,8 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     if (hasPhrase(reviewLower, t) || reviewWords.has(t) || reviewWords.has(stemOf(t))) continue;
     return reject('unlisted_credential_claim', t);
   }
-  // Visit-experience claims: the reviewer's words only (root-matched).
-  for (const term of body.match(EXPERIENCE_CLAIM_RE) || []) {
-    const t = term.toLowerCase().replace(/\s+/g, ' ');
-    const stem = stemOf(t.replace(/[- ]/g, ' '));
-    const flat = t.replace(/[- ]+/g, ' ');
-    const support = (() => {
-      const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
-      const can = allOccurrencesNegated(canonReview, canonPhrase(t), canonNeg);
-      if (lit === false || can === false) return true;
-      if (lit === true || can === true) return 'negated';
-      return false;
-    })();
-    if (support === true) continue;
-    if (support === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
-    if (support === 'negated') continue;
-    if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) {
-      const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
-      if (rootSupport === true) continue;
-      if (rootSupport === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
-      continue;
-    }
-    return reject('unlisted_experience_claim', t);
-  }
+  const experienceClaimReject = checkExperienceClaims(claimCtx);
+  if (experienceClaimReject) return experienceClaimReject;
 
   // The mandated greeting, deterministically: "Hi <reviewer first name>,"
   // or "Hello there," — nothing else may open a public reply.
@@ -812,11 +1091,18 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     || (grounding.review.firstName && new RegExp(`^hi ${escapeRe(grounding.review.firstName)},`, 'iu').test(body));
   if (!greetingOk) return reject('missing_greeting');
 
-  // Non-repetition against the location's recent posted replies.
-  const opening = words.slice(0, 5).join(' ');
+  // Non-repetition against the location's recent posted replies. The
+  // five-word comparison runs AFTER the greeting line: "Hi Tyler," / "Hi
+  // Dana," ate two of the five slots and left too few content words to tell
+  // two genuinely different replies apart (2026-09-24 fix).
+  const bodyAfterGreeting = body.replace(GREETING_PREFIX_RE, '').trim();
+  const opening = normalizeWords(bodyAfterGreeting).slice(0, 5).join(' ');
   for (const prior of recentReplies) {
-    const pw = normalizeWords(splitReply(prior, locationName).body);
-    if (pw.length && pw.slice(0, 5).join(' ') === opening) return reject('repetitive_opening', opening);
+    const priorBody = splitReply(prior, locationName).body;
+    const priorAfterGreeting = priorBody.replace(GREETING_PREFIX_RE, '').trim();
+    const pw = normalizeWords(priorBody);
+    const priorOpening = normalizeWords(priorAfterGreeting).slice(0, 5).join(' ');
+    if (priorOpening && priorOpening === opening) return reject('repetitive_opening', opening);
     if (jaccard(words, pw) >= 0.6) return reject('repetitive_body');
   }
   return null;
@@ -852,7 +1138,7 @@ HARD RULES (a reply breaking any of these is discarded):
 - Never state an address, date, dollar amount, phone number, email, or link.
 - No incentives of any kind (discount, free, credit, gift, reward). Never ask for stars or for the review to be changed.
 - No safety claims ("safe", "non-toxic", "EPA"), no re-entry or drying times, no guarantees or warranties, no "best"/"#1" claims, no competitor names.
-- No emoji in the body. No em dashes. No stock phrases: "kind words", "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to".
+- No emoji in the body. No em dashes. No stock phrases: "kind words", "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to", "pest and lawn team", "down here", "here in the neighborhood".
 - Do not repeat the openings or phrasing of the recent replies you are shown.
 - Do not summarize the review back to the reviewer.
 
@@ -880,7 +1166,9 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
     if (a.relationship) lines.push(`Relationship: ${a.relationship === 'recurring' ? 'recurring customer' : 'first visit'}`);
     if (a.tenure) lines.push(`Tenure: ${a.tenure.replace('_', ' ')}`);
     if (a.serviceCategories?.length) lines.push(`Service categories: ${a.serviceCategories.join(', ')}`);
+    if (a.servicesPerformed?.length) lines.push(`Services we have completed for them (public names; you may refer to the service by this name as context, never dates, visit counts, products or prices — refer to a service by its full name exactly as listed, and ONLY in one short sentence of the form "Thanks for choosing us for the <service>." or "Glad we could help with the <service>." — never say how it went): ${a.servicesPerformed.join(', ')}`);
     if (a.city) lines.push(`City: ${a.city}`);
+    lines.push('Do not call them a member or mention a plan, program or membership unless the reviewer used that word.');
   } else {
     lines.push('', 'ACCOUNT FACTS: none available. Use only the review.');
   }
@@ -1002,11 +1290,12 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
     const feedback = rejectionDetails.length ? rejectionDetails.map((d) => ({ code: d.code, span: d.promptSpan })) : null;
     const res = await requestDraft(grounding, mode, recentReplies, feedback, { reviewOnly: step.reviewOnly });
     if (!res.ok) {
-      // Providers down. The runner retries on a backoff for a tailored reply;
-      // once its retries are exhausted it posts this provider-independent
-      // safe copy rather than parking a 4-5 star review as provider_down.
-      const fallbackText = safeCopyReply(grounding, mode, recentReplies);
-      return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: res.reason, error: res.error, fallbackText };
+      // Providers down. The runner retries on a backoff for a tailored
+      // reply; once its retries are exhausted it parks the row as
+      // provider_down rather than posting a template — owner ruling
+      // 2026-09-24: a template reply is worse than a parked row. This
+      // supersedes the 2026-09-03 "never parks for want of copy" directive.
+      return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: res.reason, error: res.error };
     }
     const normalized = splitReply(res.text, grounding.locationName).full;
     const verdict = verifyReplyDetailed(normalized, grounding, { recentReplies, mode });
@@ -1022,55 +1311,14 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
     // name. The words live in rejectionDetails, stored on the review row.
     logger.info(`[review-reply-drafter] attempt ${attempts} rejected (${verdict.code}) review=${grounding.reviewId} mode=${mode}`);
   }
-  // Last rung: deterministic safe copy built only from facts the verifier
-  // already trusts, and verified like any other draft. A 4-5 star review
-  // gets a plain reply rather than a park (owner directive 2026-09-03: no
-  // review goes unanswered). Under-4 stars keep parking for a person.
-  const template = safeCopyReply(grounding, mode, recentReplies);
-  if (template) {
-    logger.info(`[review-reply-drafter] safe-copy reply used after ${attempts} rejected drafts review=${grounding.reviewId} mode=${mode}`);
-    return { ok: true, text: template, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reviewOnly: true, safeCopy: true };
-  }
+  // Every ladder attempt was rejected: park the row for a human rather than
+  // post a canned template — owner ruling 2026-09-24 (a template reply is
+  // worse than a parked row; supersedes the 2026-09-03 "never parks for want
+  // of copy" directive that used to fall back to a deterministic safe copy
+  // here).
   return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: 'verifier_reject' };
 }
 const stored = (details) => details.map(({ attempt, code, span }) => ({ attempt, code, span }));
-
-/**
- * Deterministic last-resort reply. Uses only the reviewer's first name and
- * the location sign-off — nothing
- * the verifier could call unsourced, and no wording that implies a past or
- * future relationship (a first-visit reviewer gets none). Three phrasings so the non-repetition
- * rule does not reject the third use at one location. Returns the first
- * variant that passes verifyReplyDetailed, else null (the row parks).
- */
-function safeCopyReply(grounding, mode, recentReplies = []) {
-  const r = grounding.review;
-  if (mode === 'low_rating' || !(Number(r.rating) >= 4)) return null;
-  // A first name the verifier itself cannot pass ("O'Neil" / "Mary-Jane"
-  // read as an unsourced proper noun) falls back to the generic greeting
-  // rather than to no reply at all.
-  const greetings = r.firstName ? [`Hi ${r.firstName},`, 'Hello there,'] : ['Hello there,'];
-  const noun = r.hasText ? 'the review' : (Number(r.rating) === 5 ? 'the five stars' : 'the rating');
-  // No technician name: a 4-star review can name a tech in a complaint, and
-  // nothing deterministic reads sentiment. The plain variant is safe for all.
-  // Each variant opens differently: the non-repetition rule compares the
-  // first five words of the body, greeting included.
-  const variants = [
-    `Thanks for ${noun}. Glad to be your pest and lawn team.`,
-    `We appreciate ${noun}. Glad you chose us.`,
-    `Much appreciated. Thanks for choosing us.`,
-  ];
-  const texts = greetings.flatMap((greeting) => variants.map((body) => `${greeting}\n\n${body}\n\n${signOffFor(grounding.locationName)}`));
-  // Prefer a variant the location has not used lately …
-  for (const text of texts) {
-    if (!verifyReplyDetailed(text, grounding, { recentReplies, mode })) return text;
-  }
-  // … but the non-repetition rule exists to keep model replies varied, not
-  // to starve the last rung: once every variant is recent, the first passing
-  // one is re-used. It still passes every other rule (no recent greeting name
-  // can be in it — it carries only this reviewer's first name).
-  return texts.find((text) => !verifyReplyDetailed(text, grounding, { recentReplies: [], mode })) || null;
-}
 
 module.exports = {
   REPLY_VERSION,
@@ -1086,7 +1334,6 @@ module.exports = {
   // tests
   splitReply,
   greetingName,
-  safeCopyReply,
   reviewEchoBans,
   relationshipAllowedTerms,
 };

@@ -66,12 +66,15 @@ describe('lawn grid invariants (2026-08-04 re-grid)', () => {
     }
   });
 
-  test('the retired basic/4x tier never appears in a priced ladder', () => {
+  test('the retired basic/4x and standard/6x tiers never appear in a sold ladder', () => {
+    // standard/6x hidden for new sales (owner directive 2026-09-24); its
+    // bracket column stays (test above) as the internal cadence anchor.
     for (const track of TRACKS) {
       for (const sqft of [1500, 4500, 20000]) {
         const tiers = lawnTiersAt(track, sqft);
-        expect(tiers.map((t) => t.freq)).toEqual([6, 9, 12]);
+        expect(tiers.map((t) => t.freq)).toEqual([9, 12]);
         expect(tiers.some((t) => t.tier === 'basic')).toBe(false);
+        expect(tiers.some((t) => t.tier === 'standard')).toBe(false);
       }
     }
   });

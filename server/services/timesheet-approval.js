@@ -481,7 +481,15 @@ async function getWeekDetail(technicianId, weekStart) {
   }
   const { dailies, entries } = snapshot;
 
-  const tech = await db('technicians').where({ id: technicianId }).first();
+  // Project, don't return-and-strip (ADMIN-BUG-R69): technicians.* includes
+  // password_hash, password_reset_token_hash/expires_at, auth_token_version,
+  // must_change_password, plus payroll/PII (pay_rate, ssn_last4, dob,
+  // address, emergency contact) — the panel reads only tech.id/tech.name
+  // (TimeTrackingPage.jsx), and approveWeek/unlockWeek both return this same
+  // object, so a select-only fix covers all three responses. Same rule this
+  // service already applies to its OWN pending-list read a few lines up
+  // (db('technicians').whereIn(...).select('id','name')).
+  const tech = await db('technicians').where({ id: technicianId }).first('id', 'name');
 
   const reviewToken = reviewSnapshotToken({ weekly, dailies, entries });
   return {

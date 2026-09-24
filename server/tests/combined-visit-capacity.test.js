@@ -134,7 +134,6 @@ describe('combined visit booking capacity', () => {
   });
 
   test.each([
-    ['lawn_care', 'lawn', 'standard', 6],
     ['lawn_care', 'lawn', 'enhanced', 9],
     ['lawn_care', 'lawn', 'premium', 12],
     ['tree_shrub', 'ts', 'light', 4],
@@ -158,6 +157,23 @@ describe('combined visit booking capacity', () => {
     ]);
     expect(profile.durationMinutes).toBe(120);
     expect(estimate).toEqual(before);
+  });
+
+  test('a lawn standard (6x) selection is no longer offered and is refused before capacity validation', () => {
+    // standard/6x is retired for new sales (owner directive 2026-09-24): the
+    // offered lawn ladder drops it, so a stale/crafted selection cannot pick
+    // it — the same refusal any unoffered tier key gets.
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    const estimate = estimateFor(['pest_control', 'lawn_care']);
+    estimate.estimate_data.result.recurring.services[1].visitsPerYear = 9;
+    estimate.estimate_data.result.results = { lawn: [
+      { name: 'Standard', v: 6, mo: 60, ann: 720, pa: 120 },
+      { name: 'Enhanced', v: 9, mo: 90, ann: 1080, pa: 120 },
+      { name: 'Premium', v: 12, mo: 120, ann: 1440, pa: 120 },
+    ] };
+    expect(() => resolveEstimateSlotProfile(estimate, {
+      selectedFrequency: 'quarterly', serviceCadences: { lawn_care: 'standard' },
+    })).toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
   });
 
   test('a persisted combined reservation keeps the accepted mix sized after the gate is off', () => {

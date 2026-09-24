@@ -152,6 +152,18 @@ test('a promised-link pre-provider check runs at handoff and stays out of serial
   }));
 });
 
+test('a final provider predicate is forwarded without early invocation or serialization', async () => {
+  const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+
+  await sendCustomerMessage({ ...BASE_INPUT, providerPreSendCheck });
+
+  const [providerInput, hooks] = sendViaTwilio.mock.calls[0];
+  expect(providerPreSendCheck).not.toHaveBeenCalled();
+  expect(hooks.providerPreSendCheck).toBe(providerPreSendCheck);
+  expect(providerInput).not.toHaveProperty('providerPreSendCheck');
+  expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('providerPreSendCheck');
+});
+
 test('a successful caller boundary preserves its finite copy deadline', async () => {
   const validUntil = Date.now() + 60000;
   const preSendCheck = jest.fn(async () => ({ ok: true, validUntil, preparation: 'fresh' }));

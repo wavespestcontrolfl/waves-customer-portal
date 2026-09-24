@@ -15,6 +15,8 @@ const {
   loadRetryContext,
   armedRetryQuery,
   classifyFailedPaymentRetry,
+  hasUnresolvedSiblingStripeOutcome,
+  deriveMonthlyChargeIdempotencyKey,
 } = require('./retry-collectibility');
 const { isEnabled } = require('../config/feature-gates');
 
@@ -34,6 +36,7 @@ const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 
 const { isBillingDayMatch } = require('./billing-helpers');
 const { isPaused } = require('./autopay-eligibility');
+const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
 
 async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint, paymentId, attemptPaymentId, retryCount = 0 }) {
   const metadata = { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode,
@@ -124,6 +127,168 @@ async function renderTemplate(templateKey, vars, context = {}) {
     throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
   }
   throw new Error(`SMS template ${templateKey} is missing or inactive`);
+}
+
+// ---------------------------------------------------------------------------
+// processMonthlyBilling collection step (ADMIN-BUG-R11) — the decisions that
+// used to sit inline in the customer loop, each one a single question.
+// ---------------------------------------------------------------------------
+
+const MONTHLY_LOCK_RETRY_ATTEMPTS = 3;
+const MONTHLY_LOCK_RETRY_DELAY_MS = 3000;
+
+// The monthly already-collected predicate — ONE definition shared by the
+// locked read and the post-contention recheck. Metadata-first
+// (billed_month stamp), payment_date window + description marker as the
+// legacy fallback; exactly the dedupe charge-now and the retry classifier
+// (retry-collectibility.js) apply.
+function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }) {
+  return db('payments')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['paid', 'processing'])
+    .where(function () {
+      this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+        .orWhere(function () {
+          this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+            .andWhere('payment_date', '>=', monthStart)
+            .andWhere('payment_date', '<=', monthEnd)
+            .andWhere('description', 'like', '%WaveGuard Monthly%');
+        });
+    })
+    .first();
+}
+
+// Run fn() under the per-customer collection lock; the lock closes the
+// check-then-charge race against charge-now and the retry sweep. Resolves
+// to exactly one of { alreadyCollected } | { unresolvedOutcome } |
+// { paymentResult }; a held-elsewhere claim rejects with
+// BILLING_CLAIM_HELD_ELSEWHERE for retryOnContention.
+function collectMonthlyDuesUnderLock(customer, period) {
+  return withCustomerBillingLock(customer.id, async () => {
+    const existingCharge = await findCollectedMonthlyPayment(customer.id, period);
+    if (existingCharge) return { alreadyCollected: existingCharge };
+
+    // Codex round-2 P0: a SIBLING attempt for this SAME obligation
+    // (charge-now, or an earlier cron/retry attempt) left an unresolved
+    // Stripe outcome — do not charge again until it reconciles.
+    const unresolvedOutcome = await hasUnresolvedSiblingStripeOutcome(customer.id, period.monthKey, db);
+    if (unresolvedOutcome.blocked) return { unresolvedOutcome };
+
+    const service = await require('./stripe');
+    // Codex round-1 P1: shared attempt-scoped key derivation
+    // (retry-collectibility.js) — the SAME source charge-now uses, so
+    // whichever of the two collectors attempts a customer's obligation
+    // SECOND today always advances past a FIRST attempt's key.
+    const idempotencyKey = await deriveMonthlyChargeIdempotencyKey(customer.id, period.monthKey, db);
+    const paymentResult = await service.chargeMonthly(customer.id, idempotencyKey);
+    return { paymentResult };
+  }, {
+    // This loop IS the 'billing-monthly' job (scheduler.js wraps
+    // processMonthlyBilling in runExclusive('billing-monthly', ...)) —
+    // checking that job's own lock here would report it "held" by this
+    // very call. 'billing-retries' (a different job) is still checked.
+    excludeJobLocks: ['billing-monthly'],
+  });
+}
+
+// Bounded retry on BILLING_CLAIM_HELD_ELSEWHERE only (the colliding
+// operation is a seconds-long deploy-overlap window). Any other error
+// propagates untouched. Resolves { ok: true, value } or { ok: false } once
+// every attempt was refused.
+async function retryOnContention(fn, { attempts, delayMs, label }) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return { ok: true, value: await fn() };
+    } catch (err) {
+      if (err.code !== 'BILLING_CLAIM_HELD_ELSEWHERE') throw err;
+      if (attempt === attempts) break;
+      logger.warn(`[billing-cron] ${label} deferred (attempt ${attempt}/${attempts}) — collection lock held elsewhere; retrying shortly`);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return { ok: false };
+}
+
+// Codex round-1 P1: a bare skip on exhausted lock contention has NO natural
+// recovery — isBillingDayMatch only matches once a month. Write a synthetic
+// 'failed' row in EXACTLY the shape a real declined charge leaves behind
+// (no PI, no amount moved, 'WaveGuard Monthly' marker, billed_month
+// stamped) so the 10 AM retry sweep's armedRetryQuery picks it up on its
+// very next run and collects through the SAME lock-protected path, plus an
+// operator alert. Codex round-3 P1: the row's never-attempted shape
+// (metadata.deferred_reason, no PI, retry_count 0, still armed) is what
+// GET /api/billing/balance leaves out of the payable balance until the
+// sweep actually attempts it.
+async function deferMonthlyCollection(customer, monthKey, now) {
+  logger.error(`[billing-cron] Monthly charge for customer ${customer.id} could not confirm exclusive collection after ${MONTHLY_LOCK_RETRY_ATTEMPTS} attempts — deferring to the retry sweep; billing_day only recurs next month, so this must not rely on tomorrow's tick alone`);
+  try {
+    await db('payments').insert({
+      customer_id: customer.id,
+      status: 'failed',
+      payment_date: etDateString(now),
+      amount: customer.monthly_rate,
+      description: `${customer.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${customer.first_name} ${customer.last_name} — DEFERRED (collection lock held elsewhere)`,
+      failure_reason: `Could not confirm exclusive collection after ${MONTHLY_LOCK_RETRY_ATTEMPTS} short retries (another process held the same customer's billing lock — expected only during a deploy overlap) — deferred to the retry sweep`,
+      retry_count: 0,
+      next_retry_at: new Date(),
+      metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: monthKey, tier: customer.waveguard_tier || '', deferred_reason: 'lock_contention' }),
+    });
+  } catch (insertErr) {
+    logger.error(`[billing-cron] Could not persist deferred-collection retry row for customer ${customer.id}: ${insertErr.message} — falling back to the alert only`);
+  }
+  await insertHealthAlert(customer.id, {
+    alert_type: 'billing_collection_deferred',
+    severity: 'high',
+    title: 'Monthly dues collection deferred — collection lock held elsewhere',
+    description: `The daily dues cron could not confirm exclusive collection for this customer after ${MONTHLY_LOCK_RETRY_ATTEMPTS} short retries (another process held the same customer's billing lock the whole time — expected only during a deploy overlap). A retry row was armed for the 10 AM retry sweep to pick up; if it also fails, a "final retry failed" SMS/alert will follow that ladder. Customer 360 "Charge now" can also collect ${monthKey} manually at any time.`,
+    trigger_data: JSON.stringify({ billed_month: monthKey, source: 'billing_monthly_cron_lock_contention' }),
+  }, 'Deferred-collection');
+  await logAutopay(customer.id, 'skipped_lock_contention', {
+    details: { source: 'autopay', billed_month: monthKey },
+  });
+}
+
+// Codex round-2 P0 + pre-push fallback audit P1: a sibling attempt for this
+// obligation left an unresolved Stripe outcome (an orphan charge, or an
+// ambiguous no-PI failure) — charging again risks a genuine double
+// collection while it is still unverified. Deliberately NO armed retry row:
+// a ladder charging again after an operator marks the orphan resolved (no
+// ledger row behind it) is the exact double collection the fence prevents.
+// An operator alert instead, naming what to reconcile and that "Charge
+// now" collects the month afterwards.
+async function alertUnresolvedMonthlyOutcome(customer, monthKey, unresolvedOutcome) {
+  logger.error(`[billing-cron] Monthly charge for customer ${customer.id} skipped — unresolved Stripe outcome from a sibling attempt (${unresolvedOutcome.reason}); reconcile before any further collection this month`);
+  const detail = unresolvedOutcome.detail || {};
+  const detailText = [
+    detail.stripe_payment_intent_id ? `, PI ${detail.stripe_payment_intent_id}` : '',
+    detail.id ? `, record ${detail.id}` : '',
+  ].join('');
+  await insertHealthAlert(customer.id, {
+    alert_type: 'billing_collection_deferred',
+    severity: 'high',
+    title: 'Monthly dues NOT collected — unresolved Stripe outcome on a prior attempt',
+    description: `The daily dues cron skipped ${monthKey} for this customer because a prior charge attempt has an unresolved Stripe outcome (${unresolvedOutcome.reason}${detailText}). Nothing was charged and NO retry is armed. Reconcile that attempt against the Stripe dashboard first — if it did collect this month, record it; if not, Customer 360 "Charge now" collects ${monthKey} manually.`,
+    trigger_data: JSON.stringify({
+      billed_month: monthKey,
+      source: 'billing_monthly_cron_unresolved_outcome',
+      reason: unresolvedOutcome.reason,
+      stripe_payment_intent_id: detail.stripe_payment_intent_id || null,
+      record_id: detail.id || null,
+    }),
+  }, 'Unresolved-outcome');
+  await logAutopay(customer.id, 'skipped_unresolved_outcome', {
+    details: { source: 'autopay', billed_month: monthKey, reason: unresolvedOutcome.reason },
+  });
+}
+
+// Best-effort operator alert: a ledger blip must never abort the collection
+// loop, only lose (and log) the bell.
+async function insertHealthAlert(customerId, row, label) {
+  try {
+    await db('customer_health_alerts').insert({ customer_id: customerId, ...row });
+  } catch (alertErr) {
+    logger.error(`[billing-cron] ${label} alert creation failed for customer ${customerId}: ${alertErr.message}`);
+  }
 }
 
 const BillingCron = {
@@ -292,30 +457,53 @@ const BillingCron = {
         // Legacy rows without the stamp keep the old payment_date-window
         // + description-marker match.
         const monthKey = `${year}-${String(month).padStart(2, '0')}`;
-        const existingCharge = await db('payments')
-          .where({ customer_id: customer.id })
-          .whereIn('status', ['paid', 'processing'])
-          .where(function () {
-            this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
-              .orWhere(function () {
-                this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
-                  .andWhere('payment_date', '>=', monthStart)
-                  .andWhere('payment_date', '<=', monthEnd)
-                  .andWhere('description', 'like', '%WaveGuard Monthly%');
-              });
-          })
-          .first();
+        // ADMIN-BUG-R11: the already-collected read + chargeMonthly call run
+        // under the SAME per-customer lock the admin "Charge now" route and
+        // the retry sweep hold (utils/customer-billing-lock.js), with a few
+        // short in-tick retries on a held-elsewhere claim — this is the ONE
+        // collector with no natural next-day retry (isBillingDayMatch only
+        // matches once a month). See collectMonthlyDuesUnderLock and
+        // retryOnContention.
+        const attempt = await retryOnContention(
+          () => collectMonthlyDuesUnderLock(customer, { monthKey, monthStart, monthEnd }),
+          { attempts: MONTHLY_LOCK_RETRY_ATTEMPTS, delayMs: MONTHLY_LOCK_RETRY_DELAY_MS, label: `Monthly charge for customer ${customer.id}` },
+        );
+        const lockOutcome = attempt.ok ? attempt.value : { claimHeldElsewhere: true };
 
-        if (existingCharge) {
-          await logAutopay(customer.id, 'skipped_already_paid', { paymentId: existingCharge.id });
+        if (lockOutcome.unresolvedOutcome) {
+          await alertUnresolvedMonthlyOutcome(customer, monthKey, lockOutcome.unresolvedOutcome);
           skipped++;
           continue;
         }
 
-        const service = await require('./stripe');
+        if (lockOutcome.claimHeldElsewhere) {
+          // Codex round-3 P1: the collector holding the lock past the retry
+          // window is very likely mid-charge for THIS month — if its row has
+          // landed by now, nothing is owed and no deferred row belongs in
+          // the ledger. Same predicate the locked path uses; a false
+          // negative only costs a deferred row the 10 AM sweep supersedes.
+          const collectedMeanwhile = await findCollectedMonthlyPayment(customer.id, { monthKey, monthStart, monthEnd })
+            .catch((readErr) => {
+              logger.warn(`[billing-cron] Post-contention already-collected recheck failed for customer ${customer.id}: ${readErr.message} — deferring as if uncollected`);
+              return null;
+            });
+          if (collectedMeanwhile) {
+            logger.info(`[billing-cron] Monthly charge for customer ${customer.id} was collected by the competing collector (payment ${collectedMeanwhile.id}) while this tick waited — nothing to defer`);
+            await logAutopay(customer.id, 'skipped_already_paid', { paymentId: collectedMeanwhile.id });
+          } else {
+            await deferMonthlyCollection(customer, monthKey, now);
+          }
+          skipped++;
+          continue;
+        }
 
-        // Charge
-        const paymentResult = await service.chargeMonthly(customer.id);
+        if (lockOutcome.alreadyCollected) {
+          await logAutopay(customer.id, 'skipped_already_paid', { paymentId: lockOutcome.alreadyCollected.id });
+          skipped++;
+          continue;
+        }
+
+        const paymentResult = lockOutcome.paymentResult;
         const settled = paymentResult?.status === 'paid';
         if (settled) charged++;
         else processing++;
@@ -801,6 +989,26 @@ const BillingCron = {
         continue;
       }
 
+      // Codex round-3 P1: an unresolved orphan charge for this CUSTOMER
+      // (customer-scoped — the orphan row cannot be tied to one obligation
+      // month) fences collection but must NOT park this row: parking is a
+      // self-supersede, and an orphan from an unrelated charge would write
+      // this month's dues off for good. Stay armed, no write; the next
+      // tick reclassifies from scratch once the orphan reconciles.
+      if (verdict.reason === RETRY_REASONS.SIBLING_ORPHAN_UNRESOLVED) {
+        await logAutopay(payment.customer_id, 'skipped_unresolved_outcome', {
+          paymentId: payment.id,
+          details: {
+            source: 'autopay_retry',
+            reason: verdict.unresolvedSibling?.reason || 'unresolved_orphan_charge',
+            orphan_id: verdict.unresolvedSibling?.detail?.id || null,
+            billed_month: obligationMonth,
+          },
+        }).catch(() => {});
+        logger.warn(`[billing-cron] Retry for payment ${payment.id} left armed — customer ${payment.customer_id} has an unresolved Stripe orphan charge; reconcile it before this month collects`);
+        continue;
+      }
+
       if (verdict.disposition !== RETRY_DISPOSITIONS.CHARGE) {
         // A reason this sweep does not know how to act on must never fall
         // through into a charge. Fail closed: leave the row armed, log.
@@ -815,6 +1023,17 @@ const BillingCron = {
       let newPayment = null;
       let originalMeta = {};
       let baseAmount = parseFloat(payment.amount);
+      // ADMIN-BUG-R11: set inside the monthly charge's collection lock below
+      // when a concurrent collector (Charge now, or this same sweep for a
+      // different rung) already took this obligation between the
+      // classification above and here — resolved exactly like the
+      // ALREADY_COLLECTED branch, never re-entering the failure ladder.
+      let raceAlreadyCollectedId = null;
+      // Set when the cross-process claim (utils/customer-billing-lock.js)
+      // is held elsewhere for this customer — a deploy overlap racing
+      // charge-now or the monthly cron. No charge was attempted, so this
+      // row must stay exactly as it was: no retry_count bump, no disarm.
+      let deferredClaimHeldElsewhere = false;
 
       try {
         const service = await require('./stripe');
@@ -858,16 +1077,66 @@ const BillingCron = {
           const monthlyCustomer = await db('customers').where({ id: payment.customer_id }).first();
           const monthlyDescription = description
             || `${monthlyCustomer?.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${monthlyCustomer?.first_name} ${monthlyCustomer?.last_name}`;
-          // Month-of-obligation stamp: this retry collects the ORIGINAL
-          // failed attempt's month (obligationMonth, resolved above), not
-          // the month the rung happens to land in — a July decline
-          // recovered Aug 1 must not satisfy August's month-window dedupe
-          // and skip a whole billing cycle.
-          newPayment = await service.charge(payment.customer_id, baseAmount, monthlyDescription, {
-            type: 'monthly_autopay',
-            tier: monthlyCustomer?.waveguard_tier || '',
-            billed_month: obligationMonth || undefined,
-          }, retryIdempotencyKey);
+          // ADMIN-BUG-R11: this retry and a concurrent admin "Charge now"
+          // click (or the daily monthly cron) collect the SAME obligation.
+          // Serialize on the SAME per-customer in-process lock those paths
+          // hold, and re-run the pure classifier one more time inside it —
+          // a collection that landed between this sweep's classification
+          // above and here (the whole point of the lock) is caught instead
+          // of charged again.
+          const lockOutcome = await withCustomerBillingLock(payment.customer_id, async () => {
+            if (obligationMonth) {
+              const recheck = await classifyFailedPaymentRetry({ payment, customer, ctx });
+              if (recheck.reason === RETRY_REASONS.ALREADY_COLLECTED) {
+                return { alreadyCollected: recheck.collectedByPaymentId };
+              }
+              if (recheck.disposition !== RETRY_DISPOSITIONS.CHARGE) {
+                // Codex round-2 P0: the recheck's verdict changed to
+                // something other than collectible/already-collected since
+                // this sweep's initial classification — most notably a
+                // SIBLING attempt's unresolved Stripe outcome
+                // (AMBIGUOUS_OUTCOME_PARKED), which the ALREADY_COLLECTED
+                // check above never catches (an orphan/ambiguous row is
+                // never 'paid'/'processing'). Defer exactly like a
+                // held-elsewhere lock: leave this row untouched; the next
+                // tick reclassifies it from scratch and reaches the SAME
+                // verdict through the top-level switch below, which owns
+                // the full park/alert handling for every reason.
+                return { deferred: true, deferredReason: recheck.reason };
+              }
+            }
+            // Month-of-obligation stamp: this retry collects the ORIGINAL
+            // failed attempt's month (obligationMonth, resolved above), not
+            // the month the rung happens to land in — a July decline
+            // recovered Aug 1 must not satisfy August's month-window dedupe
+            // and skip a whole billing cycle.
+            const charged = await service.charge(payment.customer_id, baseAmount, monthlyDescription, {
+              type: 'monthly_autopay',
+              tier: monthlyCustomer?.waveguard_tier || '',
+              billed_month: obligationMonth || undefined,
+            }, retryIdempotencyKey);
+            return { charged };
+          }, {
+            // This sweep IS the 'billing-retries' job (scheduler.js wraps
+            // processPaymentRetries in runExclusive('billing-retries', ...))
+            // — checking that job's own lock here would report it "held" by
+            // this very call and refuse every retry. Still checks
+            // 'billing-monthly' (a different job, a real other-process
+            // concern).
+            excludeJobLocks: ['billing-retries'],
+          }).catch((lockErr) => {
+            if (lockErr.code === 'BILLING_CLAIM_HELD_ELSEWHERE') return { claimHeldElsewhere: true };
+            throw lockErr;
+          });
+          if (lockOutcome.claimHeldElsewhere || lockOutcome.deferred) {
+            // Same "leave armed, reclassify next tick" handling either way
+            // — see deferredClaimHeldElsewhere's resolution below.
+            deferredClaimHeldElsewhere = true;
+          } else if (lockOutcome.alreadyCollected) {
+            raceAlreadyCollectedId = lockOutcome.alreadyCollected;
+          } else {
+            newPayment = lockOutcome.charged;
+          }
         } else {
           newPayment = await service.chargeOneTime(
             payment.customer_id,
@@ -1317,6 +1586,42 @@ const BillingCron = {
             });
           }
         }
+        continue;
+      }
+
+      // ADMIN-BUG-R11 / Codex round-2 P0: either the cross-process
+      // collection claim is held elsewhere for this customer (a deploy
+      // overlap racing charge-now or the monthly cron), or the in-lock
+      // recheck's verdict changed to something other than collectible
+      // (most notably a sibling attempt's unresolved Stripe outcome) — no
+      // charge was attempted either way, so leave this row exactly as
+      // armed; the next sweep tick reclassifies it from scratch.
+      if (deferredClaimHeldElsewhere) {
+        logger.warn(`[billing-cron] Retry for payment ${payment.id} deferred for customer ${payment.customer_id}; left armed for next tick`);
+        continue;
+      }
+
+      // ADMIN-BUG-R11: the collection lock's re-check found this obligation
+      // already collected through another door — resolve exactly like the
+      // pre-charge ALREADY_COLLECTED branch above (no charge was made; no
+      // new payment row exists to supersede this one with is wrong here, so
+      // point at the collector that actually won the race).
+      if (raceAlreadyCollectedId) {
+        await db('payments')
+          .where({ id: payment.id })
+          .update({
+            next_retry_at: null,
+            superseded_by_payment_id: raceAlreadyCollectedId,
+            failure_reason: db.raw(
+              'COALESCE(failure_reason, \'\') || ? ',
+              [` — resolved: ${obligationMonth} already collected by payment ${raceAlreadyCollectedId} (caught under the collection lock)`],
+            ),
+          }).catch((updErr) => logger.error(`[billing-cron] retry disarm (already collected, late race) failed for payment ${payment.id}: ${updErr.message}`));
+        await logAutopay(payment.customer_id, 'skipped_already_paid', {
+          paymentId: payment.id,
+          details: { source: 'autopay_retry', collected_by_payment_id: raceAlreadyCollectedId, billed_month: obligationMonth, ladder_stopped: true },
+        }).catch(() => {});
+        logger.info(`[billing-cron] Retry for payment ${payment.id} skipped — ${obligationMonth} already collected by payment ${raceAlreadyCollectedId} (caught under the collection lock)`);
         continue;
       }
 

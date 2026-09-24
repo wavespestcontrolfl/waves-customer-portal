@@ -15080,9 +15080,24 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // check_in/check_out/actual_duration and actual_start/actual_end/
 // service_time families for legacy reasons. Status changes write both
 // families so downstream reporting can read either shape.
+// Target statuses this bare status route actually commits (r1-sched-routes-2):
+// 'pending' and 'rescheduled' are not among them (un-confirming or manually
+// stamping a reschedule outside the reschedule engine's side effects is not
+// a supported transition here — self-serve/staff reschedule always goes
+// through SmartRebooker), and neither is any value outside the DB's
+// scheduled_services status enum. 'completed' / 'cancelled' / 'no_show' are
+// syntactically valid but redirected to their own routes by the explicit
+// guards just below; every other enum member routes through this handler
+// (the V2 dispatch board's row actions, including Skip, run through here).
+// The set lives in services/job-status.js so the sibling dispatch status
+// route enforces the identical closed set (pre-push fallback audit, PR #4673).
 router.put('/:id/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, requestReview } = req.body;
+    const { STATUS_ROUTE_ALLOWED_TARGETS } = require('../services/job-status');
+    if (!STATUS_ROUTE_ALLOWED_TARGETS.has(toStatus)) {
+      return res.status(400).json({ error: `Invalid status '${toStatus}'`, code: 'invalid_status' });
+    }
     // Technician tokens: own CURRENT visits (completed-in-window included,
     // NOT the live-only predicate) — a committed completion whose response
     // was lost must stay retryable so the route's same-status idempotency
@@ -16326,7 +16341,14 @@ router.get('/:id/estimate-source', async (req, res, next) => {
     res.json({
       linked: true,
       estimateId: est.id,
-      estimateToken: est.token,
+      // Owner-only: est.token is the permanent public bearer credential for
+      // the unauthenticated /api/estimates/:token router (view, PDF, resend,
+      // change-request) — admin-customers.js already strips 'estimates' from
+      // the tech 360 for exactly this reason. Never hand it to a technician
+      // token, which outlives the 7-day tech access window and any
+      // reassignment/termination (ADMIN-BUG-R40). No tech client reads this
+      // field.
+      ...(isTechnicianRequest(req) ? {} : { estimateToken: est.token }),
       // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
       // customer sees on the public quote page, so the provenance card can
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.

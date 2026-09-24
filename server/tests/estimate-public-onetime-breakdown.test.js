@@ -610,14 +610,15 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $100.00/app × 6 ÷ 12 = $50.00/mo — a SOLD cadence at the lawn
+                    // $66.67/app × 9 ÷ 12 = $50.00/mo — a SOLD cadence at the lawn
                     // program minimum, so this snapshot keeps the fast path
-                    // (4-visit lawn rows are retired regardless of price).
+                    // (4- and 6-visit lawn rows are retired regardless of price —
+                    // 6x retired for new sales 2026-09-24).
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 100,
-                    perTreatment: 100,
-                    visitsPerYear: 6,
+                    displayPrice: 66.67,
+                    perTreatment: 66.67,
+                    visitsPerYear: 9,
                   },
                 ],
                 included: [
@@ -635,9 +636,9 @@ describe('public estimate one-time breakdown', () => {
             services: [
               { name: 'Pest Control', mo: 50 },
               // The stored lawn row carries its SOLD cadence (matching the
-              // snapshot's 6-visit treatment row) — a cadence-less lawn row
+              // snapshot's 9-visit treatment row) — a cadence-less lawn row
               // with no tier ladder would be uninspectable and requote.
-              { name: 'Lawn Care', mo: 50, visitsPerYear: 6 },
+              { name: 'Lawn Care', mo: 50, visitsPerYear: 9 },
             ],
           },
           oneTime: {
@@ -687,7 +688,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
       key: 'recurring',
       monthly: 50,
-      perTreatment: 100,
+      perTreatment: 66.67,
       perVisit: null,
       addOns: [],
     }));
@@ -725,12 +726,13 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $100.00/app × 6 ÷ 12 = $50.00/mo — a sold cadence at the floor.
+                    // $66.67/app × 9 ÷ 12 = $50.00/mo — a sold cadence at the floor
+                    // (6x retired for new sales 2026-09-24).
                     service: 'lawn_care',
-                    label: 'Lawn Care (Bi-monthly)',
-                    displayPrice: 100,
-                    perTreatment: 100,
-                    visitsPerYear: 6,
+                    label: 'Lawn Care (Every 6 weeks)',
+                    displayPrice: 66.67,
+                    perTreatment: 66.67,
+                    visitsPerYear: 9,
                   },
                 ],
               },
@@ -790,7 +792,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
       monthly: 50,
-      perTreatment: 100,
+      perTreatment: 66.67,
       perVisit: null,
     }));
     expect(payload.services[1].frequencies[1]).toEqual(expect.objectContaining({
@@ -822,12 +824,13 @@ describe('public estimate one-time breakdown', () => {
                 annual: 840,
                 perServiceTreatments: [
                   {
-                    // $100.00/app × 6 ÷ 12 = $50.00/mo — a sold cadence at the floor.
+                    // $66.67/app × 9 ÷ 12 = $50.00/mo — a sold cadence at the floor
+                    // (6x retired for new sales 2026-09-24).
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 100,
-                    perTreatment: 100,
-                    visitsPerYear: 6,
+                    displayPrice: 66.67,
+                    perTreatment: 66.67,
+                    visitsPerYear: 9,
                   },
                   {
                     service: 'mosquito',
@@ -885,7 +888,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
       monthly: 50,
-      perTreatment: 100,
+      perTreatment: 66.67,
       perVisit: null,
     }));
     expect(payload.services[0].frequencies[1]).toEqual(expect.objectContaining({
@@ -980,12 +983,13 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $100.00/app × 6 ÷ 12 = $50.00/mo — a sold cadence at the floor.
+                    // $66.67/app × 9 ÷ 12 = $50.00/mo — a sold cadence at the floor
+                    // (6x retired for new sales 2026-09-24).
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 100,
-                    perTreatment: 100,
-                    visitsPerYear: 6,
+                    displayPrice: 66.67,
+                    perTreatment: 66.67,
+                    visitsPerYear: 9,
                   },
                 ],
               },
@@ -1064,13 +1068,14 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.snapshotHit).not.toBe(true);
     const keys = payload.frequencies.map((frequency) => frequency.key);
     expect(keys).not.toContain('basic');
+    // standard/6x is retired for new sales too (owner directive 2026-09-24).
+    expect(keys).not.toContain('standard');
     // Floors disarmed (programMinimumMonthly = 0): the rebuilt ladder keeps
-    // the stored Standard/Enhanced prices exactly — no $50.00/mo clamp.
+    // the stored Enhanced price exactly — no $50.00/mo clamp.
     const lawnRows = payload.frequencies
       .filter((frequency) => frequency.serviceCategory === 'lawn_care')
       .map(({ key, monthly, annual }) => ({ key, monthly, annual }));
     expect(lawnRows).toEqual([
-      { key: 'standard', monthly: 38, annual: 456 },
       { key: 'enhanced', monthly: 47, annual: 564 },
     ]);
   });
@@ -1284,9 +1289,10 @@ describe('public estimate one-time breakdown', () => {
             waveGuardTier: 'Bronze',
             monthlyTotal: 50,
             annualAfterDiscount: 600,
-            services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 50, ann: 600, visitsPerYear: 6 }],
+            // Sold Enhanced/9x row (Standard/6x retired for new sales 2026-09-24).
+            services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 50, ann: 600, visitsPerYear: 9 }],
           },
-          results: { lawn: [{ name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100, recommended: true }] },
+          results: { lawn: [{ name: 'Enhanced', v: 9, mo: 50, ann: 600, pa: 66.67, recommended: true }] },
           oneTime: { total: 0, items: [] },
         },
       },
@@ -1578,6 +1584,38 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.quoteRequiredReason).toBe('retired_lawn_cadence_requote');
   });
 
+  test('a MIXED bundle whose only stored lawn row is the retired Standard (6x) is quote-required', async () => {
+    // standard/6x retired for new sales (owner directive 2026-09-24) — same
+    // requote as the retired Basic row above: no sellable lawn cadence.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-retired-standard-lawn-mixed-requote-test',
+      monthly_total: 95,
+      annual_total: 1140,
+      estimate_data: {
+        result: {
+          results: {
+            lawn: [
+              { name: 'Standard', v: 6, mo: 45, ann: 540, pa: 90, recommended: true },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 95,
+            annualAfterDiscount: 1140,
+            services: [
+              { name: 'Pest Control', service: 'pest_control', mo: 50 },
+              { name: 'Lawn Care', service: 'lawn_care', mo: 45, visitsPerYear: 6 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('retired_lawn_cadence_requote');
+  });
+
   test('a bundle with a sellable lawn cadence in its rows stays self-serve acceptable', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-sellable-lawn-not-requote-test',
@@ -1588,7 +1626,8 @@ describe('public estimate one-time breakdown', () => {
           results: {
             lawn: [
               { name: 'Basic', v: 4, mo: 30, ann: 360, pa: 90 },
-              { name: 'Standard', v: 6, mo: 45, ann: 540, pa: 90, recommended: true },
+              { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
+              { name: 'Enhanced', v: 9, mo: 45, ann: 540, pa: 60, recommended: true },
             ],
           },
           recurring: {
@@ -1596,7 +1635,7 @@ describe('public estimate one-time breakdown', () => {
             annualAfterDiscount: 1140,
             services: [
               { name: 'Pest Control', service: 'pest_control', mo: 50 },
-              { name: 'Lawn Care', service: 'lawn_care', mo: 45, visitsPerYear: 6 },
+              { name: 'Lawn Care', service: 'lawn_care', mo: 45, visitsPerYear: 9 },
             ],
           },
           oneTime: { total: 0, items: [] },
@@ -2609,7 +2648,7 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
-  test('lawn-only public frequencies drop the retired 4-application basic tier (owner directive 2026-07-09)', () => {
+  test('lawn-only public frequencies drop the retired 4-application basic and 6-application standard tiers (owner directives 2026-07-09 / 2026-09-24)', () => {
     const estData = {
       result: {
         results: {
@@ -2628,39 +2667,40 @@ describe('public estimate one-time breakdown', () => {
       },
     };
 
-    // Quarterly is retired: a stored Basic row (even the recommended one)
-    // never re-renders as a selectable cadence, so it can't be accepted.
+    // Quarterly and Bi-monthly are retired: a stored Basic row (even the
+    // recommended one) or Standard row never re-renders as a selectable
+    // cadence, so neither can be accepted.
     const frequencies = lawnFrequenciesFromResultStats(estData);
-    expect(frequencies.map((frequency) => frequency.key)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(frequencies.map((frequency) => frequency.key)).toEqual(['enhanced', 'premium']);
     expect(frequencies[0]).toMatchObject({
-      key: 'standard',
-      label: 'Bi-monthly (6 visits)',
+      key: 'enhanced',
+      label: 'Every 6 weeks (9 visits)',
       serviceCategory: 'lawn_care',
-      serviceTierKey: 'standard',
-      monthly: 90,
-      annual: 1080,
-      perTreatment: 180,
-      visitsPerYear: 6,
+      serviceTierKey: 'enhanced',
+      monthly: 105,
+      annual: 1260,
+      perTreatment: 140,
+      visitsPerYear: 9,
       perServiceTreatments: [
-        expect.objectContaining({ service: 'lawn_care', perTreatment: 180, visitsPerYear: 6 }),
+        expect.objectContaining({ service: 'lawn_care', perTreatment: 140, visitsPerYear: 9 }),
       ],
     });
 
     // Accepting a surviving cadence still re-stamps the recurring line and
-    // marks the results rows (Basic stays unselected).
+    // marks the results rows (Basic and Standard stay unselected).
     const nextData = applySelectedLawnTierToEstimateData(estData, frequencies[0]);
     expect(nextData.result.recurring.services[0]).toMatchObject({
       service: 'lawn_care',
-      serviceKey: 'lawn_care_recurring',
-      frequency: 'bi_monthly',
-      tier: 'standard',
-      visitsPerYear: 6,
-      perTreatment: 180,
+      serviceKey: 'lawn_care_6week',
+      frequency: 'every_6_weeks',
+      tier: 'enhanced',
+      visitsPerYear: 9,
+      perTreatment: 140,
     });
     expect(nextData.result.results.lawn.map((row) => ({ tier: row.tier, selected: row.selected }))).toEqual([
       { tier: 'basic', selected: false },
-      { tier: 'standard', selected: true },
-      { tier: 'enhanced', selected: false },
+      { tier: 'standard', selected: false },
+      { tier: 'enhanced', selected: true },
       { tier: 'premium', selected: false },
     ]);
   });

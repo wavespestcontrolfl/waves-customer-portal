@@ -25,6 +25,10 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 const TRACKS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
+// Every priced cadence, including 6x: hidden from sale since 2026-09-24 but
+// still the anchor lookupLawnBracket caps 9x/12x (and one-time lawn) off,
+// so a broken 6x cell would move live sold prices. Scanned via
+// includeHiddenTiers.
 const SOLD_VISITS = [6, 9, 12];
 const GRID_MIN_SQFT = 2000;
 const GRID_MAX_SQFT = 22000;
@@ -104,7 +108,7 @@ function scanLadderGrid() {
     for (let sqft = GRID_MIN_SQFT; sqft <= GRID_MAX_SQFT; sqft += GRID_STEP_SQFT) {
       // Track rides the OPTIONS arg — priceLawnCare ignores property.grassType,
       // so passing it there silently sweeps st_augustine four times.
-      const result = priceLawnCare({ lawnSqFt: sqft }, { track });
+      const result = priceLawnCare({ lawnSqFt: sqft }, { track, includeHiddenTiers: true });
       const tiers = (result.tiers || [])
         .filter((t) => SOLD_VISITS.includes(t.visits))
         .sort((a, b) => a.visits - b.visits);

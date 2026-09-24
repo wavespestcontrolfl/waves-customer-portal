@@ -1152,20 +1152,34 @@ describe('field-confirm semantics cover day-of takeovers on BOTH status routes',
   // ⭐ ONLY THE VISIT'S OWN TECHNICIAN CAN FIELD-STAMP IT — PROVEN UNDER THE
   // ROW LOCK. admin-schedule scopes technician requests via
   // technicianCurrentVisitFilter + an in-trx row-locked re-check;
-  // admin-dispatch is not ownership-scoped, so it re-reads the row FOR UPDATE
-  // inside the transaction and re-verifies assignment + the owed-activation
-  // state there — a pre-transaction snapshot races reassignment.
+  // admin-dispatch is not ownership-scoped ahead of the transaction, so it
+  // re-verifies assignment + the owed-activation state under a row lock
+  // INSIDE the transaction — a pre-transaction snapshot races reassignment.
+  //
+  // Test contract change (PR #4673 round 3 follow-up): this used to
+  // source-grep a literal `.forUpdate()` call directly in admin-dispatch.js.
+  // Round 3 centralized that row lock into the shared `lockOwnedLiveVisit`
+  // helper (server/services/technician-visit-scope.js) — reused by every
+  // technician-reachable per-visit write in this file, not just this route —
+  // so the lock call itself now lives there instead of inline here, and the
+  // window below was widened to outrun the codex-review commentary this PR
+  // added between the anchor and the (otherwise unchanged) predicate text.
+  // BEHAVIORAL coverage of the actual guarantee (a day-of takeover succeeds
+  // and stamps field_confirmed_at; an unowned technician is refused, never
+  // stamped) now also lives in
+  // tests/admin-status-routes-field-confirm-takeover.test.js, for both
+  // status routes.
   test('admin-dispatch.js: ownership + state are re-verified under the transaction row lock for BOTH stamp paths', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     const idx = src.indexOf('let fieldConfirmVerified = false');
     expect(idx).toBeGreaterThan(-1);
-    const recheck = src.slice(idx, idx + 2000);
+    const recheck = src.slice(idx, idx + 4000);
     // One verification covers the EXPLICIT technician confirm AND the day-of
     // takeover — the confirm path finds the visit by ID with no ownership
     // predicate, so an unowned tech confirm must fall back to OFFICE-confirm
     // semantics (no field stamp, card funnel intact).
     expect(recheck).toContain('takeoverCandidate || explicitFieldConfirm');
-    expect(recheck).toContain('.forUpdate()');
+    expect(recheck).toContain('lockOwnedLiveVisit(trx, req, svc.id,');
     expect(recheck).toContain("String(locked.technician_id || '') === String(req.technicianId)");
     expect(recheck).toContain('locked.customer_confirmed !== true');
     expect(recheck).toContain("['pending', 'confirmed'].includes(String(locked.status))");
