@@ -653,6 +653,36 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-15T00:00:00Z').toISOString());
   });
 
+  test('Codex #4710 r10 P2 :890: attribution uses the LOCKED visit schedule, not the pre-lock read — a dispatch move between the two reads is honored', async () => {
+    const fakeDb = seededDb({
+      estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-09-07T12:00:00Z') }],
+    });
+    // The pre-lock read sees the OLD (stale) date; the visit is moved to
+    // the NEW date the instant the customer lock fires below, simulating
+    // dispatch moving it between recordOutcome's first read and the lock
+    // (same injection point as the customer-merge-mid-write test above).
+    fakeDb.__store.scheduled_services[0].scheduled_date = '2026-09-05';
+    fakeDb.__store.scheduled_services[0].window_start = null;
+    let flipped = false;
+    const spyDb = (name) => {
+      const q = fakeDb(name);
+      if (name === 'customers' && !flipped) {
+        flipped = true;
+        fakeDb.__store.scheduled_services[0].scheduled_date = '2026-09-10'; // the dispatch move
+      }
+      return q;
+    };
+    spyDb.transaction = async (fn) => fn(spyDb);
+
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb });
+
+    // The Sept-7 acceptance precedes the consultation's REAL (moved)
+    // Sept-10 date, so it is not this consultation's sale. Using the stale
+    // pre-lock date (Sept-5) would have wrongly counted it as in-window
+    // evidence and won this outcome.
+    expect(saved.outcome).toBe('warm');
+  });
+
   test('local audit P1: re-recording a NO-SHOWED consultation warm never wins it, even with sale evidence', async () => {
     const fakeDb = makeFakeDb({
       scheduled_services: [
@@ -767,6 +797,20 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     },
   );
 
+  // Codex #4710 r10 P2 :335: neither documented shape (naive ET, or ISO with
+  // an explicit offset/Z) — the old code fell through to
+  // parseETDateTime's host-UTC `new Date(...)` fallback and ACCEPTED these,
+  // silently reading a free-text date as UTC (a boolean/number happened to
+  // coerce to a "valid" Date too).
+  test.each(['09/25/2026 09:00', true, 1758790800000])(
+    'Codex #4710 r10 P2 :335: an unsupported followUpAt shape (%s) is rejected, not silently accepted',
+    async (followUpAt) => {
+      const fakeDb = makeFakeDb({ scheduled_services: [], leads: [] });
+      await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt }, { trx: fakeDb }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+    },
+  );
+
   test('local audit P1: a converted lead whose only booking is a free Estimate Visit is NOT a win — converted_at alone is never evidence', async () => {
     const fakeDb = seededDb({
       leads: [{ id: 'lead-1', customer_id: 'cust-1', converted_at: new Date('2026-09-16T00:00:00Z'), deleted_at: null, created_at: SCHEDULED_DATE }],
@@ -854,6 +898,35 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(saved.outcome).toBe('won');
     expect(saved.won_via).toBe('office_booking');
     expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-17T00:00:00Z').toISOString());
+  });
+
+  test('Codex #4710 r10 P2 :600: a non-qualifying booking (a free callback) is filtered by the cheap sync rule BEFORE any catalog (services table) lookup', async () => {
+    const fakeDb = seededDb({
+      extraTables: {
+        // A real, non-assessment catalog row — if isAssessmentBooking's
+        // async services lookup ran at all for visit-cb below, it would
+        // find this row (proving the lookup happened, not merely that it
+        // was harmless to skip).
+        services: [{ id: 'svc-1', service_key: 'quarterly_pest_control', name: 'Quarterly Pest Control' }],
+      },
+    });
+    fakeDb.__store.scheduled_services.push({
+      id: 'visit-cb', service_type: 'Pest Control Re-Service', service_id: 'svc-1', customer_id: 'cust-1',
+      created_at: new Date('2026-09-11T00:00:00Z'), status: 'confirmed', is_callback: true,
+    });
+    const calls = [];
+    const spyDb = (name) => { calls.push(name); return fakeDb(name); };
+    spyDb.transaction = async (fn) => fn(spyDb);
+
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb });
+
+    expect(saved.outcome).toBe('warm'); // the only candidate booking is a non-qualifying callback
+    // Pre-fix, isAssessmentBooking (async, a `services` catalog query) ran
+    // FIRST for every candidate row regardless of whether the cheap sync
+    // rule would already reject it — a recurring series creates all its
+    // children in one batch, so this could mean thousands of avoidable
+    // catalog queries per sweep tick.
+    expect(calls.filter((n) => n === 'services')).toHaveLength(0);
   });
 
   test('no qualifying evidence anywhere → stays warm', async () => {
@@ -1419,6 +1492,7 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
       }
       return fakeDb(name);
     };
+    spyDb.raw = fakeDb.raw; // Codex #4710 r10 P1 :692 — the bounded lock-wait SET LOCAL
     spyDb.transaction = async (fn) => fn(spyDb);
     db.mockImplementation(spyDb);
     db.transaction = spyDb.transaction;
@@ -1430,6 +1504,34 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
     expect(result.won).toBe(1);
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-a').outcome).toBe('warm'); // untouched by the throw
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-b').outcome).toBe('won'); // the sweep kept going
+  });
+
+  test('Codex #4710 r10 P1 :692: bounds the per-row reconciliation customer lock wait (SET LOCAL lock_timeout), set before the row lock itself', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', scheduled_date: SCHEDULED_DATE, customer_id: 'cust-1', service_type: 'Waves Assessment' },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'warm' },
+      ],
+    });
+    const calls = [];
+    const spyDb = (name) => { calls.push({ type: 'table', name }); return fakeDb(name); };
+    spyDb.raw = (sql, bindings) => { calls.push({ type: 'raw', sql }); return fakeDb.raw(sql, bindings); };
+    spyDb.transaction = async (fn) => fn(spyDb);
+    db.mockImplementation(spyDb);
+    db.transaction = spyDb.transaction;
+
+    await reconcileOpenConsultationOutcomes({ now: NOW });
+
+    // Pre-fix, reconcileOneOpenOutcome never called `.raw()` at all — a
+    // wedged customer lock could wait forever (unlimited default
+    // lock_timeout) and, because scheduler.js's runExclusive serializes the
+    // whole hourly sweep, block every OTHER row too, on every later tick.
+    const rawIdx = calls.findIndex((c) => c.type === 'raw' && /lock_timeout/i.test(c.sql));
+    const customersIdx = calls.findIndex((c) => c.type === 'table' && c.name === 'customers');
+    expect(rawIdx).toBeGreaterThanOrEqual(0);
+    expect(customersIdx).toBeGreaterThan(rawIdx);
   });
 
   test('bounded by limit — a large backlog does not all run in one tick', async () => {
@@ -1599,12 +1701,34 @@ describe('markNoShow', () => {
     expect(result.outcome).toBe('lost');
     // The pre-fix version read the existing row first, branched in JS, THEN
     // issued a plain `.where({id}).update(...)` with no outcome re-check —
-    // a TOCTOU window a concurrent markWonForCustomer could win. Now: one
-    // scheduled_services read (ownership/consultation check) + exactly ONE
-    // consultation_outcomes touch (the atomic conditional UPDATE that both
-    // applies the change AND returns the updated row — no separate read).
-    expect(tableCalls.filter((n) => n === 'scheduled_services')).toHaveLength(1);
+    // a TOCTOU window a concurrent markWonForCustomer could win. Now:
+    // exactly ONE consultation_outcomes touch (the atomic conditional
+    // UPDATE that both applies the change AND returns the updated row — no
+    // separate read). TWO scheduled_services reads (Codex #4710 r10 P2
+    // :1307 — customer → visit lock order): an unlocked preview to learn
+    // which customer to lock, then the locked ownership/consultation
+    // recheck.
+    expect(tableCalls.filter((n) => n === 'scheduled_services')).toHaveLength(2);
     expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(1);
+  });
+
+  test('Codex #4710 r10 P2 :1307: locks the customer row BEFORE the visit lock (customer -> visit, matching customer-dedupe.js\'s executeMerge order)', async () => {
+    const fakeDb = seededDb();
+    const calls = [];
+    const spyDb = (name) => { calls.push(name); return fakeDb(name); };
+
+    await markNoShow('visit-1', { trx: spyDb });
+
+    const customersIdx = calls.indexOf('customers');
+    const scheduledIdx = calls.indexOf('scheduled_services'); // first touch: the unlocked customer-id preview
+    const lockedScheduledIdx = calls.lastIndexOf('scheduled_services'); // second touch: the locked recheck
+    expect(customersIdx).toBeGreaterThanOrEqual(0);
+    // customers is locked strictly BETWEEN the two scheduled_services
+    // reads — after learning which customer to lock, before the visit's
+    // own row lock. The pre-fix version never touched `customers` at all
+    // (no lock order to get wrong, which was the bug).
+    expect(customersIdx).toBeGreaterThan(scheduledIdx);
+    expect(customersIdx).toBeLessThan(lockedScheduledIdx);
   });
 
   test('atomic guard: an already-won row is left alone by the same single UPDATE (no separate read decides it)', async () => {
@@ -1620,6 +1744,105 @@ describe('markNoShow', () => {
     // fallback is not a guard (the UPDATE's WHERE already decided nothing
     // should change) — it only supplies the return value.
     expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(2);
+  });
+});
+
+describe('deriveLinkage (via markNoShow) — the best-effort lead lookup is isolated in its own savepoint (Codex #4710 r10 P2 :305)', () => {
+  // A small connection wrapper that mirrors real Postgres transaction
+  // semantics the plain table-shim doesn't model: once ANY query on a
+  // connection throws/rejects, every LATER query on that SAME connection
+  // throws "current transaction is aborted" too — UNLESS the failing query
+  // ran inside a nested `.transaction()` (a SAVEPOINT), whose own poison
+  // state is isolated from its parent's, exactly like a real
+  // ROLLBACK TO SAVEPOINT. This is what actually distinguishes "caught the
+  // error in JS" from "the surrounding transaction is still usable" — the
+  // gap the P2 :305 finding is about.
+  function abortedError() {
+    const err = new Error('current transaction is aborted, commands ignored until end of transaction block');
+    err.code = '25P02';
+    return err;
+  }
+  function proxifyConnection(obj, poisonState) {
+    if (obj == null || typeof obj !== 'object') return obj;
+    return new Proxy(obj, {
+      get(target, prop) {
+        const value = target[prop];
+        if (typeof value !== 'function') return value;
+        return (...args) => {
+          if (poisonState.poisoned) throw abortedError();
+          let result;
+          try {
+            result = value.apply(target, args);
+          } catch (err) {
+            poisonState.poisoned = true;
+            throw err;
+          }
+          if (result && typeof result.then === 'function') {
+            const wrapped = result.then((v) => v, (err) => { poisonState.poisoned = true; throw err; });
+            // The shim's update() hands back a hybrid: a Promise (its
+            // resolved value the row count) that ALSO carries a
+            // `.returning()` method for callers that want the updated
+            // rows. `.then()` returns a brand-new promise that would drop
+            // that extra property — copy it across so callers depending on
+            // it (markNoShow's own atomic UPDATE) keep working.
+            Object.keys(result).forEach((key) => { wrapped[key] = result[key]; });
+            return wrapped;
+          }
+          return proxifyConnection(result, poisonState);
+        };
+      },
+    });
+  }
+  function wrapConnection(rawDb, poisonState) {
+    const conn = (name) => {
+      if (poisonState.poisoned) throw abortedError();
+      try {
+        return proxifyConnection(rawDb(name), poisonState);
+      } catch (err) {
+        poisonState.poisoned = true;
+        throw err;
+      }
+    };
+    // A nested `.transaction()` call is a SAVEPOINT: its own fresh poison
+    // state, never propagated back to the parent — a failure inside is
+    // contained, matching knex's automatic ROLLBACK TO SAVEPOINT.
+    conn.transaction = async (fn) => fn(wrapConnection(rawDb, { poisoned: false }));
+    conn.raw = rawDb.raw;
+    conn.__store = rawDb.__store;
+    return conn;
+  }
+
+  test('a lead-lookup failure does not abort the enclosing transaction — the no-show write still completes with lead_id: null', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-1', status: 'no_show', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', service_id: null },
+      ],
+      leads: [{ id: 'lead-1', customer_id: 'cust-1', deleted_at: null, created_at: '2026-01-01' }],
+      consultation_outcomes: [],
+    });
+    // The lead lookup's own first query throws — same shape a real
+    // constraint violation or transient error would take.
+    const failingDb = (name) => {
+      if (name === 'lead_activities as la') throw new Error('simulated lead lookup failure');
+      return fakeDb(name);
+    };
+    failingDb.raw = fakeDb.raw;
+    failingDb.__store = fakeDb.__store;
+    const poisonableDb = wrapConnection(failingDb, { poisoned: false });
+
+    // Pre-fix, deriveLinkage ran the failing query directly on the SAME
+    // connection markNoShow's insert uses right after — the throw poisoned
+    // that connection, so the insert below would reject with "current
+    // transaction is aborted" even though deriveLinkage's own try/catch
+    // already logged the lookup failure and set leadId: null. Post-fix, the
+    // lookup runs inside its own savepoint, so only that isolated state is
+    // poisoned — the insert on the parent connection still succeeds.
+    const result = await markNoShow('visit-1', { trx: poisonableDb });
+
+    expect(result).not.toBeNull();
+    expect(result.outcome).toBe('lost');
+    expect(result.lost_reason).toBe('no_show');
+    expect(result.lead_id).toBeNull();
   });
 });
 

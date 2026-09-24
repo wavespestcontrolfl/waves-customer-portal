@@ -282,24 +282,34 @@ async function deriveLinkage(svcRow, database) {
   let leadId = null;
   if (customerId) {
     try {
-      const booked = await database('lead_activities as la')
-        .join('leads as l', 'l.id', 'la.lead_id')
-        .where('l.customer_id', customerId)
-        .whereNull('l.deleted_at')
-        .where('la.activity_type', 'appointment_scheduled')
-        .whereRaw("la.metadata->>'appointmentId' = ?", [String(svcRow.id)])
-        .orderBy('la.created_at', 'desc')
-        .first('la.lead_id');
-      if (booked?.lead_id) {
-        leadId = booked.lead_id;
-      } else {
-        const base = () => database('leads').where({ customer_id: customerId }).whereNull('deleted_at');
+      // Codex #4710 r10 P2 :305: isolated in its own SAVEPOINT (a nested
+      // transaction — `database` here is often already a caller
+      // transaction/savepoint, e.g. markNoShow's job-status or repair-sweep
+      // transaction). Postgres aborts the WHOLE enclosing transaction on any
+      // statement error regardless of whether the client catches it in JS —
+      // so catching the error right here, as before, did NOT actually
+      // restore `database` to a usable state: the consultation_outcomes
+      // insert that runs immediately after deriveLinkage returns would then
+      // fail with "current transaction is aborted", instead of performing
+      // the documented best-effort write with leadId: null. Same discipline
+      // as every other best-effort read in this file (waves-db §5b).
+      leadId = await database.transaction(async (sp) => {
+        const booked = await sp('lead_activities as la')
+          .join('leads as l', 'l.id', 'la.lead_id')
+          .where('l.customer_id', customerId)
+          .whereNull('l.deleted_at')
+          .where('la.activity_type', 'appointment_scheduled')
+          .whereRaw("la.metadata->>'appointmentId' = ?", [String(svcRow.id)])
+          .orderBy('la.created_at', 'desc')
+          .first('la.lead_id');
+        if (booked?.lead_id) return booked.lead_id;
+        const base = () => sp('leads').where({ customer_id: customerId }).whereNull('deleted_at');
         const beforeBooking = svcRow.created_at
           ? await base().where('created_at', '<=', svcRow.created_at).orderBy('created_at', 'desc').first('id')
           : null;
         const leadRow = beforeBooking || await base().orderBy('created_at', 'desc').first('id');
-        leadId = leadRow ? leadRow.id : null;
-      }
+        return leadRow ? leadRow.id : null;
+      });
     } catch (err) {
       logger.warn(`[consultation-outcomes] lead lookup failed for customer ${customerId}: ${err.message}`);
     }
@@ -319,6 +329,14 @@ async function deriveLinkage(svcRow, database) {
 // this is ever called, so a truthy followUpAt reaching here is always valid.
 function isValidFollowUpAt(followUpAt) {
   if (followUpAt == null || followUpAt === '') return true; // optional — not a validation failure
+  // Codex #4710 r10 P2 :335: only a STRING can match either documented
+  // shape below — a boolean or an epoch-ms number is neither, but both
+  // parse to a finite Date through parseETDateTime's final `new Date(...)`
+  // fallback, so without this gate they reached the "neither regex
+  // matched" branch and were WAVED THROUGH by its old `return true`
+  // (unsupported-shape bug below). Reject up front instead of relying on
+  // that branch to catch every non-string too.
+  if (typeof followUpAt !== 'string') return false;
   const parsed = parseETDateTime(followUpAt);
   if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime())) return false;
   // A naive wall-clock value must round-trip (Codex #4710 P2): parsing
@@ -332,7 +350,14 @@ function isValidFollowUpAt(followUpAt) {
     // that were typed. Non-ISO inputs (a Date, epoch ms) pass as before.
     const withOffset = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/i
       .exec(String(followUpAt).trim());
-    if (!withOffset) return true;
+    // Codex #4710 r10 P2 :335: a parseable-but-unsupported shape (e.g.
+    // "09/25/2026 09:00") must be REJECTED, not waved through to
+    // parseETDateTime's host-UTC `new Date(...)` fallback — that fallback
+    // exists for internal callers (an already-absolute Date, an epoch
+    // number), not for this route's validated string input, whose contract
+    // documents exactly the two regex shapes above. A naive non-ISO string
+    // silently read as UTC is P1-B's exact bug, reopened here.
+    if (!withOffset) return false;
     const tz = withOffset[4].toUpperCase();
     const offsetMinutes = tz === 'Z' ? 0
       : (tz[0] === '-' ? -1 : 1) * (Number(tz.slice(1, 3)) * 60 + Number(tz.slice(-2)));
@@ -596,8 +621,15 @@ async function findSaleEvidenceForConsultation(database, {
   let earliestBookingAt = null;
   let earliestBookingId = null;
   for (const booking of bookings) {
-    if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale — separate, async, not part of the sync predicate
+    // Codex #4710 r10 P2 :600: the cheap SYNC predicate runs FIRST — a
+    // recurring series creates every child in one batch, so the hourly sweep
+    // could otherwise issue a `services` catalog query (isAssessmentBooking,
+    // async) per row for hundreds of rows guaranteed to fail
+    // isQualifyingSaleBooking anyway (cancelled, a callback, a recurring
+    // child, an included follow-up, …). Only a row that survives the sync
+    // rule pays for the catalog lookup.
     if (!isQualifyingSaleBooking(booking)) continue;
+    if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale — separate, async, checked only for surviving candidates
     const effectiveAt = new Date(effectiveBookingTimestamp(booking));
     if (effectiveAt < lowerBound || effectiveAt > upperBound) continue; // the OR above is a superset of the true bound — re-check the row's own effective timestamp
     if (!earliestBookingAt || effectiveAt < earliestBookingAt) {
@@ -665,6 +697,26 @@ async function attemptEvidenceBasedWin(database, {
   return won;
 }
 
+// Codex #4710 r10 P1 :692: reconciliation's customer-row lock had no bounded
+// wait — Postgres' default lock_timeout is unlimited and this transaction
+// set none, so a customer row wedged by any long-running, unrelated
+// transaction could block it indefinitely. That matters here specifically
+// (not everywhere lockCustomerRow is used) because scheduler.js:728-737
+// runs the WHOLE hourly sweep under runExclusive, and cron-lock.js's
+// runExclusive skips a later tick entirely while the previous holder is
+// still active — so one wedged row doesn't just stall its own
+// reconciliation, it can wedge the ENTIRE completeness sweep (every other
+// open outcome, indefinitely) since no later tick ever gets to run. Bound
+// the wait so a stuck lock surfaces as a normal, per-row 55P03/57014 error —
+// which reconcileOpenConsultationOutcomes' existing per-row try/catch
+// already logs and counts, exactly like any other row failure — instead of
+// hanging the tick. Same SET LOCAL lock_timeout convention as
+// scheduling/catalog-lock.js's withLockWait and inbound-sms-read.js's bell
+// retarget. Scoped to this reconciliation path only: recordOutcome's own
+// customer lock is a per-request technician write, not part of the
+// serialized completeness guarantee, so it is unaffected.
+const RECONCILE_LOCK_WAIT_MS = 5000;
+
 // The sweep's per-row unit of work: lock the customer row FIRST (P1-A
 // discipline — see lockCustomerRow), then attempt the evidence-based win
 // for this one already-existing open outcome row, both inside ONE
@@ -689,6 +741,10 @@ async function reconcileOneOpenOutcome(database, {
   outcomeRowId, customerId, scheduledDateStr, windowStart = null, now,
 }) {
   return database.transaction(async (locked) => {
+    // The bound is transaction-local (SET LOCAL — no restore needed, this
+    // transaction does nothing else afterward) and set before the lock it
+    // is meant to bound; a no-op when there is no customer to lock.
+    if (customerId) await locked.raw(`SET LOCAL lock_timeout = '${RECONCILE_LOCK_WAIT_MS}ms'`);
     await lockCustomerRow(locked, customerId);
     const won = await attemptEvidenceBasedWin(locked, {
       outcomeRowId, customerId, scheduledDateStr, windowStart, now,
@@ -883,11 +939,22 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     // insert, so it locks + attempts in one step via reconcileOneOpenOutcome.
     if (isConvertibleOutcome(saved)) {
       try {
+        // Codex #4710 r10 P2 :890: liveVisit — re-read and locked above,
+        // right before the HELD_VISIT_GUARDS checks — is the schedule this
+        // write actually validated; svcRow is the PRE-lock read and can be
+        // stale (a dispatch move between the two reads changes
+        // scheduled_date/window_start but not svcRow's copy of them). Using
+        // svcRow here re-opened exactly the race the lock exists to close:
+        // the guards above would validate the NEW schedule while the sale
+        // search below still searched around the OLD one, so a purchase
+        // that actually preceded the real consultation could be recorded as
+        // its win (or genuine evidence inside the new window could be
+        // missed).
         const won = await attemptEvidenceBasedWin(locked, {
           outcomeRowId: saved.id,
           customerId,
-          scheduledDateStr: toDateOnlyString(svcRow.scheduled_date),
-          windowStart: svcRow.window_start,
+          scheduledDateStr: toDateOnlyString(liveVisit.scheduled_date),
+          windowStart: liveVisit.window_start,
           now,
         });
         if (won) return won;
@@ -1300,6 +1367,20 @@ async function repairMissedNoShowOutcomes({ now, limit, result }) {
 async function markNoShow(scheduledServiceId, { trx } = {}) {
   const database = trx || db;
   if (!scheduledServiceId) return null;
+  // Codex #4710 r10 P2 :1307 (lock order): read the customer id UNLOCKED
+  // first, lock THAT customer row, and only then lock/recheck the visit —
+  // customer-dedupe.js's executeMerge locks `customers FOR UPDATE` first
+  // and only later updates this same scheduled_services row (customer-
+  // dedupe.js:1456, 1762-1783). Locking the visit before the insert below's
+  // implicit FK KEY SHARE lock on `customers` — the old order — is the
+  // opposite of a concurrent merge's order: a classic ABBA deadlock.
+  // customer → visit here matches every other lock site in this file (see
+  // lockCustomerRow's own "VERIFIED CALLER ORDER" comment) and mirrors
+  // recordOutcomeOnce's own svcRow-then-liveVisit shape below.
+  const preview = await database('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+  if (!preview) return null;
+  await lockCustomerRow(database, preview.customer_id);
+
   // Locked and re-checked (local audit P1): the repair sweep selects visits
   // before processing them, so the office may have reopened/rescheduled one
   // in between. The job-status caller already moved the row to no_show in
