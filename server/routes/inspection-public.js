@@ -1065,6 +1065,21 @@ async function uniqueProfileAcrossAccounts(dbConn, households, resolved) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+// The account for one full-identity household: an account household's
+// primary (else oldest) live profile; a legacy profile attached to its OWN
+// new account under the non-blocking comms fence (null when busy/changed —
+// the caller answers a recoverable retry).
+async function accountForHousehold(trx, household) {
+  if (household.legacy) return attachLinkedProfileToOwnAccount(trx, household.legacy);
+  const existingCustomer = await trx('customers')
+    .where({ account_id: household.accountId })
+    .whereNull('deleted_at')
+    .orderBy('is_primary_profile', 'desc')
+    .orderBy('created_at', 'asc')
+    .first();
+  return existingCustomer ? { accountId: household.accountId, existingCustomer } : null;
+}
+
 async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   const { ensureCustomerAccount } = require('./admin-customers');
   const verifiedContact = await leadContactVerified(freshLead, token, trx);
@@ -1082,20 +1097,27 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
     const matched = await uniqueProfileAcrossAccounts(trx, sharedPhoneHouseholds, resolved);
     if (matched) return reuseWithProvenance(trx, freshLead, matched, resolved);
   }
-  const account = await ensureCustomerAccount(trx, {
-    firstName: freshLead.first_name || 'New Lead',
-    lastName: freshLead.last_name || '',
-    phone: freshLead.phone || '',
-    email: freshLead.email || null,
-    ...(verifiedContact && !multiAccount ? {} : { forceNewAccount: true, ignorePhoneMatch: true }),
-    // The lead row is already locked, so attaching a phone-matched legacy
-    // customer to an account must use the existing non-blocking
-    // customer-comms fence + fresh re-resolve (local audit P1), exactly as
-    // the lead convert does — a busy fence fails closed (retryable) instead
-    // of deadlocking a merge-undo.
-    fenceAttach: true,
-  });
-  if (verifiedContact && !multiAccount) {
+  // The ONE full-identity household (Codex #4737 r13 pre-push P0) is used
+  // directly — ensureCustomerAccount's own phone lookup matches a last-ten
+  // suffix, so it is only ever asked for a NEW account here, never to find
+  // an existing one.
+  const single = verifiedContact && sharedPhoneHouseholds.length === 1 ? sharedPhoneHouseholds[0] : null;
+  let account;
+  if (single) {
+    account = await accountForHousehold(trx, single);
+    if (!account) return { locationFailure: 'address_unresolved' };
+  } else {
+    account = await ensureCustomerAccount(trx, {
+      firstName: freshLead.first_name || 'New Lead',
+      lastName: freshLead.last_name || '',
+      phone: freshLead.phone || '',
+      email: freshLead.email || null,
+      forceNewAccount: true,
+      ignorePhoneMatch: true,
+      fenceAttach: true,
+    });
+  }
+  if (single) {
     const matched = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
     if (matched) return reuseWithProvenance(trx, freshLead, matched, resolved);
   }

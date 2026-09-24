@@ -94,10 +94,22 @@ jest.mock('../models/db', () => {
       'select', 'join', 'leftJoin', 'groupBy', 'modify', 'onConflict', 'forUpdate', 'forNoKeyUpdate', 'distinct',
     ];
     for (const m of passthrough) q[m] = () => q;
+    // Where-conditions are recorded so a fixture may answer by them (a
+    // firstResults entry can be a function of the query).
+    q.conds = {};
+    q.where = (cond, val) => {
+      if (cond && typeof cond === 'object') Object.assign(q.conds, cond);
+      else if (typeof cond === 'string' && val !== undefined) q.conds[cond.split('.').pop()] = val;
+      return q;
+    };
     // A list result may be a function of the query's selected columns.
     q.select = (...cols) => { q.selectedColumns = cols; return q; };
     const listFor = () => (typeof listResults[table] === 'function' ? listResults[table](q) : listResults[table]) || [];
-    q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
+    q.first = async () => {
+      const v = firstResults[table];
+      if (typeof v === 'function') return v(q);
+      return v !== undefined ? v : null;
+    };
     q.update = async (payload) => { updateCalls.push({ table, payload }); return 1; };
     q.del = async () => 1;
     q.ignore = async () => [];
@@ -242,6 +254,21 @@ const LEAD_ROW = {
 // A lead whose customer link is PROVEN (Codex #4737 P0): an inbound-call
 // lead whose phone still equals its originating call's caller ID (the
 // default call_log fixture below) and matches the linked customer's phone.
+// Seeds ONE full-identity phone household (Codex #4737 r13 pre-push P0:
+// the page resolves the account from it, never ensureCustomerAccount's
+// suffix lookup): listResults for phoneMatchedHouseholds, and a customers
+// first() that answers the household's profile by account_id or id — plus
+// any other rows the test names by id.
+function seedPhoneHousehold(profile, others = []) {
+  listResults.customers = [profile];
+  const byId = Object.fromEntries([profile, ...others].map((r) => [r.id, r]));
+  firstResults.customers = (q) => {
+    if (q.conds.account_id) return profile;
+    if (q.conds.id && byId[q.conds.id]) return byId[q.conds.id];
+    return profile;
+  };
+}
+
 const LINKED_LEAD = { ...LEAD_ROW, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
 
 describe('gate off', () => {
@@ -937,6 +964,9 @@ describe('Codex #4737 r5 P1: a verified phone shared by several accounts', () =>
     const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '1 One St, Bradenton, FL 34209' });
     expect(res.statusCode).toBe(200);
     expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).not.toBe('intl-1');
+    // …and the shared suffix lookup is never consulted for an existing
+    // account: only a NEW account is requested (r13 pre-push P0).
+    expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ forceNewAccount: true, ignorePhoneMatch: true }));
   });
 
   test('no unique address match across the phone-matched accounts → a SEPARATE new account, never an additional property under one of them', async () => {
@@ -1557,7 +1587,7 @@ describe('POST /:token commit', () => {
         address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
         latitude: 27.1, longitude: -82.2, // in the service box but far from the default mockGeocode location — matched via zip, not coords
       };
-      mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+      seedPhoneHousehold(existingCustomer);
       listResults.scheduled_services = [];
       firstResults.scheduled_services = { id: 'ss-refresh', reschedule_token: 'tok-refresh' };
 
@@ -1585,7 +1615,7 @@ describe('POST /:token commit', () => {
         address_line1: '123 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
         latitude: null, longitude: null,
       };
-      mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+      seedPhoneHousehold(existingCustomer);
       listResults.customers = [existingCustomer];
       listResults.scheduled_services = [];
       // The fenced re-read sees the edit.
@@ -1611,7 +1641,7 @@ describe('POST /:token commit', () => {
         address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
         latitude: 27.52, longitude: -82.57,
       };
-      mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+      seedPhoneHousehold(existingCustomer, [firstResults.customers]);
       listResults.scheduled_services = [];
       mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
 
@@ -2175,7 +2205,7 @@ describe('POST /:token commit', () => {
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot();
         const existingCustomer = existingCustomerAt('123 Palm Ave');
-        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        seedPhoneHousehold(existingCustomer);
         listResults.scheduled_services = [
           { id: 'ss-9', scheduled_date: FUTURE_DATE, window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'tok9' },
         ];
@@ -2189,9 +2219,9 @@ describe('POST /:token commit', () => {
         expect(mockCreateSelfBooking).not.toHaveBeenCalled();
         expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
         expect(updateCalls.some((c) => c.table === 'leads')).toBe(false);
-        expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.not.objectContaining({ forceNewAccount: true }));
-        // Local audit P1: attach runs with the non-blocking comms fence.
-        expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ fenceAttach: true }));
+        // The full-identity household is used directly (Codex #4737 r13
+        // pre-push P0) — ensureCustomerAccount's suffix lookup never runs.
+        expect(mockEnsureCustomerAccount).not.toHaveBeenCalled();
       });
 
       test('same address (street + zip), no open visits → reuses the existing property profile, never a new one', async () => {
@@ -2199,7 +2229,7 @@ describe('POST /:token commit', () => {
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot();
         const existingCustomer = existingCustomerAt('123 Palm Ave');
-        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        seedPhoneHousehold(existingCustomer);
         listResults.scheduled_services = [];
         firstResults.scheduled_services = { id: 'ss-reuse', reschedule_token: 'tok-reuse' };
         firstResults.customers = existingCustomer; // the fenced re-read sees it unchanged
@@ -2222,7 +2252,7 @@ describe('POST /:token commit', () => {
         // The matched account's existing property is a DIFFERENT street —
         // MATCH_ADDRESS below matches none of it.
         const existingCustomer = existingCustomerAt('9 Other Rd');
-        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        seedPhoneHousehold(existingCustomer);
         listResults.scheduled_services = [];
         listResults.customers = [existingCustomer];
         insertResults.customers = [{ id: 'new-cust-2', account_id: 'acct-9' }];
@@ -2254,7 +2284,7 @@ describe('POST /:token commit', () => {
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot();
         const existingCustomer = existingCustomerAt('123 Palm Ave', { latitude: null, longitude: null });
-        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        seedPhoneHousehold(existingCustomer);
         listResults.scheduled_services = [];
         firstResults.customers = existingCustomer; // the fenced re-read sees it unchanged
 
@@ -2277,7 +2307,7 @@ describe('POST /:token commit', () => {
         // (default mockGeocode: {lat:27.4, lng:-82.5}), so the matched
         // row's location must win and be re-validated, not the pre-lock one.
         const existingCustomer = existingCustomerAt('123 Palm Ave', { latitude: 27.1, longitude: -82.2 }); // in the box, far from MATCH_ADDRESS's geocode
-        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        seedPhoneHousehold(existingCustomer);
         listResults.scheduled_services = [];
         // No second mockBuildAvailability value queued — the re-validation
         // call at the matched row's own (far-away) location falls back to
@@ -2345,7 +2375,7 @@ describe('POST /:token commit', () => {
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot();
         const existingCustomer = existingCustomerAt('123 Palm Ave');
-        mockEnsureCustomerAccount.mockResolvedValueOnce({ accountId: 'acct-9', existingCustomer, matchType: 'phone' });
+        seedPhoneHousehold(existingCustomer);
         listResults.scheduled_services = [];
         firstResults.scheduled_services = { id: 'ss-sms', reschedule_token: 'tok-sms' };
         firstResults.customers = existingCustomer; // the fenced re-read sees it unchanged
@@ -2356,7 +2386,9 @@ describe('POST /:token commit', () => {
         expect(res.statusCode).toBe(200);
         expect(res.body.success).toBe(true);
         expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject(existingCustomer);
-        expect(mockEnsureCustomerAccount).toHaveBeenCalledWith(expect.anything(), expect.not.objectContaining({ forceNewAccount: true }));
+        // The full-identity household is used directly (Codex #4737 r13
+        // pre-push P0) — ensureCustomerAccount's suffix lookup never runs.
+        expect(mockEnsureCustomerAccount).not.toHaveBeenCalled();
       });
     });
   });
