@@ -151,8 +151,12 @@ async function loadCustomer(customerId) {
 // invoice tools own that void. Whole account (scope null): every pending
 // term. Scoped: only a pending term whose coverage identity is one of the
 // selected families — or whose identity cannot be read (fail closed).
-async function findPendingPrepayInvoice(customerId, scope = null) {
-  const pending = await db('annual_prepay_terms')
+// `dbh` (default: the pool) lets a caller that already holds a transaction
+// and a customers row lock (customer-lifecycle-guard.js's churn/archive
+// writers) run both reads on ITS connection — a pool checkout from inside a
+// held transaction is a self-inflicted pool-exhaustion wait under load.
+async function findPendingPrepayInvoice(customerId, scope = null, dbh = db) {
+  const pending = await dbh('annual_prepay_terms')
     .where({ customer_id: customerId, status: 'payment_pending' })
     .whereNotNull('prepay_invoice_id')
     .select('id', 'prepay_invoice_id', 'plan_label', 'coverage_service_type');
@@ -163,8 +167,15 @@ async function findPendingPrepayInvoice(customerId, scope = null) {
       const identityFamily = familyOfServiceRow({ service_type: p.coverage_service_type });
       if (identityFamily && !scope.includes(identityFamily)) continue;
     }
-    const inv = await db('invoices').where({ id: p.prepay_invoice_id }).first('id', 'status', 'invoice_number');
-    if (inv && String(inv.status) !== 'void') return { term: p, invoice: inv };
+    const inv = await dbh('invoices').where({ id: p.prepay_invoice_id }).first('id', 'status', 'invoice_number');
+    // Only a STILL-PAYABLE invoice can re-activate coverage later; the
+    // coverage authority's own terminal set (annual-prepay-renewals.js
+    // INVOICE_CANCELLED_STATUSES: void/cancelled/canceled/refunded) is
+    // reused here so a legacy payment_pending term left pointing at a
+    // refunded or cancelled invoice never blocks a cancel/churn/archive
+    // (GitHub Codex #4684 r5 P2).
+    const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
+    if (inv && !INVOICE_CANCELLED_STATUSES.has(String(inv.status || '').toLowerCase())) return { term: p, invoice: inv };
   }
   return null;
 }

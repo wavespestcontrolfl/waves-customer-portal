@@ -19,7 +19,7 @@ const logger = require('../logger');
 const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
-const { applyAssignable } = require('../technician-eligibility');
+const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
@@ -100,6 +100,10 @@ async function findArrivalWindowSlots(opts) {
   let query = applyAssignable(db('technicians'));
   if (technicianId) query = query.where('technicians.id', technicianId);
   const techs = await query.select('id', 'name');
+  // Loaded once per request, right where the techs are (technician-
+  // eligibility.js) — an absent tech-day is never offered here, matching
+  // the commit-time date-scoped assertAssignableTechnician check.
+  const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
   const { ADMIN_DAY_END_MINUTES } = require('./window-rules');
   const now = new Date();
   const today = etDateString(now);
@@ -109,6 +113,7 @@ async function findArrivalWindowSlots(opts) {
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today) continue;
     for (const tech of techs) {
+      if (absentDays.has(`${tech.id}:${date}`)) continue;
       // `changes` is the caller's pending edit (duration, a re-picked
       // service address) — the same shape the save probe hands the
       // checker, so the ranking simulates the visit being saved, not the
@@ -146,6 +151,9 @@ async function findCapacitySlots(opts) {
   let query = applyAssignable(db('technicians'));
   if (technicianId) query = query.where('technicians.id', technicianId);
   const techs = await query.select('id', 'name');
+  // Loaded once per request, right where the techs are — see
+  // findArrivalWindowSlots above.
+  const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
   const { getBlackoutLayers } = require('./blackout-dates');
   let requestedServices = (opts.serviceTypes || [opts.serviceType || opts.serviceKey || ''])
     .filter(Boolean).map(service_type => ({ service_type }));
@@ -173,6 +181,7 @@ async function findCapacitySlots(opts) {
     if (date < today || blackout.has(date)) continue;
     for (const tech of techs) {
       if (inactiveTechs.has(tech.id)) continue;
+      if (absentDays.has(`${tech.id}:${date}`)) continue;
       const context = await loadArrivalRouteContext({ date, technicianId: tech.id, now, travel,
         excludeServiceIds: opts.excludeServiceIds,
         // The requesting estimate's OWN uncommitted hold must not occupy the
@@ -799,7 +808,12 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
   let techQuery = applyAssignable(db('technicians'));
   if (technicianId) techQuery = techQuery.where('technicians.id', technicianId);
   const techs = await techQuery.select('id', 'name');
-  if (!techs.length) return { techs, services: [], dates: [] };
+  if (!techs.length) return { techs, services: [], dates: [], absentDays: new Set() };
+
+  // Loaded once per request, right where the techs are — see
+  // findArrivalWindowSlots above. The per-(date,tech) loop below (in
+  // findAvailableSlots) skips a pair this names.
+  const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
 
   // Load all scheduled services in date range, per tech, with coords
   const services = await db('scheduled_services')
@@ -859,7 +873,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
     const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1]);
     if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
   }
-  return { techs, services, dates };
+  return { techs, services, dates, absentDays };
 }
 
 /**
@@ -907,7 +921,7 @@ async function findAvailableSlots(opts) {
   const dayOpen = dayStartHour * 60;
   const dayClose = dayEndHour * 60;
 
-  const { techs, services, dates } = await loadFindTimeContext({
+  const { techs, services, dates, absentDays } = await loadFindTimeContext({
     dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates,
   });
   if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
@@ -943,6 +957,7 @@ async function findAvailableSlots(opts) {
   };
   for (const date of dates) {
     for (const tech of techs) {
+      if (absentDays.has(`${tech.id}:${date}`)) continue;
       const { candidates: dayCandidates, evaluatedGaps } = candidatesForDay(date, tech, dayParams);
       evaluated += evaluatedGaps;
       candidates.push(...dayCandidates);

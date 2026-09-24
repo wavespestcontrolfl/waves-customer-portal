@@ -409,7 +409,7 @@ async function commitVoiceBooking({
       // pending office-review booking (voice_agent source_action), which
       // maybeGroupRow refuses; its grouping moment is office confirm via
       // the transitionJobStatus pending→confirmed seam (job-status.js).
-      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx });
+      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr });
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only

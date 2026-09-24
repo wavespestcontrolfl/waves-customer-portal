@@ -67,6 +67,15 @@ postgres('combined booking capacity on PostgreSQL', () => {
     await mockPg.schema.createTable('technicians', (t) => {
       t.uuid('id').primary(); t.text('name'); t.text('role'); t.text('employment_status'); t.boolean('field_dispatchable'); t.boolean('active');
     });
+    // Tech-out (#4678): every dated eligibility check (reserveSlot at hold
+    // time, commitReservation's graduate paths) reads technician_absences —
+    // an uncleared row on the slot's date refuses the tech. Mirrors
+    // migrations/20260923000002_technician_absences.js.
+    await mockPg.schema.createTable('technician_absences', (t) => {
+      t.uuid('id').primary().defaultTo(mockPg.raw('gen_random_uuid()'));
+      t.uuid('technician_id').notNullable(); t.date('absence_date').notNullable(); t.text('reason').notNullable();
+      t.timestamp('cleared_at', { useTz: true });
+    });
     await mockPg.schema.createTable('technician_capabilities', (t) => {
       t.uuid('technician_id'); t.text('service_category'); t.boolean('active');
       t.unique(['technician_id', 'service_category']);
@@ -111,6 +120,7 @@ postgres('combined booking capacity on PostgreSQL', () => {
     process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
     await mockPg('scheduled_services').del();
     await mockPg('technician_capabilities').del();
+    await mockPg('technician_absences').del();
     await mockPg('estimates').del();
     await mockPg('estimates').insert([firstEstimateId, secondEstimateId].map((id) => ({ id, customer_id: customerId, status: 'sent',
       estimate_data: estimateData(), expires_at: addETDays(new Date(), 30) })));
@@ -193,6 +203,16 @@ postgres('combined booking capacity on PostgreSQL', () => {
     await mockPg('technician_capabilities').insert({ technician_id: technicianId, service_category: 'termite', active: false });
     await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId }))
       .rejects.toMatchObject({ code: 'COMBINED_VISIT_UNAVAILABLE' });
+  });
+
+  test('a technician marked out on the slot date is refused at hold time; a cleared absence holds again (tech-out #4678)', async () => {
+    await mockPg('technician_absences').insert({ technician_id: technicianId, absence_date: date, reason: 'sick' });
+    await expect(reserveSlot({ estimateId: firstEstimateId, slotId: signedSlot(firstEstimateId) }))
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(await mockPg('scheduled_services')).toHaveLength(0);
+    await mockPg('technician_absences').update({ cleared_at: mockPg.fn.now() });
+    const held = await reserveSlot({ estimateId: firstEstimateId, slotId: signedSlot(firstEstimateId) });
+    expect(held.scheduledServiceId).toBeTruthy();
   });
 
   test('unsupported recurring foam is refused before offering or holding a combined time', async () => {
